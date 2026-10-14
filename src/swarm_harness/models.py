@@ -77,8 +77,8 @@ class TypeSpec(BaseModel):
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)
     replicas: int = 0
-    agents_per_worker: int = 100  # placeholder until the packing measurement
-    max_working_per_worker: int = 20  # placeholder until the packing measurement
+    agents_per_worker: int = 50  # measured default, experiments/packing
+    max_working_per_worker: int = 20  # measured default, experiments/packing
     flavor: str = "cpu-basic"
     worker_lifetime: str = "24h"
     lifetime_jitter: str = "4h"
