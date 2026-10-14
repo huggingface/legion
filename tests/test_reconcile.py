@@ -67,7 +67,7 @@ def test_apply_creates_agents_and_launches_workers(store, jobs, settings, clock,
     assert env["WORKER_ID"] == W0 and env["SWARM"] == "demo" and env["TYPE"] == "researcher"
     assert env["SWARM_HARNESS_URL"] == "https://controller.invalid"
     assert env["BUCKET"] == "hf://buckets/ns/sh" and env["MSGBOARD_URL"]
-    assert env["DRAIN_WINDOW"] == "10m"
+    assert env["DRAIN_WINDOW"] == "10m" and len(env["WORKER_INCARNATION"]) == 32
     assert "SWARM_HARNESS_TOKEN" not in env
     lifetime = parse_duration("24h").total_seconds()
     assert lifetime <= launch["timeout"] <= lifetime + parse_duration("4h").total_seconds()
@@ -312,7 +312,7 @@ def test_heartbeat_for_unknown_agent_unassigns_it(store, jobs, clock, tick):
     tick()
     store.clear_commands(W0)
     heartbeat(store, clock, W0, [("researcher-0000", "idle", None), ("ghost-0001", "idle", None)])
-    heartbeat(store, clock, W0, [("ghost-0001", "idle", None)])
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None), ("ghost-0001", "idle", None)])
     assert queued(store, W0) == [UnassignCommand(agent="ghost-0001")]
 
 
@@ -326,6 +326,7 @@ def test_rebuild_from_jobs_adopts_live_workers(tmp_path, jobs, settings, clock):
     actions = rebuild_from_jobs(fresh, jobs, clock())
     assert sorted(a.target for a in actions if a.kind == "adopt") == [W0, W1]
     assert fresh.get_worker(W0)["job_id"] == jobs.job_for(W0)
+    assert fresh.get_worker(W0)["incarnation"] == jobs.launches[0]["env"]["WORKER_INCARNATION"]
     hb = WorkerHeartbeat(
         worker=W0,
         deadline=clock() + timedelta(hours=1),
@@ -395,3 +396,18 @@ def test_job_labels_from_settings_are_added_but_never_override(store, jobs, sett
         "type": "researcher",
         "worker": W0,
     }
+
+
+def test_store_migrates_workers_table_without_incarnation(tmp_path):
+    import sqlite3
+
+    (tmp_path / "old").mkdir()
+    db = sqlite3.connect(tmp_path / "old" / "controller.db")
+    db.execute("CREATE TABLE workers (id TEXT PRIMARY KEY, swarm TEXT NOT NULL, type TEXT NOT NULL,"
+               " idx INTEGER NOT NULL, job_id TEXT, created_at REAL NOT NULL)")
+    db.commit()
+    db.close()
+    s = Store(tmp_path / "old")
+    s.insert_worker("w", "sw", "t", 0, 0)
+    s.update_worker("w", incarnation="abc")
+    assert s.get_worker("w")["incarnation"] == "abc"

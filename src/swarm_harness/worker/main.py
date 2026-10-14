@@ -64,6 +64,7 @@ class WorkerConfig:
     flush_interval: float = 3.0
     sync_interval: float = 180.0
     drain_window: timedelta = DEFAULT_DRAIN_WINDOW  # from the job env; assigns may update it
+    incarnation: str | None = None  # WORKER_INCARNATION: binds our polls to this job
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -79,23 +80,26 @@ class WorkerConfig:
             sync_interval=float(env.get("SYNC_INTERVAL", 180)),
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
             drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
+            incarnation=env.get("WORKER_INCARNATION") or None,
         )
 
 
 class ControllerClient:
-    def __init__(self, url: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(self, url: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None,
+                 incarnation: str | None = None) -> None:
         self.http = httpx.AsyncClient(base_url=url, headers={"Authorization": f"Bearer {token}"},
                                       timeout=httpx.Timeout(20, read=60), transport=transport)
+        self.params = {"incarnation": incarnation} if incarnation else {}
 
     async def commands(self, worker: str, wait: int) -> CommandBatch:
-        r = await self.http.get(f"/workers/{worker}/commands", params={"wait": wait},
+        r = await self.http.get(f"/workers/{worker}/commands", params={"wait": wait, **self.params},
                                 timeout=httpx.Timeout(20, read=wait + 20))
         r.raise_for_status()
         return CommandBatch.model_validate(r.json() if r.content else {"commands": []})
 
     async def heartbeat(self, hb: WorkerHeartbeat) -> None:
         r = await self.http.post(f"/workers/{hb.worker}/heartbeat", content=hb.model_dump_json(),
-                                 headers={"content-type": "application/json"})
+                                 params=self.params, headers={"content-type": "application/json"})
         r.raise_for_status()
 
     async def events(self, batch: EventBatch) -> None:
@@ -350,7 +354,8 @@ def main() -> None:
     cfg = WorkerConfig.from_env()
     cfg.work_root.mkdir(parents=True, exist_ok=True)
     sync = BucketSync(HubBucketStore(cfg.bucket), cfg.swarm) if cfg.bucket else None
-    worker = Worker(cfg, ControllerClient(cfg.url, cfg.token), sync=sync)
+    client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation)
+    worker = Worker(cfg, client, sync=sync)
     sys.exit(asyncio.run(worker.run()))
 
 

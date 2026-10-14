@@ -203,3 +203,26 @@ def test_heartbeat_json_shape(tmp_path):
     worker, _ = make_worker(tmp_path, ctrl)
     body = json.loads(worker.heartbeat_payload().model_dump_json())
     assert body["worker"] == WID and body["agents"] == [] and body["draining"] is False
+
+
+async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
+    cfg = WorkerConfig.from_env({
+        "SWARM_HARNESS_URL": "http://c", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "SWARM": "sw", "TYPE": "researcher", "WORKER_INCARNATION": "inc-1",
+        "DEADLINE": (utcnow() + timedelta(hours=1)).isoformat()})
+    assert cfg.incarnation == "inc-1"
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.url.params.get("incarnation")))
+        if request.url.path.endswith("/commands"):
+            return httpx.Response(200, json={"commands": []})
+        return httpx.Response(200, json={"ok": True})
+
+    client = ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(handler),
+                              incarnation=cfg.incarnation)
+    w = Worker(cfg, client)
+    await client.commands(WID, 0)
+    await client.heartbeat(w.heartbeat_payload())
+    await client.aclose()
+    assert seen == [(f"/workers/{WID}/commands", "inc-1"), (f"/workers/{WID}/heartbeat", "inc-1")]
