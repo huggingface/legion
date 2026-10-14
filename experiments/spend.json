@@ -1,0 +1,9 @@
+{
+ "api_key_check": 0.00085972,
+ "resume_local_dry_run": 0.001953935,
+ "resume_jobs": 0.0019356249999999998,
+ "packing_job": 0.11403,
+ "packing_local_smoke (N=1,2 + idle; plus one crashed idle turn est. <=0.001)": 0.00375305,
+ "resident_cpu_local": 0.00296,
+ "total_usd": 0.1255
+}

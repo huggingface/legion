@@ -1,0 +1,77 @@
+{
+ "local_only": true,
+ "model": "gpt-6-luna (reasoning low)",
+ "try1_workspace_write_sandbox": {
+  "thread_id": "01a139b1-2f8c-75b1-8e82-eac63d7a7245",
+  "reply": "PELICAN-7",
+  "usage": {
+   "input_tokens": 33897,
+   "cached_input_tokens": 18944,
+   "cache_write_input_tokens": 0,
+   "output_tokens": 50,
+   "reasoning_output_tokens": 0
+  },
+  "commands": [
+   "/bin/bash -lc \"cat > notes.txt <<'EOF'\nPELICAN-7\nEOF\""
+  ],
+  "errors": []
+ },
+ "try1_note": "bwrap could not create a user namespace; the write failed (exit 1) and the model still replied PELICAN-7",
+ "turn_A": {
+  "thread_id": "01a139b1-a8f6-7662-85bc-5843e2c683d8",
+  "reply": "PELICAN-7",
+  "usage": {
+   "input_tokens": 33322,
+   "cached_input_tokens": 17920,
+   "cache_write_input_tokens": 0,
+   "output_tokens": 52,
+   "reasoning_output_tokens": 0
+  },
+  "commands": [
+   "/bin/bash -lc \"cat > notes.txt <<'EOF'\nPELICAN-7\nEOF\npwd\""
+  ],
+  "errors": []
+ },
+ "turn_B_rollout_only": {
+  "thread_id": "01a139b1-a8f6-7662-85bc-5843e2c683d8",
+  "reply": "PELICAN-7",
+  "usage": {
+   "input_tokens": 53773,
+   "cached_input_tokens": 34048,
+   "cache_write_input_tokens": 0,
+   "output_tokens": 61,
+   "reasoning_output_tokens": 0
+  },
+  "commands": [],
+  "errors": []
+ },
+ "verdict_rollout_only": {
+  "reply_has_codeword": true,
+  "notes_txt_exists": true,
+  "same_thread_id": true,
+  "no_commands": true,
+  "pass": true
+ },
+ "home_B_before_resume": [
+  "./auth.json",
+  "./config.toml",
+  "./sessions/2026/10/14/rollout-2026-10-14T09-15-07-01a139b1-a8f6-7662-85bc-5843e2c683d8.jsonl"
+ ],
+ "home_B_after_resume_non_cache": [
+  "./.sandbox_migration",
+  "./auth.json",
+  "./config.toml",
+  "./goals_1.sqlite",
+  "./installation_id",
+  "./logs_2.sqlite",
+  "./memories_1.sqlite",
+  "./models_cache.json",
+  "./queue_1.sqlite",
+  "./sessions/2026/10/14/rollout-2026-10-14T09-15-07-01a139b1-a8f6-7662-85bc-5843e2c683d8.jsonl",
+  "./state_5.sqlite",
+  "./thread-writer-locks/.coordination.lock",
+  "./thread_history_1.sqlite",
+  "./thread_history_1.sqlite-shm",
+  "./thread_history_1.sqlite-wal"
+ ]
+}

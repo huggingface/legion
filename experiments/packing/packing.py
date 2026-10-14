@@ -8,7 +8,7 @@ container cgroup (memory.current). Stdlib only. Writes <out>/<harness>-N<n>.json
   packing.py --harness claude --levels 5,10,20,40 --idle 60 --out out/
   packing.py --harness codex  --levels 1,3 --out out/          (CODEX_HOME must be prepared)
 """
-import argparse, json, os, statistics, subprocess, sys, threading, time
+import argparse, json, os, resource, statistics, subprocess, sys, threading, time
 from pathlib import Path
 
 PROMPT = "Reply with the single word OK."
@@ -20,7 +20,7 @@ def cmd_for(harness, model):
         return ["claude", "-p", "--model", model, "--max-budget-usd", "0.05", "--permission-mode",
                 "bypassPermissions", "--output-format", "stream-json", "--verbose", PROMPT]
     return ["codex", "exec", "--json", "-m", model, "-c", 'model_reasoning_effort="low"',
-            "--skip-git-repo-check", "--sandbox", "workspace-write", "-c", 'approval_policy="never"', PROMPT]
+            "--skip-git-repo-check", "--sandbox", "danger-full-access", "-c", 'approval_policy="never"', PROMPT]
 
 
 def read_cgroup(name):
@@ -90,11 +90,13 @@ def level(harness, model, n, base, out):
     sampler = Sampler(os.getpid()); sampler.start(); time.sleep(1.0)
     cg0 = read_cgroup("memory.current"); recs = [{"i": i} for i in range(n)]
     ths = [threading.Thread(target=run_turn, args=(harness, model, base / f"N{n}-{i:03d}", recs[i])) for i in range(n)]
+    ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0 = time.monotonic(); [t.start() for t in ths]; [t.join() for t in ths]; wall = time.monotonic() - t0
+    ru1 = resource.getrusage(resource.RUSAGE_CHILDREN); cpu_s = (ru1.ru_utime + ru1.ru_stime) - (ru0.ru_utime + ru0.ru_stime)
     time.sleep(1.0); samples = sampler.stop()
     ok = [r for r in recs if r.get("rc") == 0 and not r.get("is_error") and "OK" in (r.get("result") or "")]
     busy = [s for s in samples if s["nprocs"] > 0]
-    res = {"harness": harness, "model": model, "n": n, "ok": len(ok), "batch_wall_s": round(wall, 2),
+    res = {"harness": harness, "model": model, "n": n, "ok": len(ok), "batch_wall_s": round(wall, 2), "cpu_s_per_turn": round(cpu_s / n, 2),
            "peak_rss_mb": round(max(s["rss_mb"] for s in samples), 1),
            "peak_rss_per_turn_mb": round(max(s["rss_mb"] for s in samples) / n, 1),
            "peak_cgroup_mem_mb": round(max(s["cg_mem_mb"] for s in samples), 1), "cgroup_mem_before_mb": round((cg0 or 0) / 2**20, 1),
