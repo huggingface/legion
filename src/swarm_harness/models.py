@@ -73,6 +73,9 @@ class TypeSpec(BaseModel):
     model: str
     image: str | None = None  # None -> default worker image
     system_prompt_file: str | None = None  # written into the workdir as CLAUDE.md / AGENTS.md
+    # The file's contents, inlined by `swarm-harness apply` (the controller and workers cannot
+    # read the caller's files). Wins over system_prompt_file on the worker.
+    system_prompt: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)

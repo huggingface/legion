@@ -60,3 +60,12 @@ def test_token_counter_reset_is_folded_into_base(store):
     row = store.get_agent("a-0000")
     assert agent_tokens(row)[m] == TokenUsage(input=155, output=21)
     assert row["cost"] == prices.cost_usd({m: TokenUsage(input=155, output=21)})
+
+
+def test_haiku_5_5_matches_claude_code_estimate():
+    # resume-gate job A: Claude Code reported total_cost_usd 0.001143 for this usage
+    u = TokenUsage(input=4, output=196, cache_read=28_030, cache_write=6_111)
+    assert prices.cost_usd({"claude-haiku-5-5": u}) == pytest.approx(0.001143, abs=2e-6)
+    # local e2e smoke turn: 0.001034465
+    u = TokenUsage(input=1206, output=265, cache_read=25_374, cache_write=4_221)
+    assert prices.cost_usd({"claude-haiku-5-5": u}) == pytest.approx(0.0010345, abs=2e-6)

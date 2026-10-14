@@ -382,3 +382,15 @@ def test_hub_errors_do_not_break_the_pass(store, jobs, clock, tick, monkeypatch)
     jobs.fail_launches = True
     store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 1}), 0)
     assert "launch_failed" in kinds(tick())
+
+
+def test_job_labels_from_settings_are_added_but_never_override(store, jobs, settings, tick):
+    settings.job_labels = {"experiment": "swarm-harness-m1", "swarm": "spoof"}
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    assert jobs.launches[0]["labels"] == {
+        "experiment": "swarm-harness-m1",
+        "swarm": "demo",
+        "type": "researcher",
+        "worker": W0,
+    }

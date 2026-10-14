@@ -140,11 +140,12 @@ async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick):
     ).status_code == 200
     a = (await client.get("/agents/researcher-0000")).json()
     assert a["state"] == "working" and a["turn_id"] == "t-1" and a["worker"] == W0
-    assert a["cost_usd"] == 22.5 and a["turns"] == 3 and a["model"] == "claude-opus-5-5"
+    # opus 5.5: 1M input at $4 + 0.1M output at $20
+    assert a["cost_usd"] == 6.0 and a["turns"] == 3 and a["model"] == "claude-opus-5-5"
     page = (await client.get("/swarms/demo/agents", params={"state": "idle"})).json()
     assert [x["name"] for x in page["agents"]] == ["researcher-0001"]
     st = (await client.get("/swarms/demo")).json()["status"]
-    assert st["cost_usd"] == 22.5
+    assert st["cost_usd"] == 6.0
     assert st["types"]["researcher"]["workers_by_state"] == {"running": 1}
 
     clock.advance(100)

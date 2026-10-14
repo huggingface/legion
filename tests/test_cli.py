@@ -62,3 +62,22 @@ def test_scale_agents_workers_remove(tmp_path, monkeypatch, app, store, tick):
     assert r.exit_code == 0 and r.output == ""
     r = runner.invoke(cli.app, ["remove", "demo"])
     assert r.exit_code == 0 and json.loads(r.output)["removing"] is True
+
+
+def test_apply_inlines_system_prompt_file(tmp_path, monkeypatch, app, store):
+    _wire(monkeypatch, app)
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "r.md").write_text("You keep notes.md.")
+    spec = make_spec(researcher={"replicas": 1, "system_prompt_file": "prompts/r.md"})
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)))
+    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    assert r.exit_code == 0, r.output
+    stored = store.get_swarm("demo")["spec"].types["researcher"]
+    assert stored.system_prompt == "You keep notes.md."
+    assert stored.system_prompt_file == "prompts/r.md"
+
+    bad = make_spec(researcher={"replicas": 1, "system_prompt_file": "prompts/nope.md"})
+    spec_file.write_text(yaml.safe_dump(bad.model_dump(mode="json", exclude_none=True)))
+    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    assert r.exit_code == 1 and "not found" in r.output

@@ -333,9 +333,23 @@ class Worker:
         return 0
 
 
+def quiet_libraries() -> None:
+    """One line per poll/heartbeat and tqdm bars per upload would drown the job log."""
+    for name in ("httpx", "httpx2", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except ImportError:
+        pass
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    quiet_libraries()
     cfg = WorkerConfig.from_env()
     cfg.work_root.mkdir(parents=True, exist_ok=True)
     sync = BucketSync(HubBucketStore(cfg.bucket), cfg.swarm) if cfg.bucket else None

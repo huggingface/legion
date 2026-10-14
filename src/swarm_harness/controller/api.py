@@ -225,6 +225,7 @@ def create_app(
     token: str,
     background: Callable[[Notifier], Awaitable[None]] | None = None,
     clock: Callable[[], datetime] = _now,
+    stats: Callable[[], dict] | None = None,
 ) -> FastAPI:
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
@@ -260,7 +261,7 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict:
-        return {"ok": True}
+        return {"ok": True, **(stats() if stats else {})}
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:

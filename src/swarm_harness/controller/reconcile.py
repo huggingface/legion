@@ -61,6 +61,7 @@ class Settings:
     launches_per_window: int = LAUNCHES_PER_WINDOW
     rate_window: timedelta = RATE_WINDOW
     rng: random.Random = field(default_factory=random.Random)
+    job_labels: dict[str, str] = field(default_factory=dict)  # deployment-wide extra job labels
 
 
 @dataclass
@@ -374,7 +375,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
             log.warning(
                 "secret %s for %s/%s is not set on the controller", name, spec.swarm, type_name
             )
-    labels = {"swarm": spec.swarm, "type": type_name, "worker": wid}
+    labels = {**s.job_labels, "swarm": spec.swarm, "type": type_name, "worker": wid}
     p.budget -= 1
     store.record_launch(p.now)
     try:
