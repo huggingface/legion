@@ -35,3 +35,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+# ruff >= 0.17 enables PYI041 by default; models.py is the shared contract, left as written.
+"src/swarm_harness/models.py" = ["PYI041"]
