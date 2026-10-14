@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -379,6 +380,29 @@ def quiet_libraries() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
+def run_and_exit(coro, *, exit: Callable[[int], object] = os._exit) -> None:
+    """Run the worker to completion, then exit at once, without asyncio.run's teardown.
+
+    By the time Worker.run returns, the worker has synced every agent, flushed its events and
+    sent its last heartbeat, so nothing in the process is needed any more. asyncio.run would
+    then cancel leftover tasks and join the default executor, and the interpreter would join
+    non-daemon threads; any of them blocking (a hung bucket or SDK call) keeps the job RUNNING
+    after a drain (1k run, check 5). Log what is still alive, then os._exit."""
+    loop = asyncio.new_event_loop()
+    code = loop.run_until_complete(coro)
+    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+    alive = [t.name for t in threading.enumerate()
+             if t is not threading.main_thread() and t.is_alive()]
+    if pending or alive:
+        log.info("exiting with %d pending tasks and %d live threads: %s", len(pending), len(alive),
+                 sorted({(t.get_coro().__qualname__ if t.get_coro() else "?") for t in pending})[:10]
+                 + sorted(set(alive))[:10])
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        stream.flush()
+    exit(code)
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -392,7 +416,7 @@ def main() -> None:
         sync = BucketSync(HubBucketStore(cfg.bucket, stats=stats), cfg.swarm)
     client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation)
     worker = Worker(cfg, client, sync=sync)
-    sys.exit(asyncio.run(worker.run()))
+    run_and_exit(worker.run())
 
 
 if __name__ == "__main__":

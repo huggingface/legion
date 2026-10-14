@@ -226,3 +226,26 @@ async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
     await client.heartbeat(w.heartbeat_payload())
     await client.aclose()
     assert seen == [(f"/workers/{WID}/commands", "inc-1"), (f"/workers/{WID}/heartbeat", "inc-1")]
+
+
+def test_run_and_exit_does_not_wait_for_a_stuck_executor_thread():
+    """1k run, check 5: a drained worker logged "drained; exiting" but its job stayed RUNNING.
+    asyncio.run's teardown joins the default executor (and Python joins non-daemon threads at
+    exit), so one blocked thread kept the process alive. The worker must exit regardless."""
+    import threading
+
+    release = threading.Event()
+    exits: list[int] = []
+
+    async def worker_run() -> int:
+        asyncio.get_running_loop().run_in_executor(None, release.wait)  # never finishes
+        asyncio.get_running_loop().create_task(asyncio.Event().wait())  # never finishes
+        await asyncio.sleep(0)
+        return 0
+
+    t = threading.Thread(target=wmain.run_and_exit, args=(worker_run(),),
+                         kwargs={"exit": exits.append}, daemon=True)
+    t.start()
+    t.join(5)
+    release.set()
+    assert exits == [0]
