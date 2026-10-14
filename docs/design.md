@@ -395,10 +395,19 @@ experiments/load-1k), both 2026-10-14.
 | Jobs API per hour (steady) | about 1 `inspect_job` per worker-state change; no `list_jobs` | | tens of calls |
 | Bucket sync, per cycle | 4 Hub calls and about 0.6 s per changed agent, serial | about 120 s for 200 changed agents | 40,000 calls if everyone is active (item 1 in §12) |
 | Restore after relaunch | 7 Hub calls per agent | 200 agents in 17 s | 70,000 calls for a mass restart |
-| Controller at 1k | 87 MB RSS, under 2% of a core, status page 54 ms | | expected fine; untested |
+| Controller at 1k | 87 MB RSS, under 2% of a core, status page 54 ms | | measured at 10k: 155 MB, status page 0.25 s and 25 KB, 0 5xx of 30,018 requests |
+| Heartbeat write at the controller | 30 ms mean at 1k | | 187 ms mean, 10.5 s max at 120 req/s (SQLite single writer) |
+| Mass restore | | 200 agents in 17 s | 50 workers x 200 agents in 15 s p50 / 29 s max; 50,000 bucket calls in 2 min, 0 429s |
 
 Inference is the bill. Hosting is noise. The 1k run spent about $2.26 on haiku and about
-$0.15 on jobs.
+$0.15 on jobs; the 10k run about $11.3 and $0.53.
+
+The 10k run (experiments/load-10k/RESULTS.md, 2026-10-14) reached 10,000 idle agents 58 s
+after apply, delivered 10,000/10,000 prompts and ran at least 9,958 turns, then stopped early:
+the Spaces edge throttled the workers' own heartbeats and polls at an aggregate of about 90 to
+120 req/s, the controller took the silent workers for dead and crash-relaunched all 50. The
+bucket, the Jobs API (50 launches in 4 s, 64 concurrent) and the controller process were not
+the limit.
 
 ## 8. Non-goals for v1
 
@@ -456,9 +465,12 @@ double-counted after a relaunch.
   long idle agents with large transcripts. This is true of any hosting model.
 - msgboard's 2,000 open-poll cap and roughly 300 req/s ingress will matter the
   day agents poll it themselves. Deferred by decision.
-- The HF Spaces edge rate-limits each client IP (429 from about 20 req/s, blocks lasting
-  minutes; measured in the 1k run). Workers were unaffected, but any single caller of the
-  controller must stay under it until there are bulk endpoints and authenticated callers.
+- The HF Spaces edge rate-limits traffic to the controller on more than the client IP. One
+  client at about 20 req/s is blocked (1k run). Fifty workers at under 1.4 req/s each, from
+  distinct egress IPs, were all blocked together once the aggregate reached about 90 to 120
+  req/s (10k run), while this workspace's monitor was not. The key (per-Space aggregate or the
+  jobs' IP range) and the threshold are not measured. Nothing above roughly 2,000 to 3,000
+  active agents can run through the Spaces edge as it is.
 
 ## 11. Decision log
 
@@ -493,23 +505,32 @@ Condensed from the grilling session, 2026-10-13/14.
 
 ## 12. Road to 10k
 
-What the 1k run says must change, in order. Items 1 to 3 are gating; the rest are
-hardening.
+What the 1k and 10k runs say must change, in order. Item 1 gates everything else.
 
-1. **Sync and restore per worker, not per agent.** One `sync_bucket` over the worker's
-   work root and one batch for session files per cycle; one listing and one download for a
-   restore. Bounds a sync cycle and a mass restart at a few calls per worker.
-2. **Bulk caller endpoints.** `POST /prompts` for many agents at once and a swarm-level
-   events stream, so a caller is not making 2 to 8 requests per agent per prompt.
-3. **Get off the anonymous edge limit.** Move the swarm token out of `Authorization` so
-   callers can send an HF token and the Space can be private; re-measure the per-IP limit
-   (about 20 req/s anonymous).
-4. **Persistent controller state.** A Space volume or SQLite snapshots to the bucket. A
-   redeploy currently wipes every swarm.
-5. **Relaunch on the worker's own "exited" signal** in its final heartbeat, instead of
-   waiting up to 90 s for `COMPLETED` or 180 s plus backoff when a job hangs.
-6. **Spend ledger** that survives scale-down and remove.
-7. Smaller: `max_working_per_worker` defers starts instead of warning; drain skips agents
-   being unassigned; explicit command acks; prebuilt worker image; Codex in a job with an
-   API key.
-
+1. **Take the control plane off the Spaces edge limit, then measure the limit.** Options, in
+   order of how much they keep: a private Space with workers sending an HF token (needs the
+   swarm token out of `Authorization`; whether authenticated traffic has a separate limit is
+   unknown); the controller as an HF Job with `--expose` (its own ingress, $0.01/h); or another
+   host. Then a controlled ramp: N cpu-basic jobs at a fixed rate each, to find the key and the
+   threshold, written into §7.
+2. **Liveness that survives a throttled ingress.** Do not cancel a `RUNNING` job only because
+   its heartbeats stopped when many workers of a swarm fell silent together; cap cancels per
+   pass; never relaunch into a block the controller can observe. Worker side: retry a failed
+   heartbeat within seconds, honour `Retry-After`, back the command poll off on 429.
+3. **Fewer requests per agent-turn.** The 10k send phase was 120 req/s: prompters 50/s and the
+   workers' immediate re-polls another 50/s. A batch `POST /prompts`, a swarm-level events
+   stream, and command polls that batch for a few hundred ms would put the same round under
+   20 req/s.
+4. **Sync and restore per worker, not per agent**, then sync on turn end so a crash loses at
+   most one turn instead of a worker's last three minutes (110 transcripts lost on one
+   cancelled worker at 10k).
+5. **A launch budget per swarm.** The crash path spent 64 launches in ten minutes with nothing
+   wrong on the workers; a per-swarm cap on relaunches per window, and a crashloop rule that
+   counts the swarm rather than the worker.
+6. **Persistent controller state** and a **spend ledger** that survive redeploys, scale-down
+   and remove.
+7. Smaller: a 200-row heartbeat should not take 10 s (fewer statements, counters out of the
+   hot path); the drain should not wait on serial unassign syncs; `max_working_per_worker`
+   defers starts instead of warning; explicit command acks; prebuilt worker image; Codex in a
+   job with an API key; the `asyncio` child-reaping warning; the kill and deadline-drain checks
+   still need a run at 10k.
