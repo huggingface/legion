@@ -220,7 +220,8 @@ async def test_status_page_renders(client, store, clock, tick):
     assert r.status_code == 200 and "text/html" in r.headers["content-type"]
     html = r.text
     assert "<h2>demo</h2>" in html and "reviewer" in html and "researcher" in html
-    assert "1 pending prompts" in html and 'href="/agents/researcher-0001"' in html
+    assert '<div class="v">1</div><div class="l">pending prompts</div>' in html
+    assert 'href="/agents/researcher-0001"' in html and 'class="chip ' in html
 
 
 async def test_delete_swarm(client, store, clock, tick):
