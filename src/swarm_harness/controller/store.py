@@ -300,11 +300,19 @@ class Store:
     def record_agent_heartbeat(
         self, name: str, fields: dict[str, Any], tokens: dict[str, TokenUsage], cost_fn
     ) -> None:
-        """Store one AgentHeartbeat. Tokens are cumulative per worker incarnation; if a model's
-        counters go backwards the harness restarted counting, so fold the old values into base."""
+        """Store one AgentHeartbeat. Tokens are cumulative (the worker restores them from the
+        bucket); if a model's counters go backwards the count restarted (a failed restore), so
+        fold the old values into base. An empty map means "not known yet" (an agent still
+        restoring on a relaunched worker) and leaves tokens and cost alone: folding there
+        counted every restored agent twice (1k run)."""
         with self.transaction():
             row = self.get_agent(name)
             if row is None:
+                return
+            if not tokens and row["tokens_last"] not in ("", "{}"):
+                if fields.get("harness_estimate_usd") is None:
+                    fields.pop("harness_estimate_usd", None)
+                self._update("agents", "name", name, fields)
                 return
             base, last = _tokens(row["tokens_base"]), _tokens(row["tokens_last"])
             for model, old in last.items():
