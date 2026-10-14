@@ -1,0 +1,122 @@
+{
+ "overall": {
+  "n": 1000,
+  "turn_ended": 712,
+  "ok": 712,
+  "first_event_p50": 5.63,
+  "first_event_p95": 10.91,
+  "turn_p50": 7.51,
+  "turn_p95": 12.21,
+  "turn_max": 22.37,
+  "e2e_p50": 13.28,
+  "e2e_p95": 20.93,
+  "e2e_max": 30.65,
+  "ack_p50": 0.02,
+  "ack_p95": 0.18,
+  "ack_max": 0.46
+ },
+ "per_worker": {
+  "load-1k-counter-w0000": {
+   "n": 200,
+   "turn_ended": 200,
+   "ok": 200,
+   "first_event_p50": 6.29,
+   "first_event_p95": 9.05,
+   "turn_p50": 8.09,
+   "turn_p95": 11.68,
+   "turn_max": 16.21,
+   "e2e_p50": 14.07,
+   "e2e_p95": 18.75,
+   "e2e_max": 21.78,
+   "ack_p50": 0.03,
+   "ack_p95": 0.32,
+   "ack_max": 0.46
+  },
+  "load-1k-counter-w0001": {
+   "n": 200,
+   "turn_ended": 100,
+   "ok": 100,
+   "first_event_p50": 4.23,
+   "first_event_p95": 6.51,
+   "turn_p50": 6.44,
+   "turn_p95": 9.19,
+   "turn_max": 12.59,
+   "e2e_p50": 10.46,
+   "e2e_p95": 13.35,
+   "e2e_max": 18.0,
+   "ack_p50": 0.02,
+   "ack_p95": 0.12,
+   "ack_max": 0.3
+  },
+  "load-1k-scribe-w0000": {
+   "n": 200,
+   "turn_ended": 186,
+   "ok": 186,
+   "first_event_p50": 5.62,
+   "first_event_p95": 10.67,
+   "turn_p50": 7.51,
+   "turn_p95": 13.27,
+   "turn_max": 22.37,
+   "e2e_p50": 13.19,
+   "e2e_p95": 20.93,
+   "e2e_max": 30.65,
+   "ack_p50": 0.03,
+   "ack_p95": 0.21,
+   "ack_max": 0.31
+  },
+  "load-1k-scribe-w0001": {
+   "n": 200,
+   "turn_ended": 164,
+   "ok": 164,
+   "first_event_p50": 6.97,
+   "first_event_p95": 13.72,
+   "turn_p50": 8.14,
+   "turn_p95": 13.03,
+   "turn_max": 14.9,
+   "e2e_p50": 16.7,
+   "e2e_p95": 22.57,
+   "e2e_max": 24.35,
+   "ack_p50": 0.02,
+   "ack_p95": 0.12,
+   "ack_max": 0.32
+  },
+  "load-1k-scribe-w0002": {
+   "n": 200,
+   "turn_ended": 62,
+   "ok": 62,
+   "first_event_p50": 4.7,
+   "first_event_p95": 9.69,
+   "turn_p50": 5.27,
+   "turn_p95": 10.6,
+   "turn_max": 11.41,
+   "e2e_p50": 7.48,
+   "e2e_p95": 16.78,
+   "e2e_max": 19.02,
+   "ack_p50": 0.02,
+   "ack_p95": 0.1,
+   "ack_max": 0.13
+  }
+ },
+ "acks": {
+  "queued": 839,
+  "null": 161
+ },
+ "session_events": {
+  "session_started": 839,
+  "null": 161
+ },
+ "anomalies": {},
+ "bad_replies": [],
+ "send_window_s": 326.7,
+ "first_send_to_last_end_s": 334.3,
+ "tokens_this_run": {
+  "claude-haiku-5-5": {
+   "input": 855034,
+   "output": 289633,
+   "cache_read": 22025564,
+   "cache_write": 3043400,
+   "reasoning": 148744
+  }
+ },
+ "cost_this_run_usd": 0.831001
+}

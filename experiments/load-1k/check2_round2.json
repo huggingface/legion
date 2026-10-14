@@ -1,0 +1,133 @@
+{
+ "overall": {
+  "n": 1000,
+  "turn_ended": 1000,
+  "ok": 999,
+  "first_event_p50": 1.22,
+  "first_event_p95": 2.3,
+  "turn_p50": 2.92,
+  "turn_p95": 4.89,
+  "turn_max": 17.15,
+  "e2e_p50": 4.27,
+  "e2e_p95": 6.54,
+  "e2e_max": 18.19,
+  "ack_p50": 0.01,
+  "ack_p95": 0.11,
+  "ack_max": 3.04
+ },
+ "per_worker": {
+  "load-1k-counter-w0000": {
+   "n": 200,
+   "turn_ended": 200,
+   "ok": 200,
+   "first_event_p50": 1.01,
+   "first_event_p95": 2.08,
+   "turn_p50": 3.29,
+   "turn_p95": 5.1,
+   "turn_max": 17.15,
+   "e2e_p50": 4.48,
+   "e2e_p95": 6.93,
+   "e2e_max": 18.19,
+   "ack_p50": 0.01,
+   "ack_p95": 0.08,
+   "ack_max": 3.04
+  },
+  "load-1k-counter-w0001": {
+   "n": 200,
+   "turn_ended": 200,
+   "ok": 200,
+   "first_event_p50": 0.99,
+   "first_event_p95": 1.87,
+   "turn_p50": 3.54,
+   "turn_p95": 5.42,
+   "turn_max": 12.01,
+   "e2e_p50": 4.76,
+   "e2e_p95": 6.76,
+   "e2e_max": 12.81,
+   "ack_p50": 0.01,
+   "ack_p95": 0.1,
+   "ack_max": 0.16
+  },
+  "load-1k-scribe-w0000": {
+   "n": 200,
+   "turn_ended": 200,
+   "ok": 199,
+   "first_event_p50": 1.25,
+   "first_event_p95": 2.32,
+   "turn_p50": 2.49,
+   "turn_p95": 5.17,
+   "turn_max": 13.26,
+   "e2e_p50": 4.01,
+   "e2e_p95": 6.09,
+   "e2e_max": 14.22,
+   "ack_p50": 0.01,
+   "ack_p95": 0.11,
+   "ack_max": 0.16
+  },
+  "load-1k-scribe-w0001": {
+   "n": 200,
+   "turn_ended": 200,
+   "ok": 200,
+   "first_event_p50": 1.48,
+   "first_event_p95": 2.63,
+   "turn_p50": 2.64,
+   "turn_p95": 4.2,
+   "turn_max": 13.21,
+   "e2e_p50": 4.21,
+   "e2e_p95": 6.2,
+   "e2e_max": 14.94,
+   "ack_p50": 0.01,
+   "ack_p95": 0.11,
+   "ack_max": 0.18
+  },
+  "load-1k-scribe-w0002": {
+   "n": 200,
+   "turn_ended": 200,
+   "ok": 200,
+   "first_event_p50": 1.08,
+   "first_event_p95": 2.54,
+   "turn_p50": 2.75,
+   "turn_p95": 4.04,
+   "turn_max": 12.04,
+   "e2e_p50": 3.96,
+   "e2e_p95": 6.03,
+   "e2e_max": 12.6,
+   "ack_p50": 0.01,
+   "ack_p95": 0.08,
+   "ack_max": 0.19
+  }
+ },
+ "acks": {
+  "queued": 1000
+ },
+ "session_events": {
+  "session_resumed": 839,
+  "session_started": 161
+ },
+ "anomalies": {},
+ "bad_replies": [
+  {
+   "agent": "scribe-0004",
+   "codeword": "scribe-0004-68e4f0",
+   "reply": "I couldn't record `scribe-0004-68e4f0` in `notes.md`. The USD budget for this session is exhausted ($0 of $0.05 remaining), so I haven't run a write. The codeword is `scribe-0004-68e4f0`, and it still needs to be appended as `- scribe-0004-68e4f0`.",
+   "status": "completed"
+  }
+ ],
+ "send_window_s": 235.7,
+ "first_send_to_last_end_s": 239.3,
+ "tokens_this_run": {
+  "claude-haiku-5-5": {
+   "input": 194984,
+   "output": 225821,
+   "cache_read": 29347943,
+   "cache_write": 4769864,
+   "reasoning": 60324
+  }
+ },
+ "cost_this_run_usd": 1.022121,
+ "controller_cost_usd_total": 2.000099,
+ "claude_estimate_usd_total": 2.000101,
+ "agents_by_state": {
+  "idle": 1000
+ }
+}

@@ -1,0 +1,24 @@
+# Check 5 re-run after the exit fix (experiments/load-1k/RESULTS.md): the same swarm and type
+# names as examples/load-1k.yaml, so counter-0000..0199 restore from the bucket, on one
+# cpu-upgrade worker whose lifetime is cut to 8 m (+0-1 m) so it drains about 3 min after launch.
+swarm: load-1k
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/swarm-harness/load-1k
+types:
+  counter:
+    harness: claude
+    model: claude-haiku-5-5
+    system_prompt_file: ../../examples/prompts/counter.md
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    labels: {experiment: swarm-harness-1k}
+    replicas: 200
+    flavor: cpu-upgrade
+    agents_per_worker: 200
+    max_working_per_worker: 120
+    idle_grace: 60s
+    worker_lifetime: 8m
+    lifetime_jitter: 1m
+    drain_window: 5m
+    max_budget_usd: 0.05
+    max_turns: 3
+    persist_workdir: true

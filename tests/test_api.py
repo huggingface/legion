@@ -300,3 +300,35 @@ async def test_heartbeat_missing_assigned_agents_requeues_their_assign(client, s
     store.clear_commands(W0)
     await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents, draining=True))
     assert store.commands_for(W0) == []
+
+
+async def test_healthz_reports_requests_and_process(client, tick):
+    await apply(client)
+    tick()
+    assert (await client.get("/agents/researcher-0000")).status_code == 200
+    await client.get("/agents/nobody")
+    h = (await client.get("/healthz")).json()
+    routes = h["requests"]["routes"]
+    assert routes["GET /agents/{name}"]["n"] == 2
+    assert routes["PUT /swarms/{swarm}"]["n"] == 1
+    assert h["requests"]["by_status"]["4xx"] == 1
+    assert h["process"]["rss_mb"] > 0 and h["process"]["cpu_s"] > 0
+
+
+async def test_heartbeat_during_restore_does_not_double_count_cost(client, clock, tick):
+    """1k run: after a relaunch the worker heartbeats agents whose restore has not finished yet,
+    with an empty token map. That read as "counters went backwards" and folded the old totals
+    into the base; once restored, the worker reported its cumulative totals again (they survive
+    in the bucket state), so the agent's cost was counted twice (+$0.67 on $2.00)."""
+    await apply(client, make_spec(researcher={"replicas": 1}))
+    tick()
+    t1 = {"claude-opus-5-5": TokenUsage(input=1_000_000)}  # $4
+    t2 = {"claude-opus-5-5": TokenUsage(input=1_500_000)}  # $6, cumulative across workers
+    for tokens in (t1, {}, t2):  # before the relaunch, while restoring, after the restore
+        hb = AgentHeartbeat(name="researcher-0000", state="idle", idle_since=clock(), tokens=tokens)
+        r = await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, [hb]))
+        assert r.status_code == 200
+        clock.advance(30)
+    a = (await client.get("/agents/researcher-0000")).json()
+    assert a["cost_usd"] == 6.0
+    assert a["tokens"]["claude-opus-5-5"]["input"] == 1_500_000

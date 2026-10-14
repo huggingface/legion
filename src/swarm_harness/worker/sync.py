@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import re
+import threading
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -26,6 +29,68 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 UPLOAD_CHUNK = 200
+
+
+@dataclass
+class BucketStats:
+    """Bucket traffic counters for the worker log: store operations (`ops`), the Hub HTTP
+    requests behind them (`http`, by method and route; xet CAS transfers run in hf_xet and are
+    not seen here) and HTTP error statuses (`errors`, e.g. 429). Thread-safe."""
+
+    ops: Counter = field(default_factory=Counter)
+    http: Counter = field(default_factory=Counter)
+    errors: Counter = field(default_factory=Counter)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add(self, kind: str, key: str, n: int = 1) -> None:
+        with self._lock:
+            getattr(self, kind)[key] += n
+
+    def snapshot(self) -> dict[str, Counter]:
+        with self._lock:
+            return {"ops": Counter(self.ops), "http": Counter(self.http),
+                    "errors": Counter(self.errors)}
+
+    def since(self, before: dict[str, Counter]) -> dict[str, dict[str, int]]:
+        now = self.snapshot()
+        return {k: dict(now[k] - before[k]) for k in now}
+
+
+_BUCKET_ROUTE = re.compile(r"^/api/buckets/[^/]+/[^/]+(?:/([^/]+))?")
+
+
+def http_route(method: str, host: str, path: str) -> str:
+    """'GET /api/buckets/ns/b/tree/x/y' -> 'GET buckets/tree'; other hosts by first segment."""
+    m = _BUCKET_ROUTE.match(path)
+    if m:
+        return f"{method} buckets/{m.group(1) or ''}".rstrip("/")
+    first = path.strip("/").split("/", 1)[0]
+    if host.endswith("huggingface.co"):
+        return f"{method} {first or '/'}"
+    return f"{method} {host}/{first}"
+
+
+def count_hub_http(stats: BucketStats) -> None:
+    """Count every request huggingface_hub's shared client makes (one install per process)."""
+    import huggingface_hub
+    from huggingface_hub.utils._http import default_client_factory
+
+    def on_request(request) -> None:
+        stats.add("http", http_route(request.method, request.url.host, request.url.path))
+
+    def on_response(response) -> None:
+        if response.status_code >= 400:
+            req = response.request
+            route = http_route(req.method, req.url.host, req.url.path)
+            stats.add("errors", f"{response.status_code} {route}")
+
+    def factory():
+        client = default_client_factory()
+        client.event_hooks["request"].append(on_request)
+        client.event_hooks.setdefault("response", []).append(on_response)
+        return client
+
+    huggingface_hub.set_client_factory(factory)
 
 
 class BucketStore(Protocol):
@@ -54,20 +119,23 @@ def parse_bucket(url: str) -> tuple[str, str]:
 class HubBucketStore:
     """huggingface_hub bucket API (batch_bucket_files / list_bucket_tree / download_bucket_files)."""
 
-    def __init__(self, url: str, token: str | None = None) -> None:
+    def __init__(self, url: str, token: str | None = None, stats: BucketStats | None = None) -> None:
         from huggingface_hub import HfApi
 
         self.bucket_id, self.base = parse_bucket(url)
         self.api = HfApi(token=token)
+        self.stats = stats or BucketStats()
 
     def upload(self, files: list[tuple[Path, str]]) -> None:
         for i in range(0, len(files), UPLOAD_CHUNK):
+            self.stats.add("ops", "batch_bucket_files")
             chunk = files[i : i + UPLOAD_CHUNK]
             self.api.batch_bucket_files(self.bucket_id, add=[(str(p), self.base + r) for p, r in chunk])
 
     def list(self, prefix: str) -> list[str]:
         from huggingface_hub import BucketFile
 
+        self.stats.add("ops", "list_bucket_tree")
         full = self.base + prefix
         out = []
         for f in self.api.list_bucket_tree(self.bucket_id, prefix=full, recursive=True):
@@ -76,6 +144,7 @@ class HubBucketStore:
         return out
 
     def download(self, files: list[tuple[str, Path]]) -> None:
+        self.stats.add("ops", "download_bucket_files")
         for _, local in files:
             local.parent.mkdir(parents=True, exist_ok=True)
         self.api.download_bucket_files(self.bucket_id, [(self.base + r, str(p)) for r, p in files])
@@ -84,9 +153,11 @@ class HubBucketStore:
         return f"hf://buckets/{self.bucket_id}/{self.base}{prefix}".rstrip("/")
 
     def sync_up(self, local: Path, prefix: str) -> None:
+        self.stats.add("ops", "sync_bucket_up")
         self.api.sync_bucket(str(local), self._url(prefix), delete=True, quiet=True)
 
     def sync_down(self, prefix: str, local: Path) -> None:
+        self.stats.add("ops", "sync_bucket_down")
         local.mkdir(parents=True, exist_ok=True)
         self.api.sync_bucket(self._url(prefix), str(local), quiet=True)
 
@@ -102,6 +173,7 @@ class BucketSync:
     def __init__(self, store: BucketStore, swarm: str) -> None:
         self.store = store
         self.swarm = swarm
+        self.stats: BucketStats = getattr(store, "stats", None) or BucketStats()
         self._seen: dict[Path, tuple[int, int]] = {}
 
     def prefix(self, rt: AgentRuntime) -> str:
@@ -145,6 +217,13 @@ class BucketSync:
                 pass
 
     async def push(self, rt: AgentRuntime) -> int:
+        try:
+            return await self._push(rt)
+        except Exception:
+            self.stats.add("errors", "push_failed")
+            raise
+
+    async def _push(self, rt: AgentRuntime) -> int:
         if rt.spec.persist_workdir and rt.workdir.is_dir():
             await asyncio.to_thread(self.store.sync_up, rt.workdir, self.prefix(rt) + "workdir")
         files = self._changed(self.collect(rt))
@@ -154,6 +233,13 @@ class BucketSync:
         return len(files)
 
     async def restore(self, rt: AgentRuntime) -> RestoreResult:
+        try:
+            return await self._restore(rt)
+        except Exception:
+            self.stats.add("errors", "restore_failed")
+            raise
+
+    async def _restore(self, rt: AgentRuntime) -> RestoreResult:
         pre = self.prefix(rt)
         remote = await asyncio.to_thread(self.store.list, pre)
         res = RestoreResult()

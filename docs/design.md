@@ -338,6 +338,11 @@ One POST per worker every 30 s, random phase:
 About 100 bytes per agent. 10k agents on 1,000 workers is about 33 requests/s
 at the controller.
 
+`tokens` are cumulative per agent across workers (the worker restores them from the bucket
+state). An empty map means "not known yet", for an agent still restoring on a relaunched
+worker, and leaves the controller's totals alone. Folding there double-counted cost in the 1k
+run (experiments/load-1k/RESULTS.md, bug 2).
+
 ### Events and sessions
 
 pi session format v3, one stream per agent, `harness` set to `claude` or
@@ -440,6 +445,9 @@ Inference is the bill. Hosting is noise.
   long idle agents with large transcripts. This is true of any hosting model.
 - msgboard's 2,000 open-poll cap and roughly 300 req/s ingress will matter the
   day agents poll it themselves. Deferred by decision.
+- The HF Spaces edge rate-limits each client IP (429 from about 20 req/s, blocks lasting
+  minutes; measured in the 1k run). Workers were unaffected, but any single caller of the
+  controller must stay under it until there are bulk endpoints and authenticated callers.
 
 ## 11. Decision log
 

@@ -54,3 +54,32 @@ async def test_persist_workdir_false_skips_workdir(tmp_path):
     (rt.workdir / "big.bin").write_text("x")
     await rt.sync_now("test")
     assert not any("/workdir/" in k for k in store.files)
+
+
+def test_http_route_names_bucket_calls():
+    from swarm_harness.worker.sync import http_route
+
+    assert http_route("GET", "huggingface.co", "/api/buckets/ns/b/tree/sw/x") == "GET buckets/tree"
+    assert http_route("POST", "huggingface.co", "/api/buckets/ns/b/batch") == "POST buckets/batch"
+    assert http_route("GET", "huggingface.co", "/api/buckets/ns/b") == "GET buckets"
+    assert http_route("GET", "cas-server.xethub.hf.co", "/v1/reconstructions/abc") == (
+        "GET cas-server.xethub.hf.co/v1")
+
+
+async def test_sync_counts_push_and_restore_failures(tmp_path):
+    class Broken(MemoryStore):
+        def upload(self, files):
+            raise RuntimeError("429")
+
+        def list(self, prefix):
+            raise RuntimeError("429")
+
+    sync = BucketSync(Broken(), "sw")
+    rt, _ = runtime(tmp_path, sync=sync)
+    await rt.setup()  # restore fails: fresh start, counted
+    await rt.prompt("hi")
+    await until(lambda: rt.state.turns == 1)
+    await rt.sync_now("test")  # push fails: logged, counted, agent stays dirty
+    assert sync.stats.snapshot()["errors"] == {"restore_failed": 1, "push_failed": 1}
+    assert rt.dirty
+    await rt.stop()
