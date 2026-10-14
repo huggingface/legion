@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
+import resource
 import secrets
+import threading
+import time
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
@@ -97,6 +101,75 @@ class Notifier:
                 await asyncio.wait_for(ev.wait(), remaining)
             except TimeoutError:
                 pass
+
+
+class RequestStats:
+    """Pure ASGI middleware counting requests per route template and status, with latency
+    (sum and max) and in-flight peak, for /healthz. Long-polls count their parked time."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self.lock = threading.Lock()
+        self.routes: dict[str, dict[str, float]] = {}
+        self.statuses: Counter[str] = Counter()
+        self.in_flight = 0
+        self.peak_in_flight = 0
+        self.started = time.time()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        status = {"code": 500}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        t0 = time.monotonic()
+        with self.lock:
+            self.in_flight += 1
+            self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            dt = time.monotonic() - t0
+            route = scope.get("route")
+            key = f"{scope['method']} {getattr(route, 'path', 'unmatched')}"
+            with self.lock:
+                self.in_flight -= 1
+                r = self.routes.setdefault(key, {"n": 0, "sum_s": 0.0, "max_s": 0.0, "errors": 0})
+                r["n"] += 1
+                r["sum_s"] += dt
+                r["max_s"] = max(r["max_s"], dt)
+                if status["code"] >= 500:
+                    r["errors"] += 1
+                self.statuses[f"{status['code'] // 100}xx"] += 1
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            routes = {
+                k: {"n": int(v["n"]), "mean_s": round(v["sum_s"] / v["n"], 4),
+                    "max_s": round(v["max_s"], 3), "5xx": int(v["errors"])}
+                for k, v in sorted(self.routes.items())
+            }
+            return {"since": self.started, "total": sum(self.statuses.values()),
+                    "by_status": dict(self.statuses), "in_flight": self.in_flight,
+                    "peak_in_flight": self.peak_in_flight, "routes": routes}
+
+
+def process_stats() -> dict:
+    """RSS and CPU seconds of the controller process (Spaces expose no metrics API)."""
+    try:
+        with open("/proc/self/statm") as f:
+            rss = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        rss = 0
+    t = os.times()
+    return {"rss_mb": round(rss / 2**20, 1),
+            "max_rss_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
+            "cpu_s": round(t.user + t.system, 2), "threads": threading.active_count(),
+            "time": round(time.time(), 1)}
 
 
 # --------------------------------------------------------------------------- status builders
@@ -240,6 +313,13 @@ def create_app(
 
     app = FastAPI(title="swarm-harness controller", lifespan=lifespan)
     app.state.store, app.state.notifier = store, notifier
+    request_stats: dict[str, RequestStats] = {}
+
+    def make_stats(app):
+        request_stats["mw"] = RequestStats(app)
+        return request_stats["mw"]
+
+    app.add_middleware(make_stats)
 
     def auth(authorization: str = Header(default="")) -> None:
         if not token or not secrets.compare_digest(authorization, f"Bearer {token}"):
@@ -261,7 +341,9 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict:
-        return {"ok": True, **(stats() if stats else {})}
+        mw = request_stats.get("mw")
+        return {"ok": True, **(stats() if stats else {}), "process": process_stats(),
+                "requests": mw.snapshot() if mw else {}}
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:

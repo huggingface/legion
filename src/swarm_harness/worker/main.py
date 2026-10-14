@@ -41,7 +41,7 @@ from swarm_harness.worker.adapters.base import HarnessAdapter
 from swarm_harness.worker.agents import AgentRuntime
 from swarm_harness.worker.events import Outbox, parse_iso, utcnow
 from swarm_harness.worker.identity import Identities
-from swarm_harness.worker.sync import BucketSync, HubBucketStore
+from swarm_harness.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
 
 log = logging.getLogger("swarm_harness.worker")
 
@@ -160,6 +160,8 @@ class Worker:
         self._wake_heartbeat = asyncio.Event()
         self._unassigning: dict[str, asyncio.Task] = {}
         self.stale = False
+        self._restoring = 0  # setups (restores) in flight; a "wave" ends when it drops to 0
+        self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -182,7 +184,7 @@ class Worker:
                               working_count=self.working_count)
             self.agents[cmd.agent] = rt
             self.drain_window = parse_duration(cmd.spec.drain_window)
-            self._spawn(rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt))
+            self._spawn(self._setup(rt, cmd))
         elif isinstance(cmd, PromptCommand):
             rt = self.agents.get(cmd.agent)
             if rt is None:
@@ -198,6 +200,26 @@ class Worker:
                 self._unassigning[cmd.agent] = self._spawn(self._unassign(rt))
         elif isinstance(cmd, DrainCommand):
             self._spawn(self.drain("command"))
+
+    async def _setup(self, rt: AgentRuntime, cmd: AssignCommand) -> None:
+        """rt.setup, timed as part of a restore wave (all setups that overlap in time)."""
+        loop = asyncio.get_running_loop()
+        if self._wave is None:
+            snap = self.sync.stats.snapshot() if self.sync else {}
+            self._wave = (loop.time(), 0, snap)
+        start, n, snap = self._wave
+        self._wave = (start, n + 1, snap)
+        self._restoring += 1
+        try:
+            await rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt)
+        finally:
+            self._restoring -= 1
+            if self._restoring == 0 and self._wave is not None:
+                start, n, snap = self._wave
+                self._wave = None
+                calls = self.sync.stats.since(snap) if self.sync else {}
+                log.info("restore wave: %d agents set up in %.1f s; bucket %s", n,
+                         loop.time() - start, calls)
 
     async def _unassign(self, rt: AgentRuntime) -> None:
         try:
@@ -282,11 +304,17 @@ class Worker:
     async def sync_loop(self) -> None:
         if self.sync is None:
             return
+        loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(self.cfg.sync_interval)
-            for rt in list(self.agents.values()):
-                if rt.live or rt.dirty:
-                    await rt.sync_now("periodic")
+            due = [rt for rt in list(self.agents.values()) if rt.live or rt.dirty]
+            if not due:
+                continue
+            t0, snap = loop.time(), self.sync.stats.snapshot()
+            for rt in due:
+                await rt.sync_now("periodic")
+            log.info("sync cycle: %d of %d agents in %.1f s; bucket %s", len(due), len(self.agents),
+                     loop.time() - t0, self.sync.stats.since(snap))
 
     async def deadline_loop(self) -> None:
         while True:
@@ -302,7 +330,11 @@ class Worker:
         log.info("draining (%s)", reason)
         self.draining = True
         self._wake_heartbeat.set()
+        loop = asyncio.get_running_loop()
+        t0, snap = loop.time(), (self.sync.stats.snapshot() if self.sync else {})
         await asyncio.gather(*(rt.drain() for rt in list(self.agents.values())), return_exceptions=True)
+        log.info("drain: %d agents finished and synced in %.1f s; bucket %s", len(self.agents),
+                 loop.time() - t0, self.sync.stats.since(snap) if self.sync else {})
         self._drained.set()
 
     async def abandon(self, why: str) -> None:
@@ -353,7 +385,11 @@ def main() -> None:
     quiet_libraries()
     cfg = WorkerConfig.from_env()
     cfg.work_root.mkdir(parents=True, exist_ok=True)
-    sync = BucketSync(HubBucketStore(cfg.bucket), cfg.swarm) if cfg.bucket else None
+    sync = None
+    if cfg.bucket:
+        stats = BucketStats()
+        count_hub_http(stats)
+        sync = BucketSync(HubBucketStore(cfg.bucket, stats=stats), cfg.swarm)
     client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation)
     worker = Worker(cfg, client, sync=sync)
     sys.exit(asyncio.run(worker.run()))

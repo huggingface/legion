@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deploy the controller to a public Docker Space and configure it.
 #   scripts/deploy-space.sh <wheel-url> [space-id]     (default space cmpatino/swarm-harness)
+# JOB_LABELS sets the deployment-wide worker job labels (default experiment=swarm-harness-m1).
 # Needs HF_TOKEN, ANTHROPIC_KEY and SWARM_HARNESS_TOKEN in the environment; values are never
 # printed. The Space is public: the API is protected by the bearer token (a private Space would
 # need an HF bearer on every request, which collides with our Authorization header).
@@ -29,10 +30,10 @@ swarm-harness controller ($(git -C "$ROOT" rev-parse --short HEAD)). Source:
 https://github.com/huggingface/swarm-harness. The API needs the swarm bearer token;
 \`/\` (status table) and \`/healthz\` are open.
 MD
-python3 - "$SPACE" "$STAGE" "$WHEEL_URL" <<'PY'
+python3 - "$SPACE" "$STAGE" "$WHEEL_URL" "${JOB_LABELS:-experiment=swarm-harness-m1}" <<'PY'
 import os, sys
 from huggingface_hub import HfApi
-space, stage, wheel = sys.argv[1:]
+space, stage, wheel, job_labels = sys.argv[1:]
 api = HfApi()
 api.create_repo(space, repo_type="space", space_sdk="docker", private=False, exist_ok=True)
 for key, env in (("SWARM_HARNESS_TOKEN", "SWARM_HARNESS_TOKEN"), ("HF_TOKEN", "HF_TOKEN"),
@@ -41,7 +42,7 @@ for key, env in (("SWARM_HARNESS_TOKEN", "SWARM_HARNESS_TOKEN"), ("HF_TOKEN", "H
 for key, value in {
     "SWARM_HARNESS_WORKER_BOOTSTRAP": "1",
     "SWARM_HARNESS_WHEEL_URL": wheel,
-    "SWARM_HARNESS_JOB_LABELS": "experiment=swarm-harness-m1",
+    "SWARM_HARNESS_JOB_LABELS": job_labels,
 }.items():
     api.add_space_variable(space, key, value)
 info = api.upload_folder(repo_id=space, repo_type="space", folder_path=stage,

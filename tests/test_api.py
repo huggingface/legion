@@ -300,3 +300,16 @@ async def test_heartbeat_missing_assigned_agents_requeues_their_assign(client, s
     store.clear_commands(W0)
     await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents, draining=True))
     assert store.commands_for(W0) == []
+
+
+async def test_healthz_reports_requests_and_process(client, tick):
+    await apply(client)
+    tick()
+    assert (await client.get("/agents/researcher-0000")).status_code == 200
+    await client.get("/agents/nobody")
+    h = (await client.get("/healthz")).json()
+    routes = h["requests"]["routes"]
+    assert routes["GET /agents/{name}"]["n"] == 2
+    assert routes["PUT /swarms/{swarm}"]["n"] == 1
+    assert h["requests"]["by_status"]["4xx"] == 1
+    assert h["process"]["rss_mb"] > 0 and h["process"]["cpu_s"] > 0
