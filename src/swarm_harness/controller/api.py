@@ -176,44 +176,169 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
     )
 
 
+_AGENT_STATE_TONE = {
+    "working": "good",
+    "idle": "neutral",
+    "stuck": "warn",
+    "unknown": "serious",
+    "dead": "crit",
+}
+_WORKER_STATE_TONE = {
+    "launching": "accent",
+    "running": "good",
+    "draining": "warn",
+    "unknown": "serious",
+    "dead": "crit",
+}
+_STATE_ORDER = ["working", "idle", "stuck", "unknown", "dead", "launching", "running", "draining"]
+
+_PAGE_CSS = """
+:root{--bg:#fcfcfb;--card:#ffffff;--ink:#1b1b1a;--ink2:#5c5b57;--ink3:#8a8984;--line:#e6e5e1;
+--accent:#2f6fde;--good:#0ca30c;--warn:#fab219;--serious:#ec835a;--crit:#d03b3b;--neutral:#9a9994;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--sans:system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#1a1a19;--card:#232321;--ink:#f1f0ec;--ink2:#b3b2ac;
+--ink3:#85847f;--line:#34342f;--accent:#7ea6ff}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans)}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;margin-bottom:24px}
+header h1{font-size:18px;font-weight:650;letter-spacing:-.01em;margin:0}
+header .meta{color:var(--ink3);font-size:13px;margin-left:auto}
+.swarm{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:20px}
+.swarm h2{font-size:17px;font-weight:650;margin:0;letter-spacing:-.01em}
+.head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.sub{color:var(--ink2);font-size:13px;margin:4px 0 16px;word-break:break-all}
+.sub code{font-family:var(--mono);font-size:12px;color:var(--ink2)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
+.stat{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--bg)}
+.stat .v{font-size:26px;font-weight:600;line-height:1.1;letter-spacing:-.02em}
+.stat .l{color:var(--ink2);font-size:12.5px;margin-top:4px}
+.tbl{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th{text-align:left;color:var(--ink3);font-weight:500;font-size:12px;text-transform:uppercase;
+letter-spacing:.04em;padding:6px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}th.num{text-align:right}
+td.name{font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;
+padding:1px 9px 1px 7px;font-size:12.5px;color:var(--ink2);background:var(--bg);white-space:nowrap}
+.chip b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.chip i,.badge i{width:8px;height:8px;border-radius:50%;background:var(--neutral);display:inline-block}
+.good i{background:var(--good)}.warn i{background:var(--warn)}.serious i{background:var(--serious)}
+.crit i{background:var(--crit)}.accent i{background:var(--accent)}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+border-radius:999px;padding:1px 9px 1px 7px;border:1px solid var(--line)}
+.badge.crit{color:var(--crit);border-color:var(--crit)}
+.badge.warn{color:var(--ink);border-color:var(--warn)}
+details{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+summary{cursor:pointer;color:var(--ink2);font-size:13px;user-select:none}
+summary:hover{color:var(--ink)}
+.agents{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.agents a{font-family:var(--mono);font-size:12px;border:1px solid var(--line);border-radius:6px;
+padding:2px 7px;color:var(--ink2);background:var(--bg)}
+.agents a:hover{color:var(--accent);border-color:var(--accent);text-decoration:none}
+.more{color:var(--ink3);font-size:12px;align-self:center}
+.empty{border:1px dashed var(--line);border-radius:12px;padding:40px 20px;text-align:center;color:var(--ink2)}
+.empty code{font-family:var(--mono);font-size:13px;color:var(--ink)}
+footer{color:var(--ink3);font-size:12px;margin-top:24px}
+"""
+
+
+def _fmt_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:.1f}K"
+    return f"{n:,}"
+
+
+def _chips(counts: dict[str, int], tones: dict[str, str]) -> str:
+    e = html.escape
+    keys = sorted(counts, key=lambda s: (_STATE_ORDER.index(s) if s in _STATE_ORDER else 99, s))
+    chips = [
+        f'<span class="chip {tones.get(s, "neutral")}"><i></i>{e(s)} <b>{counts[s]}</b></span>'
+        for s in keys
+        if counts[s]
+    ]
+    return (
+        f'<div class="chips">{"".join(chips)}</div>' if chips else '<span class="more">none</span>'
+    )
+
+
 def _status_page(store: Store, now: float) -> str:
     e = html.escape
     parts = []
     for sw in store.list_swarms():
         spec: SwarmSpec = sw["spec"]
         st = swarm_status(store, spec, now)
-        removing = " (removing)" if sw["removing"] else ""
-        parts.append(
-            f"<h2>{e(spec.swarm)}{removing}</h2><p>namespace {e(spec.namespace)} · "
-            f"bucket {e(spec.bucket)} · {st.agents_total} agents · {st.workers_total} workers · "
-            f"{st.pending_prompts} pending prompts · ${st.cost_usd:.2f}</p>"
+        removing = '<span class="badge warn"><i></i>removing</span>' if sw["removing"] else ""
+        stats = [
+            (_fmt_count(st.agents_total), "agents"),
+            (_fmt_count(st.workers_total), "workers"),
+            (_fmt_count(st.pending_prompts), "pending prompts"),
+            (f"${st.cost_usd:,.2f}", "cost"),
+        ]
+        tiles = "".join(
+            f'<div class="stat"><div class="v">{v}</div><div class="l">{l}</div></div>'
+            for v, l in stats
         )
         rows = []
         for t in st.types.values():
-            a_states = " ".join(f"{s}:{n}" for s, n in sorted(t.agents_by_state.items()))
-            w_states = " ".join(f"{s}:{n}" for s, n in sorted(t.workers_by_state.items()))
-            rows.append(
-                f"<tr><td>{e(t.name)}</td><td>{e(t.health.value)}</td><td>{t.replicas}</td>"
-                f"<td>{e(a_states)}</td><td>{e(w_states)}</td><td>${t.cost_usd:.2f}</td></tr>"
+            health = (
+                '<span class="badge good"><i></i>ok</span>'
+                if t.health.value == "ok"
+                else f'<span class="badge crit"><i></i>{e(t.health.value)}</span>'
             )
-        parts.append(
-            "<table><tr><th>type</th><th>health</th><th>replicas</th><th>agents by state</th>"
-            "<th>workers by state</th><th>cost</th></tr>" + "".join(rows) + "</table>"
+            rows.append(
+                f'<tr><td class="name">{e(t.name)}</td><td>{health}</td>'
+                f'<td class="num">{t.replicas:,}</td>'
+                f"<td>{_chips(t.agents_by_state, _AGENT_STATE_TONE)}</td>"
+                f"<td>{_chips(t.workers_by_state, _WORKER_STATE_TONE)}</td>"
+                f'<td class="num">${t.cost_usd:,.2f}</td></tr>'
+            )
+        table = (
+            '<div class="tbl"><table><thead><tr><th>type</th><th>health</th>'
+            '<th class="num">replicas</th><th>agents</th><th>workers</th><th class="num">cost</th>'
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         )
+        details = []
         for type_name in st.types:
             names = [a["name"] for a in store.list_agents(spec.swarm, type_name)]
-            links = " ".join(f'<a href="/agents/{e(n)}">{e(n)}</a>' for n in names[:200])
-            more = f" … and {len(names) - 200} more" if len(names) > 200 else ""
-            parts.append(
-                f"<details><summary>{e(type_name)} agents</summary>{links}{more}</details>"
+            links = "".join(f'<a href="/agents/{e(n)}">{e(n)}</a>' for n in names[:200])
+            more = (
+                f'<span class="more">and {len(names) - 200:,} more</span>'
+                if len(names) > 200
+                else ""
             )
-    body = "".join(parts) or "<p>No swarms.</p>"
+            details.append(
+                f"<details><summary>{e(type_name)} · {len(names):,} "
+                f"{'agent' if len(names) == 1 else 'agents'}</summary>"
+                f'<div class="agents">{links}{more}</div></details>'
+            )
+        parts.append(
+            f'<section class="swarm"><div class="head"><h2>{e(spec.swarm)}</h2>{removing}</div>'
+            f'<p class="sub">namespace <code>{e(spec.namespace)}</code> · bucket '
+            f"<code>{e(spec.bucket)}</code></p>"
+            f'<div class="stats">{tiles}</div>{table}{"".join(details)}</section>'
+        )
+    body = "".join(parts) or (
+        '<div class="empty">No swarms yet.<br>Apply one with '
+        "<code>swarm-harness apply spec.yaml</code></div>"
+    )
+    stamp = e(_dt(now).strftime("%Y-%m-%d %H:%M:%S UTC"))
     return (
-        "<!doctype html><html><head><meta charset='utf-8'><title>swarm-harness</title>"
-        "<meta http-equiv='refresh' content='30'><style>body{font-family:sans-serif;margin:2em}"
-        "table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}"
-        "</style></head><body><h1>swarm-harness</h1>"
-        f"<p>{e(_dt(now).isoformat(timespec='seconds'))}</p>{body}</body></html>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<meta name='color-scheme' content='light dark'><title>swarm-harness</title>"
+        f"<meta http-equiv='refresh' content='30'><style>{_PAGE_CSS}</style></head>"
+        '<body><div class="wrap"><header><h1>swarm-harness</h1>'
+        f'<span class="meta">{stamp} · refreshes every 30 s</span></header>{body}'
+        "<footer>Agent links return JSON and need the API bearer token.</footer>"
+        "</div></body></html>"
     )
 
 
