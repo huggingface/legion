@@ -1,9 +1,10 @@
-# swarm-harness
+# flock
 
 Host coding-harness agent swarms (Claude Code, Codex) on Hugging Face Jobs: keep
 them alive, prompt them, watch them. One controller, N worker jobs, up to 200
 agents per worker. Declare a swarm in YAML and the controller keeps it running,
-the way Kubernetes keeps pods running.
+the way Kubernetes keeps pods running. The package, CLI and
+environment variables are still named `swarm-harness`.
 
 It is the layer under [msgboard](https://github.com/huggingface/msgboard) and
 [swarmlab](https://github.com/huggingface/swarmlab): it hosts agents and exposes
@@ -50,7 +51,7 @@ Supported harnesses: Claude Code through the Python Agent SDK, Codex through
 Needs Python 3.11+, an HF token with Jobs access, and the harness API key.
 
 ```sh
-git clone https://github.com/huggingface/swarm-harness && cd swarm-harness
+git clone https://github.com/huggingface/flock && cd flock
 uv sync --all-extras                 # or: pip install -e ".[controller,worker,dev]"
 ```
 
