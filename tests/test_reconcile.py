@@ -67,6 +67,7 @@ def test_apply_creates_agents_and_launches_workers(store, jobs, settings, clock,
     assert env["WORKER_ID"] == W0 and env["SWARM"] == "demo" and env["TYPE"] == "researcher"
     assert env["SWARM_HARNESS_URL"] == "https://controller.invalid"
     assert env["BUCKET"] == "hf://buckets/ns/sh" and env["MSGBOARD_URL"]
+    assert env["DRAIN_WINDOW"] == "10m"
     assert "SWARM_HARNESS_TOKEN" not in env
     lifetime = parse_duration("24h").total_seconds()
     assert lifetime <= launch["timeout"] <= lifetime + parse_duration("4h").total_seconds()

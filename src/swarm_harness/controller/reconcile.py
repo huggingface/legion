@@ -365,6 +365,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "SWARM": spec.swarm,
         "TYPE": type_name,
         "DEADLINE": _iso(deadline),
+        "DRAIN_WINDOW": ts.drain_window,  # known before the first assign arrives
         "BUCKET": spec.bucket,
     }
     secrets = {"SWARM_HARNESS_TOKEN": s.token}

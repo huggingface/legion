@@ -86,6 +86,23 @@ def test_config_from_env(tmp_path):
     assert cfg.url == "https://c.hf.space" and cfg.work_root.as_posix() == "/work/agents"
     assert cfg.deadline.year == 2026 and cfg.deadline.tzinfo is not None
     assert cfg.sync_interval == 180 and cfg.bucket == "hf://buckets/ns/b"
+    assert cfg.drain_window == timedelta(minutes=10)  # default until the env says otherwise
+
+
+async def test_drain_window_from_env_applies_before_any_assign(tmp_path):
+    # lifetime 6 min, drain window 5 min: must not drain at once just because no assign came yet
+    cfg = WorkerConfig.from_env({
+        "SWARM_HARNESS_URL": "http://c", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "SWARM": "sw", "TYPE": "researcher", "DRAIN_WINDOW": "5m",
+        "DEADLINE": (utcnow() + timedelta(minutes=6)).isoformat()})
+    assert cfg.drain_window == timedelta(minutes=5)
+    w = Worker(cfg, ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(
+        FakeController().handler)))
+    task = asyncio.create_task(w.deadline_loop())
+    await asyncio.sleep(0.1)
+    assert not w.draining
+    task.cancel()
+    await w.client.aclose()
 
 
 async def test_dispatch_against_fake_controller(tmp_path):

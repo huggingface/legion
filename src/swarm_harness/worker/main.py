@@ -63,6 +63,7 @@ class WorkerConfig:
     heartbeat_interval: float = HEARTBEAT_INTERVAL.total_seconds()
     flush_interval: float = 3.0
     sync_interval: float = 180.0
+    drain_window: timedelta = DEFAULT_DRAIN_WINDOW  # from the job env; assigns may update it
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -77,6 +78,7 @@ class WorkerConfig:
             work_root=Path(env.get("WORK_ROOT", "/work/agents")),
             sync_interval=float(env.get("SYNC_INTERVAL", 180)),
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
+            drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
         )
 
 
@@ -148,7 +150,7 @@ class Worker:
         self.outbox = Outbox()
         self.agents: dict[str, AgentRuntime] = {}
         self.draining = False
-        self.drain_window = DEFAULT_DRAIN_WINDOW
+        self.drain_window = cfg.drain_window
         self._drained = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._wake_heartbeat = asyncio.Event()
@@ -334,16 +336,11 @@ class Worker:
 
 
 def quiet_libraries() -> None:
-    """One line per poll/heartbeat and tqdm bars per upload would drown the job log."""
+    """One line per poll/heartbeat and tqdm bars per upload would drown the job log. The env var
+    (read by huggingface_hub and its xet uploads) works where disable_progress_bars() does not."""
     for name in ("httpx", "httpx2", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    try:
-        from huggingface_hub.utils import disable_progress_bars
-
-        disable_progress_bars()
-    except ImportError:
-        pass
 
 
 def main() -> None:
