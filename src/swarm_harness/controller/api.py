@@ -208,6 +208,7 @@ header h1{font-size:18px;font-weight:650;letter-spacing:-.01em;margin:0}
 header .meta{color:var(--ink3);font-size:13px;margin-left:auto}
 .swarm{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:20px}
 .swarm h2{font-size:17px;font-weight:650;margin:0;letter-spacing:-.01em}
+.kicker{color:var(--ink3);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
 .head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
 .sub{color:var(--ink2);font-size:13px;margin:4px 0 16px;word-break:break-all}
 .sub code{font-family:var(--mono);font-size:12px;color:var(--ink2)}
@@ -301,7 +302,7 @@ def _status_page(store: Store, now: float) -> str:
                 f'<td class="num">${t.cost_usd:,.2f}</td></tr>'
             )
         table = (
-            '<div class="tbl"><table><thead><tr><th>type</th><th>health</th>'
+            '<div class="tbl"><table><thead><tr><th>agent type</th><th>health</th>'
             '<th class="num">replicas</th><th>agents</th><th>workers</th><th class="num">cost</th>'
             f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         )
@@ -320,7 +321,8 @@ def _status_page(store: Store, now: float) -> str:
                 f'<div class="agents">{links}{more}</div></details>'
             )
         parts.append(
-            f'<section class="swarm"><div class="head"><h2>{e(spec.swarm)}</h2>{removing}</div>'
+            f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
+            f"<h2>{e(spec.swarm)}</h2>{removing}</div>"
             f'<p class="sub">namespace <code>{e(spec.namespace)}</code> · bucket '
             f"<code>{e(spec.bucket)}</code></p>"
             f'<div class="stats">{tiles}</div>{table}{"".join(details)}</section>'
