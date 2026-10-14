@@ -191,9 +191,15 @@ One Python package, three entry points: `swarm-harness` (CLI/library),
 3. When the harness has been idle for `idle_grace` (default 120 s) the worker
    closes it. State is on disk.
 
-Claude headless process per working agent: about 2 s startup, about 300 MB.
-Residency buys nothing: the prompt cache is server-side with a 1 h TTL either
-way.
+Measured on cpu-basic (experiments/packing/RESULTS.md, 2026-10-14): a cold Claude
+turn costs about 1.5 CPU-seconds, mostly CLI startup, and 85 to 110 MB of real
+container memory (RSS double-counts shared pages); an idle resident session
+costs about 116 MB and no CPU. The two cores saturate at 5 concurrent cold
+turns, throughput about 1.35 turns/s, and memory never bound up to N=60. So
+CPU, not memory, limits a worker, and residency does save CPU: a prompt to a
+live process costs about 0.1 CPU-s against about 1 CPU-s cold. The prompt
+cache is server-side with a 1 h TTL either way. Hence the 120 s idle grace and
+the measured defaults of 50 agents and 20 concurrent turns per worker.
 
 ### Resume across workers
 
@@ -244,8 +250,8 @@ types:
     secrets: [ANTHROPIC_API_KEY]
     labels: {team: eval}
     replicas: 3000
-    agents_per_worker: 100     # default from the packing measurement
-    max_working_per_worker: 20 # default from the packing measurement
+    agents_per_worker: 50      # measured default, experiments/packing
+    max_working_per_worker: 20 # measured default, experiments/packing
     flavor: cpu-basic
     worker_lifetime: 24h
     lifetime_jitter: 4h
@@ -364,11 +370,11 @@ becomes one request with one admin secret; the swap is one function.
 
 | | Per worker | 10k agents |
 |---|---|---|
-| Agents (mostly idle) | 100 (to be measured) | 1,000 workers |
-| Concurrent working turns | about 20 by RAM at 300 MB each; CPU may bind first (to be measured) | 20,000 if all work at once |
-| Worker cost | $0.01/h | $10/h, about $7,300/month |
-| Jobs API: list all | | 10 requests |
-| Jobs API: cold start at 400 per 5 min | | about 13 minutes |
+| Agents (mostly idle) | 50 (measured default) | 200 workers at 50; 100 at 100 |
+| Concurrent working turns | 20; CPU binds at ~1.35 cold turns/s per worker, memory ~100 MB per turn | 4,000 at 200 workers |
+| Worker cost | $0.01/h | $2/h at 200 workers |
+| Jobs API: list all | | 2 requests at 200 workers |
+| Jobs API: cold start at 400 per 5 min | | under 5 minutes at 200 workers |
 | Heartbeats | 1 per 30 s | 33 requests/s |
 | Steady-state relaunches with jitter | | under 1 per minute |
 
@@ -405,12 +411,22 @@ Inference is the bill. Hosting is noise.
 
 ## 10. Unverified assumptions and risks
 
-- Cross-machine session resume for both harnesses (step 1 exists for this).
+- Cross-machine session resume: PASSED 2026-10-14 for both harnesses
+  (experiments/resume-gate/RESULTS.md). Claude needs only
+  `projects/<enc-cwd>/<id>.jsonl` (plus `<id>/` if present); Codex needs only the
+  rollout file at its dated relative path and rebuilds its SQLite index. Codex was
+  verified locally with two fresh homes, not in a job (no API key here).
 - Multi-day job timeouts honoured in practice (24 h is within reports; longer
   is not needed).
 - 1,000 concurrent HF Jobs under one PRO user (credits and spend limit are the
   real gates).
-- Codex app-server per agent memory footprint; no official numbers.
+- Codex app-server per agent memory footprint; `codex exec` measured locally at
+  about 263 MB RSS and 1.5 CPU-s per turn.
+- Harness usage fields are cumulative per session (Claude `total_cost_usd`,
+  `duration_api_ms`, `modelUsage`; Codex `turn.completed.usage`); the worker
+  must difference them per turn. Jobs run as root, so Claude needs `IS_SANDBOX=1`
+  for bypassPermissions, and Codex needs `--sandbox danger-full-access` in the
+  container. Never ship the Codex OAuth `auth.json` to a job; use an API key.
 - Prompt-cache re-writes after idle gaps over 1 h are the main hidden cost of
   long idle agents with large transcripts. This is true of any hosting model.
 - msgboard's 2,000 open-poll cap and roughly 300 req/s ingress will matter the
