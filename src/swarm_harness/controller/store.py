@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS workers (
   type TEXT NOT NULL,
   idx INTEGER NOT NULL,
   job_id TEXT,
+  incarnation TEXT,
   state TEXT NOT NULL DEFAULT 'launching',
   deadline REAL,
   launched_at REAL,
@@ -126,9 +127,16 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
+        self._migrate()
         # Called with ("commands", worker_id) / ("events", agent) / ("reconcile", "") after
         # writes; the API turns these into wake-ups for long-polls. Must be thread-safe.
         self.listener: Callable[[str, str], None] = lambda kind, key: None
+
+    def _migrate(self) -> None:
+        """Additive column changes for databases created by an older version."""
+        cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
+        if "incarnation" not in cols:
+            self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
 
     # ----------------------------------------------------------------- low level
 

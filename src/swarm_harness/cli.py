@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -64,11 +65,25 @@ def _print_status(st: dict) -> None:
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
 
 
+def load_spec(spec_file: str) -> SwarmSpec:
+    """Read a spec and inline each type's system_prompt_file (relative to the spec file)."""
+    path = Path(spec_file)
+    spec = SwarmSpec.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    for name, ts in spec.types.items():
+        if ts.system_prompt_file and ts.system_prompt is None:
+            src = Path(ts.system_prompt_file)
+            src = src if src.is_absolute() else path.parent / src
+            if not src.is_file():
+                typer.echo(f"type {name}: system_prompt_file {src} not found", err=True)
+                raise typer.Exit(1)
+            ts.system_prompt = src.read_text(encoding="utf-8")
+    return spec
+
+
 @app.command()
 def apply(spec_file: str) -> None:
     """Apply a swarm spec (YAML)."""
-    with open(spec_file, encoding="utf-8") as f:
-        spec = SwarmSpec.model_validate(yaml.safe_load(f))
+    spec = load_spec(spec_file)
     st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     _print_status(st)
 

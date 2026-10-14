@@ -86,6 +86,23 @@ def test_config_from_env(tmp_path):
     assert cfg.url == "https://c.hf.space" and cfg.work_root.as_posix() == "/work/agents"
     assert cfg.deadline.year == 2026 and cfg.deadline.tzinfo is not None
     assert cfg.sync_interval == 180 and cfg.bucket == "hf://buckets/ns/b"
+    assert cfg.drain_window == timedelta(minutes=10)  # default until the env says otherwise
+
+
+async def test_drain_window_from_env_applies_before_any_assign(tmp_path):
+    # lifetime 6 min, drain window 5 min: must not drain at once just because no assign came yet
+    cfg = WorkerConfig.from_env({
+        "SWARM_HARNESS_URL": "http://c", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "SWARM": "sw", "TYPE": "researcher", "DRAIN_WINDOW": "5m",
+        "DEADLINE": (utcnow() + timedelta(minutes=6)).isoformat()})
+    assert cfg.drain_window == timedelta(minutes=5)
+    w = Worker(cfg, ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(
+        FakeController().handler)))
+    task = asyncio.create_task(w.deadline_loop())
+    await asyncio.sleep(0.1)
+    assert not w.draining
+    task.cancel()
+    await w.client.aclose()
 
 
 async def test_dispatch_against_fake_controller(tmp_path):
@@ -186,3 +203,26 @@ def test_heartbeat_json_shape(tmp_path):
     worker, _ = make_worker(tmp_path, ctrl)
     body = json.loads(worker.heartbeat_payload().model_dump_json())
     assert body["worker"] == WID and body["agents"] == [] and body["draining"] is False
+
+
+async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
+    cfg = WorkerConfig.from_env({
+        "SWARM_HARNESS_URL": "http://c", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "SWARM": "sw", "TYPE": "researcher", "WORKER_INCARNATION": "inc-1",
+        "DEADLINE": (utcnow() + timedelta(hours=1)).isoformat()})
+    assert cfg.incarnation == "inc-1"
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.url.params.get("incarnation")))
+        if request.url.path.endswith("/commands"):
+            return httpx.Response(200, json={"commands": []})
+        return httpx.Response(200, json={"ok": True})
+
+    client = ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(handler),
+                              incarnation=cfg.incarnation)
+    w = Worker(cfg, client)
+    await client.commands(WID, 0)
+    await client.heartbeat(w.heartbeat_payload())
+    await client.aclose()
+    assert seen == [(f"/workers/{WID}/commands", "inc-1"), (f"/workers/{WID}/heartbeat", "inc-1")]

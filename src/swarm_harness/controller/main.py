@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -10,6 +11,9 @@ from swarm_harness.controller.jobs import FakeJobsClient, HubJobsClient, JobsCli
 from swarm_harness.controller.reconcile import Settings, run_reconciler
 from swarm_harness.controller.store import Store
 
+log = logging.getLogger("swarm_harness.controller")
+STATS_LOG_INTERVAL = 60.0
+
 
 def _public_url(port: int) -> str:
     if os.environ.get("SWARM_HARNESS_URL"):
@@ -17,6 +21,16 @@ def _public_url(port: int) -> str:
     if os.environ.get("SPACE_HOST"):  # set by HF Spaces
         return f"https://{os.environ['SPACE_HOST']}"
     return f"http://localhost:{port}"
+
+
+def parse_labels(raw: str) -> dict[str, str]:
+    """'a=1,b=2' -> {'a': '1', 'b': '2'} (SWARM_HARNESS_JOB_LABELS)."""
+    out = {}
+    for part in raw.split(","):
+        if part.strip():
+            k, _, v = part.partition("=")
+            out[k.strip()] = v.strip()
+    return out
 
 
 def build_app():
@@ -30,15 +44,32 @@ def build_app():
         jobs = FakeJobsClient()
     else:
         jobs = HubJobsClient(token=os.environ.get("HF_TOKEN"))
-    settings = Settings(public_url=_public_url(port), token=token)
+    settings = Settings(
+        public_url=_public_url(port),
+        token=token,
+        job_labels=parse_labels(os.environ.get("SWARM_HARNESS_JOB_LABELS", "")),
+    )
     interval = float(os.environ.get("SWARM_HARNESS_RECONCILE_INTERVAL", "5"))
 
-    async def background(notifier: Notifier) -> None:
-        await run_reconciler(
-            store, jobs, settings, interval, wake=lambda t: notifier.wait("reconcile:", t)
-        )
+    def stats() -> dict:
+        calls = getattr(jobs, "calls", None)
+        return {"hub_calls": dict(calls)} if calls is not None else {}
 
-    return create_app(store, token, background=background), port
+    async def log_stats() -> None:
+        while True:
+            await asyncio.sleep(STATS_LOG_INTERVAL)
+            log.info("hub calls: %s", stats().get("hub_calls", {}))
+
+    async def background(notifier: Notifier) -> None:
+        stats_task = asyncio.create_task(log_stats())
+        try:
+            await run_reconciler(
+                store, jobs, settings, interval, wake=lambda t: notifier.wait("reconcile:", t)
+            )
+        finally:
+            stats_task.cancel()
+
+    return create_app(store, token, background=background, stats=stats), port
 
 
 def main() -> None:

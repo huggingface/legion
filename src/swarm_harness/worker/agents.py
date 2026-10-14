@@ -185,14 +185,21 @@ class AgentRuntime:
 
     def _prepare_workdir(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)
-        if self._instructions_written or not self.spec.system_prompt_file:
+        if self._instructions_written:
+            return
+        target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
+        if self.spec.system_prompt is not None:
+            target.write_text(self.spec.system_prompt)
+            self._instructions_written = True
+            return
+        if not self.spec.system_prompt_file:
             return
         src = Path(self.spec.system_prompt_file)
         candidates = [src] if src.is_absolute() else [
             Path(os.environ.get("SWARM_HARNESS_PROMPTS_DIR", ".")) / src, Path.cwd() / src]
         for c in candidates:
             if c.is_file():
-                (self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]).write_text(c.read_text())
+                target.write_text(c.read_text())
                 self._instructions_written = True
                 return
         log.warning("%s: system_prompt_file %s not found", self.name, src)

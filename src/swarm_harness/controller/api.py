@@ -225,6 +225,7 @@ def create_app(
     token: str,
     background: Callable[[Notifier], Awaitable[None]] | None = None,
     clock: Callable[[], datetime] = _now,
+    stats: Callable[[], dict] | None = None,
 ) -> FastAPI:
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
@@ -260,7 +261,7 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict:
-        return {"ok": True}
+        return {"ok": True, **(stats() if stats else {})}
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -391,13 +392,21 @@ def create_app(
         names = [a["name"] for a in store.list_agents(worker=worker_id)]
         return worker_status(w, names, clock().timestamp())
 
+    def stale(w: Row, incarnation: str | None) -> bool:
+        """The caller is not the slot's current job. Workers that send no incarnation (older
+        versions) are trusted, as before."""
+        return incarnation is not None and w["incarnation"] != incarnation
+
     @api.get("/workers/{worker_id}/commands")
-    async def commands(worker_id: str, wait: float = 25):
-        worker_or_404(worker_id)
+    async def commands(worker_id: str, wait: float = 25, incarnation: str | None = None):
+        if stale(worker_or_404(worker_id), incarnation):
+            raise HTTPException(409, "worker incarnation is not the slot's current job")
 
         def check():
             w = store.get_worker(worker_id)
-            if w is None or w["job_id"] is None:
+            if w is None or stale(w, incarnation):
+                return "stale"  # replaced while this poll was parked: never hand it commands
+            if w["job_id"] is None:
                 return None  # slot has no live job (stale process): give it nothing
             cmds = store.commands_for(worker_id)
             # A draining worker starts no turns; its prompts wait for the replacement job.
@@ -406,6 +415,8 @@ def create_app(
             return (cmds, prompts) if cmds or prompts else None
 
         found = await notifier.long_poll(f"commands:{worker_id}", check, wait)
+        if found == "stale":
+            raise HTTPException(409, "worker incarnation is not the slot's current job")
         if not found:
             return CommandBatch(commands=[])
         cmds, prompts = found
@@ -421,8 +432,9 @@ def create_app(
         return JSONResponse(batch.model_dump(mode="json"), background=BackgroundTask(ack))
 
     @api.post("/workers/{worker_id}/heartbeat")
-    def heartbeat(worker_id: str, hb: WorkerHeartbeat) -> dict:
-        worker_or_404(worker_id)
+    def heartbeat(worker_id: str, hb: WorkerHeartbeat, incarnation: str | None = None) -> dict:
+        if stale(worker_or_404(worker_id), incarnation):
+            raise HTTPException(409, "worker incarnation is not the slot's current job")
         if hb.worker != worker_id:
             raise HTTPException(400, "heartbeat worker does not match the path")
         if not record_heartbeat(store, worker_id, hb, clock()):

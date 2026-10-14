@@ -1,0 +1,46 @@
+{
+ "run1": {
+  "agents": 100,
+  "turns": 109,
+  "interrupted": 0,
+  "tokens": {
+   "claude-haiku-5-5": {
+    "input": 120267,
+    "output": 38882,
+    "cache_read": 3125613,
+    "cache_write": 440922,
+    "reasoning": 19219
+   }
+  },
+  "cost_usd": 0.117839
+ },
+ "run2": {
+  "agents": 100,
+  "turns": 10,
+  "interrupted": 0,
+  "tokens": {
+   "claude-haiku-5-5": {
+    "input": 24,
+    "output": 853,
+    "cache_read": 107500,
+    "cache_write": 79337,
+    "reasoning": 467
+   }
+  },
+  "cost_usd": 0.011421
+ },
+ "hub_jobs_api_calls": {
+  "run1": {
+   "run_job": 6,
+   "inspect_job": 12,
+   "list_jobs": 0,
+   "cancel_job": 0
+  },
+  "run2": {
+   "run_job": 4,
+   "inspect_job": 9,
+   "list_jobs": 0,
+   "cancel_job": 0
+  }
+ }
+}

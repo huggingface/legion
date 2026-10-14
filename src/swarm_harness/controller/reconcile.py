@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import random
+import uuid
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -61,6 +62,7 @@ class Settings:
     launches_per_window: int = LAUNCHES_PER_WINDOW
     rate_window: timedelta = RATE_WINDOW
     rng: random.Random = field(default_factory=random.Random)
+    job_labels: dict[str, str] = field(default_factory=dict)  # deployment-wide extra job labels
 
 
 @dataclass
@@ -317,6 +319,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
     )
     common = {
         "job_id": None,
+        "incarnation": None,
         "state": WorkerState.dead.value,
         "last_heartbeat": None,
         "draining": 0,
@@ -357,13 +360,18 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     jitter = parse_duration(ts.lifetime_jitter).total_seconds()
     timeout = lifetime + s.rng.uniform(0, jitter)
     deadline = p.now + timeout
+    # Binds polls and heartbeats to this job: a parked poll or a late heartbeat from the job
+    # this one replaces must not take the new job's commands (e2e run 1, see the API).
+    incarnation = uuid.uuid4().hex
     env = {
         **ts.env,
         "SWARM_HARNESS_URL": s.public_url,
         "WORKER_ID": wid,
+        "WORKER_INCARNATION": incarnation,
         "SWARM": spec.swarm,
         "TYPE": type_name,
         "DEADLINE": _iso(deadline),
+        "DRAIN_WINDOW": ts.drain_window,  # known before the first assign arrives
         "BUCKET": spec.bucket,
     }
     secrets = {"SWARM_HARNESS_TOKEN": s.token}
@@ -374,7 +382,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
             log.warning(
                 "secret %s for %s/%s is not set on the controller", name, spec.swarm, type_name
             )
-    labels = {"swarm": spec.swarm, "type": type_name, "worker": wid}
+    labels = {**s.job_labels, "swarm": spec.swarm, "type": type_name, "worker": wid}
     p.budget -= 1
     store.record_launch(p.now)
     try:
@@ -388,6 +396,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     store.update_worker(
         wid,
         job_id=job_id,
+        incarnation=incarnation,
         launched_at=p.now,
         deadline=deadline,
         last_heartbeat=None,
@@ -454,7 +463,27 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
             ah.tokens,
             cost_usd,
         )
+    if not hb.draining and not w["retire_at"]:
+        _reassign_missing(store, w, {ah.name for ah in hb.agents}, queued)
     return True
+
+
+def _reassign_missing(store: Store, w: Row, reported: set[str], queued: set[str]) -> None:
+    """Agents placed on this worker that its heartbeat does not list, with no assign queued,
+    lost their assign on the way (a dropped poll response). Send it again; a worker treats a
+    repeated assign for an agent it already hosts as a spec update, so this is idempotent."""
+    missing = [a for a in store.list_agents(worker=w["id"]) if a["name"] not in reported]
+    if not missing:
+        return
+    sw = store.get_swarm(w["swarm"])
+    ts = sw["spec"].types.get(w["type"]) if sw else None
+    if ts is None:
+        return
+    pending = {AssignCommand.model_validate_json(b).agent for b in queued if '"assign"' in b}
+    for a in missing:
+        if a["name"] not in pending:
+            log.warning("re-sending assign for %s: missing from %s heartbeat", a["name"], w["id"])
+            _send_assign(store, w["id"], a, w["type"], ts)
 
 
 # --------------------------------------------------------------------------- startup and runner
@@ -491,6 +520,7 @@ def rebuild_from_jobs(store: Store, jobs: JobsClient, now: datetime) -> list[Act
             store.update_worker(
                 wid,
                 job_id=j.job_id,
+                incarnation=j.env.get("WORKER_INCARNATION"),
                 deadline=deadline or w["deadline"],
                 launched_at=w["launched_at"] or t,
                 # one heartbeat interval of grace before the age rules apply

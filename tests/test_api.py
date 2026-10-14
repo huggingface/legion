@@ -140,11 +140,12 @@ async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick):
     ).status_code == 200
     a = (await client.get("/agents/researcher-0000")).json()
     assert a["state"] == "working" and a["turn_id"] == "t-1" and a["worker"] == W0
-    assert a["cost_usd"] == 22.5 and a["turns"] == 3 and a["model"] == "claude-opus-5-5"
+    # opus 5.5: 1M input at $4 + 0.1M output at $20
+    assert a["cost_usd"] == 6.0 and a["turns"] == 3 and a["model"] == "claude-opus-5-5"
     page = (await client.get("/swarms/demo/agents", params={"state": "idle"})).json()
     assert [x["name"] for x in page["agents"]] == ["researcher-0001"]
     st = (await client.get("/swarms/demo")).json()["status"]
-    assert st["cost_usd"] == 22.5
+    assert st["cost_usd"] == 6.0
     assert st["types"]["researcher"]["workers_by_state"] == {"running": 1}
 
     clock.advance(100)
@@ -231,3 +232,71 @@ async def test_delete_swarm(client, store, clock, tick):
     tick()
     assert (await client.get("/swarms/demo")).status_code == 404
     assert (await client.delete("/swarms/demo")).status_code == 404
+
+
+async def test_parked_poll_of_a_finished_job_gets_nothing_from_its_replacement(
+    client, store, jobs, clock, tick
+):
+    """e2e run 1: a drained job's last long-poll was still parked on the controller when the
+    planned relaunch queued the new job's assigns. It woke, took two assigns and a held prompt
+    to a client that had exited, and the ack deleted them. Polls are now bound to the job's
+    incarnation, so the parked poll gets 409 and the replacement gets everything."""
+    await apply(client, make_spec(researcher={"replicas": 2}))
+    tick()
+    old = jobs.launches[-1]["env"]["WORKER_INCARNATION"]
+    store.clear_commands(W0)
+    agents = [AgentHeartbeat(name=f"researcher-000{i}", state="idle") for i in range(2)]
+    r = await client.post(
+        f"/workers/{W0}/heartbeat",
+        params={"incarnation": old},
+        json=hb_body(clock, W0, agents, draining=True),
+    )
+    assert r.status_code == 200, r.text
+    ack = (await client.post("/agents/researcher-0001/prompt", json={"text": "held"})).json()
+    assert ack["status"] == "pending"
+
+    parked = asyncio.create_task(
+        client.get(f"/workers/{W0}/commands", params={"wait": 5, "incarnation": old})
+    )
+    await asyncio.sleep(0.05)
+    assert not parked.done()
+    jobs.set_stage(jobs.job_for(W0), "COMPLETED")  # the drained worker exited
+    clock.advance(16)
+    tick()  # planned restart: new job, new incarnation, assigns queued
+    new = jobs.launches[-1]["env"]["WORKER_INCARNATION"]
+    assert new != old and len(jobs.launches) == 2
+    r = await asyncio.wait_for(parked, 6)
+    assert r.status_code == 409
+
+    batch = (
+        await client.get(f"/workers/{W0}/commands", params={"wait": 0, "incarnation": new})
+    ).json()["commands"]
+    assert [(c["kind"], c["agent"]) for c in batch] == [
+        ("assign", "researcher-0000"),
+        ("assign", "researcher-0001"),
+        ("prompt", "researcher-0001"),
+    ]
+    # the old process cannot heartbeat into the new job's slot either
+    r = await client.post(
+        f"/workers/{W0}/heartbeat", params={"incarnation": old}, json=hb_body(clock, W0, agents)
+    )
+    assert r.status_code == 409
+
+
+async def test_heartbeat_missing_assigned_agents_requeues_their_assign(client, store, clock, tick):
+    await apply(client, make_spec(researcher={"replicas": 2}))
+    tick()
+    store.clear_commands(W0)  # as if both assigns were delivered, one of them into the void
+    agents = [AgentHeartbeat(name="researcher-0000", state="idle")]
+    r = await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents))
+    assert r.status_code == 200
+    batch = (await client.get(f"/workers/{W0}/commands", params={"wait": 0})).json()["commands"]
+    assert [(c["kind"], c["agent"]) for c in batch] == [("assign", "researcher-0001")]
+    # already queued or reported: nothing more
+    r = await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents))
+    r = await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents))
+    assert len(store.commands_for(W0)) == 1
+    # a draining worker ignores assigns, so none are sent to it
+    store.clear_commands(W0)
+    await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents, draining=True))
+    assert store.commands_for(W0) == []

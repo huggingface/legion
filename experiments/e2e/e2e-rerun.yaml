@@ -1,0 +1,38 @@
+# Re-run of the e2e test after the incarnation fix (RESULTS.md, check 6b): examples/e2e.yaml with
+# the counter worker's lifetime cut to 8m (+ up to 1m) so it drains 3-4 minutes after launch.
+swarm: e2e
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/swarm-harness/e2e
+types:
+  scribe:
+    harness: claude
+    model: claude-haiku-5-5
+    system_prompt_file: ../../examples/prompts/scribe.md
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    labels: {experiment: swarm-harness-m1}
+    replicas: 66
+    agents_per_worker: 34
+    max_working_per_worker: 20
+    idle_grace: 60s
+    worker_lifetime: 40m
+    lifetime_jitter: 5m
+    drain_window: 5m
+    max_budget_usd: 0.05
+    max_turns: 3
+    persist_workdir: true
+  counter:
+    harness: claude
+    model: claude-haiku-5-5
+    system_prompt_file: ../../examples/prompts/counter.md
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    labels: {experiment: swarm-harness-m1}
+    replicas: 34
+    agents_per_worker: 34
+    max_working_per_worker: 20
+    idle_grace: 60s
+    worker_lifetime: 8m
+    lifetime_jitter: 1m
+    drain_window: 5m
+    max_budget_usd: 0.05
+    max_turns: 3
+    persist_workdir: true

@@ -235,3 +235,11 @@ async def test_system_prompt_written(tmp_path):
     await rt.prompt("hi")
     await until(lambda: adapter.sent == ["hi"])
     assert (rt.workdir / "CLAUDE.md").read_text() == "You are a researcher."
+
+
+async def test_inline_system_prompt_wins_over_file(tmp_path):
+    rt, adapter = runtime(tmp_path, system_prompt="Keep notes.md.", system_prompt_file="missing.md")
+    await rt.setup(restore=False)
+    await rt.prompt("hi")
+    await until(lambda: adapter.sent == ["hi"])
+    assert (rt.workdir / "CLAUDE.md").read_text() == "Keep notes.md."
