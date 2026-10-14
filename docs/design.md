@@ -382,17 +382,23 @@ becomes one request with one admin secret; the swap is one function.
 
 ## 7. Scale budget
 
-| | Per worker | 10k agents |
-|---|---|---|
-| Agents (mostly idle) | 50 (measured default) | 200 workers at 50; 100 at 100 |
-| Concurrent working turns | 20; CPU binds at ~1.35 cold turns/s per worker, memory ~100 MB per turn | 4,000 at 200 workers |
-| Worker cost | $0.01/h | $2/h at 200 workers |
-| Jobs API: list all | | 2 requests at 200 workers |
-| Jobs API: cold start at 400 per 5 min | | under 5 minutes at 200 workers |
-| Heartbeats | 1 per 30 s | 33 requests/s |
-| Steady-state relaunches with jitter | | under 1 per minute |
+Measured on cpu-basic (100 agents, experiments/e2e) and cpu-upgrade (1,000 agents,
+experiments/load-1k), both 2026-10-14.
 
-Inference is the bill. Hosting is noise.
+| | cpu-basic worker ($0.01/h) | cpu-upgrade worker ($0.03/h) | 10k agents on cpu-upgrade |
+|---|---|---|---|
+| Agents per worker (mostly idle) | 50 (default) | 200 (all resident is about 26 GB of 32) | 50 workers |
+| Concurrent working turns | 20; about 1.35 cold turns/s | 120; 4.2 to 4.9 cold turns/s, turn p95 under 30 s | about 220 cold turns/s |
+| Worker cost | $0.01/h | $0.03/h | $1.50/h |
+| Cold start to first heartbeat | about 30 s | 28 to 46 s after apply | one launch pass; under 400 per 5 min |
+| Heartbeats | 1 per 30 s (mean 30 ms at the controller) | | 1.7 requests/s |
+| Jobs API per hour (steady) | about 1 `inspect_job` per worker-state change; no `list_jobs` | | tens of calls |
+| Bucket sync, per cycle | 4 Hub calls and about 0.6 s per changed agent, serial | about 120 s for 200 changed agents | 40,000 calls if everyone is active (item 1 in §12) |
+| Restore after relaunch | 7 Hub calls per agent | 200 agents in 17 s | 70,000 calls for a mass restart |
+| Controller at 1k | 87 MB RSS, under 2% of a core, status page 54 ms | | expected fine; untested |
+
+Inference is the bill. Hosting is noise. The 1k run spent about $2.26 on haiku and about
+$0.15 on jobs.
 
 ## 8. Non-goals for v1
 
@@ -422,6 +428,11 @@ Inference is the bill. Hosting is noise.
    relaunch.
 
 1k and 10k are load tests afterwards, not features.
+
+Results: all three passed on 2026-10-14 (experiments/resume-gate, experiments/packing,
+experiments/e2e). The 1k load test passed the same day after two fixes
+(experiments/load-1k/RESULTS.md): a drained worker did not always exit, and cost was
+double-counted after a relaunch.
 
 ## 10. Unverified assumptions and risks
 
@@ -479,3 +490,26 @@ Condensed from the grilling session, 2026-10-13/14.
 | 22 | Fill workers in order; no bin packing; packing numbers measured first |
 | 23 | Repo `huggingface/swarm-harness`, Python, one package, three entry points |
 | 24 | Milestone one: resume gate, packing measurement, 100 agents end to end |
+
+## 12. Road to 10k
+
+What the 1k run says must change, in order. Items 1 to 3 are gating; the rest are
+hardening.
+
+1. **Sync and restore per worker, not per agent.** One `sync_bucket` over the worker's
+   work root and one batch for session files per cycle; one listing and one download for a
+   restore. Bounds a sync cycle and a mass restart at a few calls per worker.
+2. **Bulk caller endpoints.** `POST /prompts` for many agents at once and a swarm-level
+   events stream, so a caller is not making 2 to 8 requests per agent per prompt.
+3. **Get off the anonymous edge limit.** Move the swarm token out of `Authorization` so
+   callers can send an HF token and the Space can be private; re-measure the per-IP limit
+   (about 20 req/s anonymous).
+4. **Persistent controller state.** A Space volume or SQLite snapshots to the bucket. A
+   redeploy currently wipes every swarm.
+5. **Relaunch on the worker's own "exited" signal** in its final heartbeat, instead of
+   waiting up to 90 s for `COMPLETED` or 180 s plus backoff when a job hangs.
+6. **Spend ledger** that survives scale-down and remove.
+7. Smaller: `max_working_per_worker` defers starts instead of warning; drain skips agents
+   being unassigned; explicit command acks; prebuilt worker image; Codex in a job with an
+   API key.
+
