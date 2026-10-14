@@ -1,0 +1,59 @@
+{
+ "cold": [
+  {
+   "cpu_s": 0.98,
+   "wall_s": 2.69,
+   "api_ms": 710,
+   "cost": 0.0008447200000000001,
+   "result": "OK"
+  },
+  {
+   "cpu_s": 0.94,
+   "wall_s": 1.99,
+   "api_ms": 612,
+   "cost": 0.00017174,
+   "result": "OK"
+  },
+  {
+   "cpu_s": 0.92,
+   "wall_s": 2.05,
+   "api_ms": 602,
+   "cost": 0.00017174,
+   "result": "OK"
+  }
+ ],
+ "resident": [
+  {
+   "turn": 0,
+   "cpu_s": 0.85,
+   "wall_s": 1.99,
+   "api_ms": 1156,
+   "cost_cum": 0.0008447400000000001,
+   "result": "OK"
+  },
+  {
+   "turn": 1,
+   "cpu_s": 0.07,
+   "wall_s": 0.89,
+   "api_ms": 2020,
+   "cost_cum": 0.0013961750000000002,
+   "result": "OK"
+  },
+  {
+   "turn": 2,
+   "cpu_s": 0.15,
+   "wall_s": 7.05,
+   "api_ms": 9044,
+   "cost_cum": 0.0015845850000000001,
+   "result": "OK"
+  },
+  {
+   "turn": 3,
+   "cpu_s": 0.08,
+   "wall_s": 1.55,
+   "api_ms": 10573,
+   "cost_cum": 0.00177337,
+   "result": "OK"
+  }
+ ]
+}

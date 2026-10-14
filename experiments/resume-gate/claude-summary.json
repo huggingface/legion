@@ -1,0 +1,213 @@
+{
+ "job": {
+  "session_id": "61f47177-2753-4940-8bbd-e079e993d7c0",
+  "job_A": "6acf45f4c66288145223cf9e",
+  "job_B": "6acf464a5ccb47ba0f7980e9",
+  "turn_A": {
+   "result": "PELICAN-7",
+   "session_id": "61f47177-2753-4940-8bbd-e079e993d7c0",
+   "num_turns": 2,
+   "duration_ms": 2818,
+   "duration_api_ms": 2425,
+   "total_cost_usd": 0.0011425749999999998,
+   "usage": {
+    "input_tokens": 4,
+    "cache_creation_input_tokens": 6111,
+    "cache_read_input_tokens": 28030,
+    "output_tokens": 196,
+    "output_tokens_details": {
+     "thinking_tokens": 94
+    },
+    "server_tool_use": {
+     "web_search_requests": 0,
+     "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 6111
+    },
+    "inference_geo": "global",
+    "iterations": [
+     {
+      "input_tokens": 2,
+      "output_tokens": 9,
+      "cache_read_input_tokens": 16928,
+      "cache_creation_input_tokens": 285,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 285,
+       "ephemeral_1h_input_tokens": 0
+      },
+      "type": "message"
+     }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+   },
+   "tool_uses": [
+    "Write"
+   ]
+  },
+  "turn_B": {
+   "result": "PELICAN-7",
+   "session_id": "61f47177-2753-4940-8bbd-e079e993d7c0",
+   "num_turns": 1,
+   "duration_ms": 1103,
+   "duration_api_ms": 3315,
+   "total_cost_usd": 0.0019356249999999998,
+   "usage": {
+    "input_tokens": 2,
+    "cache_creation_input_tokens": 6264,
+    "cache_read_input_tokens": 535,
+    "output_tokens": 9,
+    "output_tokens_details": {
+     "thinking_tokens": 0
+    },
+    "server_tool_use": {
+     "web_search_requests": 0,
+     "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 6264
+    },
+    "inference_geo": "global",
+    "iterations": [
+     {
+      "input_tokens": 2,
+      "output_tokens": 9,
+      "cache_read_input_tokens": 535,
+      "cache_creation_input_tokens": 6264,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 6264,
+       "ephemeral_1h_input_tokens": 0
+      },
+      "type": "message"
+     }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+   },
+   "tool_uses": []
+  },
+  "verdict": {
+   "reply_has_codeword": true,
+   "notes_txt_exists": true,
+   "notes_txt": "PELICAN-7",
+   "same_session_id": true,
+   "no_tools_used": true,
+   "pass": true
+  },
+  "config_files_after_A": [
+   "./.claude.json",
+   "./backups/.claude.json.backup.1791968768016",
+   "./policy-limits.json",
+   "./policy-limits.json.stamp.json",
+   "./projects/-work-agents-probe-0001/61f47177-2753-4940-8bbd-e079e993d7c0.jsonl",
+   "./remote-settings.json"
+  ],
+  "restored_files_B": [
+   "./projects/-work-agents-probe-0001/61f47177-2753-4940-8bbd-e079e993d7c0.jsonl",
+   "./notes.txt"
+  ]
+ },
+ "local_dry_run": {
+  "turn_A": {
+   "result": "PELICAN-7",
+   "session_id": "d30d444e-7cee-4301-9e63-c3f40f40fb22",
+   "num_turns": 2,
+   "duration_ms": 2214,
+   "duration_api_ms": 1949,
+   "total_cost_usd": 0.001153385,
+   "usage": {
+    "input_tokens": 4,
+    "cache_creation_input_tokens": 6319,
+    "cache_read_input_tokens": 28211,
+    "output_tokens": 162,
+    "output_tokens_details": {
+     "thinking_tokens": 0
+    },
+    "server_tool_use": {
+     "web_search_requests": 0,
+     "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 6319
+    },
+    "inference_geo": "global",
+    "iterations": [
+     {
+      "input_tokens": 2,
+      "output_tokens": 9,
+      "cache_read_input_tokens": 17109,
+      "cache_creation_input_tokens": 312,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 312,
+       "ephemeral_1h_input_tokens": 0
+      },
+      "type": "message"
+     }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+   },
+   "tool_uses": [
+    "Write"
+   ]
+  },
+  "turn_B": {
+   "result": "PELICAN-7",
+   "session_id": "d30d444e-7cee-4301-9e63-c3f40f40fb22",
+   "num_turns": 1,
+   "duration_ms": 2431,
+   "duration_api_ms": 4153,
+   "total_cost_usd": 0.001953935,
+   "usage": {
+    "input_tokens": 2,
+    "cache_creation_input_tokens": 6324,
+    "cache_read_input_tokens": 535,
+    "output_tokens": 9,
+    "output_tokens_details": {
+     "thinking_tokens": 0
+    },
+    "server_tool_use": {
+     "web_search_requests": 0,
+     "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 6324
+    },
+    "inference_geo": "global",
+    "iterations": [
+     {
+      "input_tokens": 2,
+      "output_tokens": 9,
+      "cache_read_input_tokens": 535,
+      "cache_creation_input_tokens": 6324,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 6324,
+       "ephemeral_1h_input_tokens": 0
+      },
+      "type": "message"
+     }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+   },
+   "tool_uses": []
+  },
+  "verdict": {
+   "reply_has_codeword": true,
+   "notes_txt_exists": true,
+   "notes_txt": "PELICAN-7",
+   "same_session_id": true,
+   "no_tools_used": true,
+   "pass": true
+  }
+ }
+}
