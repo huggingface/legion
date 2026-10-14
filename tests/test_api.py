@@ -55,11 +55,12 @@ async def test_apply_and_get(client, tick):
     ).status_code == 400
 
 
-async def test_pending_prompt_delivered_on_new_workers_first_poll(client, store, jobs, tick):
+async def test_pending_prompt_delivered_on_new_workers_first_poll(client, store, jobs, clock, tick):
     await apply(client, make_spec(researcher={"replicas": 1}))
     tick()
     # Worker crashed: prompt is held.
     jobs.set_stage(jobs.job_for(W0), "ERROR", "boom")
+    clock.advance(61)
     tick()
     assert store.get_worker(W0)["job_id"] is None
     ack = (await client.post("/agents/researcher-0000/prompt", json={"text": "hello"})).json()

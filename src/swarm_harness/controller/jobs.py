@@ -32,6 +32,7 @@ class JobListing:
     labels: dict[str, str]
     stage: str
     env: dict[str, str]
+    message: str | None = None
 
 
 class JobsClient(Protocol):
@@ -96,6 +97,7 @@ class HubJobsClient:
                     labels=dict(job.labels or {}),
                     stage=str(getattr(stage, "value", stage)),
                     env=dict(job.environment or {}),
+                    message=job.status.message if job.status else None,
                 )
             )
         return out
@@ -110,6 +112,7 @@ class FakeJobsClient:
     states: dict[str, JobState] = field(default_factory=dict)
     fail_launches: bool = False
     inspects: int = 0
+    lists: int = 0
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
@@ -143,6 +146,7 @@ class FakeJobsClient:
             self.states[job_id] = JobState("CANCELED")
 
     def list(self, labels, *, namespace) -> list[JobListing]:
+        self.lists += 1
         out = []
         for launch in self.launches:
             if launch["namespace"] != namespace:

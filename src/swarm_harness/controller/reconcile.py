@@ -43,7 +43,9 @@ log = logging.getLogger("swarm_harness.reconcile")
 
 BACKOFF_BASE = 30.0  # s, first crash backoff
 BACKOFF_CAP = 900.0  # s, 15 min
-INSPECT_EVERY = 15.0  # s, min gap between inspect_job calls for one non-fresh worker
+INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh worker
+INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
+LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
 LAUNCH_TIMEOUT = 900.0  # s, a RUNNING job that never heartbeats in this long is a crash
 RETIRE_GRACE = 120.0  # s, an emptied worker gets this long to drain before it is cancelled
 STABLE_AFTER = 600.0  # s, a heartbeat this long after launch resets the crash streak
@@ -120,9 +122,37 @@ class _Pass:
     settings: Settings
     budget: int
     actions: list[Action] = field(default_factory=list)
+    listed: dict[str, JobState] | None = None  # job stages from one list_jobs, if used
 
     def act(self, kind: str, target: str, detail: str = "") -> None:
         self.actions.append(Action(kind, target, detail))
+
+    def job_state(self, job_id: str, namespace: str) -> JobState | None:
+        if self.listed is not None:
+            return self.listed.get(job_id)
+        try:
+            return self.jobs.inspect(job_id, namespace=namespace)
+        except Exception as exc:  # noqa: BLE001 - Hub hiccup: try again next pass
+            log.warning("inspect %s failed: %s", job_id, type(exc).__name__)
+            return None
+
+    def cancel(self, job_id: str, namespace: str) -> None:
+        try:
+            self.jobs.cancel(job_id, namespace=namespace)
+        except Exception as exc:  # noqa: BLE001 - the job may already be gone
+            log.warning("cancel %s failed: %s", job_id, type(exc).__name__)
+
+
+def _needs_check(w: Row, now: float) -> bool:
+    """Fresh, non-draining workers are trusted from heartbeats; others get a job-status check."""
+    if w["job_id"] is None:
+        return False
+    hb = w["last_heartbeat"]
+    if hb is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
+        return False
+    if hb is not None and now - hb <= _UNKNOWN and not w["draining"] and not w["retire_at"]:
+        return False
+    return w["last_inspect"] is None or now - w["last_inspect"] >= INSPECT_EVERY
 
 
 def reconcile(
@@ -134,6 +164,14 @@ def reconcile(
     p = _Pass(store, jobs, t, settings, budget=settings.launches_per_window - used)
     for sw in store.list_swarms():
         spec: SwarmSpec = sw["spec"]
+        p.listed = None
+        if sum(_needs_check(w, t) for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
+            try:
+                listing = jobs.list({"swarm": spec.swarm}, namespace=spec.namespace)
+                p.listed = {j.job_id: JobState(j.stage, j.message) for j in listing}
+            except Exception as exc:  # noqa: BLE001
+                log.warning("list_jobs for %s failed: %s", spec.swarm, type(exc).__name__)
+                p.listed = {}
         for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
             ts = None if sw["removing"] else spec.types.get(type_name)
             _reconcile_type(p, spec, type_name, ts)
@@ -181,7 +219,7 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
             store.update_worker(w["id"], retire_at=p.now + RETIRE_GRACE)
             p.act("retire", w["id"])
         elif p.now >= w["retire_at"]:
-            p.jobs.cancel(w["job_id"], namespace=spec.namespace)
+            p.cancel(w["job_id"], spec.namespace)
             store.delete_worker(w["id"])
             p.act("cancel", w["id"], w["job_id"])
 
@@ -243,31 +281,25 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
 
 
 def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> None:
-    if w["job_id"] is None:
+    if not _needs_check(w, p.now):
+        if w["job_id"] is not None:
+            p.store.update_worker(w["id"], state=worker_state(w, p.now).value)
+        return
+    p.store.update_worker(w["id"], last_inspect=p.now)
+    st = p.job_state(w["job_id"], spec.namespace)
+    if st is None:
+        return
+    if st.terminal:
+        _job_ended(p, spec, w, ts, st)
         return
     hb = w["last_heartbeat"]
-    age = None if hb is None else p.now - hb
-    fresh = age is not None and age <= _UNKNOWN and not w["draining"] and not w["retire_at"]
-    stage = None
-    if not fresh and (w["last_inspect"] is None or p.now - w["last_inspect"] >= INSPECT_EVERY):
-        st = p.jobs.inspect(w["job_id"], namespace=spec.namespace)
-        p.store.update_worker(w["id"], last_inspect=p.now)
-        if st.terminal:
-            _job_ended(p, spec, w, ts, st)
-            return
-        stage = st.stage
-    if stage is not None:
-        silent = age is not None and age > _DEAD
-        never = (
-            hb is None
-            and stage != "SCHEDULING"
-            and p.now - (w["launched_at"] or p.now) > LAUNCH_TIMEOUT
-        )
-        if silent or never:
-            p.jobs.cancel(w["job_id"], namespace=spec.namespace)
-            p.act("cancel", w["id"], w["job_id"])
-            _job_ended(p, spec, w, ts, JobState("CANCELED", "unresponsive"))
-            return
+    silent = hb is not None and p.now - hb > _DEAD
+    never = hb is None and st.stage != "SCHEDULING" and p.now - w["launched_at"] > LAUNCH_TIMEOUT
+    if silent or never:
+        p.cancel(w["job_id"], spec.namespace)
+        p.act("cancel", w["id"], w["job_id"])
+        _job_ended(p, spec, w, ts, JobState("CANCELED", "unresponsive"))
+        return
     p.store.update_worker(w["id"], state=worker_state(w, p.now).value)
 
 

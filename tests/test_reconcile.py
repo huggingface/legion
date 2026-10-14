@@ -346,3 +346,39 @@ def test_fake_jobs_list_filters_labels():
     jobs.launch("w", spec, {}, {}, {"swarm": "a", "type": "t", "worker": "w"}, 10, namespace="ns")
     assert len(jobs.list({"swarm": "a"}, namespace="ns")) == 1
     assert jobs.list({"swarm": "b"}, namespace="ns") == []
+
+
+def test_job_checks_are_bounded(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 30, "agents_per_worker": 1}), 0)
+    tick()
+    assert len(jobs.launches) == 30
+    clock.advance(30)
+    tick()
+    assert jobs.inspects == 0 and jobs.lists == 0  # launch grace: nothing is checked yet
+    clock.advance(40)
+    tick()
+    assert jobs.inspects == 0 and jobs.lists == 1  # 30 unheard-from workers: one list call
+    tick()
+    assert jobs.lists == 1  # and not again within INSPECT_EVERY
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    for i in range(1, 25):
+        wid = f"demo-researcher-w{i:04d}"
+        heartbeat(store, clock, wid, [(f"researcher-{i:04d}", "idle", None)])
+    clock.advance(16)
+    tick()
+    assert jobs.inspects == 5 and jobs.lists == 1  # few left: inspect them one by one
+
+
+def test_hub_errors_do_not_break_the_pass(store, jobs, clock, tick, monkeypatch):
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+
+    def boom(*a, **k):
+        raise RuntimeError("429")
+
+    monkeypatch.setattr(jobs, "inspect", boom)
+    clock.advance(100)
+    assert "crash" not in kinds(tick())
+    jobs.fail_launches = True
+    store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 1}), 0)
+    assert "launch_failed" in kinds(tick())
