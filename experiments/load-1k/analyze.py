@@ -43,7 +43,8 @@ def main() -> None:
     ap.add_argument("--swarm", default="load-1k")
     ap.add_argument("--out")
     a = ap.parse_args()
-    rows = [json.loads(x) for x in open(a.sent) if x.strip()]
+    with open(a.sent) as f:
+        rows = [json.loads(x) for x in f if x.strip()]
     by_worker = defaultdict(list)
     for r in rows:
         by_worker[r.get("worker")].append(r)

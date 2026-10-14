@@ -125,7 +125,7 @@ async def main() -> None:
             async with sem:
                 return await one(c, name, worker, a.text, a.deadline, errors, out)
 
-        with open(a.out, "w") as out:
+        with open(a.out, "w") as out:  # noqa: ASYNC230 - one small local file
             recs = await asyncio.gather(*(guarded(n, w, out) for n, w in agents))
         done = [r for r in recs if "turn_ended_ts" in r]
         print(json.dumps({"agents": len(recs), "turn_ended": len(done), "ok": sum(bool(r.get("ok")) for r in recs),
