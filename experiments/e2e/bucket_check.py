@@ -1,6 +1,6 @@
 """Check every agent's bucket prefix: workdir/, sessions/<name>.jsonl, harness/.../<session>.jsonl.
 
-    python bucket_check.py <bucket-url-with-prefix> <swarm>     (SWARM_HARNESS_URL/TOKEN for ids)
+    python bucket_check.py <bucket-url-with-prefix> <swarm>     (FLOCK_URL/TOKEN for ids)
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ def main() -> None:
     url, swarm = sys.argv[1], sys.argv[2]
     ns, name, *rest = url.removeprefix("hf://buckets/").strip("/").split("/")
     base = "/".join([*rest, swarm]) + "/"
-    c = httpx.Client(base_url=os.environ["SWARM_HARNESS_URL"], timeout=60,
-                     headers={"Authorization": f"Bearer {os.environ['SWARM_HARNESS_TOKEN']}"})
+    c = httpx.Client(base_url=os.environ["FLOCK_URL"], timeout=60,
+                     headers={"Authorization": f"Bearer {os.environ['FLOCK_TOKEN']}"})
     agents = c.get(f"/swarms/{swarm}/agents", params={"limit": 5000}).json()["agents"]
     files: dict[str, list[str]] = defaultdict(list)
     sizes = 0

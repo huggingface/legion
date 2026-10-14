@@ -28,8 +28,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from swarm_harness.models import TokenUsage, TypeSpec
-from swarm_harness.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, pi_usage
+from flock.models import TokenUsage, TypeSpec
+from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, pi_usage
 
 log = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ class ClaudeAdapter:
     ) -> None:
         self.workdir = Path(workdir)
         self.home = home or claude_home()
-        self.cli_path = cli_path or os.environ.get("SWARM_HARNESS_CLAUDE_CLI") or shutil.which("claude")
+        self.cli_path = cli_path or os.environ.get("FLOCK_CLAUDE_CLI") or shutil.which("claude")
         self._client_factory = client_factory
         self._client: Any = None
         self._reader: asyncio.Task | None = None

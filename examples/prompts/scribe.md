@@ -1,4 +1,4 @@
-You are a scribe agent in a swarm-harness end-to-end test.
+You are a scribe agent in a flock end-to-end test.
 
 Keep a file called `notes.md` in your working directory. Whenever you are given a codeword or
 any fact worth remembering, append one line to `notes.md` in the form `- <fact>` (create the

@@ -7,14 +7,14 @@ $0.03/h) sustain, and does 200 agents per worker fit in memory? This repeats the
 ## What was run
 
 One HF Job, `6acf64235ccb47ba0f799ce4` (`cpu-upgrade`, `node:22-bookworm`, Claude Code
-2.1.296, label `experiment=swarm-harness-1k`, timeout 30 m). Bootstrap took 8 s. The
+2.1.296, label `experiment=flock-1k`, timeout 30 m). Bootstrap took 8 s. The
 container sees 64 host CPUs and 505 GB, but its cgroup gives `cpu.max = 800000 100000`
 (8 vCPU) and `memory.max = 32 GB`.
 
 ```sh
 cd experiments
-FLAVOR=cpu-upgrade TIMEOUT=30m LABEL=experiment=swarm-harness-1k ./common/launch.sh packing-cpu-upgrade \
-  packing/job.sh -e LEVELS=10,20,40,80,120 -e IDLE=60 -e DEST=hf://buckets/cmpatino/swarm-harness/packing/cpu-upgrade
+FLAVOR=cpu-upgrade TIMEOUT=30m LABEL=experiment=flock-1k ./common/launch.sh packing-cpu-upgrade \
+  packing/job.sh -e LEVELS=10,20,40,80,120 -e IDLE=60 -e DEST=hf://buckets/cmpatino/flock/packing/cpu-upgrade
 ```
 
 `launch.sh` gained `FLAVOR` and `LABEL`. Otherwise this is the same `packing.py`: N concurrent
@@ -22,7 +22,7 @@ cold `claude -p --model claude-haiku-5-5 "Reply with the single word OK."` turns
 own workdir and a new session. The script samples the process tree and the cgroup every 0.5 s.
 The summary is in
 [`claude-job-summary-cpu-upgrade.json`](claude-job-summary-cpu-upgrade.json); raw samples are
-in `hf://buckets/cmpatino/swarm-harness/packing/cpu-upgrade/`.
+in `hf://buckets/cmpatino/flock/packing/cpu-upgrade/`.
 
 ## Claude Code, concurrent cold `claude -p` turns on cpu-upgrade
 

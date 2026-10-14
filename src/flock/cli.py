@@ -1,6 +1,6 @@
-"""`swarm-harness` CLI: a thin client over the controller API.
+"""`flock` CLI: a thin client over the controller API.
 
-Config: SWARM_HARNESS_URL and SWARM_HARNESS_TOKEN.
+Config: FLOCK_URL and FLOCK_TOKEN.
 """
 
 from __future__ import annotations
@@ -14,15 +14,15 @@ import httpx
 import typer
 import yaml
 
-from swarm_harness.models import SwarmSpec
+from flock.models import SwarmSpec
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
 
 def client() -> httpx.Client:
     """Overridden in tests to point at an in-process app."""
-    url = os.environ.get("SWARM_HARNESS_URL", "http://localhost:7860")
-    token = os.environ.get("SWARM_HARNESS_TOKEN", "")
+    url = os.environ.get("FLOCK_URL", "http://localhost:7860")
+    token = os.environ.get("FLOCK_TOKEN", "")
     return httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 

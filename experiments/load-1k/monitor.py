@@ -19,8 +19,8 @@ def main() -> None:
     ap.add_argument("out")
     ap.add_argument("--every", type=float, default=15)
     a = ap.parse_args()
-    c = httpx.Client(base_url=os.environ["SWARM_HARNESS_URL"], timeout=30,
-                     headers={"Authorization": f"Bearer {os.environ['SWARM_HARNESS_TOKEN']}"})
+    c = httpx.Client(base_url=os.environ["FLOCK_URL"], timeout=30,
+                     headers={"Authorization": f"Bearer {os.environ['FLOCK_TOKEN']}"})
     while True:
         rec: dict = {"t": time.time()}
         for key, path in (("health", "/healthz"), ("swarm", f"/swarms/{a.swarm}"),

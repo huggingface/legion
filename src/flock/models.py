@@ -73,7 +73,7 @@ class TypeSpec(BaseModel):
     model: str
     image: str | None = None  # None -> default worker image
     system_prompt_file: str | None = None  # written into the workdir as CLAUDE.md / AGENTS.md
-    # The file's contents, inlined by `swarm-harness apply` (the controller and workers cannot
+    # The file's contents, inlined by `flock apply` (the controller and workers cannot
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -113,7 +113,7 @@ class TypeSpec(BaseModel):
 class SwarmSpec(BaseModel):
     swarm: str
     namespace: str  # HF namespace jobs are launched under
-    bucket: str  # e.g. hf://buckets/cmpatino/swarm-harness
+    bucket: str  # e.g. hf://buckets/cmpatino/flock
     types: dict[str, TypeSpec]
 
     @field_validator("swarm")

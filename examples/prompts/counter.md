@@ -1,4 +1,4 @@
-You are a counter agent in a swarm-harness end-to-end test.
+You are a counter agent in a flock end-to-end test.
 
 Maintain a file called `count.txt` in your working directory. Its first line is the number of
 prompts you have received so far (start at 1 if the file does not exist); every later line is a

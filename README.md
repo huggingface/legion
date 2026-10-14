@@ -3,8 +3,7 @@
 Host coding-harness agent swarms (Claude Code, Codex) on Hugging Face Jobs: keep
 them alive, prompt them, watch them. One controller, N worker jobs, up to 200
 agents per worker. Declare a swarm in YAML and the controller keeps it running,
-the way Kubernetes keeps pods running. The package, CLI and
-environment variables are still named `swarm-harness`.
+the way Kubernetes keeps pods running.
 
 It is the layer under [msgboard](https://github.com/huggingface/msgboard) and
 [swarmlab](https://github.com/huggingface/swarmlab): it hosts agents and exposes
@@ -41,7 +40,7 @@ them.
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
-  `swarm-harness` wraps the HTTP API.
+  `flock` wraps the HTTP API.
 
 Supported harnesses: Claude Code through the Python Agent SDK, Codex through
 `codex app-server`. Codex is verified locally, not yet inside a job.
@@ -60,17 +59,17 @@ uv sync --all-extras                 # or: pip install -e ".[controller,worker,d
 As an HF Docker Space (the tested setup):
 
 ```sh
-export HF_TOKEN=... ANTHROPIC_KEY=... SWARM_HARNESS_TOKEN=$(openssl rand -hex 24)
-W=$(scripts/publish-wheel.sh hf://buckets/<you>/swarm-harness/dist)   # wheel for workers
-scripts/deploy-space.sh "$W" <you>/swarm-harness
+export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
+W=$(scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for workers
+scripts/deploy-space.sh "$W" <you>/flock
 ```
 
 Or locally:
 
 ```sh
-SWARM_HARNESS_TOKEN=... HF_TOKEN=... ANTHROPIC_API_KEY=... \
-SWARM_HARNESS_WHEEL_URL=hf://buckets/<you>/swarm-harness/dist/<rev>/swarm_harness-0.0.1-py3-none-any.whl \
-swarm-harness-controller                 # http://127.0.0.1:7860
+FLOCK_TOKEN=... HF_TOKEN=... ANTHROPIC_API_KEY=... \
+FLOCK_WHEEL_URL=hf://buckets/<you>/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl \
+flock-controller                 # http://127.0.0.1:7860
 ```
 
 Workers bootstrap from a stock `node:22-bookworm` image: they install the
@@ -83,7 +82,7 @@ must be in the controller's environment.
 # demo.yaml
 swarm: demo
 namespace: <you>
-bucket: hf://buckets/<you>/swarm-harness/demo
+bucket: hf://buckets/<you>/flock/demo
 types:
   scribe:
     harness: claude
@@ -96,13 +95,13 @@ types:
 ```
 
 ```sh
-export SWARM_HARNESS_URL=https://<you>-swarm-harness.hf.space SWARM_HARNESS_TOKEN=...
-swarm-harness apply demo.yaml
-swarm-harness status demo                        # counts by type and state, cost
-swarm-harness prompt scribe-0007 "Summarize your workdir."
-swarm-harness events scribe-0007 --follow        # JSONL: turn_started, turn_ended, ...
-swarm-harness scale demo scribe 200
-swarm-harness remove demo
+export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
+flock apply demo.yaml
+flock status demo                        # counts by type and state, cost
+flock prompt scribe-0007 "Summarize your workdir."
+flock events scribe-0007 --follow        # JSONL: turn_started, turn_ended, ...
+flock scale demo scribe 200
+flock remove demo
 ```
 
 Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
@@ -110,7 +109,7 @@ Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
 
 ### HTTP API
 
-`Authorization: Bearer $SWARM_HARNESS_TOKEN` on every call.
+`Authorization: Bearer $FLOCK_TOKEN` on every call.
 
 | Call | Purpose |
 | --- | --- |

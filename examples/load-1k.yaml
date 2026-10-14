@@ -5,14 +5,14 @@
 # experiments/packing/RESULTS-cpu-upgrade.md (turn p95 under 30 s at 120 concurrent cold turns).
 swarm: load-1k
 namespace: cmpatino
-bucket: hf://buckets/cmpatino/swarm-harness/load-1k
+bucket: hf://buckets/cmpatino/flock/load-1k
 types:
   scribe:
     harness: claude
     model: claude-haiku-5-5
     system_prompt_file: prompts/scribe.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-1k}
+    labels: {experiment: flock-1k}
     replicas: 600
     flavor: cpu-upgrade
     agents_per_worker: 200
@@ -29,7 +29,7 @@ types:
     model: claude-haiku-5-5
     system_prompt_file: prompts/counter.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-1k}
+    labels: {experiment: flock-1k}
     replicas: 400
     flavor: cpu-upgrade
     agents_per_worker: 200

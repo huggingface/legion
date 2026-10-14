@@ -9,7 +9,7 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from swarm_harness.models import (
+from flock.models import (
     AssignCommand,
     CommandBatch,
     DrainCommand,
@@ -19,9 +19,9 @@ from swarm_harness.models import (
     UnassignCommand,
     WorkerHeartbeat,
 )
-from swarm_harness.worker import main as wmain
-from swarm_harness.worker.events import utcnow
-from swarm_harness.worker.main import ControllerClient, Worker, WorkerConfig
+from flock.worker import main as wmain
+from flock.worker.events import utcnow
+from flock.worker.main import ControllerClient, Worker, WorkerConfig
 
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
@@ -80,7 +80,7 @@ def fast_backoff(monkeypatch):
 
 def test_config_from_env(tmp_path):
     cfg = WorkerConfig.from_env({
-        "SWARM_HARNESS_URL": "https://c.hf.space/", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "FLOCK_URL": "https://c.hf.space/", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "DEADLINE": "2026-10-15T09:12:00Z",
         "BUCKET": "hf://buckets/ns/b"})
     assert cfg.url == "https://c.hf.space" and cfg.work_root.as_posix() == "/work/agents"
@@ -92,7 +92,7 @@ def test_config_from_env(tmp_path):
 async def test_drain_window_from_env_applies_before_any_assign(tmp_path):
     # lifetime 6 min, drain window 5 min: must not drain at once just because no assign came yet
     cfg = WorkerConfig.from_env({
-        "SWARM_HARNESS_URL": "http://c", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "FLOCK_URL": "http://c", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "DRAIN_WINDOW": "5m",
         "DEADLINE": (utcnow() + timedelta(minutes=6)).isoformat()})
     assert cfg.drain_window == timedelta(minutes=5)
@@ -207,7 +207,7 @@ def test_heartbeat_json_shape(tmp_path):
 
 async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
     cfg = WorkerConfig.from_env({
-        "SWARM_HARNESS_URL": "http://c", "SWARM_HARNESS_TOKEN": "t", "WORKER_ID": WID,
+        "FLOCK_URL": "http://c", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "WORKER_INCARNATION": "inc-1",
         "DEADLINE": (utcnow() + timedelta(hours=1)).isoformat()})
     assert cfg.incarnation == "inc-1"

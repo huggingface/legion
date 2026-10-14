@@ -17,10 +17,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from swarm_harness.controller.jobs import JobsClient, JobState
-from swarm_harness.controller.prices import cost_usd
-from swarm_harness.controller.store import Row, Store
-from swarm_harness.models import (
+from flock.controller.jobs import JobsClient, JobState
+from flock.controller.prices import cost_usd
+from flock.controller.store import Row, Store
+from flock.models import (
     CRASHLOOP_THRESHOLD,
     DEAD_AFTER,
     LAUNCHES_PER_WINDOW,
@@ -40,7 +40,7 @@ from swarm_harness.models import (
     parse_duration,
 )
 
-log = logging.getLogger("swarm_harness.reconcile")
+log = logging.getLogger("flock.reconcile")
 
 BACKOFF_BASE = 30.0  # s, first crash backoff
 BACKOFF_CAP = 900.0  # s, 15 min
@@ -365,7 +365,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     incarnation = uuid.uuid4().hex
     env = {
         **ts.env,
-        "SWARM_HARNESS_URL": s.public_url,
+        "FLOCK_URL": s.public_url,
         "WORKER_ID": wid,
         "WORKER_INCARNATION": incarnation,
         "SWARM": spec.swarm,
@@ -374,7 +374,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "DRAIN_WINDOW": ts.drain_window,  # known before the first assign arrives
         "BUCKET": spec.bucket,
     }
-    secrets = {"SWARM_HARNESS_TOKEN": s.token}
+    secrets = {"FLOCK_TOKEN": s.token}
     for name in [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]:
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]

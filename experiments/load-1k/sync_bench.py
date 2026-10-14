@@ -1,7 +1,7 @@
 """Bucket sync cost for N synthetic agents, outside a job: serial push (as the worker's periodic
 sync loop does), then a concurrent restore into a fresh directory (as a relaunch does).
 
-    python sync_bench.py hf://buckets/cmpatino/swarm-harness/load-1k-bench --agents 200
+    python sync_bench.py hf://buckets/cmpatino/flock/load-1k-bench --agents 200
 
 Each agent: workdir/CLAUDE.md + notes.md, sessions/<name>.jsonl + .state.json, one ~80 KB
 harness transcript. Prints seconds and bucket calls per phase (BucketStats).
@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-from swarm_harness.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
+from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
 
 
 def fake_agent(root: Path, name: str, sid: str | None, write: bool):

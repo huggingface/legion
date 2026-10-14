@@ -5,16 +5,16 @@ from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
 
-from swarm_harness.controller.jobs import FakeJobsClient
-from swarm_harness.controller.reconcile import (
+from flock.controller.jobs import FakeJobsClient
+from flock.controller.reconcile import (
     agent_state,
     rebuild_from_jobs,
     reconcile,
     record_heartbeat,
     worker_state,
 )
-from swarm_harness.controller.store import Store
-from swarm_harness.models import (
+from flock.controller.store import Store
+from flock.models import (
     CRASHLOOP_THRESHOLD,
     AgentHeartbeat,
     AgentState,
@@ -62,13 +62,13 @@ def test_apply_creates_agents_and_launches_workers(store, jobs, settings, clock,
     launch = jobs.launches[0]
     assert launch["labels"] == {"swarm": "demo", "type": "researcher", "worker": W0}
     assert launch["namespace"] == "ns"
-    assert launch["secrets"] == {"SWARM_HARNESS_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-test"}
+    assert launch["secrets"] == {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-test"}
     env = launch["env"]
     assert env["WORKER_ID"] == W0 and env["SWARM"] == "demo" and env["TYPE"] == "researcher"
-    assert env["SWARM_HARNESS_URL"] == "https://controller.invalid"
+    assert env["FLOCK_URL"] == "https://controller.invalid"
     assert env["BUCKET"] == "hf://buckets/ns/sh" and env["MSGBOARD_URL"]
     assert env["DRAIN_WINDOW"] == "10m" and len(env["WORKER_INCARNATION"]) == 32
-    assert "SWARM_HARNESS_TOKEN" not in env
+    assert "FLOCK_TOKEN" not in env
     lifetime = parse_duration("24h").total_seconds()
     assert lifetime <= launch["timeout"] <= lifetime + parse_duration("4h").total_seconds()
     deadline = datetime.fromisoformat(env["DEADLINE"])
@@ -387,11 +387,11 @@ def test_hub_errors_do_not_break_the_pass(store, jobs, clock, tick, monkeypatch)
 
 
 def test_job_labels_from_settings_are_added_but_never_override(store, jobs, settings, tick):
-    settings.job_labels = {"experiment": "swarm-harness-m1", "swarm": "spoof"}
+    settings.job_labels = {"experiment": "flock-m1", "swarm": "spoof"}
     store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
     tick()
     assert jobs.launches[0]["labels"] == {
-        "experiment": "swarm-harness-m1",
+        "experiment": "flock-m1",
         "swarm": "demo",
         "type": "researcher",
         "worker": W0,

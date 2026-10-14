@@ -1,11 +1,11 @@
-# swarm-harness: design
+# flock: design
 
 Status: agreed design, 2026-10-14. Author: Carlos Patiño with Claude.
 Scope: v1, the first milestone and the contracts later layers depend on.
 
 ## 1. What it is
 
-swarm-harness hosts coding-harness agents (Claude Code, Codex) on Hugging Face
+flock hosts coding-harness agents (Claude Code, Codex) on Hugging Face
 Jobs, keeps them alive for weeks, takes prompts for them, and exposes their
 sessions and health. It is the lowest layer under two existing systems:
 
@@ -15,9 +15,9 @@ sessions and health. It is the lowest layer under two existing systems:
 - **swarmlab** (`huggingface/swarmlab`) is the experiment testbed. It owns
   worlds, metrics, specs, budgets and analysis. Today its agents are in-process
   coroutines; its design doc defers "harness agents", "live mid-run command
-  queue" and "thousands of agents" to v2. swarm-harness is those three.
+  queue" and "thousands of agents" to v2. flock is those three.
 
-swarm-harness never decides what an agent should see. It does not route
+flock never decides what an agent should see. It does not route
 inboxes. Whoever calls `prompt` has already decided the agent should see that
 text. msgboard and swarmlab plug in later through the prompt API and the
 per-agent event stream, and neither changes for v1.
@@ -172,8 +172,8 @@ is never "in" a process; the process is a view of files on disk.
 
 ### CLI and library
 
-One Python package, three entry points: `swarm-harness` (CLI/library),
-`swarm-harness-controller`, `swarm-harness-worker`. Commands: `apply`,
+One Python package, three entry points: `flock` (CLI/library),
+`flock-controller`, `flock-worker`. Commands: `apply`,
 `prompt`, `status`, `events`, `scale`, `remove`, `logs`.
 
 ## 4. Agent lifecycle
@@ -239,7 +239,7 @@ the type defines `resume_prompt`, sends it. No default.
 ```yaml
 swarm: paper-review
 namespace: cmpatino            # HF namespace for jobs
-bucket: hf://buckets/cmpatino/swarm-harness
+bucket: hf://buckets/cmpatino/flock
 types:
   researcher:
     harness: claude            # claude | codex
@@ -270,7 +270,7 @@ types:
 ```
 
 `scale` and `remove` edit the spec and re-apply. The system prompt is a file
-in the workdir, not a flag, so it survives resume. `swarm-harness apply` reads
+in the workdir, not a flag, so it survives resume. `flock apply` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
 caller's files (added in the e2e run).
@@ -478,9 +478,9 @@ Condensed from the grilling session, 2026-10-13/14.
 
 | # | Decision |
 |---|---|
-| 1 | swarm-harness is the lowest layer; swarmlab and msgboard are callers, unchanged in v1 |
+| 1 | flock is the lowest layer; swarmlab and msgboard are callers, unchanged in v1 |
 | 2 | Coding harnesses first (Claude, Codex); API-loop agents later |
-| 3 | No inbox routing in swarm-harness; prompt API plus per-agent event stream only |
+| 3 | No inbox routing in flock; prompt API plus per-agent event stream only |
 | 4 | Agents are durable sessions on disk; process per burst, 120 s idle grace |
 | 5 | Let the harness handle mid-turn messages (Claude queues, Codex steers); worker only forwards |
 | 6 | Claude via Python Agent SDK, Codex via app-server JSON-RPC; no trace-file parsing |
@@ -500,7 +500,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 20 | msgboard identity via invite redeemed by name; swap to an admin endpoint if one appears |
 | 21 | Personal namespace, PRO rate limits, launch spacing about 400 per 5 min |
 | 22 | Fill workers in order; no bin packing; packing numbers measured first |
-| 23 | Repo `huggingface/swarm-harness`, Python, one package, three entry points |
+| 23 | Repo `huggingface/flock`, Python, one package, three entry points |
 | 24 | Milestone one: resume gate, packing measurement, 100 agents end to end |
 
 ## 12. Road to 10k

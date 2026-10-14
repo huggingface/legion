@@ -3,13 +3,13 @@ event stream until its turn ends (so C is also the number of concurrent events r
 
     python prompt_load.py <swarm> --concurrency 50 --out out/sent.jsonl
 
-Per agent: POST the prompt (the body `swarm-harness prompt` sends), wait --first-poll-delay, read the
+Per agent: POST the prompt (the body `flock prompt` sends), wait --first-poll-delay, read the
 stream, then GET /agents/<name>/events?after=<next>&wait=25 (with --poll-gap between polls) until
 turn_ended. Agents are shuffled so the in-flight prompts spread over all workers. Round 1 of the
 1k run (no delay, no gap, name order) cost about 8 requests per agent and tripped the HF Spaces
 edge's per-IP rate limit (429) at about 20 requests/s. Writes one JSON line per agent:
 ack status and latency, server timestamps of the first event / turn_started / turn_ended, the
-reply, tokens, worker, and HTTP errors seen. Needs SWARM_HARNESS_URL and SWARM_HARNESS_TOKEN.
+reply, tokens, worker, and HTTP errors seen. Needs FLOCK_URL and FLOCK_TOKEN.
 """
 
 from __future__ import annotations
@@ -131,9 +131,9 @@ async def main() -> None:
                 if r.get("ok"):
                     a.expected[r["agent"]] = r["codeword"]
     limits = httpx.Limits(max_connections=a.concurrency + 10, max_keepalive_connections=a.concurrency + 10)
-    async with httpx.AsyncClient(base_url=os.environ["SWARM_HARNESS_URL"], limits=limits,
+    async with httpx.AsyncClient(base_url=os.environ["FLOCK_URL"], limits=limits,
                                  timeout=httpx.Timeout(30, read=60),
-                                 headers={"Authorization": f"Bearer {os.environ['SWARM_HARNESS_TOKEN']}"}) as c:
+                                 headers={"Authorization": f"Bearer {os.environ['FLOCK_TOKEN']}"}) as c:
         errors: Counter = Counter()
         agents, cursor = [], None
         while True:

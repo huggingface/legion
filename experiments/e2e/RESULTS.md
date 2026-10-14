@@ -9,7 +9,7 @@ drains at a shortened lifetime, a scale-down and a remove.
 
 | # | Check | Result | Key numbers |
 |---|---|---|---|
-| 1 | Space deploy, `/healthz`, CLI `status` with token | **PASS** | healthz `{"ok":true}`; `GET /swarms` without token 401; `swarm-harness status` exit 0 |
+| 1 | Space deploy, `/healthz`, CLI `status` with token | **PASS** | healthz `{"ok":true}`; `GET /swarms` without token 401; `flock status` exit 0 |
 | 2 | `apply` -> 3 workers, heartbeats < 3 min, 100 idle | **PASS** | 3 `run_job` in one pass at 09:54:26; first heartbeats +33/+46/+60 s; 100 idle at +64 s; bootstrap 14-23 s |
 | 3 | Prompt all 100 from the CLI | **PASS** | 100/100 acks `queued`, 100/100 `turn_ended`, 100/100 correct codewords; first event p50 17.8 s / p95 27.3 s; turn p50 15.2 s / p95 23.7 s; prompt to answer p50 32.5 s / p95 43.1 s; controller $0.112523 vs Claude $0.112526 |
 | 4 | Bucket: workdir, session log, harness transcript per agent | **PASS** | 100/100 complete at 09:58:53 (first sync tick after the turns), 500 files, 9.0 MB |
@@ -20,12 +20,12 @@ drains at a shortened lifetime, a scale-down and a remove.
 
 ## Setup
 
-- **Controller**: public Docker Space [`cmpatino/swarm-harness`](https://huggingface.co/spaces/cmpatino/swarm-harness)
-  (`https://cmpatino-swarm-harness.hf.space`), `cpu-basic`, no persistent storage, built from
-  `Dockerfile.controller` by `scripts/deploy-space.sh`. Space secrets `SWARM_HARNESS_TOKEN`,
+- **Controller**: public Docker Space [`cmpatino/flock`](https://huggingface.co/spaces/cmpatino/flock)
+  (`https://cmpatino-flock.hf.space`), `cpu-basic`, no persistent storage, built from
+  `Dockerfile.controller` by `scripts/deploy-space.sh`. Space secrets `FLOCK_TOKEN`,
   `HF_TOKEN`, `ANTHROPIC_API_KEY` (from `ANTHROPIC_KEY`); variables
-  `SWARM_HARNESS_WORKER_BOOTSTRAP=1`, `SWARM_HARNESS_WHEEL_URL`,
-  `SWARM_HARNESS_JOB_LABELS=experiment=swarm-harness-m1`.
+  `FLOCK_WORKER_BOOTSTRAP=1`, `FLOCK_WHEEL_URL`,
+  `FLOCK_JOB_LABELS=experiment=flock-m1`.
 - **Public Space, bearer-protected API.** A private Space needs an HF bearer token on every
   request, and that collides with our own `Authorization: Bearer <swarm token>` header. So the
   Space is public: every API route needs the swarm token (an unauthenticated
@@ -35,10 +35,10 @@ drains at a shortened lifetime, a scale-down and a remove.
 - **Workers**: bootstrap mode (no Docker daemon here, so `Dockerfile.worker` was not built).
   Each job runs `node:22-bookworm` with a bash script that installs
   `@anthropic-ai/claude-code@2.1.296`, `@openai/codex@0.162.1`, uv, `huggingface_hub==2.2.0`
-  and the swarm-harness wheel from `hf://buckets/cmpatino/swarm-harness/dist/<rev>/`
+  and the flock wheel from `hf://buckets/cmpatino/flock/dist/<rev>/`
   (`cd97485` for run 1, `f33ad53` with the fix for run 2)
   (pinned `claude-agent-sdk==0.2.166`), sets `IS_SANDBOX=1`, `CLAUDE_CONFIG_DIR=/state/claude`,
-  `CODEX_HOME=/state/codex`, and execs `swarm-harness-worker`. Bootstrap took 14 to 23 s.
+  `CODEX_HOME=/state/codex`, and execs `flock-worker`. Bootstrap took 14 to 23 s.
 - **Spec**: [`examples/e2e.yaml`](../../examples/e2e.yaml). Two types, both `harness: claude`,
   `model: claude-haiku-5-5`: `scribe` (66 replicas, system prompt: keep `notes.md`) and
   `counter` (34 replicas, system prompt: keep `count.txt`). `agents_per_worker: 34`,
@@ -47,31 +47,31 @@ drains at a shortened lifetime, a scale-down and a remove.
   **Codex is out of scope** (no OpenAI key here). Heterogeneity is two Claude types with
   different system prompts. It shows in behaviour: scribes made 1.0 tool calls per turn,
   counters 1.9 (read, then write `count.txt`).
-- Bucket prefix `hf://buckets/cmpatino/swarm-harness/e2e`, so agent state lives under
+- Bucket prefix `hf://buckets/cmpatino/flock/e2e`, so agent state lives under
   `e2e/e2e/<type>/<agent>/`.
 
 Commands, in order:
 
 ```sh
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/swarm-harness-e2e" uv sync --all-extras
-W=$(scripts/publish-wheel.sh)          # hf://buckets/cmpatino/swarm-harness/dist/<rev>/swarm_harness-0.0.1-py3-none-any.whl
-set -a; source $AM_LOCAL/swarm-harness-e2e.env; set +a   # SWARM_HARNESS_TOKEN, SWARM_HARNESS_URL (never printed)
+UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock-e2e" uv sync --all-extras
+W=$(scripts/publish-wheel.sh)          # hf://buckets/cmpatino/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl
+set -a; source $AM_LOCAL/flock-e2e.env; set +a   # FLOCK_TOKEN, FLOCK_URL (never printed)
 scripts/deploy-space.sh "$W"
-curl -s $SWARM_HARNESS_URL/healthz; swarm-harness status                  # check 1
-swarm-harness apply examples/e2e.yaml                                    # check 2
+curl -s $FLOCK_URL/healthz; flock status                  # check 1
+flock apply examples/e2e.yaml                                    # check 2
 experiments/e2e/prompt_all.sh e2e out/sent1.jsonl                        # check 3 (25 CLI processes at a time)
 python experiments/e2e/measure.py out/sent1.jsonl --out out/check3.json
-python experiments/e2e/bucket_check.py hf://buckets/cmpatino/swarm-harness/e2e e2e   # check 4
+python experiments/e2e/bucket_check.py hf://buckets/cmpatino/flock/e2e e2e   # check 4
 hf jobs cancel --namespace cmpatino 6acf5152c66288145223dfd9             # check 5
-swarm-harness prompt scribe-0045 "What is your codeword? Reply with only the codeword."   # while down
-swarm-harness prompt scribe-00{34,40,50,60,65} "What is your codeword? Reply with only the codeword."
+flock prompt scribe-0045 "What is your codeword? Reply with only the codeword."   # while down
+flock prompt scribe-00{34,40,50,60,65} "What is your codeword? Reply with only the codeword."
 hf jobs logs --namespace cmpatino <job>                                  # check 6
-swarm-harness scale e2e counter 10                                       # check 7
-swarm-harness remove e2e
+flock scale e2e counter 10                                       # check 7
+flock remove e2e
 # fix, then run 2 on the redeployed (empty) controller
 W=$(scripts/publish-wheel.sh); scripts/deploy-space.sh "$W"
-swarm-harness apply experiments/e2e/e2e-rerun.yaml                       # check 6, re-run
-swarm-harness remove e2e
+flock apply experiments/e2e/e2e-rerun.yaml                       # check 6, re-run
+flock remove e2e
 python experiments/e2e/spend.py scribe-00{00..65} counter-00{00..33}     # check 8
 ```
 
@@ -85,23 +85,23 @@ Raw logs (job logs, controller log, status poll every 15 s, per-agent measuremen
 
 `scripts/deploy-space.sh` stages `Dockerfile.controller` as `Dockerfile` with `pyproject.toml`,
 `uv.lock`, `src/` and a Space README, then sets secrets and variables through the hub API and
-uploads. The Space built in about 3 minutes. `curl $SWARM_HARNESS_URL/healthz` returned
+uploads. The Space built in about 3 minutes. `curl $FLOCK_URL/healthz` returned
 `{"ok":true,"hub_calls":{}}`, `GET /swarms` without a token returned 401, and
-`swarm-harness status` printed `no swarms` with exit 0.
+`flock status` printed `no swarms` with exit 0.
 
 ### 2. Apply
 
-`swarm-harness apply examples/e2e.yaml` at 09:54:26. Placement filled workers in order:
+`flock apply examples/e2e.yaml` at 09:54:26. Placement filled workers in order:
 `e2e-scribe-w0000` (34), `e2e-scribe-w0001` (32), `e2e-counter-w0000` (34). All three
 `run_job` calls ran in the first reconcile pass. Jobs `6acf51525ccb47ba0f798f47`,
 `6acf5152c66288145223dfd9`, `6acf5152c66288145223dfd7` carried labels
-`experiment=swarm-harness-m1, swarm=e2e, type, worker`. Bootstrap took 14, 20 and 23 s. The
+`experiment=flock-m1, swarm=e2e, type, worker`. Bootstrap took 14, 20 and 23 s. The
 first heartbeats arrived at 09:54:59, 09:55:12 and 09:55:26. Heartbeats start at a random phase
 in 0-30 s, which explains the spread. All 100 agents were `idle` at 09:55:30, 64 s after apply.
 
 ### 3. Prompt all 100
 
-`prompt_all.sh` ran `swarm-harness prompt <name> "Your codeword is <name>-<hex6>. Record it in
+`prompt_all.sh` ran `flock prompt <name> "Your codeword is <name>-<hex6>. Record it in
 your file and reply with only the codeword."` for all 100 agents, 25 CLI processes at a time. All
 100 acks were `queued`; the sends took 09:55:42-09:55:46. `measure.py` read every agent's event
 stream back. "First event" is the first event after the send (`session_started`, i.e. the prompt
@@ -198,7 +198,7 @@ after launch.
 
 ### 7. Scale down, then remove
 
-At 10:33:25, `swarm-harness scale e2e counter 10`. The controller deleted counter-0010..0033
+At 10:33:25, `flock scale e2e counter 10`. The controller deleted counter-0010..0033
 (highest slots first) and queued `unassign` commands. Each of those agents logged a final
 `sync {reason: unassign}` at 10:33:25. The bucket kept their state (counter-0033: transcript,
 session log and state, `CLAUDE.md`, `count.txt`), and run 2 showed it is usable. Following the
@@ -207,10 +207,10 @@ remaining agents and no agent moved. Status: `counter idle:8 unknown:2` (the two
 bug 1), `scribe idle:66`, 76 agents. The status cost fell from $0.12 to $0.09 because the
 aggregate covers only existing agents (see "Spend").
 
-At 10:34:00, `swarm-harness remove e2e`. Every agent was unassigned and every worker sent
+At 10:34:00, `flock remove e2e`. Every agent was unassigned and every worker sent
 `DrainCommand`. The workers logged `draining (command)` and exited 2-8 s later (`COMPLETED`).
 The controller logged `remove_worker` for each and `remove_swarm e2e` at 10:34:20. No
-`cancel_job` was needed. Afterwards `list_jobs(labels={experiment: swarm-harness-m1})` shows
+`cancel_job` was needed. Afterwards `list_jobs(labels={experiment: flock-m1})` shows
 0 running jobs. Run 2's remove took 20 s the same way.
 
 ### 8. Hub API calls and spend
@@ -275,18 +275,18 @@ included) and prices them:
 
 - `controller/jobs.py` **bootstrap launch mode**: `node:22-bookworm` plus a bash script that
   mirrors `experiments/common/job_bootstrap.sh`. It is used when
-  `SWARM_HARNESS_WORKER_BOOTSTRAP=1` or no worker image is configured; a type's own `image`
-  still wins. The wheel comes from `SWARM_HARNESS_WHEEL_URL`: `hf buckets cp`, falling back to
+  `FLOCK_WORKER_BOOTSTRAP=1` or no worker image is configured; a type's own `image`
+  still wins. The wheel comes from `FLOCK_WHEEL_URL`: `hf buckets cp`, falling back to
   the Python API, then `uv tool install`, falling back to `pip`. Tests in `tests/test_jobs.py`.
   `Dockerfile.worker` is unchanged and remains the eventual path.
 - `scripts/publish-wheel.sh` (`uv build`, upload to `dist/<git rev>/`) and
   `scripts/deploy-space.sh`.
-- **`models.py`: `TypeSpec.system_prompt: str | None` (additive).** `swarm-harness apply` inlines
+- **`models.py`: `TypeSpec.system_prompt: str | None` (additive).** `flock apply` inlines
   `system_prompt_file`, relative to the spec file. `AssignCommand.spec` carries the text, and
   the worker writes it as `CLAUDE.md`/`AGENTS.md`, preferring it over the file. Tests in
   `test_cli.py` and `test_worker_agents.py`. This is the only `models.py` change. The
   incarnation is a query parameter and a job env var, not a model field.
-- `SWARM_HARNESS_JOB_LABELS` adds deployment-wide job labels; our own `swarm/type/worker` labels
+- `FLOCK_JOB_LABELS` adds deployment-wide job labels; our own `swarm/type/worker` labels
   cannot be overridden. `/healthz` reports Hub call counts.
 - `docs/design.md` §5 gained a note for each contract addition.
 - Experiment tooling: `prompt_all.sh`, `measure.py`, `bucket_check.py`, `spend.py`,
@@ -322,6 +322,6 @@ included) and prices them:
 - Codex in a job (needs `OPENAI_API_KEY`), and a public versus private Space decision for the
   auth header.
 
-The Space `cmpatino/swarm-harness` is left running (`cpu-basic`, free tier) with no swarms. Agent
-state from both runs stays in `hf://buckets/cmpatino/swarm-harness/e2e/` (500 files, 9.3 MB).
+The Space `cmpatino/flock` is left running (`cpu-basic`, free tier) with no swarms. Agent
+state from both runs stays in `hf://buckets/cmpatino/flock/e2e/` (500 files, 9.3 MB).
 

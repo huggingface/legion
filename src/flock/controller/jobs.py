@@ -8,16 +8,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from swarm_harness.models import TypeSpec
+from flock.models import TypeSpec
 
 TERMINAL_STAGES = frozenset({"COMPLETED", "CANCELED", "ERROR", "DELETED"})
-WORKER_COMMAND = ["swarm-harness-worker"]
+WORKER_COMMAND = ["flock-worker"]
 # Default worker image when a type does not override `image`. Set by the deployment.
-# Unset (or SWARM_HARNESS_WORKER_BOOTSTRAP=1): bootstrap mode, see `bootstrap_command`.
-DEFAULT_WORKER_IMAGE = os.environ.get("SWARM_HARNESS_WORKER_IMAGE") or None
+# Unset (or FLOCK_WORKER_BOOTSTRAP=1): bootstrap mode, see `bootstrap_command`.
+DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
 # Bootstrap mode: no prebuilt image. A stock Node image installs the pinned harness CLIs, uv and
-# the swarm-harness wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
+# the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
 # runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
 BOOTSTRAP_IMAGE = "node:22-bookworm"
 CLAUDE_CODE_VERSION = "2.1.296"
@@ -33,31 +33,31 @@ npm i -g --silent @anthropic-ai/claude-code@{claude} @openai/codex@{codex} >/dev
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 uv tool install -q huggingface_hub=={hub} >/dev/null 2>&1
 mkdir -p /opt/wheels
-WHEEL=/opt/wheels/$(basename "$SWARM_HARNESS_WHEEL_URL")
-hf buckets cp "$SWARM_HARNESS_WHEEL_URL" "$WHEEL" >/dev/null 2>&1 || uv run -q --no-project \
+WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
+hf buckets cp "$FLOCK_WHEEL_URL" "$WHEEL" >/dev/null 2>&1 || uv run -q --no-project \
   --with huggingface_hub=={hub} python3 -c 'import sys; from huggingface_hub import HfApi
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
-' "$SWARM_HARNESS_WHEEL_URL" "$WHEEL"
+' "$FLOCK_WHEEL_URL" "$WHEEL"
 uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggingface_hub=={hub} \
   || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" \
        claude-agent-sdk=={sdk} huggingface_hub=={hub}
 export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
-export SWARM_HARNESS_CLAUDE_CLI="$(command -v claude)" SWARM_HARNESS_CODEX_CLI="$(command -v codex)"
+export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
 export PYTHONUNBUFFERED=1
 mkdir -p /work/agents /state/claude /state/codex
 if [ -n "${OPENAI_API_KEY:-}" ]; then printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null; fi
 echo "bootstrap: $(($(date +%s) - t0)) s; claude $(claude --version); codex $(codex --version); $(python3 --version)"
-exec swarm-harness-worker
+exec flock-worker
 """
 
 
 def bootstrap_mode(image: str | None = DEFAULT_WORKER_IMAGE) -> bool:
-    return os.environ.get("SWARM_HARNESS_WORKER_BOOTSTRAP") == "1" or not image
+    return os.environ.get("FLOCK_WORKER_BOOTSTRAP") == "1" or not image
 
 
 def bootstrap_command() -> list[str]:
-    """`bash -c <script>` for BOOTSTRAP_IMAGE; the job env must carry SWARM_HARNESS_WHEEL_URL."""
+    """`bash -c <script>` for BOOTSTRAP_IMAGE; the job env must carry FLOCK_WHEEL_URL."""
     script = _BOOTSTRAP
     for key, value in {
         "claude": CLAUDE_CODE_VERSION,
@@ -122,16 +122,16 @@ class HubJobsClient:
         self.api = HfApi(token=token)
         self.image = image
         self.bootstrap = bootstrap_mode(image)
-        self.wheel_url = wheel_url or os.environ.get("SWARM_HARNESS_WHEEL_URL")
+        self.wheel_url = wheel_url or os.environ.get("FLOCK_WHEEL_URL")
         if self.bootstrap and not self.wheel_url:
-            raise ValueError("bootstrap mode needs SWARM_HARNESS_WHEEL_URL (an hf://buckets/ path)")
+            raise ValueError("bootstrap mode needs FLOCK_WHEEL_URL (an hf://buckets/ path)")
         self.calls: Counter[str] = Counter()  # Hub API calls by method, for the logs
 
     def launch_args(self, spec: TypeSpec, env: dict[str, str]) -> dict[str, Any]:
         """Image, command and env for one worker job (a type's own `image` always wins)."""
         if spec.image or not self.bootstrap:
             return {"image": spec.image or self.image, "command": WORKER_COMMAND, "env": env}
-        env = {**env, "SWARM_HARNESS_WHEEL_URL": self.wheel_url}
+        env = {**env, "FLOCK_WHEEL_URL": self.wheel_url}
         return {"image": BOOTSTRAP_IMAGE, "command": bootstrap_command(), "env": env}
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:

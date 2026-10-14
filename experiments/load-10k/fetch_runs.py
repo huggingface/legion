@@ -11,7 +11,7 @@ from pathlib import Path
 
 from huggingface_hub import BucketFile, HfApi
 
-BUCKET = "cmpatino/swarm-harness"
+BUCKET = "cmpatino/flock"
 PREFIX = "load-10k-runs/"
 
 

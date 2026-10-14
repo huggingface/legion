@@ -16,8 +16,8 @@ from collections import Counter, defaultdict
 
 import httpx
 
-from swarm_harness.controller.prices import cost_usd
-from swarm_harness.models import TokenUsage
+from flock.controller.prices import cost_usd
+from flock.models import TokenUsage
 
 
 def pct(xs, p):
@@ -68,9 +68,9 @@ def main() -> None:
         "tokens_this_run": {m: u.model_dump() for m, u in tokens.items()},
         "cost_this_run_usd": round(cost_usd(tokens), 6),
     }
-    if os.environ.get("SWARM_HARNESS_URL"):
-        c = httpx.Client(base_url=os.environ["SWARM_HARNESS_URL"], timeout=60,
-                         headers={"Authorization": f"Bearer {os.environ['SWARM_HARNESS_TOKEN']}"})
+    if os.environ.get("FLOCK_URL"):
+        c = httpx.Client(base_url=os.environ["FLOCK_URL"], timeout=60,
+                         headers={"Authorization": f"Bearer {os.environ['FLOCK_TOKEN']}"})
         agents, cursor = [], None
         while True:
             page = c.get(f"/swarms/{a.swarm}/agents", params={"limit": 500, **({"cursor": cursor} if cursor else {})}).json()

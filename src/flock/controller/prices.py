@@ -3,7 +3,7 @@
 Claude rows are Anthropic first-party list prices (cached model table, 2026-10-06): input and
 output as listed, cache read as listed (0.1x input unless noted), 5-minute cache write 1.25x
 input. Haiku 5.5 matches Claude Code's own `total_cost_usd` (tests/test_prices.py). The Codex row
-is still a placeholder. Override any row with a JSON file whose path is in SWARM_HARNESS_PRICES:
+is still a placeholder. Override any row with a JSON file whose path is in FLOCK_PRICES:
 
     {"claude-opus-5-5": {"input": 15, "output": 75, "cache_read": 1.5, "cache_write": 18.75}}
 
@@ -18,7 +18,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
-from swarm_harness.models import TokenUsage
+from flock.models import TokenUsage
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ PRICES: dict[str, Price] = {
 @lru_cache(maxsize=1)
 def price_table() -> dict[str, Price]:
     table = dict(PRICES)
-    path = os.environ.get("SWARM_HARNESS_PRICES")
+    path = os.environ.get("FLOCK_PRICES")
     if path:
         with open(path, encoding="utf-8") as f:
             for model, p in json.load(f).items():

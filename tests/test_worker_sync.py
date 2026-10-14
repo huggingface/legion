@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from swarm_harness.worker.sync import BucketSync, parse_bucket
+from flock.worker.sync import BucketSync, parse_bucket
 
 from .worker_fakes import MemoryStore, runtime, until
 
 
 def test_parse_bucket():
-    assert parse_bucket("hf://buckets/cmpatino/swarm-harness") == ("cmpatino/swarm-harness", "")
+    assert parse_bucket("hf://buckets/cmpatino/flock") == ("cmpatino/flock", "")
     assert parse_bucket("hf://buckets/ns/b/runs/x/") == ("ns/b", "runs/x/")
 
 
@@ -57,7 +57,7 @@ async def test_persist_workdir_false_skips_workdir(tmp_path):
 
 
 def test_http_route_names_bucket_calls():
-    from swarm_harness.worker.sync import http_route
+    from flock.worker.sync import http_route
 
     assert http_route("GET", "huggingface.co", "/api/buckets/ns/b/tree/sw/x") == "GET buckets/tree"
     assert http_route("POST", "huggingface.co", "/api/buckets/ns/b/batch") == "POST buckets/batch"

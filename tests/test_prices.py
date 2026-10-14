@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from swarm_harness.controller import prices
-from swarm_harness.controller.store import agent_tokens
-from swarm_harness.models import TokenUsage
+from flock.controller import prices
+from flock.controller.store import agent_tokens
+from flock.models import TokenUsage
 
 
 def test_cost_by_model():
@@ -37,12 +37,12 @@ def test_override_file(tmp_path, monkeypatch):
     path.write_text(
         json.dumps({"tiny": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0}})
     )
-    monkeypatch.setenv("SWARM_HARNESS_PRICES", str(path))
+    monkeypatch.setenv("FLOCK_PRICES", str(path))
     prices.price_table.cache_clear()
     try:
         assert prices.cost_usd({"tiny": TokenUsage(input=1_000_000, output=500_000)}) == 2.0
     finally:
-        monkeypatch.delenv("SWARM_HARNESS_PRICES")
+        monkeypatch.delenv("FLOCK_PRICES")
         prices.price_table.cache_clear()
 
 

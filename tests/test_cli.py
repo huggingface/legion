@@ -6,7 +6,7 @@ import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from swarm_harness import cli
+from flock import cli
 
 from .conftest import TOKEN, make_spec
 

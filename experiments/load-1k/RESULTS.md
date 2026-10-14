@@ -1,6 +1,6 @@
 # 1k load test
 
-Question: does swarm-harness hold up at 1,000 agents on five `cpu-upgrade` workers, and what
+Question: does flock hold up at 1,000 agents on five `cpu-upgrade` workers, and what
 must change before 10k? Run 2026-10-14, 11:30 to 12:39 UTC, branch `load-1k`. There were 1,000
 Claude haiku agents of two types, 200 per worker. All 1,000 were prompted twice from one client.
 One worker was killed by hand, four workers drained at their deadline, then came a scale-down,
@@ -26,10 +26,10 @@ after its process exits. And this workspace's bucket mount slows hf_xet's first 
 
 ## Setup
 
-- **Controller**: the Space `cmpatino/swarm-harness` (public, bearer-protected API, `cpu-basic`,
+- **Controller**: the Space `cmpatino/flock` (public, bearer-protected API, `cpu-basic`,
   no persistent storage), redeployed with `scripts/deploy-space.sh` from wheel `7589c4f`
-  (instrumented). `JOB_LABELS=experiment=swarm-harness-1k`, so jobs carry
-  `experiment=swarm-harness-1k, swarm, type, worker`.
+  (instrumented). `JOB_LABELS=experiment=flock-1k`, so jobs carry
+  `experiment=flock-1k, swarm, type, worker`.
 - **Workers**: bootstrap mode as in e2e (`node:22-bookworm`, Claude Code 2.1.296, wheel from the
   bucket), `cpu-upgrade` (8 vCPU, 32 GB).
 - **Spec**: [`examples/load-1k.yaml`](../../examples/load-1k.yaml). Two `claude` types on
@@ -37,7 +37,7 @@ after its process exits. And this workspace's bucket mount slows hf_xet's first 
   `max_working_per_worker: 120` (from
   [packing on cpu-upgrade](../packing/RESULTS-cpu-upgrade.md)), `idle_grace: 60s`,
   `worker_lifetime: 50m`, `lifetime_jitter: 10m`, `drain_window: 5m`, `max_budget_usd: 0.05`,
-  `max_turns: 3`, bucket prefix `hf://buckets/cmpatino/swarm-harness/load-1k`.
+  `max_turns: 3`, bucket prefix `hf://buckets/cmpatino/flock/load-1k`.
   **Deviation: 600 scribes and 400 counters instead of 660/340.** Placement is per type, so
   660/340 at 200 per worker needs 4 + 2 = 6 workers. 600/400 gives the intended five workers of
   exactly 200.
@@ -52,22 +52,22 @@ after its process exits. And this workspace's bucket mount slows hf_xet's first 
   `sync_bench.py` (local sync benchmark).
 
 ```sh
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/swarm-harness-1k" uv sync --all-extras
-set -a; source /data/home/.swarm-harness-e2e.env; set +a
-W=$(scripts/publish-wheel.sh); JOB_LABELS=experiment=swarm-harness-1k scripts/deploy-space.sh "$W"
-swarm-harness apply examples/load-1k.yaml                                         # check 1
+UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock-1k" uv sync --all-extras
+set -a; source /data/home/.flock-e2e.env; set +a
+W=$(scripts/publish-wheel.sh); JOB_LABELS=experiment=flock-1k scripts/deploy-space.sh "$W"
+flock apply examples/load-1k.yaml                                         # check 1
 python experiments/load-1k/prompt_load.py load-1k --concurrency 50 --out out/sent1.jsonl   # check 2, round 1
 python experiments/load-1k/prompt_load.py load-1k --concurrency 50 --first-poll-delay 12 \
   --poll-gap 3 --out out/sent2.jsonl                                              # check 2, round 2
 python experiments/load-1k/analyze.py out/sent2.jsonl --out check2_round2.json
-python experiments/load-1k/bucket_check.py hf://buckets/cmpatino/swarm-harness/load-1k load-1k --sample 20  # check 3
+python experiments/load-1k/bucket_check.py hf://buckets/cmpatino/flock/load-1k load-1k --sample 20  # check 3
 hf jobs cancel --namespace cmpatino 6acf67da5ccb47ba0f799dd0                       # check 4
-swarm-harness prompt scribe-0250 "What is the most recent codeword you were given? ..."   # while down
+flock prompt scribe-0250 "What is the most recent codeword you were given? ..."   # while down
 python experiments/load-1k/prompt_load.py load-1k --only scribe-0201 ... --expect-from out/sent2.jsonl \
   --text "What is the most recent codeword you were given? Reply with only the codeword."
-swarm-harness scale load-1k counter 40; swarm-harness remove load-1k                # check 7
+flock scale load-1k counter 40; flock remove load-1k                # check 7
 # after the fixes: redeploy, then
-swarm-harness apply experiments/load-1k/drain-rerun.yaml; swarm-harness remove load-1k   # check 5 re-run
+flock apply experiments/load-1k/drain-rerun.yaml; flock remove load-1k   # check 5 re-run
 ```
 
 Raw data (prompter records, job logs, `/healthz` snapshots, worker-state polls every 5 s) is in
@@ -78,7 +78,7 @@ Raw data (prompter records, job logs, `/healthz` snapshots, worker-state polls e
 
 ### 1. Apply
 
-`swarm-harness apply` ran at 11:30:34.15. All five jobs were created in the same second by the
+`flock apply` ran at 11:30:34.15. All five jobs were created in the same second by the
 first reconcile pass:
 
 | worker | job | bootstrap | first heartbeat after apply | restore wave (empty bucket) |
@@ -95,11 +95,11 @@ Heartbeats start at a random phase in 0-30 s, which explains most of the spread.
 ### 2. Prompt all 1,000
 
 `prompt_load.py` keeps 50 agents in flight. For each agent it sends the e2e codeword prompt
-(`POST /agents/<name>/prompt`, the body `swarm-harness prompt` sends), then reads the agent's
+(`POST /agents/<name>/prompt`, the body `flock prompt` sends), then reads the agent's
 event stream until `turn_ended`. So 50 is also the number of concurrent events readers. It uses
 the HTTP API directly rather than 1,000 CLI processes, because this shared box cannot run 50
 Python CLIs at once. A random sample of 50 was then read back with the real CLI
-(`swarm-harness events`).
+(`flock events`).
 
 **Round 1 (11:32-11:39): FAIL on an infrastructure limit.**
 - The first prompter long-polled from the stream's end and re-polled on every event, which
@@ -142,7 +142,7 @@ Python CLIs at once. A random sample of 50 was then read back with the real CLI
   `USD budget: $0/$0.05; $0.05 remaining`, and haiku answered that its budget was "exhausted
   ($0 of $0.05 remaining)" without trying the write. The agent had spent $0.0019. It is a
   model misread, not a harness fault.
-- `swarm-harness events` on a random sample of 50: 49/50 correct. The miss is scribe-0004,
+- `flock events` on a random sample of 50: 49/50 correct. The miss is scribe-0004,
   which the sample happened to include.
 - **Controller request rate** (`/healthz` deltas, round 2): 3,374 requests in 248 s, 13.6
   req/s. Of these, 1,015 were events long-polls, 1,000 prompts, 856 command polls, 373 event
@@ -198,7 +198,7 @@ since.
 | 12:09:56 | last heartbeat of the killed job |
 | 12:09:58.2 | `hf jobs cancel` |
 | 12:11:30 | worker `dead`: heartbeat > 90 s, one `inspect_job` found it `CANCELED`; crash, backoff 30 s |
-| 12:11:35.8 | `swarm-harness prompt scribe-0250 "What is the most recent codeword ...?"`: ack `pending` |
+| 12:11:35.8 | `flock prompt scribe-0250 "What is the most recent codeword ...?"`: ack `pending` |
 | 12:11:57.8 | relaunch `6acf718dc66288145223f47a` (same worker id, `crashes: 1`) |
 | 12:12:29 | first heartbeat, **2:31 after the cancel** |
 | 12:12:36.3 | held prompt answered `scribe-0250-50332b` (its round-2 codeword) from `session_resumed`, **60.5 s after sending** |
@@ -272,7 +272,7 @@ The controller counted its Hub jobs calls over the main run (11:30-12:28; apply 
 
 ### 7. Scale down, then remove
 
-**Scale.** At 12:24:52 `swarm-harness scale load-1k counter 40` removed counter-0040..0399.
+**Scale.** At 12:24:52 `flock scale load-1k counter 40` removed counter-0040..0399.
 - That is 160 agents from counter-w0000 and all 200 of counter-w0001. All **360/360 emitted
   `sync {reason: unassign}` within 0.2 s**.
 - counter-w0000 kept 40 agents, and no agent moved.
@@ -282,14 +282,14 @@ The controller counted its Hub jobs calls over the main run (11:30-12:28; apply 
 - The status cost fell from $2.68 to $1.67, because removed agents leave the aggregate (known
   since e2e). The $2.68 itself was inflated by bug 2.
 
-**Remove.** At 12:26:16 `swarm-harness remove load-1k`.
+**Remove.** At 12:26:16 `flock remove load-1k`.
 - Every worker logged `draining (command)` and `drained; exiting` within 11-40 s.
 - scribe-w0001 and scribe-w0002 ended `COMPLETED` at 12:26:56.
 - counter-w0000 and scribe-w0000 (bug 1), and the retired counter-w0001, stayed `RUNNING`.
   The controller cancelled them after the 120 s retire grace.
 - The swarm was gone at 12:28:19, 2:03 after `remove`.
 - The re-run's remove (fixed wheel) took 51 s and ended `COMPLETED`.
-- `list_jobs(labels={experiment: swarm-harness-1k})` at the end: 13 jobs, **0 running**.
+- `list_jobs(labels={experiment: flock-1k})` at the end: 13 jobs, **0 running**.
 
 ### 8. Spend
 

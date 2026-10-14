@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from swarm_harness.worker.agents import AgentRuntime
+    from flock.worker.agents import AgentRuntime
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def count_hub_http(stats: BucketStats) -> None:
 
 
 class BucketStore(Protocol):
-    """Blocking bucket operations on paths relative to the swarm-harness root."""
+    """Blocking bucket operations on paths relative to the flock root."""
 
     def upload(self, files: list[tuple[Path, str]]) -> None: ...
     def list(self, prefix: str) -> list[str]: ...

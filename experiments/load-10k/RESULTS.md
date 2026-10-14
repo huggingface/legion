@@ -1,6 +1,6 @@
 # 10k load test
 
-Question: does swarm-harness hold up at 10,000 agents on fifty `cpu-upgrade` workers, and what
+Question: does flock hold up at 10,000 agents on fifty `cpu-upgrade` workers, and what
 must change next? Run 2026-10-14, 13:04 to 13:30 UTC, branch `load-10k`, controller and workers
 on the unchanged main wheel `0cb4258`. There were 10,000 Claude haiku agents of two types, 200 per
 worker. All 10,000 were prompted once from five cpu-basic prompter jobs. The run ended early: the
@@ -30,17 +30,17 @@ controller reads a throttled worker as a dead one. Three findings follow from th
 
 ## Setup
 
-- **Controller**: the Space `cmpatino/swarm-harness` (public, bearer-protected API, `cpu-basic`,
+- **Controller**: the Space `cmpatino/flock` (public, bearer-protected API, `cpu-basic`,
   no persistent storage), running main `0cb4258` from the published wheel
-  `hf://buckets/cmpatino/swarm-harness/dist/0cb4258/swarm_harness-0.0.1-py3-none-any.whl`.
-  Redeployed with `JOB_LABELS=experiment=swarm-harness-10k` before `apply` (no source change, so
+  `hf://buckets/cmpatino/flock/dist/0cb4258/flock-0.0.1-py3-none-any.whl`.
+  Redeployed with `JOB_LABELS=experiment=flock-10k` before `apply` (no source change, so
   no new commit; the variable change restarted the Space).
 - **Workers**: bootstrap mode as in load-1k (`node:22-bookworm`, Claude Code 2.1.296, the wheel
   from the bucket), `cpu-upgrade` (8 vCPU, 32 GB).
 - **Spec**: [`examples/load-10k.yaml`](../../examples/load-10k.yaml): `scribe` 6,000 and
   `counter` 4,000 on `claude-haiku-5-5`, `agents_per_worker: 200`, `max_working_per_worker: 120`,
   `idle_grace: 60s`, `worker_lifetime: 60m`, `lifetime_jitter: 15m`, `drain_window: 5m`,
-  `max_budget_usd: 0.05`, `max_turns: 3`, bucket prefix `hf://buckets/cmpatino/swarm-harness/load-10k`.
+  `max_budget_usd: 0.05`, `max_turns: 3`, bucket prefix `hf://buckets/cmpatino/flock/load-10k`.
   30 + 20 = 50 workers.
 - **Prompting from jobs, not from this machine.** The 1k run found the edge limits one client IP
   at about 20 req/s, so the 10k prompt came from five `cpu-basic` jobs, each a slice of 2,000
@@ -48,7 +48,7 @@ controller reads a throttled worker as a dead one. Three findings follow from th
   requests in flight. Phase A sends the codeword prompt (one POST per agent); phase B, 20 s after
   the last send, reads each agent's whole event stream once (one GET per agent) and retries
   unfinished agents every 15 s until 600 s after their send. Records are uploaded to
-  `hf://buckets/cmpatino/swarm-harness/load-10k-runs/round1/`.
+  `hf://buckets/cmpatino/flock/load-10k-runs/round1/`.
 - Tooling in this directory: `prompt_job.py` (the prompter, a uv script run with
   `hf jobs uv run`), `run_prompters.sh` (launches N slices), `fetch_runs.py` (downloads and
   concatenates the slices), `jobs_dump.py` (job metadata and logs by label). The 1k scripts
@@ -56,21 +56,21 @@ controller reads a throttled worker as a dead one. Three findings follow from th
   they are.
 
 ```sh
-git worktree add -b load-10k ../swarm-harness-wt-load-10k main
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/swarm-harness-10k" uv sync --all-extras
-set -a; source /data/home/.swarm-harness-e2e.env; set +a
-JOB_LABELS=experiment=swarm-harness-10k scripts/deploy-space.sh hf://buckets/cmpatino/swarm-harness/dist/0cb4258/swarm_harness-0.0.1-py3-none-any.whl
+git worktree add -b load-10k ../flock-wt-load-10k main
+UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock-10k" uv sync --all-extras
+set -a; source /data/home/.flock-e2e.env; set +a
+JOB_LABELS=experiment=flock-10k scripts/deploy-space.sh hf://buckets/cmpatino/flock/dist/0cb4258/flock-0.0.1-py3-none-any.whl
 python experiments/load-1k/monitor.py load-10k out/monitor.jsonl --every 15 &
 bash experiments/load-1k/watch_workers.sh load-10k out/workers.tsv 5 &
-swarm-harness apply examples/load-10k.yaml                                        # check 1, 13:04:52.9
+flock apply examples/load-10k.yaml                                        # check 1, 13:04:52.9
 python experiments/load-10k/prompt_job.py load-10k --slice 0/5 --limit 3 --out out/smoke.jsonl   # 3-agent smoke test
 bash experiments/load-10k/run_prompters.sh load-10k round1 5 10                   # check 2, 13:06:46
 hf jobs run --flavor cpu-basic ... alpine:3.20 sh -c 'wget -qO- https://api.ipify.org'  # x3, egress-IP probes
-swarm-harness remove load-10k                                                     # 13:25:25, budget stop
+flock remove load-10k                                                     # 13:25:25, budget stop
 python experiments/load-10k/jobs_dump.py out                                      # 122 jobs, 122 logs
 python experiments/load-10k/fetch_runs.py round1 out/sent1.jsonl
 python experiments/load-1k/analyze.py out/sent1.jsonl --swarm load-10k --out check2_round1.json
-python experiments/load-1k/bucket_check.py hf://buckets/cmpatino/swarm-harness/load-10k load-10k --sample 30  # check 3
+python experiments/load-1k/bucket_check.py hf://buckets/cmpatino/flock/load-10k load-10k --sample 30  # check 3
 ```
 
 Raw data (prompter records, all 122 job logs, `/healthz` snapshots, the status page HTML,
@@ -98,7 +98,7 @@ and `launches.txt`.
 
 ### 1. Apply
 
-`swarm-harness apply` returned in 0.29 s at 13:04:52.9. The first reconcile pass launched all 50
+`flock apply` returned in 0.29 s at 13:04:52.9. The first reconcile pass launched all 50
 workers: `/healthz` showed `run_job: 20` at 13:04:55, 43 at 13:04:57 and 50 at 13:04:59; the
 jobs API reports creation times from 13:04:53.8 to 13:04:57.9 and start times 13:04:57 to
 13:05:07. Nothing was refused: no `cancelReason`, no credit or concurrency message, 50 `RUNNING`.
@@ -237,7 +237,7 @@ behaviour and it kept the jobs API traffic at tens of calls per minute during th
 ### 7. Scale down, then remove
 
 `scale` was skipped: the relaunch waves were spending launches every pass and the remove could
-not wait. `swarm-harness remove load-10k` at 13:25:25:
+not wait. `flock remove load-10k` at 13:25:25:
 
 - the 10,000 agents were deleted and unassigned from their workers; 39 workers were `draining`
   within 7 s, and the 11 whose relaunched jobs were still bootstrapping got the drain on their
@@ -256,7 +256,7 @@ not wait. `swarm-harness remove load-10k` at 13:25:25:
   resumed turns after the relaunch, no re-run of interrupted turns); the 3-agent smoke test
   about $0.003. The token-derived cost of the 5,525 observed turns is $6.27, $0.00113 per turn.
   **Total about $11.3** (prompting was to stop at $45).
-- **Jobs**: 122 launches of the 130 allowed, every one labelled `experiment=swarm-harness-10k`,
+- **Jobs**: 122 launches of the 130 allowed, every one labelled `experiment=flock-10k`,
   every timeout at most 75 m (workers 60 to 75 m, prompters 40 m, probes 5 m): 50 initial
   workers, 64 crash relaunches, 5 prompters, 3 egress-IP probes. Running time: generation 1
   7.92 h, generation 2 8.58 h, generation 3 0.62 h, all `cpu-upgrade`, 17.1 h about **$0.51**; the

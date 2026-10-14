@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from swarm_harness.models import Event, SwarmSpec, TokenUsage
+from flock.models import Event, SwarmSpec, TokenUsage
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS swarms (

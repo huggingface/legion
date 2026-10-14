@@ -3,14 +3,14 @@
 # cpu-upgrade worker whose lifetime is cut to 8 m (+0-1 m) so it drains about 3 min after launch.
 swarm: load-1k
 namespace: cmpatino
-bucket: hf://buckets/cmpatino/swarm-harness/load-1k
+bucket: hf://buckets/cmpatino/flock/load-1k
 types:
   counter:
     harness: claude
     model: claude-haiku-5-5
     system_prompt_file: ../../examples/prompts/counter.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-1k}
+    labels: {experiment: flock-1k}
     replicas: 200
     flavor: cpu-upgrade
     agents_per_worker: 200

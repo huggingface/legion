@@ -1,4 +1,4 @@
-"""swarm-harness-worker: one HF Job hosting up to `agents_per_worker` agents.
+"""flock-worker: one HF Job hosting up to `agents_per_worker` agents.
 
 Tasks: command long-poll, heartbeat (random initial phase), events flusher, periodic sync,
 deadline watcher. Drain (`drain_window` before DEADLINE, or a drain command): stop starting
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import httpx
 
-from swarm_harness.models import (
+from flock.models import (
     HEARTBEAT_INTERVAL,
     AssignCommand,
     Command,
@@ -38,13 +38,13 @@ from swarm_harness.models import (
     WorkerHeartbeat,
     parse_duration,
 )
-from swarm_harness.worker.adapters.base import HarnessAdapter
-from swarm_harness.worker.agents import AgentRuntime
-from swarm_harness.worker.events import Outbox, parse_iso, utcnow
-from swarm_harness.worker.identity import Identities
-from swarm_harness.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
+from flock.worker.adapters.base import HarnessAdapter
+from flock.worker.agents import AgentRuntime
+from flock.worker.events import Outbox, parse_iso, utcnow
+from flock.worker.identity import Identities
+from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
 
-log = logging.getLogger("swarm_harness.worker")
+log = logging.getLogger("flock.worker")
 
 DEFAULT_DRAIN_WINDOW = timedelta(minutes=10)
 
@@ -70,8 +70,8 @@ class WorkerConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
         return cls(
-            url=env["SWARM_HARNESS_URL"].rstrip("/"),
-            token=env["SWARM_HARNESS_TOKEN"],
+            url=env["FLOCK_URL"].rstrip("/"),
+            token=env["FLOCK_TOKEN"],
             worker_id=env["WORKER_ID"],
             swarm=env["SWARM"],
             type=env["TYPE"],
@@ -116,10 +116,10 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
         workdir = cfg.work_root / name
         if spec.harness.value == "claude":
-            from swarm_harness.worker.adapters.claude import ClaudeAdapter
+            from flock.worker.adapters.claude import ClaudeAdapter
 
             return ClaudeAdapter(workdir)
-        from swarm_harness.worker.adapters.codex import CodexAdapter
+        from flock.worker.adapters.codex import CodexAdapter
 
         return CodexAdapter(workdir)
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # watch_workers.sh <swarm> <out.tsv> [every s]: one line per worker per poll (time, id, state, job,
-# agents, crashes, last_heartbeat). Needs SWARM_HARNESS_URL/TOKEN.
+# agents, crashes, last_heartbeat). Needs FLOCK_URL/TOKEN.
 SWARM=${1:?}; OUT=${2:?}; EVERY=${3:-5}
 while true; do
-  curl -s -H "Authorization: Bearer $SWARM_HARNESS_TOKEN" "$SWARM_HARNESS_URL/workers?swarm=$SWARM" |
+  curl -s -H "Authorization: Bearer $FLOCK_TOKEN" "$FLOCK_URL/workers?swarm=$SWARM" |
     python3 -c 'import json,sys,time
 t=time.strftime("%H:%M:%S", time.gmtime())
 try: ws=json.load(sys.stdin)

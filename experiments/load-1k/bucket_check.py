@@ -1,6 +1,6 @@
 """Per-agent bucket completeness from the bucket alone (no controller calls):
 
-    python bucket_check.py hf://buckets/cmpatino/swarm-harness/load-1k load-1k [--sample 20]
+    python bucket_check.py hf://buckets/cmpatino/flock/load-1k load-1k [--sample 20]
 
 An agent prefix <swarm>/<type>/<agent>/ is complete if it holds workdir/ files, its session log
 sessions/<agent>.jsonl and a harness transcript harness/projects/<enc-cwd>/<id>.jsonl. For a

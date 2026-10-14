@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
-from swarm_harness.models import AgentHeartbeat, Event, TokenUsage, WorkerHeartbeat
+from flock.models import AgentHeartbeat, Event, TokenUsage, WorkerHeartbeat
 
 from .conftest import make_spec
 

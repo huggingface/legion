@@ -18,7 +18,7 @@ Two phases, so reads are one request per agent rather than per-agent long-pollin
      every `--retry-gap` s until `--deadline` s after their send.
 One JSON line per agent (ack, server timestamps of the first event / turn_started / turn_ended,
 reply, tokens, worker, HTTP errors) is uploaded to `--out`; a summary is printed to the job log.
-Needs SWARM_HARNESS_URL, SWARM_HARNESS_TOKEN and HF_TOKEN in the environment.
+Needs FLOCK_URL, FLOCK_TOKEN and HF_TOKEN in the environment.
 """
 
 from __future__ import annotations
@@ -130,9 +130,9 @@ async def run(a: argparse.Namespace) -> dict:
     pacer, errors, lat = Pacer(a.rate), Counter(), {"GET": [], "POST": []}
     limits = httpx.Limits(max_connections=a.concurrency + 5, max_keepalive_connections=a.concurrency + 5)
     t_start = time.time()
-    async with httpx.AsyncClient(base_url=os.environ["SWARM_HARNESS_URL"], limits=limits,
+    async with httpx.AsyncClient(base_url=os.environ["FLOCK_URL"], limits=limits,
                                  timeout=httpx.Timeout(30, read=60),
-                                 headers={"Authorization": f"Bearer {os.environ['SWARM_HARNESS_TOKEN']}"}) as c:
+                                 headers={"Authorization": f"Bearer {os.environ['FLOCK_TOKEN']}"}) as c:
         agents, cursor = [], None
         while True:
             r = await call(c, pacer, errors, lat, "GET", f"/swarms/{a.swarm}/agents", until=time.time() + 300,

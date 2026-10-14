@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from swarm_harness.models import Event
+from flock.models import Event
 
 log = logging.getLogger(__name__)
 

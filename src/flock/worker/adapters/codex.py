@@ -23,8 +23,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from swarm_harness.models import TokenUsage, TypeSpec
-from swarm_harness.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.models import TokenUsage, TypeSpec
+from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 
 log = logging.getLogger(__name__)
 
@@ -152,7 +152,7 @@ class CodexAdapter:
                  extra_globs: tuple[str, ...] = ()) -> None:
         self.workdir = Path(workdir)
         self.home = home or codex_home()
-        self.codex_bin = codex_bin or os.environ.get("SWARM_HARNESS_CODEX_CLI") or "codex"
+        self.codex_bin = codex_bin or os.environ.get("FLOCK_CODEX_CLI") or "codex"
         self.extra_globs = extra_globs  # e.g. ('*.sqlite*',) if a future version needs more
         self.thread_id: str | None = None
         self.rollout: Path | None = None
@@ -163,7 +163,7 @@ class CodexAdapter:
         self._next_id = 0
         self._tasks: list[asyncio.Task] = []
         self._stderr: list[str] = []
-        self.effort: str | None = os.environ.get("SWARM_HARNESS_CODEX_EFFORT") or None
+        self.effort: str | None = os.environ.get("FLOCK_CODEX_EFFORT") or None
 
     # ------------------------------------------------------------------ json-rpc
     async def _write(self, msg: dict[str, Any]) -> None:
@@ -245,7 +245,7 @@ class CodexAdapter:
         )
         self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._drain_stderr())]
         try:
-            await self.request("initialize", {"clientInfo": {"name": "swarm-harness", "version": "0.0.1"}})
+            await self.request("initialize", {"clientInfo": {"name": "flock", "version": "0.0.1"}})
             await self._write({"method": "initialized", "params": {}})
             params = {"cwd": str(self.workdir), "model": spec.model, "approvalPolicy": "never",
                       "sandbox": "danger-full-access"}

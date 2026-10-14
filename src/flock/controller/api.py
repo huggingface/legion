@@ -21,9 +21,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
 
-from swarm_harness.controller.reconcile import agent_state, record_heartbeat, worker_state
-from swarm_harness.controller.store import Row, Store, agent_tokens
-from swarm_harness.models import (
+from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
+from flock.controller.store import Row, Store, agent_tokens
+from flock.models import (
     AgentState,
     AgentStatus,
     Command,
@@ -402,15 +402,15 @@ def _status_page(store: Store, now: float) -> str:
         )
     body = "".join(parts) or (
         '<div class="empty">No swarms yet.<br>Apply one with '
-        "<code>swarm-harness apply spec.yaml</code></div>"
+        "<code>flock apply spec.yaml</code></div>"
     )
     stamp = e(_dt(now).strftime("%Y-%m-%d %H:%M:%S UTC"))
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<meta name='color-scheme' content='light dark'><title>swarm-harness</title>"
+        "<meta name='color-scheme' content='light dark'><title>flock</title>"
         f"<meta http-equiv='refresh' content='30'><style>{_PAGE_CSS}</style></head>"
-        '<body><div class="wrap"><header><h1>swarm-harness</h1>'
+        '<body><div class="wrap"><header><h1>flock</h1>'
         f'<span class="meta">{stamp} · refreshes every 30 s</span></header>{body}'
         "<footer>Agent links return JSON and need the API bearer token.</footer>"
         "</div></body></html>"
@@ -438,7 +438,7 @@ def create_app(
         if task:
             task.cancel()
 
-    app = FastAPI(title="swarm-harness controller", lifespan=lifespan)
+    app = FastAPI(title="flock controller", lifespan=lifespan)
     app.state.store, app.state.notifier = store, notifier
     request_stats: dict[str, RequestStats] = {}
 

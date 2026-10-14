@@ -3,13 +3,13 @@
 #   claude_resume.sh A   start a session, write the codeword, push workdir + session file to DEST
 #   claude_resume.sh B   restore workdir + session file from DEST, resume with no tools, check codeword
 # Env: SESSION_ID (required), WORKDIR (default /work/agents/probe-0001), CLAUDE_CONFIG_DIR (required),
-#      DEST (default hf://buckets/cmpatino/swarm-harness/resume-gate/claude), OUT (default ./out),
+#      DEST (default hf://buckets/cmpatino/flock/resume-gate/claude), OUT (default ./out),
 #      MODEL (default claude-haiku-5-5). Needs ANTHROPIC_API_KEY (or a logged-in CLI) and hf auth.
 set -euo pipefail
 PHASE=${1:?phase A or B}
 : "${SESSION_ID:?}" "${CLAUDE_CONFIG_DIR:?}"
 WORKDIR=${WORKDIR:-/work/agents/probe-0001}
-DEST=${DEST:-hf://buckets/cmpatino/swarm-harness/resume-gate/claude}
+DEST=${DEST:-hf://buckets/cmpatino/flock/resume-gate/claude}
 OUT=${OUT:-$PWD/out}
 MODEL=${MODEL:-claude-haiku-5-5}
 ENC=$(printf '%s' "$WORKDIR" | sed 's/[^a-zA-Z0-9]/-/g')

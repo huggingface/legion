@@ -6,8 +6,8 @@ import subprocess
 
 import pytest
 
-from swarm_harness.controller import jobs as jobs_mod
-from swarm_harness.controller.jobs import (
+from flock.controller import jobs as jobs_mod
+from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
     CLAUDE_CODE_VERSION,
     CODEX_VERSION,
@@ -15,10 +15,10 @@ from swarm_harness.controller.jobs import (
     HubJobsClient,
     bootstrap_command,
 )
-from swarm_harness.controller.main import parse_labels
-from swarm_harness.models import TypeSpec
+from flock.controller.main import parse_labels
+from flock.models import TypeSpec
 
-WHEEL = "hf://buckets/ns/sh/dist/abc/swarm_harness-0.0.1-py3-none-any.whl"
+WHEEL = "hf://buckets/ns/sh/dist/abc/flock-0.0.1-py3-none-any.whl"
 
 
 def _spec(**kw) -> TypeSpec:
@@ -32,12 +32,12 @@ def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
     assert f"@anthropic-ai/claude-code@{CLAUDE_CODE_VERSION}" in script
     assert f"@openai/codex@{CODEX_VERSION}" in script
     assert "astral.sh/uv/install.sh" in script
-    assert 'hf buckets cp "$SWARM_HARNESS_WHEEL_URL"' in script
+    assert 'hf buckets cp "$FLOCK_WHEEL_URL"' in script
     assert "download_bucket_files" in script  # Python API fallback
     assert 'uv tool install -q "$WHEEL[worker]"' in script and "pip install" in script
     for env in ("IS_SANDBOX=1", "CLAUDE_CONFIG_DIR=/state/claude", "CODEX_HOME=/state/codex"):
         assert env in script
-    assert script.rstrip().endswith("exec swarm-harness-worker")
+    assert script.rstrip().endswith("exec flock-worker")
     assert "{" + "claude}" not in script and "{" + "hub}" not in script  # all pins filled in
     f = tmp_path / "bootstrap.sh"
     f.write_text(script)
@@ -46,9 +46,9 @@ def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
 
 def _client(monkeypatch, image, bootstrap_env=None, wheel=WHEEL) -> HubJobsClient:
     if bootstrap_env is None:
-        monkeypatch.delenv("SWARM_HARNESS_WORKER_BOOTSTRAP", raising=False)
+        monkeypatch.delenv("FLOCK_WORKER_BOOTSTRAP", raising=False)
     else:
-        monkeypatch.setenv("SWARM_HARNESS_WORKER_BOOTSTRAP", bootstrap_env)
+        monkeypatch.setenv("FLOCK_WORKER_BOOTSTRAP", bootstrap_env)
     return HubJobsClient(token="x", image=image, wheel_url=wheel)
 
 
@@ -57,7 +57,7 @@ def test_launch_args_bootstrap_when_no_image(monkeypatch):
     args = c.launch_args(_spec(), {"WORKER_ID": "w"})
     assert args["image"] == BOOTSTRAP_IMAGE == "node:22-bookworm"
     assert args["command"] == bootstrap_command()
-    assert args["env"] == {"WORKER_ID": "w", "SWARM_HARNESS_WHEEL_URL": WHEEL}
+    assert args["env"] == {"WORKER_ID": "w", "FLOCK_WHEEL_URL": WHEEL}
 
 
 def test_launch_args_bootstrap_flag_overrides_default_image(monkeypatch):
@@ -75,8 +75,8 @@ def test_launch_args_prebuilt_image(monkeypatch):
 
 
 def test_bootstrap_without_wheel_url_fails_fast(monkeypatch):
-    monkeypatch.delenv("SWARM_HARNESS_WHEEL_URL", raising=False)
-    with pytest.raises(ValueError, match="SWARM_HARNESS_WHEEL_URL"):
+    monkeypatch.delenv("FLOCK_WHEEL_URL", raising=False)
+    with pytest.raises(ValueError, match="FLOCK_WHEEL_URL"):
         _client(monkeypatch, image=None, wheel=None)
 
 
@@ -98,8 +98,8 @@ def test_launch_counts_hub_calls(monkeypatch):
 
 
 def test_parse_job_labels():
-    assert parse_labels("experiment=swarm-harness-m1, team = eval") == {
-        "experiment": "swarm-harness-m1",
+    assert parse_labels("experiment=flock-m1, team = eval") == {
+        "experiment": "flock-m1",
         "team": "eval",
     }
     assert parse_labels("") == {}

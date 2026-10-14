@@ -34,8 +34,8 @@ def main() -> None:
     ap.add_argument("--out")
     ap.add_argument("--expect", choices=["codeword", "none"], default="codeword")
     args = ap.parse_args()
-    c = httpx.Client(base_url=os.environ["SWARM_HARNESS_URL"], timeout=60,
-                     headers={"Authorization": f"Bearer {os.environ['SWARM_HARNESS_TOKEN']}"})
+    c = httpx.Client(base_url=os.environ["FLOCK_URL"], timeout=60,
+                     headers={"Authorization": f"Bearer {os.environ['FLOCK_TOKEN']}"})
     with open(args.sent) as f:
         rows = [json.loads(line) for line in f if line.strip()]
     per, acks = [], {}

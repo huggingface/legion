@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from swarm_harness.models import TypeSpec
+from flock.models import TypeSpec
 
 log = logging.getLogger(__name__)
 

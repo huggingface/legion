@@ -21,13 +21,13 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from swarm_harness.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
-from swarm_harness.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError, usage_sub
-from swarm_harness.worker.events import Outbox, SessionLog, utcnow
+from flock.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
+from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError, usage_sub
+from flock.worker.events import Outbox, SessionLog, utcnow
 
 if TYPE_CHECKING:
-    from swarm_harness.worker.identity import Identities
-    from swarm_harness.worker.sync import BucketSync
+    from flock.worker.identity import Identities
+    from flock.worker.sync import BucketSync
 
 log = logging.getLogger(__name__)
 
@@ -196,7 +196,7 @@ class AgentRuntime:
             return
         src = Path(self.spec.system_prompt_file)
         candidates = [src] if src.is_absolute() else [
-            Path(os.environ.get("SWARM_HARNESS_PROMPTS_DIR", ".")) / src, Path.cwd() / src]
+            Path(os.environ.get("FLOCK_PROMPTS_DIR", ".")) / src, Path.cwd() / src]
         for c in candidates:
             if c.is_file():
                 target.write_text(c.read_text())

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from swarm_harness.models import TokenUsage, TypeSpec
+from flock.models import TokenUsage, TypeSpec
 
 EventKind = Literal["turn_started", "message", "usage", "turn_ended", "error", "exited"]
 

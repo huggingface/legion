@@ -10,10 +10,10 @@ its context intact? Run 2026-10-14. Claude Code 2.1.296, Codex CLI 0.162.1.
 | Phase A (start, write, sync up) | `6acf45f4c66288145223cf9e` | 2 s + 17 s | 9.3 s (npm claude 5.5 s, uv+hf 1.7 s) |
 | Phase B (fresh container, restore, resume) | `6acf464a5ccb47ba0f7980e9` | 2 s + 12 s | 7.0 s |
 
-Both: `cpu-basic`, `node:22-bookworm`, label `experiment=swarm-harness-m1`, workdir
+Both: `cpu-basic`, `node:22-bookworm`, label `experiment=flock-m1`, workdir
 `/work/agents/probe-0001`, `CLAUDE_CONFIG_DIR=/state/claude`, session
 `61f47177-2753-4940-8bbd-e079e993d7c0`, bucket prefix
-`hf://buckets/cmpatino/swarm-harness/resume-gate/claude/`.
+`hf://buckets/cmpatino/flock/resume-gate/claude/`.
 
 How it was run:
 
@@ -90,8 +90,8 @@ holding only copies of `auth.json` and `config.toml`. Workdirs:
 resuming, the workdir was copied A->B and machine A's directory was moved out of reach.
 
 ```sh
-ROOT=$AM_LOCAL/tmp/swarm-harness-codexrg OUT=$PWD/out/codex ./codex_resume.sh A
-ROOT=$AM_LOCAL/tmp/swarm-harness-codexrg OUT=$PWD/out/codex ./codex_resume.sh B rollout
+ROOT=$AM_LOCAL/tmp/flock-codexrg OUT=$PWD/out/codex ./codex_resume.sh A
+ROOT=$AM_LOCAL/tmp/flock-codexrg OUT=$PWD/out/codex ./codex_resume.sh B rollout
 # each turn: codex exec --json -m gpt-6-luna -c model_reasoning_effort="low" --skip-git-repo-check \
 #   --sandbox danger-full-access -c approval_policy="never" [resume <thread_id>] "<prompt>" < /dev/null
 ```

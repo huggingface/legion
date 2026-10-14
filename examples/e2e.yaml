@@ -3,14 +3,14 @@
 # Claude types with different system prompts.
 swarm: e2e
 namespace: cmpatino
-bucket: hf://buckets/cmpatino/swarm-harness/e2e
+bucket: hf://buckets/cmpatino/flock/e2e
 types:
   scribe:
     harness: claude
     model: claude-haiku-5-5
     system_prompt_file: prompts/scribe.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-m1}
+    labels: {experiment: flock-m1}
     replicas: 66
     agents_per_worker: 34
     max_working_per_worker: 20
@@ -26,7 +26,7 @@ types:
     model: claude-haiku-5-5
     system_prompt_file: prompts/counter.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-m1}
+    labels: {experiment: flock-m1}
     replicas: 34
     agents_per_worker: 34
     max_working_per_worker: 20

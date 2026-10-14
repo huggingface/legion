@@ -7,11 +7,11 @@ import shutil
 import time
 from pathlib import Path
 
-from swarm_harness.models import TokenUsage, TypeSpec
-from swarm_harness.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
-from swarm_harness.worker.agents import AgentRuntime
-from swarm_harness.worker.events import Outbox
-from swarm_harness.worker.sync import BucketSync
+from flock.models import TokenUsage, TypeSpec
+from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.worker.agents import AgentRuntime
+from flock.worker.events import Outbox
+from flock.worker.sync import BucketSync
 
 
 def spec(**kw) -> TypeSpec:

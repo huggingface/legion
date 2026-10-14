@@ -6,11 +6,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from swarm_harness.controller.api import create_app
-from swarm_harness.controller.jobs import FakeJobsClient
-from swarm_harness.controller.reconcile import Settings, reconcile
-from swarm_harness.controller.store import Store
-from swarm_harness.models import SwarmSpec
+from flock.controller.api import create_app
+from flock.controller.jobs import FakeJobsClient
+from flock.controller.reconcile import Settings, reconcile
+from flock.controller.store import Store
+from flock.models import SwarmSpec
 
 TOKEN = "test-token"
 T0 = datetime(2026, 10, 14, 9, 0, tzinfo=UTC)

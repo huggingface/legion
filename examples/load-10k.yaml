@@ -4,14 +4,14 @@
 # worker_lifetime 60m + 0-15m jitter so the fifty deadline drains spread over a quarter hour.
 swarm: load-10k
 namespace: cmpatino
-bucket: hf://buckets/cmpatino/swarm-harness/load-10k
+bucket: hf://buckets/cmpatino/flock/load-10k
 types:
   scribe:
     harness: claude
     model: claude-haiku-5-5
     system_prompt_file: prompts/scribe.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-10k}
+    labels: {experiment: flock-10k}
     replicas: 6000
     flavor: cpu-upgrade
     agents_per_worker: 200
@@ -28,7 +28,7 @@ types:
     model: claude-haiku-5-5
     system_prompt_file: prompts/counter.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
-    labels: {experiment: swarm-harness-10k}
+    labels: {experiment: flock-10k}
     replicas: 4000
     flavor: cpu-upgrade
     agents_per_worker: 200

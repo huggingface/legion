@@ -8,15 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from swarm_harness.models import TokenUsage, TypeSpec
-from swarm_harness.worker.adapters.base import ResumeError
-from swarm_harness.worker.adapters.claude import (
+from flock.models import TokenUsage, TypeSpec
+from flock.worker.adapters.base import ResumeError
+from flock.worker.adapters.claude import (
     ClaudeAdapter,
     ClaudeMapper,
     encode_cwd,
     project_dir,
 )
-from swarm_harness.worker.adapters.codex import CodexAdapter, CodexMapper, find_rollout
+from flock.worker.adapters.codex import CodexAdapter, CodexMapper, find_rollout
 
 from .worker_fakes import runtime
 

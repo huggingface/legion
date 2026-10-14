@@ -1,8 +1,8 @@
-"""Dump every job labelled experiment=swarm-harness-10k: one JSON line per job (id, name, labels,
+"""Dump every job labelled experiment=flock-10k: one JSON line per job (id, name, labels,
 stage, message, created/started/ended, flavor) to <out>/jobs.jsonl, and the log of each job to
 <out>/logs/<id>.log (terminal jobs once; running jobs re-fetched each time).
 
-    python jobs_dump.py out [--no-logs] [--label experiment=swarm-harness-10k]
+    python jobs_dump.py out [--no-logs] [--label experiment=flock-10k]
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--no-logs", action="store_true")
-    ap.add_argument("--label", default="experiment=swarm-harness-10k")
+    ap.add_argument("--label", default="experiment=flock-10k")
     a = ap.parse_args()
     out = Path(a.out)
     (out / "logs").mkdir(parents=True, exist_ok=True)
