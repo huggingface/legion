@@ -1,0 +1,19 @@
+{
+ "agent_prefixes": 1000,
+ "complete": 1000,
+ "with_workdir": 1000,
+ "with_session_log": 1000,
+ "with_transcript": 1000,
+ "files": 5000,
+ "bytes": 102835189,
+ "list_s": 0.3,
+ "sample_transcript_matches_state": "20/20",
+ "example": [
+  "harness/projects/-work-agents-counter-0000/93834f11-c813-4a0d-a2bd-18b49c1690c6.jsonl",
+  "sessions/counter-0000.jsonl",
+  "sessions/counter-0000.state.json",
+  "workdir/CLAUDE.md",
+  "workdir/count.txt"
+ ],
+ "incomplete": []
+}
