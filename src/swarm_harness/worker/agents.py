@@ -1,0 +1,415 @@
+"""AgentRuntime: one per assigned agent; process-per-burst (design.md section 4).
+
+Phases of the harness process: none -> starting -> running -> (stopping) -> none.
+- A prompt with no process starts a burst; prompts arriving while it starts are buffered and
+  forwarded in order once it is up; later prompts go straight to the running process.
+- The burst ends when the harness has been idle for `idle_grace`, when a turn exceeds its
+  timeout (process killed, agent `stuck` until the next turn), on stop/unassign, or on drain
+  once the in-flight turn ends.
+The worker never schedules or queues beyond the startup buffer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, Field
+
+from swarm_harness.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
+from swarm_harness.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError, usage_sub
+from swarm_harness.worker.events import Outbox, SessionLog, utcnow
+
+if TYPE_CHECKING:
+    from swarm_harness.worker.identity import Identities
+    from swarm_harness.worker.sync import BucketSync
+
+log = logging.getLogger(__name__)
+
+INSTRUCTIONS_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
+
+
+class AgentState(BaseModel):
+    """What must survive a worker change; synced next to the session log."""
+
+    session_id: str | None = None
+    turn_seq: int = 0  # last turn number handed out (turn ids are t-<n>)
+    turns: int = 0  # turns ended (completed, failed or interrupted)
+    tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # cumulative, by model
+    harness_cum: dict[str, TokenUsage] = Field(default_factory=dict)  # last cumulative snapshot
+    harness_estimate_usd: float | None = None
+
+
+def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path, why: str) -> str:
+    where = f"{transcript} (harness transcript) and {session_log}" if transcript else str(session_log)
+    return (
+        f"Your previous session ({old_session}) could not be resumed: {why}. "
+        f"Its transcript is at {where}. Read it to recover your context, then continue your work."
+    )
+
+
+class AgentRuntime:
+    def __init__(
+        self,
+        name: str,
+        type_name: str,
+        spec: TypeSpec,
+        *,
+        swarm: str,
+        work_root: Path,
+        adapter: HarnessAdapter,
+        outbox: Outbox,
+        sync: BucketSync | None = None,
+        identities: Identities | None = None,
+        working_count: Callable[[], int] | None = None,
+    ) -> None:
+        self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
+        self.work_root = Path(work_root)
+        self.workdir = self.work_root / name
+        self.sessions_dir = self.work_root / "_sessions"
+        self.adapter = adapter
+        self.outbox = outbox
+        self.sync = sync
+        self.identities = identities
+        self._working_count = working_count
+        self.log = SessionLog(self.sessions_dir / f"{name}.jsonl", swarm=swarm, agent=name,
+                              harness=spec.harness.value, cwd=str(self.workdir))
+        self.state = AgentState()
+        self.phase = "none"
+        self.buffer: list[str] = []
+        self.turn_id: str | None = None
+        self.awaiting = False  # a prompt was forwarded and its turn has not started yet
+        self.stuck = False
+        self.resumed: bool | None = None
+        self.idle_since: datetime = utcnow()
+        self.last_sync: datetime | None = None
+        self.dirty = False
+        self.allow_starts = True
+        self._stop_req: str | None = None
+        self._burst: asyncio.Task | None = None
+        self._ready = asyncio.Event()
+        self._turn_started_at = 0.0
+        self._last_activity = 0.0
+        self._turn_timeout = parse_duration(spec.turn_timeout).total_seconds()
+        self._next_timeout: float | None = None
+        self._turn_tokens: dict[str, TokenUsage] = {}
+        self._instructions_written = False
+
+    # ------------------------------------------------------------------ paths and state
+    @property
+    def state_path(self) -> Path:
+        return self.sessions_dir / f"{self.name}.state.json"
+
+    @property
+    def idle_grace(self) -> float:
+        return parse_duration(self.spec.idle_grace).total_seconds()
+
+    def load_state(self) -> None:
+        if self.state_path.is_file():
+            try:
+                self.state = AgentState.model_validate_json(self.state_path.read_text())
+            except ValueError as e:
+                log.warning("%s: unreadable state file: %s", self.name, e)
+        self.log.reload()
+
+    def save_state(self) -> None:
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_path.with_suffix(".tmp")
+        tmp.write_text(self.state.model_dump_json())
+        os.replace(tmp, self.state_path)
+
+    def harness_files(self) -> list[Path]:
+        return self.adapter.session_files(self.state.session_id)
+
+    def _now(self) -> float:
+        return asyncio.get_running_loop().time()
+
+    # ------------------------------------------------------------------ events
+    def _emit(self, ev: Event) -> None:
+        self.dirty = True
+        self.outbox.add(ev)
+
+    def emit(self, kind: str, data: dict[str, Any] | None = None) -> None:
+        self._emit(self.log.custom(kind, data, turn_id=self.turn_id))
+
+    # ------------------------------------------------------------------ lifecycle
+    async def setup(self, restore: bool = True, resume_prompt: str | None = None) -> None:
+        """Run once on assign: restore from the bucket, load state, then allow starts."""
+        try:
+            if restore and self.sync is not None:
+                try:
+                    await self.sync.restore(self)
+                except Exception as e:  # noqa: BLE001 - a failed restore means a fresh start
+                    log.warning("%s: restore failed: %s", self.name, e)
+                    self.emit("error", {"error": f"restore failed: {e}"})
+            self.load_state()
+        finally:
+            self._ready.set()
+        if resume_prompt:
+            await self.prompt(resume_prompt)
+
+    async def prompt(self, text: str, *, prompt_id: str | None = None, timeout: str | None = None) -> None:
+        if timeout:
+            self._next_timeout = parse_duration(timeout).total_seconds()
+        if self.phase == "running" and not self._stop_req:
+            await self._forward(text)
+            return
+        if self.phase == "none" and (not self.allow_starts or self._stop_req):
+            self.emit("prompt_deferred", {"prompt_id": prompt_id, "text": text,
+                                          "reason": "draining" if not self.allow_starts else self._stop_req})
+            return
+        self.buffer.append(text)
+        if self.phase == "none":
+            self.phase = "starting"
+            self._burst = asyncio.create_task(self._run_burst(), name=f"burst-{self.name}")
+
+    async def _forward(self, text: str) -> None:
+        self._last_activity = self._now()
+        if self.turn_id is None:
+            self.awaiting = True
+        try:
+            await self.adapter.send(text)
+        except Exception as e:  # noqa: BLE001 - process died under us: keep the prompt for the next burst
+            log.warning("%s: send failed (%s); buffering for the next start", self.name, e)
+            self.buffer.append(text)
+
+    def _defer_buffer(self, reason: str) -> None:
+        for text in self.buffer:
+            self.emit("prompt_deferred", {"text": text, "reason": reason})
+        self.buffer.clear()
+
+    def _prepare_workdir(self) -> None:
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        if self._instructions_written or not self.spec.system_prompt_file:
+            return
+        src = Path(self.spec.system_prompt_file)
+        candidates = [src] if src.is_absolute() else [
+            Path(os.environ.get("SWARM_HARNESS_PROMPTS_DIR", ".")) / src, Path.cwd() / src]
+        for c in candidates:
+            if c.is_file():
+                (self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]).write_text(c.read_text())
+                self._instructions_written = True
+                return
+        log.warning("%s: system_prompt_file %s not found", self.name, src)
+
+    async def _run_burst(self) -> None:
+        pump: asyncio.Task | None = None
+        try:
+            await self._ready.wait()
+            if not self.allow_starts or self._stop_req:
+                self._defer_buffer("draining" if not self.allow_starts else str(self._stop_req))
+                return
+            if self._working_count and self._working_count() > self.spec.max_working_per_worker:
+                log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
+                            self.name, self._working_count(), self.spec.max_working_per_worker)
+            self._prepare_workdir()
+            env = dict(self.spec.env)
+            if self.identities is not None:
+                env.update(await self.identities.env_for(self.name, self.spec))
+            old = self.state.session_id
+            first: list[str] = []
+            data: dict[str, Any] = {"harness": self.spec.harness.value, "model": self.spec.model}
+            try:
+                sid = await self.adapter.start(self.workdir, old, self.spec, env=env)
+                kind, self.resumed = ("session_resumed", True) if old else ("session_started", False)
+            except ResumeError as e:
+                transcript = next((p for p in self.adapter.session_files(old) if old and old in p.name), None)
+                sid = await self.adapter.start(self.workdir, None, self.spec, env=env)
+                kind, self.resumed = "session_restarted", False
+                self.state.harness_cum = {}
+                first.append(restart_prompt(old, transcript, self.log.path, str(e)))
+                data.update(previous_session_id=old, reason=str(e))
+            self.state.session_id = sid
+            self.save_state()
+            self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed})
+            self.phase = "running"
+            self._last_activity = self._now()
+            pump = asyncio.create_task(self._pump())
+            pending, self.buffer = first + self.buffer, []
+            for text in pending:
+                if self._stop_req and self._stop_req != "drain":
+                    self.buffer.append(text)
+                    continue
+                await self._forward(text)
+            if self._stop_req and self._stop_req != "drain":
+                self._defer_buffer(self._stop_req)
+            await self._watch(pump)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("%s: burst failed", self.name)
+            self.emit("error", {"error": f"{type(e).__name__}: {e}", "dropped_prompts": len(self.buffer)})
+            self.buffer.clear()
+        finally:
+            self.phase = "stopping"
+            await self.adapter.stop()
+            if pump is not None:
+                try:
+                    await asyncio.wait_for(pump, 10)
+                except (TimeoutError, asyncio.CancelledError):
+                    pump.cancel()
+            if self.turn_id is not None:
+                self._interrupt("process exited")
+            self.awaiting = False
+            self.phase = "none"
+            self._burst = None
+            self.dirty = True
+            self.save_state()
+            if self.buffer and self.allow_starts and not self._stop_req:
+                self.phase = "starting"
+                self._burst = asyncio.create_task(self._run_burst(), name=f"burst-{self.name}")
+
+    async def _watch(self, pump: asyncio.Task) -> None:
+        tick = max(0.01, min(1.0, self.idle_grace / 10, self._turn_timeout / 10))
+        while True:
+            await asyncio.wait({pump}, timeout=tick)
+            if pump.done():
+                return
+            now = self._now()
+            busy = self.turn_id is not None or self.awaiting
+            if self._stop_req and (self._stop_req != "drain" or not busy):
+                if busy:
+                    self._interrupt(self._stop_req)
+                return
+            timeout = self._turn_timeout
+            started = self._turn_started_at if self.turn_id else self._last_activity
+            if busy and now - started > timeout:
+                log.warning("%s: turn exceeded %.0fs; killing the harness", self.name, timeout)
+                self._interrupt("timeout")
+                self.stuck = True
+                return
+            if not busy and now - self._last_activity >= self.idle_grace:
+                return
+
+    async def _pump(self) -> None:
+        try:
+            async for ev in self.adapter.events():
+                self.on_adapter_event(ev)
+        except Exception:
+            log.exception("%s: adapter event stream failed", self.name)
+
+    # ------------------------------------------------------------------ turns and usage
+    def on_adapter_event(self, ev: AdapterEvent) -> None:
+        k = ev.kind
+        if k == "turn_started":
+            if self.turn_id is None:
+                self._begin_turn(ev.data)
+        elif k == "message" and ev.message is not None:
+            self._emit(self.log.message(ev.message, turn_id=self.turn_id))
+        elif k == "usage" and ev.usage is not None:
+            self._account(ev)
+        elif k == "turn_ended":
+            if self.turn_id is not None:
+                tokens = {m: u.model_dump() for m, u in self._turn_tokens.items()}
+                self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
+                                         **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
+                self._end_turn()
+        elif k == "error":
+            self.emit("error", {"error": ev.error, **ev.data})
+        self.dirty = True
+
+    def _begin_turn(self, data: dict[str, Any]) -> None:
+        self.state.turn_seq += 1
+        self.turn_id = f"t-{self.state.turn_seq}"
+        self.stuck = False
+        self.awaiting = False
+        self._turn_started_at = self._now()
+        self._turn_timeout = self._next_timeout or parse_duration(self.spec.turn_timeout).total_seconds()
+        self._next_timeout = None
+        self._turn_tokens = {}
+        self.emit("turn_started", dict(data))
+
+    def _end_turn(self) -> None:
+        self.state.turns += 1
+        self.turn_id = None
+        self.awaiting = False
+        self.idle_since = utcnow()
+        self._last_activity = self._now()
+        self.save_state()
+
+    def _interrupt(self, reason: str) -> None:
+        if self.turn_id is not None:
+            self.emit("turn_interrupted", {"reason": reason})
+            self._end_turn()
+        self.awaiting = False
+
+    def _account(self, ev: AdapterEvent) -> None:
+        model = ev.model or self.spec.model
+        usage = ev.usage
+        assert usage is not None
+        if ev.cost_usd is not None:
+            self.state.harness_estimate_usd = ev.cost_usd
+        if ev.cumulative:
+            prev = self.state.harness_cum.get(model)
+            self.state.harness_cum[model] = usage
+            if ev.baseline:
+                return
+            usage = usage_sub(usage, prev)
+        self.state.tokens[model] = self.state.tokens.get(model, TokenUsage()) + usage
+        self._turn_tokens[model] = self._turn_tokens.get(model, TokenUsage()) + usage
+
+    # ------------------------------------------------------------------ control
+    @property
+    def live(self) -> bool:
+        return self.phase != "none"
+
+    async def stop(self, reason: str = "stop") -> None:
+        """Kill the harness process if any (interrupting a turn); the agent stays assigned."""
+        self._stop_req = reason
+        try:
+            if self._burst is not None:
+                await self._burst
+        finally:
+            self._stop_req = None
+        self._defer_buffer(reason)
+
+    async def drain(self) -> None:
+        """No new starts; let the in-flight turn finish (bounded by its timeout); final sync."""
+        self.allow_starts = False
+        if self._burst is not None:
+            self._stop_req = "drain"
+            try:
+                await self._burst
+            finally:
+                self._stop_req = None
+        self._defer_buffer("draining")
+        await self.sync_now("drain")
+
+    async def unassign(self) -> None:
+        self.allow_starts = False
+        await self.stop("unassign")
+        await self.sync_now("unassign")
+
+    async def sync_now(self, reason: str) -> None:
+        if self.sync is None:
+            return
+        self.emit("sync", {"reason": reason})
+        self.save_state()
+        try:
+            await self.sync.push(self)
+            self.last_sync = utcnow()
+            self.dirty = False
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: sync failed: %s", self.name, e)
+
+    def heartbeat(self) -> AgentHeartbeat:
+        working = self.turn_id is not None or self.awaiting or (self.phase == "starting" and bool(self.buffer))
+        state = "working" if working else ("stuck" if self.stuck else "idle")
+        return AgentHeartbeat(
+            name=self.name,
+            state=state,
+            turn_id=self.turn_id,
+            idle_since=None if working else self.idle_since,
+            session_id=self.state.session_id,
+            resumed=self.resumed,
+            tokens=dict(self.state.tokens),
+            harness_estimate_usd=self.state.harness_estimate_usd,
+            turns=self.state.turns,
+            last_sync=self.last_sync,
+            msgboard_principal=self.identities.principal(self.name) if self.identities else None,
+        )
