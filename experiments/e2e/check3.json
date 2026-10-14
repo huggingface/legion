@@ -1,0 +1,1841 @@
+{
+ "summary": {
+  "agents": 100,
+  "acks": {
+   "queued": 100
+  },
+  "turn_ended": 100,
+  "reply_ok": 100,
+  "session_events": {
+   "session_started": 100
+  },
+  "turns_with_tool_calls": 100,
+  "first_event_s": {
+   "p50": 17.75756525993347,
+   "p95": 27.323474645614624,
+   "min": 9.926088809967041
+  },
+  "turn_s": {
+   "p50": 15.210999965667725,
+   "p95": 23.694000005722046,
+   "max": 26.717999935150146
+  },
+  "prompt_to_end_s": {
+   "p50": 32.544684171676636,
+   "p95": 43.13199782371521,
+   "max": 52.30913233757019
+  },
+  "tokens_this_turn": {
+   "input": 119047,
+   "output": 37951,
+   "cache_read": 2984918,
+   "cache_write": 414372
+  },
+  "controller_cost_usd_total": 0.112523,
+  "claude_estimate_usd_total": 0.112526,
+  "mean_turn_s": 15.619790000915527,
+  "failures": []
+ },
+ "agents": [
+  {
+   "agent": "counter-0005",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 20.330107927322388,
+   "turn_s": 21.586999893188477,
+   "e2e_s": 41.918107748031616,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 243,
+     "cache_read": 39994,
+     "cache_write": 4193,
+     "reasoning": 43
+    }
+   }
+  },
+  {
+   "agent": "counter-0000",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 17.701797008514404,
+   "turn_s": 26.282000064849854,
+   "e2e_s": 43.98379707336426,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 449,
+     "cache_read": 40201,
+     "cache_write": 4444,
+     "reasoning": 167
+    }
+   }
+  },
+  {
+   "agent": "counter-0013",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 28.683997869491577,
+   "turn_s": 14.447999954223633,
+   "e2e_s": 43.13199782371521,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 340,
+     "cache_read": 40107,
+     "cache_write": 4368,
+     "reasoning": 88
+    }
+   }
+  },
+  {
+   "agent": "counter-0012",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 22.99328064918518,
+   "turn_s": 20.728000164031982,
+   "e2e_s": 43.73128080368042,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1205,
+     "output": 398,
+     "cache_read": 40149,
+     "cache_write": 4403,
+     "reasoning": 104
+    }
+   }
+  },
+  {
+   "agent": "counter-0003",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 22.50265121459961,
+   "turn_s": 20.71499991416931,
+   "e2e_s": 43.21865105628967,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 676,
+     "cache_read": 40079,
+     "cache_write": 4407,
+     "reasoning": 385
+    }
+   }
+  },
+  {
+   "agent": "counter-0007",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 16.595847606658936,
+   "turn_s": 23.247000217437744,
+   "e2e_s": 39.84384775161743,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 544,
+     "cache_read": 40063,
+     "cache_write": 4299,
+     "reasoning": 249
+    }
+   }
+  },
+  {
+   "agent": "counter-0009",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 15.901504278182983,
+   "turn_s": 25.348000049591064,
+   "e2e_s": 41.25150418281555,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 341,
+     "cache_read": 40065,
+     "cache_write": 4268,
+     "reasoning": 83
+    }
+   }
+  },
+  {
+   "agent": "counter-0022",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 27.956122636795044,
+   "turn_s": 13.930000066757202,
+   "e2e_s": 41.887122631073,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 489,
+     "cache_read": 40068,
+     "cache_write": 4271,
+     "reasoning": 297
+    }
+   }
+  },
+  {
+   "agent": "counter-0023",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 23.646446466445923,
+   "turn_s": 18.776999950408936,
+   "e2e_s": 42.42544651031494,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 433,
+     "cache_read": 25266,
+     "cache_write": 4268,
+     "reasoning": 135
+    }
+   }
+  },
+  {
+   "agent": "counter-0002",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 29.806132316589355,
+   "turn_s": 22.501999855041504,
+   "e2e_s": 52.30913233757019,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 472,
+     "cache_read": 40049,
+     "cache_write": 4248,
+     "reasoning": 274
+    }
+   }
+  },
+  {
+   "agent": "counter-0004",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 22.097909688949585,
+   "turn_s": 17.907999992370605,
+   "e2e_s": 40.00990962982178,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1205,
+     "output": 276,
+     "cache_read": 40028,
+     "cache_write": 4227,
+     "reasoning": 75
+    }
+   }
+  },
+  {
+   "agent": "counter-0019",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 17.223047494888306,
+   "turn_s": 17.766000032424927,
+   "e2e_s": 34.990047454833984,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 544,
+     "cache_read": 40144,
+     "cache_write": 4425,
+     "reasoning": 297
+    }
+   }
+  },
+  {
+   "agent": "counter-0014",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 15.617495775222778,
+   "turn_s": 20.18400001525879,
+   "e2e_s": 35.80349588394165,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 541,
+     "cache_read": 40027,
+     "cache_write": 4276,
+     "reasoning": 251
+    }
+   }
+  },
+  {
+   "agent": "counter-0010",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 17.525197744369507,
+   "turn_s": 14.67900013923645,
+   "e2e_s": 32.20519781112671,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 657,
+     "cache_read": 40112,
+     "cache_write": 4412,
+     "reasoning": 396
+    }
+   }
+  },
+  {
+   "agent": "counter-0011",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 26.990514039993286,
+   "turn_s": 15.210999965667725,
+   "e2e_s": 42.209513902664185,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 399,
+     "cache_read": 40025,
+     "cache_write": 4221,
+     "reasoning": 204
+    }
+   }
+  },
+  {
+   "agent": "counter-0018",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 21.66852068901062,
+   "turn_s": 15.302000045776367,
+   "e2e_s": 36.97152066230774,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1205,
+     "output": 277,
+     "cache_read": 40038,
+     "cache_write": 4234,
+     "reasoning": 85
+    }
+   }
+  },
+  {
+   "agent": "counter-0015",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 15.880550622940063,
+   "turn_s": 25.687000036239624,
+   "e2e_s": 41.56855058670044,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 551,
+     "cache_read": 40225,
+     "cache_write": 4432,
+     "reasoning": 295
+    }
+   }
+  },
+  {
+   "agent": "counter-0001",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 26.29733633995056,
+   "turn_s": 14.521999835968018,
+   "e2e_s": 40.82733631134033,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 345,
+     "cache_read": 40058,
+     "cache_write": 4293,
+     "reasoning": 149
+    }
+   }
+  },
+  {
+   "agent": "counter-0017",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 19.60243844985962,
+   "turn_s": 18.32800006866455,
+   "e2e_s": 37.93143844604492,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 491,
+     "cache_read": 25271,
+     "cache_write": 4327,
+     "reasoning": 202
+    }
+   }
+  },
+  {
+   "agent": "counter-0020",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 21.77829623222351,
+   "turn_s": 18.63700008392334,
+   "e2e_s": 40.41529631614685,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 327,
+     "cache_read": 40084,
+     "cache_write": 4280,
+     "reasoning": 129
+    }
+   }
+  },
+  {
+   "agent": "counter-0016",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 15.625350952148438,
+   "turn_s": 26.717999935150146,
+   "e2e_s": 42.451350927352905,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 441,
+     "cache_read": 40154,
+     "cache_write": 4440,
+     "reasoning": 154
+    }
+   }
+  },
+  {
+   "agent": "counter-0006",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 23.94227433204651,
+   "turn_s": 18.125,
+   "e2e_s": 42.07827425003052,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1205,
+     "output": 337,
+     "cache_read": 40063,
+     "cache_write": 4259,
+     "reasoning": 74
+    }
+   }
+  },
+  {
+   "agent": "counter-0008",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 27.323474645614624,
+   "turn_s": 15.700000047683716,
+   "e2e_s": 43.026474714279175,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 374,
+     "cache_read": 40066,
+     "cache_write": 4267,
+     "reasoning": 81
+    }
+   }
+  },
+  {
+   "agent": "counter-0024",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 19.107773065567017,
+   "turn_s": 17.561000108718872,
+   "e2e_s": 36.66877317428589,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 634,
+     "cache_read": 40090,
+     "cache_write": 4346,
+     "reasoning": 345
+    }
+   }
+  },
+  {
+   "agent": "counter-0021",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 17.570401906967163,
+   "turn_s": 18.694999933242798,
+   "e2e_s": 36.26640176773071,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 259,
+     "cache_read": 40039,
+     "cache_write": 4229,
+     "reasoning": 71
+    }
+   }
+  },
+  {
+   "agent": "counter-0026",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 29.198699235916138,
+   "turn_s": 12.136000156402588,
+   "e2e_s": 41.33569931983948,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 411,
+     "cache_read": 40020,
+     "cache_write": 4216,
+     "reasoning": 212
+    }
+   }
+  },
+  {
+   "agent": "counter-0027",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 22.500353574752808,
+   "turn_s": 18.899999856948853,
+   "e2e_s": 41.40035343170166,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 314,
+     "cache_read": 40074,
+     "cache_write": 4270,
+     "reasoning": 118
+    }
+   }
+  },
+  {
+   "agent": "counter-0025",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 19.08042860031128,
+   "turn_s": 24.141000032424927,
+   "e2e_s": 43.22242856025696,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 267,
+     "cache_read": 40030,
+     "cache_write": 4224,
+     "reasoning": 69
+    }
+   }
+  },
+  {
+   "agent": "scribe-0002",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 21.7489755153656,
+   "turn_s": 11.206000089645386,
+   "e2e_s": 33.031975507736206,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 530,
+     "cache_read": 25255,
+     "cache_write": 4145,
+     "reasoning": 354
+    }
+   }
+  },
+  {
+   "agent": "counter-0029",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 22.473453760147095,
+   "turn_s": 12.187000036239624,
+   "e2e_s": 34.66145372390747,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 247,
+     "cache_read": 40011,
+     "cache_write": 4210,
+     "reasoning": 57
+    }
+   }
+  },
+  {
+   "agent": "counter-0030",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 19.45345664024353,
+   "turn_s": 19.22100019454956,
+   "e2e_s": 38.682456731796265,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 416,
+     "cache_read": 39995,
+     "cache_write": 4194,
+     "reasoning": 226
+    }
+   }
+  },
+  {
+   "agent": "scribe-0001",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.229795217514038,
+   "turn_s": 17.009999990463257,
+   "e2e_s": 31.239795207977295,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 548,
+     "cache_read": 25255,
+     "cache_write": 4138,
+     "reasoning": 377
+    }
+   }
+  },
+  {
+   "agent": "counter-0031",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 20.51058554649353,
+   "turn_s": 20.22499990463257,
+   "e2e_s": 40.78858542442322,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 570,
+     "cache_read": 40064,
+     "cache_write": 4372,
+     "reasoning": 377
+    }
+   }
+  },
+  {
+   "agent": "scribe-0003",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.237239360809326,
+   "turn_s": 13.605000019073486,
+   "e2e_s": 31.843239307403564,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 412,
+     "cache_read": 25255,
+     "cache_write": 4074,
+     "reasoning": 250
+    }
+   }
+  },
+  {
+   "agent": "scribe-0004",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.465654373168945,
+   "turn_s": 13.6010000705719,
+   "e2e_s": 28.066654443740845,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 305,
+     "cache_read": 25255,
+     "cache_write": 4001,
+     "reasoning": 136
+    }
+   }
+  },
+  {
+   "agent": "counter-0033",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 18.589069366455078,
+   "turn_s": 21.680000066757202,
+   "e2e_s": 40.26906943321228,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 471,
+     "cache_read": 40091,
+     "cache_write": 4391,
+     "reasoning": 209
+    }
+   }
+  },
+  {
+   "agent": "counter-0032",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 22.81951379776001,
+   "turn_s": 18.289000034332275,
+   "e2e_s": 41.10951375961304,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 461,
+     "cache_read": 25275,
+     "cache_write": 4299,
+     "reasoning": 188
+    }
+   }
+  },
+  {
+   "agent": "scribe-0006",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.34751057624817,
+   "turn_s": 11.970999956130981,
+   "e2e_s": 29.319510459899902,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 414,
+     "cache_read": 25254,
+     "cache_write": 4048,
+     "reasoning": 249
+    }
+   }
+  },
+  {
+   "agent": "counter-0028",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 2,
+   "first_event_s": 23.550791025161743,
+   "turn_s": 17.776999950408936,
+   "e2e_s": 41.32979106903076,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 501,
+     "cache_read": 40012,
+     "cache_write": 4211,
+     "reasoning": 306
+    }
+   }
+  },
+  {
+   "agent": "scribe-0011",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.125787496566772,
+   "turn_s": 16.920000076293945,
+   "e2e_s": 33.04578757286072,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 300,
+     "cache_read": 25256,
+     "cache_write": 4126,
+     "reasoning": 108
+    }
+   }
+  },
+  {
+   "agent": "scribe-0005",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.62279438972473,
+   "turn_s": 23.694000005722046,
+   "e2e_s": 42.31779456138611,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 353,
+     "cache_read": 25257,
+     "cache_write": 4003,
+     "reasoning": 182
+    }
+   }
+  },
+  {
+   "agent": "scribe-0010",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 13.441334009170532,
+   "turn_s": 13.293999910354614,
+   "e2e_s": 26.7433340549469,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 222,
+     "cache_read": 25265,
+     "cache_write": 4058,
+     "reasoning": 52
+    }
+   }
+  },
+  {
+   "agent": "scribe-0000",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.823105812072754,
+   "turn_s": 15.123999834060669,
+   "e2e_s": 31.947105646133423,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 301,
+     "cache_read": 25268,
+     "cache_write": 4146,
+     "reasoning": 140
+    }
+   }
+  },
+  {
+   "agent": "scribe-0008",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 12.941881656646729,
+   "turn_s": 19.203999996185303,
+   "e2e_s": 32.14588165283203,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 551,
+     "cache_read": 25254,
+     "cache_write": 4134,
+     "reasoning": 386
+    }
+   }
+  },
+  {
+   "agent": "scribe-0013",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.24986505508423,
+   "turn_s": 15.243000030517578,
+   "e2e_s": 32.49486517906189,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 350,
+     "cache_read": 25255,
+     "cache_write": 4176,
+     "reasoning": 163
+    }
+   }
+  },
+  {
+   "agent": "scribe-0015",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.24650526046753,
+   "turn_s": 15.875,
+   "e2e_s": 33.12350535392761,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 402,
+     "cache_read": 25257,
+     "cache_write": 4000,
+     "reasoning": 231
+    }
+   }
+  },
+  {
+   "agent": "scribe-0014",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.54091215133667,
+   "turn_s": 11.689000129699707,
+   "e2e_s": 26.23091220855713,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 344,
+     "cache_read": 25254,
+     "cache_write": 3987,
+     "reasoning": 181
+    }
+   }
+  },
+  {
+   "agent": "scribe-0009",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.13502812385559,
+   "turn_s": 11.027999877929688,
+   "e2e_s": 29.16502809524536,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 541,
+     "cache_read": 25257,
+     "cache_write": 4116,
+     "reasoning": 368
+    }
+   }
+  },
+  {
+   "agent": "scribe-0012",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.122594356536865,
+   "turn_s": 13.604000091552734,
+   "e2e_s": 31.728594303131104,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 384,
+     "cache_read": 25254,
+     "cache_write": 4027,
+     "reasoning": 221
+    }
+   }
+  },
+  {
+   "agent": "scribe-0007",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 11.16066575050354,
+   "turn_s": 14.98200011253357,
+   "e2e_s": 26.14266586303711,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 555,
+     "cache_read": 25255,
+     "cache_write": 4147,
+     "reasoning": 383
+    }
+   }
+  },
+  {
+   "agent": "scribe-0019",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.749377489089966,
+   "turn_s": 12.601999998092651,
+   "e2e_s": 31.362377405166626,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 469,
+     "cache_read": 25255,
+     "cache_write": 4145,
+     "reasoning": 300
+    }
+   }
+  },
+  {
+   "agent": "scribe-0017",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 20.103602409362793,
+   "turn_s": 12.295000076293945,
+   "e2e_s": 32.51460242271423,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 436,
+     "cache_read": 25254,
+     "cache_write": 4081,
+     "reasoning": 270
+    }
+   }
+  },
+  {
+   "agent": "scribe-0016",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.984588861465454,
+   "turn_s": 15.763000011444092,
+   "e2e_s": 31.748589038848877,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 383,
+     "cache_read": 25255,
+     "cache_write": 4054,
+     "reasoning": 213
+    }
+   }
+  },
+  {
+   "agent": "scribe-0023",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 11.220106601715088,
+   "turn_s": 20.38700008392334,
+   "e2e_s": 31.60810661315918,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 411,
+     "cache_read": 25254,
+     "cache_write": 4052,
+     "reasoning": 246
+    }
+   }
+  },
+  {
+   "agent": "scribe-0020",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.931550979614258,
+   "turn_s": 15.092000007629395,
+   "e2e_s": 30.023550987243652,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 357,
+     "cache_read": 25254,
+     "cache_write": 3987,
+     "reasoning": 194
+    }
+   }
+  },
+  {
+   "agent": "scribe-0018",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.09154486656189,
+   "turn_s": 12.699000120162964,
+   "e2e_s": 28.791544914245605,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 304,
+     "cache_read": 25255,
+     "cache_write": 4124,
+     "reasoning": 147
+    }
+   }
+  },
+  {
+   "agent": "scribe-0026",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.657088279724121,
+   "turn_s": 12.574000120162964,
+   "e2e_s": 27.232088327407837,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 334,
+     "cache_read": 25254,
+     "cache_write": 3994,
+     "reasoning": 167
+    }
+   }
+  },
+  {
+   "agent": "scribe-0024",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 9.926088809967041,
+   "turn_s": 17.736999988555908,
+   "e2e_s": 27.66408896446228,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 238,
+     "cache_read": 25254,
+     "cache_write": 4066,
+     "reasoning": 73
+    }
+   }
+  },
+  {
+   "agent": "scribe-0022",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.214101791381836,
+   "turn_s": 12.516999959945679,
+   "e2e_s": 29.732101917266846,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 168,
+     "cache_read": 25255,
+     "cache_write": 3997,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0021",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.143502712249756,
+   "turn_s": 17.085999965667725,
+   "e2e_s": 31.22950267791748,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 161,
+     "cache_read": 25260,
+     "cache_write": 3985,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0031",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 11.648595094680786,
+   "turn_s": 12.582000017166138,
+   "e2e_s": 24.231595039367676,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 565,
+     "cache_read": 25256,
+     "cache_write": 4208,
+     "reasoning": 375
+    }
+   }
+  },
+  {
+   "agent": "scribe-0028",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 19.359999656677246,
+   "turn_s": 11.80299997329712,
+   "e2e_s": 31.163999557495117,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 393,
+     "cache_read": 25256,
+     "cache_write": 3992,
+     "reasoning": 225
+    }
+   }
+  },
+  {
+   "agent": "scribe-0027",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.170900344848633,
+   "turn_s": 18.329999923706055,
+   "e2e_s": 34.50290036201477,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1200,
+     "output": 472,
+     "cache_read": 25266,
+     "cache_write": 4141,
+     "reasoning": 307
+    }
+   }
+  },
+  {
+   "agent": "scribe-0025",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.940446853637695,
+   "turn_s": 10.998999834060669,
+   "e2e_s": 28.124446868896484,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 164,
+     "cache_read": 25254,
+     "cache_write": 3990,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0033",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 13.173243522644043,
+   "turn_s": 17.681999921798706,
+   "e2e_s": 30.857243537902832,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 345,
+     "cache_read": 25256,
+     "cache_write": 3993,
+     "reasoning": 177
+    }
+   }
+  },
+  {
+   "agent": "scribe-0029",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 13.83907413482666,
+   "turn_s": 16.81599998474121,
+   "e2e_s": 30.656074285507202,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 407,
+     "cache_read": 25255,
+     "cache_write": 4065,
+     "reasoning": 240
+    }
+   }
+  },
+  {
+   "agent": "scribe-0037",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.72759509086609,
+   "turn_s": 13.001999855041504,
+   "e2e_s": 31.730594873428345,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 397,
+     "cache_read": 25257,
+     "cache_write": 4003,
+     "reasoning": 226
+    }
+   }
+  },
+  {
+   "agent": "scribe-0030",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.4340717792511,
+   "turn_s": 15.391999959945679,
+   "e2e_s": 32.82607173919678,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 496,
+     "cache_read": 25255,
+     "cache_write": 4134,
+     "reasoning": 324
+    }
+   }
+  },
+  {
+   "agent": "scribe-0034",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.713134765625,
+   "turn_s": 15.8989999294281,
+   "e2e_s": 32.61713480949402,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 165,
+     "cache_read": 25254,
+     "cache_write": 3994,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0035",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.535661458969116,
+   "turn_s": 14.424000024795532,
+   "e2e_s": 32.96066164970398,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 174,
+     "cache_read": 25257,
+     "cache_write": 3999,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0032",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.07097339630127,
+   "turn_s": 14.997999906539917,
+   "e2e_s": 31.069973468780518,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 472,
+     "cache_read": 25255,
+     "cache_write": 4137,
+     "reasoning": 301
+    }
+   }
+  },
+  {
+   "agent": "scribe-0036",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.42551302909851,
+   "turn_s": 13.009999990463257,
+   "e2e_s": 29.63251304626465,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 470,
+     "cache_read": 25256,
+     "cache_write": 4068,
+     "reasoning": 299
+    }
+   }
+  },
+  {
+   "agent": "scribe-0040",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 22.521028518676758,
+   "turn_s": 10.273000001907349,
+   "e2e_s": 32.81402850151062,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 165,
+     "cache_read": 25255,
+     "cache_write": 3990,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0039",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 20.73723793029785,
+   "turn_s": 12.676999807357788,
+   "e2e_s": 33.41523790359497,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 457,
+     "cache_read": 25255,
+     "cache_write": 4091,
+     "reasoning": 289
+    }
+   }
+  },
+  {
+   "agent": "scribe-0038",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.412222385406494,
+   "turn_s": 17.82099986076355,
+   "e2e_s": 32.234222412109375,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 382,
+     "cache_read": 25256,
+     "cache_write": 3996,
+     "reasoning": 214
+    }
+   }
+  },
+  {
+   "agent": "scribe-0045",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.827496528625488,
+   "turn_s": 14.605000019073486,
+   "e2e_s": 30.437496423721313,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 556,
+     "cache_read": 25255,
+     "cache_write": 4165,
+     "reasoning": 377
+    }
+   }
+  },
+  {
+   "agent": "scribe-0041",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.75756525993347,
+   "turn_s": 14.818000078201294,
+   "e2e_s": 32.580565452575684,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 293,
+     "cache_read": 25255,
+     "cache_write": 4118,
+     "reasoning": 115
+    }
+   }
+  },
+  {
+   "agent": "scribe-0042",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 19.15456986427307,
+   "turn_s": 11.881999969482422,
+   "e2e_s": 31.036569833755493,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 476,
+     "cache_read": 25256,
+     "cache_write": 4069,
+     "reasoning": 306
+    }
+   }
+  },
+  {
+   "agent": "scribe-0043",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.625411748886108,
+   "turn_s": 7.5370001792907715,
+   "e2e_s": 23.360411882400513,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 332,
+     "cache_read": 25255,
+     "cache_write": 3990,
+     "reasoning": 167
+    }
+   }
+  },
+  {
+   "agent": "scribe-0049",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.164684057235718,
+   "turn_s": 14.378000020980835,
+   "e2e_s": 32.544684171676636,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 333,
+     "cache_read": 25254,
+     "cache_write": 4165,
+     "reasoning": 165
+    }
+   }
+  },
+  {
+   "agent": "scribe-0044",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 19.992590188980103,
+   "turn_s": 9.775000095367432,
+   "e2e_s": 29.768590211868286,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 373,
+     "cache_read": 25256,
+     "cache_write": 4001,
+     "reasoning": 201
+    }
+   }
+  },
+  {
+   "agent": "scribe-0047",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 14.235172271728516,
+   "turn_s": 15.57200002670288,
+   "e2e_s": 29.902172327041626,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 170,
+     "cache_read": 25256,
+     "cache_write": 3995,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0052",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 21.310041427612305,
+   "turn_s": 11.48799991607666,
+   "e2e_s": 32.799041509628296,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 419,
+     "cache_read": 25254,
+     "cache_write": 4073,
+     "reasoning": 254
+    }
+   }
+  },
+  {
+   "agent": "scribe-0046",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 24.96796727180481,
+   "turn_s": 7.773999929428101,
+   "e2e_s": 32.74196720123291,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 337,
+     "cache_read": 25255,
+     "cache_write": 3996,
+     "reasoning": 173
+    }
+   }
+  },
+  {
+   "agent": "scribe-0051",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 24.227297067642212,
+   "turn_s": 8.595999956130981,
+   "e2e_s": 32.824297189712524,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 412,
+     "cache_read": 25254,
+     "cache_write": 4043,
+     "reasoning": 248
+    }
+   }
+  },
+  {
+   "agent": "scribe-0048",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.411095380783081,
+   "turn_s": 15.735000133514404,
+   "e2e_s": 31.53009557723999,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1201,
+     "output": 163,
+     "cache_read": 25254,
+     "cache_write": 3986,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0050",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 13.837627410888672,
+   "turn_s": 18.651000022888184,
+   "e2e_s": 32.488627433776855,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 165,
+     "cache_read": 25255,
+     "cache_write": 3990,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0055",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 10.378853559494019,
+   "turn_s": 19.763999938964844,
+   "e2e_s": 30.143853664398193,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1200,
+     "output": 381,
+     "cache_read": 25253,
+     "cache_write": 4204,
+     "reasoning": 194
+    }
+   }
+  },
+  {
+   "agent": "scribe-0054",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.003904581069946,
+   "turn_s": 7.497999906539917,
+   "e2e_s": 22.620904445648193,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 166,
+     "cache_read": 25255,
+     "cache_write": 3994,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0053",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 13.835858821868896,
+   "turn_s": 15.500999927520752,
+   "e2e_s": 29.425858736038208,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 490,
+     "cache_read": 25255,
+     "cache_write": 4143,
+     "reasoning": 336
+    }
+   }
+  },
+  {
+   "agent": "scribe-0057",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.633697509765625,
+   "turn_s": 15.477999925613403,
+   "e2e_s": 31.115697383880615,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 249,
+     "cache_read": 25261,
+     "cache_write": 4082,
+     "reasoning": 80
+    }
+   }
+  },
+  {
+   "agent": "scribe-0060",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 21.24549102783203,
+   "turn_s": 9.48200011253357,
+   "e2e_s": 30.728491067886353,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 479,
+     "cache_read": 25256,
+     "cache_write": 4123,
+     "reasoning": 297
+    }
+   }
+  },
+  {
+   "agent": "scribe-0062",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 17.34005856513977,
+   "turn_s": 14.990999937057495,
+   "e2e_s": 32.33305859565735,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 262,
+     "cache_read": 25255,
+     "cache_write": 4085,
+     "reasoning": 84
+    }
+   }
+  },
+  {
+   "agent": "scribe-0056",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.22350311279297,
+   "turn_s": 12.198999881744385,
+   "e2e_s": 30.43350315093994,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1203,
+     "output": 369,
+     "cache_read": 25256,
+     "cache_write": 4011,
+     "reasoning": 182
+    }
+   }
+  },
+  {
+   "agent": "scribe-0058",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 28.143381118774414,
+   "turn_s": 6.0350000858306885,
+   "e2e_s": 34.25638127326965,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 508,
+     "cache_read": 25255,
+     "cache_write": 4122,
+     "reasoning": 340
+    }
+   }
+  },
+  {
+   "agent": "scribe-0063",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 18.454303979873657,
+   "turn_s": 12.832000017166138,
+   "e2e_s": 31.332304000854492,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1204,
+     "output": 235,
+     "cache_read": 25257,
+     "cache_write": 4053,
+     "reasoning": 64
+    }
+   }
+  },
+  {
+   "agent": "scribe-0059",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 16.05557107925415,
+   "turn_s": 14.072999954223633,
+   "e2e_s": 30.129570960998535,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 166,
+     "cache_read": 25255,
+     "cache_write": 3994,
+     "reasoning": 0
+    }
+   }
+  },
+  {
+   "agent": "scribe-0065",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 15.422480821609497,
+   "turn_s": 12.263000011444092,
+   "e2e_s": 27.72248077392578,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 4,
+     "output": 219,
+     "cache_read": 25255,
+     "cache_write": 4072,
+     "reasoning": 76
+    }
+   }
+  },
+  {
+   "agent": "scribe-0064",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 22.168678998947144,
+   "turn_s": 10.99399995803833,
+   "e2e_s": 33.163679122924805,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 441,
+     "cache_read": 25255,
+     "cache_write": 4080,
+     "reasoning": 272
+    }
+   }
+  },
+  {
+   "agent": "scribe-0061",
+   "ok": true,
+   "session_event": "session_started",
+   "tool_calls": 1,
+   "first_event_s": 19.42730402946472,
+   "turn_s": 10.40499997138977,
+   "e2e_s": 29.952303886413574,
+   "tokens": {
+    "claude-haiku-5-5": {
+     "input": 1202,
+     "output": 164,
+     "cache_read": 25255,
+     "cache_write": 3982,
+     "reasoning": 0
+    }
+   }
+  }
+ ]
+}

@@ -270,7 +270,10 @@ types:
 ```
 
 `scale` and `remove` edit the spec and re-apply. The system prompt is a file
-in the workdir, not a flag, so it survives resume.
+in the workdir, not a flag, so it survives resume. `swarm-harness apply` reads
+`system_prompt_file` (relative to the spec file) and sends its text as
+`system_prompt`, since neither the controller nor the workers can read the
+caller's files (added in the e2e run).
 
 ### States
 
@@ -311,6 +314,12 @@ stream; Claude answers each queued prompt as its own turn, Codex may fold a
 steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
+
+Each launch gets an incarnation token (job env `WORKER_INCARNATION`); workers send
+it as `?incarnation=` on command polls and heartbeats, and the controller answers 409
+when it is not the slot's current job, including to a poll that was parked when the
+slot was relaunched. A heartbeat that omits agents placed on that worker re-queues
+their assign. Both came from the e2e run (experiments/e2e/RESULTS.md, check 6).
 
 ### Heartbeat
 

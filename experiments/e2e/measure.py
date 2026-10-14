@@ -63,7 +63,8 @@ def main() -> None:
             "tool_calls": len(tools),
             "tokens": d.get("tokens", {}),
         })
-    status = {a["name"]: a for a in (c.get(f"/agents/{p['agent']}").json() for p in per)}
+    replies = (c.get(f"/agents/{p['agent']}") for p in per)
+    status = {a["name"]: a for a in (r.json() for r in replies if r.status_code == 200)}
     done = [p for p in per if p["turn_s"] is not None]
     tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     for p in done:

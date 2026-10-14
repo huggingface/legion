@@ -1,0 +1,142 @@
+{
+ "repoke_after_kill": {
+  "summary": {
+   "agents": 5,
+   "acks": {
+    "queued": 5
+   },
+   "turn_ended": 5,
+   "reply_ok": 5,
+   "session_events": {
+    "session_resumed": 5
+   },
+   "turns_with_tool_calls": 0,
+   "first_event_s": {
+    "p50": 0.7387053966522217,
+    "p95": 1.049922227859497,
+    "min": 0.6296243667602539
+   },
+   "turn_s": {
+    "p50": 0.9650001525878906,
+    "p95": 1.0429999828338623,
+    "max": 1.0429999828338623
+   },
+   "prompt_to_end_s": {
+    "p50": 1.5946245193481445,
+    "p95": 2.0929222106933594,
+    "max": 2.0929222106933594
+   },
+   "tokens_this_turn": {
+    "input": 1208,
+    "output": 359,
+    "cache_read": 73834,
+    "cache_write": 1620
+   },
+   "controller_cost_usd_total": 0.006102,
+   "claude_estimate_usd_total": 0.006103,
+   "mean_turn_s": 0.9236000537872314
+  },
+  "agents": [
+   {
+    "agent": "scribe-0034",
+    "reply": "scribe-0034-349a48",
+    "ok": true,
+    "session_event": "session_resumed",
+    "tool_calls": 0,
+    "first_event_s": 0.6296243667602539,
+    "turn_s": 0.9650001525878906,
+    "e2e_s": 1.5946245193481445
+   },
+   {
+    "agent": "scribe-0040",
+    "reply": "scribe-0040-0e305b",
+    "ok": true,
+    "session_event": "session_resumed",
+    "tool_calls": 0,
+    "first_event_s": 0.674666166305542,
+    "turn_s": 0.7970001697540283,
+    "e2e_s": 1.4726662635803223
+   },
+   {
+    "agent": "scribe-0050",
+    "reply": "scribe-0050-140ffc",
+    "ok": true,
+    "session_event": "session_resumed",
+    "tool_calls": 0,
+    "first_event_s": 0.7387053966522217,
+    "turn_s": 0.8250000476837158,
+    "e2e_s": 1.5637054443359375
+   },
+   {
+    "agent": "scribe-0060",
+    "reply": "scribe-0060-c4c06c",
+    "ok": true,
+    "session_event": "session_resumed",
+    "tool_calls": 0,
+    "first_event_s": 0.9712483882904053,
+    "turn_s": 0.9879999160766602,
+    "e2e_s": 1.9602482318878174
+   },
+   {
+    "agent": "scribe-0065",
+    "reply": "scribe-0065-ddc110",
+    "ok": true,
+    "session_event": "session_resumed",
+    "tool_calls": 0,
+    "first_event_s": 1.049922227859497,
+    "turn_s": 1.0429999828338623,
+    "e2e_s": 2.0929222106933594
+   }
+  ]
+ },
+ "pending_while_down": {
+  "summary": {
+   "agents": 1,
+   "acks": {
+    "pending": 1
+   },
+   "turn_ended": 1,
+   "reply_ok": 1,
+   "session_events": {
+    "session_resumed": 1
+   },
+   "turns_with_tool_calls": 0,
+   "first_event_s": {
+    "p50": 53.051109790802,
+    "p95": 53.051109790802,
+    "min": 53.051109790802
+   },
+   "turn_s": {
+    "p50": 1.1610000133514404,
+    "p95": 1.1610000133514404,
+    "max": 1.1610000133514404
+   },
+   "prompt_to_end_s": {
+    "p50": 54.21310997009277,
+    "p95": 54.21310997009277,
+    "max": 54.21310997009277
+   },
+   "tokens_this_turn": {
+    "input": 2,
+    "output": 13,
+    "cache_read": 14898,
+    "cache_write": 324
+   },
+   "controller_cost_usd_total": 0.001368,
+   "claude_estimate_usd_total": 0.001368,
+   "mean_turn_s": 1.1610000133514404
+  },
+  "agents": [
+   {
+    "agent": "scribe-0045",
+    "reply": "scribe-0045-18ca26",
+    "ok": true,
+    "session_event": "session_resumed",
+    "tool_calls": 0,
+    "first_event_s": 53.051109790802,
+    "turn_s": 1.1610000133514404,
+    "e2e_s": 54.21310997009277
+   }
+  ]
+ }
+}
