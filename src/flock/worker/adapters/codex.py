@@ -62,15 +62,17 @@ def codex_provider_id(name: str) -> str:
     return f"flock-{name}" if name in CODEX_RESERVED_PROVIDERS else name
 
 
-def _toml(v: str | int) -> str:
+def _toml(v: str | int | bool) -> str:
     """A TOML literal for a `-c key=value` override (JSON string escapes are valid TOML)."""
+    if isinstance(v, bool):  # before int: bool is an int, and TOML wants true/false
+        return "true" if v else "false"
     return str(v) if isinstance(v, int) else json.dumps(v)
 
 
 def codex_config_args(spec: TypeSpec) -> list[str]:
     """`-c` overrides for the app-server: the provider table and model for a provider-backed
     type, and the reasoning effort for any type that sets one."""
-    sets: list[tuple[str, str | int]] = []
+    sets: list[tuple[str, str | int | bool]] = []
     r = spec.resolved_model
     if r is not None:
         p, name = r.provider, codex_provider_id(r.provider_name)
@@ -83,6 +85,10 @@ def codex_config_args(spec: TypeSpec) -> list[str]:
             table["stream_idle_timeout_ms"] = int(p.timeout_s * 1000)
         sets += [(f"model_providers.{name}.{k}", v) for k, v in table.items()]
         sets += [("model_provider", name), ("model", r.model_id)]
+        # Codex 0.162.1 also sends two OpenAI-only tool types, the multi_agent `namespace` tool
+        # and the hosted `web_search` tool; other Responses servers reject the whole request
+        # (the HF router: a ZodError on those tools, before any model call). Turn both off.
+        sets += [("features.multi_agent", False), ("web_search", "disabled")]
     if spec.effective_reasoning is not None:
         sets.append(("model_reasoning_effort", REASONING_EFFORT[spec.effective_reasoning]))
     return [a for k, v in sets for a in ("-c", f"{k}={_toml(v)}")]

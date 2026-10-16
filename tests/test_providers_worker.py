@@ -110,8 +110,16 @@ def test_codex_config_args_for_a_provider():
         "model_providers.hf.stream_idle_timeout_ms": "45000",
         "model_provider": '"hf"',
         "model": '"Qwen/Qwen3.8-27B:ovhcloud"',
+        # OpenAI-only tool types off: the HF router rejects the request when they are sent
+        "features.multi_agent": "false",
+        "web_search": '"disabled"',
         "model_reasoning_effort": '"none"',
     }
+
+
+def test_toml_literals():
+    from flock.worker.adapters.codex import _toml
+    assert (_toml(True), _toml(False), _toml(3), _toml("a\"b")) == ("true", "false", "3", '"a\\"b"')
 
 
 def test_codex_config_args_reserved_name_native_and_reasoning():
