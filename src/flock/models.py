@@ -72,6 +72,8 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
 
 Reasoning = Literal["off", "low", "medium", "high"]
+# `reasoning` -> OpenAI `reasoning.effort` / Codex `model_reasoning_effort`.
+REASONING_EFFORT = {"off": "none", "low": "low", "medium": "medium", "high": "high"}
 
 
 def _pricing_row(v: list[float], where: str) -> list[float]:

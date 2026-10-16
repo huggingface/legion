@@ -11,16 +11,18 @@ import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+import httpx
+from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
 
+from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
 from flock.controller.store import Row, Store, agent_tokens
 from flock.models import (
@@ -30,9 +32,11 @@ from flock.models import (
     CommandBatch,
     EventBatch,
     Harness,
+    PreflightReport,
     PromptAck,
     PromptCommand,
     PromptRequest,
+    ProviderStatus,
     SwarmSpec,
     SwarmStatus,
     TypeHealth,
@@ -183,6 +187,7 @@ def agent_status(a: Row, w: Row | None, spec: SwarmSpec | None, pending: int, no
         type=a["type"],
         harness=ts.harness if ts else Harness.claude,
         model=ts.model if ts else "unknown",
+        provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},
         state=agent_state(a, w, now),
         idle_since=_dt(a["idle_since"]),
@@ -237,11 +242,23 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
             workers_by_state=dict(w_state),
             cost_usd=round(sum(a["cost"] for a in mine), 6),
         )
+    providers: dict[str, ProviderStatus] = {}
+    for name, prov in spec.providers.items():
+        users = [t for t, ts in spec.types.items() if ts.provider_name == name]
+        providers[name] = ProviderStatus(
+            name=name,
+            type=prov.type,
+            self_hosted=prov.self_hosted,
+            types=users,
+            working=sum(types[t].agents_by_state.get("working", 0) for t in users if t in types),
+            max_working=prov.max_working,
+        )
     return SwarmStatus(
         swarm=spec.swarm,
         namespace=spec.namespace,
         bucket=spec.bucket,
         types=types,
+        providers=providers,
         agents_total=len(agents),
         workers_total=len(workers),
         pending_prompts=sum(pending.values()),
@@ -367,15 +384,21 @@ def _status_page(store: Store, now: float) -> str:
                 if t.health.value == "ok"
                 else f'<span class="badge crit"><i></i>{e(t.health.value)}</span>'
             )
+            ts = spec.types.get(t.name)
+            model = (
+                f"<code>{e(ts.resolved_model.qualified)}</code>"
+                if ts and ts.resolved_model
+                else (f"<code>{e(ts.model)}</code>" if ts else "")
+            )
             rows.append(
-                f'<tr><td class="name">{e(t.name)}</td><td>{health}</td>'
+                f'<tr><td class="name">{e(t.name)}</td><td>{health}</td><td>{model}</td>'
                 f'<td class="num">{t.replicas:,}</td>'
                 f"<td>{_chips(t.agents_by_state, _AGENT_STATE_TONE)}</td>"
                 f"<td>{_chips(t.workers_by_state, _WORKER_STATE_TONE)}</td>"
                 f'<td class="num">${t.cost_usd:,.2f}</td></tr>'
             )
         table = (
-            '<div class="tbl"><table><thead><tr><th>agent type</th><th>health</th>'
+            '<div class="tbl"><table><thead><tr><th>agent type</th><th>health</th><th>model</th>'
             '<th class="num">replicas</th><th>agents</th><th>workers</th><th class="num">cost</th>'
             f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         )
@@ -393,11 +416,17 @@ def _status_page(store: Store, now: float) -> str:
                 f"{'agent' if len(names) == 1 else 'agents'}</summary>"
                 f'<div class="agents">{links}{more}</div></details>'
             )
+        provs = " · ".join(
+            f"<code>{e(pv.name)}</code> {e(pv.type)}{' self-hosted' if pv.self_hosted else ''}, "
+            f"working {pv.working}" + (f" / max {pv.max_working}" if pv.max_working else "")
+            for pv in st.providers.values()
+        )
+        provs = f'<p class="sub">providers: {provs}</p>' if provs else ""
         parts.append(
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
             f"<h2>{e(spec.swarm)}</h2>{removing}</div>"
             f'<p class="sub">namespace <code>{e(spec.namespace)}</code> · bucket '
-            f"<code>{e(spec.bucket)}</code></p>"
+            f"<code>{e(spec.bucket)}</code></p>{provs}"
             f'<div class="stats">{tiles}</div>{table}{"".join(details)}</section>'
         )
     body = "".join(parts) or (
@@ -426,7 +455,12 @@ def create_app(
     background: Callable[[Notifier], Awaitable[None]] | None = None,
     clock: Callable[[], datetime] = _now,
     stats: Callable[[], dict] | None = None,
+    secret_source: Mapping[str, str] | None = None,
+    preflight_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
+    """`secret_source` holds provider keys for preflight (default: the process environment,
+    where the Space puts its secrets); `preflight_transport` lets tests fake the providers."""
+    secret_source = os.environ if secret_source is None else secret_source
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
 
@@ -493,6 +527,19 @@ def create_app(
                 raise HTTPException(409, f"type {type_name!r} already belongs to swarm {owner!r}")
         store.put_swarm(spec, clock().timestamp())
         return swarm_status(store, spec, clock().timestamp())
+
+    @api.post("/swarms/{swarm}/preflight")
+    async def preflight(
+        swarm: str, spec: Annotated[SwarmSpec | None, Body()] = None
+    ) -> PreflightReport:
+        """Probe every provider-backed model in `spec` (or the applied spec when no body is
+        sent) with one small tool-calling request. Nothing is stored."""
+        if spec is None:
+            spec = spec_or_404(swarm)["spec"]
+        elif spec.swarm != swarm:
+            raise HTTPException(400, "spec.swarm does not match the path")
+        async with httpx.AsyncClient(transport=preflight_transport) as http:
+            return await run_preflight(spec, secret_source, http)
 
     @api.get("/swarms/{swarm}")
     def get_swarm(swarm: str) -> dict:

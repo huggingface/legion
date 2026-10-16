@@ -324,7 +324,13 @@ class Store:
             total = dict(base)
             for model, usage in tokens.items():
                 total[model] = total.get(model, TokenUsage()) + usage
-            fields["cost"] = cost_fn(total)
+            # Cost grows by the price of the new tokens only (totals never go backwards), so
+            # a price change on re-apply applies from then on and does not reprice history.
+            prev = dict(_tokens(row["tokens_base"]))
+            for model, usage in last.items():
+                prev[model] = prev.get(model, TokenUsage()) + usage
+            delta = cost_fn(total) - cost_fn(prev)
+            fields["cost"] = round((row["cost"] or 0.0) + max(0.0, delta), 6)
             self._update("agents", "name", name, fields)
 
     # ----------------------------------------------------------------- workers

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from flock.controller.jobs import JobsClient, JobState
-from flock.controller.prices import cost_usd
+from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.store import Row, Store
 from flock.models import (
     CRASHLOOP_THRESHOLD,
@@ -375,7 +375,10 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "BUCKET": spec.bucket,
     }
     secrets = {"FLOCK_TOKEN": s.token}
-    for name in [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]:
+    names = [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]
+    if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
+        names.append(ts.resolved_model.provider.api_key_env)
+    for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]
         else:
@@ -429,6 +432,12 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         fields["consecutive_crashes"] = 0
     store.update_worker(worker_id, **fields)
     queued = {c["body"] for c in store.commands_for(worker_id)}
+    sw = store.get_swarm(w["swarm"])
+    table = type_price_table(sw["spec"].types.get(w["type"]) if sw else None)
+
+    def cost_fn(tokens):
+        return cost_usd(tokens, table)
+
     for ah in hb.agents:
         a = store.get_agent(ah.name)
         if (
@@ -461,7 +470,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
                 "last_heartbeat": t,
             },
             ah.tokens,
-            cost_usd,
+            cost_fn,
         )
     if not hb.draining and not w["retire_at"]:
         _reassign_missing(store, w, {ah.name for ah in hb.agents}, queued)
