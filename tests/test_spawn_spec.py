@@ -114,3 +114,13 @@ def test_limits_non_negative(limits):
 def test_workers_non_negative(workers):
     with pytest.raises(ValidationError, match="must be >= 0"):
         spec(types={"a": {"workers": workers}})
+
+
+def test_example_spec_loads():
+    from pathlib import Path
+
+    from flock.cli import load_spec
+
+    s = load_spec(str(Path(__file__).parent.parent / "examples" / "spawn.yaml"))
+    assert s.spawn["leader"].cap_for("analyst") == 4 and s.limits.alive == 20
+    assert "flock spawn" in s.types["leader"].system_prompt

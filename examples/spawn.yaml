@@ -1,0 +1,37 @@
+# A leader that splits work across child agents (docs/spawn.md). Only the leader exists at
+# apply time; analysts and helpers exist once the leader spawns them, on their own workers.
+swarm: spawn-demo
+namespace: <you>
+bucket: hf://buckets/<you>/flock/spawn-demo
+types:
+  leader:
+    harness: claude
+    model: claude-opus-5-5
+    system_prompt_file: prompts/leader.md
+    secrets: [ANTHROPIC_API_KEY]
+    replicas: 1
+    workers: {initial: 1, max_extra: 0}
+    max_budget_usd: 2.0
+  analyst:
+    harness: claude
+    model: claude-haiku-5-5
+    system_prompt_file: prompts/analyst.md
+    secrets: [ANTHROPIC_API_KEY]
+    replicas: 0                    # spawned only
+    agents_per_worker: 10
+    workers: {initial: 1, max_extra: 1}
+    max_turns: 20                  # per prompt, the child's own limits
+    max_budget_usd: 0.5
+  helper:
+    harness: claude
+    model: claude-haiku-5-5
+    system_prompt_file: prompts/analyst.md
+    secrets: [ANTHROPIC_API_KEY]
+    replicas: 0
+    agents_per_worker: 10
+    workers: {initial: 0, max_extra: 1}
+    max_budget_usd: 0.2
+spawn:
+  leader:  {types: {analyst: 4, helper: 2}, depth: 2}   # per-type caps
+  analyst: {types: [helper], max: 2, depth: 1}         # list + one total cap
+limits: {alive: 20, spawned_total: 100, budget_usd: 20}

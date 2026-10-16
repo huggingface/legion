@@ -37,6 +37,10 @@ them.
 - **Planned restarts:** workers live 24 h plus jitter by default, drain before
   their deadline, and the controller relaunches them with their agents
   restored. The herd never restarts all at once.
+- **Spawning:** a leader agent creates, prompts and removes child agents of
+  other types with the `flock` CLI, under a `spawn:` policy (allowed types,
+  caps, depth) and swarm `limits:`. Each agent calls the controller with its
+  own scoped token. See [docs/spawn.md](docs/spawn.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
@@ -119,6 +123,7 @@ Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
 | `POST /agents/{name}/prompt` | body `{text, timeout?, reply_to?}`; acks `queued` or `pending` |
 | `GET /agents/{name}/events?after=&wait=` | event stream, long-poll |
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
+| `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests
@@ -142,9 +147,12 @@ No network, no real jobs: the Hub client and the harness processes are faked.
   concurrent turns; `cpu-basic` 50 and 20. Cold turns are CPU-bound at about
   1.5 CPU-seconds each.
 - Not built yet: bulk prompt endpoint, swarm-level event stream, per-worker
-  batched bucket sync, persistent controller storage (a Space redeploy wipes
-  its swarms), spend ledger, autoscaling, API-loop agents, per-caller auth.
+  batched bucket sync, spend ledger, autoscaling, API-loop agents, per-caller auth.
 - The controller's bearer token sits in the `Authorization` header, so the
   Space must be public; the API is still token-protected.
+
+- Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in
+  the controller image. Without the Space's persistent storage a redeploy wipes
+  it; replicas come back from the spec, spawned agents do not.
 
 Design, contract and decision log: [docs/design.md](docs/design.md).
