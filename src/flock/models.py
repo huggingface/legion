@@ -37,6 +37,7 @@ def parse_duration(value: str | int | float | timedelta) -> timedelta:
 class Harness(StrEnum):
     claude = "claude"
     codex = "codex"
+    pi = "pi"
 
 
 class AgentState(StrEnum):
