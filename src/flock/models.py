@@ -524,16 +524,19 @@ class SwarmStatus(BaseModel):
 
 
 class PreflightResult(BaseModel):
-    """One provider-backed model probed with one small tool-calling request."""
+    """One provider-backed model probed with a tool call and a follow-up turn."""
 
     model: str  # "<provider>:<model id>"
     provider: str
     types: list[str]
     api: str  # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic)
-    ok: bool  # HTTP success and a tool call in the reply
+    ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
     tool_call_seen: bool = False
-    latency_ms: int | None = None
+    follow_up_ok: bool = False
+    usage_reported: bool | None = None  # False: the server streamed zero tokens (cost unknown)
+    latency_ms: int | None = None  # both turns
     error: str | None = None
+    warning: str | None = None
 
 
 class PreflightReport(BaseModel):

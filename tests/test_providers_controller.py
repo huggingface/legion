@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import httpx
 import pytest
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from flock.controller.api import create_app
 from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
@@ -105,10 +106,22 @@ async def test_self_hosted_is_free_and_status_shows_providers(client, clock, tic
 # --------------------------------------------------------------------------- preflight
 
 
-def fake_provider(tool_call: bool = True, status: int = 200) -> tuple[FastAPI, list[dict]]:
-    """A tiny OpenAI-compatible (Responses) and Anthropic (Messages) server."""
+def _sse(events: list[dict], named: bool = False):
+    """A streamed reply; `named` adds `event:` lines (Anthropic style; the HF router sends none)."""
+    def lines():
+        for e in events:
+            yield (f"event: {e['type']}\n" if named else "") + f"data: {json.dumps(e)}\n\n"
+    return StreamingResponse(lines(), media_type="text/event-stream")
+
+
+def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bool = False,
+                  zero_usage: bool = False) -> tuple[FastAPI, list[dict]]:
+    """A tiny streaming OpenAI-compatible (Responses) and Anthropic (Messages) server.
+    `follow_up_fails` answers the turn carrying the tool result with `response.failed` inside
+    HTTP 200 (or an Anthropic `error` event), as the HF router did on its auto provider."""
     fake = FastAPI()
     seen: list[dict] = []
+    usage = {"input_tokens": 0 if zero_usage else 12, "output_tokens": 0 if zero_usage else 5}
 
     @fake.post("/v1/responses")
     async def responses(request: Request):
@@ -116,19 +129,58 @@ def fake_provider(tool_call: bool = True, status: int = 200) -> tuple[FastAPI, l
         seen.append({"path": "responses", "auth": request.headers.get("authorization"), **body})
         if status != 200:
             return JSONResponse({"error": {"message": "model not found"}}, status_code=status)
-        out = [{"type": "function_call", "call_id": "c1", "name": "get_time",
-                "arguments": '{"timezone": "UTC"}'}] if tool_call else [
-            {"type": "message", "role": "assistant",
-             "content": [{"type": "output_text", "text": "It is noon."}]}]
-        return {"id": "r1", "object": "response", "status": "completed", "output": out}
+        follow_up = any(i.get("type") == "function_call_output" for i in body["input"])
+        if follow_up and follow_up_fails:
+            return _sse([{"type": "response.failed", "response": {
+                "status": "failed", "error": {"code": "server_error", "message": "400 status code (no body)"}}}])
+        if follow_up:
+            out = [{"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is noon UTC."}]}]
+        elif tool_call:
+            out = [{"type": "reasoning", "id": "rs_1", "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "call it"}]},
+                   {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "get_time",
+                    "arguments": '{"timezone": "UTC"}'}]
+        else:
+            out = [{"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is noon."}]}]
+        events = [{"type": "response.created", "response": {"status": "in_progress", "output": []}}]
+        events += [{"type": "response.output_item.done", "item": it} for it in out]
+        events.append({"type": "response.completed",
+                       "response": {"id": "r1", "status": "completed", "output": out, "usage": usage}})
+        return _sse(events)
 
     @fake.post("/v1/messages")
     async def messages(request: Request):
         body = await request.json()
-        seen.append({"path": "messages", "key": request.headers.get("x-api-key"), **body})
-        content = [{"type": "tool_use", "id": "t1", "name": "get_time", "input": {"timezone": "UTC"}}]
-        return {"id": "m1", "type": "message", "role": "assistant",
-                "content": content if tool_call else [{"type": "text", "text": "noon"}]}
+        seen.append({"path": "messages", "key": request.headers.get("x-api-key"),
+                     "auth": request.headers.get("authorization"), **body})
+        last = body["messages"][-1]["content"]
+        follow_up = isinstance(last, list) and any(b.get("type") == "tool_result" for b in last)
+        if follow_up and follow_up_fails:
+            return _sse([{"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+                         {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}],
+                        named=True)
+        ev = [{"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": [],
+                                                   "usage": {"input_tokens": usage["input_tokens"]}}}]
+        if tool_call and not follow_up:
+            ev += [{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                   {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+                   {"type": "content_block_stop", "index": 0},
+                   {"type": "content_block_start", "index": 1,
+                    "content_block": {"type": "tool_use", "id": "t1", "name": "get_time", "input": {}}},
+                   {"type": "content_block_delta", "index": 1,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"timezone": '}},
+                   {"type": "content_block_delta", "index": 1,
+                    "delta": {"type": "input_json_delta", "partial_json": '"UTC"}'}},
+                   {"type": "content_block_stop", "index": 1}]
+        else:
+            ev += [{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                   {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "noon"}},
+                   {"type": "content_block_stop", "index": 0}]
+        ev += [{"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": usage["output_tokens"]}}, {"type": "message_stop"}]
+        return _sse(ev, named=True)
 
     return fake, seen
 
@@ -175,24 +227,57 @@ async def test_preflight_tool_call_seen(preflight_client):
     by_model = {x["model"]: x for x in rep["results"]}
     assert set(by_model) == {"hf:Qwen/Qwen3.8-27B", "gpu1:Qwen/Small", "anth:claude-x"}  # native skipped
     assert by_model["hf:Qwen/Qwen3.8-27B"]["types"] == ["worker", "worker2"]  # one request, two types
-    assert all(x["tool_call_seen"] and x["latency_ms"] is not None for x in rep["results"])
+    assert all(x["tool_call_seen"] and x["follow_up_ok"] and x["usage_reported"]
+               and x["latency_ms"] is not None and x["warning"] is None for x in rep["results"])
     assert by_model["anth:claude-x"]["api"] == "messages"
-    req = {(x["path"], x["model"]): x for x in seen}
-    assert len(seen) == 3
-    hf = req[("responses", "Qwen/Qwen3.8-27B")]
+    assert len(seen) == 6  # two turns per model
+    first = {(x["path"], x["model"]): x for x in seen[::-1]}  # earliest request per model wins
+    hf = first[("responses", "Qwen/Qwen3.8-27B")]
     assert hf["auth"] == "Bearer hf-secret" and hf["tools"][0]["name"] == "get_time"
-    assert "reasoning" not in hf
-    assert req[("responses", "Qwen/Small")]["reasoning"] == {"effort": "none"}
-    assert req[("messages", "claude-x")]["key"] == "ak"
+    assert hf["stream"] is True and hf["store"] is False and "reasoning" not in hf
+    assert first[("responses", "Qwen/Small")]["reasoning"] == {"effort": "none"}
+    assert first[("messages", "claude-x")]["key"] == "ak" and first[("messages", "claude-x")]["stream"]
+    # turn two carries the model's own output and the tool result, as a harness would
+    follow = [x for x in seen if x["path"] == "responses" and x["model"] == "Qwen/Qwen3.8-27B"][-1]
+    assert [i["type"] for i in follow["input"]] == ["message", "reasoning", "function_call",
+                                                    "function_call_output"]
+    assert follow["input"][-1]["call_id"] == "c1"
+    m2 = [x for x in seen if x["path"] == "messages"][-1]["messages"]
+    assert [m["role"] for m in m2] == ["user", "assistant", "user"]
+    assert m2[1]["content"][1] == {"type": "tool_use", "id": "t1", "name": "get_time",
+                                   "input": {"timezone": "UTC"}}
+    assert m2[2]["content"][0]["tool_use_id"] == "t1"
+
+
+async def test_preflight_fails_when_the_follow_up_turn_fails(preflight_client):
+    fake, _ = fake_provider(follow_up_fails=True)
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
+    assert rep["ok"] is False
+    for x in rep["results"]:
+        assert x["tool_call_seen"] and not x["follow_up_ok"] and not x["ok"]
+        assert x["error"].startswith("follow-up turn")
+    hf = {x["model"]: x for x in rep["results"]}["hf:Qwen/Qwen3.8-27B"]
+    assert "400 status code" in hf["error"]
+
+
+async def test_preflight_warns_on_zero_usage(preflight_client):
+    fake, _ = fake_provider(zero_usage=True)
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
+    assert rep["ok"] is True  # a warning, not a failure
+    for x in rep["results"]:
+        assert x["usage_reported"] is False and "zero token usage" in x["warning"]
 
 
 async def test_preflight_reports_missing_tool_call(preflight_client):
-    fake, _ = fake_provider(tool_call=False)
+    fake, seen = fake_provider(tool_call=False)
     async with await preflight_client(fake, SECRETS) as c:
         rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
     assert rep["ok"] is False
     for x in rep["results"]:
         assert x["ok"] is False and x["tool_call_seen"] is False and "no tool call" in x["error"]
+    assert len(seen) == 3  # no follow-up without a tool call
 
 
 async def test_preflight_http_error_and_missing_secret(preflight_client):
@@ -200,7 +285,7 @@ async def test_preflight_http_error_and_missing_secret(preflight_client):
     async with await preflight_client(fake, {"HF_TOKEN": "x"}) as c:
         rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
     by_model = {x["model"]: x for x in rep["results"]}
-    assert by_model["hf:Qwen/Qwen3.8-27B"]["error"].startswith("HTTP 404")
+    assert by_model["hf:Qwen/Qwen3.8-27B"]["error"].startswith("first turn: HTTP 404")
     assert by_model["gpu1:Qwen/Small"]["error"] == "secret VLLM_API_KEY is not set on the controller"
     assert rep["ok"] is False
     assert all(x["model"] != "Qwen/Small" for x in seen)  # no request without a key

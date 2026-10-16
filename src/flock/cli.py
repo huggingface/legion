@@ -111,12 +111,16 @@ def _preflight(spec: SwarmSpec) -> bool:
                 timeout=300)
     rows = [
         [r["model"], ",".join(r["types"]), r["api"], "ok" if r["ok"] else "FAIL",
-         "yes" if r["tool_call_seen"] else "no",
+         "yes" if r["tool_call_seen"] else "no", "yes" if r.get("follow_up_ok") else "no",
          "" if r["latency_ms"] is None else r["latency_ms"], r["error"] or ""]
         for r in rep["results"]
     ]
     if rows:
-        _table(rows, ["model", "types", "api", "result", "tool_call", "latency_ms", "error"])
+        _table(rows, ["model", "types", "api", "result", "tool_call", "follow_up", "latency_ms",
+                      "error"])
+        for r in rep["results"]:
+            if r.get("warning"):
+                typer.echo(f"warning: {r['model']}: {r['warning']}", err=True)
     else:
         typer.echo("preflight: no provider-backed models in this spec")
     return bool(rep["ok"])

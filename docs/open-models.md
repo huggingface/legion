@@ -102,13 +102,16 @@ GPU job's time, which flock does not count.
 ## Preflight
 
 `flock preflight spec.yaml` (or `POST /swarms/{swarm}/preflight` with the spec as the body)
-makes the controller send one small request to each distinct provider-backed model: a prompt
-asking for a call to a trivial `get_time` tool, on the Responses API for `openai_compat` and the
-Messages API for `anthropic`. Per model it reports `ok`, `tool_call_seen`, `latency_ms` and
-`error`; `ok` needs a tool call, since an agent that cannot call tools cannot work. `flock apply`
-runs it whenever the spec has provider-backed models and refuses to apply on a failure;
-`--skip-preflight` bypasses it. The probe is not streamed, while Codex streams; a server whose
-streaming breaks will pass preflight and fail in the agent.
+makes the controller probe each distinct provider-backed model the way a harness starts: two
+streamed turns on the Responses API for `openai_compat` (shaped like Codex's requests:
+`store: false`, encrypted reasoning, parallel tool calls) or the Messages API for `anthropic`.
+Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
+with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
+`follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
+server that answers turn one and fails the follow-up (the HF router's automatic provider choice
+did, see below) fails preflight. A server that streams zero token usage passes with a warning,
+since flock then cannot count cost. `flock apply` runs preflight whenever the spec has
+provider-backed models and refuses to apply on a failure; `--skip-preflight` bypasses it.
 
 ## `max_working`
 

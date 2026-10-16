@@ -135,12 +135,12 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     r = runner.invoke(cli.app, ["apply", str(spec_file)])
     assert r.exit_code == 0, r.output
     assert store.get_swarm("op")["spec"].types["worker"].provider_name == "gpu1"
-    assert len(seen) == 2
+    assert len(seen) == 4  # two probes, each a tool call plus a follow-up turn
     # native-only specs skip preflight unless asked
     native = tmp_path / "native.yaml"
     native.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
     r = runner.invoke(cli.app, ["apply", str(native)])
-    assert r.exit_code == 0 and len(seen) == 2
+    assert r.exit_code == 0 and len(seen) == 4
     r = runner.invoke(cli.app, ["apply", "--preflight", str(native)])
     assert r.exit_code == 0 and "no provider-backed models" in r.output
 
