@@ -17,7 +17,7 @@ import httpx
 import typer
 import yaml
 
-from flock.models import SwarmSpec
+from flock.models import AGENT_NAME_RE, SwarmSpec
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -44,6 +44,9 @@ def _as_agent() -> bool:
 
 
 def _is_swarm(name: str) -> bool:
+    """Only a name shaped like an agent's (`...-NNNN`) costs a lookup."""
+    if not AGENT_NAME_RE.match(name):
+        return True
     with client() as c:
         return c.get(f"/swarms/{name}").status_code == 200
 

@@ -16,13 +16,24 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
+from starlette.requests import Request
 
-from flock.controller import spawn as spawning
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
+from flock.controller.spawn import (
+    Refused,
+    SpawnAck,
+    SpawnRequest,
+    agent_depth,
+    agent_for_token,
+    agent_may,
+    remove_subtree,
+    set_token_key,
+)
+from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
 from flock.models import (
     AgentState,
@@ -34,8 +45,6 @@ from flock.models import (
     PromptAck,
     PromptCommand,
     PromptRequest,
-    SpawnAck,
-    SpawnRequest,
     SwarmSpec,
     SwarmStatus,
     TypeHealth,
@@ -211,7 +220,7 @@ def agent_status(
         msgboard_principal=a["msgboard_principal"],
         parent=a["parent"],
         children=children or [],
-        depth=spawning.agent_depth(spec, a),
+        depth=agent_depth(spec, a),
     )
 
 
@@ -442,7 +451,7 @@ def create_app(
 ) -> FastAPI:
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
-    spawning.set_token_key(store, token)
+    set_token_key(store, token)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -468,11 +477,11 @@ def create_app(
         if token and secrets.compare_digest(authorization, f"Bearer {token}"):
             return
         bearer = authorization.removeprefix("Bearer ")
-        agent = spawning.agent_for_token(store, bearer) if bearer != authorization else None
+        agent = agent_for_token(store, bearer) if bearer != authorization else None
         if agent is None:
             raise HTTPException(401, "bad or missing bearer token")
         route = getattr(request.scope.get("route"), "path", "")
-        if not spawning.agent_may(
+        if not agent_may(
             store, agent, request.method, route, request.path_params, request.query_params
         ):
             raise HTTPException(403, f"agent {agent['name']} may not call {request.method} {route}")
@@ -581,10 +590,10 @@ def create_app(
     @api.post("/agents/{name}/spawn", status_code=201)
     def spawn(name: str, req: SpawnRequest) -> SpawnAck:
         try:
-            ack, created = spawning.spawn(store, name, req, clock().timestamp())
+            ack, created = spawn_child(store, name, req, clock().timestamp())
         except KeyError:
             raise HTTPException(404, f"no agent {name!r}") from None
-        except spawning.Refused as r:
+        except Refused as r:
             return JSONResponse({"reason": r.reason, "detail": r.message}, status_code=409)
         if not created:
             return JSONResponse(ack.model_dump(mode="json"), status_code=200)
@@ -598,7 +607,7 @@ def create_app(
                 {"reason": "not_spawned", "detail": "replicas are removed by scaling their type"},
                 status_code=409,
             )
-        removed = spawning.remove_subtree(store, name, "removed", clock().timestamp())
+        removed = remove_subtree(store, name, "removed", clock().timestamp())
         store.listener("reconcile", "")
         return {"removed": [r["name"] for r in removed]}
 
@@ -614,7 +623,7 @@ def create_app(
             "swarm": a["swarm"],
             "type": a["type"],
             "parent": a["parent"],
-            "depth": spawning.agent_depth(row["spec"] if row else None, a),
+            "depth": agent_depth(row["spec"] if row else None, a),
             "children": [c["name"] for c in store.list_agents(parent=a["name"])],
         }
 
