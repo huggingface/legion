@@ -393,7 +393,8 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     except Exception as exc:  # noqa: BLE001 - any Hub failure: retry later, keep the loop alive
         store.update_worker(wid, next_launch_at=p.now + BACKOFF_BASE)
         p.act("launch_failed", wid, type(exc).__name__)
-        log.warning("launch of %s failed: %s", wid, type(exc).__name__)
+        # the Hub's message says why (a 400 names the bad field); class name alone does not
+        log.warning("launch of %s failed: %s: %s", wid, type(exc).__name__, str(exc)[:500])
         return
     store.clear_commands(wid)
     store.update_worker(
