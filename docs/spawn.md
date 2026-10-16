@@ -28,7 +28,6 @@ limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
 | `spawn.<type>.types` | required | a list of child types (then `max` is required), or a map `{child type: cap}` |
 | `spawn.<type>.max` | none | cap on the agent's existing children, all types together. Optional with the map form |
 | `spawn.<type>.depth` | 1 | generations allowed below the agent. 0: it cannot spawn |
-| `spawn.<type>.warm` | 0 | idle pre-created children. **Validated, not yet honoured** |
 | `types.<t>.workers.initial` | v1's count: `ceil(replicas / agents_per_worker)` | worker slots the type starts with |
 | `types.<t>.workers.max_extra` | 0 | worker slots spawned children of `<t>` may add on demand |
 | `limits.alive` | none | agents that exist in the swarm, replicas and spawned together |
@@ -40,7 +39,8 @@ per-prompt `max_turns` and `max_budget_usd` come from its type, as for replicas.
 
 `flock apply` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
 reach itself, including spawning its own type), a spawnable type without `workers`, the list form
-without `max`, and negative `depth`, caps, `warm`, `workers` or limits.
+without `max`, an unknown key under `spawn.<type>`, and negative `depth`, caps, `workers` or
+limits.
 
 **Depth.** A replica's depth is its type's `spawn.depth` (0 if absent), read from the current
 spec. A child is born with `min(parent's depth - 1, its own type's spawn.depth)` (0 if its type
@@ -148,7 +148,9 @@ keeps them until removed; it does nothing until prompted.
 
 ## Not yet
 
-- `spawn.warm` is validated but not honoured: there are no pre-created idle children.
+- Pre-warmed child slots (idle children created ahead of a spawn) are a possible later feature.
+  Today, `workers.initial >= 1` on the child type keeps a worker ready, so the first child skips
+  the job launch.
 - The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
   type's `system_prompt_file`.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.

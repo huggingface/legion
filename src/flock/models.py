@@ -173,14 +173,16 @@ class WorkersSpec(BaseModel):
 class SpawnRule(BaseModel):
     """What an agent of one type may spawn. `types` is a list (with one total `max`) or a map
     of per-type caps (`max` then an optional total cap). Caps count the parent's existing
-    children. `depth` is the generations allowed below the agent (0: cannot spawn)."""
+    children. `depth` is the generations allowed below the agent (0: cannot spawn). Unknown
+    keys are rejected, so a misspelled or unsupported policy field never passes silently."""
+
+    model_config = {"extra": "forbid"}
 
     types: list[str] | dict[str, int]
     max: int | None = None
     depth: int = 1
-    warm: int = 0  # idle pre-created slots; validated, not yet honoured (docs/spawn.md)
 
-    @field_validator("max", "depth", "warm")
+    @field_validator("max", "depth")
     @classmethod
     def _non_negative(cls, v: int | None) -> int | None:
         if v is not None and v < 0:

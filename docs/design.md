@@ -567,6 +567,7 @@ needs its SQLite to survive. It lives in `FLOCK_DATA` (`/data` in the controller
 with persistent storage keeps it across redeploys. No bucket mirror yet.
 
 Defaults chosen where the thread left them open: `spawn.depth` 1; caps count existing children;
-the list form needs `max`; `warm` is validated but not honoured; `budget_usd` is checked at spawn
-time only and counts removed agents' cost; replicas cannot be removed with `DELETE`
-(`not_spawned`); an agent cannot prompt or remove itself, nor read its parent's status.
+the list form needs `max`; `budget_usd` is checked at spawn time only and counts removed agents'
+cost; replicas cannot be removed with `DELETE` (`not_spawned`); an agent cannot prompt or remove
+itself, nor read its parent's status. `spawn.warm` (pre-created idle children) was dropped
+(Carlos, 2026-10-16); `workers.initial >= 1` keeps a worker ready instead.

@@ -42,7 +42,7 @@ def test_agreed_example_parses():
     s = spec(AGREED, {"alive": 500, "spawned_total": 2000, "budget_usd": 300})
     leader, analyst = s.spawn["leader"], s.spawn["analyst"]
     assert leader.allowed == ["analyst", "helper"] and leader.cap_for("helper") == 2
-    assert leader.max is None and leader.warm == 0
+    assert leader.max is None and leader.depth == 2
     assert analyst.allowed == ["helper"] and analyst.cap_for("helper") is None
     assert analyst.max == 3
     assert s.limits.alive == 500 and s.limits.budget_usd == 300
@@ -82,7 +82,7 @@ def test_worker_defaults():
         ({"leader": {"types": ["helper"], "max": -1}}, "must be >= 0"),
         ({"leader": {"types": {"helper": -1}}}, "caps must be >= 0"),
         ({"leader": {"types": ["helper"], "max": 1, "depth": -1}}, "must be >= 0"),
-        ({"leader": {"types": ["helper"], "max": 1, "warm": -1}}, "must be >= 0"),
+        ({"leader": {"types": ["helper"], "max": 1, "warm": 2}}, "warm\n  Extra inputs are not permitted"),
         ({"leader": {"types": ["leader"], "max": 1}}, "cycle leader -> leader"),
         (
             {**AGREED, "helper": {"types": ["analyst"], "max": 1}},
