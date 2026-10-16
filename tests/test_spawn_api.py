@@ -412,3 +412,33 @@ def test_placement_never_opens_more_than_declared_workers(store, jobs, tick):
     assert len(placed) == 2
     assert any(a.kind == "workers_full" for a in actions)
     assert len(store.list_workers("demo", "researcher")) == 3  # no `workers`: v1
+
+
+def test_agent_being_removed_gets_no_new_token(store, clock, tick, swarm):
+    """Review round 2 (spawn_removing_token_reissue.py): after the first removal phase revoked
+    a token, a heartbeat that omits the agent must not re-assign it with a fresh token, and a
+    token of a row marked removing must not authenticate."""
+    from datetime import timedelta
+
+    from flock.controller.reconcile import record_heartbeat
+    from flock.models import SpawnRequest, WorkerHeartbeat
+
+    parent = spawning.spawn(store, LEADER, SpawnRequest(type="analyst"), 0)[0].name
+    tick()
+    wid = store.get_agent(parent)["worker"]
+    old = spawning.agent_token(store, parent, "demo", 0)
+    with store.transaction():
+        store.mark_removing(parent)
+    store.clear_commands(wid)
+    hb = WorkerHeartbeat(worker=wid, agents=[], deadline=clock() + timedelta(hours=1))
+    assert record_heartbeat(store, wid, hb, clock())
+    assert assigns(store, wid) == []  # no re-assign, so no new token
+    assert spawning.agent_token(store, parent, "demo", 0) is None
+    assert spawning.agent_for_token(store, old) is None
+    assert store.get_agent_token(parent) is None
+    # even a token row that survived (e.g. written by an older controller) does not authenticate
+    spawning.set_token_key(store, TOKEN)
+    store.update_agent(parent, removing=0)
+    tok = spawning.agent_token(store, parent, "demo", 0)
+    store.update_agent(parent, removing=1)
+    assert spawning.agent_for_token(store, tok) is None

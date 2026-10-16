@@ -85,9 +85,13 @@ def token_hash(token: str) -> str:
 
 
 def agent_token(store: Store, agent: str, swarm: str, now: float) -> str | None:
-    """The agent's token: issued on first call, the same value on every later call."""
+    """The agent's token: issued on first call, the same value on every later call. None for
+    an agent that does not exist or is being removed (its token stays revoked)."""
     key = store.agent_token_key
     if key is None:
+        return None
+    a = store.get_agent(agent)
+    if a is None or a["removing"]:
         return None
     row = store.get_agent_token(agent)
     nonce = row["nonce"] if row else secrets.token_hex(16)
@@ -98,7 +102,7 @@ def agent_token(store: Store, agent: str, swarm: str, now: float) -> str | None:
 
 
 def agent_for_token(store: Store, token: str) -> Row | None:
-    """The live agent a presented token belongs to, or None."""
+    """The live agent a presented token belongs to, or None (also while it is being removed)."""
     key = store.agent_token_key
     if key is None or not token.startswith("flock_at_"):
         return None
@@ -106,7 +110,8 @@ def agent_for_token(store: Store, token: str) -> Row | None:
     row = store.get_agent_token(name) if name else None
     if row is None or not hmac.compare_digest(_mint(key, name, row["nonce"]), token):
         return None  # minted under an older controller token
-    return store.get_agent(name)
+    a = store.get_agent(name)
+    return None if a is None or a["removing"] else a
 
 
 # --------------------------------------------------------------------------- lineage

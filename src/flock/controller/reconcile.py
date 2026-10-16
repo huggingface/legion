@@ -283,6 +283,8 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 
 
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec) -> None:
+    if a["removing"]:
+        return  # mid-removal (docs/spawn.md): never re-assign it or re-issue its token
     resume = ts.resume_prompt if a["resume_pending"] else None
     cmd = AssignCommand(
         agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
@@ -483,7 +485,8 @@ def _reassign_missing(store: Store, w: Row, reported: set[str], queued: set[str]
     """Agents placed on this worker that its heartbeat does not list, with no assign queued,
     lost their assign on the way (a dropped poll response). Send it again; a worker treats a
     repeated assign for an agent it already hosts as a spec update, so this is idempotent."""
-    missing = [a for a in store.list_agents(worker=w["id"]) if a["name"] not in reported]
+    missing = [a for a in store.list_agents(worker=w["id"])
+               if a["name"] not in reported and not a["removing"]]
     if not missing:
         return
     sw = store.get_swarm(w["swarm"])
