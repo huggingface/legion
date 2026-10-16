@@ -168,3 +168,17 @@ def test_provider_and_alias_names():
 def test_standalone_typespec_is_native():
     ts = TypeSpec(harness="codex", model="hf:Qwen/Qwen3.8-27B")
     assert ts.resolved_model is None and ts.harness_model == "hf:Qwen/Qwen3.8-27B"
+
+
+def test_auth_option():
+    base = {"swarm": "s", "namespace": "n", "bucket": "b", "types": {}}
+    ok = SwarmSpec.model_validate({**base, "providers": {
+        "a": {"type": "anthropic", "api_key_env": "K", "auth": "bearer"}}})
+    assert ok.providers["a"].auth == "bearer"
+    with pytest.raises(ValidationError, match="openai_compat always sends a bearer token"):
+        SwarmSpec.model_validate({**base, "providers": {
+            "o": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
+                  "auth": "x-api-key"}}})
+    with pytest.raises(ValidationError):
+        SwarmSpec.model_validate({**base, "providers": {
+            "a": {"type": "anthropic", "api_key_env": "K", "auth": "basic"}}})

@@ -27,6 +27,8 @@ PROVIDERS = {
     "anth": {"type": "anthropic", "base_url": "http://vllm:8000", "api_key_env": "VLLM_KEY",
              "self_hosted": True, "timeout_s": 600, "max_retries": 1},
     "anthd": {"type": "anthropic", "api_key_env": "MY_ANTHROPIC", "pricing": {"*": [4, 20, 0.2]}},
+    "anthb": {"type": "anthropic", "base_url": "https://gw.example", "api_key_env": "VLLM_KEY",
+              "self_hosted": True, "auth": "bearer"},
 }
 WORKER_ENV = {
     "PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm",
@@ -180,6 +182,13 @@ def test_claude_env_for_an_anthropic_provider(worker_env):
     ts = typespec(c={"harness": "claude", "model": "anthd:claude-opus-5-5"})["c"]
     env = claude_env(ts, {"MY_ANTHROPIC": "ant-secret"})
     assert env["ANTHROPIC_API_KEY"] == "ant-secret" and "ANTHROPIC_BASE_URL" not in env
+
+
+def test_claude_env_bearer_auth(worker_env):
+    ts = typespec(c={"harness": "claude", "model": "anthb:Qwen/Q"})["c"]
+    env = claude_env(ts, {"VLLM_KEY": "vllm-secret"})
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "vllm-secret" and "ANTHROPIC_API_KEY" not in env
+    assert env["ANTHROPIC_BASE_URL"] == "https://gw.example"
 
 
 def test_claude_options_drop_worker_env_and_map_reasoning(tmp_path, worker_env):

@@ -100,6 +100,10 @@ class ProviderSpec(BaseModel):
     pricing: dict[str, list[float]] = Field(default_factory=dict)  # model id ("*" = any) -> row
     timeout_s: float | None = None  # passthrough to the harness / preflight
     max_retries: int | None = None  # passthrough to the harness
+    # How the key is sent. `anthropic` providers: "x-api-key" (default, Claude Code's
+    # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
+    # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
+    auth: Literal["x-api-key", "bearer"] | None = None
 
     @field_validator("api_key_env")
     @classmethod
@@ -124,6 +128,8 @@ class ProviderSpec(BaseModel):
     def _url(self) -> ProviderSpec:
         if self.type == "openai_compat" and not self.base_url:
             raise ValueError("base_url is required for type openai_compat (e.g. https://router.huggingface.co/v1)")
+        if self.type == "openai_compat" and self.auth == "x-api-key":
+            raise ValueError("auth: x-api-key is for anthropic providers; openai_compat always sends a bearer token")
         if self.base_url is not None:
             self.base_url = self.base_url.rstrip("/")
         return self

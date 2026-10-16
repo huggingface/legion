@@ -68,7 +68,12 @@ name:
 |---|---|---|
 | controller environment (Space secrets) | you | preflight; sent to jobs |
 | worker job secrets | controller, added automatically for provider-backed types | read by the worker |
-| harness process | worker | Codex: same name (`env_key`); Claude Code: `ANTHROPIC_API_KEY` |
+| harness process | worker | Codex: same name (`env_key`); Claude Code: `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` with `auth: bearer` |
+
+How the key travels: Codex always sends `Authorization: Bearer <key>`. Claude Code sends
+`x-api-key: <key>` by default; set `auth: bearer` on an `anthropic` provider to send
+`Authorization: Bearer <key>` instead (Claude Code's `ANTHROPIC_AUTH_TOKEN`), for gateways and
+proxies that only accept a bearer token. Preflight sends the key the same way.
 
 Controller secrets to set: every `api_key_env` your providers name (e.g. `HF_TOKEN`,
 `VLLM_API_KEY`), plus the `secrets` your types list, plus `FLOCK_TOKEN`.

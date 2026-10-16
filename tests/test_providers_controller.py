@@ -301,3 +301,13 @@ async def test_preflight_uses_applied_spec_without_body(preflight_client):
         other = preflight_spec().model_dump(mode="json")
         other["swarm"] = "q"
         assert (await c.post("/swarms/p/preflight", json=other)).status_code == 400
+
+
+async def test_preflight_bearer_auth_for_anthropic(preflight_client):
+    fake, seen = fake_provider()
+    providers = {"anth": {**PROVIDERS["anth"], "base_url": "http://fake", "auth": "bearer"}}
+    spec = pspec(providers, writer={"harness": "claude", "model": "anth:claude-x"})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    assert rep["ok"] is True
+    assert all(x["auth"] == "Bearer ak" and x["key"] is None for x in seen)

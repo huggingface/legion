@@ -18,7 +18,8 @@ points at a tiny exec wrapper (`env_wrapper`) that drops every name the worker d
 pass (listed in FLOCK_HARNESS_ENV_DROP) and execs the real CLI; the SDK's own variables
 (CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_SDK_VERSION, ...) are not on that list and survive.
 
-Provider-backed models (`anthropic` providers only): ANTHROPIC_API_KEY is the provider key and
+Provider-backed models (`anthropic` providers only): ANTHROPIC_API_KEY is the provider key
+(ANTHROPIC_AUTH_TOKEN, sent as `Authorization: Bearer`, when the provider sets `auth: bearer`) and
 ANTHROPIC_BASE_URL its `base_url` when set; `timeout_s` and `max_retries` go to API_TIMEOUT_MS
 and CLAUDE_CODE_MAX_RETRIES (names present in the 2.1.296 binary). `reasoning` maps to the SDK's
 `effort` (low/medium/high) or `thinking={"type": "disabled"}` (off).
@@ -143,8 +144,8 @@ def claude_env(spec: TypeSpec, env: dict[str, str]) -> dict[str, str]:
     if r is not None:
         p = r.provider
         key = env.get(p.api_key_env) if p.api_key_env in spec.secrets else env.pop(p.api_key_env, None)
-        if key is not None:
-            env["ANTHROPIC_API_KEY"] = key
+        if key is not None:  # `auth: bearer` -> Authorization: Bearer instead of x-api-key
+            env["ANTHROPIC_AUTH_TOKEN" if p.auth == "bearer" else "ANTHROPIC_API_KEY"] = key
         if p.base_url:
             env["ANTHROPIC_BASE_URL"] = p.base_url
         if p.timeout_s is not None:

@@ -188,7 +188,8 @@ async def probe(
                 _, tok2 = await _responses_turn(client, url, body2, headers, timeout)
         else:
             url = f"{p.base_url or ANTHROPIC_DEFAULT_BASE_URL}/v1/messages"
-            headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
+            auth = {"Authorization": f"Bearer {key}"} if p.auth == "bearer" else {"x-api-key": key}
+            headers = {**auth, "anthropic-version": ANTHROPIC_VERSION}
             body = messages_request(r)
             content, tok1 = await _messages_turn(client, url, body, headers, timeout)
             uses = [b for b in content if b.get("type") == "tool_use"]
