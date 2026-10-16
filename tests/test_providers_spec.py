@@ -43,9 +43,10 @@ def test_example_spec_resolves():
     s = SwarmSpec.model_validate(yaml.safe_load(EXAMPLE.read_text()))
     w, a, wr = s.types["worker"], s.types["analyst"], s.types["writer"]
     assert (w.provider_name, w.harness_model, w.resolved_model.pricing) == (
-        "hf", "Qwen/Qwen3.8-27B", [0.3, 1.2, 0.3])
+        "hf", "Qwen/Qwen3.8-27B:deepinfra", [0.2, 2.5, 0.2])  # router provider pinned
     assert (a.provider_name, a.harness_model, a.effective_reasoning) == (
         "gpu1", "Qwen/Qwen3.8-27B-FP8", "medium")
+    assert s.providers["gpu1"].network_group == "qwen-gpu"
     assert a.resolved_model.extra == {"chat_template_kwargs": {"enable_thinking": False}}
     assert wr.resolved_model is None and wr.harness_model == "claude-opus-5-5"
 

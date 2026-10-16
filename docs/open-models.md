@@ -10,14 +10,15 @@ server that speaks the API the harness speaks. You declare where models are serv
 ```yaml
 providers:                       # where models are served
   hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-         pricing: {"Qwen/Qwen3.8-27B": [0.3, 1.2, 0.3]}}       # USD per 1M: input, output, cached
-  gpu1: {type: openai_compat, base_url: http://qwen-job:8000/v1, api_key_env: VLLM_API_KEY,
+         pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}  # USD per 1M: input, output, cached
+  gpu1: {type: openai_compat, base_url: "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
+         api_key_env: VLLM_API_KEY, network_group: qwen-gpu,
          self_hosted: true, max_working: 256}                 # self-hosted: price defaults to 0
   anth: {type: anthropic, api_key_env: ANTHROPIC_API_KEY}     # base_url optional, default Anthropic
 models:                          # optional aliases and per-model settings
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
-  worker:  {harness: codex, model: "hf:Qwen/Qwen3.8-27B"}     # provider-prefixed string
+  worker:  {harness: codex, model: "hf:Qwen/Qwen3.8-27B:deepinfra"}  # provider-prefixed, router provider pinned
   analyst: {harness: codex, model: qwen-27b}                  # alias into models:
   writer:  {harness: claude, model: claude-opus-5-5}          # harness-native id, as before
 ```
@@ -71,7 +72,11 @@ run the preflight to find out for your model.
 5. `flock preflight spec.yaml`, then `flock apply spec.yaml`.
 
 For the HF router use `base_url: https://router.huggingface.co/v1`, `api_key_env: HF_TOKEN` and
-the router's per-token prices in `pricing` (they are not fetched for you).
+the router's per-token prices in `pricing` (they are not fetched for you; `GET /v1/models` lists
+them per provider). Pin the router provider in the model id (`Qwen/Qwen3.8-27B:deepinfra`, with
+`pricing` keyed on that id): on 2026-10-16 the router's automatic choice for Qwen3.8-27B
+(cerebras) failed every turn after a tool call, while deepinfra, novita and ovhcloud worked.
+Preflight catches this: it sends a tool result back.
 
 ## Keys
 

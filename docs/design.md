@@ -250,8 +250,9 @@ namespace: cmpatino            # HF namespace for jobs
 bucket: hf://buckets/cmpatino/flock
 providers:                     # optional: where open models are served (see "Providers")
   hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-         pricing: {"Qwen/Qwen3.8-27B": [0.3, 1.2, 0.3]}}
-  gpu1: {type: openai_compat, base_url: http://qwen-job:8000/v1, api_key_env: VLLM_API_KEY,
+         pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}  # router provider pinned
+  gpu1: {type: openai_compat, base_url: "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
+         api_key_env: VLLM_API_KEY, network_group: qwen-gpu,
          self_hosted: true, max_working: 256}
 models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
@@ -284,7 +285,7 @@ types:
     secrets: [OPENAI_API_KEY]
   analyst:
     harness: codex
-    model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B" directly
+    model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B:deepinfra" directly
     reasoning: low             # optional; overrides the alias
     replicas: 200
 ```
