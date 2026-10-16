@@ -539,6 +539,8 @@ class ProviderStatus(BaseModel):
     types: list[str]  # agent types using this provider
     working: int  # agents of those types in a turn now (from heartbeats)
     max_working: int | None = None  # reported, not enforced yet
+    # Agents with turns but zero reported tokens: the server sends no usage, cost is unknown.
+    zero_usage_agents: int = 0
 
 
 class SwarmStatus(BaseModel):

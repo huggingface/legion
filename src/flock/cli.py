@@ -71,6 +71,9 @@ def _print_status(st: dict) -> None:
         kind = pv["type"] + (" self-hosted" if pv["self_hosted"] else "")
         typer.echo(f"provider {pv['name']} ({kind}): working {pv['working']}{cap}, "
                    f"types {','.join(pv['types']) or '-'}")
+        if pv.get("zero_usage_agents"):
+            typer.echo(f"warning: provider {pv['name']}: {pv['zero_usage_agents']} agents finished "
+                       "turns with zero reported tokens; their cost is unknown (shown as $0)")
 
 
 def load_spec(spec_file: str) -> SwarmSpec:

@@ -252,6 +252,9 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
             types=users,
             working=sum(types[t].agents_by_state.get("working", 0) for t in users if t in types),
             max_working=prov.max_working,
+            zero_usage_agents=sum(
+                1 for a in agents if a["type"] in users and a["turns"] > 0
+                and not any(sum(u.model_dump().values()) for u in agent_tokens(a).values())),
         )
     return SwarmStatus(
         swarm=spec.swarm,
@@ -419,6 +422,8 @@ def _status_page(store: Store, now: float) -> str:
         provs = " · ".join(
             f"<code>{e(pv.name)}</code> {e(pv.type)}{' self-hosted' if pv.self_hosted else ''}, "
             f"working {pv.working}" + (f" / max {pv.max_working}" if pv.max_working else "")
+            + (f", <strong>{pv.zero_usage_agents} agents report zero tokens (cost unknown)</strong>"
+               if pv.zero_usage_agents else "")
             for pv in st.providers.values()
         )
         provs = f'<p class="sub">providers: {provs}</p>' if provs else ""

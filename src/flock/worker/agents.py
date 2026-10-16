@@ -100,6 +100,7 @@ class AgentRuntime:
         self._turn_timeout = parse_duration(spec.turn_timeout).total_seconds()
         self._next_timeout: float | None = None
         self._turn_tokens: dict[str, TokenUsage] = {}
+        self._warned_usage = False  # zero-usage warning logged for this agent
         self._instructions_written = False
 
     # ------------------------------------------------------------------ paths and state
@@ -337,12 +338,30 @@ class AgentRuntime:
         elif k == "turn_ended":
             if self.turn_id is not None:
                 tokens = {m: u.model_dump() for m, u in self._turn_tokens.items()}
+                extra = {}
+                if self._usage_missing(ev.status):
+                    extra["usage_missing"] = True
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
+                                         **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 self._end_turn()
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
         self.dirty = True
+
+    def _usage_missing(self, status: str | None) -> bool:
+        """A provider-backed turn that completed with zero reported tokens: the server sent no
+        usage (the HF router streams zeros for some providers), so its cost is unknown. Logged
+        once per agent; the controller counts such agents in swarm status."""
+        if self.spec.resolved_model is None or status not in (None, "completed"):
+            return False
+        if any(sum(u.model_dump().values()) for u in self._turn_tokens.values()):
+            return False
+        if not self._warned_usage:
+            self._warned_usage = True
+            log.warning("%s: turn completed with zero reported token usage from provider %s; "
+                        "cost is unknown", self.name, self.spec.resolved_model.provider_name)
+        return True
 
     def _begin_turn(self, data: dict[str, Any]) -> None:
         self.state.turn_seq += 1

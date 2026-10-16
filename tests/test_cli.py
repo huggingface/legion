@@ -125,6 +125,16 @@ def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, stor
     assert r.exit_code == 1 and "gpu1:Qwen/Q" in r.output
 
 
+def test_status_prints_zero_usage_warning(monkeypatch):
+    st = {"swarm": "op", "agents_total": 1, "workers_total": 1, "pending_prompts": 0, "cost_usd": 0,
+          "types": {}, "providers": {"hf": {"name": "hf", "type": "openai_compat", "self_hosted": False,
+                                            "types": ["w"], "working": 0, "max_working": None,
+                                            "zero_usage_agents": 2}}}
+    monkeypatch.setattr(cli, "_call", lambda *a, **k: {"status": st})
+    r = runner.invoke(cli.app, ["status", "op"])
+    assert r.exit_code == 0 and "2 agents finished turns with zero reported tokens" in r.output
+
+
 def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     app, seen = _provider_app(store, clock, tool_call=True)
     _wire(monkeypatch, app)

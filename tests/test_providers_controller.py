@@ -97,7 +97,7 @@ async def test_self_hosted_is_free_and_status_shows_providers(client, clock, tic
     assert st["spec"]["providers"]["gpu1"]["pricing"] == {"Qwen/Small": [0.0, 0.0, 0.0]}  # pinned
     gpu1 = st["status"]["providers"]["gpu1"]
     assert gpu1 == {"name": "gpu1", "type": "openai_compat", "self_hosted": True,
-                    "types": ["local"], "working": 1, "max_working": 2}
+                    "types": ["local"], "working": 1, "max_working": 2, "zero_usage_agents": 0}
     assert st["status"]["providers"]["anth"]["types"] == []
     page = (await client.get("/")).text
     assert "gpu1:Qwen/Small" in page and "working 1 / max 2" in page
@@ -323,3 +323,17 @@ async def test_preflight_skips_network_group_providers(preflight_client):
         rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
     r = rep["results"][0]
     assert rep["ok"] and r["skipped"] and "network group 'flock-gpu'" in r["warning"] and not seen
+
+
+async def test_status_counts_agents_with_zero_usage(client, clock, tick):
+    await put(client, pspec())
+    tick()
+    wid = "p-worker-w0000"
+    agents = [AgentHeartbeat(name="worker-0000", state="idle", turns=3,
+                             tokens={"Qwen/Qwen3.8-27B": TokenUsage()}),
+              AgentHeartbeat(name="worker-0001", state="idle", turns=0)]
+    await client.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, agents))
+    st = (await client.get("/swarms/p")).json()["status"]
+    assert st["providers"]["hf"]["zero_usage_agents"] == 1  # turns > 0 and no tokens
+    assert st["providers"]["gpu1"]["zero_usage_agents"] == 0
+    assert "report zero tokens (cost unknown)" in (await client.get("/")).text

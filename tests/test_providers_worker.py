@@ -248,3 +248,31 @@ def test_network_group_base_url_is_expanded_on_the_worker(worker_env, monkeypatc
     sets = dict(a.split("=", 1) for a in codex_config_args(t["c"])[1::2])
     assert sets["model_providers.gpu.base_url"] == '"http://ng-1-vllm:8000/v1"'
     assert claude_env(t["w"], {"VLLM_KEY": "k"})["ANTHROPIC_BASE_URL"] == "http://ng-1-vllm:8000"
+
+
+async def test_zero_usage_turn_is_flagged_and_logged_once(tmp_path, caplog):
+    from flock.models import TokenUsage
+    from flock.worker.adapters.base import AdapterEvent
+
+    def rt_for(model):
+        ts = typespec(w={"harness": "codex", "model": model})["w"]
+        return AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents",
+                            adapter=ScriptedAdapter(tmp_path / "home"), outbox=Outbox(),
+                            secret_source=WORKER_ENV)
+
+    def turn(rt, usage):
+        rt.on_adapter_event(AdapterEvent("turn_started"))
+        rt.on_adapter_event(AdapterEvent("usage", model="Qwen/Q", usage=usage, cumulative=True))
+        rt.on_adapter_event(AdapterEvent("turn_ended", status="completed"))
+        return [e for e in rt.outbox._q if e.type == "turn_ended"][-1].data["data"]
+
+    rt = rt_for("hf:Qwen/Q")
+    with caplog.at_level("WARNING"):
+        assert turn(rt, TokenUsage())["usage_missing"] is True
+        assert turn(rt, TokenUsage())["usage_missing"] is True
+    assert sum("zero reported token usage" in r.message for r in caplog.records) == 1  # once
+    assert "usage_missing" not in turn(rt_for("hf:Qwen/Q"), TokenUsage(input=10, output=2))
+    native = AgentRuntime("w-0002", "w", TypeSpec(harness="codex", model="gpt-5.5-codex"), swarm="s",
+                          work_root=tmp_path / "agents2", adapter=ScriptedAdapter(tmp_path / "h2"),
+                          outbox=Outbox(), secret_source={})
+    assert "usage_missing" not in turn(native, TokenUsage())  # only provider-backed types

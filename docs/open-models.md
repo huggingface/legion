@@ -118,6 +118,13 @@ id, else its `"*"` row, else `[0, 0, 0]` when self-hosted). Cache writes count a
 price. A re-apply with a new price changes the cost of new tokens only. Self-hosted cost is the
 GPU job's time, which flock does not count.
 
+Cost is only as good as the usage the server reports. A provider-backed turn that completes with
+zero tokens is flagged: the worker logs a warning (once per agent), the `turn_ended` event carries
+`usage_missing: true`, and `flock status` / the status page count such agents per provider
+(`zero_usage_agents`) with a "cost unknown" warning. The HF router streams zero usage for some
+providers (deepinfra, novita and ovhcloud for Qwen3.8-27B on 2026-10-16), so Codex on the router
+shows $0 today.
+
 ## Preflight
 
 `flock preflight spec.yaml` (or `POST /swarms/{swarm}/preflight` with the spec as the body)
