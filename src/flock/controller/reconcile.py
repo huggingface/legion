@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 import uuid
 from collections import Counter
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 
 from flock.controller.jobs import JobsClient, JobState
 from flock.controller.prices import cost_usd
+from flock.controller.spawn import agent_token, remove_subtree, set_token_key
 from flock.controller.store import Row, Store
 from flock.models import (
     CRASHLOOP_THRESHOLD,
@@ -161,6 +163,8 @@ def reconcile(
     store: Store, jobs: JobsClient, now: datetime, settings: Settings | None = None
 ) -> list[Action]:
     settings = settings or Settings()
+    if settings.token and store.agent_token_key is None:
+        set_token_key(store, settings.token)
     t = now.timestamp()
     used = store.launches_since(t - settings.rate_window.total_seconds())
     p = _Pass(store, jobs, t, settings, budget=settings.launches_per_window - used)
@@ -189,16 +193,15 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     for w in store.list_workers(spec.swarm, type_name):
         _refresh_worker(p, spec, w, ts)
 
-    # Desired agents; scale down removes the highest slots first.
+    # Desired agents; scale down removes the highest slots first. Spawned agents (parent set)
+    # are not replicas: they go with their parent, their type or the swarm (docs/spawn.md).
     replicas = ts.replicas if ts else 0
     existing = {a["name"]: a for a in store.list_agents(spec.swarm, type_name)}
+    reason = "type_removed" if type_name not in spec.types else "swarm_removed"
     for a in sorted(existing.values(), key=lambda a: a["slot"], reverse=True):
-        if a["slot"] >= replicas:
-            w = store.get_worker(a["worker"]) if a["worker"] else None
-            if w and w["job_id"]:
-                store.enqueue_command(w["id"], UnassignCommand(agent=a["name"]).model_dump_json())
-            store.delete_agent(a["name"])
-            p.act("unassign", a["name"], a["worker"] or "")
+        if ts is None or (a["parent"] is None and a["slot"] >= replicas):
+            for r in remove_subtree(store, a["name"], reason, p.now):
+                p.act("unassign", r["name"], r["worker"] or "")
     for slot in range(replicas):
         name = agent_name(type_name, slot)
         if name not in existing:
@@ -275,7 +278,8 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec) -> None:
     resume = ts.resume_prompt if a["resume_pending"] else None
     cmd = AssignCommand(
-        agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume
+        agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
+        parent=a["parent"], agent_token=agent_token(store, a["name"], a["swarm"], time.time()),
     )
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:

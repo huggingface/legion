@@ -16,11 +16,12 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
 
+from flock.controller import spawn as spawning
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
 from flock.controller.store import Row, Store, agent_tokens
 from flock.models import (
@@ -33,6 +34,8 @@ from flock.models import (
     PromptAck,
     PromptCommand,
     PromptRequest,
+    SpawnAck,
+    SpawnRequest,
     SwarmSpec,
     SwarmStatus,
     TypeHealth,
@@ -175,7 +178,14 @@ def process_stats() -> dict:
 # --------------------------------------------------------------------------- status builders
 
 
-def agent_status(a: Row, w: Row | None, spec: SwarmSpec | None, pending: int, now: float):
+def agent_status(
+    a: Row,
+    w: Row | None,
+    spec: SwarmSpec | None,
+    pending: int,
+    now: float,
+    children: list[str] | None = None,
+):
     ts = spec.types.get(a["type"]) if spec else None
     return AgentStatus(
         name=a["name"],
@@ -199,6 +209,9 @@ def agent_status(a: Row, w: Row | None, spec: SwarmSpec | None, pending: int, no
         last_heartbeat=_dt(a["last_heartbeat"]),
         last_sync=_dt(a["last_sync"]),
         msgboard_principal=a["msgboard_principal"],
+        parent=a["parent"],
+        children=children or [],
+        depth=spawning.agent_depth(spec, a),
     )
 
 
@@ -429,6 +442,7 @@ def create_app(
 ) -> FastAPI:
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
+    spawning.set_token_key(store, token)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -448,9 +462,21 @@ def create_app(
 
     app.add_middleware(make_stats)
 
-    def auth(authorization: str = Header(default="")) -> None:
-        if not token or not secrets.compare_digest(authorization, f"Bearer {token}"):
+    def auth(request: Request, authorization: str = Header(default="")) -> None:
+        """The controller token has full access. An agent token (docs/spawn.md) acts as that
+        agent, scoped to itself, its subtree and prompting its parent."""
+        if token and secrets.compare_digest(authorization, f"Bearer {token}"):
+            return
+        bearer = authorization.removeprefix("Bearer ")
+        agent = spawning.agent_for_token(store, bearer) if bearer != authorization else None
+        if agent is None:
             raise HTTPException(401, "bad or missing bearer token")
+        route = getattr(request.scope.get("route"), "path", "")
+        if not spawning.agent_may(
+            store, agent, request.method, route, request.path_params, request.query_params
+        ):
+            raise HTTPException(403, f"agent {agent['name']} may not call {request.method} {route}")
+        request.state.agent = agent
 
     api = APIRouter(dependencies=[Depends(auth)])
 
@@ -517,17 +543,20 @@ def create_app(
         state: AgentState | None = None,
         cursor: str | None = None,
         limit: int = 500,
+        parent: str | None = None,
     ) -> dict:
         spec = spec_or_404(swarm)["spec"]
         now = clock().timestamp()
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         pending = store.pending_counts(swarm)
+        kids = store.children_by_parent(swarm)
         out: list[AgentStatus] = []
-        rows = sorted(store.list_agents(swarm, type), key=lambda a: a["name"])
+        rows = sorted(store.list_agents(swarm, type, parent=parent), key=lambda a: a["name"])
         for a in rows:
             if cursor is not None and a["name"] <= cursor:
                 continue
-            st = agent_status(a, workers.get(a["worker"]), spec, pending.get(a["name"], 0), now)
+            st = agent_status(a, workers.get(a["worker"]), spec, pending.get(a["name"], 0), now,
+                              kids.get(a["name"]))
             if state is None or st.state == state:
                 out.append(st)
             if len(out) >= max(1, limit):
@@ -546,7 +575,48 @@ def create_app(
         row = store.get_swarm(a["swarm"])
         w = store.get_worker(a["worker"]) if a["worker"] else None
         pending = store.pending_counts(a["swarm"]).get(name, 0)
-        return agent_status(a, w, row["spec"] if row else None, pending, clock().timestamp())
+        kids = [c["name"] for c in store.list_agents(parent=name)]
+        return agent_status(a, w, row["spec"] if row else None, pending, clock().timestamp(), kids)
+
+    @api.post("/agents/{name}/spawn", status_code=201)
+    def spawn(name: str, req: SpawnRequest) -> SpawnAck:
+        try:
+            ack, created = spawning.spawn(store, name, req, clock().timestamp())
+        except KeyError:
+            raise HTTPException(404, f"no agent {name!r}") from None
+        except spawning.Refused as r:
+            return JSONResponse({"reason": r.reason, "detail": r.message}, status_code=409)
+        if not created:
+            return JSONResponse(ack.model_dump(mode="json"), status_code=200)
+        return ack
+
+    @api.delete("/agents/{name}")
+    def remove_agent(name: str) -> dict:
+        a = agent_or_404(name)
+        if a["parent"] is None:
+            return JSONResponse(
+                {"reason": "not_spawned", "detail": "replicas are removed by scaling their type"},
+                status_code=409,
+            )
+        removed = spawning.remove_subtree(store, name, "removed", clock().timestamp())
+        store.listener("reconcile", "")
+        return {"removed": [r["name"] for r in removed]}
+
+    @api.get("/whoami")
+    def whoami(request: Request) -> dict:
+        a = getattr(request.state, "agent", None)
+        if a is None:
+            return {"kind": "controller"}
+        row = store.get_swarm(a["swarm"])
+        return {
+            "kind": "agent",
+            "name": a["name"],
+            "swarm": a["swarm"],
+            "type": a["type"],
+            "parent": a["parent"],
+            "depth": spawning.agent_depth(row["spec"] if row else None, a),
+            "children": [c["name"] for c in store.list_agents(parent=a["name"])],
+        }
 
     @api.post("/agents/{name}/prompt")
     def prompt(name: str, req: PromptRequest) -> PromptAck:
