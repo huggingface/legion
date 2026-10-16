@@ -20,12 +20,13 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import stub_openai  # noqa: E402
+import stub_openai
 
 HOME = Path(os.environ["PI_CODING_AGENT_DIR"])
 WORKDIR = Path(os.environ.get("WORKDIR", "/work/agents/probe-0001"))
@@ -34,6 +35,10 @@ SESS = HOME / "sessions" / AGENT
 OUT = Path(os.environ.get("OUT", "out"))
 PI = os.environ.get("PI") or shutil.which("pi") or "pi"
 FLAGS = ["--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-approve"]
+
+
+def sh(cmd: list[str]) -> str:
+    return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout.strip()
 
 
 def cgroup_mem() -> int | None:
@@ -145,8 +150,8 @@ def requests(log: Path) -> list[dict]:
 async def phase_a(port: int, log: Path) -> dict:
     WORKDIR.mkdir(parents=True, exist_ok=True)
     (WORKDIR / "AGENTS.md").write_text("You are probe-0001, a resume-gate agent.\n")
-    res: dict = {"user": os.popen("id -un").read().strip(), "pi": os.popen(f"{PI} --version").read().strip(),
-                 "node": os.popen("node --version").read().strip(), "nproc": os.cpu_count()}
+    res: dict = {"user": sh(["id", "-un"]), "pi": sh([PI, "--version"]), "node": sh(["node", "--version"]),
+                 "nproc": os.cpu_count()}
     mem0 = cgroup_mem()
     p = Pi(os.environ["SID_MAIN"], port)
     res["startup_s"] = round(await p.start(), 3)
@@ -183,7 +188,7 @@ async def phase_a(port: int, log: Path) -> dict:
 async def phase_b(port: int, log: Path) -> dict:
     a = json.loads((OUT / "A.json").read_text())
     before = sorted(str(x.relative_to(HOME)) for x in SESS.glob("*.jsonl"))
-    res: dict = {"user": os.popen("id -un").read().strip(), "restored_session_files": before,
+    res: dict = {"user": sh(["id", "-un"]), "restored_session_files": before,
                  "home_files_before": sorted(str(x.relative_to(HOME)) for x in HOME.rglob("*") if x.is_file())}
     p = Pi(os.environ["SID_MAIN"], port)
     res["startup_s"] = round(await p.start(), 3)
