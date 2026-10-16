@@ -104,6 +104,14 @@ documented; anything inferred is marked.
   `turn/interrupt`. `turn.completed` carries
   `usage{input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens}`.
 - No official latency or memory numbers.
+- Model providers (checked 2026-10-16 against the installed 0.162.1 with `--strict-config`
+  and a local fake Responses server): `[model_providers.<id>]` takes `name`, `base_url`,
+  `env_key`, `wire_api`, `request_max_retries`, `stream_max_retries`,
+  `stream_idle_timeout_ms`; `model_provider`, `model` and `model_reasoning_effort` select
+  them. `wire_api = "chat"` is refused ("no longer supported", openai/codex discussion
+  7782): an OpenAI-compatible server must serve the **Responses API** (`POST /v1/responses`,
+  streamed). `openai`, `ollama` and `lmstudio` are reserved ids. The same keys work as
+  `codex app-server -c key=value` overrides.
 
 ### swarmlab
 
@@ -240,6 +248,13 @@ the type defines `resume_prompt`, sends it. No default.
 swarm: paper-review
 namespace: cmpatino            # HF namespace for jobs
 bucket: hf://buckets/cmpatino/flock
+providers:                     # optional: where open models are served (see "Providers")
+  hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+         pricing: {"Qwen/Qwen3.8-27B": [0.3, 1.2, 0.3]}}
+  gpu1: {type: openai_compat, base_url: http://qwen-job:8000/v1, api_key_env: VLLM_API_KEY,
+         self_hosted: true, max_working: 256}
+models:                        # optional aliases
+  qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
     harness: claude            # claude | codex
@@ -267,6 +282,11 @@ types:
     model: gpt-5.5-codex
     replicas: 500
     secrets: [OPENAI_API_KEY]
+  analyst:
+    harness: codex
+    model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B" directly
+    reasoning: low             # optional; overrides the alias
+    replicas: 200
 ```
 
 `scale` and `remove` edit the spec and re-apply. The system prompt is a file
@@ -274,6 +294,78 @@ in the workdir, not a flag, so it survives resume. `flock apply` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
 caller's files (added in the e2e run).
+
+### Providers
+
+Open models (vLLM in a GPU job, the HF router, any OpenAI-compatible or Anthropic-compatible
+server) are reached through a `providers:` block. Field names are swarmlab's
+(`swarmlab/providers/`), so a block moves between the two projects. How-to:
+`docs/open-models.md`.
+
+| Field | Meaning |
+|---|---|
+| `providers.<name>.type` | `openai_compat` (Codex; Responses API) or `anthropic` (Claude Code; Messages API) |
+| `providers.<name>.base_url` | required for `openai_compat` (ends in `/v1`); optional for `anthropic` (API root, default Anthropic) |
+| `providers.<name>.api_key_env` | NAME of the secret holding the key; the value is never in the spec |
+| `providers.<name>.self_hosted` | price defaults to `[0, 0, 0]`; the real cost is the GPU job |
+| `providers.<name>.max_working` | max agents of the swarm on this provider in a turn at once; reported, not enforced yet |
+| `providers.<name>.pricing` | `{model id or "*": [input, output, cached]}` USD per 1M tokens |
+| `providers.<name>.timeout_s`, `max_retries` | passed to the harness (Codex provider table; Claude `API_TIMEOUT_MS`, `CLAUDE_CODE_MAX_RETRIES`) |
+| `models.<alias>.model` | `"<provider>:<model id>"` |
+| `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
+| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); kept, not sent by either harness |
+| `models.<alias>.pricing` | `[input, output, cached]`, overrides the provider's |
+| `types.<t>.model` | an alias, else `"<provider>:<model id>"`, else a harness-native id (v1) |
+| `types.<t>.reasoning` | overrides the alias's |
+
+Resolution of `types.<t>.model`: an alias under `models:`; else `<prefix>:<id>` with the prefix
+under `providers:` (split on the first colon, so `hf:Qwen/Qwen3.8-27B:ovhcloud` keeps the router
+suffix); else a harness-native id with no provider. A prefix that does not look like a provider
+name (`[a-z][a-z0-9_-]*`, e.g. Bedrock's `anthropic.claude-...-v1:0`) is native.
+`models.resolve_model(spec, type_spec)` returns the `ResolvedModel` or None.
+
+Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
+type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
+row for the id, or its `"*"` row, unless `self_hosted`; harness against provider type
+(`claude` needs `anthropic`, `codex` needs `openai_compat`; native ids always pass).
+
+Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
+the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
+spec. Workers get the resolved model inside `AssignCommand.spec`; the controller prices with it.
+
+Keys: the controller adds each provider-backed type's `api_key_env` to that type's job secrets
+(it must be in the controller's environment, like every secret). The worker reads it from its
+own environment and hands it to the harness: under the same name for Codex (`env_key`), as
+`ANTHROPIC_API_KEY` for Claude Code (plus `ANTHROPIC_BASE_URL` when `base_url` is set).
+
+Harness configuration: Codex gets `-c` overrides on `codex app-server` (the provider table,
+`model_provider`, `model`, `model_reasoning_effort`; `off` is `none`), not a written
+`config.toml`, because `CODEX_HOME` is per worker and synced. Reserved ids (`openai`,
+`ollama`, `lmstudio`) become `flock-<name>`. Claude Code gets the SDK's `effort` for
+low/medium/high and `thinking: disabled` for off.
+
+`max_working` (TODO): counted per provider from heartbeats (agents in `working`) and shown in
+`GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. Enforcing it
+means holding prompts for idle agents at the command poll while the provider is at its cap and
+waking the poll when a heartbeat frees a slot; the count lags by up to one heartbeat (30 s), so
+the cap is soft by that much. Not built in PR A.
+
+Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) sends one
+small request with a trivial `get_time` tool to each distinct provider-backed model, from the
+controller (which holds the keys): the Responses API for `openai_compat` (what Codex speaks),
+the Messages API for `anthropic`. A model passes when the reply holds a tool call. `flock apply`
+runs it when the spec has provider-backed models and refuses on a failure
+(`--skip-preflight` bypasses); `flock preflight spec.yaml` runs it alone.
+
+### Harness environment
+
+A harness process gets an allowlist of the worker's environment (`PATH`, `HOME`, `USER`,
+`SHELL`, `TERM`, `LANG`, `LC_*`, `XDG_*`, `TZ`, `TMPDIR`, proxy and CA variables, `IS_SANDBOX`,
+its config dir) plus what the worker passes: the type's declared `secrets`, `env`, the msgboard
+identity, and the provider key. `FLOCK_TOKEN`, the incarnation and other job secrets stay in the
+worker (before 2026-10-16 both adapters passed `os.environ` whole). The Claude SDK merges
+`os.environ` itself, so its `cli_path` is a small exec wrapper that drops every name the worker
+did not mean to pass.
 
 ### States
 
@@ -297,6 +389,7 @@ pauses until the spec is edited.
 | Method | Path | Purpose |
 |---|---|---|
 | PUT | `/swarms/{swarm}` | apply a spec |
+| POST | `/swarms/{swarm}/preflight` | probe each provider-backed model with one tool-calling request; body: a spec (none: the applied one) |
 | GET | `/swarms/{swarm}` | spec and aggregates: counts by type and state |
 | DELETE | `/swarms/{swarm}` | drain and remove everything |
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
@@ -358,6 +451,12 @@ viewer works on it unchanged.
 Per-turn tokens by model from harness events. The controller derives cost from
 its own price table. Claude's `total_cost_usd` is stored as `harness_estimate`
 and not relied on (it is client-side and cumulative across resumes).
+
+A provider-backed type's model id is priced from its pinned `[input, output, cached]` row
+(cache writes at the input price), which wins over the table. Since 2026-10-16 an agent's cost
+grows by the price of each heartbeat's new tokens rather than being recomputed from its totals,
+so a price changed by a re-apply (or `FLOCK_PRICES`) applies from then on and does not
+reprice history.
 
 ### Identity
 
@@ -463,6 +562,12 @@ double-counted after a relaunch.
   container. Never ship the Codex OAuth `auth.json` to a job; use an API key.
 - Prompt-cache re-writes after idle gaps over 1 h are the main hidden cost of
   long idle agents with large transcripts. This is true of any hosting model.
+- Open models (PR A, 2026-10-16): Codex against a real vLLM or HF router Responses endpoint
+  (verified only against a local fake server that streams Responses events); whether the HF
+  router serves `/v1/responses` for open models; Claude Code against vLLM's Anthropic-compatible
+  endpoint (and which background model it calls there, see `ANTHROPIC_SMALL_FAST_MODEL` /
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, unset by flock); `reasoning: off` sent as effort `none`;
+  Codex behaviour for model ids it has no metadata for (context window, tool format).
 - msgboard's 2,000 open-poll cap and roughly 300 req/s ingress will matter the
   day agents poll it themselves. Deferred by decision.
 - The HF Spaces edge rate-limits traffic to the controller on more than the client IP. One
@@ -502,6 +607,8 @@ Condensed from the grilling session, 2026-10-13/14.
 | 22 | Fill workers in order; no bin packing; packing numbers measured first |
 | 23 | Repo `huggingface/flock`, Python, one package, three entry points |
 | 24 | Milestone one: resume gate, packing measurement, 100 agents end to end |
+| 25 | Open models via a swarmlab-compatible `providers:` block, optional `models:` aliases, `<provider>:<id>` model strings; claude only on `anthropic`, codex only on `openai_compat` (Responses API: Codex 0.162.1 dropped chat); price pinned into the stored spec at apply; controller-side preflight; `max_working` reported, enforcement deferred (2026-10-16) |
+| 26 | Harnesses get an allowlisted environment plus explicit additions, never the worker's `os.environ` (2026-10-16) |
 
 ## 12. Road to 10k
 
