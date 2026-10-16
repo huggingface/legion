@@ -81,3 +81,75 @@ def test_apply_inlines_system_prompt_file(tmp_path, monkeypatch, app, store):
     spec_file.write_text(yaml.safe_dump(bad.model_dump(mode="json", exclude_none=True)))
     r = runner.invoke(cli.app, ["apply", str(spec_file)])
     assert r.exit_code == 1 and "not found" in r.output
+
+
+# --------------------------------------------------------------------------- providers
+
+
+def _provider_app(store, clock, tool_call: bool):
+    import httpx
+
+    from flock.controller.api import create_app
+
+    from .test_providers_controller import fake_provider
+
+    fake, seen = fake_provider(tool_call=tool_call)
+    app = create_app(store, TOKEN, clock=clock, secret_source={"VLLM_API_KEY": "k"},
+                     preflight_transport=httpx.ASGITransport(app=fake))
+    return app, seen
+
+
+PROVIDER_SPEC = {
+    "swarm": "op", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
+                           "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
+    "models": {"q": {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
+    "types": {"worker": {"harness": "codex", "model": "q", "replicas": 1}},
+}
+
+
+def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, store, clock):
+    app, seen = _provider_app(store, clock, tool_call=False)
+    _wire(monkeypatch, app)
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
+    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    assert r.exit_code == 1 and "preflight failed" in r.output and "FAIL" in r.output
+    assert "`extra` is kept in the spec but not sent" in r.output
+    assert store.get_swarm("op") is None and len(seen) == 1
+    r = runner.invoke(cli.app, ["apply", "--skip-preflight", str(spec_file)])
+    assert r.exit_code == 0, r.output
+    assert store.get_swarm("op") is not None and len(seen) == 1
+    assert "provider gpu1 (openai_compat self-hosted): working 0, types worker" in r.output
+    r = runner.invoke(cli.app, ["preflight", str(spec_file)])
+    assert r.exit_code == 1 and "gpu1:Qwen/Q" in r.output
+
+
+def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
+    app, seen = _provider_app(store, clock, tool_call=True)
+    _wire(monkeypatch, app)
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
+    r = runner.invoke(cli.app, ["preflight", str(spec_file)])
+    assert r.exit_code == 0 and "ok" in r.output and "responses" in r.output
+    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    assert r.exit_code == 0, r.output
+    assert store.get_swarm("op")["spec"].types["worker"].provider_name == "gpu1"
+    assert len(seen) == 2
+    # native-only specs skip preflight unless asked
+    native = tmp_path / "native.yaml"
+    native.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
+    r = runner.invoke(cli.app, ["apply", str(native)])
+    assert r.exit_code == 0 and len(seen) == 2
+    r = runner.invoke(cli.app, ["apply", "--preflight", str(native)])
+    assert r.exit_code == 0 and "no provider-backed models" in r.output
+
+
+def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
+    _wire(monkeypatch, app)
+    bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "claude", "model": "q"}}}
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(bad))
+    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    assert r.exit_code == 1
+    assert "types.writer.model: harness 'claude' cannot use provider 'gpu1'" in r.output

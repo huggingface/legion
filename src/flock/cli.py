@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import typer
 import yaml
+from pydantic import ValidationError
 
 from flock.models import SwarmSpec
 
@@ -26,7 +27,9 @@ def client() -> httpx.Client:
     return httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 
-def _call(method: str, path: str, **kw) -> Any:
+def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
+    if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
+        kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
     with client() as c:
         r = c.request(method, path, **kw)
     if r.status_code >= 400:
@@ -63,12 +66,23 @@ def _print_status(st: dict) -> None:
         for t in st["types"].values()
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
+    for pv in (st.get("providers") or {}).values():
+        cap = f"/{pv['max_working']}" if pv.get("max_working") else ""
+        kind = pv["type"] + (" self-hosted" if pv["self_hosted"] else "")
+        typer.echo(f"provider {pv['name']} ({kind}): working {pv['working']}{cap}, "
+                   f"types {','.join(pv['types']) or '-'}")
 
 
 def load_spec(spec_file: str) -> SwarmSpec:
     """Read a spec and inline each type's system_prompt_file (relative to the spec file)."""
     path = Path(spec_file)
-    spec = SwarmSpec.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    try:
+        spec = SwarmSpec.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    except ValidationError as e:
+        for err in e.errors():
+            where = ".".join(str(x) for x in err["loc"])
+            typer.echo(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}", err=True)
+        raise typer.Exit(1) from None
     for name, ts in spec.types.items():
         if ts.system_prompt_file and ts.system_prompt is None:
             src = Path(ts.system_prompt_file)
@@ -80,12 +94,62 @@ def load_spec(spec_file: str) -> SwarmSpec:
     return spec
 
 
+def _provider_backed(spec: SwarmSpec) -> bool:
+    return any(ts.resolved_model is not None for ts in spec.types.values())
+
+
+def _warn_extra(spec: SwarmSpec) -> None:
+    for name, ts in spec.types.items():
+        if ts.resolved_model is not None and ts.resolved_model.extra:
+            typer.echo(f"warning: type {name}: `extra` is kept in the spec but not sent by the "
+                       f"{ts.harness.value} harness (docs/open-models.md)", err=True)
+
+
+def _preflight(spec: SwarmSpec) -> bool:
+    """POST /swarms/{swarm}/preflight with the spec; print one row per model; True if all ok."""
+    rep = _call("POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
+                timeout=300)
+    rows = [
+        [r["model"], ",".join(r["types"]), r["api"], "ok" if r["ok"] else "FAIL",
+         "yes" if r["tool_call_seen"] else "no",
+         "" if r["latency_ms"] is None else r["latency_ms"], r["error"] or ""]
+        for r in rep["results"]
+    ]
+    if rows:
+        _table(rows, ["model", "types", "api", "result", "tool_call", "latency_ms", "error"])
+    else:
+        typer.echo("preflight: no provider-backed models in this spec")
+    return bool(rep["ok"])
+
+
 @app.command()
-def apply(spec_file: str) -> None:
-    """Apply a swarm spec (YAML)."""
+def apply(
+    spec_file: str,
+    preflight: bool = typer.Option(
+        None, "--preflight/--skip-preflight",
+        help="Probe provider-backed models before applying (default: on when the spec has any)."),
+) -> None:
+    """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight."""
     spec = load_spec(spec_file)
+    _warn_extra(spec)
+    if preflight is None:
+        preflight = _provider_backed(spec)
+    if preflight and not _preflight(spec):
+        typer.echo("preflight failed: not applying (fix the provider or pass --skip-preflight)",
+                   err=True)
+        raise typer.Exit(1)
     st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     _print_status(st)
+
+
+@app.command("preflight")
+def preflight_cmd(spec_file: str) -> None:
+    """Send one small tool-calling request to each provider-backed model in a spec (through
+    the controller, which holds the keys). Exit 1 if any model fails."""
+    spec = load_spec(spec_file)
+    _warn_extra(spec)
+    if not _preflight(spec):
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -122,6 +186,7 @@ def agents(
                 [
                     a["name"],
                     a["state"],
+                    a.get("provider") or "-",
                     a["worker"],
                     a["turns"],
                     a["pending"],
@@ -132,7 +197,8 @@ def agents(
         cursor = page["cursor"]
         if not cursor:
             break
-    _table(rows, ["name", "state", "worker", "turns", "pending", "cost", "last_heartbeat"])
+    _table(rows, ["name", "state", "provider", "worker", "turns", "pending", "cost",
+                  "last_heartbeat"])
 
 
 @app.command()
