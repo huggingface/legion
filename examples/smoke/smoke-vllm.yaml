@@ -1,0 +1,38 @@
+# Smoke runs 2 and 3 (2026-10-16, flock-board/smoke-results.md): one vLLM GPU job serving
+# Qwen/Qwen3.8-27B-FP8, reached by the cpu-basic workers through the HF Jobs proxy
+# (`hf jobs run --expose-public 8000`, URL https://<job id>--8000.hf.jobs; vLLM's --api-key
+# guards it). Run 2: 4 Codex agents on the Responses API. Run 3: 1 Claude Code agent on vLLM's
+# Anthropic Messages endpoint. The URLs name the job used that day; swap in yours.
+swarm: smoke-vllm
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/flock/smoke
+providers:
+  gpu:  {type: openai_compat, base_url: "https://6ad20e87c66288145225c569--8000.hf.jobs/v1",
+         api_key_env: VLLM_API_KEY, self_hosted: true, max_working: 2}
+  gpua: {type: anthropic, base_url: "https://6ad20e87c66288145225c569--8000.hf.jobs",
+         api_key_env: VLLM_API_KEY, self_hosted: true}
+types:
+  coder:
+    harness: codex
+    model: "gpu:Qwen/Qwen3.8-27B-FP8"
+    replicas: 4
+    agents_per_worker: 4
+    max_working_per_worker: 4
+    labels: {experiment: flock-smoke}
+    worker_lifetime: 40m
+    lifetime_jitter: 1m
+    drain_window: 2m
+    idle_grace: 60s
+    turn_timeout: 10m
+  writer:
+    harness: claude
+    model: "gpua:Qwen/Qwen3.8-27B-FP8"
+    replicas: 1
+    agents_per_worker: 1
+    labels: {experiment: flock-smoke}
+    worker_lifetime: 40m
+    lifetime_jitter: 1m
+    drain_window: 2m
+    idle_grace: 60s
+    turn_timeout: 10m
+    max_turns: 20
