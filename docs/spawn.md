@@ -40,7 +40,8 @@ per-prompt `max_turns` and `max_budget_usd` come from its type, as for replicas.
 `flock apply` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
 reach itself, including spawning its own type), a spawnable type without `workers`, the list form
 without `max`, an unknown key under `spawn.<type>`, and negative `depth`, caps, `workers` or
-limits.
+limits. The controller also refuses (409) a re-apply that lowers a type's `initial + max_extra`
+below the workers its agents occupy: agents never move, so remove agents first.
 
 **Depth.** A replica's depth is its type's `spawn.depth` (0 if absent), read from the current
 spec. A child is born with `min(parent's depth - 1, its own type's spawn.depth)` (0 if its type

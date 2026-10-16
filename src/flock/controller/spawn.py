@@ -241,6 +241,22 @@ def _admit(store: Store, spec: SwarmSpec, parent: Row, type_name: str) -> None:
         )
 
 
+def worker_cap_conflicts(store: Store, spec: SwarmSpec) -> list[str]:
+    """Types whose declared worker cap is below the workers their agents occupy now. Agents
+    never move between live workers, so such an edit could not be honoured: apply refuses it."""
+    out = []
+    for name, ts in sorted(spec.types.items()):
+        if ts.workers is None:
+            continue
+        in_use = len({a["worker"] for a in store.list_agents(spec.swarm, name) if a["worker"]})
+        if in_use > max_workers(ts):
+            out.append(
+                f"type {name!r}: workers.initial + workers.max_extra = {max_workers(ts)} is below "
+                f"the {in_use} workers its agents occupy; remove agents first"
+            )
+    return out
+
+
 # --------------------------------------------------------------------------- removal
 
 

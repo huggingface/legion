@@ -32,6 +32,7 @@ from flock.controller.spawn import (
     agent_may,
     remove_subtree,
     set_token_key,
+    worker_cap_conflicts,
 )
 from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
@@ -526,6 +527,8 @@ def create_app(
             owner = store.type_owner(type_name)
             if owner not in (None, swarm):
                 raise HTTPException(409, f"type {type_name!r} already belongs to swarm {owner!r}")
+        if conflicts := worker_cap_conflicts(store, spec):
+            raise HTTPException(409, "; ".join(conflicts))
         store.put_swarm(spec, clock().timestamp())
         return swarm_status(store, spec, clock().timestamp())
 

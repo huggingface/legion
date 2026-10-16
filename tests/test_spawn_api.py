@@ -442,3 +442,27 @@ def test_agent_being_removed_gets_no_new_token(store, clock, tick, swarm):
     tok = spawning.agent_token(store, parent, "demo", 0)
     store.update_agent(parent, removing=1)
     assert spawning.agent_for_token(store, tok) is None
+
+
+async def test_apply_refuses_a_cap_below_workers_in_use(client, store, tick):
+    """Review round 2: lowering initial + max_extra below the workers a type occupies is
+    refused (agents never move, nothing is grandfathered); lowering to what is in use is fine."""
+    def with_extra(n):
+        return spawn_spec(analyst={"agents_per_worker": 1,
+                                   "workers": {"initial": 1, "max_extra": n}})
+
+    await apply(client, with_extra(2))
+    tick()
+    kids = [(await spawn(client, LEADER, "analyst")).json()["name"] for _ in range(3)]
+    tick()
+    assert len(store.list_workers("demo", "analyst")) == 3
+    for extra in (0, 1):
+        r = await client.put("/swarms/demo", json=with_extra(extra).model_dump(mode="json"))
+        assert r.status_code == 409
+        assert r.json()["detail"] == (
+            f"type 'analyst': workers.initial + workers.max_extra = {1 + extra} is below the 3 "
+            "workers its agents occupy; remove agents first")
+    assert store.get_swarm("demo")["spec"].types["analyst"].workers.max_extra == 2  # unchanged
+    await client.delete(f"/agents/{kids[2]}")
+    r = await client.put("/swarms/demo", json=with_extra(1).model_dump(mode="json"))
+    assert r.status_code == 200, r.text
