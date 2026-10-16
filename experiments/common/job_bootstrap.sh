@@ -5,6 +5,8 @@ t0=$(date +%s.%N)
 export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
 command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 >/dev/null; }
 npm i -g --silent "@anthropic-ai/claude-code@${CLAUDE_VERSION:-2.1.296}" >/dev/null 2>&1
+# EXTRA_NPM: more pinned packages, e.g. @earendil-works/pi-coding-agent@1.2.0 (resume-gate-pi)
+if [ -n "${EXTRA_NPM:-}" ]; then npm i -g --silent $EXTRA_NPM >/dev/null 2>&1; fi
 t1=$(date +%s.%N)
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 uv tool install -q "huggingface_hub==${HF_HUB_VERSION:-2.1.1}" >/dev/null 2>&1
