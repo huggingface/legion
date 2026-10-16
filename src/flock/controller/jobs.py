@@ -42,6 +42,8 @@ HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_mi
 uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggingface_hub=={hub} \
   || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" \
        claude-agent-sdk=={sdk} huggingface_hub=={hub}
+# Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
+command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
 export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
 export PYTHONUNBUFFERED=1

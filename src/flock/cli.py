@@ -1,12 +1,15 @@
 """`flock` CLI: a thin client over the controller API.
 
-Config: FLOCK_URL and FLOCK_TOKEN.
+Config: FLOCK_URL and FLOCK_TOKEN. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
+agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
+docs/spawn.md for what an agent may call.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +25,7 @@ app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_i
 def client() -> httpx.Client:
     """Overridden in tests to point at an in-process app."""
     url = os.environ.get("FLOCK_URL", "http://localhost:7860")
-    token = os.environ.get("FLOCK_TOKEN", "")
+    token = os.environ.get("FLOCK_AGENT_TOKEN") or os.environ.get("FLOCK_TOKEN", "")
     return httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 
@@ -33,6 +36,16 @@ def _call(method: str, path: str, **kw) -> Any:
         typer.echo(f"error {r.status_code}: {r.text}", err=True)
         raise typer.Exit(1)
     return r.json()
+
+
+def _as_agent() -> bool:
+    """Running inside an agent with its scoped token: names are agents, never swarms."""
+    return bool(os.environ.get("FLOCK_AGENT_TOKEN"))
+
+
+def _is_swarm(name: str) -> bool:
+    with client() as c:
+        return c.get(f"/swarms/{name}").status_code == 200
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -90,7 +103,13 @@ def apply(spec_file: str) -> None:
 
 @app.command()
 def status(swarm: str = typer.Argument(None)) -> None:
-    """Swarm status: counts by type and state."""
+    """Swarm status: counts by type and state. Given an agent name (or inside an agent), that
+    agent's status as JSON."""
+    if not swarm and _as_agent():
+        swarm = os.environ.get("FLOCK_AGENT")
+    if swarm and (_as_agent() or not _is_swarm(swarm)):
+        typer.echo(json.dumps(_call("GET", f"/agents/{swarm}"), indent=2))
+        return
     if swarm:
         _print_status(_call("GET", f"/swarms/{swarm}")["status"])
         return
@@ -107,9 +126,10 @@ def agents(
     swarm: str,
     type: str = typer.Option(None, "--type"),
     state: str = typer.Option(None, "--state"),
+    parent: str = typer.Option(None, "--parent", help="only the children of this agent"),
 ) -> None:
     """List a swarm's agents."""
-    params = {k: v for k, v in (("type", type), ("state", state)) if v}
+    params = {k: v for k, v in (("type", type), ("state", state), ("parent", parent)) if v}
     rows, cursor = [], None
     while True:
         page = _call(
@@ -158,16 +178,24 @@ def events(
     name: str,
     after: int = typer.Option(0, "--after"),
     follow: bool = typer.Option(False, "--follow", "-f"),
+    wait: bool = typer.Option(False, "--wait", help="block until an event after --after"),
+    timeout: float = typer.Option(600, "--timeout", help="seconds --wait blocks at most"),
 ) -> None:
-    """Print an agent's event stream (JSONL); --follow keeps long-polling."""
+    """Print an agent's event stream (JSONL); --follow keeps long-polling; --wait returns once
+    something new arrived (the last line on stderr is the cursor for the next --after)."""
+    deadline = time.monotonic() + timeout
     while True:
+        poll = follow or wait
         page = _call(
-            "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if follow else 0}
+            "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if poll else 0}
         )
         for ev in page["events"]:
             typer.echo(json.dumps(ev))
         after = page["next"]
-        if not follow:
+        if wait and (page["events"] or time.monotonic() >= deadline):
+            typer.echo(f"next: {after}", err=True)
+            break
+        if not poll:
             break
 
 
@@ -184,8 +212,36 @@ def scale(swarm: str, type: str, replicas: int) -> None:
 
 @app.command()
 def remove(swarm: str) -> None:
-    """Drain and remove a swarm."""
+    """Drain and remove a swarm. Given a spawned agent's name (or inside an agent), remove that
+    agent and everything it spawned."""
+    if _as_agent() or not _is_swarm(swarm):
+        typer.echo(json.dumps(_call("DELETE", f"/agents/{swarm}")))
+        return
     typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
+
+
+@app.command()
+def spawn(
+    type: str,
+    prompt: str = typer.Option(None, "--prompt", help="first prompt for the child"),
+    key: str = typer.Option(None, "--key", help="idempotency key: a repeat returns the same child"),
+    parent: str = typer.Option(None, "--parent", help="default: $FLOCK_AGENT (yourself)"),
+    as_json: bool = typer.Option(False, "--json", help="print the whole ack"),
+) -> None:
+    """Spawn a child agent of TYPE; prints its name."""
+    parent = parent or os.environ.get("FLOCK_AGENT")
+    if not parent:
+        typer.echo("no parent: pass --parent or set FLOCK_AGENT", err=True)
+        raise typer.Exit(1)
+    body = {"type": type, "prompt": prompt, "key": key}
+    ack = _call("POST", f"/agents/{parent}/spawn", json=body)
+    typer.echo(json.dumps(ack) if as_json else ack["name"])
+
+
+@app.command()
+def whoami() -> None:
+    """Who the configured token acts as: the controller, or an agent with its lineage."""
+    typer.echo(json.dumps(_call("GET", "/whoami"), indent=2))
 
 
 @app.command()

@@ -99,6 +99,8 @@ class AgentRuntime:
         self._next_timeout: float | None = None
         self._turn_tokens: dict[str, TokenUsage] = {}
         self._instructions_written = False
+        self.parent: str | None = None  # the spawning agent (AssignCommand.parent)
+        self.flock_env: dict[str, str] = {}  # FLOCK_AGENT, FLOCK_AGENT_TOKEN, ... (worker sets)
 
     # ------------------------------------------------------------------ paths and state
     @property
@@ -219,6 +221,7 @@ class AgentRuntime:
             if self.identities is not None:
                 env.update(await self.identities.env_for(self.name, self.spec))
             old = self.state.session_id
+            env.update(self.flock_env)
             first: list[str] = []
             data: dict[str, Any] = {"harness": self.spec.harness.value, "model": self.spec.model}
             try:
@@ -233,7 +236,8 @@ class AgentRuntime:
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
             self.save_state()
-            self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed})
+            self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
+                             "parent": self.parent})
             self.phase = "running"
             self._last_activity = self._now()
             pump = asyncio.create_task(self._pump())
