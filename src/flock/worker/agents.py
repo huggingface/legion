@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -67,6 +67,7 @@ class AgentRuntime:
         sync: BucketSync | None = None,
         identities: Identities | None = None,
         working_count: Callable[[], int] | None = None,
+        secret_source: Mapping[str, str] | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
         self.work_root = Path(work_root)
@@ -77,6 +78,7 @@ class AgentRuntime:
         self.sync = sync
         self.identities = identities
         self._working_count = working_count
+        self._secret_source = secret_source  # default: os.environ (job secrets arrive as env)
         self.log = SessionLog(self.sessions_dir / f"{name}.jsonl", swarm=swarm, agent=name,
                               harness=spec.harness.value, cwd=str(self.workdir))
         self.state = AgentState()
@@ -204,6 +206,28 @@ class AgentRuntime:
                 return
         log.warning("%s: system_prompt_file %s not found", self.name, src)
 
+    async def harness_env(self) -> dict[str, str]:
+        """What this agent's harness process gets beyond the adapter's allowlist: the type's
+        declared secrets, `spec.env`, the msgboard identity, and a provider-backed model's key
+        under its `api_key_env` name (read from the worker's environment, where the job puts
+        it). Nothing else from the worker: FLOCK_TOKEN and the rest stay here."""
+        source = self._secret_source if self._secret_source is not None else os.environ
+        env = {k: source[k] for k in self.spec.secrets if k in source}
+        env.update(self.spec.env)
+        if self.identities is not None:
+            env.update(await self.identities.env_for(self.name, self.spec))
+        r = self.spec.resolved_model
+        if r is not None:
+            key = source.get(r.provider.api_key_env)
+            if key:
+                env[r.provider.api_key_env] = key
+            else:
+                log.warning("%s: %s (key for provider %s) is not set on this worker",
+                            self.name, r.provider.api_key_env, r.provider_name)
+                self.emit("error", {"error": f"{r.provider.api_key_env} is not set on the worker; "
+                                             f"provider {r.provider_name} will reject requests"})
+        return env
+
     async def _run_burst(self) -> None:
         pump: asyncio.Task | None = None
         try:
@@ -215,12 +239,12 @@ class AgentRuntime:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
             self._prepare_workdir()
-            env = dict(self.spec.env)
-            if self.identities is not None:
-                env.update(await self.identities.env_for(self.name, self.spec))
+            env = await self.harness_env()
             old = self.state.session_id
             first: list[str] = []
             data: dict[str, Any] = {"harness": self.spec.harness.value, "model": self.spec.model}
+            if self.spec.resolved_model is not None:
+                data.update(provider=self.spec.provider_name, model_id=self.spec.harness_model)
             try:
                 sid = await self.adapter.start(self.workdir, old, self.spec, env=env)
                 kind, self.resumed = ("session_resumed", True) if old else ("session_started", False)

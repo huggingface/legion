@@ -8,7 +8,7 @@ An adapter owns at most one live harness process at a time (one burst). It is re
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -46,6 +46,29 @@ class AdapterEvent:
     raw: Any = None
 
 
+# What a harness process inherits from the worker's own environment. Everything else (FLOCK_TOKEN,
+# job secrets, the incarnation) stays in the worker; the harness gets only these plus what the
+# worker passes explicitly (spec.env, the type's declared secrets, identity, the provider key).
+BASE_ENV = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+    "IS_SANDBOX",  # Claude's bypassPermissions as root
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+})
+BASE_ENV_PREFIXES = ("LC_", "XDG_")
+
+
+def minimal_env(
+    parent: Mapping[str, str], explicit: Mapping[str, str], keep: Iterable[str] = ()
+) -> dict[str, str]:
+    """The harness environment: allowlisted names from `parent` (BASE_ENV, LC_*, XDG_*, plus
+    `keep`, e.g. the harness's config-dir variable), then `explicit` on top."""
+    names = BASE_ENV | set(keep)
+    env = {k: v for k, v in parent.items() if k in names or k.startswith(BASE_ENV_PREFIXES)}
+    env.update(explicit)
+    return env
+
+
 class ResumeError(RuntimeError):
     """The harness could not resume the requested session; start fresh instead."""
 
@@ -64,7 +87,9 @@ class HarnessAdapter(Protocol):
         env: dict[str, str] | None = None,
     ) -> str:
         """Start a process. Resume `session_id` (raise ResumeError if impossible) or create a
-        new session. Returns the session id in use."""
+        new session. Returns the session id in use. `env` is everything the worker passes on
+        (spec.env, declared secrets, identity, the provider key under `api_key_env`); the
+        process gets that plus `minimal_env`'s allowlist, never the worker's whole environment."""
         ...
 
     async def send(self, text: str) -> None: ...
