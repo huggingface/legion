@@ -59,6 +59,11 @@ run the preflight to find out for your model.
      `HF_NETWORK_GROUP_PREFIX` inside group members only, and the worker expands it. vLLM keeps
      its own `--api-key`. Both jobs must be in the same namespace (and resource group). The
      controller is not in the group, so preflight skips these providers (reported as `skipped`).
+     **Not yet working end to end:** a group is placed where its first member runs, and later
+     members must use a flavor available there. On 2026-10-16 a group started by an
+     `a100-large` vLLM job refused `cpu-basic` and `cpu-upgrade` workers ("Flavor 'cpu-basic'
+     for arch 'amd64' is not available where network group ... already runs"). Untested ways
+     out: start the workers first, or give the worker types a flavor from the GPU's pool.
    - **Jobs proxy.** `--expose 8000` publishes `https://<job id>--8000.hf.jobs`, which needs an
      HF token as `Authorization: Bearer`. Serve without `--api-key`, set
      `api_key_env: HF_TOKEN`, and use `auth: bearer` on `anthropic` providers, because Claude
@@ -160,8 +165,10 @@ cap would be soft by that much.
 
 ## Not verified yet
 
-- Codex against a real vLLM or HF router Responses endpoint (checked only against a local fake
-  that streams Responses events, with the real Codex 0.162.1 binary).
-- Claude Code against vLLM's Anthropic-compatible endpoint, and which background model Claude
-  Code asks that endpoint for (`ANTHROPIC_SMALL_FAST_MODEL`, unset by flock).
+- Codex against a real vLLM Responses endpoint. Against the HF router it works with a pinned
+  provider (smoke run 2026-10-16: 10/10 turns with tool calls, cost unknown because usage is zero).
+- Claude Code against vLLM's Anthropic-compatible endpoint. Against a fake server, Claude Code
+  2.1.296 sent every request, background ones included, to the type's model id, so
+  `ANTHROPIC_SMALL_FAST_MODEL` was not needed.
+- Workers reaching a GPU job through a network group (see the placement note above).
 - Codex with model ids it has no built-in metadata for (context window, auto-compaction).
