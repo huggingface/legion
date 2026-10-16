@@ -174,6 +174,8 @@ def spawn(store: Store, parent_name: str, req: SpawnRequest, now: float) -> tupl
         parent = store.get_agent(parent_name)
         if parent is None:
             raise KeyError(parent_name)
+        if parent["removing"]:
+            raise Refused("parent_removing", f"{parent_name} is being removed")
         if req.key is not None and (child := store.spawn_key_child(parent_name, req.key)):
             row = store.get_agent(child)
             depth = row["depth"] if row else 0
@@ -237,23 +239,41 @@ def _admit(store: Store, spec: SwarmSpec, parent: Row, type_name: str) -> None:
 # --------------------------------------------------------------------------- removal
 
 
+def _subtree(store: Store, name: str) -> list[Row]:
+    """`name` and its descendants, children before parents."""
+    out: list[Row] = []
+    for child in store.list_agents(parent=name):
+        out += _subtree(store, child["name"])
+    a = store.get_agent(name)
+    return out + ([a] if a else [])
+
+
 def remove_subtree(store: Store, name: str, reason: str, now: float) -> list[Row]:
     """Remove `name` and everything it spawned, children first. Each placed agent gets an
     unassign (final sync; bucket state is kept), each token is revoked, and each spawned
-    agent's parent gets `child_removed`. Returns the removed rows."""
-    a = store.get_agent(name)
-    if a is None:
+    agent's parent gets `child_removed`. Returns the removed rows.
+
+    Two transactions, each serialized with spawn admission (same store transaction): the
+    first enumerates the subtree, marks every row `removing` and revokes every token, so no
+    child can be added below it from then on (a spawn there gets 409 parent_removing); the
+    second deletes the rows. A crash between them leaves marked rows that reconcile removes."""
+    with store.transaction():
+        rows = _subtree(store, name)
+        for r in rows:
+            store.mark_removing(r["name"])
+    if not rows:
         return []
-    removed: list[Row] = []
-    for child in store.list_agents(parent=name):
-        removed += remove_subtree(store, child["name"], "parent_removed", now)
-    w = store.get_worker(a["worker"]) if a["worker"] else None
-    if w and w["job_id"]:
-        store.enqueue_command(w["id"], UnassignCommand(agent=name).model_dump_json())
-    store.delete_agent(name)
-    if a["parent"] and store.get_agent(a["parent"]) is not None:
-        ev = Event(type="child_removed", ts=_ts(now), agent=a["parent"],
-                   data={"child": name, "type": a["type"], "reason": reason})
-        store.append_events(a["swarm"], a["parent"], [ev])
-    removed.append(a)
-    return removed
+    events: list[Event] = []
+    with store.transaction():
+        for r in rows:
+            w = store.get_worker(r["worker"]) if r["worker"] else None
+            if w and w["job_id"]:
+                store.enqueue_command(w["id"], UnassignCommand(agent=r["name"]).model_dump_json())
+            store.delete_agent_rows(r["name"])
+            if r["parent"] and store.get_agent(r["parent"]) is not None:
+                why = reason if r["name"] == name else "parent_removed"
+                events.append(Event(type="child_removed", ts=_ts(now), agent=r["parent"],
+                                    data={"child": r["name"], "type": r["type"], "reason": why}))
+    for ev in events:
+        store.append_events(rows[0]["swarm"], ev.agent, [ev])
+    return rows

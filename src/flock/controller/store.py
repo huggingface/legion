@@ -160,6 +160,8 @@ class Store:
             self._x("ALTER TABLE agents ADD COLUMN parent TEXT")
             self._x("ALTER TABLE agents ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
         self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
+        if "removing" not in cols:  # set while a cascade removal is in flight
+            self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
         cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
@@ -327,17 +329,26 @@ class Store:
 
     def delete_agent(self, name: str) -> None:
         with self.transaction():
-            # Removed agents keep counting against limits.budget_usd.
-            self._x(
-                "UPDATE swarms SET removed_cost = removed_cost + "
-                "(SELECT cost FROM agents WHERE name = ?) "
-                "WHERE name = (SELECT swarm FROM agents WHERE name = ?)",
-                [name, name],
-            )
-            self._x("DELETE FROM agents WHERE name = ?", [name])
-            self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
-            self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
-            self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
+            self.delete_agent_rows(name)
+
+    def delete_agent_rows(self, name: str) -> None:
+        """delete_agent's statements, for a caller already inside a transaction."""
+        # Removed agents keep counting against limits.budget_usd.
+        self._x(
+            "UPDATE swarms SET removed_cost = removed_cost + "
+            "(SELECT cost FROM agents WHERE name = ?) "
+            "WHERE name = (SELECT swarm FROM agents WHERE name = ?)",
+            [name, name],
+        )
+        self._x("DELETE FROM agents WHERE name = ?", [name])
+        self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
+        self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
+        self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
+
+    def mark_removing(self, name: str) -> None:
+        """First phase of a cascade removal: refuse new children, revoke the token."""
+        self._x("UPDATE agents SET removing = 1 WHERE name = ?", [name])
+        self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])
 
     # ----------------------------------------------------------------- spawn
 

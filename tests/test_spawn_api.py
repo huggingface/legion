@@ -331,3 +331,68 @@ def test_store_migrates_agents_and_swarms(tmp_path):
         assert {"spawned", "removed_cost"} <= cols
     finally:
         s.close()
+
+
+def test_spawn_during_cascade_removal_leaves_no_orphan(store, client, swarm):
+    """Review P1 (spawn_remove_race.py): a spawn racing a removal must not leave a child of a
+    removed parent, nor a live token. The remover pauses while enumerating the subtree; the
+    spawn must wait for it and then be refused."""
+    import threading
+
+    from flock.models import SpawnRequest
+
+    parent = spawning.spawn(store, LEADER, SpawnRequest(type="analyst"), 0)[0].name
+    scanned, resume = threading.Event(), threading.Event()
+    original = store.list_agents
+
+    def list_agents(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if threading.current_thread().name == "remover" and kwargs.get("parent") == parent:
+            scanned.set()
+            assert resume.wait(5)
+        return result
+
+    store.list_agents = list_agents
+    removed: list = []
+    outcome: dict = {}
+
+    def spawner():
+        try:
+            outcome["ack"] = spawning.spawn(store, parent, SpawnRequest(type="helper"), 2)
+        except spawning.Refused as r:
+            outcome["refused"] = r.reason
+        except KeyError:
+            outcome["gone"] = True
+
+    remover = threading.Thread(
+        name="remover",
+        target=lambda: removed.extend(spawning.remove_subtree(store, parent, "removed", 1)),
+    )
+    remover.start()
+    assert scanned.wait(5)
+    spawn_thread = threading.Thread(target=spawner)
+    spawn_thread.start()
+    spawn_thread.join(0.3)
+    assert spawn_thread.is_alive()  # admission waits for the enumeration to finish
+    resume.set()
+    remover.join(5)
+    spawn_thread.join(5)
+    store.list_agents = original
+    assert [r["name"] for r in removed] == [parent]
+    assert "ack" not in outcome and (outcome.get("refused") == "parent_removing" or outcome["gone"])
+    assert store.list_agents(parent=parent) == [] and store.get_agent(parent) is None
+    assert store.list_agents("demo") == [store.get_agent(LEADER)]
+    assert store._q("SELECT agent FROM agent_tokens WHERE agent LIKE ?", [f"{parent}%"]) == []
+
+
+async def test_spawn_under_a_row_being_removed_is_refused(client, store, tick, swarm):
+    a = (await spawn(client, LEADER, "analyst")).json()["name"]
+    h = (await spawn(client, a, "helper")).json()["name"]
+    with store.transaction():  # the first phase of a removal, as a crash would leave it
+        for n in (h, a):
+            store.mark_removing(n)
+    assert await reason(await spawn(client, a, "helper")) == "parent_removing"
+    assert await reason(await spawn(client, a, "helper", key="k")) == "parent_removing"
+    assert store.get_agent_token(a) is None and store.get_agent_token(h) is None
+    tick()  # reconcile finishes the removal
+    assert store.get_agent(a) is None and store.get_agent(h) is None

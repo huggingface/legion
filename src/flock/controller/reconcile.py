@@ -199,7 +199,7 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     existing = {a["name"]: a for a in store.list_agents(spec.swarm, type_name)}
     reason = "type_removed" if type_name not in spec.types else "swarm_removed"
     for a in sorted(existing.values(), key=lambda a: a["slot"], reverse=True):
-        if ts is None or (a["parent"] is None and a["slot"] >= replicas):
+        if ts is None or a["removing"] or (a["parent"] is None and a["slot"] >= replicas):
             for r in spawning.remove_subtree(store, a["name"], reason, p.now):
                 p.act("unassign", r["name"], r["worker"] or "")
     for slot in range(replicas):
