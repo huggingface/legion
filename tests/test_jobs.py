@@ -94,6 +94,7 @@ def test_launch_counts_hub_calls(monkeypatch):
     assert job == "job-1" and c.calls["run_job"] == 1
     assert seen["image"] == BOOTSTRAP_IMAGE and seen["timeout"] == 2400
     assert seen["namespace"] == "ns" and seen["labels"] == {"swarm": "e"}
+    assert "network_group" not in seen
     assert jobs_mod.DEFAULT_WORKER_IMAGE is None or isinstance(jobs_mod.DEFAULT_WORKER_IMAGE, str)
 
 
@@ -103,3 +104,25 @@ def test_parse_job_labels():
         "team": "eval",
     }
     assert parse_labels("") == {}
+
+
+def test_launch_joins_the_providers_network_group(monkeypatch):
+    from flock.models import SwarmSpec
+
+    spec = SwarmSpec.model_validate({
+        "swarm": "s", "namespace": "ns", "bucket": "b",
+        "providers": {"gpu": {"type": "openai_compat", "api_key_env": "K", "self_hosted": True,
+                              "base_url": "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
+                              "network_group": "flock-gpu"}},
+        "types": {"w": {"harness": "codex", "model": "gpu:Qwen/Q"}}})
+    c = _client(monkeypatch, image=None)
+    seen = {}
+
+    class Api:
+        def run_job(self, **kw):
+            seen.update(kw)
+            return type("J", (), {"id": "job-1"})()
+
+    c.api = Api()
+    c.launch("w0", spec.types["w"], {}, {}, {}, 60, namespace="ns")
+    assert seen["network_group"] == "flock-gpu"

@@ -69,6 +69,12 @@ def bootstrap_command() -> list[str]:
     return ["bash", "-c", script]
 
 
+def network_group(spec: TypeSpec) -> str | None:
+    """The HF Jobs network group a type's workers join: its provider's `network_group`."""
+    r = spec.resolved_model
+    return r.provider.network_group if r is not None else None
+
+
 @dataclass
 class JobState:
     stage: str  # SCHEDULING, RUNNING, COMPLETED, CANCELED, ERROR, DELETED
@@ -136,6 +142,10 @@ class HubJobsClient:
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         self.calls["run_job"] += 1
+        extra: dict[str, Any] = {}
+        group = network_group(spec)
+        if group:  # join the self-hosted server's group (huggingface_hub >= 2.1)
+            extra["network_group"] = group
         job = self.api.run_job(
             **self.launch_args(spec, env),
             secrets=secrets,
@@ -143,6 +153,7 @@ class HubJobsClient:
             timeout=int(timeout),
             labels=labels,
             namespace=namespace,
+            **extra,
         )
         return job.id
 

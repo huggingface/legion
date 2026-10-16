@@ -76,7 +76,7 @@ def codex_config_args(spec: TypeSpec) -> list[str]:
     r = spec.resolved_model
     if r is not None:
         p, name = r.provider, codex_provider_id(r.provider_name)
-        table: dict[str, str | int] = {"name": r.provider_name, "base_url": p.base_url or "",
+        table: dict[str, str | int] = {"name": r.provider_name, "base_url": p.worker_base_url() or "",
                                        "env_key": p.api_key_env, "wire_api": "responses"}
         if p.max_retries is not None:
             table["request_max_retries"] = p.max_retries

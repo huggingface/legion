@@ -311,3 +311,15 @@ async def test_preflight_bearer_auth_for_anthropic(preflight_client):
         rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
     assert rep["ok"] is True
     assert all(x["auth"] == "Bearer ak" and x["key"] is None for x in seen)
+
+
+async def test_preflight_skips_network_group_providers(preflight_client):
+    fake, seen = fake_provider()
+    providers = {"gpu": {"type": "openai_compat", "api_key_env": "VLLM_API_KEY", "self_hosted": True,
+                         "base_url": "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
+                         "network_group": "flock-gpu"}}
+    spec = pspec(providers, w={"harness": "codex", "model": "gpu:Qwen/Q"})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    r = rep["results"][0]
+    assert rep["ok"] and r["skipped"] and "network group 'flock-gpu'" in r["warning"] and not seen

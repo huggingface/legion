@@ -29,6 +29,10 @@ PROVIDERS = {
     "anthd": {"type": "anthropic", "api_key_env": "MY_ANTHROPIC", "pricing": {"*": [4, 20, 0.2]}},
     "anthb": {"type": "anthropic", "base_url": "https://gw.example", "api_key_env": "VLLM_KEY",
               "self_hosted": True, "auth": "bearer"},
+    "gpu": {"type": "openai_compat", "base_url": "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
+            "api_key_env": "VLLM_KEY", "self_hosted": True, "network_group": "g"},
+    "gpua": {"type": "anthropic", "base_url": "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000",
+             "api_key_env": "VLLM_KEY", "self_hosted": True, "network_group": "g"},
 }
 WORKER_ENV = {
     "PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm",
@@ -235,3 +239,12 @@ async def test_claude_cli_gets_no_worker_secrets_through_the_real_sdk(tmp_path, 
     assert env["ANTHROPIC_API_KEY"] == "vllm-secret" and env["ANTHROPIC_BASE_URL"] == "http://vllm:8000"
     assert env["CLAUDE_CONFIG_DIR"] == "/state/claude" and env["LANG"] == "C.UTF-8"
     assert env["CLAUDE_CODE_ENTRYPOINT"] == "sdk-py"  # the SDK's own variables survive
+
+
+def test_network_group_base_url_is_expanded_on_the_worker(worker_env, monkeypatch):
+    monkeypatch.setenv("HF_NETWORK_GROUP_PREFIX", "ng-1-")
+    t = typespec(c={"harness": "codex", "model": "gpu:Qwen/Q"},
+                 w={"harness": "claude", "model": "gpua:Qwen/Q"})
+    sets = dict(a.split("=", 1) for a in codex_config_args(t["c"])[1::2])
+    assert sets["model_providers.gpu.base_url"] == '"http://ng-1-vllm:8000/v1"'
+    assert claude_env(t["w"], {"VLLM_KEY": "k"})["ANTHROPIC_BASE_URL"] == "http://ng-1-vllm:8000"

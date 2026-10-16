@@ -46,10 +46,24 @@ run the preflight to find out for your model.
 ## Pointing a swarm at vLLM
 
 1. Serve the model with tool calling on and a key, e.g.
-   `vllm serve Qwen/Qwen3.8-27B-FP8 --api-key "$VLLM_API_KEY" --enable-auto-tool-choice --tool-call-parser hermes`
-   (the parser depends on the model family).
-2. Make it reachable from the worker jobs: `base_url` must resolve from every worker, so
-   `127.0.0.1` does not work unless the workers run inside the same job.
+   `vllm serve Qwen/Qwen3.8-27B-FP8 --api-key "$VLLM_API_KEY" --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3`
+   (the parsers depend on the model family).
+2. Make it reachable from the worker jobs. `127.0.0.1` does not work unless the workers run
+   inside the same job. HF Jobs offers two paths:
+   - **Network group (recommended).** Start the server job with
+     `hf jobs run --network-group <group> --network-alias vllm ...` and set
+     `network_group: <group>` on the provider. flock launches the workers of every type on that
+     provider into the same group, and they reach the server directly on any port. Write the
+     URL with the alias, `base_url: http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1`. HF Jobs sets
+     `HF_NETWORK_GROUP_PREFIX` inside group members only, and the worker expands it. vLLM keeps
+     its own `--api-key`. Both jobs must be in the same namespace (and resource group). The
+     controller is not in the group, so preflight skips these providers (reported as `skipped`).
+   - **Jobs proxy.** `--expose 8000` publishes `https://<job id>--8000.hf.jobs`, which needs an
+     HF token as `Authorization: Bearer`. Serve without `--api-key`, set
+     `api_key_env: HF_TOKEN`, and use `auth: bearer` on `anthropic` providers, because Claude
+     Code's default `x-api-key` is not accepted. In the 2026-10-16 smoke run,
+     `--expose-public 8000` with vLLM's `--api-key` returned vLLM's 401 for every keyed request:
+     the proxy did not pass the key through.
 3. Put the key in the controller's environment (a Space secret) under the name you give
    `api_key_env`, e.g. `VLLM_API_KEY`. The controller sends it to that type's jobs as a secret.
 4. Declare the provider with `self_hosted: true` (price `[0, 0, 0]`, pinned into the spec) and,
