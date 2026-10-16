@@ -28,7 +28,7 @@ limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
 | `spawn.<type>.types` | required | a list of child types (then `max` is required), or a map `{child type: cap}` |
 | `spawn.<type>.max` | none | cap on the agent's existing children, all types together. Optional with the map form |
 | `spawn.<type>.depth` | 1 | generations allowed below the agent. 0: it cannot spawn |
-| `types.<t>.workers.initial` | v1's count: `ceil(replicas / agents_per_worker)` | worker slots the type starts with |
+| `types.<t>.workers.initial` | v1's count: `ceil(replicas / agents_per_worker)` | worker slots counted toward the cap. Not pre-created: a worker opens only when an agent needs one |
 | `types.<t>.workers.max_extra` | 0 | worker slots spawned children of `<t>` may add on demand |
 | `limits.alive` | none | agents that exist in the swarm, replicas and spawned together |
 | `limits.spawned_total` | none | children ever spawned in the swarm (the name counter); removing one does not free a place |
@@ -151,9 +151,9 @@ keeps them until removed; it does nothing until prompted.
 
 ## Not yet
 
-- Pre-warmed child slots (idle children created ahead of a spawn) are a possible later feature.
-  Today, `workers.initial >= 1` on the child type keeps a worker ready, so the first child skips
-  the job launch.
+- Pre-warming is a possible later feature. Today a worker is opened only for agents that
+  exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
+  about 30 to 45 s), whatever `workers.initial` says.
 - The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
   type's `system_prompt_file`.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
