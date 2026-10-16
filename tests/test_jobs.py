@@ -11,6 +11,7 @@ from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
     CLAUDE_CODE_VERSION,
     CODEX_VERSION,
+    PI_VERSION,
     WORKER_COMMAND,
     HubJobsClient,
     bootstrap_command,
@@ -55,9 +56,20 @@ def _client(monkeypatch, image, bootstrap_env=None, wheel=WHEEL) -> HubJobsClien
 def test_launch_args_bootstrap_when_no_image(monkeypatch):
     c = _client(monkeypatch, image=None)
     args = c.launch_args(_spec(), {"WORKER_ID": "w"})
-    assert args["image"] == BOOTSTRAP_IMAGE == "node:22-bookworm"
+    assert args["image"] == BOOTSTRAP_IMAGE == "node:22.23.3-bookworm"
     assert args["command"] == bootstrap_command()
-    assert args["env"] == {"WORKER_ID": "w", "FLOCK_WHEEL_URL": WHEEL}
+    assert args["env"] == {"WORKER_ID": "w", "FLOCK_WHEEL_URL": WHEEL, "FLOCK_HARNESS": "claude"}
+
+
+def test_bootstrap_installs_pi_only_on_pi_workers(monkeypatch):
+    script = bootstrap_command()[2]
+    assert 'if [ "${FLOCK_HARNESS:-}" = pi ]' in script
+    assert f"@earendil-works/pi-coding-agent@{PI_VERSION}" in script
+    for env in ("PI_CODING_AGENT_DIR=/state/pi", "PI_OFFLINE=1", "PI_TELEMETRY=0", "FLOCK_PI_CLI="):
+        assert env in script
+    c = _client(monkeypatch, image=None)
+    args = c.launch_args(TypeSpec(harness="pi", model="m"), {"WORKER_ID": "w"})
+    assert args["env"]["FLOCK_HARNESS"] == "pi"
 
 
 def test_launch_args_bootstrap_flag_overrides_default_image(monkeypatch):
