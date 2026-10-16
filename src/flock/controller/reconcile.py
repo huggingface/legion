@@ -39,6 +39,7 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     agent_name,
+    max_workers,
     parse_duration,
 )
 
@@ -268,7 +269,13 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 
     for w in workers:
         fill(w)
+    # A type that declares `workers` never has more than initial + max_extra worker slots
+    # (retiring ones included); agents that do not fit wait unplaced. Others: v1, unbounded.
+    slots = max_workers(ts) if ts.workers is not None else None
     while pending:
+        if slots is not None and len(store.list_workers(spec.swarm, type_name)) >= slots:
+            p.act("workers_full", f"{spec.swarm}/{type_name}", f"{pending} unplaced")
+            return
         idx = store.next_worker_index(spec.swarm, type_name)
         wid = worker_id_for(spec.swarm, type_name, idx)
         store.insert_worker(wid, spec.swarm, type_name, idx, p.now)

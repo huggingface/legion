@@ -52,8 +52,10 @@ construction.
 - **Name:** `<parent>-<type>-<NNNN>`, `NNNN` from a per-swarm counter that is never reused while
   the swarm exists, e.g. `leader-0000-analyst-0007`, then `leader-0000-analyst-0007-helper-0012`.
 - **Placement:** on the child type's own workers with v1's fill rule (fill in order, never move,
-  open a new worker on demand). Admission keeps a type within `(initial + max_extra) x
-  agents_per_worker` agents. The first child of a type with no worker waits for a job launch
+  open a new worker on demand). A type that declares `workers` never gets more than
+  `initial + max_extra` worker slots, replicas included: `apply` rejects replicas that do not fit
+  in `(initial + max_extra) x agents_per_worker`, admission refuses children past it (`workers`),
+  and placement opens no further slot. Types without `workers` keep v1's unbounded placement. The first child of a type with no worker waits for a job launch
   (about 30 to 45 s).
 - **First prompt:** `prompt` in the spawn request is held as a pending prompt and delivered when
   the child's worker polls, like any prompt to an agent whose worker is not up yet.

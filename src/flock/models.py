@@ -112,6 +112,21 @@ class TypeSpec(BaseModel):
             raise ValueError("must be >= 0")
         return v
 
+    @field_validator("workers")
+    @classmethod
+    def _replicas_fit(cls, v: WorkersSpec | None, info) -> WorkersSpec | None:
+        """Declared workers are a cap (docs/spawn.md): the replicas must fit in them."""
+        replicas, per = info.data.get("replicas"), info.data.get("agents_per_worker")
+        if v is None or v.initial is None or replicas is None or per is None:
+            return v
+        room = (v.initial + v.max_extra) * max(1, per)
+        if replicas > room:
+            raise ValueError(
+                f"replicas {replicas} do not fit in workers.initial + workers.max_extra = "
+                f"{v.initial + v.max_extra} workers x agents_per_worker {per} = {room} agents"
+            )
+        return v
+
 
 class SwarmSpec(BaseModel):
     swarm: str

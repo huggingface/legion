@@ -396,3 +396,19 @@ async def test_spawn_under_a_row_being_removed_is_refused(client, store, tick, s
     assert store.get_agent_token(a) is None and store.get_agent_token(h) is None
     tick()  # reconcile finishes the removal
     assert store.get_agent(a) is None and store.get_agent(h) is None
+
+
+def test_placement_never_opens_more_than_declared_workers(store, jobs, tick):
+    """Review P2: reconcile keeps a type that declares `workers` within initial + max_extra
+    slots; agents that do not fit wait unplaced. A type without `workers` keeps v1."""
+    spec = spawn_spec(analyst={"agents_per_worker": 1, "workers": {"initial": 1, "max_extra": 1}},
+                      researcher={"replicas": 3, "agents_per_worker": 1})
+    store.put_swarm(spec, 0)
+    for n in range(1, 5):  # past admission's check, e.g. agents_per_worker lowered on re-apply
+        store.insert_child(f"{LEADER}-analyst-{n:04d}", "demo", "analyst", n, LEADER, 0, 0)
+    actions = tick()
+    assert len(store.list_workers("demo", "analyst")) == 2
+    placed = [a for a in store.list_agents("demo", "analyst") if a["worker"]]
+    assert len(placed) == 2
+    assert any(a.kind == "workers_full" for a in actions)
+    assert len(store.list_workers("demo", "researcher")) == 3  # no `workers`: v1

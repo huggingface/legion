@@ -552,7 +552,8 @@ What may spawn is run policy, kept apart from what a type is: `spawn.<type>` lis
 types (a list with one `max`, or a map of per-type caps), and `depth`, the generations allowed
 below the agent. A child's depth is `min(parent's - 1, its type's spawn.depth)`. `apply` rejects
 cycles, so recursion ends by construction. Each spawnable type declares `workers: {initial,
-max_extra}`; admission keeps the type within that many workers. `limits` caps the swarm
+max_extra}`, a cap on its worker slots that `apply` (replicas must fit), spawn admission and
+placement all respect. `limits` caps the swarm
 (`alive`, `spawned_total`, `budget_usd`). A refusal is a 409 with a `reason`.
 
 Tokens: v1 handed the swarm's `FLOCK_TOKEN` to every harness through the inherited environment.

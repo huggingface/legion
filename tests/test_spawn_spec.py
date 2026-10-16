@@ -124,3 +124,14 @@ def test_example_spec_loads():
     s = load_spec(str(Path(__file__).parent.parent / "examples" / "spawn.yaml"))
     assert s.spawn["leader"].cap_for("analyst") == 4 and s.limits.alive == 20
     assert "flock spawn" in s.types["leader"].system_prompt
+
+
+def test_replicas_must_fit_declared_workers():
+    """Review P2 (spawn_worker_cap.py): declared workers are a cap, replicas included."""
+    over = {"replicas": 3, "agents_per_worker": 1, "workers": {"initial": 1, "max_extra": 0}}
+    with pytest.raises(ValidationError, match=r"replicas 3 do not fit in workers.initial \+ "
+                       r"workers.max_extra = 1 workers x agents_per_worker 1 = 1 agents"):
+        spec(types={"analyst": over})
+    spec(types={"analyst": {**over, "workers": {"initial": 1, "max_extra": 2}}})  # exactly fits
+    spec(types={"analyst": {**over, "workers": {"max_extra": 0}}})  # initial defaults to 3
+    spec(types={"analyst": {"replicas": 3, "agents_per_worker": 1}})  # no workers: v1
