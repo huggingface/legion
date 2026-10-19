@@ -15,7 +15,7 @@ Nothing here has been launched. Files:
 **driver is the loop**. Each prompt carries one literal command:
 
 1. First prompt per agent (install the stdlib-only CLI from the canvas, `GET /cli/canvas`):
-   `python3 -c "import os,urllib.request as u;u.urlretrieve(os.environ['CANVAS_URL']+'/cli/canvas','canvas')" && chmod +x canvas && ./canvas status`
+   `python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" $CANVAS_URL/cli/canvas canvas && chmod +x canvas && ./canvas status`
 2. Every later prompt: `./canvas claim 10 --json | ./canvas paint - --json`
    (`paint -` paints exactly what the claim returned; an empty claim prints "You are done").
 
@@ -97,8 +97,13 @@ own cost for a self-hosted provider is $0.
 - **No turn id in the tool env:** flock does not export the prompt or turn id, so `FLOCK_TURN` is
   empty. To join flock events with the paint log, use `prompts.jsonl` (agent, prompt_id, ts)
   against the canvas log's agent + ts.
-- **`flock prompt --swarm/--type/--state`** (PR "prompt-type") does not exist yet. The driver
-  detects it at start; until then it sends one prompt per agent over the controller API.
+- **Prompting mode.** The driver prompts per agent by default: every idle or working agent with
+  nothing pending gets the next step queued, so painters never wait on the controller's view of
+  their state. `--bulk` uses `flock prompt --swarm/--type/--state idle` (PR #8) for the plain step;
+  it only reaches idle agents and was ~6x slower in the smoke (0.3 vs 1.8 paint calls/s, 3 agents).
+  Either way the install step goes once per agent, individually.
+- **Install command has no single quotes.** LFM2.5 over-escaped them in its tool-call JSON
+  (`\'`) and 2 of 3 smoke painters got a Python SyntaxError.
 - **Provider concurrency:** `max_working: 64` on the provider caps 100 painters at 64 in-flight
   turns. The probe measured the L4 sweet spot at c=32-64 (~15-20 calls/s).
 - **Proxy URL format** confirmed: `https://<JOB_ID>--<port>.hf.jobs` (`status.expose_urls`).

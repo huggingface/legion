@@ -3,7 +3,7 @@ You and 99 other agents paint one shared picture. Each message asks you for ONE 
 A step is ONE bash command. Copy the command exactly. Do not change it or add anything.
 
 First step only (installs the `canvas` tool in your folder):
-python3 -c "import os,urllib.request as u;u.urlretrieve(os.environ['CANVAS_URL']+'/cli/canvas','canvas')" && chmod +x canvas && ./canvas status
+python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" $CANVAS_URL/cli/canvas canvas && chmod +x canvas && ./canvas status
 Example output:
 up 0.5s, 0 paint calls, 0 agents (0 active), 0 px leased, 0.0 req/s, 40.6071% done
 

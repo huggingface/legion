@@ -3,10 +3,13 @@
 
 Every --interval seconds:
   1. GET <canvas>/score; stop when the work set is fully painted (coverage 100%).
-  2. Prompt painters that have nothing queued. Bulk path: `flock prompt --swarm S --type T
-     --state idle "<step>"` when that CLI exists (PR "prompt-type"; detected at start).
-     Until then: list agents over the controller API (what `flock agents` reads) and POST one
-     prompt per agent (what `flock prompt` sends).
+  2. Prompt painters that have nothing queued (default: per agent). List agents over the
+     controller API (what `flock agents` reads) and POST one prompt per agent (what `flock prompt`
+     sends) to every idle or working agent with no pending prompt, so the next step is always
+     queued. --bulk instead runs `flock prompt --swarm S --type T --state idle "<step>"` (PR
+     "prompt-type"); it only reaches idle agents, so steps wait for the controller to see the
+     agent idle (smoke 2026-10-19: ~0.3 vs 1.8 paint calls/s for 3 agents). Either way a new
+     agent gets the install step once, per agent, and later prompts are the plain step.
   3. Print one progress line and append it to progress.jsonl; every prompt sent goes to
      prompts.jsonl (agent, prompt_id, ts) so flock turns join the canvas log by agent + time.
 
@@ -31,14 +34,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# No single quotes: LFM2.5 over-escapes them inside its tool-call JSON (smoke 2026-10-19).
 BOOT = (
-    'python3 -c "import os,urllib.request as u;'
-    "u.urlretrieve(os.environ['CANVAS_URL']+'/cli/canvas','canvas')\" "
-    "&& chmod +x canvas && ./canvas status"
+    'python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" '
+    "$CANVAS_URL/cli/canvas canvas && chmod +x canvas && ./canvas status"
 )
 STEP = "./canvas claim 10 --json | ./canvas paint - --json"
-# The bulk path cannot tell new agents from old ones, so it installs when missing.
-STEP_SELF_INSTALL = f"test -x canvas || {BOOT}; {STEP}"
 
 
 def prompt_text(cmd: str) -> str:
@@ -210,7 +211,12 @@ def main() -> int:
     ap.add_argument("--gpu-usd-per-hour", type=float, default=0.80, help="l4x1 = 0.80")
     ap.add_argument("--out", default="progress.jsonl")
     ap.add_argument("--prompts-log", default="prompts.jsonl")
-    ap.add_argument("--no-bulk", action="store_true", help="always prompt per agent")
+    ap.add_argument(
+        "--bulk", action="store_true", help="steps via `flock prompt --type --state idle`"
+    )
+    ap.add_argument(
+        "--no-bulk", action="store_true", help="per agent (the default; kept for old scripts)"
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--space-id",
@@ -243,7 +249,9 @@ def main() -> int:
 def drive(a, pub: Publisher) -> str:
     ctl = Controller(a.flock_url, os.environ.get("FLOCK_TOKEN", ""), a.swarm, a.type)
     canvas = a.canvas_url.rstrip("/")
-    bulk = not a.no_bulk and bulk_cli_available()
+    bulk = a.bulk and not a.no_bulk and bulk_cli_available()
+    if a.bulk and not bulk:
+        print("driver: --bulk needs `flock prompt --swarm/--type/--state`; prompting per agent")
     print(
         f"driver: swarm={a.swarm} type={a.type} canvas={canvas} "
         f"mode={'bulk flock prompt' if bulk else 'per-agent prompts'}",
@@ -279,6 +287,41 @@ def drive(a, pub: Publisher) -> str:
                 by_state[ag["state"]] = by_state.get(ag["state"], 0) + 1
             idle, working = by_state.get("idle", 0), by_state.get("working", 0)
             turns = sum(ag.get("turns") or 0 for ag in agents)
+            if not done and agents and bulk:
+                # New agents (and ones that never reached the canvas after 3 steps) get the
+                # install step individually; everyone idle then gets the plain step in bulk.
+                for ag in agents:
+                    name = ag["name"]
+                    seen = name in score.get("agents", {})
+                    if name in booted and (seen or steps.get(name, 0) < 3):
+                        continue
+                    if ag["state"] not in ("idle", "working"):
+                        continue
+                    steps[name] = 0
+                    ack = {"prompt_id": "dry-run"}
+                    if not a.dry_run:
+                        try:
+                            ack = ctl.prompt(name, prompt_text(BOOT))
+                        except (urllib.error.URLError, OSError) as e:
+                            print(f"prompt {name} failed: {e}", flush=True)
+                            continue
+                    booted.add(name)
+                    sent += 1
+                    plog.write(
+                        json.dumps(
+                            {
+                                "ts": round(time.time(), 3),
+                                "agent": name,
+                                "prompt_id": ack.get("prompt_id"),
+                                "kind": "boot",
+                            }
+                        )
+                        + "\n"
+                    )
+                for ag in agents:
+                    if ag["state"] == "idle" and ag["name"] in booted:
+                        steps[ag["name"]] = steps.get(ag["name"], 0) + 1
+                plog.flush()
             if not done and agents:
                 if bulk:
                     cmd = [
@@ -290,13 +333,13 @@ def drive(a, pub: Publisher) -> str:
                         a.type,
                         "--state",
                         "idle",
-                        prompt_text(STEP_SELF_INSTALL),
+                        prompt_text(STEP),
                     ]
                     if a.dry_run:
                         print("would run:", " ".join(cmd[:8]), "...")
                     else:
                         subprocess.run(cmd, check=False, capture_output=True)
-                    sent = idle
+                    sent += idle
                 else:
                     for ag in agents:
                         name = ag["name"]
