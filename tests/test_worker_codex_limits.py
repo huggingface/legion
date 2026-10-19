@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from flock.controller.prices import Price
-from flock.models import TypeSpec
+from flock.models import SwarmSpec, TypeSpec
 from flock.worker.adapters.codex import CodexAdapter, CodexMapper
 
 from .conftest import make_spec
@@ -216,6 +216,23 @@ async def test_codex_steer_after_last_allowed_call_becomes_the_next_turn(codex):
     assert any(e.kind == "turn_started" and e.data["harness_turn_id"] == "turn-2" for e in second)
     assert second[-1].status == "completed"
     assert codex.model_calls() == ["turn-1", "turn-2"]
+    await codex.stop()
+
+
+async def test_codex_budget_uses_the_pinned_provider_price(codex):
+    """A provider-backed type is priced at its pinned price, not the default row: at $0/M the
+    same budget that stops a default-priced call is never reached."""
+    spec_ = SwarmSpec.model_validate({
+        "swarm": "s", "namespace": "n", "bucket": "b",
+        "providers": {"hf": {"type": "openai_compat", "base_url": "https://router.example/v1",
+                             "api_key_env": "HF_TOKEN", "pricing": {"*": [0, 0, 0]}}},
+        "types": {"w": {"harness": "codex", "model": "hf:gpt-6-luna", "max_budget_usd": 0.000001}},
+    }).types["w"]
+    await codex.start(codex.workdir, None, spec_)
+    assert codex._mapper.prices["gpt-6-luna"].input == 0
+    await codex.send("2: tools")
+    evs = await until_ended(codex)
+    assert evs[-1].status == "completed" and len(codex.model_calls()) == 3
     await codex.stop()
 
 
