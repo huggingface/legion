@@ -104,6 +104,26 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         world.close()
 
     app = FastAPI(title="flock pixel canvas", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def cors_reads(request: Request, call_next):
+        """Public reads (GET) may be fetched from any origin, e.g. the progress Space page.
+        Writes get no CORS header, so a browser page elsewhere cannot paint."""
+        if request.method == "OPTIONS" and request.headers.get("origin"):
+            return Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, HEAD",
+                    "Access-Control-Allow-Headers": "X-Canvas-Token",
+                    "Access-Control-Max-Age": "3600",
+                },
+            )
+        resp = await call_next(request)
+        if request.method in ("GET", "HEAD"):
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+
     app.state.world = world
     app.state.auth = auth
 

@@ -95,3 +95,23 @@ def test_reads_open_writes_need_token(tmp_path):
         for path, body in writes:
             assert c.post(path, json=body, headers=H("a")).status_code == 401, path
         assert c.post("/claim", json={}, headers=H("a", token="sec")).status_code == 200
+
+
+def test_cors_on_public_reads_only(tmp_path):
+    app = create_app(Settings(target=_rgba(tmp_path), token="sec", rate_limit=0))
+    with TestClient(app) as c:
+        origin = {"Origin": "https://cmpatino-flock-pixel.static.hf.space"}
+        for path in [
+            "/canvas.png",
+            "/score",
+            "/status",
+            "/log",
+            "/replay/frame?t=0",
+            "/target/info",
+        ]:
+            r = c.get(path, headers=origin)
+            assert r.headers.get("access-control-allow-origin") == "*", path
+        pre = c.options("/score", headers={**origin, "Access-Control-Request-Method": "GET"})
+        assert pre.status_code == 204 and "GET" in pre.headers["access-control-allow-methods"]
+        r = c.post("/claim", json={}, headers={**origin, **H("a", token="sec")})
+        assert r.status_code == 200 and "access-control-allow-origin" not in r.headers

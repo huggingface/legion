@@ -3,6 +3,8 @@ execute each prompt's command in their own workdir (like the llm harness with a 
 
 from __future__ import annotations
 
+import gzip
+import json
 import os
 import re
 import socket
@@ -99,6 +101,10 @@ def test_driver_paints_to_completion(tmp_path):
                 "--prompts-log",
                 str(tmp_path / "prompts.jsonl"),
                 "--no-bulk",
+                "--publish-dir",
+                str(tmp_path / "space"),
+                "--run-id",
+                "r1",
             ],
             capture_output=True,
             check=False,
@@ -112,5 +118,17 @@ def test_driver_paints_to_completion(tmp_path):
         assert len(boots) == 3  # one install per agent, then claim|paint steps
         assert (tmp_path / "progress.jsonl").read_text().count("\n") >= 2
         assert (tmp_path / "prompts.jsonl").read_text().count('"kind": "step"') >= 5
+        # The progress Space files: runs.json, the progress series and the final artefacts.
+        space = tmp_path / "space"
+        runs = json.loads((space / "runs.json").read_text())
+        assert runs[-1]["id"] == "r1" and runs[-1]["status"] == "finished"
+        assert runs[-1]["canvas_url"] == canvas_url and runs[-1]["final"] == "final/r1"
+        row = json.loads((space / "runs/r1/progress.jsonl").read_text().splitlines()[-1])
+        assert row["done_pct"] == 100.0 and "agents_by_state" in row and "turns" in row
+        score = json.loads((space / "final/r1/score.json").read_text())
+        assert score["coverage_pct"] == 100.0 and score["target"]["width"] == 8
+        log = gzip.decompress((space / "final/r1/paint-log.jsonl.gz").read_bytes()).decode()
+        assert len(log.splitlines()) == score["seq"]
+        assert (space / "final/r1/canvas.png").read_bytes()[:4] == b"\x89PNG"
     finally:
         canvas_srv.should_exit = ctl_srv.should_exit = True
