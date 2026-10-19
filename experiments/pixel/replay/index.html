@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvas replay</title>
+<style>
+  :root { --bg:#fafaf7; --fg:#1d1d1b; --muted:#6b6b66; --line:#e2e1db; --card:#fff;
+          --useful:#2f8f46; --duplicate:#8a8a84; --wrong:#c4462c; --overwritten:#8b2bb5; --refused:#b08a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --fg:#ecebe6; --muted:#9a9993; --line:#2c2c2a; --card:#1e1e1c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:16px;
+           align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header .stat { color:var(--muted); font-variant-numeric: tabular-nums; }
+  main { display:grid; grid-template-columns: minmax(0,1fr) 380px; gap:16px; padding:16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .stage { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .imgs { display:flex; gap:8px; }
+  .imgs figure { margin:0; flex:1; min-width:0; }
+  .imgs img { width:100%; image-rendering: pixelated; background:#000; border-radius:4px; display:block; }
+  figcaption { color:var(--muted); font-size:12px; margin-top:4px; }
+  .controls { display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+  .controls input[type=range] { flex:1; min-width:200px; }
+  button, select, input[type=number] { font:inherit; padding:4px 10px; border:1px solid var(--line);
+           border-radius:6px; background:var(--card); color:var(--fg); }
+  button { cursor:pointer; }
+  .num { font-variant-numeric: tabular-nums; }
+  aside { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px;
+          max-height: calc(100vh - 110px); overflow:auto; }
+  aside h2 { font-size:13px; margin:0 0 8px; color:var(--muted); font-weight:600; }
+  .e { border-top:1px solid var(--line); padding:6px 0; font-size:12px; cursor:pointer; }
+  .e.cur { background: color-mix(in srgb, var(--useful) 10%, transparent); }
+  .e.future { opacity:.45; }
+  .e .h { display:flex; gap:8px; flex-wrap:wrap; }
+  .e .seq { font-weight:600; min-width:48px; }
+  .e .meta { color:var(--muted); }
+  .px { display:flex; flex-wrap:wrap; gap:3px; margin-top:4px; }
+  .chip { display:inline-flex; align-items:center; gap:3px; border:1px solid var(--line);
+          border-radius:4px; padding:0 4px; font-family:ui-monospace, monospace; font-size:11px; }
+  .sw { width:9px; height:9px; border-radius:2px; display:inline-block; border:1px solid var(--line); }
+  .o-useful { color:var(--useful); } .o-duplicate { color:var(--duplicate); }
+  .o-wrong { color:var(--wrong); } .o-overwritten { color:var(--overwritten); } .o-refused { color:var(--refused); }
+  .err { color:var(--wrong); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Canvas replay</h1>
+  <span class="stat" id="hdr">loading...</span>
+</header>
+<main>
+  <section class="stage">
+    <div class="imgs">
+      <figure><img id="frame" alt="canvas at log position"><figcaption id="cap">t = 0</figcaption></figure>
+      <figure id="tfig"><img id="target" alt="target image"><figcaption>target</figcaption></figure>
+    </div>
+    <div class="controls">
+      <button id="play">Play</button>
+      <input type="range" id="slider" min="0" max="0" value="0">
+      <input type="number" id="tbox" class="num" min="0" value="0" style="width:90px">
+    </div>
+    <div class="controls">
+      <label>speed <select id="speed">
+        <option value="1">1 entry/tick</option><option value="10">10</option>
+        <option value="100" selected>100</option><option value="1000">1000</option>
+        <option value="10000">10000</option></select></label>
+      <label>agent filter <input id="agent" placeholder="all" style="width:120px"></label>
+      <label><input type="checkbox" id="showT" checked> target</label>
+      <button id="live">Jump to live</button>
+    </div>
+    <p class="stat" id="err"></p>
+  </section>
+  <aside>
+    <h2>Tool calls (paint log) around t</h2>
+    <div id="log"></div>
+  </aside>
+</main>
+<script>
+const qs = new URLSearchParams(location.search);
+const token = qs.get('token') || '';
+const base = location.pathname.replace(/\/replay\/?$/, '');
+const H = token ? { 'X-Canvas-Token': token } : {};
+const $ = (id) => document.getElementById(id);
+let maxSeq = 0, t = +(qs.get('t') || 0), playing = false, busy = false, pending = null;
+
+async function api(path) {
+  const r = await fetch(base + path, { headers: H });
+  if (!r.ok) throw new Error(path + ': ' + r.status + ' ' + (await r.text()).slice(0, 200));
+  return r;
+}
+async function setImg(img, path) {
+  const r = await api(path);
+  const url = URL.createObjectURL(await r.blob());
+  const old = img.src; img.src = url; if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+}
+async function refreshStatus() {
+  try {
+    const s = await (await api('/status')).json();
+    maxSeq = s.seq; $('slider').max = maxSeq; $('tbox').max = maxSeq;
+    $('hdr').textContent = `entries ${s.seq} · agents ${s.agents_seen} · exact match ${s.exact_match_pct}% · ` +
+      `${s.req_per_s_10s} req/s · claims ${s.claims_outstanding}`;
+  } catch (e) { $('err').textContent = e.message; }
+}
+function fmtTs(ts) { return ts ? new Date(ts * 1000).toISOString().slice(11, 23) : ''; }
+function entryHtml(e, cur) {
+  const px = e.px.map(p => `<span class="chip o-${p[3]}" title="${p[3]}"><span class="sw" style="background:#${p[2]}"></span>${p[0]},${p[1]} ${p[3][0]}</span>`).join('');
+  return `<div class="e ${e.seq === cur ? 'cur' : ''} ${e.seq > cur ? 'future' : ''}" data-seq="${e.seq}">
+    <div class="h"><span class="seq">#${e.seq}</span><span>${e.agent}</span>
+    <span class="meta">${fmtTs(e.ts)}</span><span class="meta">turn ${e.turn ?? '-'}</span>
+    <span class="meta">req ${e.req ?? '-'}</span></div><div class="px">${px}</div></div>`;
+}
+async function render() {
+  if (busy) { pending = t; return; }
+  busy = true;
+  try {
+    $('slider').value = t; $('tbox').value = t;
+    await setImg($('frame'), `/replay/frame?t=${t}`);
+    const r = await api(`/log?after=${Math.max(0, t - 12)}&limit=25`);
+    const txt = await r.text();
+    let es = txt.split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const f = $('agent').value.trim();
+    if (f) es = es.filter(e => e.agent.includes(f));
+    $('log').innerHTML = es.map(e => entryHtml(e, t)).join('') || '<p class="stat">no entries</p>';
+    const cur = es.find(e => e.seq === t);
+    $('cap').textContent = `t = ${t} / ${maxSeq}` + (cur ? ` · ${cur.agent} · ${fmtTs(cur.ts)}` : '');
+    $('err').textContent = '';
+  } catch (e) { $('err').textContent = e.message; }
+  busy = false;
+  if (pending !== null) { t = pending; pending = null; render(); }
+}
+function go(v) { t = Math.max(0, Math.min(maxSeq, v | 0)); render(); }
+$('slider').addEventListener('input', e => go(+e.target.value));
+$('tbox').addEventListener('change', e => go(+e.target.value));
+$('log').addEventListener('click', e => { const el = e.target.closest('.e'); if (el) go(+el.dataset.seq); });
+$('live').addEventListener('click', async () => { await refreshStatus(); go(maxSeq); });
+$('showT').addEventListener('change', e => { $('tfig').style.display = e.target.checked ? '' : 'none'; });
+$('agent').addEventListener('change', render);
+$('play').addEventListener('click', () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; tick(); });
+async function tick() {
+  if (!playing) return;
+  if (t >= maxSeq) await refreshStatus();
+  if (t < maxSeq && !busy) go(t + (+$('speed').value));
+  setTimeout(tick, 250);
+}
+(async () => {
+  await refreshStatus();
+  setImg($('target'), '/target.png').catch(e => { $('err').textContent = e.message; });
+  go(t);
+  setInterval(refreshStatus, 5000);
+})();
+</script>
+</body>
+</html>
