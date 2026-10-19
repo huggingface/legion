@@ -32,6 +32,9 @@ class Settings:
     max_claim: int | None = None  # None = max_pixels_per_call
     claim_ttl: float = 120.0
     claim_mode: str = "advisory"  # advisory | enforced
+    region_enforce: bool = False  # region leases gate paint + pixel claims
+    region_ttl: float = 600.0
+    region_ttl_max: float = 3600.0
     reveal_target_in_claim: bool = True
     rate_limit: float = 2.0  # write calls per second per agent; 0 = off
     rate_burst: float = 5.0
@@ -65,6 +68,9 @@ class Settings:
             else None,
             claim_ttl=float(_env("CANVAS_CLAIM_TTL", "120")),
             claim_mode=_env("CANVAS_CLAIM_MODE", "advisory"),
+            region_enforce=_env("REGION_ENFORCE", "0") == "1",
+            region_ttl=float(_env("CANVAS_REGION_TTL", "600")),
+            region_ttl_max=float(_env("CANVAS_REGION_TTL_MAX", "3600")),
             reveal_target_in_claim=_env("CANVAS_CLAIM_REVEAL", "1") == "1",
             rate_limit=float(_env("CANVAS_RATE_LIMIT", "2")),
             rate_burst=float(_env("CANVAS_RATE_BURST", "5")),

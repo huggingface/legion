@@ -10,9 +10,9 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
-from .auth import Auth, AuthError
+from .auth import NAME_RE, Auth, AuthError
 from .config import HERE, Settings, parse_hex
-from .world import PaintError, World, hexc, png_bytes
+from .world import PaintError, RegionConflict, World, hexc, png_bytes
 
 REPLAY_DIR = HERE / "replay"
 
@@ -37,6 +37,23 @@ class ClaimBody(BaseModel):
 
 class ReleaseBody(BaseModel):
     pixels: list[Pixel] | None = None
+
+
+class RegionBody(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+    ttl: float | None = None
+
+
+class RegionRef(BaseModel):
+    id: int | None = None
+
+
+class GrantBody(BaseModel):
+    agent: str
+    id: int | None = None
 
 
 class RegisterBody(BaseModel):
@@ -92,7 +109,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(PaintError)
     async def _paint_err(request, exc: PaintError):
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        code = 409 if isinstance(exc, RegionConflict) else 400
+        return JSONResponse({"error": str(exc)}, status_code=code)
 
     @app.exception_handler(AuthError)
     async def _auth_err(request, exc: AuthError):
@@ -232,6 +250,30 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         out = world.paint(agent, px, turn=turn, req=rid)
         out["agent"] = agent
         return out
+
+    # ----------------------------------------------------------- region leases
+
+    @app.post("/claim/region")
+    def claim_region(request: Request, body: RegionBody):
+        agent = writer(request)
+        return world.claim_region(agent, body.x, body.y, body.w, body.h, body.ttl)
+
+    @app.post("/claim/region/grant")
+    def grant_region(request: Request, body: GrantBody):
+        agent = writer(request)
+        if not NAME_RE.match(body.agent):
+            raise PaintError("bad agent name: use 1-64 chars of [A-Za-z0-9._:@-]")
+        return {"regions": world.grant_region(agent, body.agent, body.id)}
+
+    @app.post("/release/region")
+    def release_region(request: Request, body: RegionRef | None = None):
+        agent = writer(request)
+        return {"released": world.release_region(agent, body.id if body else None)}
+
+    @app.get("/regions")
+    def regions(request: Request):
+        reader(request)
+        return {"regions": world.list_regions(), "enforce": cfg.region_enforce}
 
     @app.post("/agents/register")
     def register(request: Request, body: RegisterBody):

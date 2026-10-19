@@ -41,6 +41,8 @@ The `Dockerfile` is the same service as an image (`CMD python -m canvas`, `cli/`
 | `CANVAS_CLAIM_TTL` | 120 | lease seconds |
 | `CANVAS_CLAIM_MODE` | `advisory` | `enforced` refuses paints on pixels leased by someone else |
 | `CANVAS_CLAIM_REVEAL` | 1 | claim response includes each pixel's target colour |
+| `REGION_ENFORCE` | 0 | 1 = region leases gate `paint` and pixel `claim` (holder + grantees only) |
+| `CANVAS_REGION_TTL` / `_MAX` | 600 / 3600 | default / max region lease seconds |
 | `CANVAS_RATE_LIMIT` / `CANVAS_RATE_BURST` | 2 / 5 | per-agent token bucket on write calls (0 = off) |
 | `CANVAS_TOKEN` | unset | mode A shared secret |
 | `CANVAS_ADMIN_TOKEN` | unset | mode B: mints per-agent tokens |
@@ -74,6 +76,10 @@ All bodies are JSON. Errors are `{"error": "<short actionable message>"}` with 4
 | `GET /status` | uptime, seq, agents seen/active, claims outstanding, req/s (10 s), config, auth mode |
 | `GET /log?after=<seq>&limit<=5000` | paint log, JSONL |
 | `GET /replay` | replay page; `GET /replay/frame?t=<seq>` = PNG of the canvas after entry t |
+| `POST /claim/region {x,y,w,h,ttl?}` | leader leases a rectangle; overlap with a live lease -> 409 |
+| `POST /claim/region/grant {agent, id?}` | holder lets `agent` work in its region(s) (all its regions if no `id`) |
+| `POST /release/region {id?}` | holder drops one (or all) of its region leases |
+| `GET /regions` | live region leases `{id,owner,x,y,w,h,until,grants}` |
 | `POST /agents/register {name}` | admin token only; returns `{name, token}` (mode B) |
 
 Names I changed or added vs the brief: paint pixels accept `hex` as well as `r,g,b`;
@@ -95,6 +101,13 @@ apart from the coverage mask sum.
 queue is a row-major cursor over pixels that are not matching and not leased; it wraps, so pixels
 painted wrong come back around. Leases expire after the TTL (crashed agents leak nothing), and a
 correct paint clears the lease. Advisory mode (default) only steers work; `enforced` refuses.
+
+**Region leases** (for a later leader/children experiment; not used in run 1). A leader leases a
+rectangle with `POST /claim/region`; overlapping live leases are rejected (409), leases expire by
+TTL, and the holder grants children with `/claim/region/grant`. Advisory unless `REGION_ENFORCE=1`:
+then paints inside the region by anyone but the holder or grantees are `refused` (logged, so replay
+stays exact), and pixel `claim` skips regions the caller may not touch. Region leases are soft
+state, snapshotted with the claims.
 
 ## Auth
 

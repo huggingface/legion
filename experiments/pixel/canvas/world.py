@@ -39,6 +39,10 @@ class PaintError(ValueError):
     """Client error with a short, actionable message."""
 
 
+class RegionConflict(PaintError):
+    """409: the region is held by someone else."""
+
+
 def load_target(path: Path, background: tuple[int, int, int]) -> np.ndarray:
     """Load the target as uint8 HxWx3. Pixels with alpha == 0 become ``background``.
 
@@ -156,6 +160,10 @@ class World:
         self.stats: dict[str, AgentStats] = {}
         self.totals = {k: 0 for k in OUTCOMES}
         self.cursor = 0
+        # Region leases (leader -> children). region_map holds the lease id per pixel (-1 none).
+        self.regions: dict[int, dict] = {}
+        self.region_map = np.full(self.n, -1, dtype=np.int32)
+        self.next_region = 1
         self.seq = 0
         self.first_ts: float | None = None
         self.last_ts: float | None = None
@@ -242,6 +250,7 @@ class World:
             aid = self._aid(agent)
             # One lease set per agent: a new claim drops the previous one (no hoarding).
             self._release_ids(aid, self.agent_leases.pop(aid, []))
+            blocked = self._blocked_regions(agent, now)
             got: list[np.ndarray] = []
             need = n
             chunk = 1 << 16
@@ -251,6 +260,8 @@ class World:
                 lo = (start + scanned) % self.n
                 hi = min(lo + chunk, self.n, lo + self.n - scanned)
                 free = ~self.match[lo:hi] & (self.lease_until[lo:hi] <= now)
+                if len(blocked):
+                    free &= ~np.isin(self.region_map[lo:hi], blocked)
                 hits = np.flatnonzero(free)[:need] + lo
                 if len(hits):
                     got.append(hits)
@@ -288,6 +299,111 @@ class World:
             else:
                 ids = [y * self.w + x for x, y in pixels if 0 <= x < self.w and 0 <= y < self.h]
             return self._release_ids(aid, ids)
+
+    # ---------------------------------------------------------- region leases
+
+    def _paint_region(self, r: dict, rid: int) -> None:
+        m = self.region_map.reshape(self.h, self.w)
+        m[r["y"] : r["y"] + r["h"], r["x"] : r["x"] + r["w"]] = rid
+
+    def _expire_regions(self, now: float) -> None:
+        for rid in [k for k, r in self.regions.items() if r["until"] <= now]:
+            self._paint_region(self.regions.pop(rid), -1)
+
+    def _blocked_regions(self, agent: str, now: float) -> list[int]:
+        """Region ids this agent may not paint or pixel-claim in (REGION_ENFORCE=1 only)."""
+        if not self.cfg.region_enforce or not self.regions:
+            return []
+        self._expire_regions(now)
+        return [
+            k for k, r in self.regions.items() if r["owner"] != agent and agent not in r["grants"]
+        ]
+
+    def claim_region(
+        self,
+        agent: str,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        ttl: float | None = None,
+        now: float | None = None,
+    ) -> dict:
+        if w < 1 or h < 1 or x < 0 or y < 0 or x + w > self.w or y + h > self.h:
+            raise PaintError(f"region ({x},{y},{w}x{h}) outside canvas {self.w}x{self.h}")
+        ttl = self.cfg.region_ttl if ttl is None else float(ttl)
+        if not 0 < ttl <= self.cfg.region_ttl_max:
+            raise PaintError(f"ttl must be in (0, {self.cfg.region_ttl_max:g}] seconds")
+        now = time.time() if now is None else now
+        with self.lock:
+            self._expire_regions(now)
+            for r in self.regions.values():
+                if (
+                    x < r["x"] + r["w"]
+                    and r["x"] < x + w
+                    and y < r["y"] + r["h"]
+                    and r["y"] < y + h
+                ):
+                    raise RegionConflict(
+                        f"region overlaps lease {r['id']} held by {r['owner']} "
+                        f"({r['x']},{r['y']},{r['w']}x{r['h']}); pick another area or wait"
+                    )
+            rid = self.next_region
+            self.next_region += 1
+            r = {
+                "id": rid,
+                "owner": agent,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "until": now + ttl,
+                "grants": [],
+            }
+            self.regions[rid] = r
+            self._paint_region(r, rid)
+            self._stat(agent, now)
+            return dict(r)
+
+    def _owned(self, agent: str, rid: int | None) -> list[dict]:
+        mine = [r for r in self.regions.values() if r["owner"] == agent]
+        if rid is None:
+            return mine
+        r = self.regions.get(rid)
+        if r is None:
+            raise PaintError(f"no live region lease {rid}")
+        if r["owner"] != agent:
+            raise RegionConflict(f"region {rid} is held by {r['owner']}, not you")
+        return [r]
+
+    def grant_region(
+        self, agent: str, grantee: str, rid: int | None = None, now: float | None = None
+    ) -> list[dict]:
+        now = time.time() if now is None else now
+        with self.lock:
+            self._expire_regions(now)
+            rs = self._owned(agent, rid)
+            if not rs:
+                raise PaintError("you hold no region lease; POST /claim/region first")
+            for r in rs:
+                if grantee not in r["grants"]:
+                    r["grants"].append(grantee)
+            return [dict(r) for r in rs]
+
+    def release_region(self, agent: str, rid: int | None = None, now: float | None = None) -> int:
+        now = time.time() if now is None else now
+        with self.lock:
+            self._expire_regions(now)
+            rs = self._owned(agent, rid)
+            for r in rs:
+                self._paint_region(self.regions.pop(r["id"]), -1)
+            return len(rs)
+
+    def list_regions(self, now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        with self.lock:
+            self._expire_regions(now)
+            return [dict(r) for r in self.regions.values()]
 
     def claims_outstanding(self, now: float | None = None) -> int:
         now = time.time() if now is None else now
@@ -345,6 +461,7 @@ class World:
         st = self._stat(agent, ts)
         st.calls += 1
         enforced = enforce and self.cfg.claim_mode == "enforced"
+        blocked = self._blocked_regions(agent, ts) if enforce else []
         px_out = []
         applied_idx = []
         applied_rgb = []
@@ -355,7 +472,7 @@ class World:
             else:
                 refused = (
                     enforced and self.lease_owner[i] not in (-1, aid) and self.lease_until[i] > ts
-                )
+                ) or (len(blocked) > 0 and int(self.region_map[i]) in blocked)
             if refused:
                 out = "refused"
             else:
@@ -496,6 +613,10 @@ class World:
                     self.lease_owner = remap[np.where(owner < 0, len(names), owner)]
                     self.lease_until = z["lease_until"].copy()
                     self.cursor = int(z["cursor"])
+                    for r in json.loads(str(z["regions"])) if "regions" in z else []:
+                        self.regions[r["id"]] = r
+                        self._paint_region(r, r["id"])
+                        self.next_region = max(self.next_region, r["id"] + 1)
                     for i in np.flatnonzero(self.lease_owner >= 0).tolist():
                         self.agent_leases.setdefault(int(self.lease_owner[i]), []).append(i)
             except Exception as e:  # noqa: BLE001 - claims are soft state; log is the truth
@@ -515,6 +636,7 @@ class World:
                 "lease_until": self.lease_until.copy(),
                 "lease_owner": self.lease_owner.copy(),
                 "names": np.array(json.dumps(self.agent_names)),
+                "regions": np.array(json.dumps(list(self.regions.values()))),
             }
             canvas = self.canvas.copy()
         tmp = self.cfg.data_dir / (SNAP_NAME + ".tmp.npz")
@@ -570,6 +692,7 @@ class World:
                 "agents_seen": len(self.stats),
                 "agents_active_60s": active,
                 "claims_outstanding": self.claims_outstanding(now),
+                "region_leases": len(self.regions),
                 "todo": self.n - self.matched,
                 "exact_match_pct": round(100.0 * self.matched / self.n, 4),
                 "first_ts": self.first_ts,
@@ -583,6 +706,7 @@ class World:
             "claim_mode": self.cfg.claim_mode,
             "rate_limit_per_s": self.cfg.rate_limit,
             "keyframe_every": self.cfg.keyframe_every,
+            "region_enforce": self.cfg.region_enforce,
         }
         return out
 
