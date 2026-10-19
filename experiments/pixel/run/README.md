@@ -23,30 +23,48 @@ The worker image has `python3` but no `curl`, hence the python one-liner. The ag
 gets `CANVAS_URL`, `CANVAS_TOKEN` (type secrets) and `FLOCK_AGENT` (worker), which the CLI reads.
 If an agent stepped 3 times without ever reaching the canvas, the driver re-sends the install.
 
-## Launch order
+## Launch order (run 1: jobs-proxy path)
 
-1. **GPU job.** Run `RUN_ID=pixel-100-a experiments/pixel/run/job.sh`. You need `HF_TOKEN`, `VLLM_API_KEY` and `CANVAS_TOKEN` set locally.
-   It syncs the code and target into the bucket, then starts the job and prints the job id.
-2. **Wait until healthy.**
-   - `hf jobs logs <id>` should show `VLLM READY`. That takes ~3 min of scheduling plus the install and load; the probe saw ~1.5 min from RUNNING to ready.
-   - `curl <public 8765 URL>/status` should answer.
-   - The public URL for port 8765 comes from the job page or `hf jobs inspect <id>`. I have not checked which one shows it.
-3. **Secrets for flock.**
-   - `CANVAS_URL` is the public 8765 URL.
-   - `CANVAS_TOKEN` and `VLLM_API_KEY` take the same values as in step 1.
-4. **Smoke.**
-   - Run `flock apply experiments/pixel/run/spec-smoke.yaml`.
-   - Then run `python experiments/pixel/run/driver.py --swarm pixel-smoke --canvas-url <URL> --max-steps 5`.
-   - Check `/replay`. The log should show `painter-*` agents with `useful` outcomes.
+The model and the canvas are reached through the HF jobs proxy; network groups are not used (flock
+dropped provider `network_group` on purpose, 0c1b4b2; the probe in
+`flock-board/probe-reachability-lfm.md` showed `Bearer $HF_TOKEN` through the proxy -> 200 for
+chat completions at the same latency, and the controller's preflight can reach it too).
+
+1. **GPU job.** Run `RUN_ID=pixel-100-a experiments/pixel/run/job.sh`. You need `HF_TOKEN` and `CANVAS_TOKEN` set locally.
+   - vLLM is started with `--expose 8000`. The proxy protects it with the HF token, so vLLM itself runs **without** `--api-key`.
+   - The canvas is started with `--expose-public 8765`. Reads are open; writes need `CANVAS_TOKEN`.
+   - The script prints the job id.
+2. **Fill in the URLs.** Check them at launch with `hf jobs inspect <JOB_ID>`. The expected format is below, but I have not confirmed it, nor which inspect field shows it.
+   - model: `https://<JOB_ID>--8000.hf.jobs/v1`. Put it in `base_url` in `spec-smoke.yaml` / `spec-100.yaml`, replacing `<JOB_ID>`.
+   - canvas: `https://<JOB_ID>--8765.hf.jobs`. This is `CANVAS_URL`.
+3. **Wait until healthy.**
+   - `hf jobs logs <JOB_ID>` shows `VLLM READY`.
+   - `curl -H "Authorization: Bearer $HF_TOKEN" https://<JOB_ID>--8000.hf.jobs/v1/models` returns 200.
+   - `curl https://<JOB_ID>--8765.hf.jobs/status` answers with no token.
+4. **Controller:** the Space `cmpatino/flock-smoke` (it exists and is paused).
+   - Deploy it from the **`llm-harness`** branch, because the worker wheel needs `harness: llm`. In a checkout of that branch:
+     `W=$(uv run scripts/publish-wheel.sh hf://buckets/cmpatino/flock/dist)` then
+     `uv run scripts/deploy-space.sh "$W" cmpatino/flock-smoke`.
+   - `deploy-space.sh` needs `HF_TOKEN`, `FLOCK_TOKEN` and `ANTHROPIC_KEY` set. Any value works for `ANTHROPIC_KEY` if no Claude type runs.
+   - Restart the Space if it stays paused.
+   - Add Space secrets `CANVAS_URL` and `CANVAS_TOKEN`. Every secret a spec names must be in the controller's env. For example: `python -c "from huggingface_hub import HfApi;import os;a=HfApi();[a.add_space_secret('cmpatino/flock-smoke',k,os.environ[k]) for k in ('CANVAS_URL','CANVAS_TOKEN')]"`.
+   - **HF_TOKEN for the proxy:** the provider uses `api_key_env: HF_TOKEN`, and the controller's `HF_TOKEN` secret is what workers send to the proxy.
+     - The brief suggests a fine-grained read-only token under that name.
+     - But workers also use `HF_TOKEN` for the wheel and **bucket sync (write)**, so a read-only `HF_TOKEN` would break that. Keep the operator token for run 1.
+     - Or put the read-only token in a separate secret (e.g. `HF_PROXY_TOKEN`) and point `api_key_env` at it.
+5. **Smoke.** Point `FLOCK_URL` at the Space and set `FLOCK_TOKEN`.
+   - Run `flock apply experiments/pixel/run/spec-smoke.yaml`. Preflight probes the proxy URL.
+   - Then `python experiments/pixel/run/driver.py --swarm pixel-smoke --canvas-url https://<JOB_ID>--8765.hf.jobs --max-steps 5`.
+   - Check `/replay` and the progress Space.
    - Then `flock remove pixel-smoke`.
-5. **Run.**
+6. **Run.**
    - Run `flock apply experiments/pixel/run/spec-100.yaml`.
-   - Then run `python experiments/pixel/run/driver.py --swarm pixel-100 --canvas-url <URL>`.
-   - The driver stops when coverage hits 100%. Cap the run with `--max-minutes`, or each agent with `--max-steps`.
-6. **Teardown.**
+   - Then run `python experiments/pixel/run/driver.py --swarm pixel-100 --canvas-url <canvas URL> --run-id pixel-100-a`, with `SPACE_ID`/`HF_TOKEN` set for the progress page.
+   - The driver stops when the work set is 100% done. Cap the run with `--max-minutes`, or each agent with `--max-steps`.
+7. **Teardown.**
    - Run `flock remove pixel-100`.
-   - Confirm the paint log is in the bucket (`$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`; it is copied every 60 s). Optionally force a final copy by waiting one more minute.
-   - Then `hf jobs cancel <id>`. Cancelling also triggers the exit copy, but don't rely on it.
+   - Confirm the paint log is in the bucket: `$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`. It is copied every 60 s; the driver also uploads `final/<run>/paint-log.jsonl.gz` to the Space.
+   - Then `hf jobs cancel <JOB_ID>`, and pause `cmpatino/flock-smoke` again.
    - The log is the replay. A canvas started on it (`CANVAS_DATA=<dir with paint.log.jsonl> python -m canvas`) serves `/replay` locally.
 
 Driver env: `FLOCK_URL`, `FLOCK_TOKEN` (controller), `CANVAS_URL` or `--canvas-url`. Reads on the
@@ -61,19 +79,18 @@ own cost for a self-hosted provider is $0.
 - Per-agent rate is ~1 call per 5-7 s, well under the canvas limit of 2 calls/s per agent.
 - GPU cost is ~$1 (l4x1). Workers are 2-3 cpu-basic.
 
-## Needs PR #7 / blockers
+## Needs PR #7 / open items
 
-- `harness: llm`, `tool_choice`, `context_tokens`: PR #7. The specs validate against PR #7's
+- `harness: llm`, `tool_choice` and `context_tokens` come from PR #7, so the controller runs from `llm-harness`. The specs validate against PR #7's
   `flock.cli.load_spec`; `main` rejects them.
-- **Network group:** flock dropped provider `network_group` in 0c1b4b2 (decision 27). Workers are not
-  launched in the group, `${HF_NETWORK_GROUP_PREFIX}` is not expanded, and preflight from the
-  controller cannot reach the in-group URL. Either restore b9cc630, or use the proxy fallback
-  that is commented in the spec. For the fallback, vLLM is exposed with `--expose 8000` and runs
-  without `--api-key`, and `HF_TOKEN` is sent as the bearer.
-- **No `done` tool** in PR #7, and no `comms` block in the spec model. The driver decides when
-  painting is finished, and the instructions go in as `system_prompt_file`.
+- **`done_tool: done`** is in the specs, but the harness has no `done` tool yet. The spec model drops unknown
+  keys, so it is ignored until that lands. Until then the driver is the loop and decides when painting stops.
+- **No `comms` block** in the spec model, so the instructions go in via `system_prompt_file`.
 - **No turn id in the tool env:** flock does not export the prompt or turn id, so `FLOCK_TURN` is
   empty. To join flock events with the paint log, use `prompts.jsonl` (agent, prompt_id, ts)
   against the canvas log's agent + ts.
 - **`flock prompt --swarm/--type/--state`** (PR "prompt-type") does not exist yet. The driver
   detects it at start; until then it sends one prompt per agent over the controller API.
+- **Provider concurrency:** `max_working: 64` on the provider caps 100 painters at 64 in-flight
+  turns. The probe measured the L4 sweet spot at c=32-64 (~15-20 calls/s).
+- **Proxy URL format** (`<JOB_ID>--<port>.hf.jobs`) is to verify at launch.
