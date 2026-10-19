@@ -43,20 +43,24 @@ class RegionConflict(PaintError):
     """409: the region is held by someone else."""
 
 
-def load_target(path: Path, background: tuple[int, int, int]) -> np.ndarray:
-    """Load the target as uint8 HxWx3. Pixels with alpha == 0 become ``background``.
+def load_target(
+    path: Path, background: tuple[int, int, int]
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Load the target as (uint8 HxWx3 RGB, HxW alpha or None for opaque formats).
 
-    Partially transparent pixels are composited over ``background`` so the target is exact RGB.
+    alpha == 0 pixels become ``background``; partially transparent pixels are composited over
+    ``background`` (rounded), so the target is exact RGB and every colour is reachable.
     """
     im = Image.open(path)
     if im.mode in ("RGBA", "LA", "P", "PA"):
         im = im.convert("RGBA")
-        a = np.asarray(im).astype(np.float32)
+        raw = np.asarray(im)
+        a = raw.astype(np.float32)
         alpha = a[..., 3:4] / 255.0
         bg = np.array(background, dtype=np.float32)
         rgb = np.rint(a[..., :3] * alpha + bg * (1.0 - alpha)).astype(np.uint8)
-        return np.ascontiguousarray(rgb)
-    return np.ascontiguousarray(np.asarray(im.convert("RGB"), dtype=np.uint8))
+        return np.ascontiguousarray(rgb), raw[..., 3].copy()
+    return np.ascontiguousarray(np.asarray(im.convert("RGB"), dtype=np.uint8)), None
 
 
 def hexc(rgb) -> str:
@@ -121,13 +125,21 @@ class World:
         self.lock = threading.Lock()
         self.bg = parse_hex(cfg.background)
         self.blank = parse_hex(cfg.blank) if cfg.blank else self.bg
-        self.target = load_target(cfg.target, self.bg)
+        self.target, self.alpha = load_target(cfg.target, self.bg)
         self.h, self.w = self.target.shape[:2]
         self.n = self.h * self.w
         self._tflat = self.target.reshape(-1, 3)
         self._blank_frame = np.empty_like(self.target)
         self._blank_frame[:] = self.blank
-        self.work_mask = ~(self.target == np.array(self.blank, np.uint8)).all(-1).reshape(-1)
+        # Work set: pixels that must be painted. With alpha: every pixel with alpha > 0 (partial
+        # alpha included). Without alpha: pixels that differ from the blank canvas.
+        # CANVAS_BACKGROUND_IS_WORK=1: every pixel, the background too.
+        if cfg.background_is_work:
+            self.work_mask = np.ones(self.h * self.w, dtype=bool)
+        elif self.alpha is not None:
+            self.work_mask = (self.alpha > 0).reshape(-1)
+        else:
+            self.work_mask = ~(self.target == np.array(self.blank, np.uint8)).all(-1).reshape(-1)
         self.work_total = int(self.work_mask.sum())
         self.started = time.time()
         self._reset_state()
@@ -147,7 +159,9 @@ class World:
     def _reset_state(self) -> None:
         self.canvas = self._blank_frame.copy()
         self._cflat = self.canvas.reshape(-1, 3)
-        self.match = (self._cflat == self._tflat).all(-1)
+        # "match" = pixel is done. Work pixels start not done even if the blank colour happens to
+        # equal their target (they are unpainted); non-work pixels are done when colours agree.
+        self.match = (self._cflat == self._tflat).all(-1) & ~self.work_mask
         self.matched = int(self.match.sum())
         self.painted = np.zeros(self.n, dtype=bool)
         diff = self.canvas.astype(np.int64) - self.target.astype(np.int64)

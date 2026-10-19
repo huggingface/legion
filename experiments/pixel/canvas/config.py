@@ -28,6 +28,7 @@ class Settings:
     # Colour that transparent (alpha=0) target pixels become, and the blank canvas colour.
     background: str = "000000"
     blank: str | None = None  # None = same as background
+    background_is_work: bool = False  # 1 = background pixels must be painted too
     max_pixels_per_call: int = 10
     max_claim: int | None = None  # None = max_pixels_per_call
     claim_ttl: float = 120.0
@@ -62,6 +63,7 @@ class Settings:
             data_dir=Path(data) if data else None,
             background=_env("CANVAS_BACKGROUND", "000000"),
             blank=os.environ.get("CANVAS_BLANK") or None,
+            background_is_work=_env("CANVAS_BACKGROUND_IS_WORK", "0") == "1",
             max_pixels_per_call=int(_env("MAX_PIXELS_PER_CALL", "10")),
             max_claim=int(os.environ["CANVAS_MAX_CLAIM"])
             if os.environ.get("CANVAS_MAX_CLAIM")

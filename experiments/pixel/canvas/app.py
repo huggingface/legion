@@ -167,6 +167,10 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             "colours": len(u),
             "top_colours": [[f"{int(u[i]):06x}", int(c[i])] for i in top],
             "work_pixels": world.work_total,
+            "background_is_work": cfg.background_is_work,
+            "partial_alpha_pixels": (
+                0 if world.alpha is None else int(((world.alpha > 0) & (world.alpha < 255)).sum())
+            ),
             "max_pixels_per_call": cfg.max_pixels_per_call,
             "max_claim": cfg.max_claim,
         }
@@ -191,7 +195,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             "g": int(t[1]),
             "b": int(t[2]),
             "current": hexc(c),
-            "ok": hexc(t) == hexc(c),
+            "ok": bool(world.match[y * world.w + x]),
         }
 
     # ------------------------------------------------------------------ canvas

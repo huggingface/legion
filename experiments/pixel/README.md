@@ -36,6 +36,7 @@ The `Dockerfile` is the same service as an image (`CMD python -m canvas`, `cli/`
 | `CANVAS_TARGET` | `assets/target.png` | target image (RGB or RGBA) |
 | `CANVAS_BACKGROUND` | `000000` | colour that alpha=0 target pixels become (partial alpha is composited over it) |
 | `CANVAS_BLANK` | = background | initial canvas colour |
+| `CANVAS_BACKGROUND_IS_WORK` | 0 | 1 = alpha-0 background pixels must be painted too |
 | `MAX_PIXELS_PER_CALL` | **10** | hard cap per `paint` call (1 works) |
 | `CANVAS_MAX_CLAIM` | = `MAX_PIXELS_PER_CALL` | max pixels per `claim` |
 | `CANVAS_CLAIM_TTL` | 120 | lease seconds |
@@ -52,11 +53,17 @@ The `Dockerfile` is the same service as an image (`CMD python -m canvas`, `cli/`
 | `CANVAS_SNAPSHOT_SECONDS` | 30 | claims snapshot + fsync interval |
 | `CANVAS_HOST` / `CANVAS_PORT` | 0.0.0.0 / 8765 | bind |
 
-**Background decision.** The shipped `target.png` is RGB (no alpha) with a black background
-(466,409 px = 44.5%). Transparent pixels in an RGBA target become `CANVAS_BACKGROUND` (black). The
-canvas starts as that colour, so background pixels already match: they are never handed out by
-`claim`, and painting them correctly counts as `duplicate`. The work set is the 582,167 pixels that
-differ from blank. Set `CANVAS_BLANK=ffffff` to make the background part of the job.
+**Background and alpha.** The shipped `assets/target.png` is RGBA: 425,796 px alpha 0
+(background), 501,666 px alpha 255, 121,114 px partial alpha (anti-aliased edges).
+- alpha == 0 -> target colour `CANVAS_BACKGROUND` (black); **not work** by default. The canvas
+  starts as the blank colour (= background), so these pixels start done, are never handed out by
+  `claim`, and painting them correctly is a `duplicate`.
+- 0 < alpha < 255 -> composited over `CANVAS_BACKGROUND` and rounded, then treated as **work**.
+- alpha == 255 -> work. Every pixel with alpha > 0 starts "not done", even if its colour happens to
+  equal the blank canvas (it has not been painted yet). Work set: **622,780 px** (59.4%).
+- `CANVAS_BACKGROUND_IS_WORK=1` (pending Carlos) makes all 1,048,576 pixels work: the background
+  starts not done, is claimable, and painting it black is `useful`.
+- An RGB target without alpha falls back to "work = pixels that differ from the blank colour".
 
 ## API
 
@@ -91,8 +98,9 @@ pixel was already wrong; `overwritten` wrong colour on a pixel that was right (d
 `refused` enforced mode only, pixel leased by another agent, not applied. Each paint is exactly one
 of these, so counters add up to pixels painted. `wrong`/`overwritten` results carry `want`.
 
-**Scores.** `exact_match_pct` = canvas == target over all pixels (starts at 44.5% because of the
-background). `coverage_pct` = exact match over the work set only (starts at 0; the progress number).
+**Scores.** `exact_match_pct` = pixels done / all pixels, where a work pixel is done once painted
+with its exact target colour and a non-work pixel is done while its colour matches (starts at 40.6%
+= the background). `coverage_pct` = done over the work set only (starts at 0; the progress number).
 `painted_pct` = pixels touched at least once. `mse` over RGB channels (0..255), `psnr` in dB (null
 at a perfect match). Matched count and SSE are kept incrementally per pixel, so `/score` is O(1)
 apart from the coverage mask sum.
@@ -121,7 +129,10 @@ Token header: `X-Canvas-Token: <tok>` or `Authorization: Bearer <tok>` (first wi
   `CANVAS_TOKEN`. Identity = token; `X-Flock-Agent` is ignored. Only SHA-256 hashes are stored
   (`agents.json`); re-registering a name rotates its token.
 - Both can be on together. With neither set the service is open (dev) and trusts `X-Flock-Agent`.
-- Reads are open unless `CANVAS_READ_AUTH=1`. The replay page takes `?token=` and sends it as
+- **Run 1 policy:** reads need no token (`/canvas.png`, `/score`, `/status`, `/replay*`, `/log`,
+  `/target/*`, `/region`, `/regions`), so the replay page works behind `--expose-public`. Writes
+  (`/paint`, `/claim*`, `/release*`, `/agents/register`) always need a token (tested).
+  `CANVAS_READ_AUTH=1` closes reads too; the replay page then takes `?token=` and sends it as
   `X-Canvas-Token`.
 
 ## Paint log and replay
@@ -160,9 +171,11 @@ Default server settings (rate limit 2/s/agent) for the 100 x 1 run; rate limit o
 | 200 x 10/s, 20 s (saturation) | 1,086 req/s of 2,000 offered | 173 ms | 219 ms | 489 ms | 0 |
 
 So one process is ~10x the 100 req/s target before queueing. Restart reload: 15.9k log entries in
-1.0 s (~65 us/entry; a full 1024x1024 run at 10 px/call is ~58k entries, ~4 s). Log size ~380 B per
-10-px entry (~22 MB for a full run). At 100 agents x 1 call/s alternating claim/paint, 10 px per
-paint, the 582k-pixel work set takes ~20 min of pure painting.
+1.0 s (~65 us/entry; the 622,780-px work set at 10 px/call is ~62k entries, ~4 s). Log size ~380 B
+per 10-px entry (~24 MB for a full run). At 100 agents x 1 call/s alternating claim/paint, 10 px per
+paint, the work set takes ~21 min of pure painting (~35 min with `CANVAS_BACKGROUND_IS_WORK=1`).
+(The load runs were made against an RGB copy of the target; the work-set size does not change the
+per-request cost.)
 
 ## Scaling to 10k req/s (notes, not implemented)
 
@@ -206,12 +219,19 @@ through the HF jobs proxy; the canvas token then rides in `X-Canvas-Token`). Std
 agents need no install. Retries 429 up to 3 times (honouring `Retry-After`, max 5 s). Exit codes:
 0 ok, 1 request/usage error, 2 auth, 3 unreachable.
 
+## Run 1 decisions
+
+- Claims advisory (`CANVAS_CLAIM_MODE=advisory`, default).
+- Claims carry target colours (`CANVAS_CLAIM_REVEAL=1`, default): one claim + one paint per 10 px.
+- Claims are not logged. A `CANVAS_LOG_CLAIMS` switch is not implemented: log `seq` is the replay
+  time axis (one entry = one paint call), so claim entries need their own entry type in the fold
+  and the frame index. That is small but not trivial; add it if a later run needs it.
+- Reads open, writes need a token (see Auth).
+- `MAX_PIXELS_PER_CALL=10`.
+- Background as work: pending Carlos, `CANVAS_BACKGROUND_IS_WORK=0|1`.
+
 ## Open questions
 
-- Claim reveals target colours (`CANVAS_CLAIM_REVEAL=1`), making each pixel 2 calls with no
-  `get`. Turn it off to make agents read the target (more calls, more "agentic")?
-- Advisory vs enforced claims for the first run (advisory measures natural collisions).
-- HF jobs proxy: which port it exposes and whether it strips `Authorization` before forwarding;
-  the replay page in a browser cannot add the HF token header (may need `?token=` on the proxy side).
-- Black background is pre-done (44.5%). Should the background be part of the work?
-- Log claims too (for a fuller replay of agent behaviour), at ~2x log size?
+- HF jobs proxy: which port it exposes, and whether it forwards `Authorization`/custom headers.
+- Log claims later (`CANVAS_LOG_CLAIMS`) for a fuller replay of agent behaviour, at ~2x log size?
+- Should agents read the target themselves (`CANVAS_CLAIM_REVEAL=0`) in a later, more agentic run?
