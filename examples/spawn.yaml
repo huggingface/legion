@@ -1,5 +1,6 @@
 # A leader that splits work across child agents (docs/spawn.md). Only the leader exists at
 # apply time; analysts and helpers exist once the leader spawns them, on their own workers.
+# Every type lists HF_TOKEN: workers need it to fetch the flock wheel and sync to the bucket.
 swarm: spawn-demo
 namespace: <you>
 bucket: hf://buckets/<you>/flock/spawn-demo
@@ -8,7 +9,7 @@ types:
     harness: claude
     model: claude-opus-5-5
     system_prompt_file: prompts/leader.md
-    secrets: [ANTHROPIC_API_KEY]
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 1
     workers: {initial: 1, max_extra: 0}
     max_budget_usd: 2.0
@@ -16,7 +17,7 @@ types:
     harness: claude
     model: claude-haiku-5-5
     system_prompt_file: prompts/analyst.md
-    secrets: [ANTHROPIC_API_KEY]
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 0                    # spawned only
     agents_per_worker: 10
     workers: {initial: 1, max_extra: 1}
@@ -26,7 +27,7 @@ types:
     harness: claude
     model: claude-haiku-5-5
     system_prompt_file: prompts/analyst.md
-    secrets: [ANTHROPIC_API_KEY]
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 0
     agents_per_worker: 10
     workers: {initial: 0, max_extra: 1}
