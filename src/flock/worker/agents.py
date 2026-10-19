@@ -26,6 +26,7 @@ from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError
 from flock.worker.events import Outbox, SessionLog, utcnow
 
 if TYPE_CHECKING:
+    from flock.controller.prices import Price
     from flock.worker.adapters.pi import PiModelConfig
     from flock.worker.identity import Identities
     from flock.worker.sync import BucketSync
@@ -58,6 +59,15 @@ def pi_model_config(spec: TypeSpec) -> PiModelConfig | None:
     return PiModelConfig(base_url=base_url, model_id=model_id,
                          api_key_env=env.get("PI_API_KEY_ENV") or "OPENAI_API_KEY",
                          reasoning=env.get("PI_REASONING") or None)
+
+
+# TODO(PR A): `return type_price_table(spec)` (prices.py on the providers branch), which adds the
+# type's pinned provider price (`resolved_model.pricing`) under its model id; price_for then
+# finds it for Pi's `<provider>/<model id>` usage key before any global row.
+def pi_price_table(spec: TypeSpec) -> dict[str, Price] | None:
+    """Prices for enforcing a Pi type's `max_budget_usd` on the worker. None: the global table
+    (built-in rows plus FLOCK_PRICES), the same one the controller bills with."""
+    return None
 
 
 class AgentState(BaseModel):

@@ -121,9 +121,10 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
             return ClaudeAdapter(workdir)
         if spec.harness.value == "pi":
             from flock.worker.adapters.pi import PiAdapter
-            from flock.worker.agents import pi_model_config
+            from flock.worker.agents import pi_model_config, pi_price_table
 
-            return PiAdapter(workdir, agent=name, model_config=pi_model_config(spec))
+            return PiAdapter(workdir, agent=name, model_config=pi_model_config(spec),
+                             prices=pi_price_table(spec))
         from flock.worker.adapters.codex import CodexAdapter
 
         return CodexAdapter(workdir)
