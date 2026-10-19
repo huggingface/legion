@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # --------------------------------------------------------------------------- durations
 
@@ -59,19 +59,123 @@ class WorkerState(StrEnum):
 class TypeHealth(StrEnum):
     ok = "ok"
     crashlooping = "crashlooping"
+    launch_refused = "launch_refused"  # the backend refused the launch (4xx); waits for a new apply
 
 
 # --------------------------------------------------------------------------- spec
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*-\d{4,}$")
 TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+# Provider names prefix model strings ("hf:Qwen/...") and become Codex `model_providers.<name>`
+# keys, so no dots and no colons. A model string whose prefix does not look like this
+# (e.g. Bedrock's "anthropic.claude-...-v1:0") is a harness-native id, not a provider reference.
+PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
+
+Reasoning = Literal["off", "low", "medium", "high"]
+# `reasoning` -> OpenAI `reasoning.effort` / Codex `model_reasoning_effort`.
+REASONING_EFFORT = {"off": "none", "low": "low", "medium": "medium", "high": "high"}
+
+
+def _pricing_row(v: list[float], where: str) -> list[float]:
+    if len(v) != 3 or any(x < 0 for x in v):
+        raise ValueError(f"{where}: pricing must be [input, output, cached] USD per 1M tokens, >= 0")
+    return [float(x) for x in v]
+
+
+class ProviderSpec(BaseModel):
+    """Where a model is served (design.md section 5, 'Providers'). Field names follow swarmlab's
+    provider params so a `providers:` block moves between the two projects.
+
+    `api_key_env` names a secret / env var; the value is never in the spec. The controller
+    sends that secret to the provider's jobs and uses it for preflight; the worker hands it to
+    the harness."""
+
+    type: Literal["openai_compat", "anthropic"]
+    base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
+    api_key_env: str
+    self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
+    # Max agents of this swarm on this provider that may be in a turn at once. Enforced at
+    # prompt admission by the controller (FLOCK_MAX_WORKING_ENFORCE=0: report only).
+    max_working: int | None = None
+    pricing: dict[str, list[float]] = Field(default_factory=dict)  # model id ("*" = any) -> row
+    timeout_s: float | None = None  # passthrough to the harness / preflight
+    max_retries: int | None = None  # passthrough to the harness
+    # How the key is sent. `anthropic` providers: "x-api-key" (default, Claude Code's
+    # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
+    # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
+    auth: Literal["x-api-key", "bearer"] | None = None
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _env_name(cls, v: str) -> str:
+        if not ENV_NAME_RE.match(v):
+            raise ValueError(f"api_key_env {v!r} must be an env var name (the key itself never goes in the spec)")
+        return v
+
+    @field_validator("pricing")
+    @classmethod
+    def _rows(cls, v: dict[str, list[float]]) -> dict[str, list[float]]:
+        return {k: _pricing_row(row, f"pricing[{k!r}]") for k, row in v.items()}
+
+    @field_validator("max_working")
+    @classmethod
+    def _positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("max_working must be >= 1")
+        return v
+
+    @model_validator(mode="after")
+    def _url(self) -> ProviderSpec:
+        if self.type == "openai_compat" and not self.base_url:
+            raise ValueError("base_url is required for type openai_compat (e.g. https://router.huggingface.co/v1)")
+        if self.type == "openai_compat" and self.auth == "x-api-key":
+            raise ValueError("auth: x-api-key is for anthropic providers; openai_compat always sends a bearer token")
+        if self.base_url is not None:
+            self.base_url = self.base_url.rstrip("/")
+        return self
+
+
+class ModelSpec(BaseModel):
+    """An alias under `models:`: a provider-prefixed model plus per-model settings."""
+
+    model: str  # "<provider>:<model id>"
+    reasoning: Reasoning | None = None
+    # Raw request-body fields (swarmlab's `extra`). Kept for spec portability and used by
+    # nothing in the harness path yet: neither Codex nor Claude Code can add body fields.
+    extra: dict[str, Any] | None = None
+    pricing: list[float] | None = None  # overrides the provider's pricing for this alias
+
+    @field_validator("pricing")
+    @classmethod
+    def _row(cls, v: list[float] | None) -> list[float] | None:
+        return None if v is None else _pricing_row(v, "pricing")
+
+
+class ResolvedModel(BaseModel):
+    """A type's model after resolution, pinned into the stored spec at apply time."""
+
+    provider_name: str
+    provider: ProviderSpec
+    model_id: str  # what the harness sends as `model`
+    reasoning: Reasoning | None = None
+    extra: dict[str, Any] | None = None
+    pricing: list[float]  # [input, output, cached] USD per 1M tokens, pinned
+
+    @property
+    def qualified(self) -> str:
+        return f"{self.provider_name}:{self.model_id}"
 
 
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
     harness: Harness
+    # Resolution order (design.md section 5): an alias under `models:`, else "<provider>:<id>"
+    # with the prefix under `providers:`, else a harness-native id (v1 behaviour).
     model: str
+    reasoning: Reasoning | None = None  # overrides the alias's reasoning
     image: str | None = None  # None -> default worker image
     system_prompt_file: str | None = None  # written into the workdir as CLAUDE.md / AGENTS.md
     # The file's contents, inlined by `flock apply` (the controller and workers cannot
@@ -94,6 +198,24 @@ class TypeSpec(BaseModel):
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
+    # Written by SwarmSpec validation (apply time), never by hand: anything given here is
+    # replaced. None means a harness-native model.
+    resolved_model: ResolvedModel | None = None
+
+    @property
+    def harness_model(self) -> str:
+        """The model id the harness is started with."""
+        return self.resolved_model.model_id if self.resolved_model else self.model
+
+    @property
+    def provider_name(self) -> str | None:
+        return self.resolved_model.provider_name if self.resolved_model else None
+
+    @property
+    def effective_reasoning(self) -> Reasoning | None:
+        if self.resolved_model is not None:
+            return self.resolved_model.reasoning
+        return self.reasoning
 
     @field_validator(
         "worker_lifetime", "lifetime_jitter", "drain_window", "idle_grace", "turn_timeout"
@@ -115,7 +237,48 @@ class SwarmSpec(BaseModel):
     swarm: str
     namespace: str  # HF namespace jobs are launched under
     bucket: str  # e.g. hf://buckets/cmpatino/flock
+    providers: dict[str, ProviderSpec] = Field(default_factory=dict)
+    models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
+
+    @field_validator("providers")
+    @classmethod
+    def _valid_providers(cls, v: dict[str, ProviderSpec]) -> dict[str, ProviderSpec]:
+        for name in v:
+            if not PROVIDER_NAME_RE.match(name):
+                raise ValueError(f"providers.{name}: name must be lowercase [a-z0-9_-], starting with a letter")
+        return v
+
+    @model_validator(mode="after")
+    def _resolve_models(self) -> SwarmSpec:
+        """Apply-time checks and pinning: every alias and provider prefix exists, every
+        provider-backed model has a price, harness and provider speak the same API. The price
+        used is written into the spec (`resolved_model.pricing`, and the self-hosted default
+        into the provider's `pricing`), so the stored spec carries what cost is derived from."""
+        for alias, m in self.models.items():
+            if ":" in alias:
+                raise ValueError(f"models.{alias}: an alias cannot contain ':'")
+            prefix, sep, model_id = m.model.partition(":")
+            if not sep or not prefix or not model_id:
+                raise ValueError(f"models.{alias}.model: {m.model!r} must look like '<provider>:<model id>'")
+            if prefix not in self.providers:
+                raise ValueError(f"models.{alias}.model: unknown provider {prefix!r} in {m.model!r}; "
+                                 f"providers: {sorted(self.providers)}")
+        for type_name, ts in self.types.items():
+            ts.resolved_model = resolve_model(self, ts, type_name=type_name)
+            r = ts.resolved_model
+            if r is None:
+                continue
+            want = {Harness.claude: "anthropic", Harness.codex: "openai_compat"}[ts.harness]
+            if r.provider.type != want:
+                raise ValueError(
+                    f"types.{type_name}.model: harness {ts.harness.value!r} cannot use provider "
+                    f"{r.provider_name!r} (type {r.provider.type}); {ts.harness.value} needs a "
+                    f"provider of type {want}")
+            p = self.providers[r.provider_name]
+            if p.self_hosted and r.model_id not in p.pricing and "*" not in p.pricing:
+                p.pricing[r.model_id] = list(SELF_HOSTED_PRICING)  # pin the default
+        return self
 
     @field_validator("swarm")
     @classmethod
@@ -131,6 +294,41 @@ class SwarmSpec(BaseModel):
             if not TYPE_NAME_RE.match(name):
                 raise ValueError(f"type name {name!r} must be lowercase [a-z0-9-]")
         return v
+
+
+def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?") -> ResolvedModel | None:
+    """Resolve a type's `model`: alias under `models:` -> "<provider>:<id>" with the prefix
+    under `providers:` -> harness-native id (returns None). Raises ValueError naming the type
+    and field for an unknown provider prefix or a provider-backed model with no price."""
+    where = f"types.{type_name}.model"
+    alias = spec.models.get(type_spec.model)
+    target = alias.model if alias else type_spec.model
+    prefix, sep, model_id = target.partition(":")
+    if not sep or not PROVIDER_NAME_RE.match(prefix):
+        return None  # harness-native id
+    if prefix not in spec.providers:
+        raise ValueError(f"{where}: unknown provider {prefix!r} in {target!r}; declare it under "
+                         f"providers: (known: {sorted(spec.providers)}) or use a model alias")
+    if not model_id:
+        raise ValueError(f"{where}: {target!r} has no model id after '{prefix}:'")
+    provider = spec.providers[prefix]
+    pricing = (alias.pricing if alias else None) or provider.pricing.get(model_id) or provider.pricing.get("*")
+    if pricing is None:
+        if not provider.self_hosted:
+            raise ValueError(
+                f"{where}: no pricing for {target!r}; add providers.{prefix}.pricing"
+                f"[{model_id!r}] = [input, output, cached] (USD per 1M tokens)"
+                + (f" or models.{type_spec.model}.pricing" if alias else "")
+                + f", or mark providers.{prefix} self_hosted")
+        pricing = list(SELF_HOSTED_PRICING)
+    return ResolvedModel(
+        provider_name=prefix,
+        provider=provider,
+        model_id=model_id,
+        reasoning=type_spec.reasoning or (alias.reasoning if alias else None),
+        extra=alias.extra if alias else None,
+        pricing=list(pricing),
+    )
 
 
 def agent_name(type_name: str, slot: int) -> str:
@@ -271,6 +469,7 @@ class AgentStatus(BaseModel):
     type: str
     harness: Harness
     model: str
+    provider: str | None = None  # provider name when the model is provider-backed
     labels: dict[str, str]
     state: AgentState
     idle_since: datetime | None = None
@@ -309,6 +508,20 @@ class TypeStatus(BaseModel):
     agents_by_state: dict[str, int]
     workers_by_state: dict[str, int]
     cost_usd: float = 0.0
+    # Last worker-launch error for this type (the backend's message), cleared by a successful
+    # launch or a new apply. With health launch_refused it is why launches stopped.
+    launch_error: str | None = None
+
+
+class ProviderStatus(BaseModel):
+    name: str
+    type: str
+    self_hosted: bool
+    types: list[str]  # agent types using this provider
+    working: int  # agents of those types in a turn now (from heartbeats)
+    max_working: int | None = None  # enforced at prompt admission unless FLOCK_MAX_WORKING_ENFORCE=0
+    # Agents with turns but zero reported tokens: the server sends no usage, cost is unknown.
+    zero_usage_agents: int = 0
 
 
 class SwarmStatus(BaseModel):
@@ -316,10 +529,37 @@ class SwarmStatus(BaseModel):
     namespace: str
     bucket: str
     types: dict[str, TypeStatus]
+    providers: dict[str, ProviderStatus] = Field(default_factory=dict)
     agents_total: int
     workers_total: int
     pending_prompts: int
     cost_usd: float = 0.0
+
+
+class PreflightResult(BaseModel):
+    """One provider-backed model probed with a tool call and a follow-up turn."""
+
+    model: str  # "<provider>:<model id>"
+    provider: str
+    types: list[str]
+    api: str  # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic)
+    ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
+    # Not probed (e.g. the key is not in the controller's environment): neither ok nor failed.
+    # `apply` warns and proceeds, or refuses with --strict.
+    unverified: bool = False
+    tool_call_seen: bool = False
+    follow_up_ok: bool = False
+    usage_reported: bool | None = None  # False: the server streamed zero tokens (cost unknown)
+    latency_ms: int | None = None  # both turns
+    error: str | None = None
+    warning: str | None = None
+
+
+class PreflightReport(BaseModel):
+    swarm: str
+    ok: bool  # no probe failed (unverified models do not count as failures here)
+    unverified: int = 0  # models that were not probed
+    results: list[PreflightResult]
 
 
 # --------------------------------------------------------------------------- constants

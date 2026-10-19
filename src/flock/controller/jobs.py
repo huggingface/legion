@@ -191,12 +191,15 @@ class FakeJobsClient:
     cancels: list[str] = field(default_factory=list)
     states: dict[str, JobState] = field(default_factory=dict)
     fail_launches: bool = False
+    launch_error: Exception | None = None  # raised by launch() when set
     inspects: int = 0
     lists: int = 0
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
             raise RuntimeError("launch failed (fake)")
+        if self.launch_error is not None:
+            raise self.launch_error
         job_id = f"job-{len(self.launches) + 1:04d}"
         self.launches.append(
             {
