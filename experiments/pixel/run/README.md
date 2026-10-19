@@ -33,8 +33,13 @@ chat completions at the same latency, and the controller's preflight can reach i
 1. **GPU job.** Run `RUN_ID=pixel-100-a experiments/pixel/run/job.sh`. You need `HF_TOKEN` and `CANVAS_TOKEN` set locally.
    - vLLM is started with `--expose 8000`. The proxy protects it with the HF token, so vLLM itself runs **without** `--api-key`.
    - The canvas is started with `--expose-public 8765`. Reads are open; writes need `CANVAS_TOKEN`.
-   - The script prints the job id.
-2. **Fill in the URLs.** Check them at launch with `hf jobs inspect <JOB_ID>`. The expected format is below, but I have not confirmed it, nor which inspect field shows it.
+   - Image: `vllm/vllm-openai:v0.31.0` (the probe's image), with the canvas deps pip-installed on top; the
+     command overrides the image's `vllm serve` entrypoint. `VLLM_USE_FLASHINFER_SAMPLER=0` is set too.
+     The first smoke (2026-10-19) used the uv image + `pip install vllm` and died at startup: FlashInfer's
+     sampler JIT needs `nvcc` ("Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist").
+   - The script prints the job id and the exposed URLs.
+2. **Fill in the URLs.** Confirmed at the first smoke: `hf jobs run` prints them, and
+   `hf jobs inspect --json cmpatino/<JOB_ID>` has them in `status.expose_urls` (plain `inspect` prints a table).
    - model: `https://<JOB_ID>--8000.hf.jobs/v1`. Put it in `base_url` in `spec-smoke.yaml` / `spec-100.yaml`, replacing `<JOB_ID>`.
    - canvas: `https://<JOB_ID>--8765.hf.jobs`. This is `CANVAS_URL`.
 3. **Wait until healthy.**
@@ -83,8 +88,11 @@ own cost for a self-hosted provider is $0.
 
 - `harness: llm`, `tool_choice` and `context_tokens` come from PR #7, so the controller runs from `llm-harness`. The specs validate against PR #7's
   `flock.cli.load_spec`; `main` rejects them.
-- **`done_tool: done`** is in the specs, but the harness has no `done` tool yet. The spec model drops unknown
-  keys, so it is ignored until that lands. Until then the driver is the loop and decides when painting stops.
+- **`done_tool`** is a boolean on PR #7's head (`done_tool: done` fails validation).
+  - `spec-smoke.yaml`: `false`, so each prompt is one forced bash call and the driver is the loop.
+  - `spec-100.yaml`: `true` with `max_turns: 25`: a prompt runs forced bash steps until the model calls
+    `done` (or 25 calls), so the big run needs fewer prompts. The driver still decides when painting stops;
+    its `--max-steps` counts prompts, not bash steps.
 - **No `comms` block** in the spec model, so the instructions go in via `system_prompt_file`.
 - **No turn id in the tool env:** flock does not export the prompt or turn id, so `FLOCK_TURN` is
   empty. To join flock events with the paint log, use `prompts.jsonl` (agent, prompt_id, ts)
@@ -93,4 +101,4 @@ own cost for a self-hosted provider is $0.
   detects it at start; until then it sends one prompt per agent over the controller API.
 - **Provider concurrency:** `max_working: 64` on the provider caps 100 painters at 64 in-flight
   turns. The probe measured the L4 sweet spot at c=32-64 (~15-20 calls/s).
-- **Proxy URL format** (`<JOB_ID>--<port>.hf.jobs`) is to verify at launch.
+- **Proxy URL format** confirmed: `https://<JOB_ID>--<port>.hf.jobs` (`status.expose_urls`).

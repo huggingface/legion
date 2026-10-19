@@ -31,9 +31,9 @@ types:
     harness: llm
     model: lfm
     tool_choice: required        # forced tool: every prompt is ONE bash step (PR #7)
-    # The harness is adding a `done` tool; until it lands this key is ignored (unknown keys are
-    # dropped by the spec model) and driver.py is the loop that decides when painting stops.
-    done_tool: done
+    # PR #7 head: done_tool is a boolean. false = one forced bash call per prompt; driver.py is
+    # the loop (and counts steps).
+    done_tool: false
     max_turns: 25
     max_budget_usd: 0.01         # per prompt; self-hosted price is 0, so this never binds
     context_tokens: 6000         # compact well below vLLM --max-model-len 8192

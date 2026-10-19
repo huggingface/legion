@@ -13,7 +13,11 @@
 #
 # Local env: HF_TOKEN, CANVAS_TOKEN (canvas shared secret). `--secrets NAME` forwards the local
 # value; never printed.
-# Optional: FLAVOR (l4x1), TIMEOUT (3h), BUCKET (hf://buckets/cmpatino/flock), VLLM_VERSION.
+# Optional: FLAVOR (l4x1), TIMEOUT (3h), BUCKET (hf://buckets/cmpatino/flock), VLLM_IMAGE.
+# Image: vllm/vllm-openai:v0.31.0 (the probe's image; it has the CUDA toolkit). The first smoke
+# used the uv image + `pip install vllm` and died at startup: FlashInfer's sampler JIT needs nvcc
+# ("Could not find nvcc"). VLLM_USE_FLASHINFER_SAMPLER=0 is set as well, belt and braces.
+# The command below replaces the image's `vllm serve` entrypoint (as in the probe job).
 # Code + target ship through the bucket (experiments/pixel synced to pixel/code/$RUN_ID).
 # CANVAS_DATA lives on local disk and is copied to $BUCKET/pixel/runs/$RUN_ID every 60 s and on
 # exit; a restarted job with the same RUN_ID resumes from that copy (the log is the truth).
@@ -28,8 +32,8 @@ hf buckets sync "$PIXEL" "$BUCKET/pixel/code/$RUN_ID" -q \
 
 read -r -d '' INNER <<'SH' || true
 set -uo pipefail
-uv pip install --system -q "vllm==${VLLM_VERSION}" "fastapi>=0.115" "uvicorn[standard]>=0.30" \
-  "numpy>=1.26" "pillow>=10"
+# canvas deps on top of the vLLM image (pip skips what is already satisfied)
+python3 -m pip install -q "fastapi>=0.115" "uvicorn[standard]>=0.30" "numpy>=1.26" "pillow>=10"
 cp -r "/bucket/pixel/code/$RUN_ID" /app
 DEST="/bucket/pixel/runs/$RUN_ID"; DATA=/data/canvas
 mkdir -p "$DEST" "$DATA"
@@ -41,13 +45,13 @@ sync_out() {
   cp /data/*.log "$DEST/" 2>/dev/null || true
 }
 trap 'kill $CANVAS $VLLM 2>/dev/null; sleep 3; sync_out; echo "SYNCED $DEST"' EXIT TERM INT
-(cd /app && CANVAS_DATA=$DATA CANVAS_PORT=8765 exec python -m canvas) > /data/canvas.log 2>&1 &
+(cd /app && CANVAS_DATA=$DATA CANVAS_PORT=8765 exec python3 -m canvas) > /data/canvas.log 2>&1 &
 CANVAS=$!
 vllm serve LiquidAI/LFM2.5-2.6B --host 0.0.0.0 --port 8000 \
   --reasoning-parser qwen3 --tool-call-parser lfm2 --enable-auto-tool-choice \
   --max-model-len 8192 > /data/vllm.log 2>&1 &
 VLLM=$!
-until python -c "import urllib.request as u;u.urlopen('http://127.0.0.1:8000/health')" 2>/dev/null; do
+until python3 -c "import urllib.request as u;u.urlopen('http://127.0.0.1:8000/health')" 2>/dev/null; do
   kill -0 $VLLM 2>/dev/null || { echo "VLLM DIED"; tail -50 /data/vllm.log; exit 1; }
   sleep 5
 done
@@ -60,5 +64,5 @@ hf jobs run --detach --namespace cmpatino --flavor "${FLAVOR:-l4x1}" --timeout "
   --name "$RUN_ID" --label experiment=pixel \
   --expose 8000 --expose-public 8765 \
   --secrets HF_TOKEN --secrets CANVAS_TOKEN \
-  -v "$BUCKET:/bucket" -e RUN_ID="$RUN_ID" -e VLLM_VERSION="${VLLM_VERSION:-0.31.0}" \
-  ghcr.io/astral-sh/uv:python3.12-bookworm bash -c "$INNER"
+  -v "$BUCKET:/bucket" -e RUN_ID="$RUN_ID" -e VLLM_USE_FLASHINFER_SAMPLER=0 \
+  "${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0}" bash -c "$INNER"
