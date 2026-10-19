@@ -175,6 +175,11 @@ def test_harness_env_is_an_allow_list():
                    "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", "ANTHROPIC_API_KEY": "a",
                    "VLLM_KEY": "sk-1", "FOO": "bar", "MSGBOARD_TOKEN": "mb",
                    "PI_CODING_AGENT_DIR": "/state/pi"}
+    # PR A's allow-list shape: LC_*/XDG_* prefixes; Pi's own defaults yield to explicit values
+    env = harness_env(pi_spec(), {"PI_OFFLINE": "0"}, Path("/p"), None,
+                      base={"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "OTHER": "1"})
+    assert env == {"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "PI_OFFLINE": "0", "PI_SKIP_VERSION_CHECK": "1",
+                   "PI_TELEMETRY": "0", "PI_CODING_AGENT_DIR": "/p"}
 
 
 def test_pi_model_config_glue():
