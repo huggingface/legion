@@ -1,0 +1,3 @@
+#!/bin/sh
+# Put experiments/pixel/cli on PATH; agents then run `canvas claim`, `canvas paint ...`.
+exec python3 "$(dirname "$0")/canvas_cli.py" "$@"
