@@ -14,7 +14,7 @@ bucket: hf://buckets/cmpatino/flock/pixel-smoke
 providers:
   gpu:
     type: openai_compat
-    base_url: "https://6ad6214c5275124786e0859b--8000.hf.jobs/v1"
+    base_url: "https://<JOB_ID>--8000.hf.jobs/v1"   # FILL IN at launch (run/README.md step 3)
     api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
     self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
     max_working: 64              # L4 sweet spot (probe: ~15-20 calls/s at c=32-64)
