@@ -52,8 +52,8 @@ run the preflight to find out for your model.
 2. Make it reachable from the worker jobs (see "Reaching a self-hosted server" below).
 3. Put the key in the controller's environment (a Space secret) under the name you give
    `api_key_env`, e.g. `VLLM_API_KEY`. The controller sends it to that type's jobs as a secret.
-4. Declare the provider with `self_hosted: true` (price `[0, 0, 0]`, pinned into the spec) and,
-   if you want the count in status, `max_working`.
+4. Declare the provider with `self_hosted: true` (price `[0, 0, 0]`, pinned into the spec) and
+   `max_working` to cap how many agents are in a turn on it at once.
 5. `flock preflight spec.yaml`, then `flock apply spec.yaml`.
 
 For the HF router use `base_url: https://router.huggingface.co/v1`, `api_key_env: HF_TOKEN` and
@@ -153,11 +153,16 @@ unverified as failure (`flock preflight --strict` exits 1 the same way).
 ## `max_working`
 
 The number of agents of the swarm on that provider that may be in a turn at once, counted per
-agent from heartbeats (an agent is one slot whether its turn makes one request or fifty). Today
-it is reported, not enforced: `flock status`, `GET /swarms/{swarm}` (`status.providers`) and the
-status page show `working / max_working` per provider. Enforcement would hold prompts for idle
-agents while the provider is at its cap; the count lags by up to one heartbeat (30 s), so the
-cap would be soft by that much.
+agent (an agent is one slot whether its turn makes one request or fifty). The controller enforces
+it at prompt admission: a prompt for an agent that is not in a turn is accepted as usual
+(`POST /agents/{name}/prompt` never rejects it) but stays queued in the controller while the
+provider is at its cap, and goes out on a worker's next command poll once a slot frees (within
+one poll, about 25 s). Prompts for an agent already in a turn take no new slot. Heartbeat-reported
+`working` counts are the source of truth, plus prompts handed out since the agent's last
+heartbeat, so two polls between heartbeats cannot both take the last slot. The count lags by up
+to one heartbeat (30 s), so the cap is soft by that much. `flock status`, `GET /swarms/{swarm}`
+(`status.providers`) and the status page show `working / max_working` per provider.
+`FLOCK_MAX_WORKING_ENFORCE=0` on the controller turns enforcement off (report only).
 
 ## Status
 

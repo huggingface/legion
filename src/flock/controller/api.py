@@ -465,10 +465,15 @@ def create_app(
     stats: Callable[[], dict] | None = None,
     secret_source: Mapping[str, str] | None = None,
     preflight_transport: httpx.AsyncBaseTransport | None = None,
+    enforce_max_working: bool | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
-    where the Space puts its secrets); `preflight_transport` lets tests fake the providers."""
+    where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
+    `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0")."""
     secret_source = os.environ if secret_source is None else secret_source
+    if enforce_max_working is None:
+        enforce_max_working = os.environ.get("FLOCK_MAX_WORKING_ENFORCE", "1") != "0"
+    admitted: dict[str, float] = {}  # agent -> when a prompt was handed out to start a turn
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
 
@@ -661,6 +666,43 @@ def create_app(
         versions) are trusted, as before."""
         return incarnation is not None and w["incarnation"] != incarnation
 
+    def admit(w: Row, prompts: list[Row]) -> list[Row]:
+        """Provider `max_working` at prompt admission (design.md section 5). A prompt for an
+        agent that is not in a turn needs a free slot on its provider; without one it stays
+        queued here and goes out on a later poll. Slots: agents whose fresh heartbeat says
+        working, plus agents handed a prompt that no heartbeat has reported on since (so two
+        polls between heartbeats cannot both take the last slot). Soft by one heartbeat."""
+        if not enforce_max_working or not prompts:
+            return prompts
+        sw = store.get_swarm(w["swarm"])
+        ts = sw["spec"].types.get(w["type"]) if sw else None
+        r = ts.resolved_model if ts else None
+        if r is None or r.provider.max_working is None:
+            return prompts
+        spec, now = sw["spec"], clock().timestamp()
+        users = {t for t, x in spec.types.items() if x.provider_name == r.provider_name}
+        workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
+        busy: set[str] = set()
+        for a in store.list_agents(spec.swarm):
+            if a["type"] not in users:
+                continue
+            given = admitted.get(a["name"])
+            if agent_state(a, workers.get(a["worker"]), now) == AgentState.working:
+                busy.add(a["name"])
+            elif given is not None and (a["last_heartbeat"] or 0) < given:
+                busy.add(a["name"])  # handed a prompt; not reported since
+            elif given is not None:
+                del admitted[a["name"]]  # a later heartbeat is the source of truth now
+        out = []
+        for p in prompts:
+            if p["agent"] not in busy:
+                if len(busy) >= r.provider.max_working:
+                    continue  # provider full: stays queued
+                busy.add(p["agent"])
+                admitted[p["agent"]] = now
+            out.append(p)
+        return out
+
     @api.get("/workers/{worker_id}/commands")
     async def commands(worker_id: str, wait: float = 25, incarnation: str | None = None):
         if stale(worker_or_404(worker_id), incarnation):
@@ -675,7 +717,7 @@ def create_app(
             cmds = store.commands_for(worker_id)
             # A draining worker starts no turns; its prompts wait for the replacement job.
             draining = w["draining"] or w["retire_at"]
-            prompts = [] if draining else store.prompts_for_worker(worker_id)
+            prompts = [] if draining else admit(w, store.prompts_for_worker(worker_id))
             return (cmds, prompts) if cmds or prompts else None
 
         found = await notifier.long_poll(f"commands:{worker_id}", check, wait)

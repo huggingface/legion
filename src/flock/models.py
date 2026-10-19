@@ -95,8 +95,8 @@ class ProviderSpec(BaseModel):
     base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
-    # Max agents of this swarm on this provider that may be in a turn at once. Stored and
-    # reported in status; not enforced yet (design.md section 5, 'Providers').
+    # Max agents of this swarm on this provider that may be in a turn at once. Enforced at
+    # prompt admission by the controller (FLOCK_MAX_WORKING_ENFORCE=0: report only).
     max_working: int | None = None
     pricing: dict[str, list[float]] = Field(default_factory=dict)  # model id ("*" = any) -> row
     timeout_s: float | None = None  # passthrough to the harness / preflight
@@ -518,7 +518,7 @@ class ProviderStatus(BaseModel):
     self_hosted: bool
     types: list[str]  # agent types using this provider
     working: int  # agents of those types in a turn now (from heartbeats)
-    max_working: int | None = None  # reported, not enforced yet
+    max_working: int | None = None  # enforced at prompt admission unless FLOCK_MAX_WORKING_ENFORCE=0
     # Agents with turns but zero reported tokens: the server sends no usage, cost is unknown.
     zero_usage_agents: int = 0
 

@@ -335,3 +335,79 @@ async def test_status_counts_agents_with_zero_usage(client, clock, tick):
     assert st["providers"]["hf"]["zero_usage_agents"] == 1  # turns > 0 and no tokens
     assert st["providers"]["gpu1"]["zero_usage_agents"] == 0
     assert "report zero tokens (cost unknown)" in (await client.get("/")).text
+
+
+# max_working at prompt admission; the reviewer's provider_cap_repro.py is the first case.
+CAP_PROVIDERS = {"p": {"type": "openai_compat", "base_url": "http://fake/v1", "api_key_env": "K",
+                       "self_hosted": True, "max_working": 1}}
+
+
+async def _cap_client(store, clock, enforce):
+    app = create_app(store, TOKEN, clock=clock, enforce_max_working=enforce)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                             headers={"Authorization": f"Bearer {TOKEN}"})
+
+
+async def _delivered(c, wid) -> list[str]:
+    cmds = (await c.get(f"/workers/{wid}/commands?wait=0")).json()["commands"]
+    return [x["agent"] for x in cmds if x["kind"] == "prompt"]
+
+
+@pytest.mark.parametrize("env, enforced", [(None, True), ("1", True), ("0", False)])
+async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, monkeypatch, env,
+                                                         enforced):
+    if env is None:
+        monkeypatch.delenv("FLOCK_MAX_WORKING_ENFORCE", raising=False)
+    else:
+        monkeypatch.setenv("FLOCK_MAX_WORKING_ENFORCE", env)
+    spec = pspec(CAP_PROVIDERS, worker={"harness": "codex", "model": "p:test", "replicas": 2})
+    wid = "p-worker-w0000"
+    async with await _cap_client(store, clock, None) as c:
+        assert (await put(c, spec)).status_code == 200
+        tick()
+        await _delivered(c, wid)  # drain the assigns
+        busy = [AgentHeartbeat(name="worker-0000", state="working", turn_id="t1"),
+                AgentHeartbeat(name="worker-0001", state="idle")]
+        await c.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, busy))
+        st = (await c.get("/swarms/p")).json()["status"]["providers"]["p"]
+        assert st["working"] == st["max_working"] == 1
+        ack = (await c.post("/agents/worker-0001/prompt", json={"text": "start"})).json()
+        assert ack["status"] == "queued"  # accepted, never rejected
+        if not enforced:  # FLOCK_MAX_WORKING_ENFORCE=0: report only, as before
+            assert await _delivered(c, wid) == ["worker-0001"]
+            return
+        assert await _delivered(c, wid) == []  # provider full: held in the controller
+        await c.post("/agents/worker-0000/prompt", json={"text": "more for the working one"})
+        assert await _delivered(c, wid) == ["worker-0000"]  # a working agent takes no new slot
+        clock.advance(30)
+        idle = [AgentHeartbeat(name="worker-0000", state="idle"),
+                AgentHeartbeat(name="worker-0001", state="idle")]
+        await c.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, idle))
+        assert await _delivered(c, wid) == ["worker-0001"]  # slot freed: dispatched
+        assert store.pending_counts("p") == {}  # acked once the response went out
+
+
+async def test_max_working_counts_admissions_between_heartbeats(store, clock, tick):
+    spec = pspec(CAP_PROVIDERS, worker={"harness": "codex", "model": "p:test", "replicas": 2,
+                                        "agents_per_worker": 1})
+    async with await _cap_client(store, clock, True) as c:
+        assert (await put(c, spec)).status_code == 200
+        tick()
+        for i, wid in enumerate(("p-worker-w0000", "p-worker-w0001")):
+            await _delivered(c, wid)
+            idle = [AgentHeartbeat(name=f"worker-000{i}", state="idle")]
+            await c.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, idle))
+        clock.advance(1)
+        for name in ("worker-0000", "worker-0001"):
+            await c.post(f"/agents/{name}/prompt", json={"text": "go"})
+        # both idle per heartbeat, but the first poll took the only slot
+        assert await _delivered(c, "p-worker-w0000") == ["worker-0000"]
+        assert await _delivered(c, "p-worker-w0001") == []
+        clock.advance(30)  # the next heartbeat says worker-0000 is working: still full
+        busy = [AgentHeartbeat(name="worker-0000", state="working", turn_id="t")]
+        await c.post("/workers/p-worker-w0000/heartbeat", json=hb(clock, "p-worker-w0000", busy))
+        assert await _delivered(c, "p-worker-w0001") == []
+        clock.advance(30)
+        idle = [AgentHeartbeat(name="worker-0000", state="idle")]
+        await c.post("/workers/p-worker-w0000/heartbeat", json=hb(clock, "p-worker-w0000", idle))
+        assert await _delivered(c, "p-worker-w0001") == ["worker-0001"]

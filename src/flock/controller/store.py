@@ -413,7 +413,7 @@ class Store:
 
     def prompts_for_worker(self, worker_id: str) -> list[Row]:
         return self._q(
-            "SELECT p.id, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
+            "SELECT p.id, p.agent, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
             "WHERE a.worker = ? ORDER BY p.id",
             [worker_id],
         )
