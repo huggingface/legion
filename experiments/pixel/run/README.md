@@ -7,6 +7,7 @@ Nothing here has been launched. Files:
 | `painter.md` | agent instructions (19 lines): install step, then one chained command per prompt |
 | `spec-100.yaml`, `spec-smoke.yaml` | flock specs: 100 painters on 2 cpu-basic workers (+1 spare); smoke = 3 painters, 1 worker |
 | `driver.py` | keeps painters prompted until the canvas is done; writes `progress.jsonl`, `prompts.jsonl` |
+| `spec-1k.yaml`, `job-1k.sh` | the 1k run: 3 painter types x 3 providers, 3 rtx-pro-6000 jobs (below) |
 | `job.sh` | the single GPU job: vLLM (LFM2.5-2.6B, :8000) + canvas (:8765) in one container |
 
 ## How a painter works
@@ -110,3 +111,81 @@ own cost for a self-hosted provider is $0.
 - **Provider concurrency:** `max_working: 64` on the provider caps 100 painters at 64 in-flight
   turns. The probe measured the L4 sweet spot at c=32-64 (~15-20 calls/s).
 - **Proxy URL format** confirmed: `https://<JOB_ID>--<port>.hf.jobs` (`status.expose_urls`).
+
+## The 1k run (spec-1k.yaml, job-1k.sh)
+
+Same conditions as run 1, except agent count, GPUs and workers (Carlos):
+- **Same as run 1:** model and `extra`, `tool_choice: required`, `done_tool: true`, `max_turns: 25`,
+  `context_tokens: 3000`, `turn_timeout: 6m`, `painter.md`, 25 agents per cpu-basic worker.
+  The canvas keeps its defaults: `MAX_PIXELS_PER_CALL=10`, scattered claims, white blank.
+- **Different:** 1,000 painters in 3 types (`painter-a/b/c`, 334/333/333), each on its own
+  provider `gpu1..gpu3` (`max_working: 128`). flock has no client-side load balancing across
+  providers, so the split is per type. There are 3 rtx-pro-6000 jobs and 14 + 2 workers per type
+  (42 at start).
+- **Driver differs:** run 1 prompted per agent. At 1k that is 1,000 POSTs per tick, and the Space
+  edge already returned 429s at 100 agents. The 1k driver sends **one bulk prompt per type per
+  tick** instead, with backoff. This changes how fast idle agents get their next prompt, not what
+  an agent does. For a strict comparison, rerun 100 agents with the bulk driver.
+
+### Launch order
+1. `RUN_ID=run1k-YYYYMMDD experiments/pixel/run/job-1k.sh`. It launches 3 jobs (`$RUN_ID-gpu1..3`,
+   `--timeout 75m`), one engine each with `--api-server-count 4 --max-num-seqs 512`. gpu1 also runs
+   the canvas (`--expose-public 8765`). The script prints the three `base_url`s and `CANVAS_URL`.
+   Logs go to `$BUCKET/pixel/runs/$RUN_ID/gpuN/`; the paint log goes to `$BUCKET/pixel/runs/$RUN_ID/`.
+2. Fill `<JOB_ID_1..3>` in `spec-1k.yaml`. Set the Space secret `CANVAS_URL` (and `CANVAS_TOKEN`).
+3. Wait until healthy:
+   - `VLLM READY` in all three job logs;
+   - `/v1/models` returns 200 through each proxy;
+   - canvas `/status` answers.
+4. Controller `cmpatino/flock-smoke` on the `pixel-run` wheel (it includes the bulk-prompt route).
+   Run `flock apply experiments/pixel/run/spec-1k.yaml`; expect ~42 workers and 1,000 idle agents
+   after a few minutes.
+5. Driver (polls every 2 s: 2 canvas reads, 1 controller status and 3 bulk POSTs per tick):
+   ```
+   python experiments/pixel/run/driver.py --swarm pixel-1k --types painter-a,painter-b,painter-c \
+     --canvas-url <CANVAS_URL> --repeat --interval 2 --gpus 3 --gpu-usd-per-hour 8.25 \
+     --run-id $RUN_ID --run-name "1k x LFM2.5-2.6B" --max-minutes 30
+   ```
+6. Compare on the progress Space: `?tab=compare`, run 1 against this run. The time axis switches
+   to seconds for short runs.
+
+### The 5-minute check (from `flock apply`)
+By minute 5 the swarm should be painting. If not, stop and diagnose before the GPUs burn time.
+- `flock status pixel-1k`: ~1,000 agents, 42 workers running, no `launch_error`.
+- Driver line:
+  - `active` is in the hundreds within a minute of the bulk install;
+  - `px/s` is in the thousands;
+  - `idle` falls;
+  - `retries` stays small (a few). If retries climb every tick, raise `--interval`.
+- Canvas `/status`: `active_agents_10s` ≈ agents painting; `step_gap_p50_s` ~2.5-3.5 s (run 1 at
+  25 per worker). Much higher means the workers are CPU-bound.
+- Each GPU's `/metrics` through the proxy: running requests > 0 on all three. A GPU at 0 means
+  its painter type is not running.
+
+### Teardown (3 GPU jobs)
+1. The driver stops at 100% and uploads `final/<run>/` (canvas.png, agents.png fresh, score.json,
+   paint-log.jsonl.gz).
+2. Run `flock remove pixel-1k`, and wait until the workers are gone (~2 min at 100 agents; longer at 42 workers).
+3. Check the bucket paint log has `seq` lines: `$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`
+   (copied every 60 s; wait one more minute after the driver ends).
+4. `hf jobs cancel` all three (`$RUN_ID-gpu1..3`); `hf jobs ps` should show none. Pause the controller Space.
+
+### Expected numbers
+- **Throughput wanted:** ~400 model calls/s = 1,000 agents × ~0.4 steps/s. Run 1 at 25 agents
+  per worker did 0.23 steps/s per agent, so 234 steps/s is the floor if worker CPU is the limit
+  again.
+- **Available:** 3 × ~160 calls/s = **~480 calls/s** (rtx-pro-6000 probe knee).
+- **Painting phase:** the work set is 62,278 calls at 10 px. At ~400 calls/s that is **~2.6 min,
+  about 3 minutes**; at 234 calls/s it is ~4.5 min.
+- **Setup dominates:** GPU boot ~5 min, apply ~2-5 min, painting ~3 min, teardown ~3 min.
+- **Cost:**
+  - Cap: 3 × 75 min × $2.75/h = $10.3.
+  - Expected **≈ $7** (≈50 min of wall time per GPU including setup, smoke and slack).
+  - Workers: 42 cpu-basic for ~15-20 min (cents).
+- **Canvas** (one process, loadgen above):
+  - ~400 steps/s means ~800 canvas req/s (claim + paint), at p95 38 ms and 79% of a core.
+  - The ceiling is ~865 req/s, so all 480 calls/s (960 req/s) would saturate the canvas.
+- **Short-run capture:**
+  - The driver samples every 2 s, publishes every 30 s, and always uploads `final/`.
+  - `agents.png` is fetched fresh at the end.
+  - Replay keyframes are every 1,000 entries (~62 over the run).
