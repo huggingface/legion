@@ -42,7 +42,17 @@ BOOT = (
 STEP = "./canvas claim 10 --json | ./canvas paint - --json"
 
 
+REPEAT = False  # --repeat: multi-step turns (spec `done_tool: true`)
+
+
 def prompt_text(cmd: str) -> str:
+    if REPEAT and cmd == STEP:
+        return (
+            "Run exactly this command. After each result run it again, the same way, until the "
+            f'output says "You are done"; then call done.\n{cmd}'
+        )
+    if REPEAT:
+        return f"Run exactly this one command, then call done:\n{cmd}"
     return f"Next step. Run exactly this one command:\n{cmd}"
 
 
@@ -217,6 +227,12 @@ def main() -> int:
     ap.add_argument(
         "--no-bulk", action="store_true", help="per agent (the default; kept for old scripts)"
     )
+    ap.add_argument(
+        "--repeat",
+        action="store_true",
+        help="for `done_tool: true`: ask for the step repeatedly within a turn and prompt only "
+        "idle agents (a prompt sent mid-turn would be steered into the running turn)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--space-id",
@@ -234,6 +250,8 @@ def main() -> int:
     )
     ap.add_argument("--board-url", default=os.environ.get("BOARD_URL"))
     a = ap.parse_args()
+    global REPEAT
+    REPEAT = a.repeat
     a.run_id = a.run_id or f"{a.swarm}-{time.strftime('%Y%m%d-%H%M', time.gmtime())}"
     a.controller_url = a.controller_url or a.flock_url
     pub = Publisher(a, a.out)
@@ -344,6 +362,8 @@ def drive(a, pub: Publisher) -> str:
                     for ag in agents:
                         name = ag["name"]
                         if ag["state"] not in ("idle", "working") or ag.get("pending", 0) > 0:
+                            continue
+                        if a.repeat and ag["state"] != "idle":
                             continue
                         if a.max_steps and steps.get(name, 0) >= a.max_steps:
                             continue

@@ -1,11 +1,13 @@
 # Pixel run 1: 100 LFM2.5-2.6B painters on the `llm` harness (experiments/pixel/run/README.md).
-# Needs PR #7 (llm harness: `harness: llm`, `tool_choice`, `context_tokens`). Apply only after it
-# merges; on main today `harness: llm` is rejected.
+# RUN_ID run1-20261019 (job.sh, driver --run-id, progress Space). GPU: one rtx-pro-6000 job.
+# Needs PR #7 (`harness: llm`, `tool_choice`, `context_tokens`, `done_tool`): the controller runs
+# the `pixel-run` wheel (main + PR #7 + PR #8). Two placeholders to fill at launch:
+# <JOB_ID> (base_url) and <MAX_WORKING> (from the rtx-pro-6000 probe).
 #
 # Model path: the GPU job's vLLM through the HF jobs proxy (job.sh: --expose 8000, vLLM
 # without --api-key). The proxy checks the HF token sent as the bearer, so the provider key IS
-# HF_TOKEN: give the controller a fine-grained read-only token under that name if you have one,
-# else the operator token. Fill <JOB_ID> from `hf jobs inspect` (URL format: verify at launch).
+# HF_TOKEN (the operator token: workers also use HF_TOKEN for bucket sync, so read-only breaks
+# that). <JOB_ID>: `hf jobs inspect --json` -> status.expose_urls.
 # Network groups are not used: flock dropped provider network_group on purpose (0c1b4b2).
 swarm: pixel-100
 namespace: cmpatino
@@ -13,10 +15,10 @@ bucket: hf://buckets/cmpatino/flock/pixel-100
 providers:
   gpu:
     type: openai_compat
-    base_url: "https://<JOB_ID>--8000.hf.jobs/v1"   # FILL IN at launch (run/README.md step 3)
+    base_url: "https://<JOB_ID>--8000.hf.jobs/v1"   # FILL IN at launch
     api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
     self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
-    max_working: 64              # L4 sweet spot (probe: ~15-20 calls/s at c=32-64)
+    max_working: <MAX_WORKING>   # FILL IN from the rtx-pro-6000 probe (in-flight model calls)
     timeout_s: 60
     max_retries: 4
 models:
@@ -31,12 +33,14 @@ types:
     model: lfm
     tool_choice: required        # forced tool: every model call is a bash step (PR #7)
     # PR #7 head: done_tool is a boolean. true = a prompt runs up to max_turns forced bash steps
-    # and ends when the model calls `done` (fewer prompts for the big run); the smoke uses false.
+    # and ends when the model calls `done` or at max_turns (`turn_ended error, reason max_turns`,
+    # expected); fewer prompts for the big run. Driver: --repeat. Fallback if the model calls
+    # `done` after one step: false + re-apply, driver without --repeat. The smoke uses false.
     done_tool: true
     max_turns: 25
-    max_budget_usd: 0.01         # per prompt; self-hosted price is 0, so this never binds
-    context_tokens: 6000         # compact well below vLLM --max-model-len 8192
-    turn_timeout: 2m
+    max_budget_usd: 0.05         # per prompt; self-hosted price is 0, so this never binds
+    context_tokens: 3000         # smoke: ~6k-token prompts at 6000; a step needs only the last result
+    turn_timeout: 6m             # 25 steps x ~3-6 s; past it the worker kills the turn (agent stuck)
     replicas: 100
     agents_per_worker: 50
     max_working_per_worker: 50   # default 20 would cap the swarm at 40 concurrent steps

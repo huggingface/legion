@@ -30,7 +30,9 @@ dropped provider `network_group` on purpose, 0c1b4b2; the probe in
 `flock-board/probe-reachability-lfm.md` showed `Bearer $HF_TOKEN` through the proxy -> 200 for
 chat completions at the same latency, and the controller's preflight can reach it too).
 
-1. **GPU job.** Run `RUN_ID=pixel-100-a experiments/pixel/run/job.sh`. You need `HF_TOKEN` and `CANVAS_TOKEN` set locally.
+1. **GPU job.** Run `RUN_ID=run1-20261019 experiments/pixel/run/job.sh`. You need `HF_TOKEN` and `CANVAS_TOKEN` set locally.
+   - Defaults: `rtx-pro-6000`, `--timeout 90m` (the smoke used `FLAVOR=l4x1`). The vLLM command sits in a
+     marked "LAUNCH RECIPE" block (contract: API on :8000, logs `/data/vllm*.log`, pids in `VLLM_PIDS`).
    - vLLM is started with `--expose 8000`. The proxy protects it with the HF token, so vLLM itself runs **without** `--api-key`.
    - The canvas is started with `--expose-public 8765`. Reads are open; writes need `CANVAS_TOKEN`.
    - Image: `vllm/vllm-openai:v0.31.0` (the probe's image), with the canvas deps pip-installed on top; the
@@ -64,7 +66,8 @@ chat completions at the same latency, and the controller's preflight can reach i
    - Then `flock remove pixel-smoke`.
 6. **Run.**
    - Run `flock apply experiments/pixel/run/spec-100.yaml`.
-   - Then run `python experiments/pixel/run/driver.py --swarm pixel-100 --canvas-url <canvas URL> --run-id pixel-100-a`, with `SPACE_ID`/`HF_TOKEN` set for the progress page.
+   - Then run `python experiments/pixel/run/driver.py --swarm pixel-100 --canvas-url <canvas URL> --run-id run1-20261019 --repeat --interval 3 --max-minutes 80 --gpu-usd-per-hour 2.75`, with `SPACE_ID`/`HF_TOKEN` set for the progress page. Use the job's RUN_ID as `--run-id`.
+   - `--repeat` goes with `done_tool: true`: the step prompt asks the model to repeat the command within the turn, and only idle agents are prompted (a prompt sent mid-turn would be steered into the running turn). With `done_tool: false`, drop `--repeat`.
    - The driver stops when the work set is 100% done. Cap the run with `--max-minutes`, or each agent with `--max-steps`.
 7. **Teardown.**
    - Run `flock remove pixel-100`.
