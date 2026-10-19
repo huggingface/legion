@@ -6,7 +6,7 @@ bucket: hf://buckets/cmpatino/flock
 providers:
   lfm:                           # vLLM serving LiquidAI/LFM2.5-2.6B, reached over HTTPS
     type: openai_compat
-    base_url: "https://lfm.example.org/v1"
+    base_url: "https://lfm.example.org/v1"   # vLLM: --tool-call-parser lfm2 --reasoning-parser qwen3
     api_key_env: VLLM_API_KEY
     self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
     max_working: 512
@@ -15,7 +15,11 @@ providers:
 models:
   lfm-small:
     model: "lfm:LiquidAI/LFM2.5-2.6B"
-    extra: {max_tokens: 512}     # sent as-is in every request body (this harness can)
+    # sent as-is in every request body (this harness can). LFM2.5 always thinks first
+    # (its template ends with <think>); turn it off and keep replies short.
+    extra:
+      max_tokens: 256
+      chat_template_kwargs: {enable_thinking: false}
 types:
   pixel:
     harness: llm
@@ -26,5 +30,7 @@ types:
     max_turns: 8                 # model calls per prompt
     max_budget_usd: 0.01         # per prompt, flock-priced (0 here: self-hosted)
     context_tokens: 16000        # transcript estimate (chars / 4) that triggers compaction
+    tool_choice: bash            # force a bash call on every request: one action per prompt
+                                 # (20/20 valid in ~2.5 s vs 7/20 in ~25 s free-form, LFM2.5 on L4)
     turn_timeout: 5m
     system_prompt_file: prompts/pixel.md

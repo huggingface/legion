@@ -7,6 +7,12 @@ Replies, decided from the last message of each request:
 - last user text contains `bash: X` -> one `bash` tool call with command X
 - last user text contains `json: X` -> the call written as text: `{"tool": "bash", "command": X}`
 - last user text contains `py: X`   -> the call written as text, pythonic: `[bash(command=X)]`
+- `tool_choice` forces a call (`required` or a named function) -> a `bash` call every time,
+  command from `bash: X` in the last user text, else `echo forced`
+- `response_format` set             -> its JSON as text: `{"tool": "bash", "command": "echo rf"}`
+- last user text contains `think!`  -> inline reasoning without the opening tag (LFM2 style):
+                                       "pondering</think>echo: <text>"
+- last user text contains `think2!` -> `reasoning_content: "pondering"` + the echo
 - last user text contains `fail!`   -> HTTP 400 with an OpenAI-style error body
 - last user text contains `429!`    -> HTTP 429 (Retry-After: 0) the first time a request with
                                        these exact messages is seen, then the normal reply
@@ -41,6 +47,15 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     """{'content': str|None, 'tool_calls': list|None} for this request."""
     msgs = body.get("messages") or []
     last = msgs[-1] if msgs else {}
+    tc = body.get("tool_choice")
+    if tc == "required" or isinstance(tc, dict):
+        user = next((_text(m.get("content")) for m in reversed(msgs) if m.get("role") == "user"), "")
+        cmd = user.split("bash: ", 1)[1].splitlines()[0].strip() if "bash: " in user else "echo forced"
+        n = sum(1 for m in msgs if m.get("role") == "assistant")
+        return {"content": None, "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {
+            "name": "bash", "arguments": json.dumps({"command": cmd})}}]}
+    if body.get("response_format") and last.get("role") != "tool":
+        return {"content": json.dumps({"tool": "bash", "command": "echo rf"}), "tool_calls": None}
     if last.get("role") == "tool":
         return {"content": "done: " + _text(last.get("content")).strip()[:40], "tool_calls": None}
     user = _text(last.get("content")) if last.get("role") == "user" else ""
@@ -56,6 +71,10 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
         call = {"id": f"call_{n}", "type": "function",
                 "function": {"name": "bash", "arguments": json.dumps({"command": cmd})}}
         return {"content": None, "tool_calls": [call]}
+    if "think2!" in user:
+        return {"content": "echo: " + user.strip(), "tool_calls": None, "reasoning_content": "pondering"}
+    if "think!" in user:
+        return {"content": "pondering</think>\n\necho: " + user.strip(), "tool_calls": None}
     return {"content": "echo: " + user.strip(), "tool_calls": None}
 
 
@@ -95,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
         finish = "tool_calls" if r["tool_calls"] else "stop"
         if not body.get("stream"):
             msg = {"role": "assistant", "content": r["content"]}
+            if r.get("reasoning_content"):
+                msg["reasoning_content"] = r["reasoning_content"]
             if r["tool_calls"]:
                 msg["tool_calls"] = r["tool_calls"]
             self._json(200, {"id": "c1", "object": "chat.completion", "created": int(time.time()),

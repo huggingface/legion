@@ -19,6 +19,7 @@ from flock.worker.adapters.llm import (
     estimate_tokens,
     harness_env,
     repair,
+    split_thinking,
     text_tool_calls,
     wire_messages,
 )
@@ -80,12 +81,25 @@ def test_chat_usage_splits_cached_tokens():
     assert chat_usage(None) == TokenUsage()
 
 
-def test_wire_merges_the_compaction_note_and_drops_flock_keys():
-    msgs = [{"role": "system", "content": "S"}, {"role": "system", "content": "N", "flock_summary": True},
+def test_wire_drops_flock_keys():
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "N", "flock_summary": True},
             {"role": "user", "content": "u"},
             {"role": "assistant", "content": None, "flock_from_text": "{..}", "tool_calls": []}]
-    assert wire_messages(msgs) == [{"role": "system", "content": "S\n\nN"}, {"role": "user", "content": "u"},
+    assert wire_messages(msgs) == [{"role": "system", "content": "S"}, {"role": "user", "content": "N"},
+                                   {"role": "user", "content": "u"},
                                    {"role": "assistant", "content": None, "tool_calls": []}]
+
+
+@pytest.mark.parametrize(("content", "thinking", "visible"), [
+    ("<think>hmm</think>\n\nanswer", "hmm", "answer"),
+    ("hmm</think>answer", "hmm", "answer"),  # the template opened the tag (LFM2)
+    ("<think>cut off mid-thought", "cut off mid-thought", ""),
+    ("plain answer", None, "plain answer"),
+    ('hmm</think>{"tool": "bash", "command": "ls"}', "hmm", '{"tool": "bash", "command": "ls"}'),
+    (None, None, None),
+])
+def test_split_thinking(content, thinking, visible):
+    assert split_thinking(content) == (thinking, visible)
 
 
 def test_repair_closes_dangling_tool_calls():
@@ -107,7 +121,8 @@ def test_compaction_keeps_system_note_and_recent_messages(tmp_path):
     msgs = [sys_msg, *body]
     assert compact(msgs[:3], 1000, tmp_path) is None  # fits: untouched
     out = compact(msgs, 1000, tmp_path)
-    assert out[0] == sys_msg and out[1]["flock_summary"] and out[2]["role"] == "user"
+    assert out[0] == sys_msg and out[1]["flock_summary"] and out[1]["role"] == "user"
+    assert out[2]["role"] == "user" and [m["role"] for m in out].count("system") == 1
     assert out[-1] == body[-1] and estimate_tokens(out) <= 1000
     n = out[1]["flock_dropped"]
     assert n == len(msgs) - 1 - (len(out) - 2) and f"{n} earlier message(s)" in out[1]["content"]
@@ -150,6 +165,12 @@ def test_spec_llm_needs_an_openai_compat_provider():
                                   "types": {"a": {"harness": "llm", "model": "gpt-5"}}})
     with pytest.raises(ValueError, match="context_tokens must be >= 256"):
         llm_spec(context_tokens=10)
+    assert llm_spec(tool_choice="bash").tool_choice == "bash"
+    with pytest.raises(ValueError, match="tool_choice"):
+        llm_spec(tool_choice="paint")
+    with pytest.raises(ValueError, match="for harness llm only"):
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
+                                  "types": {"a": {"harness": "codex", "model": "m", "tool_choice": "required"}}})
 
 
 def test_example_spec_validates():
@@ -338,8 +359,9 @@ async def test_compaction_during_a_session(tmp_path, fake_server, monkeypatch):
         assert (await turn(a))[-1].status == "completed"
     await a.stop()
     last = requests_seen(fake_server)[-1]["body"]["messages"]
-    assert "earlier message(s) of this conversation were removed" in last[0]["content"]
-    assert last[1]["content"].startswith("msg5") and len(last) == 2
+    assert [m["role"] for m in last] == ["system", "user", "user"]  # one system message, first
+    assert "earlier message(s) of this conversation were removed" in last[1]["content"]
+    assert last[2]["content"].startswith("msg5")
     lines = [json.loads(x) for x in a.session_path(sid).read_text().splitlines()]
     assert lines[1]["flock_summary"] and lines[1]["flock_dropped"] == 10
 
@@ -454,3 +476,60 @@ async def test_bash_timeout_and_truncation(tmp_path):
     assert err and "timed out after 0.2s" in out
     out, err = await a._bash("head -c 40000 /dev/zero | tr '\\0' a; exit 3", None)
     assert err and out.endswith("[exit code 3]") and "chars truncated" in out and len(out) < 16_200
+
+
+@pytest.mark.parametrize(("where", "wire"), [
+    ({"tool_choice": "required"}, "required"),
+    ({"tool_choice": "bash"}, {"type": "function", "function": {"name": "bash"}}),
+    ({"models": {"m": {"model": "gpu:fake-model", "extra": {"tool_choice": "required"}}}, "model": "m"},
+     "required"),
+])
+async def test_forced_tool_choice_is_one_action_per_prompt(tmp_path, fake_server, monkeypatch, where, wire):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, **where)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo painted > px.txt")
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 1
+    assert roles(evs) == ["user", "assistant", "toolResult"]
+    assert (wd / "px.txt").read_text() == "painted\n"
+    [req] = requests_seen(fake_server)
+    assert req["body"]["tool_choice"] == wire
+    await a.send("again")  # the next prompt continues the transcript, one action again
+    assert (await turn(a))[-1].status == "completed" and len(requests_seen(fake_server)) == 2
+    await a.stop()
+
+
+async def test_response_format_and_no_thinking_pass_through_extra(tmp_path, fake_server, monkeypatch):
+    schema = {"type": "object", "properties": {"tool": {"const": "bash"}, "command": {"type": "string"}},
+              "required": ["tool", "command"]}
+    extra = {"response_format": {"type": "json_schema", "json_schema": {"name": "call", "schema": schema}},
+             "chat_template_kwargs": {"enable_thinking": False}}
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, model="m",
+                       models={"m": {"model": "gpu:fake-model", "extra": extra}})
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("paint")
+    evs = await turn(a)
+    body = requests_seen(fake_server)[0]["body"]
+    assert body["response_format"] == extra["response_format"]  # nested objects intact
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    res = next(e.message for e in evs if e.kind == "message" and e.message["role"] == "toolResult")
+    assert res["content"][0]["text"] == "rf\n[exit code 0]"  # the schema'd JSON ran as the call
+    await a.stop()
+
+
+@pytest.mark.parametrize("trigger", ["think!", "think2!"])
+async def test_thinking_is_shown_not_resent(tmp_path, fake_server, monkeypatch, trigger):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch)
+    sid = await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send(f"{trigger} hi")
+    evs = await turn(a)
+    asst = next(e.message for e in evs if e.kind == "message" and e.message["role"] == "assistant")
+    assert asst["content"] == [{"type": "thinking", "thinking": "pondering"},
+                               {"type": "text", "text": f"echo: {trigger} hi"}]
+    assert next(e for e in evs if e.kind == "usage").usage.output == 7  # tokens still counted
+    await a.send("next")
+    await turn(a)
+    await a.stop()
+    sent = requests_seen(fake_server)[1]["body"]["messages"]
+    assert sent[2] == {"role": "assistant", "content": f"echo: {trigger} hi"}
+    assert "pondering" not in a.session_path(sid).read_text()

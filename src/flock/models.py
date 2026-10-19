@@ -201,6 +201,9 @@ class TypeSpec(BaseModel):
     max_budget_usd: float | None = None  # per prompt, passed to the harness
     # harness llm only: transcript size (estimated tokens) that triggers compaction; None: 32k
     context_tokens: int | None = None
+    # harness llm only: chat-completions `tool_choice` on every call: auto (default) | required |
+    # none | bash (force that tool). A forcing value makes each prompt one action.
+    tool_choice: Literal["auto", "required", "none", "bash"] | None = None
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -295,6 +298,8 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
+            if ts.harness != Harness.llm and (ts.tool_choice is not None or ts.context_tokens is not None):
+                raise ValueError(f"types.{type_name}: tool_choice and context_tokens are for harness llm only")
             if r is None:
                 if ts.harness == Harness.llm:
                     raise ValueError(

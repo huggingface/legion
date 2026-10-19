@@ -232,7 +232,10 @@ compacted (system + a note + the newest messages) past the type's `context_token
 turn ends on a reply without tool calls; prompts sent mid-turn become the next user message;
 `max_turns` / `max_budget_usd` are checked before each model call, as for Pi and Codex. Usage
 is per call. `extra` is sent as body fields; `reasoning` is ignored. Tool calls written as
-text (`{"tool": "bash", ...}` or `[bash(command=...)]`) are accepted for small models.
+text (`{"tool": "bash", ...}` or `[bash(command=...)]`) are accepted for small models. A type's
+`tool_choice` (`required` or `bash`) forces a call on every request and makes each prompt one
+action. Thinking (`reasoning_content` or inline `<think>`) is shown, never resent; the
+transcript keeps exactly one system message, first (LFM2's template requires it).
 
 ### Resume across workers
 
@@ -301,6 +304,7 @@ types:
     max_turns: 50              # model calls per prompt; enforced for every harness
     max_budget_usd: 2.0        # spend per prompt (flock price table); enforced likewise
     context_tokens: null       # llm harness only: compaction threshold, default 32000
+    tool_choice: null          # llm harness only: auto | required | none | bash (one action per prompt)
     persist_workdir: true
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
@@ -669,7 +673,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
-| 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, chars/4 compaction past `context_tokens`, tool calls written as text accepted); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
+| 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, chars/4 compaction past `context_tokens`, tool calls written as text accepted; `tool_choice` forcing makes a prompt one action, after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 
 ## 12. Road to 10k
 

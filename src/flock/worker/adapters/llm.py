@@ -10,11 +10,20 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   (system, user, assistant, tool), appended as the turn runs. Resume reloads it; the system
   message is rebuilt from the preamble and the workdir's AGENTS.md on every start. Keys starting
   with `flock_` are ours and never sent.
+- Exactly one system message, first (LFM2's template requires it): compaction notes and
+  steered prompts are user messages.
 - Compaction: when the transcript's estimated size (characters / 4) exceeds `context_tokens`,
-  keep the system message, one `flock_summary` note (how many messages were dropped) and the
-  newest messages that fit in half the budget, starting at a user message; then, if still over,
-  shorten old tool outputs. No model-written summary. The file is rewritten; the full history
-  stays in the agent's flock session log.
+  keep the system message, one `flock_summary` user note (how many messages were dropped) and
+  the newest messages that fit in half the budget, starting at a user message; then, if still
+  over, shorten old tool outputs. No model-written summary. The file is rewritten; the full
+  history stays in the agent's flock session log.
+- Thinking: `reasoning_content` / `reasoning`, or inline `<think>...</think>` (also without the
+  opening tag, which LFM2's template emits itself), becomes a pi `thinking` block and is never
+  sent back; its tokens are in the server's usage.
+- `tool_choice` (type setting, else the alias's `extra`, else auto): `required` or `bash`
+  forces a call on every request, so a turn is one action: the forced call, its tool run, done
+  (plus one more step per steered prompt). Constrained output is what makes small thinking
+  models fast and reliable (2.5 s and 20/20 valid vs 25 s and 7/20 free-form, LFM2.5-2.6B).
 - Tool calls: native `tool_calls`, or, for small models that write the call as text, a reply
   that is only `{"tool": "bash", "command": ...}` (optionally fenced) or a pythonic
   `[bash(command="...")]`. Such a reply is stored as a proper tool call (`flock_from_text`), so
@@ -191,16 +200,10 @@ def estimate_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 def wire_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The request's `messages`: `flock_*` keys dropped, leading system messages (the system
-    prompt and a compaction note) merged into one, since many chat templates allow only one."""
-    out: list[dict[str, Any]] = []
-    for m in messages:
-        clean = {k: v for k, v in m.items() if not k.startswith("flock_")}
-        if clean.get("role") == "system" and out and out[-1]["role"] == "system" and len(out) == 1:
-            out[0] = {**out[0], "content": f"{out[0]['content']}\n\n{clean.get('content') or ''}"}
-        else:
-            out.append(clean)
-    return out
+    """The request's `messages`: `flock_*` keys dropped. There is exactly one system message,
+    first (LFM2's template, among others, requires it): compaction notes and steered prompts
+    are user messages."""
+    return [{k: v for k, v in m.items() if not k.startswith("flock_")} for m in messages]
 
 
 def repair(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -247,11 +250,36 @@ def compact(messages: list[dict[str, Any]], limit: int, workdir: Path) -> list[d
     if cut == 0 and kept == body:
         return None
     n = dropped_before + cut
-    note = {"role": "system", "flock_summary": True, "flock_dropped": n,
+    note = {"role": "user", "flock_summary": True, "flock_dropped": n,
             "content": f"[flock] {n} earlier message(s) of this conversation were removed to stay "
                        f"under context_tokens={limit}. Your files in {workdir} are intact; re-read "
                        "anything you need from them."}
     return [system, note, *kept]
+
+
+_THINK = re.compile(r"^\s*(?:<think>)?(.*?)</think>\s*", re.DOTALL)
+
+
+def split_thinking(content: Any) -> tuple[str | None, Any]:
+    """(thinking, visible content) for a reply that carries its reasoning inline: `<think>...
+    </think>answer`, or `...</think>answer` when the chat template already opened the tag (LFM2
+    ends its prompt with `<think>`). A reply cut off inside `<think>` is all thinking. Servers
+    run with a reasoning parser (vLLM `--reasoning-parser`) send `reasoning_content` instead."""
+    if not isinstance(content, str):
+        return None, content
+    if m := _THINK.match(content):
+        return m.group(1).strip() or None, content[m.end():]
+    if content.lstrip().startswith("<think>"):
+        return content.lstrip()[len("<think>"):].strip() or None, ""
+    return None, content
+
+
+TOOL_CHOICES = ("auto", "required", "none")
+
+
+def wire_tool_choice(choice: str) -> str | dict[str, Any]:
+    """`auto` | `required` | `none` as is; any other value names a tool to force."""
+    return choice if choice in TOOL_CHOICES else {"type": "function", "function": {"name": choice}}
 
 
 def _ms() -> int:
@@ -322,6 +350,14 @@ class LLMAdapter:
             return []
         p = self.session_path(sid)
         return [p] if p.is_file() else []
+
+    @property
+    def forced(self) -> bool:
+        """The effective tool_choice forces a call (`required` or a named tool)."""
+        spec = self._spec
+        r = spec.resolved_model if spec else None
+        choice = (spec.tool_choice if spec else None) or ((r.extra or {}).get("tool_choice") if r else None)
+        return choice is not None and choice not in ("auto", "none")
 
     @property
     def context_tokens(self) -> int:
@@ -505,7 +541,8 @@ class LLMAdapter:
                     await self._run_tool(call)
                 queued = self._drain()
                 self._user(queued)
-                if not tool_calls and not queued:
+                if not queued and (not tool_calls or self.forced):
+                    # forced tool choice: one action per prompt (the model could never answer)
                     self._end("completed", num_turns=calls)
                     return
         except asyncio.CancelledError:
@@ -519,7 +556,7 @@ class LLMAdapter:
                          model: str) -> list[dict[str, Any]]:
         """Store the reply, emit it as a pi message; returns the tool calls to run as
         {id, name, arguments: dict | error str}."""
-        content = msg.get("content")
+        inline, content = split_thinking(msg.get("content"))
         native = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
         calls: list[dict[str, Any]] = []
         # an empty reply is stored as "" (servers reject an assistant message with neither)
@@ -541,7 +578,7 @@ class LLMAdapter:
                      for i, c in enumerate(parsed)]
         self._append(stored)
         blocks: list[dict[str, Any]] = []
-        thinking = msg.get("reasoning_content") or msg.get("reasoning")
+        thinking = msg.get("reasoning_content") or msg.get("reasoning") or inline
         if isinstance(thinking, str) and thinking:
             blocks.append({"type": "thinking", "thinking": thinking})
         if isinstance(content, str) and content:
@@ -612,6 +649,8 @@ class LLMAdapter:
                                 "tools": [BASH_TOOL], "tool_choice": "auto", "temperature": 0,
                                 "max_tokens": DEFAULT_MAX_TOKENS, **(r.extra or {})}
         body.pop("stream", None)
+        if spec.tool_choice is not None:  # the type's setting wins over the alias's extra
+            body["tool_choice"] = wire_tool_choice(spec.tool_choice)
         url = f"{r.provider.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
         retries = r.provider.max_retries if r.provider.max_retries is not None else DEFAULT_MAX_RETRIES

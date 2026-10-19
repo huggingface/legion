@@ -163,7 +163,8 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
             return JSONResponse({"error": {"message": "bad tool message"}}, status_code=400)
         msg: dict = {"role": "assistant", "content": "It is noon UTC."}
         if tool_call and not follow_up:
-            msg = ({"role": "assistant", "content": '{"tool": "get_time", "timezone": "UTC"}'} if text_call
+            msg = ({"role": "assistant", "content": 'hmm</think>{"tool": "get_time", "timezone": "UTC"}'}
+                   if text_call
                    else {"role": "assistant", "content": None, "tool_calls": [
                        {"id": "call_1", "type": "function",
                         "function": {"name": "get_time", "arguments": '{"timezone": "UTC"}'}}]})
@@ -346,7 +347,7 @@ async def test_preflight_bearer_auth_for_anthropic(preflight_client):
 
 async def test_preflight_probes_chat_completions_for_llm_types(preflight_client):
     fake, seen = fake_provider()
-    extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    extra = {"chat_template_kwargs": {"enable_thinking": False}, "response_format": {"type": "json_object"}}
     spec = SwarmSpec.model_validate({
         "swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": preflight_providers(),
         "models": {"small": {"model": "gpu1:Qwen/Small", "extra": extra}},
@@ -364,6 +365,7 @@ async def test_preflight_probes_chat_completions_for_llm_types(preflight_client)
     chats = [x for x in seen if x["path"] == "chat"]
     assert len(chats) == 2 and chats[0]["auth"] == "Bearer v"
     assert "stream" not in chats[0] and chats[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "response_format" not in chats[0]  # the agent's output schema, not the probe's
     assert chats[0]["tools"][0]["function"]["name"] == "get_time" and chats[0]["temperature"] == 0
     m2 = chats[1]["messages"]
     assert [m["role"] for m in m2] == ["user", "assistant", "tool"]
@@ -377,6 +379,14 @@ async def test_preflight_llm_accepts_a_tool_call_written_as_text(preflight_clien
         [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
     assert x["ok"] and x["api"] == "chat_completions" and "wrote its tool call as text" in x["warning"]
     assert seen[1]["messages"][1]["tool_calls"][0]["function"]["name"] == "get_time"
+    # a forced tool_choice on the type: named -> the probe's own tool; follow-up back to auto
+    forced = pspec(preflight_providers(), pixel={"harness": "llm", "model": "gpu1:Qwen/Small",
+                                                 "tool_choice": "bash"})
+    fake, seen = fake_provider()
+    async with await preflight_client(fake, SECRETS) as c:
+        [x] = (await c.post("/swarms/p/preflight", json=forced.model_dump(mode="json"))).json()["results"]
+    assert x["ok"] and seen[0]["tool_choice"] == {"type": "function", "function": {"name": "get_time"}}
+    assert seen[1]["tool_choice"] == "auto"
     for kw, err in (({"tool_call": False}, "no tool call"), ({"follow_up_fails": True}, "follow-up turn")):
         fake, _ = fake_provider(**kw)
         async with await preflight_client(fake, SECRETS) as c:

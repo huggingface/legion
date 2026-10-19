@@ -69,8 +69,9 @@ def responses_request(r: ResolvedModel) -> dict[str, Any]:
     return body
 
 
-def chat_request(r: ResolvedModel) -> dict[str, Any]:
-    """Turn one as the llm harness sends it: non-streamed, temperature 0, `extra` on top."""
+def chat_request(r: ResolvedModel, tool_choice: str | None = None) -> dict[str, Any]:
+    """Turn one as the llm harness sends it: non-streamed, temperature 0, `extra` on top, the
+    type's `tool_choice` last (a named tool forces the probe's own tool)."""
     body: dict[str, Any] = {
         "model": r.model_id,
         "messages": [{"role": "user", "content": PROMPT}],
@@ -82,6 +83,11 @@ def chat_request(r: ResolvedModel) -> dict[str, Any]:
         **(r.extra or {}),
     }
     body.pop("stream", None)
+    # an agent's response_format describes its own output, which the get_time probe cannot match
+    body.pop("response_format", None)
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice if tool_choice in ("auto", "required", "none") else {
+            "type": "function", "function": {"name": "get_time"}}
     return body
 
 
@@ -199,16 +205,17 @@ async def _chat_turn(client, url, body, headers, timeout) -> tuple[dict[str, Any
 
 def _text_get_time_call(content: Any) -> bool:
     """The model wrote the tool call as text, e.g. {"tool": "get_time", ...} or get_time(...)."""
-    from flock.worker.adapters.llm import text_tool_calls
+    from flock.worker.adapters.llm import split_thinking, text_tool_calls
 
-    return bool(text_tool_calls(content, "get_time"))
+    return bool(text_tool_calls(split_thinking(content)[1], "get_time"))
 
 
 async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResult,
-                      timeout: float) -> int:
-    """Two Chat Completions turns; returns tokens reported. Raises ProbeError."""
+                      timeout: float, tool_choice: str | None = None) -> int:
+    """Two Chat Completions turns; returns tokens reported. Raises ProbeError. The follow-up
+    goes out with `tool_choice: auto` (a forced choice would demand another call)."""
     url, headers = f"{r.provider.base_url}/chat/completions", {"Authorization": f"Bearer {key}"}
-    body = chat_request(r)
+    body = chat_request(r, tool_choice)
     msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
     if not calls and _text_get_time_call(msg.get("content")):
@@ -220,8 +227,10 @@ async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResul
     result.tool_call_seen = bool(calls)
     if not calls:
         return tok1
-    sent = {"role": "assistant", "content": msg.get("content"), "tool_calls": calls}
-    body2 = {**body, "messages": [*body["messages"], sent, *(
+    from flock.worker.adapters.llm import split_thinking
+
+    sent = {"role": "assistant", "content": split_thinking(msg.get("content"))[1], "tool_calls": calls}
+    body2 = {**body, "tool_choice": "auto", "messages": [*body["messages"], sent, *(
         {"role": "tool", "tool_call_id": c.get("id"), "content": TOOL_RESULT} for c in calls)]}
     _, tok2 = await _chat_turn(client, url, body2, headers, timeout)
     return tok1 + tok2
@@ -229,7 +238,7 @@ async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResul
 
 async def probe(
     client: httpx.AsyncClient, r: ResolvedModel, key: str | None, types: list[str],
-    api: str | None = None,
+    api: str | None = None, tool_choice: str | None = None,
 ) -> PreflightResult:
     """Turn one asks for a tool call; turn two sends the call back with its result, the way a
     harness does on its first tool use. Streamed for Responses and Messages, as those harnesses
@@ -248,7 +257,7 @@ async def probe(
     tok2 = 0
     try:
         if api == "chat_completions":
-            tok1 = await _probe_chat(client, r, key, result, timeout)
+            tok1 = await _probe_chat(client, r, key, result, timeout, tool_choice)
         elif p.type == "openai_compat":
             url, headers = f"{p.base_url}/responses", {"Authorization": f"Bearer {key}"}
             body = responses_request(r)
@@ -305,18 +314,20 @@ def api_for(harness: Harness, r: ResolvedModel) -> str:
     return "responses" if r.provider.type == "openai_compat" else "messages"
 
 
-def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str]]:
+def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str, str | None]]:
     """Distinct provider-backed (provider, model id, reasoning, API) in the spec, with their
-    types and the API to probe. `extra` is part of the key for chat completions (it is sent)."""
-    seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
+    types, the API to probe and the llm tool_choice. `extra` and `tool_choice` are part of the
+    key for chat completions (they are sent)."""
+    seen: dict[tuple, tuple[ResolvedModel, list[str], str, str | None]] = {}
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
         if r is None:
             continue
         api = api_for(ts.harness, r)
         extra = json.dumps(r.extra, sort_keys=True) if api == "chat_completions" else None
-        key = (r.provider_name, r.model_id, r.reasoning, api, extra)
-        seen.setdefault(key, (r, [], api))[1].append(type_name)
+        choice = ts.tool_choice if api == "chat_completions" else None
+        key = (r.provider_name, r.model_id, r.reasoning, api, extra, choice)
+        seen.setdefault(key, (r, [], api, choice))[1].append(type_name)
     return list(seen.values())
 
 
@@ -324,8 +335,8 @@ async def run_preflight(
     spec: SwarmSpec, secrets: Mapping[str, str], client: httpx.AsyncClient
 ) -> PreflightReport:
     results = await asyncio.gather(*(
-        probe(client, r, secrets.get(r.provider.api_key_env), types, api)
-        for r, types, api in models_to_probe(spec)
+        probe(client, r, secrets.get(r.provider.api_key_env), types, api, choice)
+        for r, types, api, choice in models_to_probe(spec)
     ))
     return PreflightReport(swarm=spec.swarm, ok=all(x.ok or x.unverified for x in results),
                            unverified=sum(x.unverified for x in results), results=list(results))

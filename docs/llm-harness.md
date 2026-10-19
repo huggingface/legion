@@ -26,9 +26,11 @@ providers:
   lfm: {type: openai_compat, base_url: "https://lfm.example.org/v1", api_key_env: VLLM_API_KEY,
         self_hosted: true, timeout_s: 60, max_retries: 4}
 models:
-  lfm-small: {model: "lfm:LiquidAI/LFM2.5-2.6B", extra: {max_tokens: 512}}
+  lfm-small: {model: "lfm:LiquidAI/LFM2.5-2.6B",
+              extra: {max_tokens: 256, chat_template_kwargs: {enable_thinking: false}}}
 types:
-  pixel: {harness: llm, model: lfm-small, max_turns: 8, max_budget_usd: 0.01, context_tokens: 16000}
+  pixel: {harness: llm, model: lfm-small, tool_choice: bash, max_turns: 8, max_budget_usd: 0.01,
+          context_tokens: 16000}
 ```
 
 - A provider is required (`openai_compat` only; `anthropic` or a native model id is rejected at
@@ -40,11 +42,38 @@ types:
 - `extra` from the alias is merged into every request body (this harness can; the others
   cannot). It may override the defaults `temperature: 0` and `max_tokens: 4096`. `stream` is
   dropped: requests are never streamed.
-- `reasoning` is ignored. Use `extra` with the server's own field (e.g.
-  `chat_template_kwargs: {enable_thinking: false}` on vLLM, `reasoning_effort` on the router).
+- `tool_choice` (new, `llm` only): `auto` (default), `required`, `none`, or `bash` (force that
+  tool by name). It wins over a `tool_choice` in `extra`. A forcing value (`required`, `bash`)
+  makes every prompt **one action**: one forced call, its tool run, turn `completed` (plus one
+  more forced step per prompt steered in mid-turn), because a forced model can never answer in
+  text. Use it for small models: on LFM2.5-2.6B (vLLM, L4) a named tool choice gave 20/20 valid
+  calls in ~2.5 s and ~22 output tokens, against 7-15/20 in ~25 s free-form
+  (flock-board/probe-reachability-lfm.md).
+- `response_format` goes in `extra` and is sent as is, nested objects included. A JSON schema
+  shaped like `{"tool": "bash", "command": ...}` makes every reply a call through the text
+  fallback below; any other schema'd reply is the turn's final answer.
+- `reasoning` is ignored. Use `extra` with the server's own field: for thinking models on vLLM
+  (LFM2.5, Qwen3) `chat_template_kwargs: {enable_thinking: false}`; `reasoning_effort` on the
+  router.
 - `timeout_s` (default 120) is the per-request timeout; `max_retries` (default 3) bounds retries
   on HTTP 429, 5xx and transport errors, with jittered exponential backoff from 1 s (capped at
   30 s; `Retry-After` honoured up to that cap). Other 4xx fail the turn at once.
+
+## Thinking models (LFM2.5, Qwen3)
+
+LFM2.5's chat template ends the prompt with `<think>`, so the model always thinks first; free
+form, it spends 800-1024 tokens (~25 s) before answering. Serve it with vLLM
+`--reasoning-parser qwen3` (Liquid's recommendation; also `--tool-call-parser lfm2`) so the
+reasoning arrives as `reasoning_content`, and switch thinking off or force a tool as above. The
+harness tolerates both forms: `reasoning_content` / `reasoning`, or inline `<think>...</think>`
+in the content (also `...</think>` without the opening tag, and a reply cut off inside
+`<think>`). The thinking becomes a pi `thinking` block in the event stream; it is stripped from
+the stored transcript and never sent back. Its tokens are counted (they are in the server's
+`completion_tokens`).
+
+The LFM template also needs exactly one system message, first. The harness keeps it that way:
+the system prompt is the only system message; compaction notes and steered prompts are user
+messages.
 
 ## How a turn runs
 
@@ -55,9 +84,9 @@ any steered prompts. It stops when a reply has no tool call and nothing was stee
 | Adapter event | When |
 |---|---|
 | `turn_started` | the loop takes a prompt while idle |
-| `message` (pi format) | each user prompt, assistant reply (`toolCall` blocks, `thinking` from `reasoning_content`) and `toolResult` |
+| `message` (pi format) | each user prompt, assistant reply (`toolCall` blocks, `thinking` from `reasoning_content` or `<think>`) and `toolResult` |
 | `usage` | after every model call, per call (not cumulative); `input` excludes cached prompt tokens, keyed by the model id |
-| `turn_ended completed` | a reply without tool calls and no queued prompt; `data.num_turns` = model calls |
+| `turn_ended completed` | a reply without tool calls and no queued prompt, or (forced `tool_choice`) after the forced call's tool ran; `data.num_turns` = model calls |
 | `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
 | `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
 | `turn_ended interrupted` | `stop` mid-turn (timeout, stop, drain); the tool's process group is killed |
@@ -97,17 +126,18 @@ requests show the model the proper form; the pi message carries `toolCallsFromTe
   so prompt changes apply to old sessions. Tool calls left without a result by an interrupted
   turn get a `[interrupted: no result]` tool message, so the server accepts the transcript.
 - Compaction, before a model call whose transcript estimate exceeds `context_tokens`: keep the
-  system message, one note (a system message saying how many earlier messages were removed,
-  merged into the system prompt on the wire) and the newest messages that fit in half the
-  budget, starting at a user message. If the current turn alone is still too big, old tool
+  system message, one note (a user message saying how many earlier messages were removed) and
+  the newest messages that fit in half the budget, starting at a user message. If the current turn alone is still too big, old tool
   outputs in it are cut to 1000 characters. No model-written summary. The file is rewritten;
   the full history stays in the agent's flock session log (`_sessions/<agent>.jsonl`).
 
 ## Preflight
 
 Types on `llm` are probed on `POST {base_url}/chat/completions`, non-streamed, with the alias's
-`extra`: turn one asks for a `get_time` tool call, turn two sends the tool result back and must
-complete. A tool call written as text passes with a warning. The same model on a Codex type is
+`extra` (minus `response_format`, which describes the agent's output, not the probe's) and the
+type's `tool_choice` (a named tool forces the probe's `get_time`): turn one asks for a tool
+call, turn two sends the tool result back with `tool_choice: auto` and must complete. A tool
+call written as text (after any `</think>`) passes with a warning. The same model on a Codex type is
 probed separately on the Responses API.
 
 ## What it deliberately lacks
@@ -123,4 +153,7 @@ The harness cannot make a 2.6B model agentic on its own. In `AGENTS.md`: say exa
 prompt should achieve and what the final text answer looks like; give literal command examples
 for the few operations the agent needs (e.g. the exact `curl` to post to msgboard); say to stop
 after the task and answer in one line; keep it short (it is resent on every call). Set
-`max_turns` low (5-10) so a looping model fails fast, and cap `extra.max_tokens`.
+`max_turns` low (5-10) so a looping model fails fast, cap `extra.max_tokens`, and prefer
+`tool_choice: bash` (or a `response_format` schema) over free-form replies: constrained output
+is what makes a 2.6B thinking model fast and reliable. With a forced tool, the prompt must say
+which single command to run for this step; the agent never gets to "think out loud" in text.
