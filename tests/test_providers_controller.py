@@ -115,7 +115,7 @@ def _sse(events: list[dict], named: bool = False):
 
 
 def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bool = False,
-                  zero_usage: bool = False) -> tuple[FastAPI, list[dict]]:
+                  zero_usage: bool = False, text_call: bool = False) -> tuple[FastAPI, list[dict]]:
     """A tiny streaming OpenAI-compatible (Responses) and Anthropic (Messages) server.
     `follow_up_fails` answers the turn carrying the tool result with `response.failed` inside
     HTTP 200 (or an Anthropic `error` event), as the HF router did on its auto provider."""
@@ -149,6 +149,27 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
         events.append({"type": "response.completed",
                        "response": {"id": "r1", "status": "completed", "output": out, "usage": usage}})
         return _sse(events)
+
+    @fake.post("/v1/chat/completions")
+    async def chat(request: Request):
+        """Non-streamed Chat Completions (the llm harness). `text_call`: the model writes the
+        call as JSON text instead of `tool_calls`, as small models do."""
+        body = await request.json()
+        seen.append({"path": "chat", "auth": request.headers.get("authorization"), **body})
+        if status != 200:
+            return JSONResponse({"error": {"message": "model not found"}}, status_code=status)
+        follow_up = body["messages"][-1]["role"] == "tool"
+        if follow_up and follow_up_fails:
+            return JSONResponse({"error": {"message": "bad tool message"}}, status_code=400)
+        msg: dict = {"role": "assistant", "content": "It is noon UTC."}
+        if tool_call and not follow_up:
+            msg = ({"role": "assistant", "content": '{"tool": "get_time", "timezone": "UTC"}'} if text_call
+                   else {"role": "assistant", "content": None, "tool_calls": [
+                       {"id": "call_1", "type": "function",
+                        "function": {"name": "get_time", "arguments": '{"timezone": "UTC"}'}}]})
+        u = {"prompt_tokens": usage["input_tokens"], "completion_tokens": usage["output_tokens"]}
+        return JSONResponse({"id": "c1", "object": "chat.completion", "usage": u,
+                             "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]})
 
     @fake.post("/v1/messages")
     async def messages(request: Request):
@@ -321,6 +342,46 @@ async def test_preflight_bearer_auth_for_anthropic(preflight_client):
         rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
     assert rep["ok"] is True
     assert all(x["auth"] == "Bearer ak" and x["key"] is None for x in seen)
+
+
+async def test_preflight_probes_chat_completions_for_llm_types(preflight_client):
+    fake, seen = fake_provider()
+    extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    spec = SwarmSpec.model_validate({
+        "swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": preflight_providers(),
+        "models": {"small": {"model": "gpu1:Qwen/Small", "extra": extra}},
+        "types": {"pixel": {"harness": "llm", "model": "small"},
+                  "pixel2": {"harness": "llm", "model": "small"},
+                  "coder": {"harness": "codex", "model": "gpu1:Qwen/Small"}}})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    assert rep["ok"] is True
+    by_api = {x["api"]: x for x in rep["results"]}
+    assert set(by_api) == {"chat_completions", "responses"}  # same model, two wires
+    chat = by_api["chat_completions"]
+    assert chat["types"] == ["pixel", "pixel2"] and chat["tool_call_seen"] and chat["follow_up_ok"]
+    assert chat["usage_reported"] and chat["warning"] is None
+    chats = [x for x in seen if x["path"] == "chat"]
+    assert len(chats) == 2 and chats[0]["auth"] == "Bearer v"
+    assert "stream" not in chats[0] and chats[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert chats[0]["tools"][0]["function"]["name"] == "get_time" and chats[0]["temperature"] == 0
+    m2 = chats[1]["messages"]
+    assert [m["role"] for m in m2] == ["user", "assistant", "tool"]
+    assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
+
+
+async def test_preflight_llm_accepts_a_tool_call_written_as_text(preflight_client):
+    spec = pspec(preflight_providers(), pixel={"harness": "llm", "model": "gpu1:Qwen/Small"})
+    fake, seen = fake_provider(text_call=True)
+    async with await preflight_client(fake, SECRETS) as c:
+        [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
+    assert x["ok"] and x["api"] == "chat_completions" and "wrote its tool call as text" in x["warning"]
+    assert seen[1]["messages"][1]["tool_calls"][0]["function"]["name"] == "get_time"
+    for kw, err in (({"tool_call": False}, "no tool call"), ({"follow_up_fails": True}, "follow-up turn")):
+        fake, _ = fake_provider(**kw)
+        async with await preflight_client(fake, SECRETS) as c:
+            [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
+        assert not x["ok"] and err in x["error"]
 
 
 async def test_status_counts_agents_with_zero_usage(client, clock, tick):

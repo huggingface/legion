@@ -51,10 +51,10 @@ uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggin
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
-export PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
+export FLOCK_LLM_HOME=/state/llm PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
 export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/claude /state/codex /state/pi
+mkdir -p /work/agents /state/claude /state/codex /state/pi /state/llm
 if [ -n "${OPENAI_API_KEY:-}" ]; then printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null; fi
 echo "bootstrap: $(($(date +%s) - t0)) s; claude $(claude --version); codex $(codex --version); $(python3 --version)"
 exec flock-worker

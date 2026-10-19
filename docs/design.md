@@ -224,6 +224,16 @@ counts model calls and prices each one with the flock price table, and sends Pi 
 a call past either limit (turn ends `error`, `reason` max_turns|max_budget_usd).
 Packing numbers for Pi are not measured yet; idle VmRSS of one RPC process was 117 MB locally.
 
+The `llm` harness (`harness: llm`, docs/llm-harness.md) has no process: a "burst" is an asyncio
+task in the worker that runs a Chat Completions loop with one `bash` tool against an
+`openai_compat` provider (required). The session is a JSONL file of chat messages under
+`$FLOCK_LLM_HOME/sessions/<agent>/` (`/state/llm`), appended per step, reloaded on resume and
+compacted (system + a note + the newest messages) past the type's `context_tokens`. A flock
+turn ends on a reply without tool calls; prompts sent mid-turn become the next user message;
+`max_turns` / `max_budget_usd` are checked before each model call, as for Pi and Codex. Usage
+is per call. `extra` is sent as body fields; `reasoning` is ignored. Tool calls written as
+text (`{"tool": "bash", ...}` or `[bash(command=...)]`) are accepted for small models.
+
 ### Resume across workers
 
 `persist_workdir` defaults to true. The worker syncs, per agent, the workdir
@@ -273,7 +283,7 @@ models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: claude            # claude | codex | pi
+    harness: claude            # claude | codex | pi | llm
     model: claude-opus-5-5
     image: null                # default worker image; override to add tools/skills
     system_prompt_file: prompts/researcher.md   # written to the workdir as CLAUDE.md / AGENTS.md
@@ -290,6 +300,7 @@ types:
     idle_grace: 120s
     max_turns: 50              # model calls per prompt; enforced for every harness
     max_budget_usd: 2.0        # spend per prompt (flock price table); enforced likewise
+    context_tokens: null       # llm harness only: compaction threshold, default 32000
     persist_workdir: true
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
@@ -320,7 +331,7 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 
 | Field | Meaning |
 |---|---|
-| `providers.<name>.type` | `openai_compat` (Codex; Responses API) or `anthropic` (Claude Code; Messages API) |
+| `providers.<name>.type` | `openai_compat` (Codex: Responses API; Pi and `llm`: Chat Completions) or `anthropic` (Claude Code; Messages API) |
 | `providers.<name>.base_url` | required for `openai_compat` (ends in `/v1`); optional for `anthropic` (API root, default Anthropic) |
 | `providers.<name>.api_key_env` | NAME of the secret holding the key; the value is never in the spec |
 | `providers.<name>.self_hosted` | price defaults to `[0, 0, 0]`; the real cost is the GPU job |
@@ -330,7 +341,7 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 | `providers.<name>.timeout_s`, `max_retries` | passed to the harness (Codex provider table; Claude `API_TIMEOUT_MS`, `CLAUDE_CODE_MAX_RETRIES`) |
 | `models.<alias>.model` | `"<provider>:<model id>"` |
 | `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
-| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); kept, not sent by either harness |
+| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); sent by the `llm` harness only |
 | `models.<alias>.pricing` | `[input, output, cached]`, overrides the provider's |
 | `types.<t>.model` | an alias, else `"<provider>:<model id>"`, else a harness-native id (v1) |
 | `types.<t>.reasoning` | overrides the alias's |
@@ -344,7 +355,8 @@ name (`[a-z][a-z0-9_-]*`, e.g. Bedrock's `anthropic.claude-...-v1:0`) is native.
 Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
 type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
 row for the id, or its `"*"` row, unless `self_hosted`; harness against provider type
-(`claude` needs `anthropic`, `codex` needs `openai_compat`; native ids always pass).
+(`claude` needs `anthropic`, `codex`, `pi` and `llm` need `openai_compat`; native ids pass,
+except on `llm`, which needs a provider).
 
 Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
 the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
@@ -376,7 +388,8 @@ and inference runs elsewhere; flock does not colocate workers with GPU jobs.
 Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) probes each
 distinct provider-backed model from the controller (which holds the keys) with two streamed
 turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
-API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`. Best-effort: a
+API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`, non-streamed
+Chat Completions (with `extra`) for types on the `llm` harness. Best-effort: a
 failed probe refuses `flock apply` (`--skip-preflight` bypasses); a model not probed (key not
 in the controller's environment, or preflight skipped) is reported `unverified` with a warning
 and applied anyway unless `--strict`. Zero streamed usage is a warning.
@@ -435,11 +448,12 @@ steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
 
-Per-prompt limits: Claude, Codex and Pi all enforce `max_turns` (model calls) and
+Per-prompt limits: Claude, Codex, Pi and `llm` all enforce `max_turns` (model calls) and
 `max_budget_usd` (spend, priced from the flock table). Claude gets both as SDK options.
 Codex and Pi have no such option, so the worker adapter counts model calls (Codex: one
 `thread/tokenUsage/updated` per call) and prices each call; before the call that would
-pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`) and the turn ends
+pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`, `llm` simply does not
+call) and the turn ends
 `error` with `reason` max_turns|max_budget_usd, `subtype` error_max_turns|error_max_budget_usd
 and `num_turns`. The session stays usable. A Codex steer into a turn that has used its
 allowance is held and sent as the next turn once that turn ends.
@@ -655,6 +669,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
+| 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, chars/4 compaction past `context_tokens`, tool calls written as text accepted); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 
 ## 12. Road to 10k
 

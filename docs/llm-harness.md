@@ -1,0 +1,126 @@
+# The `llm` harness
+
+`harness: llm` is a plain API loop for small open models: no coding-agent CLI, no external
+process. The worker calls an OpenAI-compatible Chat Completions endpoint, runs the model's
+`bash` tool calls in the agent's workdir, and sends the results back until the model answers in
+text. Code: `src/flock/worker/adapters/llm.py`. Design inspired by swarmlab's `LLMAgent`; no
+swarmlab dependency. Example: `examples/llm-small-model.yaml` (LiquidAI/LFM2.5-2.6B on vLLM).
+
+## When to use it
+
+- Small models (2-10B) that Claude Code, Codex or Pi drown in long system prompts and many tools.
+  The `llm` system prompt is a short preamble plus your `AGENTS.md`; there is one tool.
+- High call volume (e.g. a pixel swarm doing about 1M short calls): no process start per burst
+  (an idle agent costs a JSONL file; a working one an asyncio task), so a worker holds many more
+  agents than with a CLI harness.
+- Servers that only speak Chat Completions (Codex needs the Responses API).
+
+Use Claude Code, Codex or Pi when the agent must edit code well: they have file-edit tools,
+model-written compaction, parallel tool calls, prompt caching strategies and years of prompt
+tuning that this loop does not.
+
+## Spec
+
+```yaml
+providers:
+  lfm: {type: openai_compat, base_url: "https://lfm.example.org/v1", api_key_env: VLLM_API_KEY,
+        self_hosted: true, timeout_s: 60, max_retries: 4}
+models:
+  lfm-small: {model: "lfm:LiquidAI/LFM2.5-2.6B", extra: {max_tokens: 512}}
+types:
+  pixel: {harness: llm, model: lfm-small, max_turns: 8, max_budget_usd: 0.01, context_tokens: 16000}
+```
+
+- A provider is required (`openai_compat` only; `anthropic` or a native model id is rejected at
+  apply). The key stays in the provider's `api_key_env` secret, never in the spec.
+- `max_turns`: model calls per flock prompt. `max_budget_usd`: per prompt, priced with the
+  type's flock price table (the pinned provider price), as for Codex and Pi.
+- `context_tokens` (new, `llm` only, default 32000, minimum 256): the transcript size that
+  triggers compaction, estimated as characters / 4.
+- `extra` from the alias is merged into every request body (this harness can; the others
+  cannot). It may override the defaults `temperature: 0` and `max_tokens: 4096`. `stream` is
+  dropped: requests are never streamed.
+- `reasoning` is ignored. Use `extra` with the server's own field (e.g.
+  `chat_template_kwargs: {enable_thinking: false}` on vLLM, `reasoning_effort` on the router).
+- `timeout_s` (default 120) is the per-request timeout; `max_retries` (default 3) bounds retries
+  on HTTP 429, 5xx and transport errors, with jittered exponential backoff from 1 s (capped at
+  30 s; `Retry-After` honoured up to that cap). Other 4xx fail the turn at once.
+
+## How a turn runs
+
+A flock prompt is one turn. The loop appends the prompt as a user message, then repeats: check
+limits, compact if needed, call the model, store and emit the reply, run its tool calls, append
+any steered prompts. It stops when a reply has no tool call and nothing was steered in.
+
+| Adapter event | When |
+|---|---|
+| `turn_started` | the loop takes a prompt while idle |
+| `message` (pi format) | each user prompt, assistant reply (`toolCall` blocks, `thinking` from `reasoning_content`) and `toolResult` |
+| `usage` | after every model call, per call (not cumulative); `input` excludes cached prompt tokens, keyed by the model id |
+| `turn_ended completed` | a reply without tool calls and no queued prompt; `data.num_turns` = model calls |
+| `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
+| `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
+| `turn_ended interrupted` | `stop` mid-turn (timeout, stop, drain); the tool's process group is killed |
+| `error`, `exited` | `exited` once per burst, on `stop`; an internal failure ends the burst with `error` + `exited` |
+
+Steering: a prompt sent during a turn is queued and becomes the next user message after the
+current tool results, inside the same turn (several queued prompts go in together).
+
+## Tool
+
+One tool, `bash` (`command`, optional `timeout` seconds, default 120, max 600): `bash -c` in the
+workdir, stdin closed, stdout and stderr combined, output truncated to 16000 characters (head
+and tail) plus `[exit code N]`; a non-zero exit is `isError`. It runs in its own process group,
+killed on timeout or stop. Its environment is the shared allow-list (`PATH`, `HOME`, locale,
+proxies, ...) plus what the worker passes (the type's `secrets`, `env`, msgboard identity,
+`FLOCK_AGENT*`), minus `FLOCK_TOKEN` and minus the provider key.
+
+Small models often write the call as text instead of `tool_calls`. The loop accepts a reply
+that is only (after stripping a code fence or `<tool_call>` / `<|tool_call_start|>` tags):
+
+- `{"tool": "bash", "command": "..."}` (what the preamble asks for), or
+  `{"name": "bash", "arguments": {"command": "..."}}`;
+- a pythonic call list, `[bash(command="...")]` (LFM2's syntax; parsed with `ast`, literals
+  only, nothing evaluated).
+
+Anything else, including prose that contains such JSON, is a final answer. A parsed call is
+stored as a native `tool_calls` entry (`flock_from_text` keeps the original text), so later
+requests show the model the proper form; the pi message carries `toolCallsFromText: true`.
+
+## Session, resume, compaction
+
+- Session file: `$FLOCK_LLM_HOME/sessions/<agent>/<session id>.jsonl` (`/state/llm` in the
+  worker image), one Chat Completions message per line, appended as the turn runs. It is the
+  adapter's only `session_files()` entry, synced to the bucket like Pi's.
+- Resume reloads it (a missing file is a `ResumeError`: fresh session plus the restart prompt).
+  The system message is rebuilt on every start from the preamble and the workdir's `AGENTS.md`,
+  so prompt changes apply to old sessions. Tool calls left without a result by an interrupted
+  turn get a `[interrupted: no result]` tool message, so the server accepts the transcript.
+- Compaction, before a model call whose transcript estimate exceeds `context_tokens`: keep the
+  system message, one note (a system message saying how many earlier messages were removed,
+  merged into the system prompt on the wire) and the newest messages that fit in half the
+  budget, starting at a user message. If the current turn alone is still too big, old tool
+  outputs in it are cut to 1000 characters. No model-written summary. The file is rewritten;
+  the full history stays in the agent's flock session log (`_sessions/<agent>.jsonl`).
+
+## Preflight
+
+Types on `llm` are probed on `POST {base_url}/chat/completions`, non-streamed, with the alias's
+`extra`: turn one asks for a `get_time` tool call, turn two sends the tool result back and must
+complete. A tool call written as text passes with a warning. The same model on a Codex type is
+probed separately on the Responses API.
+
+## What it deliberately lacks
+
+No streaming, no parallel tool execution, no file read/edit tools (bash covers `cat`, heredocs,
+`sed`), no model-written compaction, no prompt-cache control, no images, no MCP, no reasoning
+setting, no tokenizer (the context estimate is a heuristic). Packing (agents per worker) is not
+measured yet.
+
+## What a small model still needs from the prompt
+
+The harness cannot make a 2.6B model agentic on its own. In `AGENTS.md`: say exactly what one
+prompt should achieve and what the final text answer looks like; give literal command examples
+for the few operations the agent needs (e.g. the exact `curl` to post to msgboard); say to stop
+after the task and answer in one line; keep it short (it is resent on every call). Set
+`max_turns` low (5-10) so a looping model fails fast, and cap `extra.max_tokens`.

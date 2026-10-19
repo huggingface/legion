@@ -38,6 +38,7 @@ class Harness(StrEnum):
     claude = "claude"
     codex = "codex"
     pi = "pi"
+    llm = "llm"  # in-process chat-completions loop (docs/llm-harness.md)
 
 
 class AgentState(StrEnum):
@@ -142,8 +143,8 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Kept for spec portability and used by
-    # nothing in the harness path yet: neither Codex nor Claude Code can add body fields.
+    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only: Codex,
+    # Claude Code and Pi cannot add body fields, so for them it is kept for spec portability.
     extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
@@ -198,6 +199,8 @@ class TypeSpec(BaseModel):
     turn_timeout: str = "30m"
     max_turns: int | None = None  # per prompt, passed to the harness
     max_budget_usd: float | None = None  # per prompt, passed to the harness
+    # harness llm only: transcript size (estimated tokens) that triggers compaction; None: 32k
+    context_tokens: int | None = None
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -233,6 +236,13 @@ class TypeSpec(BaseModel):
     def _non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("context_tokens")
+    @classmethod
+    def _context_tokens(cls, v: int | None) -> int | None:
+        if v is not None and v < 256:
+            raise ValueError("context_tokens must be >= 256")
         return v
 
     @field_validator("workers")
@@ -286,9 +296,13 @@ class SwarmSpec(BaseModel):
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
             if r is None:
+                if ts.harness == Harness.llm:
+                    raise ValueError(
+                        f"types.{type_name}.model: harness 'llm' needs a provider-backed model "
+                        f"('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
                 continue
             want = {Harness.claude: "anthropic", Harness.codex: "openai_compat",
-                    Harness.pi: "openai_compat"}[ts.harness]
+                    Harness.pi: "openai_compat", Harness.llm: "openai_compat"}[ts.harness]
             if r.provider.type != want:
                 raise ValueError(
                     f"types.{type_name}.model: harness {ts.harness.value!r} cannot use provider "
@@ -723,7 +737,9 @@ class PreflightResult(BaseModel):
     model: str  # "<provider>:<model id>"
     provider: str
     types: list[str]
-    api: str  # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic)
+    # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic) |
+    # "chat_completions" (openai_compat for llm types)
+    api: str
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
     # Not probed (e.g. the key is not in the controller's environment): neither ok nor failed.
     # `apply` warns and proceeds, or refuses with --strict.

@@ -6,7 +6,10 @@ one asks the model to call a trivial tool; turn two sends the model's output bac
 result and must complete. A server that accepts turn one but fails the follow-up (the HF router's
 auto provider choice did, 2026-10-16) fails preflight. Zero reported usage is a warning. `openai_compat` providers are probed on the Responses API,
 because that is the only wire Codex 0.162.1 speaks (`wire_api = "chat"` is rejected);
-`anthropic` providers on the Messages API, which is what Claude Code speaks.
+`anthropic` providers on the Messages API, which is what Claude Code speaks. Types whose harness
+is `llm` are probed on Chat Completions, non-streamed with the alias's `extra`, as that harness
+sends them; a tool call the model writes as text (which the harness accepts) passes with a
+warning.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import httpx
 
 from flock.models import (
     REASONING_EFFORT,
+    Harness,
     PreflightReport,
     PreflightResult,
     ResolvedModel,
@@ -62,6 +66,22 @@ def responses_request(r: ResolvedModel) -> dict[str, Any]:
     }
     if r.reasoning is not None:
         body["reasoning"] = {"effort": REASONING_EFFORT[r.reasoning]}
+    return body
+
+
+def chat_request(r: ResolvedModel) -> dict[str, Any]:
+    """Turn one as the llm harness sends it: non-streamed, temperature 0, `extra` on top."""
+    body: dict[str, Any] = {
+        "model": r.model_id,
+        "messages": [{"role": "user", "content": PROMPT}],
+        "tools": [{"type": "function", "function": {"name": "get_time", "description": TOOL_DESCRIPTION,
+                                                    "parameters": TOOL_SCHEMA}}],
+        "tool_choice": "auto",
+        "temperature": 0,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+        **(r.extra or {}),
+    }
+    body.pop("stream", None)
     return body
 
 
@@ -160,13 +180,62 @@ async def _messages_turn(client, url, body, headers, timeout) -> tuple[list[dict
     return [blocks[i] for i in sorted(blocks)], tokens
 
 
+async def _chat_turn(client, url, body, headers, timeout) -> tuple[dict[str, Any], int]:
+    """One non-streamed Chat Completions call -> (assistant message, tokens reported)."""
+    resp = await client.post(url, json=body, headers=headers, timeout=timeout)
+    if resp.status_code >= 400:
+        raise ProbeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise ProbeError(f"not JSON: {resp.text[:200]}") from e
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not choices:
+        raise ProbeError(f"no choices in the reply: {json.dumps(data)[:300]}")
+    u = data.get("usage") or {}
+    tokens = int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)
+    return choices[0].get("message") or {}, tokens
+
+
+def _text_get_time_call(content: Any) -> bool:
+    """The model wrote the tool call as text, e.g. {"tool": "get_time", ...} or get_time(...)."""
+    from flock.worker.adapters.llm import text_tool_calls
+
+    return bool(text_tool_calls(content, "get_time"))
+
+
+async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResult,
+                      timeout: float) -> int:
+    """Two Chat Completions turns; returns tokens reported. Raises ProbeError."""
+    url, headers = f"{r.provider.base_url}/chat/completions", {"Authorization": f"Bearer {key}"}
+    body = chat_request(r)
+    msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
+    calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
+    if not calls and _text_get_time_call(msg.get("content")):
+        result.warning = ("the model wrote its tool call as text, not tool_calls; the llm harness "
+                          "accepts this (docs/llm-harness.md), other harnesses would not")
+        calls = [{"id": "text_0", "type": "function",
+                  "function": {"name": "get_time", "arguments": '{"timezone": "UTC"}'}}]
+        msg = {"role": "assistant", "content": None, "tool_calls": calls}
+    result.tool_call_seen = bool(calls)
+    if not calls:
+        return tok1
+    sent = {"role": "assistant", "content": msg.get("content"), "tool_calls": calls}
+    body2 = {**body, "messages": [*body["messages"], sent, *(
+        {"role": "tool", "tool_call_id": c.get("id"), "content": TOOL_RESULT} for c in calls)]}
+    _, tok2 = await _chat_turn(client, url, body2, headers, timeout)
+    return tok1 + tok2
+
+
 async def probe(
-    client: httpx.AsyncClient, r: ResolvedModel, key: str | None, types: list[str]
+    client: httpx.AsyncClient, r: ResolvedModel, key: str | None, types: list[str],
+    api: str | None = None,
 ) -> PreflightResult:
     """Turn one asks for a tool call; turn two sends the call back with its result, the way a
-    harness does on its first tool use. Both streamed, as the harnesses stream."""
+    harness does on its first tool use. Streamed for Responses and Messages, as those harnesses
+    stream; not streamed for Chat Completions (the llm harness)."""
     p = r.provider
-    api = "responses" if p.type == "openai_compat" else "messages"
+    api = api or ("responses" if p.type == "openai_compat" else "messages")
     result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types, api=api,
                              ok=False)
     if not key:
@@ -176,8 +245,11 @@ async def probe(
         return result
     timeout = p.timeout_s or DEFAULT_TIMEOUT_S
     t0 = time.monotonic()
+    tok2 = 0
     try:
-        if p.type == "openai_compat":
+        if api == "chat_completions":
+            tok1 = await _probe_chat(client, r, key, result, timeout)
+        elif p.type == "openai_compat":
             url, headers = f"{p.base_url}/responses", {"Authorization": f"Bearer {key}"}
             body = responses_request(r)
             out, tok1 = await _responses_turn(client, url, body, headers, timeout)
@@ -220,20 +292,31 @@ async def probe(
     result.follow_up_ok = result.ok = True
     result.usage_reported = (tok1 + tok2) > 0
     if not result.usage_reported:
-        result.warning = ("the server reported zero token usage on streamed requests; "
-                          "flock cannot count this model's cost")
+        result.warning = "; ".join(filter(None, [result.warning, (
+            "the server reported zero token usage on streamed requests; "
+            "flock cannot count this model's cost")]))
     return result
 
 
-def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str]]]:
-    """Distinct provider-backed (provider, model id, reasoning) in the spec, with their types."""
-    seen: dict[tuple[str, str, str | None], tuple[ResolvedModel, list[str]]] = {}
+def api_for(harness: Harness, r: ResolvedModel) -> str:
+    """The wire API a type's harness speaks to its provider."""
+    if harness == Harness.llm:
+        return "chat_completions"
+    return "responses" if r.provider.type == "openai_compat" else "messages"
+
+
+def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str]]:
+    """Distinct provider-backed (provider, model id, reasoning, API) in the spec, with their
+    types and the API to probe. `extra` is part of the key for chat completions (it is sent)."""
+    seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
         if r is None:
             continue
-        key = (r.provider_name, r.model_id, r.reasoning)
-        seen.setdefault(key, (r, []))[1].append(type_name)
+        api = api_for(ts.harness, r)
+        extra = json.dumps(r.extra, sort_keys=True) if api == "chat_completions" else None
+        key = (r.provider_name, r.model_id, r.reasoning, api, extra)
+        seen.setdefault(key, (r, [], api))[1].append(type_name)
     return list(seen.values())
 
 
@@ -241,8 +324,8 @@ async def run_preflight(
     spec: SwarmSpec, secrets: Mapping[str, str], client: httpx.AsyncClient
 ) -> PreflightReport:
     results = await asyncio.gather(*(
-        probe(client, r, secrets.get(r.provider.api_key_env), types)
-        for r, types in models_to_probe(spec)
+        probe(client, r, secrets.get(r.provider.api_key_env), types, api)
+        for r, types, api in models_to_probe(spec)
     ))
     return PreflightReport(swarm=spec.swarm, ok=all(x.ok or x.unverified for x in results),
                            unverified=sum(x.unverified for x in results), results=list(results))

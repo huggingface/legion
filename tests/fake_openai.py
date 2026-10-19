@@ -5,7 +5,11 @@ Run: python fake_openai.py <port|0> <log.jsonl>   (prints "PORT <n>" once listen
 Replies, decided from the last message of each request:
 - last message is a tool result     -> a final text "done: <first 40 chars of the result>"
 - last user text contains `bash: X` -> one `bash` tool call with command X
+- last user text contains `json: X` -> the call written as text: `{"tool": "bash", "command": X}`
+- last user text contains `py: X`   -> the call written as text, pythonic: `[bash(command=X)]`
 - last user text contains `fail!`   -> HTTP 400 with an OpenAI-style error body
+- last user text contains `429!`    -> HTTP 429 (Retry-After: 0) the first time a request with
+                                       these exact messages is seen, then the normal reply
 - otherwise                         -> text "echo: <last user text>"
 Streams SSE when the request asks for `stream: true` (Pi does), with a usage chunk at the end:
 prompt_tokens 100 (+1 per message), 40 of them cached, completion_tokens 7.
@@ -22,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 LOCK = threading.Lock()
+SEEN_429: set[str] = set()
 
 
 def _text(content: Any) -> str:
@@ -39,6 +44,12 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     if last.get("role") == "tool":
         return {"content": "done: " + _text(last.get("content")).strip()[:40], "tool_calls": None}
     user = _text(last.get("content")) if last.get("role") == "user" else ""
+    if "json: " in user:
+        cmd = user.split("json: ", 1)[1].splitlines()[0].strip()
+        return {"content": json.dumps({"tool": "bash", "command": cmd}), "tool_calls": None}
+    if "py: " in user:
+        cmd = user.split("py: ", 1)[1].splitlines()[0].strip()
+        return {"content": f"[bash(command={cmd!r})]", "tool_calls": None}
     if "bash: " in user:
         cmd = user.split("bash: ", 1)[1].splitlines()[0].strip()
         n = sum(1 for m in msgs if m.get("role") == "assistant")
@@ -70,6 +81,15 @@ class Handler(BaseHTTPRequestHandler):
         if "fail!" in _text((body.get("messages") or [{}])[-1].get("content")):
             self._json(400, {"error": {"message": "fake failure", "type": "invalid_request_error"}})
             return
+        if "429!" in _text((body.get("messages") or [{}])[-1].get("content")):
+            key = json.dumps(body.get("messages"), sort_keys=True)
+            with LOCK:
+                first = key not in SEEN_429
+                SEEN_429.add(key)
+            if first:
+                self._json(429, {"error": {"message": "rate limited", "type": "rate_limit"}},
+                           headers={"retry-after": "0"})
+                return
         r = reply_for(body)
         model = body.get("model", "fake-model")
         finish = "tool_calls" if r["tool_calls"] else "stop"
@@ -98,9 +118,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
-    def _json(self, code: int, obj: Any) -> None:
+    def _json(self, code: int, obj: Any, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(obj).encode()
         self.send_response(code)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))
         self.end_headers()

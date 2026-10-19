@@ -38,7 +38,9 @@ harness on the wrong kind of provider.
 |---|---|---|---|
 | `codex` | `openai_compat` | OpenAI **Responses** (`POST {base_url}/responses`, streamed) | required, ends in `/v1` |
 | `claude` | `anthropic` | Anthropic Messages (`POST {base_url}/v1/messages`) | optional API root, no `/v1` |
-| either | none (native id) | the harness's own vendor | - |
+| `pi` | `openai_compat` | OpenAI Chat Completions (Pi's `openai-completions`) | required, ends in `/v1` |
+| `llm` | `openai_compat` (required) | OpenAI **Chat Completions** (`POST {base_url}/chat/completions`, not streamed) | required, ends in `/v1` |
+| claude, codex, pi | none (native id) | the harness's own vendor | - |
 
 Codex 0.162.1 (the pinned version) refuses `wire_api = "chat"`, so a server that only has
 `/v1/chat/completions` will not work with Codex. vLLM serves `/v1/responses`; for the HF router,
@@ -112,8 +114,10 @@ worker.
 A type's `reasoning` overrides its alias's. Whether a server honours the effort is up to the
 server; Qwen3 on vLLM turns thinking off through the chat template, not the effort. `extra`
 (raw request-body fields such as `chat_template_kwargs`) is accepted for swarmlab compatibility
-but neither harness can send body fields, so it is not used; set such defaults on the server
-(vLLM can set default chat-template arguments at startup).
+but Claude Code, Codex and Pi cannot send body fields, so for them it is not used; set such
+defaults on the server (vLLM can set default chat-template arguments at startup). The `llm`
+harness does send `extra`, merged into every request body, and ignores `reasoning`
+(docs/llm-harness.md).
 
 ## Cost
 
@@ -134,8 +138,10 @@ shows $0 today.
 
 `flock preflight spec.yaml` (or `POST /swarms/{swarm}/preflight` with the spec as the body)
 makes the controller probe each distinct provider-backed model the way a harness starts: two
-streamed turns on the Responses API for `openai_compat` (shaped like Codex's requests:
-`store: false`, encrypted reasoning, parallel tool calls) or the Messages API for `anthropic`.
+turns, streamed on the Responses API for `openai_compat` (shaped like Codex's requests:
+`store: false`, encrypted reasoning, parallel tool calls), non-streamed Chat Completions with
+`extra` for types on the `llm` harness (a tool call written as text passes with a warning,
+since that harness accepts it), or the Messages API for `anthropic`.
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
 `follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
