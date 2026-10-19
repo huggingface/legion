@@ -26,48 +26,12 @@ from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError
 from flock.worker.events import Outbox, SessionLog, utcnow
 
 if TYPE_CHECKING:
-    from flock.controller.prices import Price
-    from flock.worker.adapters.pi import PiModelConfig
     from flock.worker.identity import Identities
     from flock.worker.sync import BucketSync
 
 log = logging.getLogger(__name__)
 
 INSTRUCTIONS_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "pi": "AGENTS.md"}
-
-PI_COMPAT_PREFIX = "openai_compat:"
-
-
-# TODO(PR A): replace with resolve_model() (the controller resolves `models:` entries and sends
-# the result on assign); this temporary convention only exists so pi types can run before that.
-def pi_model_config(spec: TypeSpec) -> PiModelConfig | None:
-    """Pi endpoint for a type, from `model: "openai_compat:<base_url>|<model_id>"` or from
-    `env: {PI_BASE_URL, PI_MODEL}`; `PI_API_KEY_ENV` (default OPENAI_API_KEY) names the env var
-    holding the key and `PI_REASONING` sets the thinking level. None: `spec.model` is passed to
-    Pi as given (one of Pi's built-in providers, e.g. `anthropic/claude-...`)."""
-    from flock.worker.adapters.pi import PiModelConfig
-
-    env = spec.env
-    if spec.model.startswith(PI_COMPAT_PREFIX):
-        base_url, sep, model_id = spec.model[len(PI_COMPAT_PREFIX):].partition("|")
-        if not sep or not base_url or not model_id:
-            raise ValueError(f"pi model {spec.model!r}: expected openai_compat:<base_url>|<model_id>")
-    elif env.get("PI_BASE_URL"):
-        base_url, model_id = env["PI_BASE_URL"], env.get("PI_MODEL") or spec.model
-    else:
-        return None
-    return PiModelConfig(base_url=base_url, model_id=model_id,
-                         api_key_env=env.get("PI_API_KEY_ENV") or "OPENAI_API_KEY",
-                         reasoning=env.get("PI_REASONING") or None)
-
-
-# TODO(PR A): `return type_price_table(spec)` (prices.py on the providers branch), which adds the
-# type's pinned provider price (`resolved_model.pricing`) under its model id; price_for then
-# finds it for Pi's `<provider>/<model id>` usage key before any global row.
-def pi_price_table(spec: TypeSpec) -> dict[str, Price] | None:
-    """Prices for enforcing a Pi type's `max_budget_usd` on the worker. None: the global table
-    (built-in rows plus FLOCK_PRICES), the same one the controller bills with."""
-    return None
 
 
 class AgentState(BaseModel):

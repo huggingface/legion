@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from flock.models import TokenUsage, TypeSpec
+from flock.controller.prices import price_for
+from flock.models import SwarmSpec, TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, ResumeError
 from flock.worker.adapters.pi import (
     PiAdapter,
@@ -23,9 +24,10 @@ from flock.worker.adapters.pi import (
     PiModelConfig,
     _descendants,
     harness_env,
+    pi_model_config,
     write_models_json,
 )
-from flock.worker.agents import INSTRUCTIONS_FILE, AgentRuntime, pi_model_config
+from flock.worker.agents import INSTRUCTIONS_FILE, AgentRuntime
 from flock.worker.events import Outbox
 
 from . import fake_openai
@@ -150,7 +152,7 @@ def test_mapper_budget_uses_the_price_table():
 def test_models_json_has_env_reference_not_key(tmp_path, monkeypatch):
     monkeypatch.setenv("VLLM_KEY", "sk-very-secret")
     cfg = PiModelConfig(base_url="https://h/v1", api_key_env="VLLM_KEY", model_id="Qwen/Q-27B",
-                        reasoning="low", extra={"contextWindow": 131072})
+                        provider="flock", reasoning="low", extra={"contextWindow": 131072})
     path = write_models_json(tmp_path, cfg)
     data = json.loads(path.read_text())
     assert data == {"providers": {"flock": {"baseUrl": "https://h/v1", "api": "openai-completions",
@@ -159,39 +161,54 @@ def test_models_json_has_env_reference_not_key(tmp_path, monkeypatch):
                                                         "contextWindow": 131072}]}}}
     assert "sk-very-secret" not in path.read_text()
     assert [p.name for p in tmp_path.iterdir()] == ["models.json"]
-    assert not PiModelConfig("u", "K", "m", reasoning="off").models_json()["providers"]["flock"]["models"][0]["reasoning"]
+    assert not PiModelConfig("u", "K", "m", "flock", reasoning="off").models_json()["providers"]["flock"]["models"][0]["reasoning"]
     assert cfg.model_ref == "flock/Qwen/Q-27B"
 
 
 def test_harness_env_is_an_allow_list():
+    """Shared allow-list (adapters/base.minimal_env) plus Pi's own variables; secrets and the
+    provider key arrive in `env`, selected by AgentRuntime.harness_env; FLOCK_TOKEN never."""
     base = {"PATH": "/bin", "HOME": "/root", "LANG": "C.UTF-8", "FLOCK_TOKEN": "worker-secret",
             "FLOCK_URL": "https://c", "HF_TOKEN": "hf_x", "VLLM_KEY": "sk-1", "GH_TOKEN": "g",
             "ANTHROPIC_API_KEY": "a", "PI_OFFLINE": "1"}
-    spec = pi_spec(secrets=["ANTHROPIC_API_KEY", "FLOCK_TOKEN"], env={"FOO": "bar"})
-    cfg = PiModelConfig("u", "VLLM_KEY", "m")
-    env = harness_env(spec, {"FOO": "bar", "MSGBOARD_TOKEN": "mb", "FLOCK_TOKEN": "x"}, Path("/state/pi"), cfg,
-                      base=base)
+    selected = {"ANTHROPIC_API_KEY": "a", "VLLM_KEY": "sk-1", "FOO": "bar", "MSGBOARD_TOKEN": "mb",
+                "FLOCK_TOKEN": "x"}
+    env = harness_env(selected, Path("/state/pi"), base=base)
     assert env == {"PATH": "/bin", "HOME": "/root", "LANG": "C.UTF-8", "PI_OFFLINE": "1",
                    "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", "ANTHROPIC_API_KEY": "a",
                    "VLLM_KEY": "sk-1", "FOO": "bar", "MSGBOARD_TOKEN": "mb",
                    "PI_CODING_AGENT_DIR": "/state/pi"}
-    # PR A's allow-list shape: LC_*/XDG_* prefixes; Pi's own defaults yield to explicit values
-    env = harness_env(pi_spec(), {"PI_OFFLINE": "0"}, Path("/p"), None,
+    # LC_*/XDG_* prefixes; Pi's own defaults yield to explicit values
+    env = harness_env({"PI_OFFLINE": "0"}, Path("/p"),
                       base={"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "OTHER": "1"})
     assert env == {"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "PI_OFFLINE": "0", "PI_SKIP_VERSION_CHECK": "1",
                    "PI_TELEMETRY": "0", "PI_CODING_AGENT_DIR": "/p"}
 
 
-def test_pi_model_config_glue():
+PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://h:8000/v1", "api_key_env": "VLLM_KEY",
+                     "self_hosted": True},
+             "hf": {"type": "openai_compat", "base_url": "https://router.example/v1",
+                    "api_key_env": "HF_TOKEN", "pricing": {"*": [0.5, 1.5, 0.1]}}}
+
+
+def provider_spec(model: str, **kw) -> TypeSpec:
+    """A pi type as the worker receives it: resolved against `providers:` at apply."""
+    return SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b", "providers": PROVIDERS,
+                                     "types": {"a": {"harness": "pi", "model": model, **kw}}}).types["a"]
+
+
+def test_pi_model_config_from_resolved_model():
     assert pi_model_config(pi_spec(model="anthropic/claude-haiku-5-5")) is None
-    c = pi_model_config(pi_spec(model="openai_compat:http://h:8000/v1|Qwen/Q",
-                                env={"PI_API_KEY_ENV": "VLLM_KEY", "PI_REASONING": "high"}))
+    c = pi_model_config(provider_spec("gpu:Qwen/Q", reasoning="high"))
     assert c == PiModelConfig(base_url="http://h:8000/v1", api_key_env="VLLM_KEY", model_id="Qwen/Q",
-                              reasoning="high")
-    c = pi_model_config(pi_spec(model="ignored", env={"PI_BASE_URL": "http://r/v1", "PI_MODEL": "m-2"}))
-    assert (c.base_url, c.model_id, c.api_key_env, c.reasoning) == ("http://r/v1", "m-2", "OPENAI_API_KEY", None)
-    with pytest.raises(ValueError):
-        pi_model_config(pi_spec(model="openai_compat:http://h/v1"))
+                              provider="gpu", reasoning="high")
+    assert c.model_ref == "gpu/Qwen/Q"
+    # pi needs an openai_compat provider, like codex
+    with pytest.raises(ValueError, match="needs a provider of type openai_compat"):
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
+                                  "providers": {"an": {"type": "anthropic", "api_key_env": "K",
+                                                       "pricing": {"*": [1, 1, 1]}}},
+                                  "types": {"a": {"harness": "pi", "model": "an:m"}}})
 
 
 def _session(home: Path, agent: str, sid: str, cwd: Path, ts: str = "2026-10-16T08-00-00-000Z") -> Path:
@@ -246,8 +263,11 @@ def test_worker_factory_builds_pi_adapter(tmp_path):
 
     cfg = WorkerConfig(url="u", token="t", worker_id="w", swarm="s", type="a",
                        deadline=datetime.now(UTC), bucket=None, work_root=tmp_path)
-    a = default_adapter_factory(cfg)("a-0001", pi_spec(model="openai_compat:http://h/v1|m"))
+    a = default_adapter_factory(cfg)("a-0001", provider_spec("hf:m"))
     assert isinstance(a, PiAdapter) and a.agent == "a-0001" and a.model_config.model_id == "m"
+    assert a.model_config.model_ref == "hf/m"
+    # budgets use the pinned provider price (type_price_table), found for Pi's usage key
+    assert price_for(a.model_config.model_ref, a.prices).input == 0.5
 
 
 # --------------------------------------------------------------------------- real pi + fake server
@@ -276,8 +296,17 @@ def make_adapter(tmp_path, srv, monkeypatch, home: Path | None = None) -> tuple[
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "AGENTS.md").write_text("You are pi-0001. MARKER-AGENTS-MD\n")
     cfg = PiModelConfig(base_url=f"http://127.0.0.1:{srv.server_port}/v1", api_key_env="FLOCK_TEST_PI_KEY",
-                        model_id="fake-model")
-    return PiAdapter(wd, home=home or tmp_path / "pi", pi_bin=PI_BIN, model_config=cfg), wd
+                        model_id="fake-model", provider="flock")
+    a = PiAdapter(wd, home=home or tmp_path / "pi", pi_bin=PI_BIN, model_config=cfg)
+    start = a.start
+
+    async def start_with_key(workdir, session_id, spec, *, env=None):
+        # what AgentRuntime.harness_env adds for a provider-backed type: the key, by name
+        key = {k: os.environ[k] for k in ("FLOCK_TEST_PI_KEY",) if k in os.environ}
+        return await start(workdir, session_id, spec, env={**key, **(env or {})})
+
+    a.start = start_with_key
+    return a, wd
 
 
 async def until_turn_ended(a: PiAdapter, timeout: float = 30) -> list[AdapterEvent]:

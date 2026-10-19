@@ -8,26 +8,28 @@ experiments/resume-gate-pi/RESULTS.md); no real model yet (see "Not verified").
 
 ## Running a Pi type
 
-Until PR A lands `models:` entries and `resolve_model()`, a pi type names its endpoint with a
-temporary convention (`pi_model_config` in `worker/agents.py`, marked `TODO(PR A)`):
+A pi type names its model the way codex does (design.md section 5): a `<provider>:<id>` string
+or a `models:` alias, resolved at apply; Pi needs an `openai_compat` provider.
 
 ```yaml
+providers:
+  gpu:
+    type: openai_compat
+    base_url: https://my-endpoint.example/v1
+    api_key_env: VLLM_API_KEY      # the job receives it; the worker hands it to Pi by name
+    self_hosted: true
 types:
   analyst:
     harness: pi
-    model: "openai_compat:https://my-endpoint.example/v1|Qwen/Qwen3.8-27B-FP8"
-    env:
-      PI_API_KEY_ENV: VLLM_API_KEY   # env var holding the key (default OPENAI_API_KEY)
-      PI_REASONING: low              # optional: --thinking level
-    secrets: [VLLM_API_KEY]          # the job receives it; only this name reaches Pi
+    model: "gpu:Qwen/Qwen3.8-27B-FP8"
+    reasoning: low                 # optional: --thinking level
     system_prompt_file: prompts/analyst.md   # written to the workdir as AGENTS.md
 ```
 
-Equivalent: `env: {PI_BASE_URL: ..., PI_MODEL: ...}` with any `model`. Without either form,
-`model` is passed to `pi --model` as given (one of Pi's built-in providers, e.g.
-`anthropic/claude-haiku-5-5`; its key must be in `secrets`). Pi refuses to prompt when the key
-variable is unset, so for a keyless endpoint set it to any value (e.g. in `env`); the adapter
-reports that refusal as a failed turn.
+A model without a provider prefix is passed to `pi --model` as given (one of Pi's built-in
+providers, e.g. `anthropic/claude-haiku-5-5`; its key must be in `secrets`). Pi refuses to
+prompt when the key variable is unset, so for a keyless endpoint set it to any value (e.g. in
+`env`); the adapter reports that refusal as a failed turn.
 
 ## How it runs
 
@@ -38,7 +40,7 @@ reports that refusal as a failed turn.
   expected file on resume).
 - **Home**: `PI_CODING_AGENT_DIR=/state/pi`, one per worker (every agent on a worker has the
   same type). The adapter writes `/state/pi/models.json` atomically on every start: one provider
-  (`flock`), `api: openai-completions`, `apiKey: "$<VAR>"`. The key is read from the
+  (the flock provider name), `api: openai-completions`, `apiKey: "$<VAR>"`. The key is read from the
   environment at request time; it never lands on disk (`auth.json` stays `{}`).
 - **System prompt**: `AGENTS.md` in the workdir. Pi also reads AGENTS.md/CLAUDE.md from parent
   directories and its agent dir, so `/work`, `/work/agents` and `/state/pi` must not have one.
@@ -69,16 +71,14 @@ reports that refusal as a failed turn.
   `error_max_turns` / `error_max_budget_usd`, as Claude reports them). A limit reached on a
   final answer ends the turn normally. A steered prompt that arrives after the last allowed
   answer can have its request already on the wire when the abort lands (one extra call, at
-  most). Pinned provider prices: `agents.pi_price_table(spec)`, `None` until PR A
-  (`TODO(PR A)`: `type_price_table(spec)`).
-- **Environment**: `minimal_env` with PR A's allow-list (`PATH HOME USER LOGNAME SHELL TERM LANG
-  LANGUAGE TZ TMPDIR IS_SANDBOX LC_* XDG_*`, CA and proxy variables) plus Pi's own variables,
-  then the selected env: the names in the type's `secrets` and the API key variable (from the
-  worker environment), the type's `env` and the msgboard identity. `PI_OFFLINE=1
-  PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0` unless set; `PI_CODING_AGENT_DIR`. `FLOCK_TOKEN` is
-  always removed, even when listed. The allow-list is a copy of PR A's `base.minimal_env`
-  (`TODO(PR A)`: import it; `selected_env` goes away because PR A's runtime selects the same
-  names for every harness).
+  most). Pinned provider prices: the worker passes `type_price_table(spec)`, so a
+  provider-backed type is priced at its pinned price.
+- **Environment**: the shared `minimal_env` (`adapters/base.py`: `PATH HOME USER LOGNAME SHELL
+  TERM LANG LANGUAGE TZ TMPDIR IS_SANDBOX LC_* XDG_*`, CA and proxy variables) plus Pi's own
+  variables, then what `AgentRuntime.harness_env` selects for every harness: the names in the
+  type's `secrets`, the provider's key variable, the type's `env` and the msgboard identity.
+  `PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0` unless set; `PI_CODING_AGENT_DIR`.
+  `FLOCK_TOKEN` is always removed, even when listed.
 
 ## Event mapping
 

@@ -35,38 +35,16 @@ import logging
 import os
 import signal
 import uuid
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from flock.controller.prices import Price, price_for
 from flock.models import TokenUsage, TypeSpec
-from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
 
 log = logging.getLogger(__name__)
-
-# The worker-environment allow-list: the same names and function as PR A's adapters/base.py
-# (BASE_ENV, BASE_ENV_PREFIXES, minimal_env), copied so this PR stands alone.
-# TODO(PR A): `from flock.worker.adapters.base import minimal_env` and delete these three.
-BASE_ENV = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ", "TMPDIR",
-    "IS_SANDBOX",  # Claude's bypassPermissions as root
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
-})
-BASE_ENV_PREFIXES = ("LC_", "XDG_")
-
-
-def minimal_env(parent: Mapping[str, str], explicit: Mapping[str, str],
-                keep: Iterable[str] = ()) -> dict[str, str]:
-    """The harness environment: allowlisted names from `parent` (BASE_ENV, LC_*, XDG_*, plus
-    `keep`, e.g. the harness's config-dir variable), then `explicit` on top."""
-    names = BASE_ENV | set(keep)
-    env = {k: v for k, v in parent.items() if k in names or k.startswith(BASE_ENV_PREFIXES)}
-    env.update(explicit)
-    return env
-
 
 # Never reaches Pi, even when listed in `secrets` or `env` (the worker's controller credential).
 ENV_DENY = ("FLOCK_TOKEN",)
@@ -83,17 +61,17 @@ def pi_home() -> Path:
 
 @dataclass(frozen=True)
 class PiModelConfig:
-    """One OpenAI-compatible endpoint for Pi's models.json. Mirrors what PR A's
-    `resolve_model()` returns (provider_name, provider.base_url, provider.api_key_env, model_id,
-    reasoning, extra). `api_key_env` names the env var holding the key; the key never reaches
-    disk. `reasoning` is a thinking level (off|minimal|low|medium|high|xhigh|max) or None.
-    `extra` is merged into the model entry (contextWindow, maxTokens, cost, ...)."""
+    """One OpenAI-compatible endpoint for Pi's models.json, from a type's `ResolvedModel`
+    (`pi_model_config`). `provider` is the flock provider name, so Pi's model ref and usage key
+    are `<provider>/<model id>`. `api_key_env` names the env var holding the key; the key never
+    reaches disk. `reasoning` is a thinking level (off|minimal|low|medium|high|xhigh|max) or
+    None. `extra` is merged into the model entry (contextWindow, maxTokens, cost, ...)."""
 
     base_url: str
     api_key_env: str
     model_id: str
+    provider: str
     reasoning: str | None = None
-    provider: str = "flock"
     api: str = "openai-completions"
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -105,6 +83,17 @@ class PiModelConfig:
         model = {"id": self.model_id, "reasoning": self.reasoning not in (None, "off"), **self.extra}
         return {"providers": {self.provider: {"baseUrl": self.base_url, "api": self.api,
                                               "apiKey": f"${self.api_key_env}", "models": [model]}}}
+
+
+def pi_model_config(spec: TypeSpec) -> PiModelConfig | None:
+    """Pi's endpoint for a provider-backed type (`spec.resolved_model`). None: a harness-native
+    model, passed to Pi as given (one of Pi's built-in providers, e.g. `anthropic/claude-...`)."""
+    r = spec.resolved_model
+    if r is None:
+        return None
+    return PiModelConfig(base_url=r.provider.base_url or "", api_key_env=r.provider.api_key_env,
+                         model_id=r.model_id, provider=r.provider_name,
+                         reasoning=spec.effective_reasoning)
 
 
 def write_models_json(home: Path, cfg: PiModelConfig) -> Path:
@@ -131,27 +120,14 @@ def _same_dir(a: str | Path | None, b: str | Path) -> bool:
     return a is not None and os.path.realpath(a) == os.path.realpath(b)
 
 
-def selected_env(spec: TypeSpec, env: Mapping[str, str] | None, model: PiModelConfig | None,
-                 source: Mapping[str, str]) -> dict[str, str]:
-    """What the runtime passes as `env` on PR A (`AgentRuntime.harness_env`): the type's secrets
-    and the API key variable, by name, from the worker environment, then `env` (the type's `env`
-    plus the msgboard identity). TODO(PR A): delete; the runtime selects these for every harness."""
-    names = [*spec.secrets, *([model.api_key_env] if model else [])]
-    out = {k: source[k] for k in names if k in source}
-    if model and model.api_key_env not in out and model.api_key_env not in (env or {}):
-        log.warning("pi: %s is not set; Pi refuses to prompt without a key (set it to any value "
-                    "for a keyless endpoint)", model.api_key_env)
-    out.update(env or {})
-    return out
-
-
-def harness_env(spec: TypeSpec, env: dict[str, str] | None, home: Path,
-                model: PiModelConfig | None, base: Mapping[str, str] | None = None) -> dict[str, str]:
+def harness_env(env: Mapping[str, str] | None, home: Path,
+                base: Mapping[str, str] | None = None) -> dict[str, str]:
     """The Pi process environment: `minimal_env` of the worker's (allow-list plus Pi's own
-    variables) with the selected `env` on top, Pi's network-off defaults where unset, its agent
-    dir, and never FLOCK_TOKEN."""
+    variables) with `env` on top (what `AgentRuntime.harness_env` selected: the type's secrets,
+    `env`, the msgboard identity, the provider key), Pi's network-off defaults where unset, its
+    agent dir, and never FLOCK_TOKEN."""
     base = os.environ if base is None else base
-    out = minimal_env(base, selected_env(spec, env, model, base), keep=PI_ENV_DEFAULTS)
+    out = minimal_env(base, env or {}, keep=PI_ENV_DEFAULTS)
     for k, v in PI_ENV_DEFAULTS.items():
         out.setdefault(k, v)
     for k in ENV_DENY:
@@ -462,7 +438,7 @@ class PiAdapter:
                      "--session-id", sid, "--model", cfg.model_ref if cfg else spec.model, *PI_FLAGS]
         if cfg is not None and cfg.reasoning:
             self.argv += ["--thinking", cfg.reasoning]
-        self.env = harness_env(spec, env, self.home, cfg)
+        self.env = harness_env(env, self.home)
         self._queue = EventQueue()
         self._mapper = PiMapper(cfg.model_ref if cfg else spec.model, max_turns=spec.max_turns,
                                 max_budget_usd=spec.max_budget_usd, prices=self.prices)
