@@ -101,6 +101,49 @@ def test_mapper_errors_and_ignored_records():
     assert e[0].kind == "usage" and e[0].usage == TokenUsage(input=5, output=2)
 
 
+def test_mapper_limits_from_the_fixture():
+    """max_turns counts model calls per flock turn; it trips only when Pi would call again
+    (a toolUse answer, or a turn_start past the limit for a steered prompt)."""
+    recs = [json.loads(x) for x in (FIX / "pi_rpc.jsonl").read_text().splitlines()]
+    m = PiMapper("fake/fake-model", max_turns=1)
+    ended, aborts = [], 0
+    for r in recs:
+        evs = m.on_prompt_response(r) if r.get("command") == "prompt" else m.on_record(r)
+        ended += [e for e in evs if e.kind == "turn_ended"]
+        if m.abort_requested:
+            aborts, m.abort_requested = aborts + 1, False
+    # hello: 1 call, completed | tool call: abort after the first call | 400 | abort mid-tool
+    assert aborts == 2
+    assert [(e.status, e.data.get("reason")) for e in ended] == [
+        ("completed", None), ("error", "max_turns"), ("error", None), ("error", "max_turns")]
+    assert "max_turns exceeded (1)" in ended[1].error and ended[1].data["subtype"] == "error_max_turns"
+
+
+def test_mapper_budget_uses_the_price_table():
+    from flock.controller.prices import Price
+
+    prices = {"fake/fake-model": Price(1.0, 1.0, 1.0, 1.0)}  # $1 per 1M tokens of each kind
+    tool = {"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse",
+                                                "usage": {"input": 60, "output": 40}}}
+    m = PiMapper("fake/fake-model", max_budget_usd=0.0002, prices=prices)
+    m.on_record({"type": "agent_start"})
+    m.on_record({"type": "turn_start"})
+    m.on_record(tool)  # $0.0001 so far: under budget
+    assert not m.abort_requested and m.cost == pytest.approx(0.0001)
+    m.on_record({"type": "turn_start"})
+    m.on_record(tool)  # $0.0002: not over
+    m.on_record({"type": "turn_start"})
+    m.on_record(tool)  # $0.0003: over, and Pi wants another call
+    assert m.abort_requested and m.limit == "max_budget_usd"
+    [end] = m.on_record({"type": "agent_settled", "aborted": True})
+    assert end.status == "error" and end.data["reason"] == "max_budget_usd"
+    # unknown model ids are priced at the table's (high) default, never free
+    m = PiMapper("x/unknown", max_budget_usd=0.0001)
+    m.on_record({"type": "agent_start"})
+    m.on_record(tool)
+    assert m.limit == "max_budget_usd"
+
+
 # --------------------------------------------------------------------------- config, env, files
 
 
@@ -401,3 +444,57 @@ async def test_pi_thinking_level_reaches_the_endpoint(tmp_path, fake_server, mon
     await until_turn_ended(a)
     await a.stop()
     assert requests_seen(fake_server)[0]["body"]["reasoning_effort"] == "high"
+
+
+@pi_bin
+async def test_pi_max_turns_aborts_the_run(tmp_path, fake_server, monkeypatch):
+    """review finding 2: with max_turns=1 a tool prompt used to make two model calls."""
+    a, wd = make_adapter(tmp_path, fake_server, monkeypatch)
+    await a.start(wd, None, pi_spec(max_turns=1))
+    await a.send("bash: echo limit-check > ran.txt")
+    evs = await until_turn_ended(a)
+    assert evs[-1].status == "error" and evs[-1].data["reason"] == "max_turns"
+    assert len(requests_seen(fake_server)) == 1
+    # the session is still usable: the next prompt runs (1 call, under the limit)
+    await a.send("hello again")
+    evs = await until_turn_ended(a)
+    assert evs[-1].status == "completed"
+    assert len(requests_seen(fake_server)) == 2
+    await a.stop()
+
+
+@pi_bin
+async def test_pi_max_turns_not_hit(tmp_path, fake_server, monkeypatch):
+    a, wd = make_adapter(tmp_path, fake_server, monkeypatch)
+    await a.start(wd, None, pi_spec(max_turns=2))
+    await a.send("bash: echo ok")
+    evs = await until_turn_ended(a)
+    assert evs[-1].status == "completed" and len(requests_seen(fake_server)) == 2
+    await a.stop()
+
+
+@pi_bin
+async def test_pi_max_budget_aborts_the_run(tmp_path, fake_server, monkeypatch):
+    """review finding 2: max_budget_usd=0.000001 used to be ignored. The fake model is not in the
+    price table, so it is priced at the default row ($15/M input): one call is over budget."""
+    a, wd = make_adapter(tmp_path, fake_server, monkeypatch)
+    await a.start(wd, None, pi_spec(max_budget_usd=0.000001))
+    await a.send("bash: echo budget-check")
+    evs = await until_turn_ended(a)
+    assert evs[-1].status == "error" and evs[-1].data["reason"] == "max_budget_usd"
+    assert len(requests_seen(fake_server)) == 1
+    await a.stop()
+
+
+@pi_bin
+async def test_pi_runtime_reports_limit_in_turn_ended(tmp_path, fake_server, monkeypatch):
+    a, _ = make_adapter(tmp_path, fake_server, monkeypatch)
+    rt = AgentRuntime("pi-0001", "pi", pi_spec(max_turns=1), swarm="sw",
+                      work_root=tmp_path / "work" / "agents", adapter=a, outbox=Outbox())
+    await rt.setup(restore=False)
+    await rt.prompt("bash: echo hi")
+    await until(lambda: rt.state.turns == 1, timeout=30)
+    await rt.stop()
+    [ended] = [r["data"] for r in map(json.loads, rt.log.path.read_text().splitlines())
+               if r.get("customType") == "turn_ended"]
+    assert ended["status"] == "error" and ended["reason"] == "max_turns" and ended["num_turns"] == 1

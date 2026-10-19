@@ -16,6 +16,11 @@ Observed with 1.2.0 (tests/fixtures/pi_rpc.jsonl, recorded against tests/fake_op
 - Usage is per model call on each assistant `message_end` (`input` excludes cached tokens;
   `reasoning` is already inside `output`). Nothing is cumulative except `get_session_stats`.
 - A model error ends the run with an assistant message `stopReason: "error"` + `errorMessage`.
+- `max_turns` / `max_budget_usd` (per flock turn, which may fold several steered prompts) are
+  enforced here: the mapper counts model calls (`turn_start`) and prices each assistant
+  `message_end` from the flock price table; when Pi would make another call past a limit
+  (an assistant message that asks for tools, or a `turn_start` for a steered prompt) the
+  adapter sends `abort`, and the turn ends `error` with `data.reason` max_turns|max_budget_usd.
 - Closing stdin exits at once, even mid-tool, and Pi kills the tool's process group
   (backgrounded grandchildren included). SIGKILL does not: the tool's bash runs in its own
   session and survives, so `stop` kills the descendants it saw before killing Pi.
@@ -35,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from flock.controller.prices import Price, price_for
 from flock.models import TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 
@@ -140,17 +146,44 @@ class PiMapper:
     (or `agent_start`) to `agent_settled`; Pi may run several model calls, retries, compactions
     and queued steers inside it."""
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, *, max_turns: int | None = None,
+                 max_budget_usd: float | None = None, prices: dict[str, Price] | None = None) -> None:
         self.model = model
+        self.max_turns = max_turns
+        self.max_budget_usd = max_budget_usd
+        self.prices = prices
         self.in_turn = False
         self.last_assistant: dict[str, Any] | None = None
+        self.calls = 0  # model calls in this flock turn
+        self.cost = 0.0  # flock-priced cost of this flock turn
+        self.limit: str | None = None  # the limit that made us abort this turn
+        self.abort_requested = False  # set when `limit` is first hit; the adapter sends `abort`
 
     def _open(self, data: dict[str, Any]) -> list[AdapterEvent]:
         if self.in_turn:
             return []
         self.in_turn = True
         self.last_assistant = None
+        self.calls, self.cost, self.limit, self.abort_requested = 0, 0.0, None, False
         return [AdapterEvent("turn_started", data=data)]
+
+    def _spend(self, model: str | None, u: TokenUsage) -> None:
+        if self.max_budget_usd is not None:
+            p = price_for(model or "", self.prices)
+            self.cost += (u.input * p.input + u.output * p.output + u.cache_read * p.cache_read
+                          + u.cache_write * p.cache_write) / 1_000_000
+
+    def _exceeded(self) -> str | None:
+        """The limit another model call would break, if any."""
+        if self.max_turns is not None and self.calls >= self.max_turns:
+            return "max_turns"
+        if self.max_budget_usd is not None and self.cost > self.max_budget_usd:
+            return "max_budget_usd"
+        return None
+
+    def _check(self, *, next_call: bool) -> None:
+        if self.limit is None and next_call and (hit := self._exceeded()):
+            self.limit, self.abort_requested = hit, True
 
     def on_prompt_response(self, resp: dict[str, Any]) -> list[AdapterEvent]:
         if resp.get("success") and (resp.get("data") or {}).get("disposition") == "started":
@@ -161,6 +194,12 @@ class PiMapper:
         t = rec.get("type")
         if t == "agent_start":
             return self._open({})
+        if t == "turn_start":
+            # a call already past the limit (a steered prompt after a final answer): stop it
+            self._check(next_call=True)
+            if self.limit is None:  # after an abort Pi still opens a call it never sends
+                self.calls += 1
+            return []
         if t == "message_end":
             msg = rec.get("message") or {}
             out = [AdapterEvent("message", message=msg, raw=rec)]
@@ -171,10 +210,14 @@ class PiMapper:
                 u = _usage(msg.get("usage"))
                 if u != TokenUsage():
                     out.append(AdapterEvent("usage", model=model, usage=u, raw=rec))
+                    self._spend(model, u)
+                # toolUse: Pi runs the tools and calls the model again
+                self._check(next_call=msg.get("stopReason") == "toolUse")
             return out
         if t == "compaction_end":
             u = ((rec.get("result") or {}).get("usage")) or None
             if u:
+                self._spend(self.model, _usage(u))
                 return [AdapterEvent("usage", model=self.model, usage=_usage(u),
                                      data={"compaction": True}, raw=rec)]
             return []
@@ -183,6 +226,13 @@ class PiMapper:
                 return []
             self.in_turn = False
             last = self.last_assistant or {}
+            if self.limit:
+                limit = getattr(self, self.limit)
+                return [AdapterEvent("turn_ended", status="error", raw=rec,
+                                     error=f"{self.limit} exceeded ({limit}): {self.calls} model call(s), "
+                                           f"${self.cost:.6f}; aborted",
+                                     data={"reason": self.limit, "subtype": f"error_{self.limit}",
+                                           "num_turns": self.calls})]
             if rec.get("aborted"):
                 return [AdapterEvent("turn_ended", status="interrupted", raw=rec)]
             if last.get("stopReason") == "error":
@@ -248,12 +298,14 @@ class PiAdapter:
     harness = "pi"
 
     def __init__(self, workdir: Path, *, agent: str | None = None, home: Path | None = None,
-                 pi_bin: str | None = None, model_config: PiModelConfig | None = None) -> None:
+                 pi_bin: str | None = None, model_config: PiModelConfig | None = None,
+                 prices: dict[str, Price] | None = None) -> None:
         self.workdir = Path(workdir)
         self.agent = agent or self.workdir.name
         self.home = Path(home) if home else pi_home()
         self.pi_bin = pi_bin or os.environ.get("FLOCK_PI_CLI") or "pi"
         self.model_config = model_config
+        self.prices = prices  # for max_budget_usd; None: the global table
         self.session_id: str | None = None
         self.session_file: Path | None = None
         self.env: dict[str, str] = {}
@@ -346,6 +398,16 @@ class PiAdapter:
                 return  # our own request: the caller handles failures
         for ev in self._mapper.on_record(rec):
             self._queue.put(ev)
+        if self._mapper.abort_requested:
+            self._mapper.abort_requested = False
+            log.warning("%s: %s exceeded; aborting the pi run", self.agent, self._mapper.limit)
+            self._tasks.append(asyncio.create_task(self._abort()))
+
+    async def _abort(self) -> None:
+        try:
+            await self.request({"type": "abort"}, timeout=STOP_GRACE)
+        except Exception as e:  # noqa: BLE001 - the burst ends anyway if Pi is gone
+            self._queue.put(AdapterEvent("error", error=f"abort after limit: {e}"))
 
     async def _drain_stderr(self) -> None:
         assert self._proc and self._proc.stderr
@@ -376,7 +438,8 @@ class PiAdapter:
             self.argv += ["--thinking", cfg.reasoning]
         self.env = harness_env(spec, env, self.home, cfg)
         self._queue = EventQueue()
-        self._mapper = PiMapper(cfg.model_ref if cfg else spec.model)
+        self._mapper = PiMapper(cfg.model_ref if cfg else spec.model, max_turns=spec.max_turns,
+                                max_budget_usd=spec.max_budget_usd, prices=self.prices)
         self._stderr = []
         self._proc = await asyncio.create_subprocess_exec(
             *self.argv, cwd=str(self.workdir), env=self.env, limit=64 * 1024 * 1024,
