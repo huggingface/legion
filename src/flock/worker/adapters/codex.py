@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from flock.controller.prices import Price, price_for, type_price_table
 from flock.models import REASONING_EFFORT, TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
 
@@ -110,14 +111,38 @@ def _ms() -> int:
     return int(time.time() * 1000)
 
 
+TOOL_ITEMS = ("commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch")
+
+
 class CodexMapper:
-    """Maps app-server notifications to AdapterEvents; tracks the active turn."""
+    """Maps app-server notifications to AdapterEvents; tracks the active turn.
+
+    `max_turns` / `max_budget_usd` (per flock turn, which may fold several steered prompts) are
+    enforced here; the app-server has no per-turn call or spend limit (0.163.0 schema: only a
+    thread-goal `tokenBudget`, in tokens). One `thread/tokenUsage/updated` for the active turn
+    is one model call; its `last` usage is priced with the flock price table. When Codex would
+    call the model again past a limit (the call started a tool, or ended without a final answer)
+    the adapter sends `turn/interrupt`, and the turn ends `error` with `data.reason`
+    max_turns|max_budget_usd, as Pi and Claude report it. A steer into a turn that has used its
+    allowance is held and sent as the next turn once this one completes.
+    """
+
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
+    prices: dict[str, Price] | None = None  # None: the global table
 
     def __init__(self, model: str | None = None, provider: str = "openai") -> None:
         self.model = model
         self.provider = provider
         self.active_turn: str | None = None
         self.started: set[str] = set()
+        self._reset()
+
+    def _reset(self) -> None:
+        self.calls, self.cost = 0, 0.0  # model calls and flock-priced cost in this flock turn
+        self.limit: str | None = None  # the limit that made us interrupt this turn
+        self.abort_requested = False  # set when `limit` is first hit; the adapter interrupts
+        self._saw_tool = self._saw_final = False  # what the current model call produced so far
 
     def _assistant(self, content: list[dict], stop: str = "stop") -> dict[str, Any]:
         return {"role": "assistant", "content": content, "api": "openai-responses",
@@ -136,7 +161,45 @@ class CodexMapper:
         if turn_id in self.started:
             return []
         self.started.add(turn_id)
+        self._reset()
         return [AdapterEvent("turn_started", data={"harness_turn_id": turn_id})]
+
+    def _exceeded(self) -> str | None:
+        """The limit another model call would break, if any."""
+        if self.max_turns is not None and self.calls >= self.max_turns:
+            return "max_turns"
+        if self.max_budget_usd is not None and self.cost > self.max_budget_usd:
+            return "max_budget_usd"
+        return None
+
+    def exhausted(self) -> bool:
+        """The active turn may not call the model again (a steer would make it)."""
+        return self.active_turn is not None and (self.limit is not None
+                                                 or self._exceeded() is not None)
+
+    def _stop(self, hit: str | None) -> None:
+        if hit and self.limit is None:
+            self.limit, self.abort_requested = hit, True
+
+    def _call(self, u: TokenUsage) -> None:
+        """One model call of the active turn finished (its token count arrived)."""
+        self._stop(self._exceeded())  # a call we would have stopped happened anyway
+        self.calls += 1
+        if self.max_budget_usd is not None:
+            pr = price_for(self.model or "", self.prices)
+            self.cost += (u.input * pr.input + u.output * pr.output + u.cache_read * pr.cache_read
+                          + u.cache_write * pr.cache_write) / 1_000_000
+        # Codex calls again after tools, or when the call ended without a final answer
+        if self._saw_tool or not self._saw_final:
+            self._stop(self._exceeded())
+        self._saw_tool = self._saw_final = False
+
+    def _note(self, item: dict[str, Any]) -> None:
+        t = item.get("type")
+        if t in TOOL_ITEMS:
+            self._saw_tool = True
+        elif t == "agentMessage" and item.get("phase") in (None, "final_answer"):
+            self._saw_final = True
 
     def on_notification(self, method: str, p: dict[str, Any]) -> list[AdapterEvent]:
         if method == "turn/started":
@@ -145,6 +208,14 @@ class CodexMapper:
             turn = p.get("turn") or {}
             if turn.get("id") == self.active_turn:
                 self.active_turn = None
+            if turn.get("id") in self.started and self.limit:
+                limit, lim = self.limit, getattr(self, self.limit)
+                self.limit = None
+                return [AdapterEvent("turn_ended", status="error", raw=p,
+                                     error=f"{limit} exceeded ({lim}): {self.calls} model call(s), "
+                                           f"${self.cost:.6f}; interrupted",
+                                     data={"harness_turn_id": turn.get("id"), "reason": limit,
+                                           "subtype": f"error_{limit}", "num_turns": self.calls})]
             err = turn.get("error")
             return [AdapterEvent("turn_ended", status=turn.get("status") or "completed",
                                  error=(err or {}).get("message") if isinstance(err, dict) else None,
@@ -152,13 +223,19 @@ class CodexMapper:
         if method == "thread/tokenUsage/updated":
             total = (p.get("tokenUsage") or {}).get("total") or {}
             baseline = p.get("turnId") not in self.started
+            if not baseline and p.get("turnId") == self.active_turn:  # `last`: this call only
+                self._call(_tokens((p.get("tokenUsage") or {}).get("last") or {}))
             return [AdapterEvent("usage", model=self.model, usage=_tokens(total), cumulative=True,
                                  baseline=baseline, raw=p)]
         if method == "error":
             err = p.get("error") or {}
             return [AdapterEvent("error", error=str(err.get("message") or err),
                                  data={"willRetry": p.get("willRetry")}, raw=p)]
+        if method == "item/started":
+            self._note(p.get("item") or {})
+            return []
         if method == "item/completed":
+            self._note(p.get("item") or {})
             return self._item(p.get("item") or {})
         return []
 
@@ -199,11 +276,13 @@ class CodexAdapter:
     harness = "codex"
 
     def __init__(self, workdir: Path, *, home: Path | None = None, codex_bin: str | None = None,
-                 extra_globs: tuple[str, ...] = ()) -> None:
+                 extra_globs: tuple[str, ...] = (), prices: dict[str, Price] | None = None) -> None:
         self.workdir = Path(workdir)
         self.home = home or codex_home()
         self.codex_bin = codex_bin or os.environ.get("FLOCK_CODEX_CLI") or "codex"
         self.extra_globs = extra_globs  # e.g. ('*.sqlite*',) if a future version needs more
+        self.prices = prices  # for max_budget_usd; None: the type's table (global + pinned)
+        self._held: list[str] = []  # steers held until an exhausted turn ends
         self.thread_id: str | None = None
         self.rollout: Path | None = None
         self._proc: asyncio.subprocess.Process | None = None
@@ -256,6 +335,10 @@ class CodexAdapter:
         except Exception as e:  # noqa: BLE001
             self._queue.put(AdapterEvent("error", error=f"app-server reader: {e}"))
         finally:
+            if self._held:
+                self._queue.put(AdapterEvent("error", error="app-server exited with held prompts",
+                                             data={"dropped_prompts": self._held}))
+                self._held = []
             for f in self._pending.values():
                 if not f.done():
                     f.set_result({"error": {"message": "app-server exited"}})
@@ -277,8 +360,34 @@ class CodexAdapter:
             await self._write({"id": msg["id"], "error": {"code": -32601, "message": "unsupported"}})
             return
         if method:
+            ended = False
             for ev in self._mapper.on_notification(method, msg.get("params") or {}):
                 self._queue.put(ev)
+                ended = ended or ev.kind == "turn_ended"
+            m = self._mapper
+            if m.abort_requested and m.active_turn:
+                m.abort_requested = False
+                log.warning("codex: %s exceeded; interrupting turn %s", m.limit, m.active_turn)
+                self._tasks.append(asyncio.create_task(self._interrupt(m.active_turn)))
+            if ended and self._held:
+                held, self._held = self._held, []
+                self._tasks.append(asyncio.create_task(self._send_held(held)))
+
+    async def _interrupt(self, turn_id: str) -> None:
+        try:
+            await self.request("turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id},
+                               timeout=30)
+        except Exception as e:  # noqa: BLE001 - the turn may have ended on its own
+            self._queue.put(AdapterEvent("error", error=f"turn/interrupt after limit: {e}"))
+
+    async def _send_held(self, held: list[str]) -> None:
+        """Steers that arrived after the turn used its allowance: the next turn."""
+        try:
+            for text in held:
+                await self.send(text)
+        except Exception as e:  # noqa: BLE001
+            self._queue.put(AdapterEvent("error", error=f"held prompt not sent: {e}",
+                                         data={"dropped_prompts": held}))
 
     async def _drain_stderr(self) -> None:
         assert self._proc and self._proc.stderr
@@ -323,11 +432,17 @@ class CodexAdapter:
         self.thread_id = thread["id"]
         self._mapper.model = r.get("model") or thread.get("model") or model
         self.rollout = Path(thread["path"]) if thread.get("path") else None
+        self._mapper.max_turns, self._mapper.max_budget_usd = spec.max_turns, spec.max_budget_usd
+        # a provider-backed type is priced at its pinned price (type_price_table adds it)
+        self._mapper.prices = self.prices if self.prices is not None else type_price_table(spec)
         return self.thread_id
 
     async def send(self, text: str) -> None:
         inp = [{"type": "text", "text": text, "text_elements": []}]
         turn = self._mapper.active_turn
+        if turn and self._mapper.exhausted():  # a steer would make a call past the limit
+            self._held.append(text)
+            return
         if turn:
             try:
                 await self.request("turn/steer", {"threadId": self.thread_id, "expectedTurnId": turn,

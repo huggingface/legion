@@ -15,7 +15,8 @@ them.
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
   and one or more agent types. Each type sets the harness (`claude` or
   `codex`), model, replicas, system prompt, job flavor, agents per worker,
-  worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`.
+  worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`
+  (enforced for every harness: Claude in its SDK, Codex and Pi in the worker).
   `apply`, `scale` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name

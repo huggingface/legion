@@ -273,8 +273,8 @@ types:
     lifetime_jitter: 4h
     drain_window: 10m
     idle_grace: 120s
-    max_turns: 50              # per prompt, passed to the harness
-    max_budget_usd: 2.0        # per prompt, passed to the harness
+    max_turns: 50              # model calls per prompt; enforced for every harness
+    max_budget_usd: 2.0        # spend per prompt (flock price table); enforced likewise
     persist_workdir: true
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
@@ -419,6 +419,15 @@ stream; Claude answers each queued prompt as its own turn, Codex may fold a
 steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
+
+Per-prompt limits: Claude, Codex and Pi all enforce `max_turns` (model calls) and
+`max_budget_usd` (spend, priced from the flock table). Claude gets both as SDK options.
+Codex and Pi have no such option, so the worker adapter counts model calls (Codex: one
+`thread/tokenUsage/updated` per call) and prices each call; before the call that would
+pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`) and the turn ends
+`error` with `reason` max_turns|max_budget_usd, `subtype` error_max_turns|error_max_budget_usd
+and `num_turns`. The session stays usable. A Codex steer into a turn that has used its
+allowance is held and sent as the next turn once that turn ends.
 
 Each launch gets an incarnation token (job env `WORKER_INCARNATION`); workers send
 it as `?incarnation=` on command polls and heartbeats, and the controller answers 409
@@ -624,6 +633,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 25 | Open models via a swarmlab-compatible `providers:` block, optional `models:` aliases, `<provider>:<id>` model strings; claude only on `anthropic`, codex only on `openai_compat` (Responses API: Codex 0.162.1 dropped chat); price pinned into the stored spec at apply; controller-side preflight; `max_working` reported, enforcement deferred (2026-10-16); superseded by 27 for `max_working` |
 | 26 | Harnesses get an allowlisted environment plus explicit additions, never the worker's `os.environ` (2026-10-16) |
 | 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission for every turn start (API prompt, resume prompt; spawn's queued prompts), on by default, `FLOCK_MAX_WORKING_ENFORCE=0` as escape hatch (Carlos) |
+| 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 
 ## 12. Road to 10k
 
