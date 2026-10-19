@@ -148,7 +148,7 @@ def agents(
                     a["worker"],
                     a["turns"],
                     a["pending"],
-                    f"${a['cost_usd']:.2f}",
+                    f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
                     a["last_heartbeat"],
                 ]
             )
