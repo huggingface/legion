@@ -479,10 +479,10 @@ async def test_bash_timeout_and_truncation(tmp_path):
 
 
 @pytest.mark.parametrize(("where", "wire"), [
-    ({"tool_choice": "required"}, "required"),
+    ({"tool_choice": "required", "done_tool": False}, "required"),
     ({"tool_choice": "bash"}, {"type": "function", "function": {"name": "bash"}}),
-    ({"models": {"m": {"model": "gpu:fake-model", "extra": {"tool_choice": "required"}}}, "model": "m"},
-     "required"),
+    ({"models": {"m": {"model": "gpu:fake-model", "extra": {"tool_choice": "required"}}}, "model": "m",
+      "done_tool": False}, "required"),
 ])
 async def test_forced_tool_choice_is_one_action_per_prompt(tmp_path, fake_server, monkeypatch, where, wire):
     a, wd, spec = make(tmp_path, fake_server, monkeypatch, **where)
@@ -533,3 +533,59 @@ async def test_thinking_is_shown_not_resent(tmp_path, fake_server, monkeypatch, 
     sent = requests_seen(fake_server)[1]["body"]["messages"]
     assert sent[2] == {"role": "assistant", "content": f"echo: {trigger} hi"}
     assert "pondering" not in a.session_path(sid).read_text()
+
+
+async def test_required_with_done_runs_several_steps(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required")
+    sid = await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo x >> px.txt done after 3")
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 4  # 3 bash + done
+    assert (wd / "px.txt").read_text().count("x") == 3
+    final = [e.message for e in evs if e.kind == "message"][-1]
+    assert final["role"] == "assistant" and final["content"] == [{"type": "text", "text": "painted 3"}]
+    body = requests_seen(fake_server)[0]["body"]
+    assert [t["function"]["name"] for t in body["tools"]] == ["bash", "done"]
+    assert "call the `done` tool" in body["messages"][0]["content"]
+    lines = [json.loads(x) for x in a.session_path(sid).read_text().splitlines()]
+    assert [m["role"] for m in lines[-3:]] == ["assistant", "tool", "assistant"]  # done -> ok -> summary
+    await a.send("next, done after 0")  # the transcript stays valid for the next prompt
+    end = (await turn(a))[-1]
+    assert end.status == "completed" and end.data["num_turns"] == 1
+    await a.stop()
+
+
+async def test_required_without_done_hits_max_turns(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=3)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo again")  # the model never calls done
+    end = (await turn(a))[-1]
+    assert end.status == "error" and end.data["reason"] == "max_turns" and end.data["num_turns"] == 3
+    await a.stop()
+
+
+async def test_done_tool_defaults_and_text_form(tmp_path, fake_server, monkeypatch):
+    a, _, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="bash")
+    a._spec = spec
+    assert not a.done_enabled  # named bash: one action, unchanged
+    a._spec = llm_spec(fake_server.url, tool_choice="bash", done_tool=True)
+    assert a.done_enabled
+    a._spec = llm_spec(fake_server.url)
+    assert not a.done_enabled
+    assert text_tool_calls('{"tool": "done", "summary": "ok"}', "done") == [
+        {"name": "done", "arguments": {"summary": "ok"}}]
+    with pytest.raises(ValueError, match="for harness llm only"):
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
+                                  "types": {"a": {"harness": "codex", "model": "m", "done_tool": True}}})
+
+
+async def test_forced_with_done_has_a_default_call_cap(tmp_path, fake_server, monkeypatch):
+    import flock.worker.adapters.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "FORCED_DEFAULT_MAX_TURNS", 2)
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required")
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("never done")
+    end = (await turn(a))[-1]
+    assert end.data["reason"] == "max_turns" and end.data["num_turns"] == 2 and "(2)" in end.error
+    await a.stop()

@@ -21,8 +21,10 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   opening tag, which LFM2's template emits itself), becomes a pi `thinking` block and is never
   sent back; its tokens are in the server's usage.
 - `tool_choice` (type setting, else the alias's `extra`, else auto): `required` or `bash`
-  forces a call on every request, so a turn is one action: the forced call, its tool run, done
-  (plus one more step per steered prompt). Constrained output is what makes small thinking
+  forces a call on every request. With the `done` tool offered (`done_tool`, default on for
+  `required`) the turn runs until the model calls `done` (its summary is the final assistant
+  message) or a limit; without it a forced turn is one action: the forced call, its tool run,
+  done (plus one more step per steered prompt). Constrained output is what makes small thinking
   models fast and reliable (2.5 s and 20/20 valid vs 25 s and 7/20 free-form, LFM2.5-2.6B).
 - Tool calls: native `tool_calls`, or, for small models that write the call as text, a reply
   that is only `{"tool": "bash", "command": ...}` (optionally fenced) or a pythonic
@@ -76,6 +78,7 @@ BASH_TIMEOUT_S = 120.0
 BASH_TIMEOUT_MAX_S = 600.0
 OUTPUT_LIMIT = 16_000  # characters of tool output sent back to the model (head and tail)
 STOP_GRACE = 5.0
+FORCED_DEFAULT_MAX_TURNS = 50  # forced tool choice with `done` and no max_turns
 
 PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
 You have one tool, `bash`. It runs a shell command in that directory and returns the output \
@@ -101,6 +104,20 @@ BASH_TOOL: dict[str, Any] = {
         },
     },
 }
+
+
+DONE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "done",
+        "description": "Call this when the task for this prompt is finished. Ends your turn.",
+        "parameters": {
+            "type": "object",
+            "properties": {"summary": {"type": "string", "description": "One line: what you did."}},
+        },
+    },
+}
+DONE_PREAMBLE = "\nWhen the task is done, call the `done` tool with a one-line summary."
 
 
 def llm_home() -> Path:
@@ -360,12 +377,28 @@ class LLMAdapter:
         return choice is not None and choice not in ("auto", "none")
 
     @property
+    def done_enabled(self) -> bool:
+        """`done` is offered: the type's `done_tool`, by default on when `required` is forced.
+        With it a forced turn runs until `done` (or a limit); without it a forced turn is one
+        action."""
+        spec = self._spec
+        if spec is None:
+            return False
+        if spec.done_tool is not None:
+            return spec.done_tool
+        r = spec.resolved_model
+        choice = spec.tool_choice or ((r.extra or {}).get("tool_choice") if r else None)
+        return choice == "required"
+
+    @property
     def context_tokens(self) -> int:
         return (self._spec.context_tokens if self._spec else None) or DEFAULT_CONTEXT_TOKENS
 
     # ------------------------------------------------------------------ transcript file
     def system_prompt(self) -> str:
         text = PREAMBLE.format(agent=self.agent, workdir=self.workdir)
+        if self.done_enabled:
+            text += DONE_PREAMBLE
         f = self.workdir / INSTRUCTIONS
         if f.is_file():
             text += "\n\n" + f.read_text()
@@ -505,15 +538,20 @@ class LLMAdapter:
         model = spec.resolved_model.model_id
         self.in_turn = True
         calls, cost = 0, 0.0
+        # a forced model that never calls `done` would loop until turn_timeout: cap it
+        max_turns = spec.max_turns
+        if max_turns is None and self.forced and self.done_enabled:
+            max_turns = FORCED_DEFAULT_MAX_TURNS
+        limits = {"max_turns": max_turns, "max_budget_usd": spec.max_budget_usd}
         self._queue.put(AdapterEvent("turn_started"))
         try:
             self._user(texts)
             while True:
-                hit = ("max_turns" if spec.max_turns is not None and calls >= spec.max_turns
+                hit = ("max_turns" if max_turns is not None and calls >= max_turns
                        else "max_budget_usd" if spec.max_budget_usd is not None and cost > spec.max_budget_usd
                        else None)
                 if hit:
-                    self._end("error", f"{hit} exceeded ({getattr(spec, hit)}): {calls} model call(s), "
+                    self._end("error", f"{hit} exceeded ({limits[hit]}): {calls} model call(s), "
                                        f"${cost:.6f}; stopped", reason=hit, subtype=f"error_{hit}",
                               num_turns=calls)
                     return
@@ -537,12 +575,24 @@ class LLMAdapter:
                     cost += (usage.input * p.input + usage.output * p.output
                              + usage.cache_read * p.cache_read + usage.cache_write * p.cache_write) / 1e6
                 tool_calls = await self._assistant(msg, choice.get("finish_reason"), usage, model)
+                done: dict[str, Any] | None = None
                 for call in tool_calls:
-                    await self._run_tool(call)
+                    if done is not None:
+                        self._tool_result(call, "[skipped: done was called]", True)
+                    elif call["name"] == "done" and self.done_enabled:
+                        done = call
+                        self._tool_result(call, "ok", False)
+                    else:
+                        await self._run_tool(call)
+                if done is not None:
+                    self._finish(done, model)
+                    self._end("completed", num_turns=calls)
+                    return
                 queued = self._drain()
                 self._user(queued)
-                if not queued and (not tool_calls or self.forced):
-                    # forced tool choice: one action per prompt (the model could never answer)
+                if not queued and (not tool_calls or (self.forced and not self.done_enabled)):
+                    # forced tool choice without `done`: one action per prompt (the model could
+                    # never answer in text)
                     self._end("completed", num_turns=calls)
                     return
         except asyncio.CancelledError:
@@ -568,7 +618,8 @@ class LLMAdapter:
                 calls.append({"id": c.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                               "name": fn.get("name"), "arguments": _parse_args(fn.get("arguments"))})
                 c.setdefault("id", calls[-1]["id"])
-        elif parsed := text_tool_calls(content):
+        elif parsed := (text_tool_calls(content)
+                        or (text_tool_calls(content, "done") if self.done_enabled else [])):
             n = sum(1 for m in self.messages if m.get("role") == "assistant")
             stored = {"role": "assistant", "content": None, "flock_from_text": content, "tool_calls": [
                 {"id": f"text_{n}_{i}", "type": "function",
@@ -595,20 +646,36 @@ class LLMAdapter:
         self._queue.put(AdapterEvent("message", message=pi_msg))
         return calls
 
+    def _finish(self, call: dict[str, Any], model: str) -> None:
+        """`done` was called: its summary is the turn's final assistant message."""
+        args = call["arguments"] if isinstance(call["arguments"], dict) else {}
+        summary = args.get("summary")
+        text = summary.strip() if isinstance(summary, str) and summary.strip() else "done"
+        self._append({"role": "assistant", "content": text})
+        r = self._spec.resolved_model if self._spec else None
+        self._queue.put(AdapterEvent("message", message={
+            "role": "assistant", "content": [{"type": "text", "text": text}], "api": "openai-completions",
+            "provider": r.provider_name if r else None, "model": model, "usage": pi_usage(TokenUsage()),
+            "stopReason": "stop", "fromDoneTool": True, "timestamp": _ms()}))
+
+    def _tool_result(self, call: dict[str, Any], out: str, err: bool) -> None:
+        self._append({"role": "tool", "tool_call_id": call["id"], "content": out})
+        self._queue.put(AdapterEvent("message", message={
+            "role": "toolResult", "toolCallId": call["id"], "toolName": call["name"],
+            "content": [{"type": "text", "text": out}], "isError": err, "timestamp": _ms()}))
+
     async def _run_tool(self, call: dict[str, Any]) -> None:
         args = call["arguments"]
         if isinstance(args, str):
             out, err = args, True
         elif call["name"] != "bash":
-            out, err = f"unknown tool {call['name']!r}; the only tool is bash", True
+            tools = "bash and done" if self.done_enabled else "bash"
+            out, err = f"unknown tool {call['name']!r}; the tools are {tools}", True
         elif not isinstance(args.get("command"), str) or not args["command"].strip():
             out, err = "bash needs a non-empty `command` string", True
         else:
             out, err = await self._bash(args["command"], args.get("timeout"))
-        self._append({"role": "tool", "tool_call_id": call["id"], "content": out})
-        self._queue.put(AdapterEvent("message", message={
-            "role": "toolResult", "toolCallId": call["id"], "toolName": call["name"],
-            "content": [{"type": "text", "text": out}], "isError": err, "timestamp": _ms()}))
+        self._tool_result(call, out, err)
 
     async def _bash(self, command: str, timeout: Any) -> tuple[str, bool]:
         try:
@@ -646,7 +713,8 @@ class LLMAdapter:
         assert spec is not None and spec.resolved_model is not None and self._client is not None
         r = spec.resolved_model
         body: dict[str, Any] = {"model": r.model_id, "messages": wire_messages(self.messages),
-                                "tools": [BASH_TOOL], "tool_choice": "auto", "temperature": 0,
+                                "tools": [BASH_TOOL, DONE_TOOL] if self.done_enabled else [BASH_TOOL],
+                                "tool_choice": "auto", "temperature": 0,
                                 "max_tokens": DEFAULT_MAX_TOKENS, **(r.extra or {})}
         body.pop("stream", None)
         if spec.tool_choice is not None:  # the type's setting wins over the alias's extra

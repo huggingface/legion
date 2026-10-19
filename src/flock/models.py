@@ -204,6 +204,9 @@ class TypeSpec(BaseModel):
     # harness llm only: chat-completions `tool_choice` on every call: auto (default) | required |
     # none | bash (force that tool). A forcing value makes each prompt one action.
     tool_choice: Literal["auto", "required", "none", "bash"] | None = None
+    # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
+    # required. With it a forced turn runs several steps; without it, one action per prompt.
+    done_tool: bool | None = None
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -298,8 +301,10 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
-            if ts.harness != Harness.llm and (ts.tool_choice is not None or ts.context_tokens is not None):
-                raise ValueError(f"types.{type_name}: tool_choice and context_tokens are for harness llm only")
+            if ts.harness != Harness.llm and (ts.tool_choice is not None or ts.context_tokens is not None
+                                              or ts.done_tool is not None):
+                raise ValueError(f"types.{type_name}: tool_choice, done_tool and context_tokens are for "
+                                 "harness llm only")
             if r is None:
                 if ts.harness == Harness.llm:
                     raise ValueError(

@@ -8,7 +8,8 @@ Replies, decided from the last message of each request:
 - last user text contains `json: X` -> the call written as text: `{"tool": "bash", "command": X}`
 - last user text contains `py: X`   -> the call written as text, pythonic: `[bash(command=X)]`
 - `tool_choice` forces a call (`required` or a named function) -> a `bash` call every time,
-  command from `bash: X` in the last user text, else `echo forced`
+  command from `bash: X` in the last user text, else `echo forced`; with a `done` tool offered
+  and `done after N` in that text, `done {summary: "painted N"}` once N tool results followed it
 - `response_format` set             -> its JSON as text: `{"tool": "bash", "command": "echo rf"}`
 - last user text contains `think!`  -> inline reasoning without the opening tag (LFM2 style):
                                        "pondering</think>echo: <text>"
@@ -52,6 +53,13 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
         user = next((_text(m.get("content")) for m in reversed(msgs) if m.get("role") == "user"), "")
         cmd = user.split("bash: ", 1)[1].splitlines()[0].strip() if "bash: " in user else "echo forced"
         n = sum(1 for m in msgs if m.get("role") == "assistant")
+        offered = {t.get("function", {}).get("name") for t in body.get("tools") or []}
+        if "done" in offered and "done after " in user:
+            want = int(user.split("done after ", 1)[1].split()[0])
+            since = next(i for i in range(len(msgs) - 1, -1, -1) if msgs[i].get("role") == "user")
+            if sum(1 for m in msgs[since:] if m.get("role") == "tool") >= want:
+                return {"content": None, "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {
+                    "name": "done", "arguments": json.dumps({"summary": f"painted {want}"})}}]}
         return {"content": None, "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {
             "name": "bash", "arguments": json.dumps({"command": cmd})}}]}
     if body.get("response_format") and last.get("role") != "tool":

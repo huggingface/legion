@@ -49,6 +49,14 @@ types:
   text. Use it for small models: on LFM2.5-2.6B (vLLM, L4) a named tool choice gave 20/20 valid
   calls in ~2.5 s and ~22 output tokens, against 7-15/20 in ~25 s free-form
   (flock-board/probe-reachability-lfm.md).
+- `done_tool` (new, `llm` only; default on when `tool_choice` is `required`, off otherwise): offer
+  a second tool, `done {summary?: string}`. With it, a forced turn runs several steps: the model
+  must call `bash` or `done` on every request, and calling `done` ends the turn `completed` with
+  the summary as the final assistant message (calls after `done` in the same reply are skipped).
+  `max_turns` still caps model calls (`reason: max_turns`); with no `max_turns`, a forced turn
+  with `done` is capped at 50 calls so a model that never calls `done` cannot loop until
+  `turn_timeout`. `tool_choice: bash` offers only `bash` (one action per prompt) unless
+  `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too.
 - `response_format` goes in `extra` and is sent as is, nested objects included. A JSON schema
   shaped like `{"tool": "bash", "command": ...}` makes every reply a call through the text
   fallback below; any other schema'd reply is the turn's final answer.
@@ -58,6 +66,17 @@ types:
 - `timeout_s` (default 120) is the per-request timeout; `max_retries` (default 3) bounds retries
   on HTTP 429, 5xx and transport errors, with jittered exponential backoff from 1 s (capped at
   30 s; `Retry-After` honoured up to that cap). Other 4xx fail the turn at once.
+
+### Painter pattern (multi-step forced turns)
+
+```yaml
+pixel: {harness: llm, model: lfm-small, tool_choice: required, max_turns: 12}  # done_tool on
+```
+
+In `AGENTS.md`: "Each step is one chained shell command (read the canvas, pick a pixel, paint
+it, e.g. `curl -s .../canvas && curl -s -X POST .../paint -d ...`). Call `done` when the canvas
+says nothing is left, or after N paints." The model can never ramble in text (every reply is a
+call, ~25 tokens), and the turn ends on `done` or at `max_turns`.
 
 ## Thinking models (LFM2.5, Qwen3)
 
@@ -86,7 +105,7 @@ any steered prompts. It stops when a reply has no tool call and nothing was stee
 | `turn_started` | the loop takes a prompt while idle |
 | `message` (pi format) | each user prompt, assistant reply (`toolCall` blocks, `thinking` from `reasoning_content` or `<think>`) and `toolResult` |
 | `usage` | after every model call, per call (not cumulative); `input` excludes cached prompt tokens, keyed by the model id |
-| `turn_ended completed` | a reply without tool calls and no queued prompt, or (forced `tool_choice`) after the forced call's tool ran; `data.num_turns` = model calls |
+| `turn_ended completed` | a reply without tool calls and no queued prompt; a `done` call (its summary is emitted first as the final assistant message, `fromDoneTool: true`); or, forced `tool_choice` without `done`, after the forced call's tool ran. `data.num_turns` = model calls |
 | `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
 | `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
 | `turn_ended interrupted` | `stop` mid-turn (timeout, stop, drain); the tool's process group is killed |
@@ -97,7 +116,7 @@ current tool results, inside the same turn (several queued prompts go in togethe
 
 ## Tool
 
-One tool, `bash` (`command`, optional `timeout` seconds, default 120, max 600): `bash -c` in the
+One tool, `bash` (plus `done` when `done_tool` is on, see above) (`command`, optional `timeout` seconds, default 120, max 600): `bash -c` in the
 workdir, stdin closed, stdout and stderr combined, output truncated to 16000 characters (head
 and tail) plus `[exit code N]`; a non-zero exit is `isError`. It runs in its own process group,
 killed on timeout or stop. Its environment is the shared allow-list (`PATH`, `HOME`, locale,
