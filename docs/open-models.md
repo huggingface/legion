@@ -11,8 +11,8 @@ server that speaks the API the harness speaks. You declare where models are serv
 providers:                       # where models are served
   hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
          pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}  # USD per 1M: input, output, cached
-  gpu1: {type: openai_compat, base_url: "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
-         api_key_env: VLLM_API_KEY, network_group: qwen-gpu,
+  gpu1: {type: openai_compat, base_url: "https://qwen.example.org/v1",  # your vLLM, over HTTPS
+         api_key_env: VLLM_API_KEY,
          self_hosted: true, max_working: 256}                 # self-hosted: price defaults to 0
   anth: {type: anthropic, api_key_env: ANTHROPIC_API_KEY}     # base_url optional, default Anthropic
 models:                          # optional aliases and per-model settings
@@ -49,27 +49,7 @@ run the preflight to find out for your model.
 1. Serve the model with tool calling on and a key, e.g.
    `vllm serve Qwen/Qwen3.8-27B-FP8 --api-key "$VLLM_API_KEY" --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3`
    (the parsers depend on the model family).
-2. Make it reachable from the worker jobs. `127.0.0.1` does not work unless the workers run
-   inside the same job. HF Jobs offers two paths:
-   - **Network group (recommended).** Start the server job with
-     `hf jobs run --network-group <group> --network-alias vllm ...` and set
-     `network_group: <group>` on the provider. flock launches the workers of every type on that
-     provider into the same group, and they reach the server directly on any port. Write the
-     URL with the alias, `base_url: http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1`. HF Jobs sets
-     `HF_NETWORK_GROUP_PREFIX` inside group members only, and the worker expands it. vLLM keeps
-     its own `--api-key`. Both jobs must be in the same namespace (and resource group). The
-     controller is not in the group, so preflight skips these providers (reported as `skipped`).
-     **Not yet working end to end:** a group is placed where its first member runs, and later
-     members must use a flavor available there. On 2026-10-16 a group started by an
-     `a100-large` vLLM job refused `cpu-basic` and `cpu-upgrade` workers ("Flavor 'cpu-basic'
-     for arch 'amd64' is not available where network group ... already runs"). Untested ways
-     out: start the workers first, or give the worker types a flavor from the GPU's pool.
-   - **Jobs proxy.** `--expose 8000` publishes `https://<job id>--8000.hf.jobs`, which needs an
-     HF token as `Authorization: Bearer`. Serve without `--api-key`, set
-     `api_key_env: HF_TOKEN`, and use `auth: bearer` on `anthropic` providers, because Claude
-     Code's default `x-api-key` is not accepted. In the 2026-10-16 smoke run,
-     `--expose-public 8000` with vLLM's `--api-key` returned vLLM's 401 for every keyed request:
-     the proxy did not pass the key through.
+2. Make it reachable from the worker jobs (see "Reaching a self-hosted server" below).
 3. Put the key in the controller's environment (a Space secret) under the name you give
    `api_key_env`, e.g. `VLLM_API_KEY`. The controller sends it to that type's jobs as a secret.
 4. Declare the provider with `self_hosted: true` (price `[0, 0, 0]`, pinned into the spec) and,
@@ -82,6 +62,21 @@ them per provider). Pin the router provider in the model id (`Qwen/Qwen3.8-27B:d
 `pricing` keyed on that id): on 2026-10-16 the router's automatic choice for Qwen3.8-27B
 (cerebras) failed every turn after a tool call, while deepinfra, novita and ovhcloud worked.
 Preflight catches this: it sends a tool result back.
+
+## Reaching a self-hosted server
+
+A self-hosted provider is just a `base_url` that every worker must be able to reach over
+HTTPS, with the key sent as the provider says. flock does not place workers next to the
+server: workers are CPU jobs and inference runs elsewhere. `127.0.0.1` works only if the server
+runs inside the worker job. Options: a public endpoint behind its own key (e.g. vLLM's
+`--api-key` behind a TLS proxy or on a cloud VM; the simplest, and preflight can probe it from
+the controller); HF Inference Endpoints, which serve an HTTPS URL that takes an HF token as
+`Authorization: Bearer` (`api_key_env: HF_TOKEN`); or the HF Jobs proxy, untested: start the
+GPU job with `--expose 8000` (URL `https://<job id>--8000.hf.jobs`, which checks an HF token),
+serve vLLM without `--api-key`, set `api_key_env: HF_TOKEN`, and use `auth: bearer` on
+`anthropic` providers because Claude Code's default `x-api-key` is not accepted. On 2026-10-16
+`--expose-public 8000` with vLLM's own `--api-key` returned vLLM's 401 for every keyed request
+(the proxy most likely did not pass the key through).
 
 ## Keys
 
@@ -170,5 +165,5 @@ cap would be soft by that much.
 - Claude Code against vLLM's Anthropic-compatible endpoint. Against a fake server, Claude Code
   2.1.296 sent every request, background ones included, to the type's model id, so
   `ANTHROPIC_SMALL_FAST_MODEL` was not needed.
-- Workers reaching a GPU job through a network group (see the placement note above).
+- Workers reaching a GPU job through the HF Jobs proxy (`--expose` with an HF token).
 - Codex with model ids it has no built-in metadata for (context window, auto-compaction).

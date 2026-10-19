@@ -251,8 +251,8 @@ bucket: hf://buckets/cmpatino/flock
 providers:                     # optional: where open models are served (see "Providers")
   hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
          pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}  # router provider pinned
-  gpu1: {type: openai_compat, base_url: "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1",
-         api_key_env: VLLM_API_KEY, network_group: qwen-gpu,
+  gpu1: {type: openai_compat, base_url: "https://qwen.example.org/v1",  # your vLLM, over HTTPS
+         api_key_env: VLLM_API_KEY,
          self_hosted: true, max_working: 256}
 models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}

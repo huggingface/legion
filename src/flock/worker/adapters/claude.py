@@ -147,7 +147,7 @@ def claude_env(spec: TypeSpec, env: dict[str, str]) -> dict[str, str]:
         if key is not None:  # `auth: bearer` -> Authorization: Bearer instead of x-api-key
             env["ANTHROPIC_AUTH_TOKEN" if p.auth == "bearer" else "ANTHROPIC_API_KEY"] = key
         if p.base_url:
-            env["ANTHROPIC_BASE_URL"] = p.worker_base_url() or p.base_url
+            env["ANTHROPIC_BASE_URL"] = p.base_url
         if p.timeout_s is not None:
             env["API_TIMEOUT_MS"] = str(int(p.timeout_s * 1000))
         if p.max_retries is not None:

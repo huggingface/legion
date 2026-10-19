@@ -46,7 +46,6 @@ def test_example_spec_resolves():
         "hf", "Qwen/Qwen3.8-27B:deepinfra", [0.2, 2.5, 0.2])  # router provider pinned
     assert (a.provider_name, a.harness_model, a.effective_reasoning) == (
         "gpu1", "Qwen/Qwen3.8-27B-FP8", "medium")
-    assert s.providers["gpu1"].network_group == "qwen-gpu"
     assert a.resolved_model.extra == {"chat_template_kwargs": {"enable_thinking": False}}
     assert wr.resolved_model is None and wr.harness_model == "claude-opus-5-5"
 
@@ -183,20 +182,3 @@ def test_auth_option():
     with pytest.raises(ValidationError):
         SwarmSpec.model_validate({**base, "providers": {
             "a": {"type": "anthropic", "api_key_env": "K", "auth": "basic"}}})
-
-
-def test_network_group_and_worker_base_url():
-    base = {"swarm": "s", "namespace": "n", "bucket": "b", "types": {}}
-    url = "http://${HF_NETWORK_GROUP_PREFIX}vllm:8000/v1"
-    p = SwarmSpec.model_validate({**base, "providers": {"gpu": {
-        "type": "openai_compat", "base_url": url, "api_key_env": "K", "self_hosted": True,
-        "network_group": "flock-smoke"}}}).providers["gpu"]
-    assert p.worker_base_url({"HF_NETWORK_GROUP_PREFIX": "ng-x-"}) == "http://ng-x-vllm:8000/v1"
-    assert p.worker_base_url({}) == url  # unset: left as is, so the failure names it
-    with pytest.raises(ValidationError, match="set network_group"):
-        SwarmSpec.model_validate({**base, "providers": {"gpu": {
-            "type": "openai_compat", "base_url": url, "api_key_env": "K", "self_hosted": True}}})
-    with pytest.raises(ValidationError, match="network_group must be"):
-        SwarmSpec.model_validate({**base, "providers": {"gpu": {
-            "type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
-            "self_hosted": True, "network_group": "Bad_Name"}}})

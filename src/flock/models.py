@@ -6,9 +6,7 @@ is expressed here. Change it deliberately and update the design doc.
 
 from __future__ import annotations
 
-import os
 import re
-from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
@@ -71,8 +69,6 @@ TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 # (e.g. Bedrock's "anthropic.claude-...-v1:0") is a harness-native id, not a provider reference.
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-NETWORK_GROUP_RE = re.compile(r"^[a-z0-9-]{1,46}$")  # HF Jobs' rule for group names
-NETWORK_GROUP_PREFIX_VAR = "${HF_NETWORK_GROUP_PREFIX}"
 SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
 
 Reasoning = Literal["off", "low", "medium", "high"]
@@ -108,12 +104,6 @@ class ProviderSpec(BaseModel):
     # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
     # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
     auth: Literal["x-api-key", "bearer"] | None = None
-    # HF Jobs network group (self-hosted servers in a job): the worker jobs of every type on this
-    # provider join it, so they reach the server job directly on any port. `base_url` may then
-    # name the server by alias, `http://${HF_NETWORK_GROUP_PREFIX}<alias>:8000/v1`; the worker
-    # expands the variable (it is set only inside group members). Not reachable from the
-    # controller, so preflight skips such providers.
-    network_group: str | None = None
 
     @field_validator("api_key_env")
     @classmethod
@@ -138,25 +128,11 @@ class ProviderSpec(BaseModel):
     def _url(self) -> ProviderSpec:
         if self.type == "openai_compat" and not self.base_url:
             raise ValueError("base_url is required for type openai_compat (e.g. https://router.huggingface.co/v1)")
-        if self.network_group is not None and not NETWORK_GROUP_RE.match(self.network_group):
-            raise ValueError("network_group must be lowercase letters, digits and dashes, 46 characters max")
-        if NETWORK_GROUP_PREFIX_VAR in (self.base_url or "") and self.network_group is None:
-            raise ValueError(f"base_url uses {NETWORK_GROUP_PREFIX_VAR}, which is only set inside a "
-                             "network group; set network_group")
         if self.type == "openai_compat" and self.auth == "x-api-key":
             raise ValueError("auth: x-api-key is for anthropic providers; openai_compat always sends a bearer token")
         if self.base_url is not None:
             self.base_url = self.base_url.rstrip("/")
         return self
-
-
-    def worker_base_url(self, environ: Mapping[str, str] | None = None) -> str | None:
-        """`base_url` as a worker uses it: ${HF_NETWORK_GROUP_PREFIX} replaced from the job's
-        environment (left as is when unset, so the error names it)."""
-        env = os.environ if environ is None else environ
-        if self.base_url and NETWORK_GROUP_PREFIX_VAR in self.base_url and "HF_NETWORK_GROUP_PREFIX" in env:
-            return self.base_url.replace(NETWORK_GROUP_PREFIX_VAR, env["HF_NETWORK_GROUP_PREFIX"])
-        return self.base_url
 
 
 class ModelSpec(BaseModel):
@@ -565,7 +541,6 @@ class PreflightResult(BaseModel):
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
     tool_call_seen: bool = False
     follow_up_ok: bool = False
-    skipped: bool = False  # not probed (a network-group provider the controller cannot reach)
     usage_reported: bool | None = None  # False: the server streamed zero tokens (cost unknown)
     latency_ms: int | None = None  # both turns
     error: str | None = None

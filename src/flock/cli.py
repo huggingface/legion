@@ -113,8 +113,7 @@ def _preflight(spec: SwarmSpec) -> bool:
     rep = _call("POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
                 timeout=300)
     rows = [
-        [r["model"], ",".join(r["types"]), r["api"],
-         "skipped" if r.get("skipped") else "ok" if r["ok"] else "FAIL",
+        [r["model"], ",".join(r["types"]), r["api"], "ok" if r["ok"] else "FAIL",
          "yes" if r["tool_call_seen"] else "no", "yes" if r.get("follow_up_ok") else "no",
          "" if r["latency_ms"] is None else r["latency_ms"], r["error"] or ""]
         for r in rep["results"]

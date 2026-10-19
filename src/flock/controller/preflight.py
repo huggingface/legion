@@ -169,11 +169,6 @@ async def probe(
     api = "responses" if p.type == "openai_compat" else "messages"
     result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types, api=api,
                              ok=False)
-    if p.network_group:
-        result.ok = result.skipped = True
-        result.warning = (f"not probed: reachable only inside HF Jobs network group "
-                          f"{p.network_group!r}, which the controller is not in")
-        return result
     if not key:
         result.error = f"secret {p.api_key_env} is not set on the controller"
         return result
