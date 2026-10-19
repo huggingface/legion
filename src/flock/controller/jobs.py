@@ -48,6 +48,8 @@ HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_mi
 uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggingface_hub=={hub} \
   || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" \
        claude-agent-sdk=={sdk} huggingface_hub=={hub}
+# Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
+command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
 export PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
 export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
@@ -166,6 +168,11 @@ class HubJobsClient:
         self.calls["cancel_job"] += 1
         self.api.cancel_job(job_id=job_id, namespace=namespace)
 
+    def logs_tail(self, job_id, *, namespace, n: int = 5) -> list[str]:
+        """Last `n` log lines of a finished job (one Hub call), for a crash's last_error."""
+        self.calls["fetch_job_logs"] += 1
+        return list(self.api.fetch_job_logs(job_id=job_id, namespace=namespace, tail=n))[-n:]
+
     def list(self, labels, *, namespace) -> list[JobListing]:
         self.calls["list_jobs"] += 1
         out = []
@@ -194,6 +201,7 @@ class FakeJobsClient:
     launch_error: Exception | None = None  # raised by launch() when set
     inspects: int = 0
     lists: int = 0
+    logs: dict[str, list[str]] = field(default_factory=dict)  # job id -> log lines (tests)
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
@@ -222,6 +230,9 @@ class FakeJobsClient:
     def inspect(self, job_id, *, namespace) -> JobState:
         self.inspects += 1
         return self.states.get(job_id, JobState("DELETED"))
+
+    def logs_tail(self, job_id, *, namespace, n: int = 5) -> list[str]:
+        return self.logs.get(job_id, [])[-n:]
 
     def cancel(self, job_id, *, namespace) -> None:
         self.cancels.append(job_id)

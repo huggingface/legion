@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Deploy the controller to a public Docker Space and configure it.
-#   scripts/deploy-space.sh <wheel-url> [space-id]     (default space cmpatino/flock)
+#   scripts/deploy-space.sh <wheel-url> <space-id>     e.g. <you>/flock
 # JOB_LABELS sets the deployment-wide worker job labels (default experiment=flock-m1).
 # Needs HF_TOKEN, ANTHROPIC_KEY and FLOCK_TOKEN in the environment; values are never
 # printed. The Space is public: the API is protected by the bearer token (a private Space would
 # need an HF bearer on every request, which collides with our Authorization header).
 set -euo pipefail
-WHEEL_URL=${1:?wheel url from scripts/publish-wheel.sh}
-SPACE=${2:-cmpatino/flock}
+USAGE="usage: scripts/deploy-space.sh <wheel-url from scripts/publish-wheel.sh> <namespace>/<space>"
+WHEEL_URL=${1:?$USAGE}
+SPACE=${2:?$USAGE}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT

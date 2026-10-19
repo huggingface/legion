@@ -180,6 +180,7 @@ class Worker:
                 await asyncio.shield(pending)
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].spec = cmd.spec
+                self._set_lineage(self.agents[cmd.agent], cmd)
                 return
             if self.draining:
                 log.warning("assign %s ignored while draining", cmd.agent)
@@ -189,6 +190,7 @@ class Worker:
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
                               sync=self.sync, identities=self.identities,
                               working_count=self.working_count)
+            self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.drain_window = parse_duration(cmd.spec.drain_window)
             self._spawn(self._setup(rt, cmd))
@@ -207,6 +209,20 @@ class Worker:
                 self._unassigning[cmd.agent] = self._spawn(self._unassign(rt))
         elif isinstance(cmd, DrainCommand):
             self._spawn(self.drain("command"))
+
+    def _set_lineage(self, rt: AgentRuntime, cmd: AssignCommand) -> None:
+        """What the agent's harness needs to call the controller as itself (docs/spawn.md):
+        its own scoped token, never the worker's FLOCK_TOKEN."""
+        rt.parent = cmd.parent
+        rt.flock_env = {
+            "FLOCK_URL": self.cfg.url,
+            "FLOCK_AGENT": cmd.agent,
+            "FLOCK_PARENT": cmd.parent or "",
+            "FLOCK_AGENT_TOKEN": cmd.agent_token or "",
+            # Masks the worker's token in the environment the adapters still inherit; the
+            # harness env allow-list (PR #2) makes this redundant.
+            "FLOCK_TOKEN": "",
+        }
 
     async def _setup(self, rt: AgentRuntime, cmd: AssignCommand) -> None:
         """rt.setup, timed as part of a restore wave (all setups that overlap in time)."""

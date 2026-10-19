@@ -42,6 +42,10 @@ them.
 - **Planned restarts:** workers live 24 h plus jitter by default, drain before
   their deadline, and the controller relaunches them with their agents
   restored. The herd never restarts all at once.
+- **Spawning:** a leader agent creates, prompts and removes child agents of
+  other types with the `flock` CLI, under a `spawn:` policy (allowed types,
+  caps, depth) and swarm `limits:`. Each agent calls the controller with its
+  own scoped token. See [docs/spawn.md](docs/spawn.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
@@ -59,14 +63,19 @@ git clone https://github.com/huggingface/flock && cd flock
 uv sync --all-extras                 # or: pip install -e ".[controller,worker,dev]"
 ```
 
+`uv sync` does not activate the environment, so the commands below go through `uv run` (or
+run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,
+a different program; `uv run` also gives the scripts a Python with `huggingface_hub`.
+
 ### Run the controller
 
 As an HF Docker Space (the tested setup):
 
 ```sh
 export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
-W=$(scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for workers
-scripts/deploy-space.sh "$W" <you>/flock
+uv run hf buckets create <you>/flock --private                # once: wheels and agent state
+W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for workers
+uv run scripts/deploy-space.sh "$W" <you>/flock
 ```
 
 Or locally:
@@ -74,12 +83,22 @@ Or locally:
 ```sh
 FLOCK_TOKEN=... HF_TOKEN=... ANTHROPIC_API_KEY=... \
 FLOCK_WHEEL_URL=hf://buckets/<you>/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl \
-flock-controller                 # http://127.0.0.1:7860
+uv run flock-controller          # http://127.0.0.1:7860
 ```
 
 Workers bootstrap from a stock `node:22-bookworm` image: they install the
 pinned harness CLI and the wheel from the bucket. Every secret a spec names
 must be in the controller's environment.
+
+One key, three places. The names differ only for the Anthropic key:
+
+| Your shell (`deploy-space.sh` reads) | Space secret / controller env | Spec `secrets:` |
+| --- | --- | --- |
+| `ANTHROPIC_KEY` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
+| `HF_TOKEN` | `HF_TOKEN` | `HF_TOKEN` (workers need it for the wheel and the bucket) |
+| `FLOCK_TOKEN` | `FLOCK_TOKEN` | never: the controller passes it to workers itself |
+
+Running the controller locally, export the middle column (`ANTHROPIC_API_KEY`).
 
 ### Declare and drive a swarm
 
@@ -114,12 +133,12 @@ types:
 
 ```sh
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
-flock apply demo.yaml
-flock status demo                        # counts by type and state, cost
-flock prompt scribe-0007 "Summarize your workdir."
-flock events scribe-0007 --follow        # JSONL: turn_started, turn_ended, ...
-flock scale demo scribe 200
-flock remove demo
+uv run flock apply demo.yaml
+uv run flock status demo                 # counts by type and state, cost
+uv run flock prompt scribe-0007 "Summarize your workdir."
+uv run flock events scribe-0007 --follow # JSONL: turn_started, turn_ended, ...
+uv run flock scale demo scribe 200
+uv run flock remove demo
 ```
 
 Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
@@ -139,6 +158,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `POST /agents/{name}/prompt` | body `{text, timeout?, reply_to?}`; acks `queued` or `pending` |
 | `GET /agents/{name}/events?after=&wait=` | event stream, long-poll |
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
+| `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests
@@ -162,9 +182,12 @@ No network, no real jobs: the Hub client and the harness processes are faked.
   concurrent turns; `cpu-basic` 50 and 20. Cold turns are CPU-bound at about
   1.5 CPU-seconds each.
 - Not built yet: bulk prompt endpoint, swarm-level event stream, per-worker
-  batched bucket sync, persistent controller storage (a Space redeploy wipes
-  its swarms), spend ledger, autoscaling, API-loop agents, per-caller auth.
+  batched bucket sync, spend ledger, autoscaling, API-loop agents, per-caller auth.
 - The controller's bearer token sits in the `Authorization` header, so the
   Space must be public; the API is still token-protected.
+
+- Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in
+  the controller image. Without the Space's persistent storage a redeploy wipes
+  it; replicas come back from the spec, spawned agents do not.
 
 Design, contract and decision log: [docs/design.md](docs/design.md).

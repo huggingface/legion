@@ -654,6 +654,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission for every turn start (API prompt, resume prompt; spawn's queued prompts), on by default, `FLOCK_MAX_WORKING_ENFORCE=0` as escape hatch (Carlos) |
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
+| 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
 
 ## 12. Road to 10k
 
@@ -686,3 +687,41 @@ What the 1k and 10k runs say must change, in order. Item 1 gates everything else
    defers starts instead of warning; explicit command acks; prebuilt worker image; Codex in a
    job with an API key; the `asyncio` child-reaping warning; the kill and deadline-drain checks
    still need a run at 10k.
+
+## 13. Spawn
+
+Added 2026-10-16 (board thread, msg 388). User guide: [spawn.md](spawn.md).
+
+A leader agent creates child agents of other types through the controller, with the `flock`
+CLI inside its harness. A child is an ordinary agent row with `parent` set and no replica slot,
+named `<parent>-<type>-<NNNN>` from a per-swarm counter that is never reused. Reconcile places
+it on its own type's workers with the fill rule of §3 (a job carries one type's image, secrets
+and flavor), so nothing about workers changes. Scaling `replicas` ignores spawned rows; they go
+with their parent (cascade, children first), their type, the swarm, or an explicit
+`DELETE /agents/{name}`.
+
+What may spawn is run policy, kept apart from what a type is: `spawn.<type>` lists the child
+types (a list with one `max`, or a map of per-type caps), and `depth`, the generations allowed
+below the agent. A child's depth is `min(parent's - 1, its type's spawn.depth)`. `apply` rejects
+cycles, so recursion ends by construction. Each spawnable type declares `workers: {initial,
+max_extra}`, a cap on its worker slots that `apply` (replicas must fit), spawn admission and
+placement all respect. `limits` caps the swarm
+(`alive`, `spawned_total`, `budget_usd`). A refusal is a 409 with a `reason`.
+
+Tokens: v1 handed the swarm's `FLOCK_TOKEN` to every harness through the inherited environment.
+Now each agent gets `FLOCK_AGENT_TOKEN`, an HMAC of its name and a nonce under a key derived from
+the controller token. The controller stores only a hash, re-derives the same value for every
+assign, and deletes it with the agent. That token may act on the agent itself, its subtree, and
+prompt its parent. The worker blanks `FLOCK_TOKEN` in the harness env; the allow-list from the
+providers work removes the rest of the inherited environment.
+
+Persistence: spawned rows are the first agents not derivable from the spec, so the controller
+needs its SQLite to survive. It lives in `FLOCK_DATA` (`/data` in the controller image); a Space
+with persistent storage keeps it across redeploys. No bucket mirror yet.
+
+Defaults chosen where the thread left them open: `spawn.depth` 1; caps count existing children;
+the list form needs `max`; `budget_usd` is checked at spawn time only and counts removed agents'
+cost; replicas cannot be removed with `DELETE` (`not_spawned`); an agent cannot prompt or remove
+itself, nor read its parent's status. `spawn.warm` (pre-created idle children) was dropped
+(Carlos, 2026-10-16). Workers open only for agents that exist, so the first spawn of a type with
+no agents pays the worker's boot time; pre-warming is a possible later feature.

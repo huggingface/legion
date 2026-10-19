@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from flock.controller import spawn as spawning
 from flock.controller.jobs import JobsClient, JobState
 from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.store import Row, Store
@@ -39,6 +40,7 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     agent_name,
+    max_workers,
     parse_duration,
 )
 
@@ -173,6 +175,8 @@ def reconcile(
     store: Store, jobs: JobsClient, now: datetime, settings: Settings | None = None
 ) -> list[Action]:
     settings = settings or Settings()
+    if settings.token and store.agent_token_key is None:
+        spawning.set_token_key(store, settings.token)
     t = now.timestamp()
     used = store.launches_since(t - settings.rate_window.total_seconds())
     p = _Pass(store, jobs, t, settings, budget=settings.launches_per_window - used)
@@ -201,16 +205,15 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     for w in store.list_workers(spec.swarm, type_name):
         _refresh_worker(p, spec, w, ts)
 
-    # Desired agents; scale down removes the highest slots first.
+    # Desired agents; scale down removes the highest slots first. Spawned agents (parent set)
+    # are not replicas: they go with their parent, their type or the swarm (docs/spawn.md).
     replicas = ts.replicas if ts else 0
     existing = {a["name"]: a for a in store.list_agents(spec.swarm, type_name)}
+    reason = "type_removed" if type_name not in spec.types else "swarm_removed"
     for a in sorted(existing.values(), key=lambda a: a["slot"], reverse=True):
-        if a["slot"] >= replicas:
-            w = store.get_worker(a["worker"]) if a["worker"] else None
-            if w and w["job_id"]:
-                store.enqueue_command(w["id"], UnassignCommand(agent=a["name"]).model_dump_json())
-            store.delete_agent(a["name"])
-            p.act("unassign", a["name"], a["worker"] or "")
+        if ts is None or a["removing"] or (a["parent"] is None and a["slot"] >= replicas):
+            for r in spawning.remove_subtree(store, a["name"], reason, p.now):
+                p.act("unassign", r["name"], r["worker"] or "")
     for slot in range(replicas):
         name = agent_name(type_name, slot)
         if name not in existing:
@@ -279,7 +282,13 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 
     for w in workers:
         fill(w)
+    # A type that declares `workers` never has more than initial + max_extra worker slots
+    # (retiring ones included); agents that do not fit wait unplaced. Others: v1, unbounded.
+    slots = max_workers(ts) if ts.workers is not None else None
     while pending:
+        if slots is not None and len(store.list_workers(spec.swarm, type_name)) >= slots:
+            p.act("workers_full", f"{spec.swarm}/{type_name}", f"{pending} unplaced")
+            return
         idx = store.next_worker_index(spec.swarm, type_name)
         wid = worker_id_for(spec.swarm, type_name, idx)
         store.insert_worker(wid, spec.swarm, type_name, idx, p.now)
@@ -287,13 +296,16 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 
 
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec) -> None:
+    if a["removing"]:
+        return  # mid-removal (docs/spawn.md): never re-assign it or re-issue its token
     resume = ts.resume_prompt if a["resume_pending"] else None
     # A provider with max_working admits a resume prompt like any other (api.py `admit`): it
     # goes to pending_prompts after the assign instead of riding inside it.
     r = ts.resolved_model
     held, resume = (resume, None) if resume and r and r.provider.max_working else (None, resume)
     cmd = AssignCommand(
-        agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume
+        agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
+        parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
     )
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:
@@ -354,6 +366,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
     store.update_worker(
         wid,
         **common,
+        last_error=_crash_reason(p, spec, w, st),
         crashes=w["crashes"] + 1,
         consecutive_crashes=streak,
         next_launch_at=p.now + backoff,
@@ -373,6 +386,23 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
     if streak >= CRASHLOOP_THRESHOLD:
         store.set_type_health(w["swarm"], w["type"], TypeHealth.crashlooping.value)
         p.act("crashloop", f"{w['swarm']}/{w['type']}")
+
+
+def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
+    """`STAGE: message`, plus the job's last log lines (one Hub call per crash) when the
+    jobs client can fetch them: a boot failure (wheel download 401, missing key) is only
+    visible there."""
+    reason = f"{st.stage}: {st.message}" if st.message else st.stage
+    tail = getattr(p.jobs, "logs_tail", None)
+    if tail is not None and w["job_id"]:
+        try:
+            lines = [ln.strip() for ln in tail(w["job_id"], namespace=spec.namespace) if ln.strip()]
+        except Exception as exc:  # noqa: BLE001 - logs are a nicety; never break the pass
+            log.warning("logs of %s failed: %s", w["job_id"], type(exc).__name__)
+            lines = []
+        if lines:
+            reason += " | " + " / ".join(lines)
+    return reason[:500]
 
 
 def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> None:
@@ -417,6 +447,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         # the Hub's message says why (a 400 names the bad field); class name alone does not
         msg = f"{type(exc).__name__}: {str(exc)[:500]}"
         log.warning("launch of %s failed: %s", wid, msg)
+        store.update_worker(wid, last_error=f"launch failed: {msg}"[:500])
         if launch_refused(exc):
             store.set_type_health(spec.swarm, type_name, TypeHealth.launch_refused.value)
             store.set_launch_error(spec.swarm, type_name, msg, 0)
@@ -515,7 +546,8 @@ def _reassign_missing(store: Store, w: Row, reported: set[str], queued: set[str]
     """Agents placed on this worker that its heartbeat does not list, with no assign queued,
     lost their assign on the way (a dropped poll response). Send it again; a worker treats a
     repeated assign for an agent it already hosts as a spec update, so this is idempotent."""
-    missing = [a for a in store.list_agents(worker=w["id"]) if a["name"] not in reported]
+    missing = [a for a in store.list_agents(worker=w["id"])
+               if a["name"] not in reported and not a["removing"]]
     if not missing:
         return
     sw = store.get_swarm(w["swarm"])

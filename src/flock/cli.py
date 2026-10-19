@@ -1,12 +1,15 @@
 """`flock` CLI: a thin client over the controller API.
 
-Config: FLOCK_URL and FLOCK_TOKEN.
+Config: FLOCK_URL and FLOCK_TOKEN. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
+agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
+docs/spawn.md for what an agent may call.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +18,7 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from flock.models import SwarmSpec
+from flock.models import AGENT_NAME_RE, SwarmSpec
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -23,7 +26,7 @@ app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_i
 def client() -> httpx.Client:
     """Overridden in tests to point at an in-process app."""
     url = os.environ.get("FLOCK_URL", "http://localhost:7860")
-    token = os.environ.get("FLOCK_TOKEN", "")
+    token = os.environ.get("FLOCK_AGENT_TOKEN") or os.environ.get("FLOCK_TOKEN", "")
     return httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 
@@ -36,6 +39,19 @@ def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
         typer.echo(f"error {r.status_code}: {r.text}", err=True)
         raise typer.Exit(1)
     return r.json()
+
+
+def _as_agent() -> bool:
+    """Running inside an agent with its scoped token: names are agents, never swarms."""
+    return bool(os.environ.get("FLOCK_AGENT_TOKEN"))
+
+
+def _is_swarm(name: str) -> bool:
+    """Only a name shaped like an agent's (`...-NNNN`) costs a lookup."""
+    if not AGENT_NAME_RE.match(name):
+        return True
+    with client() as c:
+        return c.get(f"/swarms/{name}").status_code == 200
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -196,7 +212,13 @@ def preflight_cmd(
 
 @app.command()
 def status(swarm: str = typer.Argument(None)) -> None:
-    """Swarm status: counts by type and state."""
+    """Swarm status: counts by type and state. Given an agent name (or inside an agent), that
+    agent's status as JSON."""
+    if not swarm and _as_agent():
+        swarm = os.environ.get("FLOCK_AGENT")
+    if swarm and (_as_agent() or not _is_swarm(swarm)):
+        typer.echo(json.dumps(_call("GET", f"/agents/{swarm}"), indent=2))
+        return
     if swarm:
         _print_status(_call("GET", f"/swarms/{swarm}")["status"])
         return
@@ -213,9 +235,10 @@ def agents(
     swarm: str,
     type: str = typer.Option(None, "--type"),
     state: str = typer.Option(None, "--state"),
+    parent: str = typer.Option(None, "--parent", help="only the children of this agent"),
 ) -> None:
     """List a swarm's agents."""
-    params = {k: v for k, v in (("type", type), ("state", state)) if v}
+    params = {k: v for k, v in (("type", type), ("state", state), ("parent", parent)) if v}
     rows, cursor = [], None
     while True:
         page = _call(
@@ -232,7 +255,7 @@ def agents(
                     a["worker"],
                     a["turns"],
                     a["pending"],
-                    f"${a['cost_usd']:.2f}",
+                    f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
                     a["last_heartbeat"],
                 ]
             )
@@ -261,21 +284,71 @@ def prompt(
     typer.echo(json.dumps(_call("POST", f"/agents/{name}/prompt", json=body)))
 
 
+def _short(text: Any, n: int = 160) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _blocks_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for b in content or []:
+        if b.get("type") == "text":
+            parts.append(b.get("text", ""))
+        elif b.get("type") == "toolCall":
+            parts.append(f"[{b.get('name')} {_short(json.dumps(b.get('arguments')), 80)}]")
+    return " ".join(parts)
+
+
+def pretty_event(ev: dict) -> str:
+    """One line per event: time, turn, kind, then the text or a summary (`events --pretty`)."""
+    ts = str(ev.get("ts", ""))[11:19]
+    turn = ev.get("turn_id") or "-"
+    data = ev.get("data") or {}
+    kind = ev.get("type", "?")
+    if kind == "message":
+        m = data.get("message") or {}
+        role = m.get("role", "?")
+        if role == "toolResult":
+            return f"{ts} {turn:>5} tool     {m.get('toolName', '')}: {_short(_blocks_text(m.get('content')), 120)}"
+        return f"{ts} {turn:>5} {role:<8} {_short(_blocks_text(m.get('content')))}"
+    detail = data.get("data", data) if isinstance(data.get("data"), dict) else data
+    if kind == "turn_ended":
+        toks = detail.get("tokens") or {}
+        used = " ".join(f"{model} in={u.get('input', 0)} out={u.get('output', 0)}"
+                        for model, u in toks.items())
+        return f"{ts} {turn:>5} {kind:<8} {detail.get('status')} {used}".rstrip()
+    keep = {k: v for k, v in detail.items() if v is not None}
+    summary = " ".join(f"{k}={_short(v, 60)}" for k, v in keep.items())
+    return f"{ts} {turn:>5} {kind:<8} {summary}".rstrip()
+
+
 @app.command()
 def events(
     name: str,
     after: int = typer.Option(0, "--after"),
     follow: bool = typer.Option(False, "--follow", "-f"),
+    wait: bool = typer.Option(False, "--wait", help="block until an event after --after"),
+    timeout: float = typer.Option(600, "--timeout", help="seconds --wait blocks at most"),
+    pretty: bool = typer.Option(False, "--pretty", help="one readable line per event"),
 ) -> None:
-    """Print an agent's event stream (JSONL); --follow keeps long-polling."""
+    """Print an agent's event stream (JSONL); --follow keeps long-polling; --wait returns once
+    something new arrived (the last line on stderr is the cursor for the next --after);
+    --pretty prints time, turn, kind and the text or a summary instead of JSON."""
+    deadline = time.monotonic() + timeout
     while True:
+        poll = follow or wait
         page = _call(
-            "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if follow else 0}
+            "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if poll else 0}
         )
         for ev in page["events"]:
-            typer.echo(json.dumps(ev))
+            typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
         after = page["next"]
-        if not follow:
+        if wait and (page["events"] or time.monotonic() >= deadline):
+            typer.echo(f"next: {after}", err=True)
+            break
+        if not poll:
             break
 
 
@@ -292,8 +365,36 @@ def scale(swarm: str, type: str, replicas: int) -> None:
 
 @app.command()
 def remove(swarm: str) -> None:
-    """Drain and remove a swarm."""
+    """Drain and remove a swarm. Given a spawned agent's name (or inside an agent), remove that
+    agent and everything it spawned."""
+    if _as_agent() or not _is_swarm(swarm):
+        typer.echo(json.dumps(_call("DELETE", f"/agents/{swarm}")))
+        return
     typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
+
+
+@app.command()
+def spawn(
+    type: str,
+    prompt: str = typer.Option(None, "--prompt", help="first prompt for the child"),
+    key: str = typer.Option(None, "--key", help="idempotency key: a repeat returns the same child"),
+    parent: str = typer.Option(None, "--parent", help="default: $FLOCK_AGENT (yourself)"),
+    as_json: bool = typer.Option(False, "--json", help="print the whole ack"),
+) -> None:
+    """Spawn a child agent of TYPE; prints its name."""
+    parent = parent or os.environ.get("FLOCK_AGENT")
+    if not parent:
+        typer.echo("no parent: pass --parent or set FLOCK_AGENT", err=True)
+        raise typer.Exit(1)
+    body = {"type": type, "prompt": prompt, "key": key}
+    ack = _call("POST", f"/agents/{parent}/spawn", json=body)
+    typer.echo(json.dumps(ack) if as_json else ack["name"])
+
+
+@app.command()
+def whoami() -> None:
+    """Who the configured token acts as: the controller, or an agent with its lineage."""
+    typer.echo(json.dumps(_call("GET", "/whoami"), indent=2))
 
 
 @app.command()
@@ -309,10 +410,13 @@ def workers(swarm: str) -> None:
             w["crashes"],
             w["deadline"],
             w["last_heartbeat"],
+            w.get("last_error") or "",
         ]
         for w in _call("GET", "/workers", params={"swarm": swarm})
     ]
-    _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat"])
+    _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
+                  "last_error"])
+    typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
 if __name__ == "__main__":

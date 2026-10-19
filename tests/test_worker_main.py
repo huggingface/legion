@@ -236,15 +236,24 @@ def test_run_and_exit_does_not_wait_for_a_stuck_executor_thread():
 
     release = threading.Event()
     exits: list[int] = []
+    leftover: list[asyncio.Task] = []
 
     async def worker_run() -> int:
         asyncio.get_running_loop().run_in_executor(None, release.wait)  # never finishes
-        asyncio.get_running_loop().create_task(asyncio.Event().wait())  # never finishes
+        leftover.append(asyncio.get_running_loop().create_task(asyncio.Event().wait()))  # ditto
         await asyncio.sleep(0)
         return 0
 
+    def fake_exit(code: int) -> None:
+        exits.append(code)
+        # os._exit would end the process here; the test goes on, so finish the task it left
+        # pending (else its loop is collected with it: "Task was destroyed but it is pending").
+        task = leftover[0]
+        task.cancel()
+        task.get_loop().run_until_complete(asyncio.gather(task, return_exceptions=True))
+
     t = threading.Thread(target=wmain.run_and_exit, args=(worker_run(),),
-                         kwargs={"exit": exits.append}, daemon=True)
+                         kwargs={"exit": fake_exit}, daemon=True)
     t.start()
     t.join(5)
     release.set()

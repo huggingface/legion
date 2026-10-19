@@ -96,6 +96,19 @@ CREATE TABLE IF NOT EXISTS event_index (
   lines INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS launches (ts REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  agent TEXT PRIMARY KEY,
+  swarm TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  nonce TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS spawn_keys (
+  parent TEXT NOT NULL,
+  key TEXT NOT NULL,
+  child TEXT NOT NULL,
+  PRIMARY KEY (parent, key)
+);
 """
 
 Row = dict[str, Any]
@@ -133,6 +146,9 @@ class Store:
         # Called with ("commands", worker_id) / ("events", agent) / ("reconcile", "") after
         # writes; the API turns these into wake-ups for long-polls. Must be thread-safe.
         self.listener: Callable[[str, str], None] = lambda kind, key: None
+        # HMAC key for per-agent tokens (controller/spawn.py), derived from the controller
+        # token and never stored: the table holds only hashes.
+        self.agent_token_key: bytes | None = None
 
     def _migrate(self) -> None:
         """Additive column changes for databases created by an older version."""
@@ -144,6 +160,21 @@ class Store:
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
+        if "last_error" not in cols:  # last launch failure or crash, shown by `flock workers`
+            self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
+        # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
+        # of removed agents on swarms.
+        cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
+        if "parent" not in cols:
+            self._x("ALTER TABLE agents ADD COLUMN parent TEXT")
+            self._x("ALTER TABLE agents ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
+        self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
+        if "removing" not in cols:  # set while a cascade removal is in flight
+            self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
+        cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
+        if "spawned" not in cols:
+            self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
+            self._x("ALTER TABLE swarms ADD COLUMN removed_cost REAL NOT NULL DEFAULT 0")
 
     # ----------------------------------------------------------------- low level
 
@@ -294,10 +325,16 @@ class Store:
         return self._one("SELECT * FROM agents WHERE name = ?", [name])
 
     def list_agents(
-        self, swarm: str | None = None, type_name: str | None = None, worker: str | None = None
+        self,
+        swarm: str | None = None,
+        type_name: str | None = None,
+        worker: str | None = None,
+        parent: str | None = None,
     ) -> list[Row]:
         where, args = [], []
-        for col, val in (("swarm", swarm), ("type", type_name), ("worker", worker)):
+        for col, val in (
+            ("swarm", swarm), ("type", type_name), ("worker", worker), ("parent", parent)
+        ):
             if val is not None:
                 where.append(f"{col} = ?")
                 args.append(val)
@@ -316,8 +353,98 @@ class Store:
 
     def delete_agent(self, name: str) -> None:
         with self.transaction():
-            self._x("DELETE FROM agents WHERE name = ?", [name])
-            self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
+            self.delete_agent_rows(name)
+
+    def delete_agent_rows(self, name: str) -> None:
+        """delete_agent's statements, for a caller already inside a transaction."""
+        # Removed agents keep counting against limits.budget_usd.
+        self._x(
+            "UPDATE swarms SET removed_cost = removed_cost + "
+            "(SELECT cost FROM agents WHERE name = ?) "
+            "WHERE name = (SELECT swarm FROM agents WHERE name = ?)",
+            [name, name],
+        )
+        self._x("DELETE FROM agents WHERE name = ?", [name])
+        self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
+        self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
+        self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
+
+    def mark_removing(self, name: str) -> None:
+        """First phase of a cascade removal: refuse new children, revoke the token."""
+        self._x("UPDATE agents SET removing = 1 WHERE name = ?", [name])
+        self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])
+
+    # ----------------------------------------------------------------- spawn
+
+    def insert_child(
+        self, name: str, swarm: str, type_name: str, n: int, parent: str, depth: int, now: float
+    ) -> None:
+        self._x(
+            "INSERT INTO agents (name, swarm, type, slot, parent, depth, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [name, swarm, type_name, n, parent, depth, now],
+        )
+
+    def next_spawn_number(self, swarm: str) -> int:
+        """The swarm's spawn counter, incremented; never reused while the swarm exists."""
+        with self._lock:
+            self._x("UPDATE swarms SET spawned = spawned + 1 WHERE name = ?", [swarm])
+            return self._one("SELECT spawned FROM swarms WHERE name = ?", [swarm])["spawned"]
+
+    def spawned_count(self, swarm: str) -> int:
+        row = self._one("SELECT spawned FROM swarms WHERE name = ?", [swarm])
+        return row["spawned"] if row else 0
+
+    def children_by_parent(self, swarm: str) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for r in self._q(
+            "SELECT parent, name FROM agents WHERE swarm = ? AND parent IS NOT NULL ORDER BY name",
+            [swarm],
+        ):
+            out.setdefault(r["parent"], []).append(r["name"])
+        return out
+
+    def swarm_cost(self, swarm: str) -> float:
+        """Cost of every agent the swarm has had: live rows plus removed ones."""
+        row = self._one(
+            "SELECT s.removed_cost + COALESCE((SELECT SUM(cost) FROM agents WHERE swarm = ?), 0) "
+            "AS c FROM swarms s WHERE s.name = ?",
+            [swarm, swarm],
+        )
+        return row["c"] if row else 0.0
+
+    def count_agents(self, swarm: str, type_name: str | None = None) -> int:
+        sql, args = "SELECT COUNT(*) AS n FROM agents WHERE swarm = ?", [swarm]
+        if type_name is not None:
+            sql += " AND type = ?"
+            args.append(type_name)
+        return self._one(sql, args)["n"]
+
+    def spawn_key_child(self, parent: str, key: str) -> str | None:
+        row = self._one("SELECT child FROM spawn_keys WHERE parent = ? AND key = ?", [parent, key])
+        return row["child"] if row else None
+
+    def put_spawn_key(self, parent: str, key: str, child: str) -> None:
+        self._x("INSERT INTO spawn_keys (parent, key, child) VALUES (?, ?, ?)", [parent, key, child])
+
+    # ----------------------------------------------------------------- agent tokens
+
+    def get_agent_token(self, agent: str) -> Row | None:
+        return self._one("SELECT * FROM agent_tokens WHERE agent = ?", [agent])
+
+    def agent_for_token_hash(self, token_hash: str) -> str | None:
+        row = self._one("SELECT agent FROM agent_tokens WHERE token_hash = ?", [token_hash])
+        return row["agent"] if row else None
+
+    def put_agent_token(
+        self, agent: str, swarm: str, token_hash: str, nonce: str, now: float
+    ) -> None:
+        self._x(
+            "INSERT INTO agent_tokens (agent, swarm, token_hash, nonce, created_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(agent) DO UPDATE SET "
+            "token_hash = excluded.token_hash, nonce = excluded.nonce",
+            [agent, swarm, token_hash, nonce, now],
+        )
 
     def record_agent_heartbeat(
         self, name: str, fields: dict[str, Any], tokens: dict[str, TokenUsage], cost_fn
