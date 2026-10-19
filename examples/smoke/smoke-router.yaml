@@ -1,0 +1,23 @@
+# Smoke run 1 (2026-10-16, flock-board/smoke-results.md): Codex on the HF router, 2 agents on one
+# cpu-basic worker. The router's auto provider choice for Qwen3.8-27B (cerebras) fails every
+# follow-up request after a tool call (400), so the model is pinned to deepinfra. Prices are
+# the router's /v1/models rows for that provider (no cached price listed; input price used).
+swarm: smoke-router
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/flock/smoke
+providers:
+  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+       pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}
+types:
+  coder:
+    harness: codex
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
+    replicas: 2
+    agents_per_worker: 2
+    max_working_per_worker: 2
+    labels: {experiment: flock-smoke}
+    worker_lifetime: 40m
+    lifetime_jitter: 1m
+    drain_window: 2m
+    idle_grace: 60s
+    turn_timeout: 10m

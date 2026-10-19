@@ -11,6 +11,18 @@ send and closes it on `result`; any assistant/user message after a `result` open
 turn (a queued prompt the CLI ran separately). `modelUsage` and `total_cost_usd` on
 `result` are cumulative for the session, across resumes, so usage is reported as
 cumulative and the runtime takes deltas.
+
+Environment: the SDK starts the CLI with the worker's whole `os.environ` merged under
+`options.env`, which would hand FLOCK_TOKEN and every job secret to the agent. So `cli_path`
+points at a tiny exec wrapper (`env_wrapper`) that drops every name the worker did not mean to
+pass (listed in FLOCK_HARNESS_ENV_DROP) and execs the real CLI; the SDK's own variables
+(CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_SDK_VERSION, ...) are not on that list and survive.
+
+Provider-backed models (`anthropic` providers only): ANTHROPIC_API_KEY is the provider key
+(ANTHROPIC_AUTH_TOKEN, sent as `Authorization: Bearer`, when the provider sets `auth: bearer`) and
+ANTHROPIC_BASE_URL its `base_url` when set; `timeout_s` and `max_retries` go to API_TIMEOUT_MS
+and CLAUDE_CODE_MAX_RETRIES (names present in the 2.1.296 binary). `reasoning` maps to the SDK's
+`effort` (low/medium/high) or `thinking={"type": "disabled"}` (off).
 """
 
 from __future__ import annotations
@@ -21,6 +33,8 @@ import logging
 import os
 import re
 import shutil
+import sys
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -29,7 +43,13 @@ from pathlib import Path
 from typing import Any
 
 from flock.models import TokenUsage, TypeSpec
-from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, pi_usage
+from flock.worker.adapters.base import (
+    AdapterEvent,
+    EventQueue,
+    ResumeError,
+    minimal_env,
+    pi_usage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +109,61 @@ def project_dir(home: Path, cwd: str | Path) -> Path | None:
 
 def glob_escape(s: str) -> str:
     return re.sub(r"([*?\[])", r"[\1]", s)
+
+
+# --------------------------------------------------------------------------- environment
+
+DROP_VAR = "FLOCK_HARNESS_ENV_DROP"
+_WRAPPER = """#!{python} -I
+# Written by flock's ClaudeAdapter: exec the Claude CLI without the names in {drop}.
+import os, sys
+drop = set(filter(None, os.environ.get({drop!r}, "").split(",")))
+drop.add({drop!r})
+os.execve({cli!r}, [{cli!r}, *sys.argv[1:]], {{k: v for k, v in os.environ.items() if k not in drop}})
+"""
+_wrappers: dict[str, str] = {}
+
+
+def env_wrapper(cli: str) -> str:
+    """Path of an executable that runs `cli` with the names in FLOCK_HARNESS_ENV_DROP removed
+    from its environment (one per CLI path per process)."""
+    if cli not in _wrappers:
+        d = Path(tempfile.mkdtemp(prefix="flock-claude-"))
+        w = d / "claude"
+        w.write_text(_WRAPPER.format(python=sys.executable, cli=cli, drop=DROP_VAR))
+        w.chmod(0o700)
+        _wrappers[cli] = str(w)
+    return _wrappers[cli]
+
+
+def claude_env(spec: TypeSpec, env: dict[str, str]) -> dict[str, str]:
+    """What the CLI should see: `minimal_env` of the worker's environment plus `env`, with a
+    provider-backed type's key moved to ANTHROPIC_API_KEY and its base URL set."""
+    env = dict(env)
+    r = spec.resolved_model
+    if r is not None:
+        p = r.provider
+        key = env.get(p.api_key_env) if p.api_key_env in spec.secrets else env.pop(p.api_key_env, None)
+        if key is not None:  # `auth: bearer` -> Authorization: Bearer instead of x-api-key
+            env["ANTHROPIC_AUTH_TOKEN" if p.auth == "bearer" else "ANTHROPIC_API_KEY"] = key
+        if p.base_url:
+            env["ANTHROPIC_BASE_URL"] = p.base_url
+        if p.timeout_s is not None:
+            env["API_TIMEOUT_MS"] = str(int(p.timeout_s * 1000))
+        if p.max_retries is not None:
+            env["CLAUDE_CODE_MAX_RETRIES"] = str(p.max_retries)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:  # jobs run as root; bypass needs this
+        env.setdefault("IS_SANDBOX", "1")
+    return minimal_env(os.environ, env, keep=("CLAUDE_CONFIG_DIR",))
+
+
+def reasoning_options(spec: TypeSpec) -> dict[str, Any]:
+    r = spec.effective_reasoning
+    if r is None:
+        return {}
+    if r == "off":
+        return {"thinking": {"type": "disabled"}}
+    return {"effort": r}
 
 
 # --------------------------------------------------------------------------- mapping
@@ -237,6 +312,19 @@ class ClaudeMapper:
 # --------------------------------------------------------------------------- adapter
 
 
+def _bundled_cli() -> str | None:
+    """The SDK's bundled CLI, so the env wrapper also covers images without `claude` on PATH."""
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return None
+    for name in ("claude", "claude.exe"):
+        p = Path(claude_agent_sdk.__file__).parent / "_bundled" / name
+        if p.is_file():
+            return str(p)
+    return None
+
+
 class ClaudeAdapter:
     harness = "claude"
 
@@ -250,7 +338,8 @@ class ClaudeAdapter:
     ) -> None:
         self.workdir = Path(workdir)
         self.home = home or claude_home()
-        self.cli_path = cli_path or os.environ.get("FLOCK_CLAUDE_CLI") or shutil.which("claude")
+        self.cli_path = cli_path or os.environ.get("FLOCK_CLAUDE_CLI") or shutil.which("claude") \
+            or _bundled_cli()
         self._client_factory = client_factory
         self._client: Any = None
         self._reader: asyncio.Task | None = None
@@ -262,14 +351,17 @@ class ClaudeAdapter:
         from claude_agent_sdk import ClaudeAgentOptions
 
         kw: dict[str, Any] = {"resume": session_id} if resume else {"session_id": session_id}
+        kw.update(reasoning_options(spec))
+        final = claude_env(spec, env)
+        drop = sorted(k for k in os.environ if k not in final)
         return ClaudeAgentOptions(
             cwd=str(self.workdir),
-            model=spec.model,
+            model=spec.harness_model,
             permission_mode="bypassPermissions",
             max_turns=spec.max_turns,
             max_budget_usd=spec.max_budget_usd,
-            env=env,
-            cli_path=self.cli_path,
+            env={**final, DROP_VAR: ",".join(drop)},
+            cli_path=env_wrapper(self.cli_path) if self.cli_path else None,
             stderr=self._on_stderr,
             **kw,
         )
@@ -288,12 +380,9 @@ class ClaudeAdapter:
             raise ResumeError(f"no transcript for session {session_id} under {self.home}/projects")
         sid = session_id or str(uuid.uuid4())
         self._queue = EventQueue()
-        self._mapper = ClaudeMapper(spec.model)
+        self._mapper = ClaudeMapper(spec.harness_model)
         factory = self._client_factory or ClaudeSDKClient
-        env = dict(env or {})
-        if hasattr(os, "geteuid") and os.geteuid() == 0:  # jobs run as root; bypass needs this
-            env.setdefault("IS_SANDBOX", "1")
-        self._client = factory(self._options(spec, sid, resume, env))
+        self._client = factory(self._options(spec, sid, resume, dict(env or {})))
         try:
             await self._client.connect()
         except Exception as e:

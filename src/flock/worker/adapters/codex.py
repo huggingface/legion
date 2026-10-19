@@ -10,6 +10,13 @@ replayed once, tagged with the previous turn id), turn/completed, error.
 `thread/resume` in 0.162.1 takes only `threadId` (no `path`); the rollout file under
 $CODEX_HOME/sessions is enough to resume (verified: rollout-only CODEX_HOME resumed with
 context intact).
+
+Provider-backed models (design.md section 5, 'Providers') are configured with `-c` overrides
+on the app-server command line: `model_providers.<name>.{name, base_url, env_key, wire_api}`,
+`model_provider`, `model`, and `model_reasoning_effort`. These are config.toml keys (checked
+against 0.162.1 with `--strict-config`); passing them per process instead of writing
+$CODEX_HOME/config.toml keeps the shared, synced CODEX_HOME untouched. 0.162.1 rejects
+`wire_api = "chat"` ("no longer supported"), so the provider must serve the Responses API.
 """
 
 from __future__ import annotations
@@ -24,8 +31,8 @@ from pathlib import Path
 from typing import Any
 
 from flock.controller.prices import Price, price_for
-from flock.models import TokenUsage, TypeSpec
-from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.models import REASONING_EFFORT, TokenUsage, TypeSpec
+from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +51,48 @@ def find_rollout(home: Path, thread_id: str) -> Path | None:
 
 class RpcError(RuntimeError):
     pass
+
+
+# Built-in provider ids Codex 0.162.1 refuses to see redefined ("reserved built-in provider IDs").
+CODEX_RESERVED_PROVIDERS = frozenset({"openai", "ollama", "lmstudio"})
+
+
+def codex_provider_id(name: str) -> str:
+    """The `model_providers` key for a flock provider: its name, or `flock-<name>` when the name
+    is a Codex built-in (a swarmlab-style `openai:` prefix would otherwise stop the app-server)."""
+    return f"flock-{name}" if name in CODEX_RESERVED_PROVIDERS else name
+
+
+def _toml(v: str | int | bool) -> str:
+    """A TOML literal for a `-c key=value` override (JSON string escapes are valid TOML)."""
+    if isinstance(v, bool):  # before int: bool is an int, and TOML wants true/false
+        return "true" if v else "false"
+    return str(v) if isinstance(v, int) else json.dumps(v)
+
+
+def codex_config_args(spec: TypeSpec) -> list[str]:
+    """`-c` overrides for the app-server: the provider table and model for a provider-backed
+    type, and the reasoning effort for any type that sets one."""
+    sets: list[tuple[str, str | int | bool]] = []
+    r = spec.resolved_model
+    if r is not None:
+        p, name = r.provider, codex_provider_id(r.provider_name)
+        table: dict[str, str | int] = {"name": r.provider_name, "base_url": p.base_url or "",
+                                       "env_key": p.api_key_env, "wire_api": "responses"}
+        if p.max_retries is not None:
+            table["request_max_retries"] = p.max_retries
+            table["stream_max_retries"] = p.max_retries
+        if p.timeout_s is not None:
+            table["stream_idle_timeout_ms"] = int(p.timeout_s * 1000)
+        sets += [(f"model_providers.{name}.{k}", v) for k, v in table.items()]
+        sets += [("model_provider", name), ("model", r.model_id)]
+        # Codex 0.162.1 also sends two OpenAI-only tool types, the multi_agent `namespace` tool
+        # and the hosted `web_search` tool; other Responses servers reject the whole request
+        # (the HF router: a ZodError on those tools, before any model call). Turn both off.
+        sets += [("features.multi_agent", False), ("web_search", "disabled")]
+    if spec.effective_reasoning is not None:
+        sets.append(("model_reasoning_effort", REASONING_EFFORT[spec.effective_reasoning]))
+    return [a for k, v in sets for a in ("-c", f"{k}={_toml(v)}")]
 
 
 def _tokens(b: dict[str, Any]) -> TokenUsage:
@@ -82,8 +131,9 @@ class CodexMapper:
     max_budget_usd: float | None = None
     prices: dict[str, Price] | None = None  # None: the global table
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, provider: str = "openai") -> None:
         self.model = model
+        self.provider = provider
         self.active_turn: str | None = None
         self.started: set[str] = set()
         self._reset()
@@ -96,7 +146,7 @@ class CodexMapper:
 
     def _assistant(self, content: list[dict], stop: str = "stop") -> dict[str, Any]:
         return {"role": "assistant", "content": content, "api": "openai-responses",
-                "provider": "openai", "model": self.model, "stopReason": stop, "timestamp": _ms()}
+                "provider": self.provider, "model": self.model, "stopReason": stop, "timestamp": _ms()}
 
     def _tool(self, item: dict, name: str, args: dict, output: str, is_error: bool) -> list[AdapterEvent]:
         call = self._assistant([{"type": "toolCall", "id": item["id"], "name": name, "arguments": args}],
@@ -243,6 +293,12 @@ class CodexAdapter:
         self._tasks: list[asyncio.Task] = []
         self._stderr: list[str] = []
         self.effort: str | None = os.environ.get("FLOCK_CODEX_EFFORT") or None
+        self._turn_effort: str | None = self.effort
+
+    def process_env(self, env: dict[str, str] | None) -> dict[str, str]:
+        """Allowlisted worker env + what the worker passes + CODEX_HOME. Never os.environ whole:
+        it holds FLOCK_TOKEN and every job secret."""
+        return minimal_env(os.environ, {**(env or {}), "CODEX_HOME": str(self.home)})
 
     # ------------------------------------------------------------------ json-rpc
     async def _write(self, msg: dict[str, Any]) -> None:
@@ -345,18 +401,21 @@ class CodexAdapter:
         if session_id and not find_rollout(self.home, session_id):
             raise ResumeError(f"no rollout for thread {session_id} under {self.home}/sessions")
         self._queue = EventQueue()
-        self._mapper = CodexMapper(spec.model)
+        model = spec.harness_model
+        self._mapper = CodexMapper(model, spec.provider_name or "openai")
+        # The type's own reasoning wins over the deployment-wide FLOCK_CODEX_EFFORT.
+        self._turn_effort = None if spec.effective_reasoning else self.effort
         self._proc = await asyncio.create_subprocess_exec(
-            self.codex_bin, "app-server",
+            self.codex_bin, "app-server", *codex_config_args(spec),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=str(self.workdir), limit=64 * 1024 * 1024,
-            env={**os.environ, **(env or {}), "CODEX_HOME": str(self.home)},
+            env=self.process_env(env),
         )
         self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._drain_stderr())]
         try:
             await self.request("initialize", {"clientInfo": {"name": "flock", "version": "0.0.1"}})
             await self._write({"method": "initialized", "params": {}})
-            params = {"cwd": str(self.workdir), "model": spec.model, "approvalPolicy": "never",
+            params = {"cwd": str(self.workdir), "model": model, "approvalPolicy": "never",
                       "sandbox": "danger-full-access"}
             if session_id:
                 try:
@@ -371,7 +430,7 @@ class CodexAdapter:
             raise
         thread = r.get("thread") or {}
         self.thread_id = thread["id"]
-        self._mapper.model = r.get("model") or thread.get("model") or spec.model
+        self._mapper.model = r.get("model") or thread.get("model") or model
         self.rollout = Path(thread["path"]) if thread.get("path") else None
         self._mapper.max_turns, self._mapper.max_budget_usd = spec.max_turns, spec.max_budget_usd
         self._mapper.prices = self.prices
@@ -391,8 +450,8 @@ class CodexAdapter:
             except RpcError as e:  # the turn ended under us; start a new one
                 log.info("steer failed (%s); starting a new turn", e)
         params: dict[str, Any] = {"threadId": self.thread_id, "input": inp}
-        if self.effort:
-            params["effort"] = self.effort
+        if self._turn_effort:
+            params["effort"] = self._turn_effort
         r = await self.request("turn/start", params)
         for ev in self._mapper.on_turn_id(r["turn"]["id"]):
             self._queue.put(ev)

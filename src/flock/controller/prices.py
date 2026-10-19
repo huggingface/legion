@@ -9,6 +9,11 @@ is still a placeholder. Override any row with a JSON file whose path is in FLOCK
 
 All prices are USD per 1M tokens. Reasoning tokens are assumed to be included in the
 output count the harness reports, so they are not billed separately.
+
+Provider-backed models (design.md section 5, 'Providers') are priced from the row pinned into
+the applied spec (`TypeSpec.resolved_model.pricing`, [input, output, cached]), which wins over
+this table for that type's model id. Cache writes are billed at the input price (OpenAI-style
+servers report none; vLLM's Anthropic endpoint has no cache-write tier).
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
-from flock.models import TokenUsage
+from flock.models import TokenUsage, TypeSpec
 
 
 @dataclass(frozen=True)
@@ -72,3 +77,17 @@ def cost_usd(tokens: dict[str, TokenUsage], table: dict[str, Price] | None = Non
             + u.cache_write * p.cache_write
         ) / 1_000_000
     return round(total, 6)
+
+
+def pinned_price(row: list[float]) -> Price:
+    """[input, output, cached] from a spec's pricing -> Price (cache writes at input)."""
+    return Price(input=row[0], output=row[1], cache_read=row[2], cache_write=row[0])
+
+
+def type_price_table(ts: TypeSpec | None) -> dict[str, Price]:
+    """The price table for one agent type: the global table plus the type's pinned provider
+    price under its model id."""
+    table = price_table()
+    if ts is not None and ts.resolved_model is not None:
+        table = {**table, ts.resolved_model.model_id: pinned_price(ts.resolved_model.pricing)}
+    return table
