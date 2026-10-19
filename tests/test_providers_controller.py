@@ -286,9 +286,19 @@ async def test_preflight_http_error_and_missing_secret(preflight_client):
         rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
     by_model = {x["model"]: x for x in rep["results"]}
     assert by_model["hf:Qwen/Qwen3.8-27B"]["error"].startswith("first turn: HTTP 404")
-    assert by_model["gpu1:Qwen/Small"]["error"] == "secret VLLM_API_KEY is not set on the controller"
-    assert rep["ok"] is False
+    small = by_model["gpu1:Qwen/Small"]  # no key on the controller: unverified, not failed
+    assert small["unverified"] is True and small["ok"] is False and small["error"] is None
+    assert "unverified: secret VLLM_API_KEY is not set on the controller" in small["warning"]
+    assert rep["ok"] is False and rep["unverified"] == 2  # the 404 still fails the report
     assert all(x["model"] != "Qwen/Small" for x in seen)  # no request without a key
+
+
+async def test_preflight_missing_key_alone_is_unverified_not_failed(preflight_client):
+    fake, seen = fake_provider()
+    async with await preflight_client(fake, {}) as c:
+        rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
+    assert rep["ok"] is True and rep["unverified"] == 3 and not seen
+    assert all(x["unverified"] and not x["ok"] for x in rep["results"])
 
 
 async def test_preflight_uses_applied_spec_without_body(preflight_client):

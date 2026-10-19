@@ -108,12 +108,25 @@ def _warn_extra(spec: SwarmSpec) -> None:
                        f"{ts.harness.value} harness (docs/open-models.md)", err=True)
 
 
-def _preflight(spec: SwarmSpec) -> bool:
-    """POST /swarms/{swarm}/preflight with the spec; print one row per model; True if all ok."""
+def _warn_unverified(models: list[str], why: str) -> None:
+    for m in models:
+        typer.echo(f"warning: {m}: unverified ({why})", err=True)
+
+
+def _unprobed(spec: SwarmSpec) -> list[str]:
+    return sorted({ts.resolved_model.qualified for ts in spec.types.values()
+                   if ts.resolved_model is not None})
+
+
+def _preflight(spec: SwarmSpec, strict: bool) -> bool:
+    """POST /swarms/{swarm}/preflight with the spec; print one row per model. True when no probe
+    failed and, with `strict`, every model was actually probed. Never silent about a model that
+    was not probed."""
     rep = _call("POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
                 timeout=300)
     rows = [
-        [r["model"], ",".join(r["types"]), r["api"], "ok" if r["ok"] else "FAIL",
+        [r["model"], ",".join(r["types"]), r["api"],
+         "unverified" if r.get("unverified") else "ok" if r["ok"] else "FAIL",
          "yes" if r["tool_call_seen"] else "no", "yes" if r.get("follow_up_ok") else "no",
          "" if r["latency_ms"] is None else r["latency_ms"], r["error"] or ""]
         for r in rep["results"]
@@ -126,7 +139,11 @@ def _preflight(spec: SwarmSpec) -> bool:
                 typer.echo(f"warning: {r['model']}: {r['warning']}", err=True)
     else:
         typer.echo("preflight: no provider-backed models in this spec")
-    return bool(rep["ok"])
+    unverified = int(rep.get("unverified") or 0)
+    if unverified:
+        typer.echo(f"warning: {unverified} model(s) unverified"
+                   + (" (--strict: counted as failure)" if strict else ""), err=True)
+    return bool(rep["ok"]) and not (strict and unverified)
 
 
 @app.command()
@@ -135,27 +152,40 @@ def apply(
     preflight: bool = typer.Option(
         None, "--preflight/--skip-preflight",
         help="Probe provider-backed models before applying (default: on when the spec has any)."),
+    strict: bool = typer.Option(
+        False, "--strict", help="Treat models that were not probed (unverified) as failures."),
 ) -> None:
-    """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight."""
+    """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight; a model
+    that could not be probed is reported as unverified and applied anyway unless --strict."""
     spec = load_spec(spec_file)
     _warn_extra(spec)
     if preflight is None:
         preflight = _provider_backed(spec)
-    if preflight and not _preflight(spec):
-        typer.echo("preflight failed: not applying (fix the provider or pass --skip-preflight)",
-                   err=True)
-        raise typer.Exit(1)
+    if preflight:
+        if not _preflight(spec, strict):
+            typer.echo("preflight failed: not applying (fix the provider or pass --skip-preflight)",
+                       err=True)
+            raise typer.Exit(1)
+    elif unprobed := _unprobed(spec):
+        _warn_unverified(unprobed, "preflight skipped")
+        if strict:
+            typer.echo("--strict: not applying unverified models", err=True)
+            raise typer.Exit(1)
     st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     _print_status(st)
 
 
 @app.command("preflight")
-def preflight_cmd(spec_file: str) -> None:
+def preflight_cmd(
+    spec_file: str,
+    strict: bool = typer.Option(False, "--strict", help="Exit 1 on unverified models too."),
+) -> None:
     """Send one small tool-calling request to each provider-backed model in a spec (through
-    the controller, which holds the keys). Exit 1 if any model fails."""
+    the controller, which holds the keys). Exit 1 if any model fails; models that could not be
+    probed are reported as unverified (exit 1 only with --strict)."""
     spec = load_spec(spec_file)
     _warn_extra(spec)
-    if not _preflight(spec):
+    if not _preflight(spec, strict):
         raise typer.Exit(1)
 
 

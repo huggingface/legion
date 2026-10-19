@@ -170,7 +170,9 @@ async def probe(
     result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types, api=api,
                              ok=False)
     if not key:
-        result.error = f"secret {p.api_key_env} is not set on the controller"
+        result.unverified = True
+        result.warning = (f"unverified: secret {p.api_key_env} is not set on the controller, "
+                          "so the model was not probed")
         return result
     timeout = p.timeout_s or DEFAULT_TIMEOUT_S
     t0 = time.monotonic()
@@ -242,4 +244,5 @@ async def run_preflight(
         probe(client, r, secrets.get(r.provider.api_key_env), types)
         for r, types in models_to_probe(spec)
     ))
-    return PreflightReport(swarm=spec.swarm, ok=all(x.ok for x in results), results=list(results))
+    return PreflightReport(swarm=spec.swarm, ok=all(x.ok or x.unverified for x in results),
+                           unverified=sum(x.unverified for x in results), results=list(results))

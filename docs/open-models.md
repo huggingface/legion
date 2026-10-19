@@ -144,6 +144,12 @@ did, see below) fails preflight. A server that streams zero token usage passes w
 since flock then cannot count cost. `flock apply` runs preflight whenever the spec has
 provider-backed models and refuses to apply on a failure; `--skip-preflight` bypasses it.
 
+Preflight never passes silently. A model that was not probed (its `api_key_env` is not in the
+controller's environment, or `--skip-preflight`) is reported as `unverified` with a warning
+line. Validation is best-effort: `apply` blocks on definite problems (a failed probe) and
+proceeds on missing evidence (unverified), unless `--strict` is passed, which counts
+unverified as failure (`flock preflight --strict` exits 1 the same way).
+
 ## `max_working`
 
 The number of agents of the swarm on that provider that may be in a turn at once, counted per

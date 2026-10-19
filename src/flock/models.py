@@ -539,6 +539,9 @@ class PreflightResult(BaseModel):
     types: list[str]
     api: str  # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic)
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
+    # Not probed (e.g. the key is not in the controller's environment): neither ok nor failed.
+    # `apply` warns and proceeds, or refuses with --strict.
+    unverified: bool = False
     tool_call_seen: bool = False
     follow_up_ok: bool = False
     usage_reported: bool | None = None  # False: the server streamed zero tokens (cost unknown)
@@ -549,7 +552,8 @@ class PreflightResult(BaseModel):
 
 class PreflightReport(BaseModel):
     swarm: str
-    ok: bool
+    ok: bool  # no probe failed (unverified models do not count as failures here)
+    unverified: int = 0  # models that were not probed
     results: list[PreflightResult]
 
 

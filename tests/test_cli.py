@@ -155,6 +155,35 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     assert r.exit_code == 0 and "no provider-backed models" in r.output
 
 
+def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, store, clock):
+    import httpx
+
+    from flock.controller.api import create_app
+
+    from .test_providers_controller import fake_provider
+
+    fake, seen = fake_provider()
+    app = create_app(store, TOKEN, clock=clock, secret_source={},  # no provider key on the controller
+                     preflight_transport=httpx.ASGITransport(app=fake))
+    _wire(monkeypatch, app)
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
+    r = runner.invoke(cli.app, ["preflight", str(spec_file)])
+    assert r.exit_code == 0 and "unverified" in r.output and "VLLM_API_KEY is not set" in r.output
+    assert runner.invoke(cli.app, ["preflight", "--strict", str(spec_file)]).exit_code == 1
+    r = runner.invoke(cli.app, ["apply", "--strict", str(spec_file)])
+    assert r.exit_code == 1 and "preflight failed" in r.output and store.get_swarm("op") is None
+    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    assert r.exit_code == 0, r.output
+    assert "warning: 1 model(s) unverified" in r.output and store.get_swarm("op") is not None
+    assert not seen  # nothing was sent without a key
+    # skipping preflight is never silent either
+    r = runner.invoke(cli.app, ["apply", "--skip-preflight", str(spec_file)])
+    assert r.exit_code == 0 and "gpu1:Qwen/Q: unverified (preflight skipped)" in r.output
+    r = runner.invoke(cli.app, ["apply", "--skip-preflight", "--strict", str(spec_file)])
+    assert r.exit_code == 1 and "--strict: not applying unverified models" in r.output
+
+
 def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     _wire(monkeypatch, app)
     bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "claude", "model": "q"}}}
