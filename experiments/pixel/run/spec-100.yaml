@@ -1,8 +1,7 @@
 # Pixel run 1: 100 LFM2.5-2.6B painters on the `llm` harness (experiments/pixel/run/README.md).
 # RUN_ID run1-20261019 (job.sh, driver --run-id, progress Space). GPU: one rtx-pro-6000 job.
 # Needs PR #7 (`harness: llm`, `tool_choice`, `context_tokens`, `done_tool`): the controller runs
-# the `pixel-run` wheel (main + PR #7 + PR #8). Two placeholders to fill at launch:
-# <JOB_ID> (base_url) and <MAX_WORKING> (from the rtx-pro-6000 probe).
+# the `pixel-run` wheel (main + PR #7 + PR #8). Fill <JOB_ID> (base_url) at launch.
 #
 # Model path: the GPU job's vLLM through the HF jobs proxy (job.sh: --expose 8000, vLLM
 # without --api-key). The proxy checks the HF token sent as the bearer, so the provider key IS
@@ -18,7 +17,7 @@ providers:
     base_url: "https://<JOB_ID>--8000.hf.jobs/v1"   # FILL IN at launch
     api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
     self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
-    max_working: <MAX_WORKING>   # FILL IN from the rtx-pro-6000 probe (in-flight model calls)
+    max_working: 128             # rtx-pro-6000 probe knee: c=128, ~160 calls/s, p50 0.8 s
     timeout_s: 60
     max_retries: 4
 models:

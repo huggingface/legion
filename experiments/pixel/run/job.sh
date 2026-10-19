@@ -54,11 +54,11 @@ CANVAS=$!
 # Contract: the OpenAI API answers on 127.0.0.1:8000 (`--expose 8000` proxies it; /health is
 # polled below), logs go to /data/vllm*.log (synced to the bucket), and every server process
 # that must stay up is in VLLM_PIDS (space-separated). Default = the smoke's single engine
-# (baseline), so the script works unchanged if the probe says "baseline".
+# (baseline) plus the probe's `--max-num-seqs 512 --api-server-count 4`.
 vllm serve LiquidAI/LFM2.5-2.6B --host 0.0.0.0 --port 8000 \
   --reasoning-parser qwen3 --tool-call-parser lfm2 --enable-auto-tool-choice \
-  --max-model-len 8192 > /data/vllm.log 2>&1 &
-VLLM_PIDS="$VLLM_PIDS $!"
+  --max-model-len 8192 --max-num-seqs 512 --api-server-count 4 > /data/vllm.log 2>&1 &
+VLLM_PIDS="$VLLM_PIDS $!"  # probe (rtx-pro-6000): one engine + 4 API servers, knee c=128, ~160 calls/s
 # ===================== END vLLM LAUNCH RECIPE ================================================
 alive() { for p in $VLLM_PIDS; do kill -0 "$p" 2>/dev/null || return 1; done; }
 until python3 -c "import urllib.request as u;u.urlopen('http://127.0.0.1:8000/health')" 2>/dev/null; do
