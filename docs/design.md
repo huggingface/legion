@@ -235,6 +235,10 @@ to the identical absolute paths before the first resume. Resume is what makes
 week-long projects possible; it is also the first thing milestone one
 verifies.
 
+Buckets keep bytes, not file modes, so each push also writes `<workdir>/.flock-modes.json`
+(the octal mode of every file with an executable bit) and restore re-applies it; without it an
+executable script came back 0644 after a re-apply (pixel run 1, 2026-10-19).
+
 If the harness refuses to resume (typically after a version bump), the worker
 starts a fresh session with the same name, sends a first prompt stating where
 the previous transcript is, writes a `session_restarted` event, and status
