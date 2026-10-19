@@ -309,7 +309,8 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 | `providers.<name>.base_url` | required for `openai_compat` (ends in `/v1`); optional for `anthropic` (API root, default Anthropic) |
 | `providers.<name>.api_key_env` | NAME of the secret holding the key; the value is never in the spec |
 | `providers.<name>.self_hosted` | price defaults to `[0, 0, 0]`; the real cost is the GPU job |
-| `providers.<name>.max_working` | max agents of the swarm on this provider in a turn at once; reported, not enforced yet |
+| `providers.<name>.max_working` | max agents of the swarm on this provider in a turn at once; enforced at prompt admission (`FLOCK_MAX_WORKING_ENFORCE=0`: report only) |
+| `providers.<name>.auth` | `anthropic` only: `x-api-key` (default) or `bearer` (Claude Code's `ANTHROPIC_AUTH_TOKEN`) |
 | `providers.<name>.pricing` | `{model id or "*": [input, output, cached]}` USD per 1M tokens |
 | `providers.<name>.timeout_s`, `max_retries` | passed to the harness (Codex provider table; Claude `API_TIMEOUT_MS`, `CLAUDE_CODE_MAX_RETRIES`) |
 | `models.<alias>.model` | `"<provider>:<model id>"` |
@@ -345,18 +346,25 @@ Harness configuration: Codex gets `-c` overrides on `codex app-server` (the prov
 `ollama`, `lmstudio`) become `flock-<name>`. Claude Code gets the SDK's `effort` for
 low/medium/high and `thinking: disabled` for off.
 
-`max_working` (TODO): counted per provider from heartbeats (agents in `working`) and shown in
-`GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. Enforcing it
-means holding prompts for idle agents at the command poll while the provider is at its cap and
-waking the poll when a heartbeat frees a slot; the count lags by up to one heartbeat (30 s), so
-the cap is soft by that much. Not built in PR A.
+`max_working`: counted per provider from heartbeats (agents in `working`) and shown in
+`GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. The controller
+enforces it at prompt admission: on a command poll, a prompt for an agent that is not in a turn
+goes out only while the provider has a free slot; otherwise it stays in `pending_prompts` and
+goes out on a later poll (never rejected). Slots are fresh heartbeat `working` agents plus
+agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s);
+`FLOCK_MAX_WORKING_ENFORCE=0` turns it off (report only).
 
-Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) sends one
-small request with a trivial `get_time` tool to each distinct provider-backed model, from the
-controller (which holds the keys): the Responses API for `openai_compat` (what Codex speaks),
-the Messages API for `anthropic`. A model passes when the reply holds a tool call. `flock apply`
-runs it when the spec has provider-backed models and refuses on a failure
-(`--skip-preflight` bypasses); `flock preflight spec.yaml` runs it alone.
+Reachability: a provider is a `base_url` every worker reaches over HTTPS. Workers are CPU jobs
+and inference runs elsewhere; flock does not colocate workers with GPU jobs.
+
+Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) probes each
+distinct provider-backed model from the controller (which holds the keys) with two streamed
+turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
+API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`. Best-effort: a
+failed probe refuses `flock apply` (`--skip-preflight` bypasses); a model not probed (key not
+in the controller's environment, or preflight skipped) is reported `unverified` with a warning
+and applied anyway unless `--strict`. Zero streamed usage is a warning.
+`flock preflight spec.yaml` runs it alone.
 
 ### Harness environment
 
@@ -382,8 +390,10 @@ Per agent, status also carries `pending` (prompts held by the controller),
 `resumed` (bool), `worker`, `session_id`, harness, model, labels, token
 totals, derived cost, uptime, last sync time, msgboard principal if any.
 
-Type-level: `crashlooping` after K consecutive worker crashes; launching
-pauses until the spec is edited.
+Type-level: `crashlooping` after K consecutive worker crashes; `launch_refused` when the
+backend refuses a launch with a 4xx (not 408/429; e.g. an unknown or unplaceable flavor), with
+its message in `launch_error`. Either pauses launching until the spec is re-applied. Transient
+launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 
 ### API (controller)
 
@@ -475,6 +485,8 @@ becomes one request with one admin secret; the swap is one function.
 | Worker job ends with "Job timeout" | planned; relaunch immediately, restore agents |
 | Worker crashes | relaunch with exponential backoff; `turn_interrupted` events; `resume_prompt` if set |
 | K consecutive crashes of one type | type marked `crashlooping`, launching paused |
+| Launch refused (Hub 4xx) | type marked `launch_refused` with the Hub's message, no retries until re-apply |
+| Launch fails transiently (5xx, network) | retry with backoff 30 s doubling to 5 min; last error in status |
 | Turn exceeds timeout | process killed, agent `stuck` once, then idle |
 | Harness refuses resume | fresh session, `session_restarted`, `resumed: false` |
 | Controller restarts | rebuild from `list_jobs` labels, wait one heartbeat interval |
@@ -608,8 +620,9 @@ Condensed from the grilling session, 2026-10-13/14.
 | 22 | Fill workers in order; no bin packing; packing numbers measured first |
 | 23 | Repo `huggingface/flock`, Python, one package, three entry points |
 | 24 | Milestone one: resume gate, packing measurement, 100 agents end to end |
-| 25 | Open models via a swarmlab-compatible `providers:` block, optional `models:` aliases, `<provider>:<id>` model strings; claude only on `anthropic`, codex only on `openai_compat` (Responses API: Codex 0.162.1 dropped chat); price pinned into the stored spec at apply; controller-side preflight; `max_working` reported, enforcement deferred (2026-10-16) |
+| 25 | Open models via a swarmlab-compatible `providers:` block, optional `models:` aliases, `<provider>:<id>` model strings; claude only on `anthropic`, codex only on `openai_compat` (Responses API: Codex 0.162.1 dropped chat); price pinned into the stored spec at apply; controller-side preflight; `max_working` reported, enforcement deferred (2026-10-16); superseded by 27 for `max_working` |
 | 26 | Harnesses get an allowlisted environment plus explicit additions, never the worker's `os.environ` (2026-10-16) |
+| 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission behind `FLOCK_MAX_WORKING_ENFORCE` (default on) |
 
 ## 12. Road to 10k
 

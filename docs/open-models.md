@@ -178,3 +178,5 @@ to one heartbeat (30 s), so the cap is soft by that much. `flock status`, `GET /
   `ANTHROPIC_SMALL_FAST_MODEL` was not needed.
 - Workers reaching a GPU job through the HF Jobs proxy (`--expose` with an HF token).
 - Codex with model ids it has no built-in metadata for (context window, auto-compaction).
+- Cost of Codex on the HF router: the working router providers stream zero usage, so it shows
+  as $0 with the zero-usage warning.
