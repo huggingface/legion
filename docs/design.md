@@ -351,8 +351,9 @@ low/medium/high and `thinking: disabled` for off.
 enforces it at prompt admission: on a command poll, a prompt for an agent that is not in a turn
 goes out only while the provider has a free slot; otherwise it stays in `pending_prompts` and
 goes out on a later poll (never rejected). Slots are fresh heartbeat `working` agents plus
-agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s);
-`FLOCK_MAX_WORKING_ENFORCE=0` turns it off (report only).
+agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s). A capped
+provider's `resume_prompt` is queued behind the assign so it is admitted the same way.
+`FLOCK_MAX_WORKING_ENFORCE=0` is an escape hatch (report only). Hard limits belong at the endpoint.
 
 Reachability: a provider is a `base_url` every worker reaches over HTTPS. Workers are CPU jobs
 and inference runs elsewhere; flock does not colocate workers with GPU jobs.
@@ -622,7 +623,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 24 | Milestone one: resume gate, packing measurement, 100 agents end to end |
 | 25 | Open models via a swarmlab-compatible `providers:` block, optional `models:` aliases, `<provider>:<id>` model strings; claude only on `anthropic`, codex only on `openai_compat` (Responses API: Codex 0.162.1 dropped chat); price pinned into the stored spec at apply; controller-side preflight; `max_working` reported, enforcement deferred (2026-10-16); superseded by 27 for `max_working` |
 | 26 | Harnesses get an allowlisted environment plus explicit additions, never the worker's `os.environ` (2026-10-16) |
-| 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission behind `FLOCK_MAX_WORKING_ENFORCE` (default on) |
+| 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission for every turn start (API prompt, resume prompt; spawn's queued prompts), on by default, `FLOCK_MAX_WORKING_ENFORCE=0` as escape hatch (Carlos) |
 
 ## 12. Road to 10k
 

@@ -153,16 +153,28 @@ unverified as failure (`flock preflight --strict` exits 1 the same way).
 ## `max_working`
 
 The number of agents of the swarm on that provider that may be in a turn at once, counted per
-agent (an agent is one slot whether its turn makes one request or fifty). The controller enforces
-it at prompt admission: a prompt for an agent that is not in a turn is accepted as usual
-(`POST /agents/{name}/prompt` never rejects it) but stays queued in the controller while the
-provider is at its cap, and goes out on a worker's next command poll once a slot frees (within
-one poll, about 25 s). Prompts for an agent already in a turn take no new slot. Heartbeat-reported
-`working` counts are the source of truth, plus prompts handed out since the agent's last
-heartbeat, so two polls between heartbeats cannot both take the last slot. The count lags by up
-to one heartbeat (30 s), so the cap is soft by that much. `flock status`, `GET /swarms/{swarm}`
-(`status.providers`) and the status page show `working / max_working` per provider.
-`FLOCK_MAX_WORKING_ENFORCE=0` on the controller turns enforcement off (report only).
+agent (an agent is one slot whether its turn makes one request or fifty). The controller
+enforces it, on by default:
+
+- **Queue, not reject.** A prompt for an agent that is not in a turn is accepted as usual
+  (`POST /agents/{name}/prompt` never refuses it) but stays queued in the controller while the
+  provider is at its cap. It goes out on a worker's next command poll once a slot frees
+  (within one poll, about 25 s). A prompt for an agent already in a turn takes no new slot.
+- **Every turn start is admitted the same way.** Admission happens where the controller hands
+  queued prompts to workers, so it covers API prompts and `resume_prompt` after a crash (for a
+  capped provider it is queued behind the assign instead of riding inside it). Anything that
+  queues a prompt in the controller is covered too, e.g. a spawned child's first prompt.
+- **Counts come from worker heartbeats**, plus prompts handed out since the agent's last
+  heartbeat (so two polls between heartbeats cannot both take the last slot). The count lags
+  by up to one heartbeat (30 s), so the cap is **soft by one heartbeat**.
+- **The real limit belongs at the endpoint.** `max_working` keeps a swarm from overrunning a
+  server it shares; it does not protect the server from other clients, and it counts agents,
+  not requests. Set the server's own concurrency limits (vLLM `--max-num-seqs`, a gateway
+  rate limit) for a hard bound.
+
+`flock status`, `GET /swarms/{swarm}` (`status.providers`) and the status page show
+`working / max_working` per provider. `FLOCK_MAX_WORKING_ENFORCE=0` on the controller is an
+escape hatch: report only, no queueing.
 
 ## Status
 

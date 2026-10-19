@@ -136,13 +136,14 @@ class Store:
 
     def _migrate(self) -> None:
         """Additive column changes for databases created by an older version."""
+        types_cols = {r["name"] for r in self._q("PRAGMA table_info(types)")}
+        if "launch_error" not in types_cols:  # last worker-launch error per type
+            self._x("ALTER TABLE types ADD COLUMN launch_error TEXT")
+            self._x("ALTER TABLE types ADD COLUMN launch_failures INTEGER NOT NULL DEFAULT 0")
+
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
-        cols = {r["name"] for r in self._q("PRAGMA table_info(types)")}
-        if "launch_error" not in cols:
-            self._x("ALTER TABLE types ADD COLUMN launch_error TEXT")
-            self._x("ALTER TABLE types ADD COLUMN launch_failures INTEGER NOT NULL DEFAULT 0")
 
     # ----------------------------------------------------------------- low level
 

@@ -467,9 +467,35 @@ def test_transient_launch_errors_back_off_with_a_cap(store, jobs, clock, tick):
 
 
 def test_launch_refused_classification():
-    from flock.controller.jobs import LaunchRefused, launch_refused
+    from flock.controller.reconcile import launch_refused
 
     assert launch_refused(_HubError(400, "x")) and launch_refused(_HubError(422, "x"))
-    assert launch_refused(LaunchRefused("x"))
+    BadRequestError = type("BadRequestError", (Exception,), {})
+    assert launch_refused(BadRequestError("x"))
     assert not launch_refused(_HubError(429, "x")) and not launch_refused(_HubError(503, "x"))
     assert not launch_refused(RuntimeError("x")) and not launch_refused(ConnectionError("x"))
+
+
+def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, tick):
+    """A capped provider's resume prompt is queued after the assign (pending_prompts), so the
+    controller's max_working admission sees it like any API prompt."""
+    from flock.models import SwarmSpec
+
+    spec = SwarmSpec.model_validate({
+        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+        "providers": {"p": {"type": "openai_compat", "base_url": "http://fake/v1",
+                            "api_key_env": "K", "self_hosted": True, "max_working": 1}},
+        "types": {"researcher": {"harness": "codex", "model": "p:m", "replicas": 1,
+                                 "resume_prompt": "go on"}}})
+    store.put_swarm(spec, 0)
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "working", "t-9")])
+    jobs.set_stage(jobs.job_for(W0), "ERROR", "OOM killed")
+    clock.advance(100)
+    assert "crash" in kinds(tick())
+    clock.advance(31)
+    assert "launch" in kinds(tick())
+    (assign,) = queued(store, W0)
+    assert assign.agent == "researcher-0000" and assign.resume_prompt is None
+    (held,) = store.prompts_for_worker(W0)
+    assert held["agent"] == "researcher-0000" and '"text":"go on"' in held["body"]
