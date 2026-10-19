@@ -81,6 +81,16 @@ Workers bootstrap from a stock `node:22-bookworm` image: they install the
 pinned harness CLI and the wheel from the bucket. Every secret a spec names
 must be in the controller's environment.
 
+One key, three places. The names differ only for the Anthropic key:
+
+| Your shell (`deploy-space.sh` reads) | Space secret / controller env | Spec `secrets:` |
+| --- | --- | --- |
+| `ANTHROPIC_KEY` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
+| `HF_TOKEN` | `HF_TOKEN` | `HF_TOKEN` (workers need it for the wheel and the bucket) |
+| `FLOCK_TOKEN` | `FLOCK_TOKEN` | never: the controller passes it to workers itself |
+
+Running the controller locally, export the middle column (`ANTHROPIC_API_KEY`).
+
 ### Declare and drive a swarm
 
 ```yaml
