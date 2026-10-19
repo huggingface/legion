@@ -78,6 +78,40 @@ class Worker(threading.Thread):
         conn.close()
 
 
+def cpu_seconds(pid: int) -> float:
+    """utime + stime of a process (Linux /proc), in seconds."""
+    with open(f"/proc/{pid}/stat") as fh:
+        f = fh.read().rsplit(")", 1)[1].split()
+    return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+
+
+class Poller(threading.Thread):
+    """Dashboard-like reads every --poll-every s (progress page / driver), timed separately."""
+
+    def __init__(self, url, paths, every, stop_at):
+        super().__init__(daemon=True)
+        u = urllib.parse.urlparse(url)
+        self.host, self.port, self.paths, self.every, self.stop_at = (
+            u.hostname,
+            u.port or 80,
+            paths,
+            every,
+            stop_at,
+        )
+        self.lat: dict[str, list[float]] = {p: [] for p in paths}
+
+    def run(self):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=30)
+        while time.monotonic() < self.stop_at:
+            for p in self.paths:
+                t0 = time.perf_counter()
+                conn.request("GET", p)
+                conn.getresponse().read()
+                self.lat[p].append(time.perf_counter() - t0)
+            time.sleep(self.every)
+        conn.close()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--url", default=os.environ.get("CANVAS_URL", "http://127.0.0.1:8765"))
@@ -85,16 +119,27 @@ def main() -> None:
     ap.add_argument("--rate", type=float, default=1.0, help="HTTP calls/s per worker")
     ap.add_argument("--duration", type=float, default=60.0)
     ap.add_argument("-n", type=int, default=None, help="pixels per claim (server default)")
+    ap.add_argument(
+        "--poll", default="", help="comma list of GET paths polled every --poll-every s"
+    )
+    ap.add_argument("--poll-every", type=float, default=10.0)
+    ap.add_argument("--pid", type=int, default=0, help="server pid: report its CPU use")
     a = ap.parse_args()
     token = os.environ.get("CANVAS_TOKEN", "")
     stop_at = time.monotonic() + a.duration
     ws = [Worker(i, a, stop_at, token) for i in range(a.workers)]
     t0 = time.monotonic()
+    cpu0 = cpu_seconds(a.pid) if a.pid else None
+    poller = Poller(a.url, [p for p in a.poll.split(",") if p], a.poll_every, stop_at)
+    if poller.paths:
+        poller.start()
     for w in ws:
         w.start()
     for w in ws:
         w.join()
     el = time.monotonic() - t0
+    if poller.paths:
+        poller.join()
     lat = {k: [x for w in ws for x in w.lat[k]] for k in ("claim", "paint")}
     allx = lat["claim"] + lat["paint"]
     codes: dict[int, int] = {}
@@ -114,6 +159,14 @@ def main() -> None:
             f"p95={pct(xs, 95) * 1e3:6.1f}ms p99={pct(xs, 99) * 1e3:6.1f}ms "
             f"max={max(xs, default=0) * 1e3:6.1f}ms"
         )
+    for p, xs in poller.lat.items():
+        print(
+            f"  poll {p}: n={len(xs)} p50={pct(xs, 50) * 1e3:.1f}ms "
+            f"max={max(xs, default=0) * 1e3:.1f}ms"
+        )
+    if cpu0 is not None:
+        used = cpu_seconds(a.pid) - cpu0
+        print(f"server cpu: {used:.1f} s over {el:.1f} s = {100 * used / el:.0f}% of one core")
     print(
         f"useful pixels painted={sum(w.useful for w in ws)} "
         f"({sum(w.useful for w in ws) / el:.0f} px/s)"

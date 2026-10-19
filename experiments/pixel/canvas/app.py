@@ -253,7 +253,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/agents/active")
-    def agents_active(request: Request, window: float = Query(10.0, gt=0, le=3600)):
+    async def agents_active(request: Request, window: float = Query(10.0, gt=0, le=3600)):
         reader(request)
         names = world.active(window)
         return {"window_s": window, "count": len(names), "agents": names}
@@ -266,18 +266,18 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------------ writes
 
     @app.post("/claim")
-    def claim(request: Request, body: ClaimBody | None = None):
+    async def claim(request: Request, body: ClaimBody | None = None):
         agent = writer(request)
         return world.claim(agent, body.n if body else None)
 
     @app.post("/release")
-    def release(request: Request, body: ReleaseBody | None = None):
+    async def release(request: Request, body: ReleaseBody | None = None):
         agent = writer(request)
         pts = None if body is None or body.pixels is None else [(p.x, p.y) for p in body.pixels]
         return {"released": world.release(agent, pts)}
 
     @app.post("/paint")
-    def paint(request: Request, body: PaintBody):
+    async def paint(request: Request, body: PaintBody):
         agent = writer(request)
         px = []
         for p in body.pixels:
@@ -329,12 +329,12 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     # ----------------------------------------------------------- score/status
 
     @app.get("/score")
-    def score(request: Request, agents: bool = True):
+    async def score(request: Request, agents: bool = True):
         reader(request)
         return world.score(agents=agents)
 
     @app.get("/status")
-    def status(request: Request):
+    async def status(request: Request):
         reader(request)
         out = world.status()
         out["auth"] = {

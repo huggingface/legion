@@ -199,7 +199,31 @@ Default server settings (rate limit 2/s/agent) for the 100 x 1 run; rate limit o
 | 100 x 5/s, 20 s | 499.6 req/s | 1.0 ms | 1.6 ms | 3.0 ms | 0 |
 | 200 x 10/s, 20 s (saturation) | 1,086 req/s of 2,000 offered | 173 ms | 219 ms | 489 ms | 0 |
 
-So one process is ~10x the 100 req/s target before queueing. Restart reload: 15.9k log entries in
+### 1k painters (2026-10-20)
+
+1,000 loadgen workers (one thread and keep-alive connection each, rate limit default 2/s/agent),
+10 px per paint. A poller reads `/agents.png`, `/agents/active`, `/mask.png?style=overlay`,
+`/canvas.png`, `/score` and `/status` every 10 s throughout. CPU is the canvas process
+(`--pid`, /proc). The hot routes (`claim`, `paint`, `release`, `score`, `status`,
+`/agents/active`) are now `async def`; the threadpool hand-off was the limit before.
+
+| run | achieved | p50 | p95 | p99 | canvas CPU | polls p50 (agents.png / mask / canvas.png) |
+|---|---|---|---|---|---|---|
+| 1,000 x 0.4/s, 60 s (sync routes) | 399.5 req/s | 2.5 ms | 5.8 ms | 66 ms | 60% of a core | 45 / 40 / 28 ms |
+| **1,000 x 0.4/s, 60 s (async)** | **399.6 req/s** | 1.9 ms | **3.7 ms** | 42 ms | **49%** | 75 / 44 / 30 ms |
+| 1,000 x 0.8/s, 45 s (sync routes) | 675 of 800 (saturated) | 1,475 ms | 1,694 ms | 1,740 ms | 111% | ~1.6 s |
+| **1,000 x 0.8/s, 45 s (async)** | **798.6 req/s** | 2.1 ms | **38 ms** | 241 ms | **79%** | 53 / 44 / 30 ms |
+| 1,000 x 1.2/s, 30 s (async) | 865 of 1,200 (saturated) | 1,142 ms | 1,341 ms | 1,391 ms | 101% | - |
+
+- One process holds 400 req/s with room to spare. It holds **800 req/s**, which is what a
+  claim + paint pair per step at ~400 model calls/s means. It saturates at **~865 req/s** here,
+  with the loadgen's 1,000 threads on the same 8-core box.
+- So the 1k run fits in one canvas process if the swarm reaches the ~400 steps/s wanted. It would
+  not fit if all three GPUs' ~480 calls/s (960 canvas req/s) were used; that needs sharding
+  (README "Scaling", a separate task).
+- Run 1 measured 0.23 steps/s per agent, which would be 234 steps/s and ~470 req/s at 1k.
+
+Single-process numbers at 100 agents: one process is ~10x the 100 req/s target before queueing. Restart reload: 15.9k log entries in
 1.0 s (~65 us/entry; the 622,780-px work set at 10 px/call is ~62k entries, ~4 s). Log size ~380 B
 per 10-px entry (~24 MB for a full run). At 100 agents x 1 call/s alternating claim/paint, 10 px per
 paint, the work set takes ~21 min of pure painting (~35 min with `CANVAS_BACKGROUND_IS_WORK=1`).

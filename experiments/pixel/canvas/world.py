@@ -751,7 +751,9 @@ class World:
         with self.lock:
             if self._log_fh is not None:
                 self._log_fh.flush()
-                os.fsync(self._log_fh.fileno())
+                fd = self._log_fh.fileno()
+            else:
+                fd = None
             payload = {
                 "seq": np.int64(self.seq),
                 "head": np.int64(self.head),
@@ -761,6 +763,11 @@ class World:
                 "regions": np.array(json.dumps(list(self.regions.values()))),
             }
             canvas = self.canvas.copy()
+        if fd is not None:
+            try:
+                os.fsync(fd)  # outside the lock: requests keep flowing while the disk syncs
+            except OSError:
+                pass
         tmp = self.cfg.data_dir / (SNAP_NAME + ".tmp.npz")
         np.savez_compressed(tmp, **payload)
         os.replace(tmp, self.cfg.data_dir / SNAP_NAME)
