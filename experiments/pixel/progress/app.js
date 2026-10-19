@@ -361,11 +361,13 @@ if (typeof document !== 'undefined') (() => {
     const pts = sets.flatMap((s) => s.xs.map((x, i) => [x, s.ys[i]]).filter((q) => q[1] !== null));
     c.fillStyle = css('--muted'); c.strokeStyle = css('--line'); c.font = '11px system-ui'; c.lineWidth = 1;
     if (!pts.length) { c.fillText('no data', pad.l, H / 2); return; }
-    const x1 = Math.max(1, ...pts.map((q) => q[0])), top = Math.max(1e-9, ...pts.map((q) => q[1])) * 1.1;
+    // Short runs (the 1k run paints for ~3 min): seconds on the axis below 10 minutes.
+    const span = Math.max(...pts.map((q) => q[0])), secs = span < 10;
+    const x1 = Math.max(secs ? 0.05 : 1, span), top = Math.max(1e-9, ...pts.map((q) => q[1])) * 1.1;
     const X = (v) => pad.l + v / x1 * (W - pad.l - pad.r), Y = (v) => H - pad.b - v / top * (H - pad.t - pad.b);
     for (const f of [0, 0.5, 1]) { const y = Y(top * f); c.beginPath(); c.moveTo(pad.l, y); c.lineTo(W - pad.r, y); c.stroke();
       c.fillText(fmt(top * f, top >= 10 ? 0 : 1), 2, y + 4); }
-    c.fillText(`${fmt(x1, 0)} min`, W - pad.r - 44, H - 4);
+    c.fillText(secs ? `${fmt(x1 * 60, 0)} s` : `${fmt(x1, 0)} min`, W - pad.r - 44, H - 4);
     for (const s of sets) {
       c.strokeStyle = css(s.color); c.lineWidth = 2; c.setLineDash(s.dash ? [5, 4] : []); c.beginPath();
       let on = false;

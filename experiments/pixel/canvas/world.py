@@ -873,7 +873,7 @@ class World:
 
     # ------------------------------------------------------------------ masks
 
-    def mask_png(self, kind: str = "painted", style: str = "grey") -> bytes:
+    def mask_png(self, kind: str = "painted", style: str = "grey", fresh: bool = False) -> bytes:
         """PNG of painted (touched at least once) or done pixels, cached per ``mask_every``
         paint calls. style grey: 1-bit, white = yes. style overlay: RGBA, magenta = yes,
         transparent elsewhere, so a page can lay it over the canvas with no pixel work."""
@@ -881,7 +881,7 @@ class World:
             raise PaintError("mask: kind must be painted|done, style grey|overlay")
         key = (kind, style)
         with self.lock:
-            hit = self._mask_cache.get(key)
+            hit = None if fresh else self._mask_cache.get(key)
             if hit is not None and self.seq - hit[0] < max(1, self.cfg.mask_every):
                 return hit[1]
             m = (self.painted if kind == "painted" else self.match & self.work_mask).copy()
@@ -924,10 +924,10 @@ class World:
         img[on] = col[owner[on]]
         return img.reshape(self.h, self.w, 3)
 
-    def agents_png(self) -> bytes:
+    def agents_png(self, fresh: bool = False) -> bytes:
         """Each painted pixel in its last painter's colour; cached per ``mask_every`` paints."""
         with self.lock:
-            hit = self._mask_cache.get(("agents", ""))
+            hit = None if fresh else self._mask_cache.get(("agents", ""))
             if hit is not None and self.seq - hit[0] < max(1, self.cfg.mask_every):
                 return hit[1]
             owner, seq = self.owner.copy(), self.seq

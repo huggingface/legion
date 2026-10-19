@@ -36,6 +36,7 @@ def test_agent_map_is_cached_per_n_paints(mk):
     first = c.get("/agents.png").content
     c.post("/paint", json={"pixels": [{"x": 1, "y": 1, "hex": hx(t[1, 1])}]}, headers=H("a"))
     assert c.get("/agents.png").content == first  # within 5 paints: cached
+    assert c.get("/agents.png?fresh=1").content != first  # the driver's final upload
     for _ in range(5):
         c.post("/paint", json={"pixels": [{"x": 2, "y": 2, "hex": "000000"}]}, headers=H("a"))
     assert c.get("/agents.png").content != first

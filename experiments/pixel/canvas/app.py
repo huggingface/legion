@@ -237,19 +237,19 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/mask.png")
-    def mask_png(request: Request, kind: str = "painted", style: str = "grey"):
+    def mask_png(request: Request, kind: str = "painted", style: str = "grey", fresh: bool = False):
         reader(request)
         return Response(
-            world.mask_png(kind, style),
+            world.mask_png(kind, style, fresh),
             media_type="image/png",
             headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/agents.png")
-    def agents_png(request: Request):
+    def agents_png(request: Request, fresh: bool = False):
         reader(request)
         return Response(
-            world.agents_png(), media_type="image/png", headers={"Cache-Control": "no-store"}
+            world.agents_png(fresh), media_type="image/png", headers={"Cache-Control": "no-store"}
         )
 
     @app.get("/agents/active")
