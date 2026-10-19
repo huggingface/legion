@@ -71,6 +71,7 @@
       <label>agent filter <input id="agent" placeholder="all" style="width:120px"></label>
       <label><input type="checkbox" id="showT" checked> target</label>
       <label><input type="checkbox" id="showM"> painted mask</label>
+      <label><input type="checkbox" id="showA"> agent map</label>
       <button id="live">Jump to live</button>
     </div>
     <p class="stat" id="err"></p>
@@ -119,7 +120,7 @@ async function render() {
   busy = true;
   try {
     $('slider').value = t; $('tbox').value = t;
-    await setImg($('frame'), `/replay/frame?t=${t}`);
+    await setImg($('frame'), $('showA').checked ? `/replay/agents?t=${t}` : `/replay/frame?t=${t}`);
     const m = $('showM').checked;
     $('frame').style.filter = m ? 'brightness(.35)' : '';
     $('mask').style.display = m ? 'block' : 'none';
@@ -145,6 +146,7 @@ $('live').addEventListener('click', async () => { await refreshStatus(); go(maxS
 $('showT').addEventListener('change', e => { $('tfig').style.display = e.target.checked ? '' : 'none'; });
 $('agent').addEventListener('change', render);
 $('showM').addEventListener('change', render);
+$('showA').addEventListener('change', render);
 $('play').addEventListener('click', () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; tick(); });
 async function tick() {
   if (!playing) return;

@@ -245,6 +245,19 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/agents.png")
+    def agents_png(request: Request):
+        reader(request)
+        return Response(
+            world.agents_png(), media_type="image/png", headers={"Cache-Control": "no-store"}
+        )
+
+    @app.get("/agents/active")
+    def agents_active(request: Request, window: float = Query(10.0, gt=0, le=3600)):
+        reader(request)
+        names = world.active(window)
+        return {"window_s": window, "count": len(names), "agents": names}
+
     @app.get("/target.png")
     def target_png(request: Request):
         reader(request)
@@ -363,6 +376,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             media_type="image/png",
             headers={"Cache-Control": "public, max-age=3600" if t <= world.seq else "no-store"},
         )
+
+    @app.get("/replay/agents")
+    def replay_agents(request: Request, t: int = 0):
+        reader(request)
+        return Response(png_bytes(world.replay_agents(t)), media_type="image/png")
 
     @app.get("/replay/mask")
     def replay_mask(request: Request, t: int = 0, style: str = "overlay"):

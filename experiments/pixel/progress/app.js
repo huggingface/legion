@@ -7,18 +7,22 @@ PX.parseLog = function (text) {
   let total = 0;
   const entries = lines.map((l) => JSON.parse(l));
   for (const e of entries) total += e.px.length;
-  const idx = new Int32Array(total), rgb = new Uint8Array(total * 3);
+  const idx = new Int32Array(total), rgb = new Uint8Array(total * 3), aid = new Int32Array(total);
   const ends = new Int32Array(entries.length + 1);
   const meta = new Array(entries.length + 1);
-  return { entries, idx, rgb, ends, meta, total, filled: false };
+  return { entries, idx, rgb, aid, names: [], ends, meta, total, filled: false };
 };
 
 PX.index = function (log, width) {
   // Fill idx/rgb/ends once; refused pixels were never applied, so they are skipped.
   let k = 0;
+  const ids = new Map();
   log.entries.forEach((e, i) => {
+    let a = ids.get(e.agent);
+    if (a === undefined) { a = log.names.length; ids.set(e.agent, a); log.names.push(e.agent); }
     for (const p of e.px) {
       if (p[3] === 'refused') continue;
+      log.aid[k] = a;
       log.idx[k] = p[1] * width + p[0];
       const h = p[2];
       log.rgb[3 * k] = parseInt(h.slice(0, 2), 16);
@@ -92,6 +96,51 @@ PX.Replayer.prototype.maskFrame = function (t) {
   for (let j = ends[k]; j < ends[t]; j++) m[idx[j]] = 1;
   return m;
 };
+// Stable agent colour; mirrors canvas/world.py agent_colour exactly (FNV-1a 32, golden ratio).
+PX.agentColour = function (name) {
+  let h = 0x811c9dc5;
+  for (const b of new TextEncoder().encode(name)) h = Math.imul(h ^ b, 0x01000193) >>> 0;
+  const hue = (h * 0.6180339887498949) % 1.0;
+  const s = [0.6, 0.8, 1.0][(h >>> 8) % 3], v = [0.75, 0.9, 1.0][(h >>> 16) % 3];
+  const h6 = hue * 6.0, i = Math.floor(h6) % 6, f = h6 - Math.floor(h6);
+  const p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+  const [r, g, b] = [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i];
+  return [Math.floor(r * 255 + 0.5), Math.floor(g * 255 + 0.5), Math.floor(b * 255 + 0.5)];
+};
+// Last painter per pixel at log position t (-1 = unpainted), same keyframe scheme.
+PX.Replayer.prototype.ownerKeyframe = function (k) {
+  this.okf = this.okf || new Map();
+  const blank = () => new Int32Array(this.w * this.h).fill(-1);
+  if (k === 0) return blank();
+  if (this.okf.has(k)) { const v = this.okf.get(k); this.okf.delete(k); this.okf.set(k, v); return v; }
+  let prev = 0;
+  for (const c of this.okf.keys()) if (c < k && c > prev) prev = c;
+  const o = prev === 0 ? blank() : new Int32Array(this.okf.get(prev));
+  const { idx, aid, ends } = this.log;
+  for (let j = ends[prev]; j < ends[k]; j++) o[idx[j]] = aid[j];
+  this.okf.set(k, o);
+  while (this.okf.size > this.max) this.okf.delete(this.okf.keys().next().value);
+  return o;
+};
+PX.Replayer.prototype.ownerFrame = function (t) {
+  t = Math.max(0, Math.min(this.length, t | 0));
+  const k = Math.floor(t / this.every) * this.every;
+  const o = new Int32Array(this.ownerKeyframe(k));
+  const { idx, aid, ends } = this.log;
+  for (let j = ends[k]; j < ends[t]; j++) o[idx[j]] = aid[j];
+  return o;
+};
+PX.Replayer.prototype.agentFrame = function (t) {
+  if (!this.palette) this.palette = this.log.names.map(PX.agentColour);
+  const o = this.ownerFrame(t), buf = new Uint8ClampedArray(this.blank);
+  for (let i = 0; i < o.length; i++) {
+    if (o[i] < 0) continue;
+    const c = this.palette[o[i]];
+    buf[4 * i] = c[0]; buf[4 * i + 1] = c[1]; buf[4 * i + 2] = c[2];
+  }
+  return buf;
+};
+
 // Painted pixels in magenta over a dimmed frame (RGBA, in place).
 PX.overlayMask = function (rgba, mask, dim = 0.35) {
   for (let i = 0; i < mask.length; i++) {
@@ -109,6 +158,40 @@ PX.gunzipText = async function (buf) {
   return await new Response(stream).text();
 };
 
+PX.smooth = function (xs, k = 3) {
+  return xs.map((_, i) => { const w = xs.slice(Math.max(0, i - k + 1), i + 1).filter((v) => v !== null);
+    return w.length ? w.reduce((a, b) => a + b, 0) / w.length : null; });
+}
+PX.series = function (rows) {
+  // Per-row derived metrics; px/s and calls/s from deltas between driver ticks.
+  return rows.map((r, i) => {
+    const p = rows[i - 1], dt = p ? r.elapsed_s - p.elapsed_s : 0;
+    const st = r.agents_by_state || {};
+    const idle = r.idle_pct ?? (r.agents ? 100 * (st.idle || 0) / r.agents : null);
+    return {
+      m: r.elapsed_s / 60,
+      px: p && dt > 0 ? (r.work_done - p.work_done) / dt : null,
+      calls: r.paint_calls_per_s ?? (p && dt > 0 ? (r.seq - p.seq) / dt : null),
+      active: r.active_agents ?? st.working ?? null,
+      idle,
+      gap: r.step_gap_p50_s ?? null,
+      model: r.model_p50_s ?? null,
+    };
+  });
+};
+PX.summary = function (run, rows) {
+  const f = rows[0], l = rows[rows.length - 1];
+  if (!f || !l) return null;
+  const span = Math.max(1, l.elapsed_s - f.elapsed_s), ser = PX.series(rows);
+  const px = PX.smooth(ser.map((s) => s.px)).filter((v) => v !== null);
+  return {
+    duration_min: ((run.finished_at && run.started_at) ? (run.finished_at - run.started_at) : span) / 60,
+    px_mean: (l.work_done - f.work_done) / span, px_peak: px.length ? Math.max(...px) : null,
+    calls_mean: (l.seq - f.seq) / span, agents: Math.max(...rows.map((r) => r.agents || 0)),
+    gpus: run.gpus ?? null, cost: (l.gpu_usd_est || 0) + (l.flock_cost_usd || 0), done: l.done_pct,
+  };
+};
+
 if (typeof module !== 'undefined') module.exports = PX;
 
 // ------------------------------------------------------------------- UI
@@ -117,11 +200,15 @@ if (typeof document !== 'undefined') (() => {
   const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(d);
   const bust = () => `ts=${Date.now()}`;
   let runs = [], run = null, liveTimer = null, progTimer = null, replayer = null, playing = false;
-  let maskOn = false;
-  function setMask(on) {
-    maskOn = on;
-    for (const id of ['livefig', 'replayfig']) $(id).classList.toggle('masked', on);
-    if (on && run && run.canvas_url) $('livemask').src = `${run.canvas_url}/mask.png?style=overlay&${bust()}`;
+  let view = 'canvas'; // canvas | mask | agents
+  function liveSrc(base) { return `${base}/${view === 'agents' ? 'agents.png' : 'canvas.png'}?${bust()}`; }
+  function setView(v) {
+    view = v;
+    for (const id of ['livefig', 'replayfig']) $(id).classList.toggle('masked', v === 'mask');
+    if (run && run.canvas_url) {
+      $('liveimg').src = liveSrc(run.canvas_url);
+      if (v === 'mask') $('livemask').src = `${run.canvas_url}/mask.png?style=overlay&${bust()}`;
+    }
     if (replayer) draw(+$('slider').value);
   }
 
@@ -178,8 +265,8 @@ if (typeof document !== 'undefined') (() => {
     try {
       const [score, status] = await Promise.all([getJSON(`${base}/score?${bust()}`), getJSON(`${base}/status?${bust()}`)]);
       tiles(score, status);
-      $('liveimg').src = `${base}/canvas.png?${bust()}`;
-      if (maskOn) $('livemask').src = `${base}/mask.png?style=overlay&${bust()}`;
+      $('liveimg').src = liveSrc(base);
+      if (view === 'mask') $('livemask').src = `${base}/mask.png?style=overlay&${bust()}`;
       $('livecap').textContent = `live, every 10 s · ${new Date().toLocaleTimeString()} · seq ${status.seq}`;
       $('liveerr').textContent = '';
     } catch (e) {
@@ -229,8 +316,8 @@ if (typeof document !== 'undefined') (() => {
 
   function draw(t) {
     if (!replayer) return;
-    const buf = replayer.frame(t);
-    if (maskOn) PX.overlayMask(buf, replayer.maskFrame(t));
+    const buf = view === 'agents' ? replayer.agentFrame(t) : replayer.frame(t);
+    if (view === 'mask') PX.overlayMask(buf, replayer.maskFrame(t));
     $('replay').getContext('2d').putImageData(new ImageData(buf, replayer.w, replayer.h), 0, 0);
     const e = replayer.log.entries[t - 1];
     $('replaycap').textContent = `t = ${t} / ${replayer.length}`;
@@ -265,8 +352,84 @@ if (typeof document !== 'undefined') (() => {
     if (run.final) loadReplay();
   }
 
+  // ---------------------------------------------------------------- compare
+  function chartXY(el, sets) {
+    const dpr = window.devicePixelRatio || 1, W = el.clientWidth, H = el.clientHeight;
+    el.width = W * dpr; el.height = H * dpr;
+    const c = el.getContext('2d'); c.scale(dpr, dpr); c.clearRect(0, 0, W, H);
+    const pad = { l: 40, r: 8, t: 8, b: 18 };
+    const pts = sets.flatMap((s) => s.xs.map((x, i) => [x, s.ys[i]]).filter((q) => q[1] !== null));
+    c.fillStyle = css('--muted'); c.strokeStyle = css('--line'); c.font = '11px system-ui'; c.lineWidth = 1;
+    if (!pts.length) { c.fillText('no data', pad.l, H / 2); return; }
+    const x1 = Math.max(1, ...pts.map((q) => q[0])), top = Math.max(1e-9, ...pts.map((q) => q[1])) * 1.1;
+    const X = (v) => pad.l + v / x1 * (W - pad.l - pad.r), Y = (v) => H - pad.b - v / top * (H - pad.t - pad.b);
+    for (const f of [0, 0.5, 1]) { const y = Y(top * f); c.beginPath(); c.moveTo(pad.l, y); c.lineTo(W - pad.r, y); c.stroke();
+      c.fillText(fmt(top * f, top >= 10 ? 0 : 1), 2, y + 4); }
+    c.fillText(`${fmt(x1, 0)} min`, W - pad.r - 44, H - 4);
+    for (const s of sets) {
+      c.strokeStyle = css(s.color); c.lineWidth = 2; c.setLineDash(s.dash ? [5, 4] : []); c.beginPath();
+      let on = false;
+      s.xs.forEach((x, i) => { const y = s.ys[i]; if (y === null) { on = false; return; }
+        on ? c.lineTo(X(x), Y(y)) : c.moveTo(X(x), Y(y)); on = true; });
+      c.stroke();
+    }
+    c.setLineDash([]);
+  }
+  async function loadRows(r) {
+    try {
+      const res = await fetch(`runs/${r.id}/progress.jsonl?${bust()}`, { cache: 'no-store' });
+      return res.ok ? (await res.text()).split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+    } catch (e) { return []; }
+  }
+  async function renderCompare() {
+    const A = runs.find((r) => r.id === $('cmpA').value), B = runs.find((r) => r.id === $('cmpB').value);
+    const [ra, rb] = await Promise.all([A ? loadRows(A) : [], B ? loadRows(B) : []]);
+    const sa = PX.series(ra), sb = PX.series(rb);
+    const sets = (key, sm) => [
+      { xs: sa.map((s) => s.m), ys: sm ? PX.smooth(sa.map((s) => s[key])) : sa.map((s) => s[key]), color: '--a' },
+      { xs: sb.map((s) => s.m), ys: sm ? PX.smooth(sb.map((s) => s[key])) : sb.map((s) => s[key]), color: '--b', dash: true },
+    ];
+    chartXY($('cPx'), sets('px', true)); chartXY($('cCalls'), sets('calls', true));
+    chartXY($('cActive'), sets('active')); chartXY($('cIdle'), sets('idle'));
+    chartXY($('cLat'), [...sets('gap'), ...sets('model').map((s) => ({ ...s, color: s.color === '--a' ? '--ok' : '--bad' }))]);
+    const ua = A && PX.summary(A, ra), ub = B && PX.summary(B, rb);
+    const rowsT = [['', A ? A.name || A.id : '-', B ? B.name || B.id : '-'],
+      ['duration (min)', ua && fmt(ua.duration_min, 1), ub && fmt(ub.duration_min, 1)],
+      ['done %', ua && fmt(ua.done, 1), ub && fmt(ub.done, 1)],
+      ['px/s mean', ua && fmt(ua.px_mean, 0), ub && fmt(ub.px_mean, 0)],
+      ['px/s peak (30 s avg)', ua && fmt(ua.px_peak, 0), ub && fmt(ub.px_peak, 0)],
+      ['paint calls/s mean', ua && fmt(ua.calls_mean, 1), ub && fmt(ub.calls_mean, 1)],
+      ['agents', ua && ua.agents, ub && ub.agents], ['GPUs', ua && (ua.gpus ?? '-'), ub && (ub.gpus ?? '-')],
+      ['cost (GPU est + flock), $', ua && fmt(ua.cost), ub && fmt(ub.cost)]];
+    $('cmpTable').innerHTML = rowsT.map((r, i) => `<tr>${r.map((v) => i ? `<td>${v ?? '-'}</td>` : `<th>${v}</th>`).join('')}</tr>`).join('');
+    for (const [run, f, a, cap] of [[A, 'fA', 'aA', 'fAc'], [B, 'fB', 'aB', 'fBc']]) {
+      const base = run && run.final;
+      $(f).src = base ? `${base}/canvas.png` : (run && run.canvas_url ? `${run.canvas_url}/canvas.png?${bust()}` : '');
+      $(a).src = base ? `${base}/agents.png` : (run && run.canvas_url ? `${run.canvas_url}/agents.png?${bust()}` : '');
+      $(cap).textContent = run ? `${run.name || run.id} (${run.status})` : '-';
+    }
+  }
+  function showTab(name) {
+    const cmp = name === 'compare';
+    $('tabRun').classList.toggle('on', !cmp); $('tabCompare').classList.toggle('on', cmp);
+    $('compare').hidden = !cmp; $('main').hidden = cmp || !runs.length;
+    for (const id of ['run', 'pill', 'when']) $(id).style.display = cmp ? 'none' : '';
+    if (cmp) {
+      const opts = runs.slice().reverse().map((r) => `<option value="${r.id}">${r.name || r.id} (${r.status})</option>`).join('');
+      if (!$('cmpA').options.length) {
+        $('cmpA').innerHTML = opts; $('cmpB').innerHTML = opts;
+        $('cmpA').value = runs[runs.length - 1]?.id ?? ''; $('cmpB').value = runs[runs.length - 2]?.id ?? runs[0]?.id ?? '';
+      }
+      renderCompare();
+    }
+  }
+  $('tabRun').addEventListener('click', () => showTab('run'));
+  $('tabCompare').addEventListener('click', () => showTab('compare'));
+  $('cmpA').addEventListener('change', renderCompare);
+  $('cmpB').addEventListener('change', renderCompare);
+
   $('run').addEventListener('change', (e) => select(e.target.value));
-  $('masktoggle').addEventListener('change', (e) => setMask(e.target.checked));
+  $('view').addEventListener('change', (e) => setView(e.target.value));
   $('slider').addEventListener('input', (e) => draw(+e.target.value));
   $('play').addEventListener('click', () => {
     playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play';
@@ -286,7 +449,9 @@ if (typeof document !== 'undefined') (() => {
     if (!Array.isArray(runs) || !runs.length) { $('empty').hidden = false; return; }
     $('main').hidden = false;
     $('run').innerHTML = runs.slice().reverse().map((r) => `<option value="${r.id}">${r.name || r.id} (${r.status})</option>`).join('');
-    const want = new URLSearchParams(location.search).get('run');
+    const qp = new URLSearchParams(location.search);
+    const want = qp.get('run');
+    if (qp.get('tab') === 'compare') setTimeout(() => showTab('compare'), 0);
     select(want || runs[runs.length - 1].id);
     $('run').value = run.id;
     setInterval(async () => { // pick up status changes (finished, new final files)

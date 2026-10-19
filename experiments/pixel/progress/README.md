@@ -20,7 +20,16 @@ with front matter.
   and fetches `{canvas_url}/score` and `/status`. It shows done %, exact %, pixels left, MSE/PSNR,
   outcomes, req/s, claims outstanding, active agents and the top 10 agents by useful pixels.
   The canvas sends `Access-Control-Allow-Origin: *` on GET routes only.
-- **Painted mask toggle:**
+- **View selector:** canvas, painted mask, or agent map (every painted pixel in its last
+  painter's colour; live from `/agents.png`, in the replay from the log, same colours as the
+  server: `agentColour` mirrors `canvas/world.py::agent_colour`, tested).
+- **Compare tab** (`?tab=compare`):
+  - Pick two runs; the latest two are the default.
+  - Overlaid series on minutes since start: px/s, paint calls/s, active agents, idle %, step gap
+    p50, and model p50 when the driver records it.
+  - A summary table: duration, px/s mean and peak, paint calls/s, agents, GPUs, cost.
+  - Final canvases and agent maps side by side, from `final/<id>/agents.png`.
+- **Painted mask:**
   - Live view: lays the canvas's `/mask.png?style=overlay` (magenta = painted, transparent elsewhere) over the dimmed live image. The server renders it, so the browser does no per-pixel work. It refreshes every 10 s with the canvas.
   - Replay: the same mask at position t, computed from the log with the same keyframe scheme.
 - **Time series** from `runs/<id>/progress.jsonl`, drawn with canvas 2D (no library):

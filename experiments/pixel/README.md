@@ -93,9 +93,12 @@ All bodies are JSON. Errors are `{"error": "<short actionable message>"}` with 4
 | `GET /canvas.png`, `GET /target.png` | full images |
 | `GET /mask.png?kind=painted\|done&style=grey\|overlay` | painted (touched) or done pixels; grey = 1-bit PNG, overlay = magenta on transparent RGBA; cached per `CANVAS_MASK_EVERY` paints |
 | `GET /replay/mask?t=<seq>&style=` | painted mask after log entry t (from the log) |
+| `GET /agents.png` | agent map: each painted pixel in its last painter's colour (stable FNV-1a hash of the name -> hue, saturation, value), unpainted = blank; cached per `CANVAS_MASK_EVERY` paints |
+| `GET /replay/agents?t=<seq>` | agent map after log entry t |
+| `GET /agents/active?window=10` | `{count, agents}` with a paint call in the last `window` s (O(active): agents kept in last-paint order) |
 | `GET /cli/canvas` | the CLI source (agents install it with one python line) |
 | `GET /score?agents=true` | `exact_match_pct`, `coverage_pct`, `painted_pct`, `matched`, `todo`, `mse`, `psnr`, paint totals, per-agent counters |
-| `GET /status` | uptime, seq, agents seen/active, claims outstanding, req/s (10 s), config, auth mode |
+| `GET /status` | uptime, seq, agents seen/active, `active_agents_10s`, `step_gap_p50_s` (median time between an agent's consecutive paint calls, last 60 s), claims outstanding, req/s (10 s), config, auth mode |
 | `GET /log?after=<seq>&limit<=5000` | paint log, JSONL |
 | `GET /replay` | replay page; `GET /replay/frame?t=<seq>` = PNG of the canvas after entry t |
 | `POST /claim/region {x,y,w,h,ttl?}` | leader leases a rectangle; overlap with a live lease -> 409 |

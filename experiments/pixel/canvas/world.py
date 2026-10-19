@@ -74,6 +74,29 @@ def png_bytes(arr: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
+def _fnv1a(name: str) -> int:
+    h = 0x811C9DC5
+    for b in name.encode():
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def agent_colour(name: str) -> tuple[int, int, int]:
+    """Stable colour per agent name: FNV-1a 32 -> hue (golden-ratio spread), saturation and value
+    from other hash bits (3 x 3 levels, so 1k agents rarely collide). Mirrored exactly in
+    progress/app.js (agentColour): same doubles, round-half-up as floor(x * 255 + 0.5)."""
+    h = _fnv1a(name)
+    hue = (h * 0.6180339887498949) % 1.0
+    s = (0.6, 0.8, 1.0)[(h >> 8) % 3]
+    v = (0.75, 0.9, 1.0)[(h >> 16) % 3]
+    h6 = hue * 6.0
+    i = int(h6) % 6
+    f = h6 - int(h6)
+    p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    r, g, b = [(v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)][i]
+    return int(r * 255 + 0.5), int(g * 255 + 0.5), int(b * 255 + 0.5)
+
+
 def mask_bytes(m: np.ndarray, style: str = "grey") -> bytes:
     buf = io.BytesIO()
     if style == "overlay":
@@ -184,10 +207,14 @@ class World:
         self.match = (self._cflat == self._tflat).all(-1) & ~self.work_mask
         self.matched = int(self.match.sum())
         self.painted = np.zeros(self.n, dtype=bool)
+        self.owner = np.full(self.n, -1, dtype=np.int32)  # agent id of the last applied paint
         diff = self.canvas.astype(np.int64) - self.target.astype(np.int64)
         self.sse = int((diff * diff).sum())
         self.lease_until = np.zeros(self.n, dtype=np.float64)
         self.lease_owner = np.full(self.n, -1, dtype=np.int32)
+        self.last_paint: OrderedDict[str, float] = OrderedDict()  # oldest first
+        self.gaps: deque[tuple[float, float]] = deque(maxlen=20000)
+        self._colours = np.zeros((0, 3), np.uint8)
         self.agent_ids: dict[str, int] = {}
         self.agent_names: list[str] = []
         self.agent_leases: dict[int, list[int]] = {}
@@ -212,6 +239,7 @@ class World:
         self.r_rgb = _Grow(np.uint8, 3)
         self.r_end = _Grow(np.int64)
         self.r_end.extend([0])  # entry 0 = blank canvas
+        self.r_aid = _Grow(np.int32)  # agent id per applied paint (agent map replay)
         self.r_ts = _Grow(np.float64)
         self.r_ts.extend([0.0])
         self._offsets: list[tuple[int, int]] = []  # (seq before entry, byte offset) per 1000
@@ -589,6 +617,13 @@ class World:
         if applied_idx:
             self.r_idx.extend(applied_idx)
             self.r_rgb.extend(applied_rgb)
+            self.r_aid.extend([aid] * len(applied_idx))
+            self.owner[applied_idx] = aid
+        # Activity: agents ordered by last paint call; gaps between an agent's calls.
+        prev = self.last_paint.pop(agent, None)
+        self.last_paint[agent] = ts
+        if prev is not None:
+            self.gaps.append((ts, ts - prev))
         self.r_end.extend([self.r_idx.n])
         self.r_ts.extend([ts])
         if self.first_ts is None:
@@ -786,6 +821,8 @@ class World:
                 "last_ts": self.last_ts,
             }
         out["req_per_s_10s"] = self.req_per_s()
+        out["active_agents_10s"] = len(self.active(10.0, now))
+        out["step_gap_p50_s"] = self.step_gap_p50(60.0, now)
         out["config"] = {
             "max_pixels_per_call": self.cfg.max_pixels_per_call,
             "max_claim": self.cfg.max_claim,
@@ -853,6 +890,64 @@ class World:
         with self.lock:
             self._mask_cache[key] = (seq, data)
         return data
+
+    def active(self, window: float = 10.0, now: float | None = None) -> list[str]:
+        """Agents with a paint call in the last ``window`` s, newest first. O(active)."""
+        now = time.time() if now is None else now
+        out = []
+        with self.lock:
+            for name in reversed(self.last_paint):
+                if now - self.last_paint[name] > window:
+                    break
+                out.append(name)
+        return out
+
+    def step_gap_p50(self, window: float = 60.0, now: float | None = None) -> float | None:
+        """Median time between consecutive paint calls of the same agent, last ``window`` s."""
+        now = time.time() if now is None else now
+        with self.lock:
+            xs = [g for t, g in self.gaps if now - t <= window]
+        return round(float(np.median(xs)), 3) if xs else None
+
+    def colours(self) -> np.ndarray:
+        """Per agent id colour table (grows as agents appear). Call under the lock."""
+        if len(self._colours) < len(self.agent_names):
+            new = [agent_colour(n) for n in self.agent_names[len(self._colours) :]]
+            self._colours = np.concatenate([self._colours, np.array(new, np.uint8)])
+        return self._colours
+
+    def agent_map(self, owner: np.ndarray) -> np.ndarray:
+        img = self._blank_frame.reshape(-1, 3).copy()
+        with self.lock:
+            col = self.colours()
+        on = owner >= 0
+        img[on] = col[owner[on]]
+        return img.reshape(self.h, self.w, 3)
+
+    def agents_png(self) -> bytes:
+        """Each painted pixel in its last painter's colour; cached per ``mask_every`` paints."""
+        with self.lock:
+            hit = self._mask_cache.get(("agents", ""))
+            if hit is not None and self.seq - hit[0] < max(1, self.cfg.mask_every):
+                return hit[1]
+            owner, seq = self.owner.copy(), self.seq
+        data = png_bytes(self.agent_map(owner))
+        with self.lock:
+            self._mask_cache[("agents", "")] = (seq, data)
+        return data
+
+    def replay_agents(self, t: int) -> np.ndarray:
+        """Agent map after log entry ``t``: last painter per pixel, folded from the index."""
+        with self.lock:
+            t = max(0, min(int(t), self.seq))
+            k = int(self.r_end.view()[t])
+            idx, aid = self.r_idx.view()[:k], self.r_aid.view()[:k]
+        owner = np.full(self.n, -1, dtype=np.int32)
+        if k:
+            rev = idx[::-1]
+            u, first = np.unique(rev, return_index=True)
+            owner[u] = aid[k - 1 - first]
+        return self.agent_map(owner)
 
     def replay_mask(self, t: int) -> np.ndarray:
         """Painted mask after log entry ``t``, folded from the replay index (vectorised)."""
