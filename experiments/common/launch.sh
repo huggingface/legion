@@ -8,6 +8,8 @@
 set -euo pipefail
 NAME=${1:?name}; SCRIPT=${2:?script}; shift 2
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# Jobs only get experiments/: ship the one fake OpenAI server with them (gitignored copy).
+cp "$HERE/../tests/fake_openai.py" "$HERE/common/fake_openai.py"
 REV=${SCRIPTS_REV:-$(git -C "$HERE" rev-parse --short HEAD)-$(date +%s)}
 hf buckets sync "$HERE" "hf://buckets/cmpatino/flock/scripts/$REV" --exclude "*/out/*" -q >/dev/null
 SECRETS=(--secrets HF_TOKEN)

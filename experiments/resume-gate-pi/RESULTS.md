@@ -9,8 +9,9 @@ retries); verdict `pass: true`. Results below.
 
 ## What it checks
 
-`pi_resume.sh` drives `pi --mode rpc` through `gate.py` against `stub_openai.py` (a copy of
-`tests/fake_openai.py`) inside the same container, so no model is called and nothing is spent on
+`pi_resume.sh` drives `pi --mode rpc` through `gate.py` against `tests/fake_openai.py` (copied
+to `common/fake_openai.py` by `launch.sh`; the 2026-10-16 jobs ran an identical checked-in copy,
+`stub_openai.py`, since removed) inside the same container, so no model is called and nothing is spent on
 inference. Layout as on a worker: `PI_CODING_AGENT_DIR=/state/pi`, workdir
 `/work/agents/probe-0001`, `--session-dir /state/pi/sessions/probe-0001`.
 

@@ -1,5 +1,5 @@
 """Pi resume gate driver: talks to `pi --mode rpc` directly (as the claude/codex gates use their
-CLIs) against stub_openai.py in the same container, so there is no inference spend.
+CLIs) against tests/fake_openai.py in the same container, so there is no inference spend.
 
     gate.py A   two sessions in WORKDIR:
                   main: "the codeword is PELICAN-7" (text) + "bash: echo PELICAN-7 > notes.txt" (tool)
@@ -25,8 +25,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import stub_openai
+# The fake server is tests/fake_openai.py: from the checkout when run locally, from the copy
+# common/launch.sh puts next to the job scripts (common/fake_openai.py) inside a job.
+_HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(_HERE.parent.parent / "tests"), str(_HERE.parent / "common")]
+import fake_openai
 
 HOME = Path(os.environ["PI_CODING_AGENT_DIR"])
 WORKDIR = Path(os.environ.get("WORKDIR", "/work/agents/probe-0001"))
@@ -228,7 +231,7 @@ async def main() -> None:
     phase = sys.argv[1]
     OUT.mkdir(parents=True, exist_ok=True)
     log = OUT / f"stub-{phase}.jsonl"
-    srv = stub_openai.serve(0, str(log))
+    srv = fake_openai.serve(0, str(log))
     res = await (phase_a if phase == "A" else phase_b)(srv.server_port, log)
     (OUT / f"{phase}.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res.get("verdict", res)))

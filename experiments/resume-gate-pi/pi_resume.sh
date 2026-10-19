@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pi cross-machine resume gate (docs/pi.md; flock-v2 note milestone 1). No inference spend: Pi
-# talks to stub_openai.py inside the same container.
+# talks to tests/fake_openai.py (shipped as common/fake_openai.py by launch.sh) inside the
+# same container.
 #   pi_resume.sh A   two sessions in WORKDIR (one cut off mid-tool by SIGKILL), push workdir +
 #                    ONLY sessions/<agent>/*_<sid>.jsonl + out to DEST
 #   pi_resume.sh B   fresh container: restore workdir + session files at the same paths, resume
