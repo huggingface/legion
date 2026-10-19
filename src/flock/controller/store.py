@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS types (
   type TEXT NOT NULL,
   health TEXT NOT NULL DEFAULT 'ok',
   next_worker INTEGER NOT NULL DEFAULT 0,
+  launch_error TEXT,
+  launch_failures INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (swarm, type)
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -134,6 +136,11 @@ class Store:
 
     def _migrate(self) -> None:
         """Additive column changes for databases created by an older version."""
+        types_cols = {r["name"] for r in self._q("PRAGMA table_info(types)")}
+        if "launch_error" not in types_cols:  # last worker-launch error per type
+            self._x("ALTER TABLE types ADD COLUMN launch_error TEXT")
+            self._x("ALTER TABLE types ADD COLUMN launch_failures INTEGER NOT NULL DEFAULT 0")
+
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
@@ -193,10 +200,11 @@ class Store:
             for type_name in spec.types:
                 self._x(
                     "INSERT INTO types (swarm, type) VALUES (?, ?) "
-                    "ON CONFLICT(swarm, type) DO UPDATE SET health = 'ok'",
+                    "ON CONFLICT(swarm, type) DO UPDATE SET health = 'ok', launch_error = NULL, "
+                    "launch_failures = 0",
                     [spec.swarm, type_name],
                 )
-            # Re-applying the spec clears crashlooping and its crash streaks.
+            # Re-applying the spec clears crashlooping, launch_refused and their streaks.
             self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
         self.listener("reconcile", "")
 
@@ -239,6 +247,20 @@ class Store:
             "INSERT INTO types (swarm, type, health) VALUES (?, ?, ?) "
             "ON CONFLICT(swarm, type) DO UPDATE SET health = excluded.health",
             [swarm, type_name, health],
+        )
+
+    def launch_error(self, swarm: str, type_name: str) -> tuple[str | None, int]:
+        """(last launch error, consecutive transient launch failures) for a type."""
+        row = self._one("SELECT launch_error, launch_failures FROM types WHERE swarm = ? AND type = ?",
+                        [swarm, type_name])
+        return (row["launch_error"], row["launch_failures"]) if row else (None, 0)
+
+    def set_launch_error(self, swarm: str, type_name: str, error: str | None, failures: int) -> None:
+        self._x(
+            "INSERT INTO types (swarm, type, launch_error, launch_failures) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(swarm, type) DO UPDATE SET launch_error = excluded.launch_error, "
+            "launch_failures = excluded.launch_failures",
+            [swarm, type_name, error, failures],
         )
 
     def next_worker_index(self, swarm: str, type_name: str) -> int:
@@ -324,7 +346,13 @@ class Store:
             total = dict(base)
             for model, usage in tokens.items():
                 total[model] = total.get(model, TokenUsage()) + usage
-            fields["cost"] = cost_fn(total)
+            # Cost grows by the price of the new tokens only (totals never go backwards), so
+            # a price change on re-apply applies from then on and does not reprice history.
+            prev = dict(_tokens(row["tokens_base"]))
+            for model, usage in last.items():
+                prev[model] = prev.get(model, TokenUsage()) + usage
+            delta = cost_fn(total) - cost_fn(prev)
+            fields["cost"] = round((row["cost"] or 0.0) + max(0.0, delta), 6)
             self._update("agents", "name", name, fields)
 
     # ----------------------------------------------------------------- workers
@@ -386,7 +414,7 @@ class Store:
 
     def prompts_for_worker(self, worker_id: str) -> list[Row]:
         return self._q(
-            "SELECT p.id, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
+            "SELECT p.id, p.agent, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
             "WHERE a.worker = ? ORDER BY p.id",
             [worker_id],
         )

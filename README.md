@@ -34,6 +34,10 @@ them.
   prompt to an agent whose worker is down is held and delivered after relaunch.
 - **Usage and cost:** tokens per model per turn, cost from a price table, per
   agent and per swarm.
+- **Open models:** a `providers:` block points a type at vLLM in a GPU job, the
+  HF router or any OpenAI- or Anthropic-compatible server (`model:
+  "gpu1:Qwen/Qwen3.8-27B-FP8"`), with prices pinned at apply and a preflight
+  that checks each model can call tools. See [docs/open-models.md](docs/open-models.md).
 - **Planned restarts:** workers live 24 h plus jitter by default, drain before
   their deadline, and the controller relaunches them with their agents
   restored. The herd never restarts all at once.
@@ -94,6 +98,19 @@ types:
     max_budget_usd: 0.05
 ```
 
+Open models go through `providers:` (keys by secret name only; [docs/open-models.md](docs/open-models.md)):
+
+```yaml
+providers:
+  gpu1: {type: openai_compat, base_url: "https://qwen.example.org/v1",  # your vLLM, over HTTPS
+         api_key_env: VLLM_API_KEY,
+         self_hosted: true, max_working: 256}
+models:
+  qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
+types:
+  analyst: {harness: codex, model: qwen-27b, replicas: 50}
+```
+
 ```sh
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
 flock apply demo.yaml
@@ -105,7 +122,8 @@ flock remove demo
 ```
 
 Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
-`workers <swarm>`.
+`workers <swarm>`, `preflight <spec>`. `apply` runs the preflight first when the
+spec has provider-backed models (`--skip-preflight` to bypass).
 
 ### HTTP API
 
@@ -114,6 +132,7 @@ Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
 | Call | Purpose |
 | --- | --- |
 | `PUT/GET/DELETE /swarms/{swarm}`, `GET /swarms` | apply, inspect, remove |
+| `POST /swarms/{swarm}/preflight` | one tool-calling request per provider-backed model |
 | `GET /swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | `GET /agents/{name}` | one agent's state, pending prompts, cost |
 | `POST /agents/{name}/prompt` | body `{text, timeout?, reply_to?}`; acks `queued` or `pending` |
