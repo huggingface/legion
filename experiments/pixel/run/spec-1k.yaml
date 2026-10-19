@@ -14,7 +14,10 @@ providers:
     base_url: "https://<JOB_ID_1>--8000.hf.jobs/v1"   # FILL IN: job-1k.sh prints it
     api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
     self_hosted: true
-    max_working: 128             # rtx-pro-6000 probe knee: c=128, ~160 calls/s
+    max_working: 400             # >= replicas per type. At 128 (1k run 2026-10-19) only 128 agents per
+                                 # provider ever ran: admission holds a slot until the agent's next
+                                 # heartbeat and the first workers to poll keep re-taking freed slots, so
+                                 # 205 agents per type sat at 0 turns. vLLM still had max-num-seqs 512.
     timeout_s: 60
     max_retries: 4
   gpu2:
@@ -22,7 +25,10 @@ providers:
     base_url: "https://<JOB_ID_2>--8000.hf.jobs/v1"   # FILL IN: job-1k.sh prints it
     api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
     self_hosted: true
-    max_working: 128             # rtx-pro-6000 probe knee: c=128, ~160 calls/s
+    max_working: 400             # >= replicas per type. At 128 (1k run 2026-10-19) only 128 agents per
+                                 # provider ever ran: admission holds a slot until the agent's next
+                                 # heartbeat and the first workers to poll keep re-taking freed slots, so
+                                 # 205 agents per type sat at 0 turns. vLLM still had max-num-seqs 512.
     timeout_s: 60
     max_retries: 4
   gpu3:
@@ -30,7 +36,10 @@ providers:
     base_url: "https://<JOB_ID_3>--8000.hf.jobs/v1"   # FILL IN: job-1k.sh prints it
     api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
     self_hosted: true
-    max_working: 128             # rtx-pro-6000 probe knee: c=128, ~160 calls/s
+    max_working: 400             # >= replicas per type. At 128 (1k run 2026-10-19) only 128 agents per
+                                 # provider ever ran: admission holds a slot until the agent's next
+                                 # heartbeat and the first workers to poll keep re-taking freed slots, so
+                                 # 205 agents per type sat at 0 turns. vLLM still had max-num-seqs 512.
     timeout_s: 60
     max_retries: 4
 models:
