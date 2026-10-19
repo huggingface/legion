@@ -6,8 +6,60 @@ workdir, a worker, a state and a cost like any replica, and they idle and resume
 What is new is a `parent`, a `depth`, and a token that lets the agent call the controller as
 itself.
 
-Example spec: [`examples/spawn.yaml`](../examples/spawn.yaml). Design notes and decisions:
+Example specs: [`examples/first-spawn.yaml`](../examples/first-spawn.yaml) (the walkthrough
+below) and [`examples/spawn.yaml`](../examples/spawn.yaml). Design notes and decisions:
 [design.md §13](design.md#13-spawn).
+
+## First spawn: a leader spawns 5 children
+
+From a clone of this repo, with `uv sync --all-extras` done. Replace `<you>` everywhere,
+including in `examples/first-spawn.yaml`. Cost: a few cents of Haiku and under $0.01 of jobs.
+
+```sh
+export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
+hf buckets create <you>/flock --private                      # once
+W=$(scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)  # wheel the workers install
+scripts/deploy-space.sh "$W" <you>/flock                     # controller Space, up in about 1 min
+export FLOCK_URL=https://<you>-flock.hf.space
+flock apply examples/first-spawn.yaml     # leader-0000 boots (~40 s), then idles until prompted
+flock prompt leader-0000 "Start: spawn the 5 analyst children now."
+flock events leader-0000 --pretty         # spawned x5, then "spawned 5"
+flock agents first-spawn                  # repeat until the children are idle
+```
+
+The children show `unknown` with `pending 1` for about 50 s: the first spawn of a type with no
+agents boots its worker (a job launch). That is normal. Then each child answers, reports to the
+leader (the reports arrive as the leader's turns t-2, t-3, ...), and idles:
+
+```text
+$ flock agents first-spawn    # about 1 min after the prompt; last_heartbeat column cut
+name                      state  worker                     turns  pending  cost
+leader-0000               idle   first-spawn-leader-w0000   1      0        $0.0030
+leader-0000-analyst-0001  idle   first-spawn-analyst-w0000  1      0        $0.0021
+...
+leader-0000-analyst-0005  idle   first-spawn-analyst-w0000  1      0        $0.0019
+$ flock events leader-0000-analyst-0003 --pretty
+08:55:31     - session_started session_id=… resumed=False parent=leader-0000
+08:55:31   t-1 user     Capital of France? One word.
+08:55:34   t-1 assistant Paris
+08:55:35   t-1 assistant [Bash {"command": "flock prompt \"$FLOCK_PARENT\" \"leader-0000-analyst-0003: Paris\"…]
+08:55:36   t-1 turn_ended completed claude-haiku-5-5 in=… out=…
+```
+
+`turns` and `state` come from worker heartbeats (every 30 s), so they lag the event stream. An
+agent's answer is the text of its `assistant` messages; `turn_ended` only says the turn is over.
+If a worker never gets past `launching`/`dead`, `flock workers first-spawn` shows its
+`last_error` (status and log tail); `hf jobs logs <job>` has the rest. A 401 there usually means
+`HF_TOKEN` is missing from the type's `secrets`.
+
+## Teardown
+
+```sh
+flock remove first-spawn                           # drains and cancels its workers (about 20 s)
+hf jobs ps --label swarm=first-spawn               # empty once they are gone
+hf spaces pause <you>/flock                        # the Space is public and holds your secrets
+hf buckets delete <you>/flock                      # optional: wheels and agent state
+```
 
 ## Spec
 
@@ -46,7 +98,7 @@ below the workers its agents occupy: agents never move, so remove agents first.
 **Depth.** A replica's depth is its type's `spawn.depth` (0 if absent), read from the current
 spec. A child is born with `min(parent's depth - 1, its own type's spawn.depth)` (0 if its type
 is absent from `spawn:`) and keeps it. With no cycles and finite depth, recursion ends by
-construction.
+construction. `depth` is what is left, so a child of a `depth: 1` leader shows `depth: 0`.
 
 ## Lifecycle
 

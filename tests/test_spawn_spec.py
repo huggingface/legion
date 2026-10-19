@@ -135,3 +135,13 @@ def test_replicas_must_fit_declared_workers():
     spec(types={"analyst": {**over, "workers": {"initial": 1, "max_extra": 2}}})  # exactly fits
     spec(types={"analyst": {**over, "workers": {"max_extra": 0}}})  # initial defaults to 3
     spec(types={"analyst": {"replicas": 3, "agents_per_worker": 1}})  # no workers: v1
+
+
+def test_walkthrough_spec_loads():
+    from pathlib import Path
+
+    from flock.cli import load_spec
+
+    s = load_spec(str(Path(__file__).parent.parent / "examples" / "first-spawn.yaml"))
+    assert s.spawn["leader"].cap_for("analyst") == 5
+    assert all("HF_TOKEN" in t.secrets for t in s.types.values())
