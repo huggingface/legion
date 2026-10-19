@@ -17,9 +17,9 @@ def test_target_alpha_becomes_background(mk):
     c, w, t = mk()
     info = c.get("/target/info").json()
     assert info["width"] == 8 and info["height"] == 8
-    assert info["background"] == "000000" and info["blank"] == "000000"
+    assert info["background"] == "ffffff" and info["blank"] == "ffffff"
     assert info["max_pixels_per_call"] == 10 and info["max_claim"] == 10
-    assert c.get("/target/pixel", params={"x": 0, "y": 3}).json()["hex"] == "000000"
+    assert c.get("/target/pixel", params={"x": 0, "y": 3}).json()["hex"] == "ffffff"
     assert c.get("/target/pixel", params={"x": 0, "y": 3}).json()["ok"] is True  # blank == bg
     assert c.get("/target/pixel", params={"x": 3, "y": 3}).json()["hex"] == hx(t[3, 3])
     reg = c.get("/target/region", params={"x": 1, "y": 1, "w": 3, "h": 2}).json()
@@ -76,8 +76,10 @@ def test_claims_ttl_and_exclusivity(mk):
     # After the TTL, leases expire and pixels become claimable by others.
     later = w.claim("c", 49, now=w.lease_until.max() + 1)
     assert len(later["pixels"]) == 10  # capped by max_claim
-    # Release frees an agent's leases.
-    assert c.post("/release", headers=H("b")).json()["released"] == 10
+    # Expired leases belong to nobody; release frees an agent's live leases.
+    assert c.post("/release", headers=H("b")).json()["released"] == 0
+    assert len(c.post("/claim", json={"n": 5}, headers=H("b")).json()["pixels"]) == 5
+    assert c.post("/release", headers=H("b")).json()["released"] == 5
     # Painting correct colour removes the pixel from the work queue for good.
     for p in a2["pixels"]:
         c.post("/paint", json={"pixels": [p]}, headers=H("a"))
@@ -120,10 +122,14 @@ def test_accounting_and_score(mk):
     assert s["paints"] == {"useful": 1, "duplicate": 2, "wrong": 2, "overwritten": 1, "refused": 0}
     assert s["agents"]["a"]["useful"] == 1 and s["agents"]["b"]["overwritten"] == 1
     # Score agrees with a from-scratch numpy computation.
-    canvas = np.zeros_like(t)
+    canvas = np.full_like(t, 255)  # blank is white
     canvas[2, 2] = bad
     canvas[3, 3] = bad
-    match = (canvas == t).all(-1)
+    painted = np.zeros(t.shape[:2], bool)
+    painted[2, 2] = painted[3, 3] = painted[0, 0] = True
+    work = np.zeros(t.shape[:2], bool)
+    work[1:, 1:] = True  # the transparent top row / left column is background
+    match = (canvas == t).all(-1) & (painted | ~work)
     mse = ((canvas.astype(float) - t) ** 2).mean()
     assert s["matched"] == int(match.sum())
     assert math.isclose(s["mse"], round(mse, 4))
@@ -172,7 +178,7 @@ def _random_paints(t, n_calls, seed=1, cap=10):
 def test_log_and_replay_frames_match_sequence(mk):
     c, w, t = mk(keyframe_every=3, keyframe_cache=2)
     calls = _random_paints(t, 40)
-    expected = [np.zeros_like(t)]
+    expected = [np.full_like(t, 255)]
     for i, (agent, pts) in enumerate(calls):
         r = c.post(
             "/paint",

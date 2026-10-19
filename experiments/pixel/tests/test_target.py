@@ -16,41 +16,43 @@ from canvas.world import World
 def _rgba(tmp_path):
     a = np.zeros((4, 4, 4), np.uint8)  # all transparent background
     a[1, 1] = (255, 157, 0, 255)  # opaque orange
-    a[1, 2] = (0, 0, 0, 255)  # opaque black: same colour as the background, still work
+    a[1, 2] = (0, 0, 0, 255)  # opaque black
+    a[2, 1] = (255, 255, 255, 255)  # opaque white: same colour as the blank canvas, still work
     a[2, 2] = (200, 100, 50, 128)  # partial alpha edge pixel
     p = tmp_path / "rgba.png"
     Image.fromarray(a, "RGBA").save(p)
     return p
 
 
-def test_alpha_zero_is_background_partial_alpha_is_work(tmp_path):
+def test_defaults_white_blank_alpha_zero_background_partial_over_blank(tmp_path):
     w = World(Settings(target=_rgba(tmp_path)))
-    assert w.work_total == 3
-    assert tuple(w.target[0, 0]) == (0, 0, 0)
-    # Partial alpha composited over the background (black): round(c * 128/255).
-    assert tuple(w.target[2, 2]) == (100, 50, 25)
-    assert w.matched == 13  # the 13 transparent pixels are done; the 3 work pixels are not
-    # Opaque black over a black blank canvas still needs painting, and counts as useful.
-    out = w.paint("a", [(2, 1, 0, 0, 0)])
-    assert out["results"][0]["outcome"] == "useful"
-    assert w.paint("a", [(0, 0, 0, 0, 0)])["results"][0]["outcome"] == "duplicate"
+    assert w.blank == (255, 255, 255) and w.bg == (255, 255, 255)
+    assert w.work_total == 4
+    assert tuple(w.target[0, 0]) == (255, 255, 255)
+    # Partial alpha composited over the white blank: round(c * a + 255 * (1 - a)), a = 128/255.
+    assert tuple(w.target[2, 2]) == (227, 177, 152)
+    assert w.matched == 12  # the 12 transparent pixels are done; the 4 work pixels are not
+    # Opaque white on the white canvas still needs painting, and painting it is useful.
+    assert not w.match[2 * 4 + 1]
+    assert w.paint("a", [(1, 2, 255, 255, 255)])["results"][0]["outcome"] == "useful"
+    assert w.paint("a", [(0, 0, 255, 255, 255)])["results"][0]["outcome"] == "duplicate"
     claimable = w.claim("b", 10)["pixels"]
-    assert {(p["x"], p["y"]) for p in claimable} == {(1, 1), (2, 2)}
+    assert {(p["x"], p["y"]) for p in claimable} == {(1, 1), (2, 1), (2, 2)}
+
+
+def test_background_and_blank_overrides(tmp_path):
+    w = World(Settings(target=_rgba(tmp_path), blank="000000", background="00ff00"))
+    assert tuple(w.target[0, 0]) == (0, 255, 0)  # alpha 0 -> CANVAS_BACKGROUND
+    assert tuple(w.target[2, 2]) == (100, 50, 25)  # partial alpha over the black blank
+    # Background differs from the blank canvas: not work, but claimable so it gets fixed.
+    assert w.work_total == 4 and len(w.order) == 16
 
 
 def test_background_is_work_switch(tmp_path):
     w = World(Settings(target=_rgba(tmp_path), background_is_work=True))
     assert w.work_total == 16 and w.matched == 0
-    assert w.paint("a", [(0, 0, 0, 0, 0)])["results"][0]["outcome"] == "useful"
-    assert (
-        len(
-            w.claim(
-                "b",
-                50,
-            ).get("pixels")
-        )
-        == 10
-    )  # capped, background included
+    assert w.paint("a", [(0, 0, 255, 255, 255)])["results"][0]["outcome"] == "useful"
+    assert len(w.claim("b", 50)["pixels"]) == 10  # capped, background included
     s = w.score(agents=False)
     assert s["work_total"] == 16 and s["coverage_pct"] == round(100 / 16, 4)
 

@@ -23,9 +23,10 @@ const PX = require(process.argv[2]); const fs = require('fs');
 (async () => {
   const text = await PX.gunzipText(fs.readFileSync(process.argv[3]));
   const [w, h] = [+process.argv[4], +process.argv[5]];
-  const r = new PX.Replayer(PX.index(PX.parseLog(text), w), w, h, [0, 0, 0], 7, 2);
+  const r = new PX.Replayer(PX.index(PX.parseLog(text), w), w, h, [255, 255, 255], 7, 2);
   const out = {};
-  for (const t of JSON.parse(process.argv[6])) out[t] = Array.from(r.frame(t));
+  for (const t of JSON.parse(process.argv[6]))
+    out[t] = { f: Array.from(r.frame(t)), m: Array.from(r.maskFrame(t)) };
   console.log(JSON.stringify(out));
 })();
 """
@@ -59,5 +60,7 @@ def test_js_replay_matches_service(tmp_path):
     )
     frames = json.loads(r.stdout)
     for t in ts:
-        rgba = np.array(frames[str(t)], dtype=np.uint8).reshape(10, 12, 4)
+        rgba = np.array(frames[str(t)]["f"], dtype=np.uint8).reshape(10, 12, 4)
         assert np.array_equal(rgba[..., :3], w.frame(t)), t
+        mask = np.array(frames[str(t)]["m"], dtype=bool).reshape(10, 12)
+        assert np.array_equal(mask, w.replay_mask(t)), t

@@ -20,6 +20,9 @@ with front matter.
   and fetches `{canvas_url}/score` and `/status`. It shows done %, exact %, pixels left, MSE/PSNR,
   outcomes, req/s, claims outstanding, active agents and the top 10 agents by useful pixels.
   The canvas sends `Access-Control-Allow-Origin: *` on GET routes only.
+- **Painted mask toggle:**
+  - Live view: lays the canvas's `/mask.png?style=overlay` (magenta = painted, transparent elsewhere) over the dimmed live image. The server renders it, so the browser does no per-pixel work. It refreshes every 10 s with the canvas.
+  - Replay: the same mask at position t, computed from the log with the same keyframe scheme.
 - **Time series** from `runs/<id>/progress.jsonl`, drawn with canvas 2D (no library):
   - done % and exact %;
   - canvas req/s and working agents;

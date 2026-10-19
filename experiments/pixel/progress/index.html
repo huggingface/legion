@@ -27,6 +27,10 @@
   .wide { grid-column: 1 / -1; }
   .imgs { display:flex; gap:8px; }
   .imgs figure { margin:0; flex:1; min-width:0; }
+  .stack { position:relative; }
+  .stack .overlay { position:absolute; inset:0; display:none; background:transparent; }
+  .masked .overlay { display:block; }
+  .masked img.base { filter:brightness(.35); }
   .imgs img, .imgs canvas { width:100%; display:block; image-rendering:pixelated; background:#000; border-radius:4px; }
   figcaption, .muted { color:var(--muted); font-size:12px; }
   .tiles { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap:8px; }
@@ -53,13 +57,14 @@
   <select id="run" aria-label="run"></select>
   <span id="pill" class="pill">-</span>
   <span id="when" class="muted"></span>
+  <label class="muted"><input type="checkbox" id="masktoggle"> painted mask (magenta)</label>
 </header>
 <div id="empty" class="empty" hidden>No run yet. The driver adds runs here (see experiments/pixel/progress/README.md).</div>
 <main id="main" hidden>
   <section id="live">
     <h2>Canvas</h2>
     <div class="imgs">
-      <figure><img id="liveimg" alt="live canvas"><figcaption id="livecap">live, every 10 s</figcaption></figure>
+      <figure id="livefig"><div class="stack"><img id="liveimg" class="base" alt="live canvas"><img id="livemask" class="overlay" alt="painted mask"></div><figcaption id="livecap">live, every 10 s</figcaption></figure>
       <figure><img id="targetimg" alt="target"><figcaption>target</figcaption></figure>
     </div>
     <p id="liveerr" class="err"></p>
@@ -81,7 +86,7 @@
   <section class="wide" id="replaysec" hidden>
     <h2>Replay (from the uploaded paint log)</h2>
     <div class="imgs">
-      <figure><canvas id="replay" width="1024" height="1024"></canvas><figcaption id="replaycap">loading...</figcaption></figure>
+      <figure id="replayfig"><canvas id="replay" width="1024" height="1024"></canvas><figcaption id="replaycap">loading...</figcaption></figure>
       <figure><img id="finalimg" alt="final canvas"><figcaption>final canvas</figcaption></figure>
     </div>
     <div class="row">

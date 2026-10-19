@@ -8,7 +8,7 @@ from PIL import Image
 from canvas.app import create_app
 from canvas.config import Settings
 
-BG = (0, 0, 0)
+BG = (255, 255, 255)  # default blank = background = white
 
 
 def make_target(path, w=8, h=8, seed=0):

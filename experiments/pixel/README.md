@@ -34,14 +34,17 @@ The `Dockerfile` is the same service as an image (`CMD python -m canvas`, `cli/`
 | var | default | meaning |
 |---|---|---|
 | `CANVAS_TARGET` | `assets/target.png` | target image (RGB or RGBA) |
-| `CANVAS_BACKGROUND` | `000000` | colour that alpha=0 target pixels become (partial alpha is composited over it) |
-| `CANVAS_BLANK` | = background | initial canvas colour |
+| `CANVAS_BLANK` | `ffffff` | initial canvas colour; partial-alpha target pixels are composited over it |
+| `CANVAS_BACKGROUND` | = blank | colour that alpha=0 target pixels become |
 | `CANVAS_BACKGROUND_IS_WORK` | 0 | 1 = alpha-0 background pixels must be painted too |
 | `MAX_PIXELS_PER_CALL` | **10** | hard cap per `paint` call (1 works) |
 | `CANVAS_MAX_CLAIM` | = `MAX_PIXELS_PER_CALL` | max pixels per `claim` |
 | `CANVAS_CLAIM_TTL` | 120 | lease seconds |
 | `CANVAS_CLAIM_MODE` | `advisory` | `enforced` refuses paints on pixels leased by someone else |
 | `CANVAS_CLAIM_REVEAL` | 1 | claim response includes each pixel's target colour |
+| `CANVAS_CLAIM_ORDER` | `scattered` | `scattered` = seeded permutation of the work set; `rows` = row-major |
+| `CANVAS_CLAIM_SEED` | 0 | permutation seed (same seed, same claim order: reproducible runs) |
+| `CANVAS_MASK_EVERY` | 100 | `/mask.png` is re-rendered at most every N paint calls |
 | `REGION_ENFORCE` | 0 | 1 = region leases gate `paint` and pixel `claim` (holder + grantees only) |
 | `CANVAS_REGION_TTL` / `_MAX` | 600 / 3600 | default / max region lease seconds |
 | `CANVAS_RATE_LIMIT` / `CANVAS_RATE_BURST` | 2 / 5 | per-agent token bucket on write calls (0 = off) |
@@ -54,15 +57,24 @@ The `Dockerfile` is the same service as an image (`CMD python -m canvas`, `cli/`
 | `CANVAS_HOST` / `CANVAS_PORT` | 0.0.0.0 / 8765 | bind |
 
 **Background and alpha.** The shipped `assets/target.png` is RGBA: 425,796 px alpha 0
-(background), 501,666 px alpha 255, 121,114 px partial alpha (anti-aliased edges).
-- alpha == 0 -> target colour `CANVAS_BACKGROUND` (black); **not work** by default. The canvas
-  starts as the blank colour (= background), so these pixels start done, are never handed out by
-  `claim`, and painting them correctly is a `duplicate`.
-- 0 < alpha < 255 -> composited over `CANVAS_BACKGROUND` and rounded, then treated as **work**.
-- alpha == 255 -> work. Every pixel with alpha > 0 starts "not done", even if its colour happens to
-  equal the blank canvas (it has not been painted yet). Work set: **622,780 px** (59.4%).
-- `CANVAS_BACKGROUND_IS_WORK=1` (pending Carlos) makes all 1,048,576 pixels work: the background
-  starts not done, is claimable, and painting it black is `useful`.
+(background), 501,666 px alpha 255, 121,114 px partial alpha (anti-aliased edges, mostly the drop
+shadow).
+- The canvas starts **white** (`CANVAS_BLANK=ffffff`). It used to start black, but then the shadow
+  was black on black and a smoke run looked empty.
+- alpha == 0: target colour `CANVAS_BACKGROUND`, which defaults to the blank colour, white.
+  - These pixels are **not work** by default. They start done and are never handed out by `claim`.
+  - Painting them correctly is a `duplicate`.
+- 0 < alpha < 255: composited over the blank colour and rounded, so the shadow is grey on white.
+  These pixels are **work**.
+- alpha == 255: work.
+- Every pixel with alpha > 0 starts "not done", even when its colour already equals the blank
+  canvas. For example, an opaque white pixel on the white canvas stays unpainted until someone
+  paints it, and that paint is `useful`.
+- Work set: **622,780 px** (59.4%).
+- `CANVAS_BACKGROUND_IS_WORK=1` (pending Carlos) makes all 1,048,576 pixels work. The background
+  then starts not done, is claimable, and painting it is `useful`.
+- If `CANVAS_BACKGROUND` differs from the blank colour and the background is not work, those
+  pixels are still claimable, so they get fixed; they just don't count in `coverage_pct`.
 - An RGB target without alpha falls back to "work = pixels that differ from the blank colour".
 
 ## API
@@ -79,6 +91,9 @@ All bodies are JSON. Errors are `{"error": "<short actionable message>"}` with 4
 | `POST /paint {pixels:[{x,y,hex}\|{x,y,r,g,b}], turn?}` | cap enforced; per-pixel `results[{x,y,outcome,want?}]`, `counts`, `seq`, running `score` |
 | `GET /region?x&y&w&h&format=` | live canvas, same formats as target |
 | `GET /canvas.png`, `GET /target.png` | full images |
+| `GET /mask.png?kind=painted\|done&style=grey\|overlay` | painted (touched) or done pixels; grey = 1-bit PNG, overlay = magenta on transparent RGBA; cached per `CANVAS_MASK_EVERY` paints |
+| `GET /replay/mask?t=<seq>&style=` | painted mask after log entry t (from the log) |
+| `GET /cli/canvas` | the CLI source (agents install it with one python line) |
 | `GET /score?agents=true` | `exact_match_pct`, `coverage_pct`, `painted_pct`, `matched`, `todo`, `mse`, `psnr`, paint totals, per-agent counters |
 | `GET /status` | uptime, seq, agents seen/active, claims outstanding, req/s (10 s), config, auth mode |
 | `GET /log?after=<seq>&limit<=5000` | paint log, JSONL |
@@ -99,15 +114,26 @@ pixel was already wrong; `overwritten` wrong colour on a pixel that was right (d
 of these, so counters add up to pixels painted. `wrong`/`overwritten` results carry `want`.
 
 **Scores.** `exact_match_pct` = pixels done / all pixels, where a work pixel is done once painted
-with its exact target colour and a non-work pixel is done while its colour matches (starts at 40.6%
-= the background). `coverage_pct` = done over the work set only (starts at 0; the progress number).
+with its exact target colour and a non-work pixel is done while its colour matches (starts at 40.61%
+= the background, white or black alike). The starting MSE is 8,778 (PSNR 8.7 dB) on the white
+canvas; it was 17,759 (5.6 dB) when the canvas started black. `coverage_pct` = done over the work set only (starts at 0; the progress number).
 `painted_pct` = pixels touched at least once. `mse` over RGB channels (0..255), `psnr` in dB (null
 at a perfect match). Matched count and SSE are kept incrementally per pixel, so `/score` is O(1)
 apart from the coverage mask sum.
 
-**Claims.** One lease set per agent: a new `claim` drops your previous leases (no hoarding). The
-queue is a row-major cursor over pixels that are not matching and not leased; it wraps, so pixels
-painted wrong come back around. Leases expire after the TTL (crashed agents leak nothing), and a
+**Claims.** One lease set per agent: a new `claim` drops your previous leases, so nobody hoards.
+- The queue is a free list, O(1) amortised per claimed pixel (measured 0.03 ms per 10-px claim on
+  1024x1024).
+- It has three parts:
+  - `order`: the claimable pixels in `CANVAS_CLAIM_ORDER`. The default, `scattered`, is a fixed
+    seeded permutation of the work set, so claims spread over the whole image and a run is
+    reproducible. `rows` is row-major, the old behaviour.
+  - a requeue of pixels handed back: released, lease expired, painted wrong, or overwritten. It is
+    served first.
+  - a FIFO of leases waiting to expire.
+- Entries are checked lazily when popped (skipped if done or leased).
+- If both queues run dry while free pixels remain, for example after a restart, a repair sweep
+  refills the requeue. It runs at most once a second. Leases expire after the TTL (crashed agents leak nothing), and a
 correct paint clears the lease. Advisory mode (default) only steers work; `enforced` refuses.
 
 **Region leases** (for a later leader/children experiment; not used in run 1). A leader leases a
@@ -201,7 +227,7 @@ Repeat this loop until you are told you are done:
    `wrong` or `overwritten` = you sent a wrong colour; the line shows the right one, repaint it.
 4. Go back to step 1. When claim says "nothing to claim ... You are done", stop.
 Rules:
-- Only paint pixels you claimed. The black background is already done; do not paint it.
+- Only paint pixels you claimed. The white background is already done; do not paint it.
 - Colours are 6 hex digits like ff9d00. x is the column (0-1023), y is the row (0-1023).
 - "rate limited": wait the seconds it says, then run the same command again.
 - Any other error says what to fix. Fix it; never repeat a failing command unchanged.

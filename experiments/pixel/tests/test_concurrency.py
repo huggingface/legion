@@ -76,7 +76,10 @@ def test_200_agents_concurrent_paint(tmp_path):
     assert s["paints"]["useful"] == len(painted) + 1
     assert s["paints"]["duplicate"] == total_calls - 1
     assert s["paints"]["wrong"] == 0 and s["paints"]["overwritten"] == 0
-    assert s["matched"] == int((cf == tf).all(-1).sum())
+    # Done = right colour AND (painted, or not work): white work pixels on the white blank
+    # canvas start "not done" even though the colours agree.
+    done = (cf == tf).all(-1) & (world.painted | ~world.work_mask)
+    assert s["matched"] == int(done.sum())
     assert sum(a["pixels"] for a in s["agents"].values()) == total_calls * 10
     assert len(s["agents"]) == N_AGENTS
     # Replay of the final position equals the live canvas.

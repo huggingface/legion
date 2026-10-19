@@ -55,7 +55,7 @@
 <main>
   <section class="stage">
     <div class="imgs">
-      <figure><img id="frame" alt="canvas at log position"><figcaption id="cap">t = 0</figcaption></figure>
+      <figure><div style="position:relative"><img id="frame" alt="canvas at log position"><img id="mask" alt="painted mask" style="position:absolute;inset:0;display:none;background:transparent"></div><figcaption id="cap">t = 0</figcaption></figure>
       <figure id="tfig"><img id="target" alt="target image"><figcaption>target</figcaption></figure>
     </div>
     <div class="controls">
@@ -70,6 +70,7 @@
         <option value="10000">10000</option></select></label>
       <label>agent filter <input id="agent" placeholder="all" style="width:120px"></label>
       <label><input type="checkbox" id="showT" checked> target</label>
+      <label><input type="checkbox" id="showM"> painted mask</label>
       <button id="live">Jump to live</button>
     </div>
     <p class="stat" id="err"></p>
@@ -119,6 +120,10 @@ async function render() {
   try {
     $('slider').value = t; $('tbox').value = t;
     await setImg($('frame'), `/replay/frame?t=${t}`);
+    const m = $('showM').checked;
+    $('frame').style.filter = m ? 'brightness(.35)' : '';
+    $('mask').style.display = m ? 'block' : 'none';
+    if (m) await setImg($('mask'), `/replay/mask?t=${t}&style=overlay`);
     const r = await api(`/log?after=${Math.max(0, t - 12)}&limit=25`);
     const txt = await r.text();
     let es = txt.split('\n').filter(Boolean).map(l => JSON.parse(l));
@@ -139,6 +144,7 @@ $('log').addEventListener('click', e => { const el = e.target.closest('.e'); if 
 $('live').addEventListener('click', async () => { await refreshStatus(); go(maxSeq); });
 $('showT').addEventListener('change', e => { $('tfig').style.display = e.target.checked ? '' : 'none'; });
 $('agent').addEventListener('change', render);
+$('showM').addEventListener('change', render);
 $('play').addEventListener('click', () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; tick(); });
 async function tick() {
   if (!playing) return;

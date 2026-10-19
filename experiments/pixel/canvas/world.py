@@ -21,7 +21,7 @@ import math
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -44,12 +44,12 @@ class RegionConflict(PaintError):
 
 
 def load_target(
-    path: Path, background: tuple[int, int, int]
+    path: Path, background: tuple[int, int, int], blank: tuple[int, int, int] | None = None
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Load the target as (uint8 HxWx3 RGB, HxW alpha or None for opaque formats).
 
     alpha == 0 pixels become ``background``; partially transparent pixels are composited over
-    ``background`` (rounded), so the target is exact RGB and every colour is reachable.
+    ``blank`` (default: ``background``), rounded, so the target is exact RGB.
     """
     im = Image.open(path)
     if im.mode in ("RGBA", "LA", "P", "PA"):
@@ -57,8 +57,9 @@ def load_target(
         raw = np.asarray(im)
         a = raw.astype(np.float32)
         alpha = a[..., 3:4] / 255.0
-        bg = np.array(background, dtype=np.float32)
-        rgb = np.rint(a[..., :3] * alpha + bg * (1.0 - alpha)).astype(np.uint8)
+        under = np.array(background if blank is None else blank, dtype=np.float32)
+        rgb = np.rint(a[..., :3] * alpha + under * (1.0 - alpha)).astype(np.uint8)
+        rgb[raw[..., 3] == 0] = background
         return np.ascontiguousarray(rgb), raw[..., 3].copy()
     return np.ascontiguousarray(np.asarray(im.convert("RGB"), dtype=np.uint8)), None
 
@@ -70,6 +71,17 @@ def hexc(rgb) -> str:
 def png_bytes(arr: np.ndarray) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(arr, "RGB").save(buf, format="PNG", compress_level=1)
+    return buf.getvalue()
+
+
+def mask_bytes(m: np.ndarray, style: str = "grey") -> bytes:
+    buf = io.BytesIO()
+    if style == "overlay":
+        rgba = np.zeros(m.shape + (4,), np.uint8)
+        rgba[m] = (255, 0, 255, 255)
+        Image.fromarray(rgba, "RGBA").save(buf, format="PNG", compress_level=1)
+    else:
+        Image.fromarray(m).convert("1").save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -123,9 +135,9 @@ class World:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.bg = parse_hex(cfg.background)
-        self.blank = parse_hex(cfg.blank) if cfg.blank else self.bg
-        self.target, self.alpha = load_target(cfg.target, self.bg)
+        self.blank = parse_hex(cfg.blank)
+        self.bg = parse_hex(cfg.background) if cfg.background else self.blank
+        self.target, self.alpha = load_target(cfg.target, self.bg, self.blank)
         self.h, self.w = self.target.shape[:2]
         self.n = self.h * self.w
         self._tflat = self.target.reshape(-1, 3)
@@ -141,6 +153,14 @@ class World:
         else:
             self.work_mask = ~(self.target == np.array(self.blank, np.uint8)).all(-1).reshape(-1)
         self.work_total = int(self.work_mask.sum())
+        # Claim queue order over the claimable set (work pixels, plus any non-work pixel that
+        # starts with the wrong colour). scattered = seeded permutation (reproducible runs).
+        start_ok = (self._tflat == np.array(self.blank, np.uint8)).all(-1)
+        claimable = np.flatnonzero(self.work_mask | ~start_ok).astype(np.int32)
+        if cfg.claim_order == "scattered":
+            claimable = np.random.default_rng(cfg.claim_seed).permutation(claimable)
+        self.order = claimable
+        self._mask_cache: dict[tuple[str, str], tuple[int, bytes]] = {}
         self.started = time.time()
         self._reset_state()
         self._buckets: dict[str, _Bucket] = {}
@@ -173,7 +193,13 @@ class World:
         self.agent_leases: dict[int, list[int]] = {}
         self.stats: dict[str, AgentStats] = {}
         self.totals = {k: 0 for k in OUTCOMES}
-        self.cursor = 0
+        # Claim free list: `order[head:]` not handed out yet, `requeue` = pixels handed back
+        # (released, expired, painted wrong), `expiry` = FIFO of (until, owner, ids) leases.
+        # Entries are checked lazily on pop (skip if done or leased), so a claim is O(n) amortised.
+        self.head = 0
+        self.requeue: deque[int] = deque()
+        self.expiry: deque[tuple[float, int, np.ndarray]] = deque()
+        self._last_sweep = 0.0
         # Region leases (leader -> children). region_map holds the lease id per pixel (-1 none).
         self.regions: dict[int, dict] = {}
         self.region_map = np.full(self.n, -1, dtype=np.int32)
@@ -252,7 +278,61 @@ class World:
         ids = ids[own]
         self.lease_until[ids] = 0.0
         self.lease_owner[ids] = -1
+        self.requeue.extend(ids[~self.match[ids]].tolist())
         return len(ids)
+
+    def _expire(self, now: float) -> None:
+        """Hand expired leases back to the queue (leases share one TTL, so FIFO order)."""
+        while self.expiry and self.expiry[0][0] <= now:
+            until, aid, ids = self.expiry.popleft()
+            live = (self.lease_until[ids] == until) & (self.lease_owner[ids] == aid)
+            back = ids[live & ~self.match[ids]]
+            self.lease_owner[ids[live]] = -1
+            self.requeue.extend(back.tolist())
+
+    def _take(self, need: int, now: float, blocked: list[int]) -> list[int]:
+        """Pop up to ``need`` free pixels: requeue first, then the order; lease them at once."""
+        got: list[int] = []
+        held: list[int] = []  # blocked by a region for this agent: put back afterwards
+        until = now + self.cfg.claim_ttl
+        for _ in range(2):  # second pass only after a repair sweep
+            while need and self.requeue:
+                i = self.requeue.popleft()
+                if self.match[i] or self.lease_until[i] > now:
+                    continue
+                if blocked and int(self.region_map[i]) in blocked:
+                    held.append(i)
+                    continue
+                self.lease_until[i] = until
+                got.append(i)
+                need -= 1
+            while need and self.head < len(self.order):
+                cand = self.order[self.head : self.head + 4096]
+                free = ~self.match[cand] & (self.lease_until[cand] <= now)
+                ok = free
+                if blocked:
+                    bl = np.isin(self.region_map[cand], blocked)
+                    ok = free & ~bl
+                pos = np.flatnonzero(ok)[:need]
+                end = int(pos[-1]) + 1 if len(pos) else len(cand)
+                if blocked:
+                    held.extend(cand[:end][free[:end] & bl[:end]].tolist())
+                take = cand[pos]
+                self.lease_until[take] = until
+                got.extend(take.tolist())
+                need -= len(take)
+                self.head += end
+            # Queue exhausted but pixels may still be free (e.g. after a restart): one repair
+            # sweep, at most once a second, so the queue can never lose a pixel for good.
+            if not need or now - self._last_sweep < 1.0:
+                break
+            self._last_sweep = now
+            mask = ~self.match & (self.lease_until <= now)
+            self.requeue.extend(self.order[mask[self.order]].tolist())
+            if not self.requeue:
+                break
+        self.requeue.extendleft(reversed(held))
+        return got
 
     def claim(self, agent: str, n: int | None = None, now: float | None = None) -> dict:
         n = self.cfg.max_claim if n is None else int(n)
@@ -264,29 +344,14 @@ class World:
             aid = self._aid(agent)
             # One lease set per agent: a new claim drops the previous one (no hoarding).
             self._release_ids(aid, self.agent_leases.pop(aid, []))
+            self._expire(now)
             blocked = self._blocked_regions(agent, now)
-            got: list[np.ndarray] = []
-            need = n
-            chunk = 1 << 16
-            start = self.cursor
-            scanned = 0
-            while need > 0 and scanned < self.n:
-                lo = (start + scanned) % self.n
-                hi = min(lo + chunk, self.n, lo + self.n - scanned)
-                free = ~self.match[lo:hi] & (self.lease_until[lo:hi] <= now)
-                if len(blocked):
-                    free &= ~np.isin(self.region_map[lo:hi], blocked)
-                hits = np.flatnonzero(free)[:need] + lo
-                if len(hits):
-                    got.append(hits)
-                    need -= len(hits)
-                    self.cursor = int(hits[-1] + 1) % self.n
-                scanned += hi - lo
-            ids = np.concatenate(got) if got else np.zeros(0, dtype=np.int64)
+            ids = np.array(self._take(n, now, blocked), dtype=np.int64)
             until = now + self.cfg.claim_ttl
-            self.lease_until[ids] = until
             self.lease_owner[ids] = aid
             self.agent_leases[aid] = ids.tolist()
+            if len(ids):
+                self.expiry.append((until, aid, ids))
             st = self._stat(agent, now)
             st.claims += 1
             remaining = self.n - self.matched
@@ -512,6 +577,8 @@ class World:
                 if ok or self.lease_owner[i] == aid:
                     self.lease_owner[i] = -1
                     self.lease_until[i] = 0.0
+                if not ok and outcomes is None and self.lease_until[i] <= ts:
+                    self.requeue.append(i)  # needs paint again and nobody holds it
                 applied_idx.append(i)
                 applied_rgb.append((r, g, b))
             px_out.append([x, y, f"{r:02x}{g:02x}{b:02x}", out])
@@ -626,7 +693,13 @@ class World:
                     owner = z["lease_owner"]
                     self.lease_owner = remap[np.where(owner < 0, len(names), owner)]
                     self.lease_until = z["lease_until"].copy()
-                    self.cursor = int(z["cursor"])
+                    owners = self.lease_owner >= 0
+                    groups: dict[tuple[float, int], list[int]] = {}
+                    for i in np.flatnonzero(owners).tolist():
+                        key = (float(self.lease_until[i]), int(self.lease_owner[i]))
+                        groups.setdefault(key, []).append(i)
+                    for (until, aid), ids in sorted(groups.items()):
+                        self.expiry.append((until, aid, np.array(ids, dtype=np.int64)))
                     for r in json.loads(str(z["regions"])) if "regions" in z else []:
                         self.regions[r["id"]] = r
                         self._paint_region(r, r["id"])
@@ -646,7 +719,7 @@ class World:
                 os.fsync(self._log_fh.fileno())
             payload = {
                 "seq": np.int64(self.seq),
-                "cursor": np.int64(self.cursor),
+                "head": np.int64(self.head),
                 "lease_until": self.lease_until.copy(),
                 "lease_owner": self.lease_owner.copy(),
                 "names": np.array(json.dumps(self.agent_names)),
@@ -760,6 +833,36 @@ class World:
         while len(self._kf) > max(1, self.cfg.keyframe_cache):
             self._kf.popitem(last=False)
         return frame
+
+    # ------------------------------------------------------------------ masks
+
+    def mask_png(self, kind: str = "painted", style: str = "grey") -> bytes:
+        """PNG of painted (touched at least once) or done pixels, cached per ``mask_every``
+        paint calls. style grey: 1-bit, white = yes. style overlay: RGBA, magenta = yes,
+        transparent elsewhere, so a page can lay it over the canvas with no pixel work."""
+        if kind not in ("painted", "done") or style not in ("grey", "overlay"):
+            raise PaintError("mask: kind must be painted|done, style grey|overlay")
+        key = (kind, style)
+        with self.lock:
+            hit = self._mask_cache.get(key)
+            if hit is not None and self.seq - hit[0] < max(1, self.cfg.mask_every):
+                return hit[1]
+            m = (self.painted if kind == "painted" else self.match & self.work_mask).copy()
+            seq = self.seq
+        data = mask_bytes(m.reshape(self.h, self.w), style)
+        with self.lock:
+            self._mask_cache[key] = (seq, data)
+        return data
+
+    def replay_mask(self, t: int) -> np.ndarray:
+        """Painted mask after log entry ``t``, folded from the replay index (vectorised)."""
+        with self.lock:
+            t = max(0, min(int(t), self.seq))
+            k = int(self.r_end.view()[t])
+            idx = self.r_idx.view()[:k]
+        m = np.zeros(self.n, dtype=bool)
+        m[idx] = True
+        return m.reshape(self.h, self.w)
 
     def region(self, src: np.ndarray, x: int, y: int, w: int, h: int) -> np.ndarray:
         if w < 1 or h < 1 or x < 0 or y < 0 or x + w > self.w or y + h > self.h:

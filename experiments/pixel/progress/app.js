@@ -70,6 +70,38 @@ PX.Replayer = class {
   }
 };
 
+// Painted mask at log position t (1 = touched at least once), same keyframe scheme.
+PX.Replayer.prototype.maskKeyframe = function (k) {
+  this.mkf = this.mkf || new Map();
+  if (k === 0) return new Uint8Array(this.w * this.h);
+  if (this.mkf.has(k)) { const v = this.mkf.get(k); this.mkf.delete(k); this.mkf.set(k, v); return v; }
+  let prev = 0;
+  for (const c of this.mkf.keys()) if (c < k && c > prev) prev = c;
+  const m = prev === 0 ? new Uint8Array(this.w * this.h) : new Uint8Array(this.mkf.get(prev));
+  const { idx, ends } = this.log;
+  for (let j = ends[prev]; j < ends[k]; j++) m[idx[j]] = 1;
+  this.mkf.set(k, m);
+  while (this.mkf.size > this.max) this.mkf.delete(this.mkf.keys().next().value);
+  return m;
+};
+PX.Replayer.prototype.maskFrame = function (t) {
+  t = Math.max(0, Math.min(this.length, t | 0));
+  const k = Math.floor(t / this.every) * this.every;
+  const m = new Uint8Array(this.maskKeyframe(k));
+  const { idx, ends } = this.log;
+  for (let j = ends[k]; j < ends[t]; j++) m[idx[j]] = 1;
+  return m;
+};
+// Painted pixels in magenta over a dimmed frame (RGBA, in place).
+PX.overlayMask = function (rgba, mask, dim = 0.35) {
+  for (let i = 0; i < mask.length; i++) {
+    const o = 4 * i;
+    if (mask[i]) { rgba[o] = 255; rgba[o + 1] = 0; rgba[o + 2] = 255; }
+    else { rgba[o] *= dim; rgba[o + 1] *= dim; rgba[o + 2] *= dim; }
+  }
+  return rgba;
+};
+
 PX.gunzipText = async function (buf) {
   const u8 = new Uint8Array(buf);
   if (u8[0] !== 0x1f || u8[1] !== 0x8b) return new TextDecoder().decode(u8); // already decoded
@@ -85,6 +117,13 @@ if (typeof document !== 'undefined') (() => {
   const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(d);
   const bust = () => `ts=${Date.now()}`;
   let runs = [], run = null, liveTimer = null, progTimer = null, replayer = null, playing = false;
+  let maskOn = false;
+  function setMask(on) {
+    maskOn = on;
+    for (const id of ['livefig', 'replayfig']) $(id).classList.toggle('masked', on);
+    if (on && run && run.canvas_url) $('livemask').src = `${run.canvas_url}/mask.png?style=overlay&${bust()}`;
+    if (replayer) draw(+$('slider').value);
+  }
 
   async function getJSON(url) {
     const r = await fetch(url, { cache: 'no-store' });
@@ -140,6 +179,7 @@ if (typeof document !== 'undefined') (() => {
       const [score, status] = await Promise.all([getJSON(`${base}/score?${bust()}`), getJSON(`${base}/status?${bust()}`)]);
       tiles(score, status);
       $('liveimg').src = `${base}/canvas.png?${bust()}`;
+      if (maskOn) $('livemask').src = `${base}/mask.png?style=overlay&${bust()}`;
       $('livecap').textContent = `live, every 10 s · ${new Date().toLocaleTimeString()} · seq ${status.seq}`;
       $('liveerr').textContent = '';
     } catch (e) {
@@ -190,6 +230,7 @@ if (typeof document !== 'undefined') (() => {
   function draw(t) {
     if (!replayer) return;
     const buf = replayer.frame(t);
+    if (maskOn) PX.overlayMask(buf, replayer.maskFrame(t));
     $('replay').getContext('2d').putImageData(new ImageData(buf, replayer.w, replayer.h), 0, 0);
     const e = replayer.log.entries[t - 1];
     $('replaycap').textContent = `t = ${t} / ${replayer.length}`;
@@ -225,6 +266,7 @@ if (typeof document !== 'undefined') (() => {
   }
 
   $('run').addEventListener('change', (e) => select(e.target.value));
+  $('masktoggle').addEventListener('change', (e) => setMask(e.target.checked));
   $('slider').addEventListener('input', (e) => draw(+e.target.value));
   $('play').addEventListener('click', () => {
     playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play';

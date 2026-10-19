@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from .auth import NAME_RE, Auth, AuthError
 from .config import HERE, Settings, parse_hex
-from .world import PaintError, RegionConflict, World, hexc, png_bytes
+from .world import PaintError, RegionConflict, World, hexc, mask_bytes, png_bytes
 
 REPLAY_DIR = HERE / "replay"
 
@@ -236,6 +236,15 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             png_bytes(arr), media_type="image/png", headers={"Cache-Control": "no-store"}
         )
 
+    @app.get("/mask.png")
+    def mask_png(request: Request, kind: str = "painted", style: str = "grey"):
+        reader(request)
+        return Response(
+            world.mask_png(kind, style),
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/target.png")
     def target_png(request: Request):
         reader(request)
@@ -354,6 +363,13 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             media_type="image/png",
             headers={"Cache-Control": "public, max-age=3600" if t <= world.seq else "no-store"},
         )
+
+    @app.get("/replay/mask")
+    def replay_mask(request: Request, t: int = 0, style: str = "overlay"):
+        reader(request)
+        if style not in ("grey", "overlay"):
+            raise PaintError("style must be grey or overlay")
+        return Response(mask_bytes(world.replay_mask(t), style), media_type="image/png")
 
     @app.get("/")
     def index():
