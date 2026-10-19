@@ -30,7 +30,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from flock.controller.prices import Price, price_for
+from flock.controller.prices import Price, price_for, type_price_table
 from flock.models import REASONING_EFFORT, TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
 
@@ -281,7 +281,7 @@ class CodexAdapter:
         self.home = home or codex_home()
         self.codex_bin = codex_bin or os.environ.get("FLOCK_CODEX_CLI") or "codex"
         self.extra_globs = extra_globs  # e.g. ('*.sqlite*',) if a future version needs more
-        self.prices = prices  # for max_budget_usd; None: the global table
+        self.prices = prices  # for max_budget_usd; None: the type's table (global + pinned)
         self._held: list[str] = []  # steers held until an exhausted turn ends
         self.thread_id: str | None = None
         self.rollout: Path | None = None
@@ -433,7 +433,8 @@ class CodexAdapter:
         self._mapper.model = r.get("model") or thread.get("model") or model
         self.rollout = Path(thread["path"]) if thread.get("path") else None
         self._mapper.max_turns, self._mapper.max_budget_usd = spec.max_turns, spec.max_budget_usd
-        self._mapper.prices = self.prices
+        # a provider-backed type is priced at its pinned price (type_price_table adds it)
+        self._mapper.prices = self.prices if self.prices is not None else type_price_table(spec)
         return self.thread_id
 
     async def send(self, text: str) -> None:
