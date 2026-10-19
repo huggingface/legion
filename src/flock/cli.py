@@ -176,6 +176,46 @@ def prompt(
     typer.echo(json.dumps(_call("POST", f"/agents/{name}/prompt", json=body)))
 
 
+def _short(text: Any, n: int = 160) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _blocks_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for b in content or []:
+        if b.get("type") == "text":
+            parts.append(b.get("text", ""))
+        elif b.get("type") == "toolCall":
+            parts.append(f"[{b.get('name')} {_short(json.dumps(b.get('arguments')), 80)}]")
+    return " ".join(parts)
+
+
+def pretty_event(ev: dict) -> str:
+    """One line per event: time, turn, kind, then the text or a summary (`events --pretty`)."""
+    ts = str(ev.get("ts", ""))[11:19]
+    turn = ev.get("turn_id") or "-"
+    data = ev.get("data") or {}
+    kind = ev.get("type", "?")
+    if kind == "message":
+        m = data.get("message") or {}
+        role = m.get("role", "?")
+        if role == "toolResult":
+            return f"{ts} {turn:>5} tool     {m.get('toolName', '')}: {_short(_blocks_text(m.get('content')), 120)}"
+        return f"{ts} {turn:>5} {role:<8} {_short(_blocks_text(m.get('content')))}"
+    detail = data.get("data", data) if isinstance(data.get("data"), dict) else data
+    if kind == "turn_ended":
+        toks = detail.get("tokens") or {}
+        used = " ".join(f"{model} in={u.get('input', 0)} out={u.get('output', 0)}"
+                        for model, u in toks.items())
+        return f"{ts} {turn:>5} {kind:<8} {detail.get('status')} {used}".rstrip()
+    keep = {k: v for k, v in detail.items() if v is not None}
+    summary = " ".join(f"{k}={_short(v, 60)}" for k, v in keep.items())
+    return f"{ts} {turn:>5} {kind:<8} {summary}".rstrip()
+
+
 @app.command()
 def events(
     name: str,
@@ -183,9 +223,11 @@ def events(
     follow: bool = typer.Option(False, "--follow", "-f"),
     wait: bool = typer.Option(False, "--wait", help="block until an event after --after"),
     timeout: float = typer.Option(600, "--timeout", help="seconds --wait blocks at most"),
+    pretty: bool = typer.Option(False, "--pretty", help="one readable line per event"),
 ) -> None:
     """Print an agent's event stream (JSONL); --follow keeps long-polling; --wait returns once
-    something new arrived (the last line on stderr is the cursor for the next --after)."""
+    something new arrived (the last line on stderr is the cursor for the next --after);
+    --pretty prints time, turn, kind and the text or a summary instead of JSON."""
     deadline = time.monotonic() + timeout
     while True:
         poll = follow or wait
@@ -193,7 +235,7 @@ def events(
             "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if poll else 0}
         )
         for ev in page["events"]:
-            typer.echo(json.dumps(ev))
+            typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
         after = page["next"]
         if wait and (page["events"] or time.monotonic() >= deadline):
             typer.echo(f"next: {after}", err=True)
