@@ -260,10 +260,13 @@ def workers(swarm: str) -> None:
             w["crashes"],
             w["deadline"],
             w["last_heartbeat"],
+            w.get("last_error") or "",
         ]
         for w in _call("GET", "/workers", params={"swarm": swarm})
     ]
-    _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat"])
+    _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
+                  "last_error"])
+    typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
 if __name__ == "__main__":

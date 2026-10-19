@@ -478,6 +478,7 @@ class WorkerStatus(BaseModel):
     last_heartbeat: datetime | None
     launched_at: datetime
     crashes: int = 0
+    last_error: str | None = None  # last launch failure or crash: job status, log tail
 
 
 class TypeStatus(BaseModel):

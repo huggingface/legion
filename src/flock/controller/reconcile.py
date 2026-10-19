@@ -346,6 +346,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
     store.update_worker(
         wid,
         **common,
+        last_error=_crash_reason(p, spec, w, st),
         crashes=w["crashes"] + 1,
         consecutive_crashes=streak,
         next_launch_at=p.now + backoff,
@@ -365,6 +366,23 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
     if streak >= CRASHLOOP_THRESHOLD:
         store.set_type_health(w["swarm"], w["type"], TypeHealth.crashlooping.value)
         p.act("crashloop", f"{w['swarm']}/{w['type']}")
+
+
+def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
+    """`STAGE: message`, plus the job's last log lines (one Hub call per crash) when the
+    jobs client can fetch them: a boot failure (wheel download 401, missing key) is only
+    visible there."""
+    reason = f"{st.stage}: {st.message}" if st.message else st.stage
+    tail = getattr(p.jobs, "logs_tail", None)
+    if tail is not None and w["job_id"]:
+        try:
+            lines = [ln.strip() for ln in tail(w["job_id"], namespace=spec.namespace) if ln.strip()]
+        except Exception as exc:  # noqa: BLE001 - logs are a nicety; never break the pass
+            log.warning("logs of %s failed: %s", w["job_id"], type(exc).__name__)
+            lines = []
+        if lines:
+            reason += " | " + " / ".join(lines)
+    return reason[:500]
 
 
 def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> None:
@@ -401,7 +419,8 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     try:
         job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace)
     except Exception as exc:  # noqa: BLE001 - any Hub failure: retry later, keep the loop alive
-        store.update_worker(wid, next_launch_at=p.now + BACKOFF_BASE)
+        store.update_worker(wid, next_launch_at=p.now + BACKOFF_BASE,
+                            last_error=f"launch failed: {type(exc).__name__}: {exc}"[:500])
         p.act("launch_failed", wid, type(exc).__name__)
         log.warning("launch of %s failed: %s", wid, type(exc).__name__)
         return

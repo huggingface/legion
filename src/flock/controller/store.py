@@ -153,6 +153,8 @@ class Store:
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
+        if "last_error" not in cols:  # last launch failure or crash, shown by `flock workers`
+            self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}

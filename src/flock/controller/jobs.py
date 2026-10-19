@@ -160,6 +160,11 @@ class HubJobsClient:
         self.calls["cancel_job"] += 1
         self.api.cancel_job(job_id=job_id, namespace=namespace)
 
+    def logs_tail(self, job_id, *, namespace, n: int = 5) -> list[str]:
+        """Last `n` log lines of a finished job (one Hub call), for a crash's last_error."""
+        self.calls["fetch_job_logs"] += 1
+        return list(self.api.fetch_job_logs(job_id=job_id, namespace=namespace, tail=n))[-n:]
+
     def list(self, labels, *, namespace) -> list[JobListing]:
         self.calls["list_jobs"] += 1
         out = []
@@ -187,6 +192,7 @@ class FakeJobsClient:
     fail_launches: bool = False
     inspects: int = 0
     lists: int = 0
+    logs: dict[str, list[str]] = field(default_factory=dict)  # job id -> log lines (tests)
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
@@ -213,6 +219,9 @@ class FakeJobsClient:
     def inspect(self, job_id, *, namespace) -> JobState:
         self.inspects += 1
         return self.states.get(job_id, JobState("DELETED"))
+
+    def logs_tail(self, job_id, *, namespace, n: int = 5) -> list[str]:
+        return self.logs.get(job_id, [])[-n:]
 
     def cancel(self, job_id, *, namespace) -> None:
         self.cancels.append(job_id)

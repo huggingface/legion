@@ -237,6 +237,7 @@ def worker_status(w: Row, agents: list[str], now: float) -> WorkerStatus:
         last_heartbeat=_dt(w["last_heartbeat"]),
         launched_at=_dt(w["launched_at"] or w["created_at"]),
         crashes=w["crashes"],
+        last_error=w.get("last_error"),
     )
 
 
