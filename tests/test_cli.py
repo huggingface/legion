@@ -135,6 +135,19 @@ def test_status_prints_zero_usage_warning(monkeypatch):
     assert r.exit_code == 0 and "2 agents finished turns with zero reported tokens" in r.output
 
 
+def test_status_prints_launch_errors(monkeypatch):
+    def t(name, health, err):
+        return {"name": name, "health": health, "replicas": 1, "agents_by_state": {},
+                "workers_by_state": {}, "cost_usd": 0, "launch_error": err}
+    st = {"swarm": "op", "agents_total": 2, "workers_total": 2, "pending_prompts": 0, "cost_usd": 0,
+          "types": {"a": t("a", "launch_refused", "BadRequestError: bad flavor"),
+                    "b": t("b", "ok", "HfHubHTTPError: 503")}}
+    monkeypatch.setattr(cli, "_call", lambda *a, **k: {"status": st})
+    r = runner.invoke(cli.app, ["status", "op"])
+    assert "type a: launch refused, not retrying until the next apply: BadRequestError" in r.output
+    assert "type b: last launch error, retrying: HfHubHTTPError: 503" in r.output
+
+
 def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     app, seen = _provider_app(store, clock, tool_call=True)
     _wire(monkeypatch, app)

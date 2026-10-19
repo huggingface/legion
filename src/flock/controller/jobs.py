@@ -69,6 +69,21 @@ def bootstrap_command() -> list[str]:
     return ["bash", "-c", script]
 
 
+class LaunchRefused(Exception):
+    """A launch the backend will refuse again for the same spec (bad flavor, validation)."""
+
+
+def launch_refused(exc: BaseException) -> bool:
+    """Permanent launch failure: a Hub 4xx (not 408/429, which are worth retrying), or a
+    client-side validation error. Anything else (5xx, network) is transient."""
+    if isinstance(exc, LaunchRefused):
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return 400 <= status < 500 and status not in (408, 429)
+    return type(exc).__name__ in ("HFValidationError", "BadRequestError")
+
+
 @dataclass
 class JobState:
     stage: str  # SCHEDULING, RUNNING, COMPLETED, CANCELED, ERROR, DELETED
@@ -183,12 +198,15 @@ class FakeJobsClient:
     cancels: list[str] = field(default_factory=list)
     states: dict[str, JobState] = field(default_factory=dict)
     fail_launches: bool = False
+    launch_error: Exception | None = None  # raised by launch() when set
     inspects: int = 0
     lists: int = 0
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
             raise RuntimeError("launch failed (fake)")
+        if self.launch_error is not None:
+            raise self.launch_error
         job_id = f"job-{len(self.launches) + 1:04d}"
         self.launches.append(
             {

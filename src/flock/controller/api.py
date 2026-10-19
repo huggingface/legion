@@ -241,6 +241,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
             agents_by_state=dict(by_state),
             workers_by_state=dict(w_state),
             cost_usd=round(sum(a["cost"] for a in mine), 6),
+            launch_error=store.launch_error(spec.swarm, type_name)[0],
         )
     providers: dict[str, ProviderStatus] = {}
     for name, prov in spec.providers.items():
@@ -387,6 +388,8 @@ def _status_page(store: Store, now: float) -> str:
                 if t.health.value == "ok"
                 else f'<span class="badge crit"><i></i>{e(t.health.value)}</span>'
             )
+            if t.launch_error:
+                health += f' <span class="meta">{e(t.launch_error[:200])}</span>'
             ts = spec.types.get(t.name)
             model = (
                 f"<code>{e(ts.resolved_model.qualified)}</code>"

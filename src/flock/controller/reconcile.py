@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from flock.controller.jobs import JobsClient, JobState
+from flock.controller.jobs import JobsClient, JobState, launch_refused
 from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.store import Row, Store
 from flock.models import (
@@ -44,6 +44,7 @@ log = logging.getLogger("flock.reconcile")
 
 BACKOFF_BASE = 30.0  # s, first crash backoff
 BACKOFF_CAP = 900.0  # s, 15 min
+LAUNCH_BACKOFF_CAP = 300.0  # s, transient launch errors back off 30 s, 60 s, ... up to 5 min
 INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh worker
 INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
 LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
@@ -226,8 +227,8 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
             p.act("cancel", w["id"], w["job_id"])
 
     # Launch slots that have agents and no job.
-    if ts is None or store.type_health(spec.swarm, type_name) == TypeHealth.crashlooping:
-        return
+    if ts is None or store.type_health(spec.swarm, type_name) != TypeHealth.ok:
+        return  # crashlooping or launch_refused: wait for a new apply
     for w in store.list_workers(spec.swarm, type_name):
         if w["job_id"] is not None or not counts[w["id"]]:
             continue
@@ -236,7 +237,8 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
         if p.budget <= 0:
             p.act("budget_exhausted", w["id"])
             return
-        _launch(p, spec, type_name, ts, w)
+        if not _launch(p, spec, type_name, ts, w):
+            return  # refused: no more launches for this type
 
 
 def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
@@ -354,7 +356,9 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         p.act("crashloop", f"{w['swarm']}/{w['type']}")
 
 
-def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> None:
+def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> bool:
+    """Launch a worker job. False when the backend refused it for good (the type is then
+    marked launch_refused and no slot of it launches again until the spec is re-applied)."""
     store, s, wid = p.store, p.settings, w["id"]
     lifetime = parse_duration(ts.worker_lifetime).total_seconds()
     jitter = parse_duration(ts.lifetime_jitter).total_seconds()
@@ -390,12 +394,22 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     store.record_launch(p.now)
     try:
         job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace)
-    except Exception as exc:  # noqa: BLE001 - any Hub failure: retry later, keep the loop alive
-        store.update_worker(wid, next_launch_at=p.now + BACKOFF_BASE)
-        p.act("launch_failed", wid, type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - any Hub failure: keep the loop alive
         # the Hub's message says why (a 400 names the bad field); class name alone does not
-        log.warning("launch of %s failed: %s: %s", wid, type(exc).__name__, str(exc)[:500])
-        return
+        msg = f"{type(exc).__name__}: {str(exc)[:500]}"
+        log.warning("launch of %s failed: %s", wid, msg)
+        if launch_refused(exc):
+            store.set_type_health(spec.swarm, type_name, TypeHealth.launch_refused.value)
+            store.set_launch_error(spec.swarm, type_name, msg, 0)
+            p.act("launch_refused", f"{spec.swarm}/{type_name}", msg)
+            return False
+        failures = store.launch_error(spec.swarm, type_name)[1] + 1
+        backoff = min(BACKOFF_BASE * 2 ** (failures - 1), LAUNCH_BACKOFF_CAP)
+        store.set_launch_error(spec.swarm, type_name, msg, failures)
+        store.update_worker(wid, next_launch_at=p.now + backoff)
+        p.act("launch_failed", wid, f"{msg}; backoff {backoff:.0f}s")
+        return True
+    store.set_launch_error(spec.swarm, type_name, None, 0)
     store.clear_commands(wid)
     store.update_worker(
         wid,
@@ -412,6 +426,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     for a in store.list_agents(worker=wid):
         _send_assign(store, wid, a, type_name, ts)
     p.act("launch", wid, job_id)
+    return True
 
 
 # --------------------------------------------------------------------------- heartbeats

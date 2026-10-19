@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS types (
   type TEXT NOT NULL,
   health TEXT NOT NULL DEFAULT 'ok',
   next_worker INTEGER NOT NULL DEFAULT 0,
+  launch_error TEXT,
+  launch_failures INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (swarm, type)
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -137,6 +139,10 @@ class Store:
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
+        cols = {r["name"] for r in self._q("PRAGMA table_info(types)")}
+        if "launch_error" not in cols:
+            self._x("ALTER TABLE types ADD COLUMN launch_error TEXT")
+            self._x("ALTER TABLE types ADD COLUMN launch_failures INTEGER NOT NULL DEFAULT 0")
 
     # ----------------------------------------------------------------- low level
 
@@ -193,10 +199,11 @@ class Store:
             for type_name in spec.types:
                 self._x(
                     "INSERT INTO types (swarm, type) VALUES (?, ?) "
-                    "ON CONFLICT(swarm, type) DO UPDATE SET health = 'ok'",
+                    "ON CONFLICT(swarm, type) DO UPDATE SET health = 'ok', launch_error = NULL, "
+                    "launch_failures = 0",
                     [spec.swarm, type_name],
                 )
-            # Re-applying the spec clears crashlooping and its crash streaks.
+            # Re-applying the spec clears crashlooping, launch_refused and their streaks.
             self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
         self.listener("reconcile", "")
 
@@ -239,6 +246,20 @@ class Store:
             "INSERT INTO types (swarm, type, health) VALUES (?, ?, ?) "
             "ON CONFLICT(swarm, type) DO UPDATE SET health = excluded.health",
             [swarm, type_name, health],
+        )
+
+    def launch_error(self, swarm: str, type_name: str) -> tuple[str | None, int]:
+        """(last launch error, consecutive transient launch failures) for a type."""
+        row = self._one("SELECT launch_error, launch_failures FROM types WHERE swarm = ? AND type = ?",
+                        [swarm, type_name])
+        return (row["launch_error"], row["launch_failures"]) if row else (None, 0)
+
+    def set_launch_error(self, swarm: str, type_name: str, error: str | None, failures: int) -> None:
+        self._x(
+            "INSERT INTO types (swarm, type, launch_error, launch_failures) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(swarm, type) DO UPDATE SET launch_error = excluded.launch_error, "
+            "launch_failures = excluded.launch_failures",
+            [swarm, type_name, error, failures],
         )
 
     def next_worker_index(self, swarm: str, type_name: str) -> int:

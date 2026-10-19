@@ -66,6 +66,11 @@ def _print_status(st: dict) -> None:
         for t in st["types"].values()
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
+    for t in st["types"].values():
+        if t.get("launch_error"):
+            what = ("launch refused, not retrying until the next apply"
+                    if t["health"] == "launch_refused" else "last launch error, retrying")
+            typer.echo(f"warning: type {t['name']}: {what}: {t['launch_error']}")
     for pv in (st.get("providers") or {}).values():
         cap = f"/{pv['max_working']}" if pv.get("max_working") else ""
         kind = pv["type"] + (" self-hosted" if pv["self_hosted"] else "")

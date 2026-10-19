@@ -411,3 +411,65 @@ def test_store_migrates_workers_table_without_incarnation(tmp_path):
     s.insert_worker("w", "sw", "t", 0, 0)
     s.update_worker("w", incarnation="abc")
     assert s.get_worker("w")["incarnation"] == "abc"
+
+
+class _HubError(Exception):
+    """Shaped like huggingface_hub's HfHubHTTPError: carries the response."""
+
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.response = type("R", (), {"status_code": status})()
+
+
+def test_permanent_launch_error_stops_retrying_until_reapply(store, jobs, clock, tick):
+    from flock.controller.api import swarm_status
+
+    jobs.launch_error = _HubError(400, "Flavor 'cpu-basic' for arch 'amd64' is not available")
+    store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 1}), 0)
+    acts = tick()
+    assert kinds(acts).count("launch_refused") == 1 and "launch" not in kinds(acts)
+    assert store.type_health("demo", "researcher") == "launch_refused"
+    for _ in range(5):  # no more attempts, however long we wait
+        clock.advance(600)
+        assert not {"launch", "launch_failed", "launch_refused"} & set(kinds(tick()))
+    spec = store.get_swarm("demo")["spec"]
+    t = swarm_status(store, spec, clock().timestamp()).types["researcher"]
+    assert t.health == "launch_refused" and "not available" in t.launch_error
+    jobs.launch_error = None  # a new apply resets it
+    store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 1}), 0)
+    assert kinds(tick()).count("launch") == 2
+    assert store.type_health("demo", "researcher") == "ok"
+    assert store.launch_error("demo", "researcher") == (None, 0)
+
+
+def test_transient_launch_errors_back_off_with_a_cap(store, jobs, clock, tick):
+    jobs.launch_error = _HubError(503, "Service Unavailable")
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    delays = []
+    for _ in range(8):
+        acts = [a for a in tick() if a.kind == "launch_failed"]
+        assert len(acts) == 1
+        delay = store.get_worker(W0)["next_launch_at"] - clock().timestamp()
+        delays.append(delay)
+        clock.advance(delay - 1)  # just before the backoff ends: no attempt
+        assert "launch_failed" not in kinds(tick())
+        clock.advance(1)
+    assert delays == [30, 60, 120, 240, 300, 300, 300, 300]
+    assert store.type_health("demo", "researcher") == "ok"
+    err, failures = store.launch_error("demo", "researcher")
+    assert err == "_HubError: Service Unavailable" and failures == 8
+    jobs.launch_error = ConnectionError("reset")  # no status: transient too
+    assert "launch_failed" in kinds(tick())
+    jobs.launch_error = None
+    clock.advance(300)
+    assert "launch" in kinds(tick())
+    assert store.launch_error("demo", "researcher") == (None, 0)  # cleared by a launch
+
+
+def test_launch_refused_classification():
+    from flock.controller.jobs import LaunchRefused, launch_refused
+
+    assert launch_refused(_HubError(400, "x")) and launch_refused(_HubError(422, "x"))
+    assert launch_refused(LaunchRefused("x"))
+    assert not launch_refused(_HubError(429, "x")) and not launch_refused(_HubError(503, "x"))
+    assert not launch_refused(RuntimeError("x")) and not launch_refused(ConnectionError("x"))

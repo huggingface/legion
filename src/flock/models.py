@@ -58,6 +58,7 @@ class WorkerState(StrEnum):
 class TypeHealth(StrEnum):
     ok = "ok"
     crashlooping = "crashlooping"
+    launch_refused = "launch_refused"  # the backend refused the launch (4xx); waits for a new apply
 
 
 # --------------------------------------------------------------------------- spec
@@ -506,6 +507,9 @@ class TypeStatus(BaseModel):
     agents_by_state: dict[str, int]
     workers_by_state: dict[str, int]
     cost_usd: float = 0.0
+    # Last worker-launch error for this type (the backend's message), cleared by a successful
+    # launch or a new apply. With health launch_refused it is why launches stopped.
+    launch_error: str | None = None
 
 
 class ProviderStatus(BaseModel):
