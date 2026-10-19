@@ -303,6 +303,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         }
         return out
 
+    @app.get("/cli/canvas")
+    def cli_source():
+        """The CLI itself, so a worker without the repo can fetch it (stdlib only)."""
+        return FileResponse(HERE / "cli" / "canvas_cli.py", media_type="text/x-python")
+
     @app.get("/healthz")
     def healthz():
         return {"ok": True}

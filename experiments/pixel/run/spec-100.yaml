@@ -1,0 +1,56 @@
+# Pixel run 1: 100 LFM2.5-2.6B painters on the `llm` harness (experiments/pixel/run/README.md).
+# Needs PR #7 (llm harness: `harness: llm`, `tool_choice`, `context_tokens`). Apply only after it
+# merges; on main today `harness: llm` is rejected.
+#
+# Model path: in-group URL to the GPU job (job.sh: --network-group pixel --network-alias model).
+# BLOCKED on flock today: provider `network_group` (launch workers in the group, expand
+# ${HF_NETWORK_GROUP_PREFIX}) was removed in 0c1b4b2, so workers are not in the group and the
+# controller's preflight cannot reach this URL. Either restore it (b9cc630) or use the proxy form
+# commented below (vLLM exposed with --expose 8000, no --api-key, HF token as bearer; probe
+# 2026-10-19: same latency).
+swarm: pixel-100
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/flock/pixel-100
+providers:
+  gpu:
+    type: openai_compat
+    base_url: "http://${HF_NETWORK_GROUP_PREFIX}model:8000/v1"
+    api_key_env: VLLM_API_KEY    # any string; the same value is passed to vLLM --api-key
+    # network_group: pixel       # the field b9cc630 had; ignored by flock until restored
+    self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
+    max_working: 100
+    timeout_s: 60
+    max_retries: 4
+  # gpu:                         # proxy fallback (works with flock as is)
+  #   type: openai_compat
+  #   base_url: "https://<job proxy URL for port 8000>/v1"
+  #   api_key_env: HF_TOKEN      # read-only fine-grained token for the namespace
+  #   self_hosted: true
+  #   max_working: 100
+models:
+  lfm:
+    model: "gpu:LiquidAI/LFM2.5-2.6B"
+    extra:
+      max_tokens: 256
+      chat_template_kwargs: {enable_thinking: false}
+types:
+  painter:
+    harness: llm
+    model: lfm
+    tool_choice: required        # forced tool: every prompt is ONE bash step (PR #7)
+    max_turns: 25
+    max_budget_usd: 0.01         # per prompt; self-hosted price is 0, so this never binds
+    context_tokens: 6000         # compact well below vLLM --max-model-len 8192
+    turn_timeout: 2m
+    replicas: 100
+    agents_per_worker: 50
+    max_working_per_worker: 50   # default 20 would cap the swarm at 40 concurrent steps
+    workers: {initial: 2, max_extra: 1}
+    flavor: cpu-basic
+    # CANVAS_URL = the canvas's public URL (job.sh --expose-public 8765), set after the GPU job
+    # is up. CANVAS_TOKEN = the canvas shared secret (mode A); identity = FLOCK_AGENT.
+    secrets: [CANVAS_URL, CANVAS_TOKEN]
+    # The brief asked for `comms.instructions`; flock has no `comms` block (unknown keys are
+    # silently ignored), so the instructions go in as the agent's AGENTS.md.
+    system_prompt_file: painter.md
+    labels: {experiment: pixel-100}

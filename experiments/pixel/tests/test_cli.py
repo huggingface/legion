@@ -86,3 +86,32 @@ def test_unreachable(monkeypatch, capsys):
     monkeypatch.setenv("CANVAS_URL", "http://127.0.0.1:9")
     assert canvas_cli.main(["status"]) == 3
     assert "check CANVAS_URL" in capsys.readouterr().err
+
+
+def test_claim_pipe_paint(server, capsys, monkeypatch):
+    import io
+
+    _world, _ = server
+    assert canvas_cli.main(["claim", "3", "--json"]) == 0
+    claim = capsys.readouterr().out
+    assert len(json.loads(claim)["pixels"]) == 3
+    monkeypatch.setattr("sys.stdin", io.StringIO(claim))
+    assert canvas_cli.main(["paint", "-", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["counts"] == {"useful": 3} and out["seq"] == 1
+    # An empty claim (finished canvas) is a clean no-op with a clear message.
+    empty = json.dumps({"pixels": [], "runs": [], "remaining": 0, "done": True, "lease_s": 120})
+    monkeypatch.setattr("sys.stdin", io.StringIO(empty))
+    assert canvas_cli.main(["paint", "-"]) == 0
+    assert "You are done" in capsys.readouterr().out
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"error": "rate limited"}'))
+    assert canvas_cli.main(["paint", "-"]) == 1
+    assert canvas_cli.main(["claim", "x"]) == 1
+
+
+def test_cli_served_by_canvas(server):
+    import os
+    import urllib.request
+
+    src = urllib.request.urlopen(os.environ["CANVAS_URL"] + "/cli/canvas").read().decode()
+    assert src.startswith("#!/usr/bin/env python3") and "def main(" in src

@@ -19,9 +19,10 @@ import urllib.request
 import uuid
 
 USAGE = """canvas <command> [args] [--json]
-  claim [-n N]            lease up to N pixels that still need paint (prints target colours)
+  claim [N]               lease up to N pixels that still need paint (prints target colours)
   get X Y [W H]           target colour (and current colour) of a pixel or small region
-  paint X,Y,RRGGBB ...    paint pixels (max per call is enforced by the server; '-' reads stdin)
+  paint X,Y,RRGGBB ...    paint pixels (max per call is enforced by the server)
+  paint -                 paint from stdin: `canvas claim 10 --json | canvas paint - --json`
   release                 give back your leased pixels
   score                   progress: exact match %, MSE/PSNR, paint outcomes
   status                  service status: agents, claims, req/s
@@ -163,7 +164,12 @@ def run(argv: list[str]) -> tuple[dict, str]:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if a.cmd == "claim":
-        out = call("POST", "/claim", {"n": a.n})
+        n = a.n
+        if a.args:
+            if len(a.args) != 1 or not a.args[0].isdigit():
+                raise CliError("usage: canvas claim [N]  (N = how many pixels, e.g. 10)")
+            n = int(a.args[0])
+        out = call("POST", "/claim", {"n": n})
         return out, fmt_claim(out)
     if a.cmd == "get":
         nums = a.args
@@ -179,7 +185,28 @@ def run(argv: list[str]) -> tuple[dict, str]:
     if a.cmd == "paint":
         toks = a.args
         if toks == ["-"]:
-            toks = sys.stdin.read().split()
+            data = sys.stdin.read().strip()
+            if data.startswith("{"):
+                # Piped from `canvas claim --json`: paint exactly what was claimed.
+                try:
+                    claim = json.loads(data)
+                except json.JSONDecodeError:
+                    raise CliError(
+                        "stdin is not valid claim JSON; run: canvas claim 10 --json"
+                    ) from None
+                if "error" in claim:
+                    raise CliError(f"claim failed: {claim['error']}")
+                if not claim.get("pixels"):
+                    msg = fmt_claim(claim) if "done" in claim else "nothing to paint"
+                    return {"pixels": 0, "done": bool(claim.get("done")), "message": msg}, msg
+                toks = [f"{p['x']},{p['y']},{p['hex']}" for p in claim["pixels"] if "hex" in p]
+                if not toks:
+                    raise CliError(
+                        "claim has no target colours (CANVAS_CLAIM_REVEAL=0); "
+                        "look them up with: canvas get X Y"
+                    )
+            else:
+                toks = data.split()
         if not toks:
             raise CliError("usage: canvas paint X,Y,RRGGBB [X,Y,RRGGBB ...]")
         body = {"pixels": [parse_pixel(t) for t in toks]}
