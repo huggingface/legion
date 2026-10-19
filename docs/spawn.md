@@ -15,16 +15,25 @@ below) and [`examples/spawn.yaml`](../examples/spawn.yaml). Design notes and dec
 From a clone of this repo, with `uv sync --all-extras` done. Replace `<you>` everywhere,
 including in `examples/first-spawn.yaml`. Cost: a few cents of Haiku and under $0.01 of jobs.
 
+`uv sync` does not activate the environment, so every command goes through `uv run`, which
+also gives the scripts a Python with `huggingface_hub`. A bare `flock` may be util-linux's
+file-locking tool (`/usr/bin/flock`), a different program.
+
 ```sh
 export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
-hf buckets create <you>/flock --private                      # once
-W=$(scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)  # wheel the workers install
-scripts/deploy-space.sh "$W" <you>/flock                     # controller Space, up in about 1 min
+uv run hf buckets create <you>/flock --private                      # once
+W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)  # wheel the workers install
+uv run scripts/deploy-space.sh "$W" <you>/flock                     # returns while it builds
 export FLOCK_URL=https://<you>-flock.hf.space
-flock apply examples/first-spawn.yaml     # leader-0000 boots (~40 s), then idles until prompted
-flock prompt leader-0000 "Start: spawn the 5 analyst children now."
-flock events leader-0000 --pretty         # spawned x5, then "spawned 5"
-flock agents first-spawn                  # repeat until the children are idle
+# 1. wait for the Space to build (a minute or two)
+until curl -fsS "$FLOCK_URL/healthz" >/dev/null; do sleep 10; done
+uv run flock apply examples/first-spawn.yaml
+# 2. apply returns before reconcile creates the leader: wait for its row (a few seconds)
+until uv run flock agents first-spawn | grep -q '^leader-0000 '; do sleep 5; done
+uv run flock prompt leader-0000 "Start: spawn the 5 analyst children now."
+# 3. follow the leader (its worker boots first, ~40 s): spawned x5, then "spawned 5"; Ctrl-C
+uv run flock events leader-0000 --follow --pretty
+uv run flock agents first-spawn             # repeat until the children are idle
 ```
 
 The children show `unknown` with `pending 1` for about 50 s: the first spawn of a type with no
@@ -32,13 +41,13 @@ agents boots its worker (a job launch). That is normal. Then each child answers,
 leader (the reports arrive as the leader's turns t-2, t-3, ...), and idles:
 
 ```text
-$ flock agents first-spawn    # about 1 min after the prompt; last_heartbeat column cut
+$ uv run flock agents first-spawn   # about 1 min after the prompt; last_heartbeat cut
 name                      state  worker                     turns  pending  cost
 leader-0000               idle   first-spawn-leader-w0000   1      0        $0.0030
 leader-0000-analyst-0001  idle   first-spawn-analyst-w0000  1      0        $0.0021
 ...
 leader-0000-analyst-0005  idle   first-spawn-analyst-w0000  1      0        $0.0019
-$ flock events leader-0000-analyst-0003 --pretty
+$ uv run flock events leader-0000-analyst-0003 --pretty
 08:55:31     - session_started session_id=… resumed=False parent=leader-0000
 08:55:31   t-1 user     Capital of France? One word.
 08:55:34   t-1 assistant Paris
@@ -48,17 +57,17 @@ $ flock events leader-0000-analyst-0003 --pretty
 
 `turns` and `state` come from worker heartbeats (every 30 s), so they lag the event stream. An
 agent's answer is the text of its `assistant` messages; `turn_ended` only says the turn is over.
-If a worker never gets past `launching`/`dead`, `flock workers first-spawn` shows its
+If a worker never gets past `launching`/`dead`, `uv run flock workers first-spawn` shows its
 `last_error` (status and log tail); `hf jobs logs <job>` has the rest. A 401 there usually means
 `HF_TOKEN` is missing from the type's `secrets`.
 
 ## Teardown
 
 ```sh
-flock remove first-spawn                           # drains and cancels its workers (about 20 s)
-hf jobs ps --label swarm=first-spawn               # empty once they are gone
-hf spaces pause <you>/flock                        # the Space is public and holds your secrets
-hf buckets delete <you>/flock                      # optional: wheels and agent state
+uv run flock remove first-spawn                    # drains and cancels its workers (about 20 s)
+uv run hf jobs ps --label swarm=first-spawn        # empty once they are gone
+uv run hf spaces pause <you>/flock                 # the Space is public and holds your secrets
+uv run hf buckets delete <you>/flock               # optional: wheels and agent state
 ```
 
 ## Spec
