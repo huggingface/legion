@@ -64,6 +64,7 @@ As an HF Docker Space (the tested setup):
 
 ```sh
 export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
+hf buckets create <you>/flock --private                       # once: wheels and agent state
 W=$(scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for workers
 scripts/deploy-space.sh "$W" <you>/flock
 ```
