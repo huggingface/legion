@@ -15,8 +15,8 @@ Nothing here has been launched. Files:
 **driver is the loop**. Each prompt carries one literal command:
 
 1. First prompt per agent (install the stdlib-only CLI from the canvas, `GET /cli/canvas`):
-   `python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" $CANVAS_URL/cli/canvas canvas && chmod +x canvas && ./canvas status`
-2. Every later prompt: `./canvas claim 10 --json | ./canvas paint - --json`
+   `python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" $CANVAS_URL/cli/canvas canvas && python3 canvas status`
+2. Every later prompt: `python3 canvas claim 10 --json | python3 canvas paint - --json`
    (`paint -` paints exactly what the claim returned; an empty claim prints "You are done").
 
 The worker image has `python3` but no `curl`, hence the python one-liner. The agent's tool env

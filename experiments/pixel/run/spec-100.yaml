@@ -41,9 +41,9 @@ types:
     context_tokens: 3000         # smoke: ~6k-token prompts at 6000; a step needs only the last result
     turn_timeout: 6m             # 25 steps x ~3-6 s; past it the worker kills the turn (agent stuck)
     replicas: 100
-    agents_per_worker: 50
-    max_working_per_worker: 50   # default 20 would cap the swarm at 40 concurrent steps
-    workers: {initial: 2, max_extra: 1}
+    agents_per_worker: 25        # run 1: 50 per cpu-basic was CPU-bound (110 px/s); 25 gave 234 px/s
+    max_working_per_worker: 25   # run 1: 2 workers x 50 agents were CPU-bound (~9 s steps)
+    workers: {initial: 4, max_extra: 1}
     flavor: cpu-basic
     # CANVAS_URL = https://<JOB_ID>--8765.hf.jobs (job.sh --expose-public 8765), set after the
     # GPU job is up. CANVAS_TOKEN = the canvas shared secret (mode A); identity = FLOCK_AGENT.

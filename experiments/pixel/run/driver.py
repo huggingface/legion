@@ -37,9 +37,11 @@ import urllib.request
 # No single quotes: LFM2.5 over-escapes them inside its tool-call JSON (smoke 2026-10-19).
 BOOT = (
     'python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" '
-    "$CANVAS_URL/cli/canvas canvas && chmod +x canvas && ./canvas status"
+    "$CANVAS_URL/cli/canvas canvas && python3 canvas status"
 )
-STEP = "./canvas claim 10 --json | ./canvas paint - --json"
+# `python3 canvas`, not `./canvas`: a workdir restored from the bucket loses the exec bit (run 1:
+# 10 agents looped on "Permission denied" after a re-apply).
+STEP = "python3 canvas claim 10 --json | python3 canvas paint - --json"
 
 
 REPEAT = False  # --repeat: multi-step turns (spec `done_tool: true`)
@@ -276,6 +278,20 @@ def drive(a, pub: Publisher) -> str:
         flush=True,
     )
     steps: dict[str, int] = {}
+    # Per agent: canvas paint calls seen at the last prompt, and prompts since they last grew.
+    # Re-install after 3 prompts without a new paint call (`/score` keeps agent names across
+    # deployments, so "never seen on the canvas" alone misses a broken install after a re-apply).
+    last_calls: dict[str, int] = {}
+    stalled: dict[str, int] = {}
+
+    def needs_install(name: str, score: dict) -> bool:
+        if name not in booted:
+            return True
+        calls = (score.get("agents", {}).get(name) or {}).get("calls", 0)
+        stalled[name] = stalled.get(name, 0) + 1 if calls <= last_calls.get(name, -1) else 0
+        last_calls[name] = calls
+        return stalled[name] >= 3
+
     booted: set[str] = set()
     t0 = time.time()
     last_seq, last_t = None, None
@@ -310,12 +326,11 @@ def drive(a, pub: Publisher) -> str:
                 # install step individually; everyone idle then gets the plain step in bulk.
                 for ag in agents:
                     name = ag["name"]
-                    seen = name in score.get("agents", {})
-                    if name in booted and (seen or steps.get(name, 0) < 3):
+                    if ag["state"] != "idle":  # once per bulk prompt, not per tick
                         continue
-                    if ag["state"] not in ("idle", "working"):
+                    if not needs_install(name, score):
                         continue
-                    steps[name] = 0
+                    steps[name] = stalled[name] = 0
                     ack = {"prompt_id": "dry-run"}
                     if not a.dry_run:
                         try:
@@ -369,10 +384,9 @@ def drive(a, pub: Publisher) -> str:
                             continue
                         # Never booted, or stepped 3+ times without ever reaching the canvas
                         # (the install failed): send the install step.
-                        seen = name in score.get("agents", {})
-                        first = name not in booted or (not seen and steps.get(name, 0) >= 3)
+                        first = needs_install(name, score)
                         if first:
-                            steps[name] = 0
+                            steps[name] = stalled[name] = 0
                         text = prompt_text(BOOT if first else STEP)
                         if a.dry_run:
                             ack = {"prompt_id": "dry-run"}
