@@ -18,6 +18,7 @@ from flock.worker.adapters.llm import (
     compact,
     estimate_tokens,
     harness_env,
+    redact,
     repair,
     split_thinking,
     text_tool_calls,
@@ -589,3 +590,47 @@ async def test_forced_with_done_has_a_default_call_cap(tmp_path, fake_server, mo
     end = (await turn(a))[-1]
     assert end.data["reason"] == "max_turns" and end.data["num_turns"] == 2 and "(2)" in end.error
     await a.stop()
+
+
+async def test_non_2xx_bodies_are_reported_redacted(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch)
+    await a.start(wd, None, spec, env={KEY_ENV: "sk-test-secret-key-123"})
+    await a.send("fail! please")
+    evs = await turn(a)
+    [err] = [e for e in evs if e.kind == "error"]
+    assert err.data == {"status": 400, "attempt": 1, "retrying": False}
+    assert err.error.startswith("HTTP 400 from http://127.0.0.1") and "context too long" in err.error
+    assert "sk-test-secret-key-123" not in err.error and "[redacted]" in err.error
+    body = err.error.split(": ", 1)[1]
+    assert len(body) == 500  # the first 500 chars of the body
+    end = evs[-1]
+    assert end.status == "error" and end.data["reason"] == "api_error"  # handling unchanged
+    assert "sk-test-secret-key-123" not in end.error
+
+    await a.send("503! now")  # retried as before (3 retries), one error event per response
+    evs = await turn(a)
+    errs = [e for e in evs if e.kind == "error"]
+    assert [e.data["retrying"] for e in errs] == [True, True, True, False]
+    assert all(e.data["status"] == 503 and "engine overloaded" in e.error for e in errs)
+    assert "gave up after 4 attempts" in evs[-1].error
+    await a.stop()
+
+
+def test_redact():
+    assert redact("Authorization: Bearer abc.def-123 ok", None) == "Authorization: Bearer [redacted] ok"
+    assert redact("key hf_abcdefghijk and sk-abcdefghij12", None) == "key [redacted] and [redacted]"
+    assert redact("my-own-key-value appears", "my-own-key-value") == "[redacted] appears"
+
+
+def test_warn_extra_skips_the_llm_harness(capsys):
+    from flock import cli
+
+    spec = SwarmSpec.model_validate({
+        "swarm": "s", "namespace": "n", "bucket": "b",
+        "providers": {"p": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
+                            "self_hosted": True}},
+        "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
+        "types": {"pix": {"harness": "llm", "model": "m"}, "cx": {"harness": "codex", "model": "m"}}})
+    cli._warn_extra(spec)
+    err = capsys.readouterr().err
+    assert "type cx: `extra`" in err and "pix" not in err

@@ -14,7 +14,9 @@ Replies, decided from the last message of each request:
 - last user text contains `think!`  -> inline reasoning without the opening tag (LFM2 style):
                                        "pondering</think>echo: <text>"
 - last user text contains `think2!` -> `reasoning_content: "pondering"` + the echo
-- last user text contains `fail!`   -> HTTP 400 with an OpenAI-style error body
+- last user text contains `fail!`   -> HTTP 400 with an OpenAI-style error body (long, and
+                                       echoing the Authorization header)
+- last user text contains `503!`    -> HTTP 503 every time
 - last user text contains `429!`    -> HTTP 429 (Retry-After: 0) the first time a request with
                                        these exact messages is seen, then the normal reply
 - otherwise                         -> text "echo: <last user text>"
@@ -105,8 +107,15 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
         with LOCK, open(self.log_path, "a") as f:
             f.write(json.dumps({"auth": self.headers.get("authorization"), "body": body}) + "\n")
-        if "fail!" in _text((body.get("messages") or [{}])[-1].get("content")):
-            self._json(400, {"error": {"message": "fake failure", "type": "invalid_request_error"}})
+        last_text = _text((body.get("messages") or [{}])[-1].get("content"))
+        if "fail!" in last_text:
+            # echoes the caller's Authorization header, as a careless server might
+            self._json(400, {"error": {"auth_seen": self.headers.get("authorization"),
+                                       "message": "fake failure: context too long " + "x" * 600,
+                                       "type": "invalid_request_error"}})
+            return
+        if "503!" in last_text:
+            self._json(503, {"error": {"message": "engine overloaded"}})
             return
         if "429!" in _text((body.get("messages") or [{}])[-1].get("content")):
             key = json.dumps(body.get("messages"), sort_keys=True)

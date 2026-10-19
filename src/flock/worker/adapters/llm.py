@@ -325,6 +325,19 @@ class CallError(RuntimeError):
     pass
 
 
+ERROR_BODY_CHARS = 500
+_SECRETS = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|\b(?:hf|sk|ghp|gho|xox[bp])[_-][A-Za-z0-9_-]{8,}")
+
+
+def redact(text: str, *secrets: str | None) -> str:
+    """Error text safe to log: the given secrets, bearer tokens and common key shapes (hf_,
+    sk-, ghp_, ...) replaced by `[redacted]`."""
+    for sec in secrets:
+        if sec and len(sec) >= 4:
+            text = text.replace(sec, "[redacted]")
+    return _SECRETS.sub(lambda m: (m.group(1) or "") + "[redacted]", text)
+
+
 # --------------------------------------------------------------------------- adapter
 
 
@@ -737,7 +750,17 @@ class LLMAdapter:
                     if not isinstance(data, dict) or not data.get("choices"):
                         raise CallError(f"the reply has no choices: {json.dumps(data)[:300]}")
                     return data
-                err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                # redact before cutting, so a secret across the cut cannot leak in part
+                body_text = redact(resp.text[:4 * ERROR_BODY_CHARS], self._key)[:ERROR_BODY_CHARS]
+                err = f"HTTP {resp.status_code}: {body_text[:300]}"
+                retrying = (resp.status_code == 429 or resp.status_code >= 500) and attempt < retries
+                # the server's reason, in the event stream (run 1: 29 x 400 in 67k calls, unlogged)
+                self._queue.put(AdapterEvent("error", error=f"HTTP {resp.status_code} from "
+                                             f"{url}: {body_text}",
+                                             data={"status": resp.status_code, "attempt": attempt + 1,
+                                                   "retrying": retrying}))
+                log.warning("%s: HTTP %d from the model server: %s", self.agent, resp.status_code,
+                            body_text[:200])
                 if resp.status_code != 429 and resp.status_code < 500:
                     raise CallError(err)
                 with contextlib.suppress(TypeError, ValueError):

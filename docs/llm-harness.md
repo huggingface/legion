@@ -109,7 +109,8 @@ any steered prompts. It stops when a reply has no tool call and nothing was stee
 | `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
 | `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
 | `turn_ended interrupted` | `stop` mid-turn (timeout, stop, drain); the tool's process group is killed |
-| `error`, `exited` | `exited` once per burst, on `stop`; an internal failure ends the burst with `error` + `exited` |
+| `error` | every non-2xx reply from the model server: `HTTP <status> from <url>: <first 500 chars of the body>` (keys and bearer tokens redacted), `data` = `{status, attempt, retrying}`; retries and turn handling are unchanged. Also an internal failure, which ends the burst |
+| `exited` | once per burst, on `stop` (or after an internal failure) |
 
 Steering: a prompt sent during a turn is queued and becomes the next user message after the
 current tool results, inside the same turn (several queued prompts go in together).
