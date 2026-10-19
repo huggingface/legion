@@ -211,6 +211,9 @@ generates. Prompts go out as `prompt` with `streamingBehavior: "steer"`, which s
 when Pi is idle and queues into the running one when busy; a flock turn runs from the start
 of a Pi run to `agent_settled`. Usage is per model call, not cumulative. The system prompt is
 the workdir's `AGENTS.md`. Pi's harness environment is an allow-list (no `FLOCK_TOKEN`).
+Pi has no turn or budget options, so the worker enforces `max_turns` and `max_budget_usd`: it
+counts model calls and prices each one with the flock price table, and sends Pi `abort` before
+a call past either limit (turn ends `error`, `reason` max_turns|max_budget_usd).
 Packing numbers for Pi are not measured yet; idle VmRSS of one RPC process was 117 MB locally.
 
 ### Resume across workers
@@ -463,9 +466,9 @@ double-counted after a relaunch.
   `projects/<enc-cwd>/<id>.jsonl` (plus `<id>/` if present); Codex needs only the
   rollout file at its dated relative path and rebuilds its SQLite index. Codex was
   verified locally with two fresh homes, not in a job (no API key here).
-- Pi cross-machine resume: NOT yet run in a job (experiments/resume-gate-pi; passed a
-  local dry run with two agent dirs). Pi as root, its memory and startup on cpu-basic, and
-  compaction on long sessions are unmeasured (docs/pi.md).
+- Pi cross-machine resume: PASSED 2026-10-16 in two cpu-basic jobs, as root
+  (experiments/resume-gate-pi/RESULTS.md). Packing on cpu-basic and compaction on long
+  sessions are unmeasured (docs/pi.md).
 - Multi-day job timeouts honoured in practice (24 h is within reports; longer
   is not needed).
 - 1,000 concurrent HF Jobs under one PRO user (credits and spend limit are the
