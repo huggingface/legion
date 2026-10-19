@@ -8,3 +8,4 @@ dist/
 *.db
 *.sqlite
 experiments/**/out/
+experiments/common/fake_openai.py

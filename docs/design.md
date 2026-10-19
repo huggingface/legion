@@ -5,7 +5,7 @@ Scope: v1, the first milestone and the contracts later layers depend on.
 
 ## 1. What it is
 
-flock hosts coding-harness agents (Claude Code, Codex) on Hugging Face
+flock hosts coding-harness agents (Claude Code, Codex, Pi) on Hugging Face
 Jobs, keeps them alive for weeks, takes prompts for them, and exposes their
 sessions and health. It is the lowest layer under two existing systems:
 
@@ -104,6 +104,14 @@ documented; anything inferred is marked.
   `turn/interrupt`. `turn.completed` carries
   `usage{input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens}`.
 - No official latency or memory numbers.
+- Model providers (checked 2026-10-16 against the installed 0.162.1 with `--strict-config`
+  and a local fake Responses server): `[model_providers.<id>]` takes `name`, `base_url`,
+  `env_key`, `wire_api`, `request_max_retries`, `stream_max_retries`,
+  `stream_idle_timeout_ms`; `model_provider`, `model` and `model_reasoning_effort` select
+  them. `wire_api = "chat"` is refused ("no longer supported", openai/codex discussion
+  7782): an OpenAI-compatible server must serve the **Responses API** (`POST /v1/responses`,
+  streamed). `openai`, `ollama` and `lmstudio` are reserved ids. The same keys work as
+  `codex app-server -c key=value` overrides.
 
 ### swarmlab
 
@@ -182,11 +190,12 @@ One Python package, three entry points: `flock` (CLI/library),
 
 1. A prompt arrives for an idle agent. The worker starts the harness in the
    agent's workdir, resuming its session id: Claude through the Python Agent
-   SDK in streaming-input mode, Codex as one app-server process per agent.
+   SDK in streaming-input mode, Codex as one app-server process per agent, Pi as
+   one `pi --mode rpc` process per agent.
    Prompts that land during the roughly 2 s startup wait in a small buffer and
    are forwarded as soon as stdin is open.
 2. While the process is alive, every further prompt is forwarded directly.
-   Claude queues it as the next turn; Codex steers it into the running turn.
+   Claude queues it as the next turn; Codex and Pi steer it into the running turn.
    The worker does no scheduling and no queueing beyond the startup buffer.
 3. When the harness has been idle for `idle_grace` (default 120 s) the worker
    closes it. State is on disk.
@@ -201,12 +210,26 @@ live process costs about 0.1 CPU-s against about 1 CPU-s cold. The prompt
 cache is server-side with a 1 h TTL either way. Hence the 120 s idle grace and
 the measured defaults of 50 agents and 20 concurrent turns per worker.
 
+Pi (`@earendil-works/pi-coding-agent` 1.2.0, `harness: pi`, docs/pi.md) follows the same
+model: one `pi --mode rpc` process per burst, cwd = the workdir, JSONL commands on stdin and
+events on stdout. Every agent on a worker shares `PI_CODING_AGENT_DIR=/state/pi` (same type,
+same `models.json`, which the worker writes with the API key as an env-var reference) and has
+its own `--session-dir /state/pi/sessions/<agent>`; the worker passes a session id it
+generates. Prompts go out as `prompt` with `streamingBehavior: "steer"`, which starts a run
+when Pi is idle and queues into the running one when busy; a flock turn runs from the start
+of a Pi run to `agent_settled`. Usage is per model call, not cumulative. The system prompt is
+the workdir's `AGENTS.md`. Pi's harness environment is an allow-list (no `FLOCK_TOKEN`).
+Pi has no turn or budget options, so the worker enforces `max_turns` and `max_budget_usd`: it
+counts model calls and prices each one with the flock price table, and sends Pi `abort` before
+a call past either limit (turn ends `error`, `reason` max_turns|max_budget_usd).
+Packing numbers for Pi are not measured yet; idle VmRSS of one RPC process was 117 MB locally.
+
 ### Resume across workers
 
 `persist_workdir` defaults to true. The worker syncs, per agent, the workdir
 and the harness's session directory (Claude:
 `projects/<encoded-cwd>/<session>.jsonl`; Codex: the rollout file and, if it
-proves necessary, the SQLite index) to
+proves necessary, the SQLite index; Pi: `sessions/<agent>/<ts>_<session>.jsonl`) to
 `<bucket>/<swarm>/<type>/<agent>/`. On relaunch the new worker restores both
 to the identical absolute paths before the first resume. Resume is what makes
 week-long projects possible; it is also the first thing milestone one
@@ -240,9 +263,17 @@ the type defines `resume_prompt`, sends it. No default.
 swarm: paper-review
 namespace: cmpatino            # HF namespace for jobs
 bucket: hf://buckets/cmpatino/flock
+providers:                     # optional: where open models are served (see "Providers")
+  hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+         pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}  # router provider pinned
+  gpu1: {type: openai_compat, base_url: "https://qwen.example.org/v1",  # your vLLM, over HTTPS
+         api_key_env: VLLM_API_KEY,
+         self_hosted: true, max_working: 256}
+models:                        # optional aliases
+  qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: claude            # claude | codex
+    harness: claude            # claude | codex | pi
     model: claude-opus-5-5
     image: null                # default worker image; override to add tools/skills
     system_prompt_file: prompts/researcher.md   # written to the workdir as CLAUDE.md / AGENTS.md
@@ -257,8 +288,8 @@ types:
     lifetime_jitter: 4h
     drain_window: 10m
     idle_grace: 120s
-    max_turns: 50              # per prompt, passed to the harness
-    max_budget_usd: 2.0        # per prompt, passed to the harness
+    max_turns: 50              # model calls per prompt; enforced for every harness
+    max_budget_usd: 2.0        # spend per prompt (flock price table); enforced likewise
     persist_workdir: true
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
@@ -267,6 +298,11 @@ types:
     model: gpt-5.5-codex
     replicas: 500
     secrets: [OPENAI_API_KEY]
+  analyst:
+    harness: codex
+    model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B:deepinfra" directly
+    reasoning: low             # optional; overrides the alias
+    replicas: 200
 ```
 
 `scale` and `remove` edit the spec and re-apply. The system prompt is a file
@@ -274,6 +310,87 @@ in the workdir, not a flag, so it survives resume. `flock apply` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
 caller's files (added in the e2e run).
+
+### Providers
+
+Open models (vLLM in a GPU job, the HF router, any OpenAI-compatible or Anthropic-compatible
+server) are reached through a `providers:` block. Field names are swarmlab's
+(`swarmlab/providers/`), so a block moves between the two projects. How-to:
+`docs/open-models.md`.
+
+| Field | Meaning |
+|---|---|
+| `providers.<name>.type` | `openai_compat` (Codex; Responses API) or `anthropic` (Claude Code; Messages API) |
+| `providers.<name>.base_url` | required for `openai_compat` (ends in `/v1`); optional for `anthropic` (API root, default Anthropic) |
+| `providers.<name>.api_key_env` | NAME of the secret holding the key; the value is never in the spec |
+| `providers.<name>.self_hosted` | price defaults to `[0, 0, 0]`; the real cost is the GPU job |
+| `providers.<name>.max_working` | max agents of the swarm on this provider in a turn at once; enforced at prompt admission (`FLOCK_MAX_WORKING_ENFORCE=0`: report only) |
+| `providers.<name>.auth` | `anthropic` only: `x-api-key` (default) or `bearer` (Claude Code's `ANTHROPIC_AUTH_TOKEN`) |
+| `providers.<name>.pricing` | `{model id or "*": [input, output, cached]}` USD per 1M tokens |
+| `providers.<name>.timeout_s`, `max_retries` | passed to the harness (Codex provider table; Claude `API_TIMEOUT_MS`, `CLAUDE_CODE_MAX_RETRIES`) |
+| `models.<alias>.model` | `"<provider>:<model id>"` |
+| `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
+| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); kept, not sent by either harness |
+| `models.<alias>.pricing` | `[input, output, cached]`, overrides the provider's |
+| `types.<t>.model` | an alias, else `"<provider>:<model id>"`, else a harness-native id (v1) |
+| `types.<t>.reasoning` | overrides the alias's |
+
+Resolution of `types.<t>.model`: an alias under `models:`; else `<prefix>:<id>` with the prefix
+under `providers:` (split on the first colon, so `hf:Qwen/Qwen3.8-27B:ovhcloud` keeps the router
+suffix); else a harness-native id with no provider. A prefix that does not look like a provider
+name (`[a-z][a-z0-9_-]*`, e.g. Bedrock's `anthropic.claude-...-v1:0`) is native.
+`models.resolve_model(spec, type_spec)` returns the `ResolvedModel` or None.
+
+Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
+type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
+row for the id, or its `"*"` row, unless `self_hosted`; harness against provider type
+(`claude` needs `anthropic`, `codex` needs `openai_compat`; native ids always pass).
+
+Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
+the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
+spec. Workers get the resolved model inside `AssignCommand.spec`; the controller prices with it.
+
+Keys: the controller adds each provider-backed type's `api_key_env` to that type's job secrets
+(it must be in the controller's environment, like every secret). The worker reads it from its
+own environment and hands it to the harness: under the same name for Codex (`env_key`), as
+`ANTHROPIC_API_KEY` for Claude Code (plus `ANTHROPIC_BASE_URL` when `base_url` is set).
+
+Harness configuration: Codex gets `-c` overrides on `codex app-server` (the provider table,
+`model_provider`, `model`, `model_reasoning_effort`; `off` is `none`), not a written
+`config.toml`, because `CODEX_HOME` is per worker and synced. Reserved ids (`openai`,
+`ollama`, `lmstudio`) become `flock-<name>`. Claude Code gets the SDK's `effort` for
+low/medium/high and `thinking: disabled` for off.
+
+`max_working`: counted per provider from heartbeats (agents in `working`) and shown in
+`GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. The controller
+enforces it at prompt admission: on a command poll, a prompt for an agent that is not in a turn
+goes out only while the provider has a free slot; otherwise it stays in `pending_prompts` and
+goes out on a later poll (never rejected). Slots are fresh heartbeat `working` agents plus
+agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s). A capped
+provider's `resume_prompt` is queued behind the assign so it is admitted the same way.
+`FLOCK_MAX_WORKING_ENFORCE=0` is an escape hatch (report only). Hard limits belong at the endpoint.
+
+Reachability: a provider is a `base_url` every worker reaches over HTTPS. Workers are CPU jobs
+and inference runs elsewhere; flock does not colocate workers with GPU jobs.
+
+Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) probes each
+distinct provider-backed model from the controller (which holds the keys) with two streamed
+turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
+API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`. Best-effort: a
+failed probe refuses `flock apply` (`--skip-preflight` bypasses); a model not probed (key not
+in the controller's environment, or preflight skipped) is reported `unverified` with a warning
+and applied anyway unless `--strict`. Zero streamed usage is a warning.
+`flock preflight spec.yaml` runs it alone.
+
+### Harness environment
+
+A harness process gets an allowlist of the worker's environment (`PATH`, `HOME`, `USER`,
+`SHELL`, `TERM`, `LANG`, `LC_*`, `XDG_*`, `TZ`, `TMPDIR`, proxy and CA variables, `IS_SANDBOX`,
+its config dir) plus what the worker passes: the type's declared `secrets`, `env`, the msgboard
+identity, and the provider key. `FLOCK_TOKEN`, the incarnation and other job secrets stay in the
+worker (before 2026-10-16 both adapters passed `os.environ` whole). The Claude SDK merges
+`os.environ` itself, so its `cli_path` is a small exec wrapper that drops every name the worker
+did not mean to pass.
 
 ### States
 
@@ -289,14 +406,17 @@ Per agent, status also carries `pending` (prompts held by the controller),
 `resumed` (bool), `worker`, `session_id`, harness, model, labels, token
 totals, derived cost, uptime, last sync time, msgboard principal if any.
 
-Type-level: `crashlooping` after K consecutive worker crashes; launching
-pauses until the spec is edited.
+Type-level: `crashlooping` after K consecutive worker crashes; `launch_refused` when the
+backend refuses a launch with a 4xx (not 408/429; e.g. an unknown or unplaceable flavor), with
+its message in `launch_error`. Either pauses launching until the spec is re-applied. Transient
+launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 
 ### API (controller)
 
 | Method | Path | Purpose |
 |---|---|---|
 | PUT | `/swarms/{swarm}` | apply a spec |
+| POST | `/swarms/{swarm}/preflight` | probe each provider-backed model with one tool-calling request; body: a spec (none: the applied one) |
 | GET | `/swarms/{swarm}` | spec and aggregates: counts by type and state |
 | DELETE | `/swarms/{swarm}` | drain and remove everything |
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
@@ -310,10 +430,19 @@ pauses until the spec is edited.
 | GET | `/` | HTML status table |
 
 Prompt results are not tracked per prompt. Callers read the agent's event
-stream; Claude answers each queued prompt as its own turn, Codex may fold a
+stream; Claude answers each queued prompt as its own turn, Codex and Pi may fold a
 steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
+
+Per-prompt limits: Claude, Codex and Pi all enforce `max_turns` (model calls) and
+`max_budget_usd` (spend, priced from the flock table). Claude gets both as SDK options.
+Codex and Pi have no such option, so the worker adapter counts model calls (Codex: one
+`thread/tokenUsage/updated` per call) and prices each call; before the call that would
+pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`) and the turn ends
+`error` with `reason` max_turns|max_budget_usd, `subtype` error_max_turns|error_max_budget_usd
+and `num_turns`. The session stays usable. A Codex steer into a turn that has used its
+allowance is held and sent as the next turn once that turn ends.
 
 Each launch gets an incarnation token (job env `WORKER_INCARNATION`); workers send
 it as `?incarnation=` on command polls and heartbeats, and the controller answers 409
@@ -345,9 +474,10 @@ run (experiments/load-1k/RESULTS.md, bug 2).
 
 ### Events and sessions
 
-pi session format v3, one stream per agent, `harness` set to `claude` or
-`codex`. Produced by the worker from the harness's structured output (SDK
-messages, app-server notifications); no trace-file parsing. Harness-neutral
+pi session format v3, one stream per agent, `harness` set to `claude`,
+`codex` or `pi`. Produced by the worker from the harness's structured output (SDK
+messages, app-server notifications, Pi RPC events, whose messages are already pi v3
+and pass through unchanged); no trace-file parsing. Harness-neutral
 events added by the worker: `session_started`, `session_resumed`,
 `session_restarted`, `turn_interrupted`, `sync`. The same stream is what the
 bucket holds and what `/agents/{name}/events` serves, so the Hub traces
@@ -358,6 +488,12 @@ viewer works on it unchanged.
 Per-turn tokens by model from harness events. The controller derives cost from
 its own price table. Claude's `total_cost_usd` is stored as `harness_estimate`
 and not relied on (it is client-side and cumulative across resumes).
+
+A provider-backed type's model id is priced from its pinned `[input, output, cached]` row
+(cache writes at the input price), which wins over the table. Since 2026-10-16 an agent's cost
+grows by the price of each heartbeat's new tokens rather than being recomputed from its totals,
+so a price changed by a re-apply (or `FLOCK_PRICES`) applies from then on and does not
+reprice history.
 
 ### Identity
 
@@ -375,6 +511,8 @@ becomes one request with one admin secret; the swap is one function.
 | Worker job ends with "Job timeout" | planned; relaunch immediately, restore agents |
 | Worker crashes | relaunch with exponential backoff; `turn_interrupted` events; `resume_prompt` if set |
 | K consecutive crashes of one type | type marked `crashlooping`, launching paused |
+| Launch refused (Hub 4xx) | type marked `launch_refused` with the Hub's message, no retries until re-apply |
+| Launch fails transiently (5xx, network) | retry with backoff 30 s doubling to 5 min; last error in status |
 | Turn exceeds timeout | process killed, agent `stuck` once, then idle |
 | Harness refuses resume | fresh session, `session_restarted`, `resumed: false` |
 | Controller restarts | rebuild from `list_jobs` labels, wait one heartbeat interval |
@@ -450,6 +588,9 @@ double-counted after a relaunch.
   `projects/<enc-cwd>/<id>.jsonl` (plus `<id>/` if present); Codex needs only the
   rollout file at its dated relative path and rebuilds its SQLite index. Codex was
   verified locally with two fresh homes, not in a job (no API key here).
+- Pi cross-machine resume: PASSED 2026-10-16 in two cpu-basic jobs, as root
+  (experiments/resume-gate-pi/RESULTS.md). Packing on cpu-basic and compaction on long
+  sessions are unmeasured (docs/pi.md).
 - Multi-day job timeouts honoured in practice (24 h is within reports; longer
   is not needed).
 - 1,000 concurrent HF Jobs under one PRO user (credits and spend limit are the
@@ -463,6 +604,12 @@ double-counted after a relaunch.
   container. Never ship the Codex OAuth `auth.json` to a job; use an API key.
 - Prompt-cache re-writes after idle gaps over 1 h are the main hidden cost of
   long idle agents with large transcripts. This is true of any hosting model.
+- Open models (PR A, 2026-10-16): Codex against a real vLLM or HF router Responses endpoint
+  (verified only against a local fake server that streams Responses events); whether the HF
+  router serves `/v1/responses` for open models; Claude Code against vLLM's Anthropic-compatible
+  endpoint (and which background model it calls there, see `ANTHROPIC_SMALL_FAST_MODEL` /
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, unset by flock); `reasoning: off` sent as effort `none`;
+  Codex behaviour for model ids it has no metadata for (context window, tool format).
 - msgboard's 2,000 open-poll cap and roughly 300 req/s ingress will matter the
   day agents poll it themselves. Deferred by decision.
 - The HF Spaces edge rate-limits traffic to the controller on more than the client IP. One
@@ -502,7 +649,12 @@ Condensed from the grilling session, 2026-10-13/14.
 | 22 | Fill workers in order; no bin packing; packing numbers measured first |
 | 23 | Repo `huggingface/flock`, Python, one package, three entry points |
 | 24 | Milestone one: resume gate, packing measurement, 100 agents end to end |
-| 25 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
+| 25 | Open models via a swarmlab-compatible `providers:` block, optional `models:` aliases, `<provider>:<id>` model strings; claude only on `anthropic`, codex only on `openai_compat` (Responses API: Codex 0.162.1 dropped chat); price pinned into the stored spec at apply; controller-side preflight; `max_working` reported, enforcement deferred (2026-10-16); superseded by 27 for `max_working` |
+| 26 | Harnesses get an allowlisted environment plus explicit additions, never the worker's `os.environ` (2026-10-16) |
+| 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission for every turn start (API prompt, resume prompt; spawn's queued prompts), on by default, `FLOCK_MAX_WORKING_ENFORCE=0` as escape hatch (Carlos) |
+| 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
+| 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
+| 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
 
 ## 12. Road to 10k
 

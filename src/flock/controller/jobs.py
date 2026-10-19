@@ -19,9 +19,11 @@ DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 # Bootstrap mode: no prebuilt image. A stock Node image installs the pinned harness CLIs, uv and
 # the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
 # runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
-BOOTSTRAP_IMAGE = "node:22-bookworm"
+# Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
+BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
 CLAUDE_CODE_VERSION = "2.1.296"
 CODEX_VERSION = "0.162.1"
+PI_VERSION = "1.2.0"  # @earendil-works/pi-coding-agent; installed only on pi workers (~20 s)
 HF_HUB_VERSION = "2.2.0"
 CLAUDE_AGENT_SDK_VERSION = "0.2.166"
 
@@ -30,6 +32,10 @@ export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
 t0=$(date +%s)
 command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 >/dev/null; }
 npm i -g --silent @anthropic-ai/claude-code@{claude} @openai/codex@{codex} >/dev/null 2>&1
+if [ "${FLOCK_HARNESS:-}" = pi ]; then
+  npm i -g --silent @earendil-works/pi-coding-agent@{pi} >/dev/null 2>&1
+  export FLOCK_PI_CLI="$(command -v pi)"
+fi
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 uv tool install -q huggingface_hub=={hub} >/dev/null 2>&1
 mkdir -p /opt/wheels
@@ -45,9 +51,10 @@ uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggin
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
+export PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
 export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/claude /state/codex
+mkdir -p /work/agents /state/claude /state/codex /state/pi
 if [ -n "${OPENAI_API_KEY:-}" ]; then printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null; fi
 echo "bootstrap: $(($(date +%s) - t0)) s; claude $(claude --version); codex $(codex --version); $(python3 --version)"
 exec flock-worker
@@ -64,6 +71,7 @@ def bootstrap_command() -> list[str]:
     for key, value in {
         "claude": CLAUDE_CODE_VERSION,
         "codex": CODEX_VERSION,
+        "pi": PI_VERSION,
         "hub": HF_HUB_VERSION,
         "sdk": CLAUDE_AGENT_SDK_VERSION,
     }.items():
@@ -133,7 +141,7 @@ class HubJobsClient:
         """Image, command and env for one worker job (a type's own `image` always wins)."""
         if spec.image or not self.bootstrap:
             return {"image": spec.image or self.image, "command": WORKER_COMMAND, "env": env}
-        env = {**env, "FLOCK_WHEEL_URL": self.wheel_url}
+        env = {**env, "FLOCK_WHEEL_URL": self.wheel_url, "FLOCK_HARNESS": spec.harness.value}
         return {"image": BOOTSTRAP_IMAGE, "command": bootstrap_command(), "env": env}
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
@@ -190,6 +198,7 @@ class FakeJobsClient:
     cancels: list[str] = field(default_factory=list)
     states: dict[str, JobState] = field(default_factory=dict)
     fail_launches: bool = False
+    launch_error: Exception | None = None  # raised by launch() when set
     inspects: int = 0
     lists: int = 0
     logs: dict[str, list[str]] = field(default_factory=dict)  # job id -> log lines (tests)
@@ -197,6 +206,8 @@ class FakeJobsClient:
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
             raise RuntimeError("launch failed (fake)")
+        if self.launch_error is not None:
+            raise self.launch_error
         job_id = f"job-{len(self.launches) + 1:04d}"
         self.launches.append(
             {

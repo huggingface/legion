@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 
 from flock.controller import spawn as spawning
 from flock.controller.jobs import JobsClient, JobState
-from flock.controller.prices import cost_usd
+from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.store import Row, Store
 from flock.models import (
     CRASHLOOP_THRESHOLD,
@@ -32,6 +32,7 @@ from flock.models import (
     AssignCommand,
     DrainCommand,
     Event,
+    PromptCommand,
     SwarmSpec,
     TypeHealth,
     TypeSpec,
@@ -47,6 +48,7 @@ log = logging.getLogger("flock.reconcile")
 
 BACKOFF_BASE = 30.0  # s, first crash backoff
 BACKOFF_CAP = 900.0  # s, 15 min
+LAUNCH_BACKOFF_CAP = 300.0  # s, transient launch errors back off 30 s, 60 s, ... up to 5 min
 INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh worker
 INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
 LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
@@ -73,6 +75,15 @@ class Action:
     kind: str  # launch, planned_restart, crash, crashloop, cancel, assign, unassign, retire, ...
     target: str
     detail: str = ""
+
+
+def launch_refused(exc: BaseException) -> bool:
+    """Permanent launch failure: a Hub 4xx (not 408/429, which are worth retrying), or a
+    client-side validation error. Anything else (5xx, network) is transient."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return 400 <= status < 500 and status not in (408, 429)
+    return type(exc).__name__ in ("HFValidationError", "BadRequestError")
 
 
 def worker_id_for(swarm: str, type_name: str, idx: int) -> str:
@@ -230,8 +241,8 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
             p.act("cancel", w["id"], w["job_id"])
 
     # Launch slots that have agents and no job.
-    if ts is None or store.type_health(spec.swarm, type_name) == TypeHealth.crashlooping:
-        return
+    if ts is None or store.type_health(spec.swarm, type_name) != TypeHealth.ok:
+        return  # crashlooping or launch_refused: wait for a new apply
     for w in store.list_workers(spec.swarm, type_name):
         if w["job_id"] is not None or not counts[w["id"]]:
             continue
@@ -241,6 +252,8 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
             p.act("budget_exhausted", w["id"])
             return
         _launch(p, spec, type_name, ts, w)
+        if store.type_health(spec.swarm, type_name) != TypeHealth.ok:
+            return  # refused: no more launches for this type
 
 
 def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
@@ -286,6 +299,10 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     if a["removing"]:
         return  # mid-removal (docs/spawn.md): never re-assign it or re-issue its token
     resume = ts.resume_prompt if a["resume_pending"] else None
+    # A provider with max_working admits a resume prompt like any other (api.py `admit`): it
+    # goes to pending_prompts after the assign instead of riding inside it.
+    r = ts.resolved_model
+    held, resume = (resume, None) if resume and r and r.provider.max_working else (None, resume)
     cmd = AssignCommand(
         agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
@@ -293,6 +310,9 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:
         store.update_agent(a["name"], resume_pending=0)
+    if held:
+        prompt = PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=held)
+        store.add_prompt(a["name"], prompt.model_dump_json(), time.time())
 
 
 def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> None:
@@ -386,6 +406,8 @@ def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
 
 
 def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> None:
+    # A refused launch marks the type launch_refused: no slot of it launches again until the
+    # spec is re-applied. Transient errors back off per type, capped at LAUNCH_BACKOFF_CAP.
     store, s, wid = p.store, p.settings, w["id"]
     lifetime = parse_duration(ts.worker_lifetime).total_seconds()
     jitter = parse_duration(ts.lifetime_jitter).total_seconds()
@@ -406,7 +428,10 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "BUCKET": spec.bucket,
     }
     secrets = {"FLOCK_TOKEN": s.token}
-    for name in [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]:
+    names = [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]
+    if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
+        names.append(ts.resolved_model.provider.api_key_env)
+    for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]
         else:
@@ -418,12 +443,23 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     store.record_launch(p.now)
     try:
         job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace)
-    except Exception as exc:  # noqa: BLE001 - any Hub failure: retry later, keep the loop alive
-        store.update_worker(wid, next_launch_at=p.now + BACKOFF_BASE,
-                            last_error=f"launch failed: {type(exc).__name__}: {exc}"[:500])
-        p.act("launch_failed", wid, type(exc).__name__)
-        log.warning("launch of %s failed: %s", wid, type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - any Hub failure: keep the loop alive
+        # the Hub's message says why (a 400 names the bad field); class name alone does not
+        msg = f"{type(exc).__name__}: {str(exc)[:500]}"
+        log.warning("launch of %s failed: %s", wid, msg)
+        store.update_worker(wid, last_error=f"launch failed: {msg}"[:500])
+        if launch_refused(exc):
+            store.set_type_health(spec.swarm, type_name, TypeHealth.launch_refused.value)
+            store.set_launch_error(spec.swarm, type_name, msg, 0)
+            p.act("launch_refused", f"{spec.swarm}/{type_name}", msg)
+            return
+        failures = store.launch_error(spec.swarm, type_name)[1] + 1
+        backoff = min(BACKOFF_BASE * 2 ** (failures - 1), LAUNCH_BACKOFF_CAP)
+        store.set_launch_error(spec.swarm, type_name, msg, failures)
+        store.update_worker(wid, next_launch_at=p.now + backoff)
+        p.act("launch_failed", wid, f"{msg}; backoff {backoff:.0f}s")
         return
+    store.set_launch_error(spec.swarm, type_name, None, 0)
     store.clear_commands(wid)
     store.update_worker(
         wid,
@@ -461,6 +497,12 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         fields["consecutive_crashes"] = 0
     store.update_worker(worker_id, **fields)
     queued = {c["body"] for c in store.commands_for(worker_id)}
+    sw = store.get_swarm(w["swarm"])
+    table = type_price_table(sw["spec"].types.get(w["type"]) if sw else None)
+
+    def cost_fn(tokens):
+        return cost_usd(tokens, table)
+
     for ah in hb.agents:
         a = store.get_agent(ah.name)
         if (
@@ -493,7 +535,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
                 "last_heartbeat": t,
             },
             ah.tokens,
-            cost_usd,
+            cost_fn,
         )
     if not hb.draining and not w["retire_at"]:
         _reassign_missing(store, w, {ah.name for ah in hb.agents}, queued)
