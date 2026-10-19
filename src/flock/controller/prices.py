@@ -58,11 +58,16 @@ def price_table() -> dict[str, Price]:
 
 
 def price_for(model: str, table: dict[str, Price] | None = None) -> Price:
-    """Exact match, else the longest table key that prefixes the model id, else default."""
+    """Exact match on the model id, then on the part after its first '/' (Pi reports
+    `provider/model`, e.g. `anthropic/claude-haiku-5-5`); else the longest table key that
+    prefixes either; else default. A provider price pinned into `table` under the bare model id
+    therefore wins for `<provider>/<model id>`."""
     table = table or price_table()
-    if model in table:
-        return table[model]
-    prefixes = [k for k in table if k != DEFAULT_MODEL and model.startswith(k)]
+    ids = [model, model.split("/", 1)[1]] if "/" in model else [model]
+    for m in ids:
+        if m in table:
+            return table[m]
+    prefixes = [k for k in table if k != DEFAULT_MODEL and any(m.startswith(k) for m in ids)]
     return table[max(prefixes, key=len)] if prefixes else table[DEFAULT_MODEL]
 
 

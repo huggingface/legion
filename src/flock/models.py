@@ -37,6 +37,7 @@ def parse_duration(value: str | int | float | timedelta) -> timedelta:
 class Harness(StrEnum):
     claude = "claude"
     codex = "codex"
+    pi = "pi"
 
 
 class AgentState(StrEnum):
@@ -268,7 +269,8 @@ class SwarmSpec(BaseModel):
             r = ts.resolved_model
             if r is None:
                 continue
-            want = {Harness.claude: "anthropic", Harness.codex: "openai_compat"}[ts.harness]
+            want = {Harness.claude: "anthropic", Harness.codex: "openai_compat",
+                    Harness.pi: "openai_compat"}[ts.harness]
             if r.provider.type != want:
                 raise ValueError(
                     f"types.{type_name}.model: harness {ts.harness.value!r} cannot use provider "

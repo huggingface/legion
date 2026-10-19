@@ -5,7 +5,7 @@ Scope: v1, the first milestone and the contracts later layers depend on.
 
 ## 1. What it is
 
-flock hosts coding-harness agents (Claude Code, Codex) on Hugging Face
+flock hosts coding-harness agents (Claude Code, Codex, Pi) on Hugging Face
 Jobs, keeps them alive for weeks, takes prompts for them, and exposes their
 sessions and health. It is the lowest layer under two existing systems:
 
@@ -190,11 +190,12 @@ One Python package, three entry points: `flock` (CLI/library),
 
 1. A prompt arrives for an idle agent. The worker starts the harness in the
    agent's workdir, resuming its session id: Claude through the Python Agent
-   SDK in streaming-input mode, Codex as one app-server process per agent.
+   SDK in streaming-input mode, Codex as one app-server process per agent, Pi as
+   one `pi --mode rpc` process per agent.
    Prompts that land during the roughly 2 s startup wait in a small buffer and
    are forwarded as soon as stdin is open.
 2. While the process is alive, every further prompt is forwarded directly.
-   Claude queues it as the next turn; Codex steers it into the running turn.
+   Claude queues it as the next turn; Codex and Pi steer it into the running turn.
    The worker does no scheduling and no queueing beyond the startup buffer.
 3. When the harness has been idle for `idle_grace` (default 120 s) the worker
    closes it. State is on disk.
@@ -209,12 +210,26 @@ live process costs about 0.1 CPU-s against about 1 CPU-s cold. The prompt
 cache is server-side with a 1 h TTL either way. Hence the 120 s idle grace and
 the measured defaults of 50 agents and 20 concurrent turns per worker.
 
+Pi (`@earendil-works/pi-coding-agent` 1.2.0, `harness: pi`, docs/pi.md) follows the same
+model: one `pi --mode rpc` process per burst, cwd = the workdir, JSONL commands on stdin and
+events on stdout. Every agent on a worker shares `PI_CODING_AGENT_DIR=/state/pi` (same type,
+same `models.json`, which the worker writes with the API key as an env-var reference) and has
+its own `--session-dir /state/pi/sessions/<agent>`; the worker passes a session id it
+generates. Prompts go out as `prompt` with `streamingBehavior: "steer"`, which starts a run
+when Pi is idle and queues into the running one when busy; a flock turn runs from the start
+of a Pi run to `agent_settled`. Usage is per model call, not cumulative. The system prompt is
+the workdir's `AGENTS.md`. Pi's harness environment is an allow-list (no `FLOCK_TOKEN`).
+Pi has no turn or budget options, so the worker enforces `max_turns` and `max_budget_usd`: it
+counts model calls and prices each one with the flock price table, and sends Pi `abort` before
+a call past either limit (turn ends `error`, `reason` max_turns|max_budget_usd).
+Packing numbers for Pi are not measured yet; idle VmRSS of one RPC process was 117 MB locally.
+
 ### Resume across workers
 
 `persist_workdir` defaults to true. The worker syncs, per agent, the workdir
 and the harness's session directory (Claude:
 `projects/<encoded-cwd>/<session>.jsonl`; Codex: the rollout file and, if it
-proves necessary, the SQLite index) to
+proves necessary, the SQLite index; Pi: `sessions/<agent>/<ts>_<session>.jsonl`) to
 `<bucket>/<swarm>/<type>/<agent>/`. On relaunch the new worker restores both
 to the identical absolute paths before the first resume. Resume is what makes
 week-long projects possible; it is also the first thing milestone one
@@ -258,7 +273,7 @@ models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: claude            # claude | codex
+    harness: claude            # claude | codex | pi
     model: claude-opus-5-5
     image: null                # default worker image; override to add tools/skills
     system_prompt_file: prompts/researcher.md   # written to the workdir as CLAUDE.md / AGENTS.md
@@ -415,7 +430,7 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/` | HTML status table |
 
 Prompt results are not tracked per prompt. Callers read the agent's event
-stream; Claude answers each queued prompt as its own turn, Codex may fold a
+stream; Claude answers each queued prompt as its own turn, Codex and Pi may fold a
 steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
@@ -459,9 +474,10 @@ run (experiments/load-1k/RESULTS.md, bug 2).
 
 ### Events and sessions
 
-pi session format v3, one stream per agent, `harness` set to `claude` or
-`codex`. Produced by the worker from the harness's structured output (SDK
-messages, app-server notifications); no trace-file parsing. Harness-neutral
+pi session format v3, one stream per agent, `harness` set to `claude`,
+`codex` or `pi`. Produced by the worker from the harness's structured output (SDK
+messages, app-server notifications, Pi RPC events, whose messages are already pi v3
+and pass through unchanged); no trace-file parsing. Harness-neutral
 events added by the worker: `session_started`, `session_resumed`,
 `session_restarted`, `turn_interrupted`, `sync`. The same stream is what the
 bucket holds and what `/agents/{name}/events` serves, so the Hub traces
@@ -572,6 +588,9 @@ double-counted after a relaunch.
   `projects/<enc-cwd>/<id>.jsonl` (plus `<id>/` if present); Codex needs only the
   rollout file at its dated relative path and rebuilds its SQLite index. Codex was
   verified locally with two fresh homes, not in a job (no API key here).
+- Pi cross-machine resume: PASSED 2026-10-16 in two cpu-basic jobs, as root
+  (experiments/resume-gate-pi/RESULTS.md). Packing on cpu-basic and compaction on long
+  sessions are unmeasured (docs/pi.md).
 - Multi-day job timeouts honoured in practice (24 h is within reports; longer
   is not needed).
 - 1,000 concurrent HF Jobs under one PRO user (credits and spend limit are the
@@ -634,6 +653,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 26 | Harnesses get an allowlisted environment plus explicit additions, never the worker's `os.environ` (2026-10-16) |
 | 27 | Review follow-up (2026-10-19): no `network_group`, workers are CPU-only and reach providers over HTTPS; preflight is best-effort (failed probe blocks, unprobed is `unverified`, `--strict` blocks it); a Hub 4xx on launch marks the type `launch_refused` until re-apply; `max_working` enforced at prompt admission for every turn start (API prompt, resume prompt; spawn's queued prompts), on by default, `FLOCK_MAX_WORKING_ENFORCE=0` as escape hatch (Carlos) |
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
+| 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 
 ## 12. Road to 10k
 
