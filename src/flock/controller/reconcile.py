@@ -97,13 +97,23 @@ def _iso(ts: float) -> str:
 # --------------------------------------------------------------------------- derived states
 
 
+def last_seen(w: Row) -> float | None:
+    """When the current job last reached us: its last heartbeat, or a later command poll or
+    event post. Heartbeats can be throttled away (HTTP 429 at the Space edge, pixel run 1k)
+    while other requests get through; only silence on every route makes a worker dead."""
+    hb = w["last_heartbeat"]
+    if hb is None:
+        return None
+    return max(hb, w.get("last_seen") or 0.0)
+
+
 def worker_state(w: Row, now: float) -> WorkerState:
     if w["job_id"] is None:
         return WorkerState.dead
-    hb = w["last_heartbeat"]
-    if hb is None:
+    seen = last_seen(w)
+    if seen is None:
         return WorkerState.launching
-    age = now - hb
+    age = now - seen
     if age > _DEAD:
         return WorkerState.dead
     if age > _UNKNOWN:
@@ -121,7 +131,10 @@ def agent_state(a: Row, w: Row | None, now: float) -> AgentState:
         return AgentState.unknown  # not yet reported by the current job
     age = now - hb
     if age > _DEAD:
-        return AgentState.dead
+        # dead if the worker's heartbeats arrive without it; unknown if they are not arriving
+        # (the worker is alive by its polls, see last_seen, but its reports are stale)
+        fresh = w["last_heartbeat"] is not None and now - w["last_heartbeat"] <= _UNKNOWN
+        return AgentState.dead if fresh else AgentState.unknown
     if age > _UNKNOWN or not a["hb_state"]:
         return AgentState.unknown
     return AgentState(a["hb_state"])
@@ -163,10 +176,10 @@ def _needs_check(w: Row, now: float) -> bool:
     """Fresh, non-draining workers are trusted from heartbeats; others get a job-status check."""
     if w["job_id"] is None:
         return False
-    hb = w["last_heartbeat"]
-    if hb is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
+    seen = last_seen(w)
+    if seen is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
         return False
-    if hb is not None and now - hb <= _UNKNOWN and not w["draining"] and not w["retire_at"]:
+    if seen is not None and now - seen <= _UNKNOWN and not w["draining"] and not w["retire_at"]:
         return False
     return w["last_inspect"] is None or now - w["last_inspect"] >= INSPECT_EVERY
 
@@ -327,8 +340,8 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     if st.terminal:
         _job_ended(p, spec, w, ts, st)
         return
-    hb = w["last_heartbeat"]
-    silent = hb is not None and p.now - hb > _DEAD
+    hb, seen = w["last_heartbeat"], last_seen(w)
+    silent = seen is not None and p.now - seen > _DEAD  # no heartbeat, poll or event post
     never = hb is None and st.stage != "SCHEDULING" and p.now - w["launched_at"] > LAUNCH_TIMEOUT
     if silent or never:
         p.cancel(w["job_id"], spec.namespace)
@@ -355,6 +368,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "incarnation": None,
         "state": WorkerState.dead.value,
         "last_heartbeat": None,
+        "last_seen": None,
         "draining": 0,
     }
     if planned:
@@ -468,6 +482,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         launched_at=p.now,
         deadline=deadline,
         last_heartbeat=None,
+        last_seen=None,
         last_inspect=None,
         draining=0,
         state=WorkerState.launching.value,
@@ -489,6 +504,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         return False
     fields = {
         "last_heartbeat": t,
+        "last_seen": t,
         "deadline": hb.deadline.timestamp(),
         "draining": int(hb.draining),
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,

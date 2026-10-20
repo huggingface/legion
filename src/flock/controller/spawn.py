@@ -144,8 +144,9 @@ def agent_may(
     params: Mapping[str, str],
     query: Mapping[str, str],
 ) -> bool:
-    """What an agent token allows: itself (status, events, whoami), its subtree (status,
-    events, spawn, prompt, remove; it cannot remove itself) and prompting its parent."""
+    """What an agent token allows: itself (status, events, whoami, prompting its own
+    children in bulk), its subtree (status, events, spawn, prompt, bulk-prompt children,
+    remove; it cannot remove itself) and prompting its parent."""
     me, target = agent["name"], params.get("name")
 
     def below(t: str | None) -> bool:
@@ -157,6 +158,8 @@ def agent_may(
         case "GET", "/agents/{name}" | "/agents/{name}/events":
             return target == me or below(target)
         case "POST", "/agents/{name}/spawn":
+            return target == me or below(target)
+        case "POST", "/agents/{name}/children/prompts":
             return target == me or below(target)
         case "POST", "/agents/{name}/prompt":
             return (target is not None and target == agent["parent"]) or below(target)

@@ -76,6 +76,7 @@ def make_worker(tmp_path, ctrl: FakeController, *, deadline_in: float = 3600, sy
 @pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch):
     monkeypatch.setattr(wmain, "_backoff", lambda attempt: 0.01)
+    monkeypatch.setattr(wmain, "_retry_delay", lambda attempt, retry_after: 0.01)
 
 
 def test_config_from_env(tmp_path):

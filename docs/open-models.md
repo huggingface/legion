@@ -164,15 +164,19 @@ enforces it, on by default:
 
 - **Queue, not reject.** A prompt for an agent that is not in a turn is accepted as usual
   (`POST /agents/{name}/prompt` never refuses it) but stays queued in the controller while the
-  provider is at its cap. It goes out on a worker's next command poll once a slot frees
-  (within one poll, about 25 s). A prompt for an agent already in a turn takes no new slot.
+  provider is at its cap. A prompt for an agent already in a turn takes no new slot.
+- **Oldest prompt first.** Free slots go to pending prompts in the order they were created,
+  across all workers of the provider, so a worker that polls often cannot keep re-taking
+  freed slots. The worker owning the next prompt in line is woken as soon as a slot frees.
 - **Every turn start is admitted the same way.** Admission happens where the controller hands
   queued prompts to workers, so it covers API prompts and `resume_prompt` after a crash (for a
   capped provider it is queued behind the assign instead of riding inside it). Anything that
   queues a prompt in the controller is covered too, e.g. a spawned child's first prompt.
-- **Counts come from worker heartbeats**, plus prompts handed out since the agent's last
-  heartbeat (so two polls between heartbeats cannot both take the last slot). The count lags
-  by up to one heartbeat (30 s), so the cap is **soft by one heartbeat**.
+- **Counts come from worker heartbeats, corrected by turn events.** A prompt handed out
+  takes its slot at once (two polls between heartbeats cannot both take the last slot), and
+  the agent's `turn_ended` event releases it at once (events reach the controller every 3 s),
+  not at the next heartbeat. The cap is still **soft by about one heartbeat**: a heartbeat
+  built before the worker saw a turn change can briefly overrule an event.
 - **The real limit belongs at the endpoint.** `max_working` keeps a swarm from overrunning a
   server it shares; it does not protect the server from other clients, and it counts agents,
   not requests. Set the server's own concurrency limits (vLLM `--max-num-seqs`, a gateway

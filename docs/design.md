@@ -383,8 +383,16 @@ low/medium/high and `thinking: disabled` for off.
 `GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. The controller
 enforces it at prompt admission: on a command poll, a prompt for an agent that is not in a turn
 goes out only while the provider has a free slot; otherwise it stays in `pending_prompts` and
-goes out on a later poll (never rejected). Slots are fresh heartbeat `working` agents plus
-agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s). A capped
+goes out on a later poll (never rejected). Free slots go to pending prompts in FIFO order of
+creation across all of the provider's workers (oldest pending prompt first), not to whichever
+worker polls first; a worker that is not running (dead, draining, launching) holds no place.
+Slots are fresh heartbeat `working` agents, overridden by what the controller learned since:
+a prompt handed out takes the slot at once, and a `turn_ended` / `turn_interrupted` /
+`prompt_deferred` event releases it at once and wakes the polls of the workers next in line
+(pixel run 1k: holding slots until the next heartbeat and first-poller-wins let 384 of 1,000
+agents run at `max_working: 128`). Still soft by about one heartbeat: an event batch arrives
+up to `flush_interval` (3 s) after the turn ends, and a heartbeat built before the worker
+saw a turn change can briefly overrule an event. A capped
 provider's `resume_prompt` is queued behind the assign so it is admitted the same way.
 `FLOCK_MAX_WORKING_ENFORCE=0` is an escape hatch (report only). Hard limits belong at the endpoint.
 
@@ -418,8 +426,17 @@ did not mean to pass.
 | `working` | a harness process is running a turn for this agent |
 | `idle` | no process; `idle_since` is the end of the last turn |
 | `stuck` | a turn exceeded its timeout and was killed; cleared on the next turn |
-| `unknown` | worker heartbeat older than 90 s |
-| `dead` | worker heartbeat older than 180 s, or the job is terminal |
+| `unknown` | worker not seen for 90 s, or the agent's own report is older than 90 s |
+| `dead` | worker not seen for 180 s, or the job is terminal; or the worker's heartbeats arrive without this agent for 180 s |
+
+"Seen" is the worker's last heartbeat, command poll or event post from its current job
+(`workers.last_seen`): a Space edge can throttle heartbeats (HTTP 429) while other requests
+get through, so a worker is declared dead, cancelled and relaunched only after the full
+180 s with none of them arriving. Workers retry 429 and 5xx inside their controller client
+with exponential backoff and full jitter, never sooner than `Retry-After` (at most 30 s a
+wait; a heartbeat retries for up to 20 s, polls and event posts for 30 s), and keep at most
+three requests in flight: one poll, one heartbeat, one event batch (events are batched every
+3 s; polls are spaced at least 1 s apart even when commands keep coming).
 
 Per agent, status also carries `pending` (prompts held by the controller),
 `resumed` (bool), `worker`, `session_id`, harness, model, labels, token
@@ -441,6 +458,7 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`. Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |
@@ -465,7 +483,8 @@ and `num_turns`. The session stays usable. A Codex steer into a turn that has us
 allowance is held and sent as the next turn once that turn ends.
 
 Each launch gets an incarnation token (job env `WORKER_INCARNATION`); workers send
-it as `?incarnation=` on command polls and heartbeats, and the controller answers 409
+it as `?incarnation=` on command polls, heartbeats and event posts (events from a replaced
+job are still stored but do not count as seen), and the controller answers 409
 when it is not the slot's current job, including to a poll that was parked when the
 slot was relaunched. A heartbeat that omits agents placed on that worker re-queues
 their assign. Both came from the e2e run (experiments/e2e/RESULTS.md, check 6).
@@ -691,6 +710,9 @@ What the 1k and 10k runs say must change, in order. Item 1 gates everything else
    its heartbeats stopped when many workers of a swarm fell silent together; cap cancels per
    pass; never relaunch into a block the controller can observe. Worker side: retry a failed
    heartbeat within seconds, honour `Retry-After`, back the command poll off on 429.
+   Partly done after the pixel run 1k (29 of 42 workers declared dead): workers retry 429/5xx
+   with backoff and jitter honouring `Retry-After`, and dead needs silence on every route
+   (heartbeat, poll, events) for 180 s. Still open: a cap on cancels per pass.
 3. **Fewer requests per agent-turn.** The 10k send phase was 120 req/s: prompters 50/s and the
    workers' immediate re-polls another 50/s. A batch `POST /prompts`, a swarm-level events
    stream, and command polls that batch for a few hundred ms would put the same round under
