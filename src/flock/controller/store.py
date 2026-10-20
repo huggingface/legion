@@ -162,6 +162,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
         if "last_error" not in cols:  # last launch failure or crash, shown by `flock workers`
             self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
+        if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
+            self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}

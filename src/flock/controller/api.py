@@ -61,6 +61,7 @@ from flock.models import (
 
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
+SEEN_EVERY = 5.0  # s, min gap between last_seen writes per worker
 _COMMAND = TypeAdapter(Annotated[Command, Field(discriminator="kind")])
 
 
@@ -878,10 +879,19 @@ def create_app(
             released |= seen[0] != "idle" and ah.state != "working"
         return released
 
+    def seen(w: Row) -> None:
+        """Any request from the slot's current job proves it alive (reconcile.last_seen).
+        Written at most every SEEN_EVERY seconds per worker."""
+        now = clock().timestamp()
+        if w["job_id"] is not None and now - (w.get("last_seen") or 0.0) >= SEEN_EVERY:
+            store.update_worker(w["id"], last_seen=now)
+
     @api.get("/workers/{worker_id}/commands")
     async def commands(worker_id: str, wait: float = 25, incarnation: str | None = None):
-        if stale(worker_or_404(worker_id), incarnation):
+        w0 = worker_or_404(worker_id)
+        if stale(w0, incarnation):
             raise HTTPException(409, "worker incarnation is not the slot's current job")
+        seen(w0)
 
         def check():
             w = store.get_worker(worker_id)
@@ -928,8 +938,10 @@ def create_app(
         return {"ok": True}
 
     @api.post("/workers/{worker_id}/events")
-    def post_events(worker_id: str, batch: EventBatch) -> dict:
+    def post_events(worker_id: str, batch: EventBatch, incarnation: str | None = None) -> dict:
         w = worker_or_404(worker_id)
+        if not stale(w, incarnation):  # a replaced job's last events are still accepted
+            seen(w)
         grouped: dict[str, list] = {}
         for ev in batch.events:
             grouped.setdefault(ev.agent, []).append(ev)

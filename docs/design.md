@@ -407,8 +407,17 @@ did not mean to pass.
 | `working` | a harness process is running a turn for this agent |
 | `idle` | no process; `idle_since` is the end of the last turn |
 | `stuck` | a turn exceeded its timeout and was killed; cleared on the next turn |
-| `unknown` | worker heartbeat older than 90 s |
-| `dead` | worker heartbeat older than 180 s, or the job is terminal |
+| `unknown` | worker not seen for 90 s, or the agent's own report is older than 90 s |
+| `dead` | worker not seen for 180 s, or the job is terminal; or the worker's heartbeats arrive without this agent for 180 s |
+
+"Seen" is the worker's last heartbeat, command poll or event post from its current job
+(`workers.last_seen`): a Space edge can throttle heartbeats (HTTP 429) while other requests
+get through, so a worker is declared dead, cancelled and relaunched only after the full
+180 s with none of them arriving. Workers retry 429 and 5xx inside their controller client
+with exponential backoff and full jitter, never sooner than `Retry-After` (at most 30 s a
+wait; a heartbeat retries for up to 20 s, polls and event posts for 30 s), and keep at most
+three requests in flight: one poll, one heartbeat, one event batch (events are batched every
+3 s; polls are spaced at least 1 s apart even when commands keep coming).
 
 Per agent, status also carries `pending` (prompts held by the controller),
 `resumed` (bool), `worker`, `session_id`, harness, model, labels, token
@@ -453,7 +462,8 @@ and `num_turns`. The session stays usable. A Codex steer into a turn that has us
 allowance is held and sent as the next turn once that turn ends.
 
 Each launch gets an incarnation token (job env `WORKER_INCARNATION`); workers send
-it as `?incarnation=` on command polls and heartbeats, and the controller answers 409
+it as `?incarnation=` on command polls, heartbeats and event posts (events from a replaced
+job are still stored but do not count as seen), and the controller answers 409
 when it is not the slot's current job, including to a poll that was parked when the
 slot was relaunched. A heartbeat that omits agents placed on that worker re-queues
 their assign. Both came from the e2e run (experiments/e2e/RESULTS.md, check 6).
@@ -678,6 +688,9 @@ What the 1k and 10k runs say must change, in order. Item 1 gates everything else
    its heartbeats stopped when many workers of a swarm fell silent together; cap cancels per
    pass; never relaunch into a block the controller can observe. Worker side: retry a failed
    heartbeat within seconds, honour `Retry-After`, back the command poll off on 429.
+   Partly done after the pixel run 1k (29 of 42 workers declared dead): workers retry 429/5xx
+   with backoff and jitter honouring `Retry-After`, and dead needs silence on every route
+   (heartbeat, poll, events) for 180 s. Still open: a cap on cancels per pass.
 3. **Fewer requests per agent-turn.** The 10k send phase was 120 req/s: prompters 50/s and the
    workers' immediate re-polls another 50/s. A batch `POST /prompts`, a swarm-level events
    stream, and command polls that batch for a few hundred ms would put the same round under
