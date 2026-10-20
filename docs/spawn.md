@@ -187,6 +187,10 @@ flock events <agent> --after N --wait      # blocks until something new (or --ti
 flock remove <agent>                       # a descendant and its subtree
 ```
 
+The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up to
+5 attempts with exponential backoff and jitter, never sooner than `Retry-After`, so a thousand
+agents calling it through a Space edge do not fail on throttling.
+
 For the operator (controller token), `flock spawn <type> --parent <agent>` spawns on an agent's
 behalf, `flock agents <swarm> --parent <agent>` lists children, and `status` / `remove` take an
 agent name when the name is not a swarm.

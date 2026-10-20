@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -30,11 +32,60 @@ def client() -> httpx.Client:
     return httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 
+RETRY_ATTEMPTS = 5  # requests in all, per call
+RETRY_BASE = 1.0  # s, first backoff before jitter
+RETRY_CAP = 30.0  # s, longest single wait, Retry-After included
+_sleep = time.sleep  # tests replace it
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    raw = r.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, when.timestamp() - time.time()) if when.tzinfo else None
+
+
+def _retryable(method: str, r: httpx.Response | None) -> bool:
+    """429 (the Space edge throttling 1,000 agents) and 502/503/504 never reached the app or
+    were not processed: retry any method. A 500 or a dropped connection may have been
+    processed, so only reads retry on those."""
+    if r is None:
+        return method == "GET"
+    return r.status_code in (429, 502, 503, 504) or (r.status_code == 500 and method == "GET")
+
+
+def _request(c: httpx.Client, method: str, path: str, **kw) -> httpx.Response:
+    """One controller request, retried up to RETRY_ATTEMPTS times with exponential backoff and
+    full jitter, never sooner than Retry-After."""
+    for attempt in range(RETRY_ATTEMPTS):
+        last = attempt == RETRY_ATTEMPTS - 1
+        try:
+            r = c.request(method, path, **kw)
+        except httpx.TransportError:
+            if last or not _retryable(method, None):
+                raise
+            r = None
+        if r is not None and (last or not _retryable(method, r)):
+            return r
+        backoff = random.uniform(0, min(RETRY_CAP, RETRY_BASE * 2 ** attempt))
+        wait = max(backoff, (_retry_after(r) or 0.0) if r is not None else 0.0)
+        _sleep(min(RETRY_CAP, wait))
+    raise AssertionError("unreachable")
+
+
 def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
     if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
         kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
     with client() as c:
-        r = c.request(method, path, **kw)
+        r = _request(c, method, path, **kw)
     if r.status_code >= 400:
         typer.echo(f"error {r.status_code}: {r.text}", err=True)
         raise typer.Exit(1)
@@ -51,7 +102,7 @@ def _is_swarm(name: str) -> bool:
     if not AGENT_NAME_RE.match(name):
         return True
     with client() as c:
-        return c.get(f"/swarms/{name}").status_code == 200
+        return _request(c, "GET", f"/swarms/{name}").status_code == 200
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
