@@ -17,6 +17,8 @@ from typing import Any
 
 from flock.models import Event, SwarmSpec, TokenUsage
 
+DB_NAME = "controller.db"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS swarms (
   name TEXT PRIMARY KEY,
@@ -136,7 +138,7 @@ class Store:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._db = sqlite3.connect(
-            self.data_dir / "controller.db", check_same_thread=False, isolation_level=None
+            self.data_dir / DB_NAME, check_same_thread=False, isolation_level=None
         )
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -162,6 +164,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
         if "last_error" not in cols:  # last launch failure or crash, shown by `flock workers`
             self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
+        if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
+            self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
@@ -217,6 +221,41 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def changes(self) -> int:
+        """Rows changed through this connection since it opened (every write goes through it)."""
+        with self._lock:
+            return self._db.total_changes
+
+    def backup_to(self, path: str | Path) -> None:
+        """Consistent copy of the database, WAL included (SQLite online backup API)."""
+        path = Path(path)
+        path.unlink(missing_ok=True)
+        dst = sqlite3.connect(path)
+        try:
+            with self._lock:
+                self._db.backup(dst)
+        finally:
+            dst.close()
+
+    def repair_events(self) -> int:
+        """After a restore, make each event file and its index agree: a file longer than the
+        index (lines appended after the DB snapshot) is cut back, a missing or shorter one sets
+        the index to what is there. Returns the number of agents fixed."""
+        fixed = 0
+        with self._lock:
+            for row in self._q("SELECT agent, swarm, lines FROM event_index"):
+                path = self._events_path(row["swarm"], row["agent"])
+                lines = path.read_bytes().splitlines(keepends=True) if path.exists() else []
+                lines = [ln for ln in lines if ln.endswith(b"\n")]  # drop a torn last line
+                if len(lines) == row["lines"]:
+                    continue
+                keep = lines[: row["lines"]]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"".join(keep))
+                self._x("UPDATE event_index SET lines = ? WHERE agent = ?", [len(keep), row["agent"]])
+                fixed += 1
+        return fixed
 
     # ----------------------------------------------------------------- swarms and types
 
@@ -340,6 +379,19 @@ class Store:
                 args.append(val)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         return self._q(f"SELECT * FROM agents {clause} ORDER BY swarm, type, slot", args)
+
+    def agent_states(self, swarm: str, types: Iterable[str]) -> list[Row]:
+        """Just the columns `agent_state` reads, for the agents of `types` (admission runs this
+        on every poll that carries prompts, so it skips the token columns)."""
+        types = sorted(types)
+        if not types:
+            return []
+        marks = ",".join("?" * len(types))
+        return self._q(
+            "SELECT name, type, worker, hb_state, last_heartbeat FROM agents "
+            f"WHERE swarm = ? AND type IN ({marks})",
+            [swarm, *types],
+        )
 
     def insert_agent(self, name: str, swarm: str, type_name: str, slot: int, now: float) -> None:
         self._x(
@@ -539,12 +591,41 @@ class Store:
         if row and row["worker"]:
             self.listener("commands", row["worker"])
 
+    def add_prompts(self, rows: list[tuple[str, str]], now: float) -> None:
+        """Many (agent, body) prompts in one transaction; each worker is woken once."""
+        if not rows:
+            return
+        with self.transaction():
+            self._db.executemany(
+                "INSERT INTO pending_prompts (agent, body, created_at) VALUES (?, ?, ?)",
+                [(agent, body, now) for agent, body in rows],
+            )
+        names = {agent for agent, _ in rows}
+        workers = {a["worker"] for a in self.list_agents() if a["name"] in names and a["worker"]}
+        for w in sorted(workers):
+            self.listener("commands", w)
+
     def prompts_for_worker(self, worker_id: str) -> list[Row]:
         return self._q(
             "SELECT p.id, p.agent, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
             "WHERE a.worker = ? ORDER BY p.id",
             [worker_id],
         )
+
+    def oldest_pending(self, swarm: str, types: Iterable[str]) -> list[str]:
+        """Agents of `types` with pending prompts, oldest first prompt first (prompt ids grow
+        with creation): the FIFO order `max_working` admission hands out free slots in."""
+        types = sorted(types)
+        if not types:
+            return []
+        marks = ",".join("?" * len(types))
+        rows = self._q(
+            "SELECT p.agent, MIN(p.id) AS first FROM pending_prompts p "
+            "JOIN agents a ON a.name = p.agent "
+            f"WHERE a.swarm = ? AND a.type IN ({marks}) GROUP BY p.agent ORDER BY first",
+            [swarm, *types],
+        )
+        return [r["agent"] for r in rows]
 
     def delete_prompts(self, ids: list[int]) -> None:
         if ids:

@@ -205,3 +205,27 @@ def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     r = runner.invoke(cli.app, ["apply", str(spec_file)])
     assert r.exit_code == 1
     assert "types.writer.model: harness 'claude' cannot use provider 'gpu1'" in r.output
+
+
+def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
+    from flock.models import SwarmSpec
+
+    spec = SwarmSpec.model_validate({
+        "swarm": "s", "namespace": "n", "bucket": "b",
+        "providers": {"p": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
+                            "self_hosted": True},
+                      "a": {"type": "anthropic", "api_key_env": "A", "self_hosted": True}},
+        "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
+                   "plain": {"model": "p:m"},
+                   "am": {"model": "a:m", "extra": {"x": 1}}},
+        "types": {"cx": {"harness": "codex", "model": "m"}, "pi": {"harness": "pi", "model": "m"},
+                  "cl": {"harness": "claude", "model": "am"}, "nox": {"harness": "codex", "model": "plain"}}})
+    cli._warn_extra(spec)
+    err = capsys.readouterr().err
+    assert all(f"type {t}: `extra`" in err for t in ("cx", "pi", "cl")) and "nox" not in err
+    # the llm harness sends `extra` as body fields: never warned (PR #7 adds the harness)
+    assert "llm" not in cli.EXTRA_NOT_SENT
+    monkeypatch.setattr(cli, "EXTRA_NOT_SENT", frozenset({"claude"}))
+    cli._warn_extra(spec)
+    err = capsys.readouterr().err
+    assert "type cl:" in err and "type cx:" not in err

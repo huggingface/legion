@@ -51,10 +51,10 @@ uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggin
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
-export PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
+export FLOCK_LLM_HOME=/state/llm PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
 export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/claude /state/codex /state/pi
+mkdir -p /work/agents /state/claude /state/codex /state/pi /state/llm
 if [ -n "${OPENAI_API_KEY:-}" ]; then printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null; fi
 echo "bootstrap: $(($(date +%s) - t0)) s; claude $(claude --version); codex $(codex --version); $(python3 --version)"
 exec flock-worker
@@ -126,6 +126,7 @@ class HubJobsClient:
         token: str | None = None,
         image: str | None = DEFAULT_WORKER_IMAGE,
         wheel_url: str | None = None,
+        network_group: str | None = None,
     ):
         from huggingface_hub import HfApi
 
@@ -135,6 +136,9 @@ class HubJobsClient:
         self.wheel_url = wheel_url or os.environ.get("FLOCK_WHEEL_URL")
         if self.bootstrap and not self.wheel_url:
             raise ValueError("bootstrap mode needs FLOCK_WHEEL_URL (an hf://buckets/ path)")
+        # Job mode (docs/deploy-job.md): every worker joins the controller's network group and
+        # reaches it directly, never through the Spaces edge or the jobs proxy.
+        self.network_group = network_group
         self.calls: Counter[str] = Counter()  # Hub API calls by method, for the logs
 
     def launch_args(self, spec: TypeSpec, env: dict[str, str]) -> dict[str, Any]:
@@ -146,8 +150,10 @@ class HubJobsClient:
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         self.calls["run_job"] += 1
+        group = {"network_group": self.network_group} if self.network_group else {}
         job = self.api.run_job(
             **self.launch_args(spec, env),
+            **group,
             secrets=secrets,
             flavor=spec.flavor,
             timeout=int(timeout),
@@ -202,6 +208,7 @@ class FakeJobsClient:
     inspects: int = 0
     lists: int = 0
     logs: dict[str, list[str]] = field(default_factory=dict)  # job id -> log lines (tests)
+    network_group: str | None = None  # recorded on every launch, as HubJobsClient sends it
 
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         if self.fail_launches:
@@ -219,6 +226,7 @@ class FakeJobsClient:
                 "labels": dict(labels),
                 "timeout": timeout,
                 "namespace": namespace,
+                "network_group": self.network_group,
             }
         )
         self.states[job_id] = JobState("RUNNING")

@@ -13,10 +13,10 @@ them.
 ## Features
 
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
-  and one or more agent types. Each type sets the harness (`claude` or
-  `codex`), model, replicas, system prompt, job flavor, agents per worker,
+  and one or more agent types. Each type sets the harness (`claude`,
+  `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
   worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`
-  (enforced for every harness: Claude in its SDK, Codex and Pi in the worker).
+  (enforced for every harness: Claude in its SDK, Codex, Pi and `llm` in the worker).
   `apply`, `scale` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name
@@ -51,8 +51,14 @@ them.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
   `flock` wraps the HTTP API.
 
-Supported harnesses: Claude Code through the Python Agent SDK, Codex through
-`codex app-server`. Codex is verified locally, not yet inside a job.
+Supported harnesses:
+
+| `harness` | What runs | Providers | Notes |
+|---|---|---|---|
+| `claude` | Claude Code through the Python Agent SDK | native, `anthropic` | |
+| `codex` | `codex app-server` | native, `openai_compat` (Responses API) | verified locally, not yet in a job |
+| `pi` | `pi --mode rpc` | native, `openai_compat` | [docs/pi.md](docs/pi.md) |
+| `llm` | in-process Chat Completions loop, one `bash` tool | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
 
 ## Usage
 
@@ -76,6 +82,17 @@ export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
 uv run hf buckets create <you>/flock --private                # once: wheels and agent state
 W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for workers
 uv run scripts/deploy-space.sh "$W" <you>/flock
+```
+
+As an HF Job in the workers' network group (job mode, for swarms past a few dozen workers:
+no Spaces edge between workers and the controller; see [docs/deploy-job.md](docs/deploy-job.md)):
+
+```sh
+uv run scripts/deploy-job.sh "$W" --group <name>     # prints the job's two URLs
+export FLOCK_URL=https://<job id>--7860.hf.jobs       # API through the jobs proxy
+# the CLI sends HF_TOKEN to the proxy and FLOCK_TOKEN as X-Flock-Token;
+# https://<job id>--7861.hf.jobs is the public, read-only status page
+uv run scripts/deploy-job.sh --down --group <name> "$W"   # teardown: cancel + delete its state
 ```
 
 Or locally:
@@ -156,6 +173,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | `GET /agents/{name}` | one agent's state, pending prompts, cost |
 | `POST /agents/{name}/prompt` | body `{text, timeout?, reply_to?}`; acks `queued` or `pending` |
+| `POST /swarms/{swarm}/prompts` | body `{type, state?, text, timeout?, reply_to?}`: the prompt to every agent of a type in one request (`flock prompt --swarm S --type T [--state idle] TEXT`); acks counts. With `state: idle` agents that already have a pending prompt are skipped (`skip_pending`, counted in `skipped_pending`), so repeated calls never stack prompts |
 | `GET /agents/{name}/events?after=&wait=` | event stream, long-poll |
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |

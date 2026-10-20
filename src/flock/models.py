@@ -38,6 +38,7 @@ class Harness(StrEnum):
     claude = "claude"
     codex = "codex"
     pi = "pi"
+    llm = "llm"  # in-process chat-completions loop (docs/llm-harness.md)
 
 
 class AgentState(StrEnum):
@@ -142,8 +143,8 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Kept for spec portability and used by
-    # nothing in the harness path yet: neither Codex nor Claude Code can add body fields.
+    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only: Codex,
+    # Claude Code and Pi cannot add body fields, so for them it is kept for spec portability.
     extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
@@ -198,6 +199,18 @@ class TypeSpec(BaseModel):
     turn_timeout: str = "30m"
     max_turns: int | None = None  # per prompt, passed to the harness
     max_budget_usd: float | None = None  # per prompt, passed to the harness
+    # harness llm only: transcript size (estimated tokens) that triggers compaction; None: 32k
+    context_tokens: int | None = None
+    # harness llm only: chat-completions `tool_choice` on every call: auto (default) | required |
+    # none | bash (force that tool). A forcing value makes each prompt one action.
+    tool_choice: Literal["auto", "required", "none", "bash"] | None = None
+    # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
+    # required. With it a forced turn runs several steps; without it, one action per prompt.
+    done_tool: bool | None = None
+    # harness llm only: starting chars/token for the size estimate (calibrated online from the
+    # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
+    chars_per_token: float | None = None
+    tool_output_chars: int | None = None
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -233,6 +246,27 @@ class TypeSpec(BaseModel):
     def _non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("chars_per_token")
+    @classmethod
+    def _cpt(cls, v: float | None) -> float | None:
+        if v is not None and not 0.5 <= v <= 8:
+            raise ValueError("chars_per_token must be between 0.5 and 8")
+        return v
+
+    @field_validator("tool_output_chars")
+    @classmethod
+    def _toc(cls, v: int | None) -> int | None:
+        if v is not None and v < 200:
+            raise ValueError("tool_output_chars must be >= 200")
+        return v
+
+    @field_validator("context_tokens")
+    @classmethod
+    def _context_tokens(cls, v: int | None) -> int | None:
+        if v is not None and v < 256:
+            raise ValueError("context_tokens must be >= 256")
         return v
 
     @field_validator("workers")
@@ -285,10 +319,18 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
+            llm_only = ("tool_choice", "done_tool", "context_tokens", "chars_per_token",
+                        "tool_output_chars")
+            if ts.harness != Harness.llm and any(getattr(ts, f) is not None for f in llm_only):
+                raise ValueError(f"types.{type_name}: {', '.join(llm_only)} are for harness llm only")
             if r is None:
+                if ts.harness == Harness.llm:
+                    raise ValueError(
+                        f"types.{type_name}.model: harness 'llm' needs a provider-backed model "
+                        f"('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
                 continue
             want = {Harness.claude: "anthropic", Harness.codex: "openai_compat",
-                    Harness.pi: "openai_compat"}[ts.harness]
+                    Harness.pi: "openai_compat", Harness.llm: "openai_compat"}[ts.harness]
             if r.provider.type != want:
                 raise ValueError(
                     f"types.{type_name}.model: harness {ts.harness.value!r} cannot use provider "
@@ -626,6 +668,46 @@ class PromptAck(BaseModel):
     turn_id: str | None = None  # set later via the event stream, may be None here
 
 
+class BulkPromptRequest(BaseModel):
+    """One prompt to every agent of a type (`POST /swarms/{swarm}/prompts`), optionally only
+    those in one state. Each agent gets its own pending prompt, admitted as a single one is."""
+
+    type: str
+    state: AgentState | None = None
+    text: str
+    timeout: str | None = None
+    reply_to: str | None = None
+    # Skip agents that already have a pending (undelivered) prompt. Default: on with
+    # state=idle ("only if idle and empty": repeated calls never stack prompts), off otherwise.
+    skip_pending: bool | None = None
+
+
+class ChildrenPromptRequest(BaseModel):
+    """One prompt to an agent's direct children (`POST /agents/{name}/children/prompts`),
+    optionally only those of one type and/or state; same rules as BulkPromptRequest. Allowed
+    for that agent's own scoped token (and its ancestors'), so a leader prompts its idle
+    children in one request."""
+
+    type: str | None = None
+    state: AgentState | None = None
+    text: str
+    timeout: str | None = None
+    reply_to: str | None = None
+    skip_pending: bool | None = None  # default: on with state=idle
+
+
+class BulkPromptAck(BaseModel):
+    swarm: str
+    type: str | None  # None: any type (children route without `type`)
+    parent: str | None = None  # set by the children route
+    matched: int  # agents of the type
+    queued: int  # prompts for agents whose worker is up
+    pending: int  # prompts held until the agent's worker is up
+    skipped_state: int = 0  # not in the requested state
+    skipped_removing: int = 0  # being removed (spawn cascade)
+    skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
+
+
 class SpawnRequest(BaseModel):
     type: str
     prompt: str | None = None  # first prompt, held until the child is placed
@@ -723,7 +805,9 @@ class PreflightResult(BaseModel):
     model: str  # "<provider>:<model id>"
     provider: str
     types: list[str]
-    api: str  # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic)
+    # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic) |
+    # "chat_completions" (openai_compat for llm types)
+    api: str
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
     # Not probed (e.g. the key is not in the controller's environment): neither ok nor failed.
     # `apply` warns and proceeds, or refuses with --strict.
