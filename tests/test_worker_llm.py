@@ -4,6 +4,7 @@ model calls), plus its pure helpers (text tool calls, compaction, repair) and sp
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from pathlib import Path
 
@@ -356,7 +357,7 @@ async def test_compaction_during_a_session(tmp_path, fake_server, monkeypatch):
     a, wd, spec = make(tmp_path, fake_server, monkeypatch, context_tokens=600)
     sid = await a.start(wd, None, spec, env={KEY_ENV: "k"})
     for i in range(6):
-        await a.send(f"msg{i} " + "x" * 600)
+        await a.send(f"msg{i} realtok! " + "x" * 600)
         assert (await turn(a))[-1].status == "completed"
     await a.stop()
     last = requests_seen(fake_server)[-1]["body"]["messages"]
@@ -599,7 +600,7 @@ async def test_non_2xx_bodies_are_reported_redacted(tmp_path, fake_server, monke
     evs = await turn(a)
     [err] = [e for e in evs if e.kind == "error"]
     assert err.data == {"status": 400, "attempt": 1, "retrying": False}
-    assert err.error.startswith("HTTP 400 from http://127.0.0.1") and "context too long" in err.error
+    assert err.error.startswith("HTTP 400 from http://127.0.0.1") and "bad request" in err.error
     assert "sk-test-secret-key-123" not in err.error and "[redacted]" in err.error
     body = err.error.split(": ", 1)[1]
     assert len(body) == 500  # the first 500 chars of the body
@@ -634,3 +635,94 @@ def test_warn_extra_skips_the_llm_harness(capsys):
     cli._warn_extra(spec)
     err = capsys.readouterr().err
     assert "type cx: `extra`" in err and "pix" not in err
+
+
+# --------------------------------------------------------------------------- context bounding (pixel run 3)
+
+STEP = ('n=$(( $(cat c 2>/dev/null || echo 0) + 1 )); echo $n > c; '
+        'python3 -c "import json; print(json.dumps({\'ok\': True, \'pixels\': [[i, i, \'#a0b0c0\'] '
+        'for i in range(30)]}))"; [ $n -ge 12 ] && echo DONE-NOW; true')
+
+
+def test_compaction_drops_old_steps_inside_one_turn(tmp_path):
+    def call(i):
+        return {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{i}", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "paint"}]
+    for i in range(10):
+        msgs += [call(i), {"role": "tool", "tool_call_id": f"c{i}", "content": "p" * 600}]
+    out = compact(msgs, 1000, tmp_path)
+    assert [m["role"] for m in out[:3]] == ["system", "user", "user"] and out[2]["content"] == "paint"
+    ids = [m["tool_call_id"] for m in out if m["role"] == "tool"]
+    assert ids == [f"c{i}" for i in range(10 - len(ids), 10)] and len(ids) >= 2  # newest steps
+    assert all(m["tool_calls"][0]["id"] in ids for m in out if m["role"] == "assistant")  # never split
+    assert estimate_tokens(out) <= 1000 and out[1]["flock_dropped"] == 2 * (10 - len(ids))
+    agg = compact(msgs, 100_000, tmp_path, aggressive=True)  # after a context error: last 2 steps
+    assert [m.get("tool_call_id") for m in agg if m["role"] == "tool"] == ["c8", "c9"]
+    assert compact(msgs, 100_000, tmp_path) is None and compact(msgs, 10, tmp_path, over=False) is None
+
+
+def tokens_sent(srv) -> list[int]:
+    return [fake_openai.prompt_tokens(r["body"]) for r in requests_seen(srv)]
+
+
+async def test_growing_turn_is_compacted_before_the_bound(tmp_path, fake_server, monkeypatch):
+    """Run 3: ~600-char JSON tool results at ~2 chars/token; a chars/4 estimate let a 3000-token
+    budget reach 7.9k and overflow 8192. Projection from the server's count keeps it bounded."""
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", context_tokens=2500,
+                       max_turns=20)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send(f"realtok! ctxlimit=3000 bash: {STEP}")  # each step adds ~570 tokens
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 13  # 12 steps + done
+    assert not [e for e in evs if e.kind == "error"]  # never a 400
+    sent = tokens_sent(fake_server)
+    assert max(sent) <= 2500 * 1.05 and sent[-1] < sent[-3] + 400  # bounded, not monotonic growth
+    assert any("earlier message(s)" in m["content"] for r in requests_seen(fake_server)[-1:]
+               for m in r["body"]["messages"] if m["role"] == "user")
+    assert 1.5 < a.chars_per_token < 2.5  # calibrated toward the server's ~2 chars/token
+    await a.stop()
+
+
+async def test_context_error_compacts_and_retries_once(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=30,
+                       context_tokens=100_000)  # no proactive compaction: the server is the bound
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send(f"realtok! ctxlimit=2200 bash: {STEP}")
+    evs = await turn(a)
+    errs = [e for e in evs if e.kind == "error"]
+    assert errs and all(e.data["status"] == 400 and "maximum context length" in e.error for e in errs)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 13  # each 400 retried once
+    statuses = [fake_openai.prompt_tokens(r["body"]) > 2200 for r in requests_seen(fake_server)]
+    assert not any(x and y for x, y in itertools.pairwise(statuses))  # retry fits
+    await a.stop()
+
+
+async def test_context_error_that_cannot_shrink_ends_with_context_overflow(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("realtok! ctxlimit=50 hello")  # system + prompt alone exceed the server's limit
+    end = (await turn(a))[-1]
+    assert end.status == "error" and end.data["reason"] == "context_overflow"
+    assert len(requests_seen(fake_server)) == 1  # nothing to drop: no retry
+    await a.stop()
+
+
+async def test_calibration_and_settings(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, chars_per_token=3.0, tool_output_chars=300)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    assert a.chars_per_token == 3.0 and a.projected_tokens() > 0
+    await a.send("realtok! bash: python3 -c \"print('y' * 1000)\"")
+    evs = await turn(a)
+    assert 2.0 < a.chars_per_token < 3.0  # moved toward the server's ~2
+    res = next(e.message for e in evs if e.kind == "message" and e.message["role"] == "toolResult")
+    text = res["content"][0]["text"]
+    assert "chars truncated" in text and len(text) < 400  # tool_output_chars bounds the stored result
+    tokens, _ = a._last_prompt
+    assert a.projected_tokens() >= tokens  # projection starts from the server's count
+    await a.stop()
+    with pytest.raises(ValueError, match="for harness llm only"):
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
+                                  "types": {"a": {"harness": "codex", "model": "m", "chars_per_token": 2}}})
+    with pytest.raises(ValueError, match="tool_output_chars must be >= 200"):
+        llm_spec(tool_output_chars=10)

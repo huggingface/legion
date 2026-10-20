@@ -12,11 +12,18 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   with `flock_` are ours and never sent.
 - Exactly one system message, first (LFM2's template requires it): compaction notes and
   steered prompts are user messages.
-- Compaction: when the transcript's estimated size (characters / 4) exceeds `context_tokens`,
-  keep the system message, one `flock_summary` user note (how many messages were dropped) and
-  the newest messages that fit in half the budget, starting at a user message; then, if still
-  over, shorten old tool outputs. No model-written summary. The file is rewritten; the full
-  history stays in the agent's flock session log.
+- Context bounding (pixel run 3: a chars/4 estimate let a 3000-token budget reach 7.9k and
+  overflow 8192, because JSON tool output runs ~2 chars/token): before each call the next
+  prompt is projected as the server's `prompt_tokens` for the previous call plus the new
+  characters / `chars_per_token` (default 2.5, calibrated online from reported tokens). Over
+  `context_tokens`, compaction keeps the system message, one `flock_summary` user note (how
+  many messages were dropped) and the newest messages within half the budget: whole earlier
+  prompts first, then the oldest steps of the current turn (assistant + tool results, never
+  split; the newest two kept), then shortened old tool outputs. A 400 that names the context
+  length compacts aggressively (last prompt + two steps) and retries once; otherwise the turn
+  ends `error`, reason `context_overflow`. Tool output is capped at `tool_output_chars`
+  (default 8000). No model-written summary. The file is rewritten; the full history stays in
+  the agent's flock session log.
 - Thinking: `reasoning_content` / `reasoning`, or inline `<think>...</think>` (also without the
   opening tag, which LFM2's template emits itself), becomes a pi `thinking` block and is never
   sent back; its tokens are in the server's usage.
@@ -68,7 +75,12 @@ ENV_DENY = ("FLOCK_TOKEN",)  # never reaches tool processes, even when listed in
 INSTRUCTIONS = "AGENTS.md"
 DEFAULT_CONTEXT_TOKENS = 32_000
 COMPACT_TARGET = 0.5  # share of context_tokens kept after compaction
-OLD_TOOL_OUTPUT_CHARS = 1_000  # what compaction's second stage leaves of an old tool output
+OLD_TOOL_OUTPUT_CHARS = 1_000  # what compaction's last stage leaves of an old tool output
+DEFAULT_CHARS_PER_TOKEN = 2.5  # JSON tool output runs ~2 chars/token (pixel run 3); prose ~4
+CPT_MIN, CPT_MAX = 1.0, 6.0  # bounds of the online calibration
+CPT_EMA = 0.3  # weight of the newest observation
+KEEP_STEPS = 2  # model steps (assistant + its tool results) an overflow compaction keeps
+CONTEXT_ERROR = re.compile(r"(?i)context|maximum.{0,40}length|too long|too many tokens|max_model_len")
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_MAX_RETRIES = 3
 BACKOFF_S = 1.0
@@ -76,7 +88,7 @@ BACKOFF_MAX_S = 30.0
 DEFAULT_MAX_TOKENS = 4096
 BASH_TIMEOUT_S = 120.0
 BASH_TIMEOUT_MAX_S = 600.0
-OUTPUT_LIMIT = 16_000  # characters of tool output sent back to the model (head and tail)
+OUTPUT_LIMIT = 8_000  # default `tool_output_chars`: stored/sent tool output, head and tail
 STOP_GRACE = 5.0
 FORCED_DEFAULT_MAX_TURNS = 50  # forced tool choice with `done` and no max_turns
 
@@ -211,9 +223,14 @@ def chat_usage(u: dict[str, Any] | None) -> TokenUsage:
                       cache_read=cached, reasoning=reasoning)
 
 
-def estimate_tokens(messages: list[dict[str, Any]]) -> int:
-    """chars / 4 over what is sent (tool schemas excluded); a heuristic, not a tokenizer."""
-    return sum(len(json.dumps(m, ensure_ascii=False)) for m in wire_messages(messages)) // 4
+def wire_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(len(json.dumps(m, ensure_ascii=False)) for m in wire_messages(messages))
+
+
+def estimate_tokens(messages: list[dict[str, Any]], chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
+    """Characters sent / chars_per_token (tool schemas excluded); a heuristic, not a tokenizer.
+    The adapter calibrates chars_per_token from the server's reported prompt tokens."""
+    return int(wire_chars(messages) / chars_per_token)
 
 
 def wire_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -244,9 +261,34 @@ def repair(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def compact(messages: list[dict[str, Any]], limit: int, workdir: Path) -> list[dict[str, Any]] | None:
-    """The compacted transcript, or None when it fits or cannot shrink. See module docstring."""
-    if estimate_tokens(messages) <= limit:
+def _steps(tail: list[dict[str, Any]]) -> list[list[int]]:
+    """Indexes of each model step in `tail`: an assistant message and the tool results after it."""
+    out: list[list[int]] = []
+    for i, m in enumerate(tail):
+        if m.get("role") == "assistant":
+            out.append([i])
+        elif m.get("role") == "tool" and out:
+            out[-1].append(i)
+    return out
+
+
+def compact(messages: list[dict[str, Any]], limit: int, workdir: Path, *,
+            chars_per_token: float = DEFAULT_CHARS_PER_TOKEN, over: bool | None = None,
+            aggressive: bool = False) -> list[dict[str, Any]] | None:
+    """The compacted transcript, or None when it fits (`over` None: by estimate; the adapter
+    passes its own projection) or cannot shrink.
+
+    1. Drop whole earlier prompts: keep from the oldest user message whose tail fits in
+       COMPACT_TARGET of the limit (the newest user message at least).
+    2. Inside that tail (one long turn), drop the oldest model steps (an assistant message and
+       its tool results, never split) until it fits, keeping the newest KEEP_STEPS.
+    3. Shorten old tool outputs to OLD_TOOL_OUTPUT_CHARS.
+    `aggressive` (after a context-length error): keep only the newest user message and the
+    newest KEEP_STEPS steps, then shorten."""
+    def est(ms: list[dict[str, Any]]) -> int:
+        return estimate_tokens(ms, chars_per_token)
+
+    if over is False or (over is None and not aggressive and est(messages) <= limit):
         return None
     system = messages[0]
     dropped_before = sum(int(m.get("flock_dropped") or 0) for m in messages if m.get("flock_summary"))
@@ -255,18 +297,29 @@ def compact(messages: list[dict[str, Any]], limit: int, workdir: Path) -> list[d
     starts = [i for i, m in enumerate(body) if m.get("role") == "user"]
     if not starts:
         return None
-    cut = next((i for i in starts if estimate_tokens([system, *body[i:]]) <= target), starts[-1])
-    kept = [dict(m) for m in body[cut:]]
-    # second stage: shorten old tool outputs (all but the newest two messages), oldest first
+    cut = starts[-1] if aggressive else next(
+        (i for i in starts if est([system, *body[i:]]) <= target), starts[-1])
+    tail = [dict(m) for m in body[cut:]]
+    dropped = cut
+    # 2. old steps inside the kept tail
+    steps = _steps(tail)
+    drop: set[int] = set()
+    for step in steps[:max(0, len(steps) - KEEP_STEPS)]:
+        if not aggressive and est([system, *(m for k, m in enumerate(tail) if k not in drop)]) <= target:
+            break
+        drop.update(step)
+    kept = [m for k, m in enumerate(tail) if k not in drop]
+    dropped += len(drop)
+    # 3. shorten old tool outputs (all but the newest two messages), oldest first
     for m in kept[:-2]:
-        if estimate_tokens([system, *kept]) <= limit:
+        if not aggressive and est([system, *kept]) <= limit:
             break
         c = m.get("content")
         if m.get("role") == "tool" and isinstance(c, str) and len(c) > OLD_TOOL_OUTPUT_CHARS:
             m["content"] = c[:OLD_TOOL_OUTPUT_CHARS] + f"\n[... {len(c) - OLD_TOOL_OUTPUT_CHARS} chars removed]"
-    if cut == 0 and kept == body:
+    if dropped == 0 and kept == body:
         return None
-    n = dropped_before + cut
+    n = dropped_before + dropped
     note = {"role": "user", "flock_summary": True, "flock_dropped": n,
             "content": f"[flock] {n} earlier message(s) of this conversation were removed to stay "
                        f"under context_tokens={limit}. Your files in {workdir} are intact; re-read "
@@ -322,7 +375,13 @@ def _parse_args(raw: Any) -> dict[str, Any] | str:
 
 
 class CallError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None, body: str = "") -> None:
+        super().__init__(message)
+        self.status, self.body = status, body
+
+    @property
+    def context_overflow(self) -> bool:
+        return self.status == 400 and bool(CONTEXT_ERROR.search(self.body))
 
 
 ERROR_BODY_CHARS = 500
@@ -366,6 +425,8 @@ class LLMAdapter:
         self._task: asyncio.Task | None = None
         self._tool_proc: asyncio.subprocess.Process | None = None
         self._exited = True
+        self.chars_per_token = DEFAULT_CHARS_PER_TOKEN  # calibrated online
+        self._last_prompt: tuple[int, int] | None = None  # (reported prompt tokens, chars sent)
 
     @property
     def session_dir(self) -> Path:
@@ -402,6 +463,36 @@ class LLMAdapter:
         r = spec.resolved_model
         choice = spec.tool_choice or ((r.extra or {}).get("tool_choice") if r else None)
         return choice == "required"
+
+    def projected_tokens(self) -> int:
+        """Prompt size of the next request: the server's count for the previous request plus
+        the estimate for what was added since; the estimate alone when there is none."""
+        chars = wire_chars(self.messages)
+        if self._last_prompt is None:
+            return int(chars / self.chars_per_token)
+        tokens, sent = self._last_prompt
+        return tokens + int(max(0, chars - sent) / self.chars_per_token)
+
+    def _calibrate(self, prompt_tokens: int, chars: int) -> None:
+        if prompt_tokens <= 0 or chars <= 0:
+            return
+        self._last_prompt = (prompt_tokens, chars)
+        obs = chars / prompt_tokens
+        cpt = (1 - CPT_EMA) * self.chars_per_token + CPT_EMA * obs
+        self.chars_per_token = min(CPT_MAX, max(CPT_MIN, cpt))
+
+    def _compact(self, *, aggressive: bool = False) -> bool:
+        over = None if aggressive else self.projected_tokens() > self.context_tokens
+        c = compact(self.messages, self.context_tokens, self.workdir,
+                    chars_per_token=self.chars_per_token, over=over, aggressive=aggressive)
+        if c is None:
+            return False
+        log.info("%s: compacted the transcript%s (%d -> %d messages)", self.agent,
+                 " after a context-length error" if aggressive else "", len(self.messages), len(c))
+        self.messages = c
+        self._last_prompt = None  # the transcript changed: back to the calibrated estimate
+        self._rewrite()
+        return True
 
     @property
     def context_tokens(self) -> int:
@@ -461,6 +552,8 @@ class LLMAdapter:
                 raise ResumeError(f"cannot resume llm session {session_id}: no file {path}")
             messages = self._load(path)
         self._spec = spec
+        self.chars_per_token = spec.chars_per_token or DEFAULT_CHARS_PER_TOKEN
+        self._last_prompt = None
         self.session_id = session_id or str(uuid.uuid4())
         system = {"role": "system", "content": self.system_prompt()}
         if messages and messages[0].get("role") == "system" and not messages[0].get("flock_summary"):
@@ -551,6 +644,7 @@ class LLMAdapter:
         model = spec.resolved_model.model_id
         self.in_turn = True
         calls, cost = 0, 0.0
+        overflow_retried = False
         # a forced model that never calls `done` would loop until turn_timeout: cap it
         max_turns = spec.max_turns
         if max_turns is None and self.forced and self.done_enabled:
@@ -568,20 +662,23 @@ class LLMAdapter:
                                        f"${cost:.6f}; stopped", reason=hit, subtype=f"error_{hit}",
                               num_turns=calls)
                     return
-                if (c := compact(self.messages, self.context_tokens, self.workdir)) is not None:
-                    log.info("%s: compacted the transcript (%d -> %d messages)", self.agent,
-                             len(self.messages), len(c))
-                    self.messages = c
-                    self._rewrite()
+                self._compact()  # when the projected prompt is over context_tokens
+                sent = wire_chars(self.messages)
                 try:
                     data = await self._complete()
                 except CallError as e:
-                    self._end("error", str(e), reason="api_error", num_turns=calls)
+                    if e.context_overflow and not overflow_retried and self._compact(aggressive=True):
+                        overflow_retried = True  # one retry per step, on the shrunk transcript
+                        continue
+                    reason = "context_overflow" if e.context_overflow else "api_error"
+                    self._end("error", str(e), reason=reason, num_turns=calls)
                     return
+                overflow_retried = False
                 calls += 1
                 choice = (data.get("choices") or [{}])[0]
                 msg = choice.get("message") or {}
                 usage = chat_usage(data.get("usage"))
+                self._calibrate(usage.input + usage.cache_read, sent)
                 if usage != TokenUsage():
                     self._queue.put(AdapterEvent("usage", model=model, usage=usage))
                     p = price_for(model, self.prices)
@@ -711,7 +808,9 @@ class LLMAdapter:
             raise
         finally:
             self._tool_proc = None if self._tool_proc is proc else self._tool_proc
-        text = _truncate(out.decode(errors="replace"))
+        spec = self._spec
+        text = _truncate(out.decode(errors="replace"),
+                         (spec.tool_output_chars if spec else None) or OUTPUT_LIMIT)
         return f"{text}{'' if not text or text.endswith(chr(10)) else chr(10)}[exit code {proc.returncode}]", \
             proc.returncode != 0
 
@@ -762,7 +861,7 @@ class LLMAdapter:
                 log.warning("%s: HTTP %d from the model server: %s", self.agent, resp.status_code,
                             body_text[:200])
                 if resp.status_code != 429 and resp.status_code < 500:
-                    raise CallError(err)
+                    raise CallError(err, resp.status_code, body_text)
                 with contextlib.suppress(TypeError, ValueError):
                     retry_after = float(resp.headers.get("retry-after"))
             if attempt == retries:

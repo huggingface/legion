@@ -207,6 +207,10 @@ class TypeSpec(BaseModel):
     # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
     # required. With it a forced turn runs several steps; without it, one action per prompt.
     done_tool: bool | None = None
+    # harness llm only: starting chars/token for the size estimate (calibrated online from the
+    # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
+    chars_per_token: float | None = None
+    tool_output_chars: int | None = None
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -242,6 +246,20 @@ class TypeSpec(BaseModel):
     def _non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("chars_per_token")
+    @classmethod
+    def _cpt(cls, v: float | None) -> float | None:
+        if v is not None and not 0.5 <= v <= 8:
+            raise ValueError("chars_per_token must be between 0.5 and 8")
+        return v
+
+    @field_validator("tool_output_chars")
+    @classmethod
+    def _toc(cls, v: int | None) -> int | None:
+        if v is not None and v < 200:
+            raise ValueError("tool_output_chars must be >= 200")
         return v
 
     @field_validator("context_tokens")
@@ -301,10 +319,10 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
-            if ts.harness != Harness.llm and (ts.tool_choice is not None or ts.context_tokens is not None
-                                              or ts.done_tool is not None):
-                raise ValueError(f"types.{type_name}: tool_choice, done_tool and context_tokens are for "
-                                 "harness llm only")
+            llm_only = ("tool_choice", "done_tool", "context_tokens", "chars_per_token",
+                        "tool_output_chars")
+            if ts.harness != Harness.llm and any(getattr(ts, f) is not None for f in llm_only):
+                raise ValueError(f"types.{type_name}: {', '.join(llm_only)} are for harness llm only")
             if r is None:
                 if ts.harness == Harness.llm:
                     raise ValueError(

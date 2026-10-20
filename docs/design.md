@@ -228,7 +228,7 @@ The `llm` harness (`harness: llm`, docs/llm-harness.md) has no process: a "burst
 task in the worker that runs a Chat Completions loop with one `bash` tool against an
 `openai_compat` provider (required). The session is a JSONL file of chat messages under
 `$FLOCK_LLM_HOME/sessions/<agent>/` (`/state/llm`), appended per step, reloaded on resume and
-compacted (system + a note + the newest messages) past the type's `context_tokens`. A flock
+compacted (system + a note + the newest messages and steps) when the prompt projected from the server's last `prompt_tokens` passes the type's `context_tokens`. A flock
 turn ends on a reply without tool calls; prompts sent mid-turn become the next user message;
 `max_turns` / `max_budget_usd` are checked before each model call, as for Pi and Codex. Usage
 is per call. `extra` is sent as body fields; `reasoning` is ignored. Tool calls written as
@@ -675,7 +675,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
-| 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, chars/4 compaction past `context_tokens`, tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
+| 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, compaction past `context_tokens` projected from the server's prompt_tokens (2026-10-20, run 3: chars/4 undercounted JSON 2x; context-length 400 compacts and retries once, else reason `context_overflow`), tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 
 ## 12. Road to 10k
 

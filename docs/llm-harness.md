@@ -37,8 +37,14 @@ types:
   apply). The key stays in the provider's `api_key_env` secret, never in the spec.
 - `max_turns`: model calls per flock prompt. `max_budget_usd`: per prompt, priced with the
   type's flock price table (the pinned provider price), as for Codex and Pi.
-- `context_tokens` (new, `llm` only, default 32000, minimum 256): the transcript size that
-  triggers compaction, estimated as characters / 4.
+- `context_tokens` (new, `llm` only, default 32000, minimum 256): the prompt size (tokens) the
+  harness keeps each request under, by compacting before the call (see "Context bounding").
+  Set it well below the server's `--max-model-len` minus `max_tokens`.
+- `chars_per_token` (new, `llm` only, default 2.5, 0.5-8): the starting characters-per-token
+  for size estimates; calibrated online from the server's reported prompt tokens.
+- `tool_output_chars` (new, `llm` only, default 8000, minimum 200): bash output beyond this is
+  cut (head and tail kept, with a `[... N chars truncated ...]` marker) before it is stored or
+  sent.
 - `extra` from the alias is merged into every request body (this harness can; the others
   cannot). It may override the defaults `temperature: 0` and `max_tokens: 4096`. `stream` is
   dropped: requests are never streamed.
@@ -108,6 +114,7 @@ any steered prompts. It stops when a reply has no tool call and nothing was stee
 | `turn_ended completed` | a reply without tool calls and no queued prompt; a `done` call (its summary is emitted first as the final assistant message, `fromDoneTool: true`); or, forced `tool_choice` without `done`, after the forced call's tool ran. `data.num_turns` = model calls |
 | `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
 | `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
+| `turn_ended error`, `reason: context_overflow` | a context-length 400 that compaction plus one retry could not fix |
 | `turn_ended interrupted` | `stop` mid-turn (timeout, stop, drain); the tool's process group is killed |
 | `error` | every non-2xx reply from the model server: `HTTP <status> from <url>: <first 500 chars of the body>` (keys and bearer tokens redacted), `data` = `{status, attempt, retrying}`; retries and turn handling are unchanged. Also an internal failure, which ends the burst |
 | `exited` | once per burst, on `stop` (or after an internal failure) |
@@ -118,8 +125,8 @@ current tool results, inside the same turn (several queued prompts go in togethe
 ## Tool
 
 One tool, `bash` (plus `done` when `done_tool` is on, see above) (`command`, optional `timeout` seconds, default 120, max 600): `bash -c` in the
-workdir, stdin closed, stdout and stderr combined, output truncated to 16000 characters (head
-and tail) plus `[exit code N]`; a non-zero exit is `isError`. It runs in its own process group,
+workdir, stdin closed, stdout and stderr combined, output truncated to `tool_output_chars`
+(default 8000) characters (head and tail) plus `[exit code N]`; a non-zero exit is `isError`. It runs in its own process group,
 killed on timeout or stop. Its environment is the shared allow-list (`PATH`, `HOME`, locale,
 proxies, ...) plus what the worker passes (the type's `secrets`, `env`, msgboard identity,
 `FLOCK_AGENT*`), minus `FLOCK_TOKEN` and minus the provider key.
@@ -145,11 +152,37 @@ requests show the model the proper form; the pi message carries `toolCallsFromTe
   The system message is rebuilt on every start from the preamble and the workdir's `AGENTS.md`,
   so prompt changes apply to old sessions. Tool calls left without a result by an interrupted
   turn get a `[interrupted: no result]` tool message, so the server accepts the transcript.
-- Compaction, before a model call whose transcript estimate exceeds `context_tokens`: keep the
-  system message, one note (a user message saying how many earlier messages were removed) and
-  the newest messages that fit in half the budget, starting at a user message. If the current turn alone is still too big, old tool
-  outputs in it are cut to 1000 characters. No model-written summary. The file is rewritten;
-  the full history stays in the agent's flock session log (`_sessions/<agent>.jsonl`).
+- Compaction (see "Context bounding" below) rewrites the file; the full history stays in the
+  agent's flock session log (`_sessions/<agent>.jsonl`).
+
+## Context bounding
+
+Pixel run 3 (2026-10-20) had `context_tokens: 3000`, yet painter prompts reached 7,937 tokens
+and vLLM refused 2,376 calls (0.64% of 369k) with "maximum context length is 8192". There were
+two causes. The size estimate was characters / 4, but JSON tool output runs about 2
+characters per token (a 616-character paint result cost ~312 tokens). And compaction could not
+shrink a single long turn: it only dropped whole earlier prompts. Now:
+
+1. **Projection from the server's count.** Before each call the next prompt is projected as the
+   previous call's reported `prompt_tokens` (cached included) plus the characters added since,
+   divided by `chars_per_token`. With no previous call in this burst, or after a compaction, it
+   is the characters / `chars_per_token` estimate. Over `context_tokens`, the transcript is
+   compacted before sending.
+2. **Calibration.** Each reply's `prompt_tokens` against the characters sent updates
+   `chars_per_token`: an exponential moving average, weight 0.3, bounded to 1-6. It starts at
+   the type's `chars_per_token` (default 2.5).
+3. **Compaction, to half of `context_tokens`.** It keeps the system message and one note (a user
+   message saying how many earlier messages were removed). It then drops, in order:
+   - whole earlier prompts;
+   - the oldest steps of the current turn (an assistant message with its tool results, never
+     split; the newest two steps and the turn's prompt are always kept);
+   - text from old tool outputs, cut to 1000 characters.
+   There is no model-written summary.
+4. **Context-length errors.** A 400 whose body mentions the context or maximum length triggers
+   an aggressive compaction (only the newest prompt and the newest two steps), and the call is
+   retried once. If that is impossible or fails again, the turn ends `error` with reason
+   **`context_overflow`**. Other 4xx still end with `api_error`.
+5. **Capped tool output.** Tool output is capped at `tool_output_chars` before it is stored.
 
 ## Preflight
 
@@ -164,7 +197,8 @@ probed separately on the Responses API.
 
 No streaming, no parallel tool execution, no file read/edit tools (bash covers `cat`, heredocs,
 `sed`), no model-written compaction, no prompt-cache control, no images, no MCP, no reasoning
-setting, no tokenizer (the context estimate is a heuristic). Packing (agents per worker) is not
+setting, no tokenizer (the context projection uses the server's reported counts plus a
+calibrated chars/token estimate). Packing (agents per worker) is not
 measured yet.
 
 ## What a small model still needs from the prompt

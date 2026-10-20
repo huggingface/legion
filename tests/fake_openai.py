@@ -16,6 +16,10 @@ Replies, decided from the last message of each request:
 - last user text contains `think2!` -> `reasoning_content: "pondering"` + the echo
 - last user text contains `fail!`   -> HTTP 400 with an OpenAI-style error body (long, and
                                        echoing the Authorization header)
+- `realtok!` in any user message: prompt_tokens = characters of the messages / 2 (else 100 +
+  one per message); `ctxlimit=N` there: HTTP 400 "maximum context length is N tokens" (vLLM's
+  wording) when prompt_tokens > N
+- forced `tool_choice` with `done` offered: `done` once the last tool result contains DONE-NOW
 - last user text contains `503!`    -> HTTP 503 every time
 - last user text contains `429!`    -> HTTP 429 (Retry-After: 0) the first time a request with
                                        these exact messages is seen, then the normal reply
@@ -28,6 +32,7 @@ Every request is appended to the log as {"auth": <Authorization header>, "body":
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -56,6 +61,9 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
         cmd = user.split("bash: ", 1)[1].splitlines()[0].strip() if "bash: " in user else "echo forced"
         n = sum(1 for m in msgs if m.get("role") == "assistant")
         offered = {t.get("function", {}).get("name") for t in body.get("tools") or []}
+        if "done" in offered and last.get("role") == "tool" and "DONE-NOW" in _text(last.get("content")):
+            return {"content": None, "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {
+                "name": "done", "arguments": json.dumps({"summary": "finished"})}}]}
         if "done" in offered and "done after " in user:
             want = int(user.split("done after ", 1)[1].split()[0])
             since = next(i for i in range(len(msgs) - 1, -1, -1) if msgs[i].get("role") == "user")
@@ -88,8 +96,20 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     return {"content": "echo: " + user.strip(), "tool_calls": None}
 
 
+def _users(body: dict[str, Any]) -> str:
+    return "\n".join(_text(m.get("content")) for m in body.get("messages") or [] if m.get("role") == "user")
+
+
+def prompt_tokens(body: dict[str, Any]) -> int:
+    """100 + one per message; with `realtok!` in a user message, a realistic count for JSON-ish
+    text: characters of the messages / 2 (pixel run 3 measured ~2 chars/token)."""
+    if "realtok!" in _users(body):
+        return len(json.dumps(body.get("messages") or [])) // 2
+    return 100 + len(body.get("messages") or [])
+
+
 def usage_for(body: dict[str, Any]) -> dict[str, Any]:
-    n = 100 + len(body.get("messages") or [])
+    n = prompt_tokens(body)
     return {"prompt_tokens": n, "completion_tokens": 7, "total_tokens": n + 7,
             "prompt_tokens_details": {"cached_tokens": 40}}
 
@@ -111,9 +131,16 @@ class Handler(BaseHTTPRequestHandler):
         if "fail!" in last_text:
             # echoes the caller's Authorization header, as a careless server might
             self._json(400, {"error": {"auth_seen": self.headers.get("authorization"),
-                                       "message": "fake failure: context too long " + "x" * 600,
+                                       "message": "fake failure: bad request " + "x" * 600,
                                        "type": "invalid_request_error"}})
             return
+        if m := re.search(r"ctxlimit=(\d+)", _users(body)):
+            limit, n = int(m.group(1)), prompt_tokens(body)
+            if n > limit:  # vLLM's wording
+                self._json(400, {"object": "error", "type": "BadRequestError", "code": 400, "message": (
+                    f"This model's maximum context length is {limit} tokens. However, your request has "
+                    f"{n} input tokens. Please reduce the length of the input messages.")})
+                return
         if "503!" in last_text:
             self._json(503, {"error": {"message": "engine overloaded"}})
             return
