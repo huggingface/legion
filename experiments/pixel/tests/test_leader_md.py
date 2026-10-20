@@ -30,11 +30,15 @@ case "$1" in
     t="$2"; n=$(cat "$S/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$S/n"
     printf '%s-%s-%04d\n' "$FLOCK_AGENT" "$t" "$n"; echo "$FLOCK_AGENT-$t-$(printf %04d $n)" >> "$S/kids" ;;
   prompt)
-    k="$2"; text="$3"; echo "$k" >> "$S/prompts"; mkdir -p "$S/wd/$k"
-    install=$(printf '%s\n' "$text" | sed -n 's/^Run this once: //p')
-    step=$(printf '%s\n' "$text" | tail -n 1)
-    ( cd "$S/wd/$k" && export FLOCK_AGENT="$k" && bash -c "$install" > /dev/null 2>&1
-      for i in $(seq 1 3); do out=$(bash -c "$step" 2>&1); echo "$out" | grep -q "You are done" && break; done ) ;;
+    # `prompt NAME TEXT` or `prompt --children [--state idle] TEXT` (all kids are idle here)
+    if [ "$2" = --children ]; then shift 2; [ "$1" = --state ] && shift 2; ks=$(cat "$S/kids")
+    else ks="$2"; shift 2; fi
+    text="$1"; cmd=$(printf '%s\n' "$text" | tail -n 1)
+    for k in $ks; do echo "$k" >> "$S/prompts"; mkdir -p "$S/wd/$k"
+      ( cd "$S/wd/$k" && export FLOCK_AGENT="$k"
+        if printf '%s' "$text" | grep -q "run it again"; then
+          for i in $(seq 1 3); do out=$(bash -c "$cmd" 2>&1); echo "$out" | grep -q "You are done" && break; done
+        else bash -c "$cmd" > /dev/null 2>&1; fi ); done ;;
   agents)
     echo "name state provider worker turns pending cost last_heartbeat"
     while read k; do echo "$k idle - w 1 0 \$0 -"; done < "$S/kids" ;;
@@ -57,7 +61,7 @@ def _serve(app):
 
 
 def test_every_command_in_leader_md_is_valid_shell(tmp_path):
-    blocks = [_cmd(p) for p in ("python3 -c", "B=", ": >", "P=", "RC=")]
+    blocks = [_cmd(p) for p in ("python3 -c", "B=", ": >", "P1=", "RC=")]
     blocks += [
         ln.strip() for ln in LEADER_MD.splitlines() if ln.strip().startswith("python3 board.py")
     ]
@@ -72,7 +76,7 @@ def _cmd(prefix: str) -> str:
     lines = LEADER_MD.splitlines()
     i = next(j for j, ln in enumerate(lines) if ln.startswith(prefix))
     out = [lines[i]]
-    if prefix.startswith("P="):
+    if prefix.startswith("P1="):
         while not out[-1].endswith("echo started"):
             i += 1
             out.append(lines[i])
@@ -162,7 +166,7 @@ def test_leader_md_commands_run_end_to_end(tmp_path, canvas):
     kids = (wd / "kids.txt").read_text().split()
     assert len(kids) == 100 and kids[0] == "leader-0003-painter-a-0001"
     assert "granted 1 agents" in out  # the team pattern leader-0003-*
-    assert re.search(r"started", run(_cmd("P=")))
+    assert re.search(r"started", run(_cmd("P1=")))
     out = run(_cmd("RC="), extra="sleep(){ :; }; ")
     assert "BAND DONE" in out
     band = [int(v) for v in (wd / "band.txt").read_text().split()]

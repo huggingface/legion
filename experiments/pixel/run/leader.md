@@ -14,13 +14,12 @@ B=$((10#${FLOCK_AGENT##*-})); for k in 0 1 2 3 4 5 6 7 8 9; do b=$(((B+k)%10)); 
 boots a worker, ~45 s, that is normal), then give your whole team your band:
 : > kids.txt; for t in a:34 b:33 c:33; do for i in $(seq 1 ${t#*:}); do flock spawn painter-${t%:*} --key ${t%:*}$i >> kids.txt; done; done; wc -l < kids.txt; python3 canvas grant-region "$FLOCK_AGENT-*"
 
-4. Start them in ONE command (bash timeout 600000 ms): your painters get the install prompt P1,
-then the paint prompt P, each as ONE bulk call to all your children (never a per-child loop; keep
-both texts as they are; P goes to prompt.txt for step 5):
+4. Start them in ONE command (bash timeout 600000 ms): ONE bulk call sends the install prompt P1; P
+(keep both texts as is) goes to prompt.txt only, and step 5 sends it to children once they are idle:
 P1='Run exactly this one command, then call done:
 python3 -c "import sys,urllib.request as u;u.urlretrieve(*sys.argv[1:])" $CANVAS_URL/cli/canvas canvas && python3 canvas status'
 P='Run exactly this command. After each result run it again, the same way, until the output says "You are done"; then call done.
-python3 canvas claim 10 --json | python3 canvas paint - --json'; echo "$P" > prompt.txt; flock prompt --children "$P1" && flock prompt --children "$P" && echo started
+python3 canvas claim 10 --json | python3 canvas paint - --json'; echo "$P" > prompt.txt; flock prompt --children "$P1" && echo started
 
 5. One round (up to ~8 min; bash timeout 600000 ms): re-prompts idle painters every 30 s with ONE
 bulk call (`flock prompt --children --state idle`), posts a

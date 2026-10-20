@@ -86,7 +86,14 @@ def http(
 ) -> dict:
     headers = {"Content-Type": "application/json"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if host.endswith(".hf.jobs") and os.environ.get("HF_TOKEN"):
+            # job-mode controller behind the jobs proxy: HF token for the proxy, flock token
+            # in X-Flock-Token (the proxy forwards it; smoke 2026-10-20)
+            headers["Authorization"] = f"Bearer {os.environ['HF_TOKEN']}"
+            headers["X-Flock-Token"] = token
+        else:
+            headers["Authorization"] = f"Bearer {token}"
     data = json.dumps(body).encode() if body is not None else None
     for attempt in range(BACKOFF.tries):
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
