@@ -3,7 +3,8 @@
 Tasks: command long-poll, heartbeat (random initial phase), events flusher, periodic sync,
 deadline watcher. Drain (`drain_window` before DEADLINE, or a drain command): stop starting
 harness processes, let in-flight turns finish (bounded by turn_timeout), final sync per
-agent, flush events, last heartbeat, exit 0. Controller errors are retried with backoff,
+agent, flush events, last heartbeat, exit 0. Controller errors are retried with backoff
+(429 and 5xx inside the client first, honouring Retry-After: a Space edge throttles a 1k swarm),
 except 404/409 on our own worker routes: the controller says this slot has no live job (we
 are a stale process and a replacement may already own our agents), so we kill the harness
 processes and exit 0 without syncing, to avoid overwriting the replacement's bucket state.
@@ -18,9 +19,11 @@ import random
 import re
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx
@@ -103,28 +106,93 @@ class WorkerConfig:
         )
 
 
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RETRY_BASE = 1.0  # s, first retry delay before jitter
+RETRY_CAP = 30.0  # s, longest single wait, Retry-After included
+MAX_CONCURRENCY = 3  # requests in flight per worker: one poll, one heartbeat, one event batch
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    """Retry-After as seconds (delta-seconds or an HTTP date), if the response has one."""
+    raw = r.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (when - utcnow()).total_seconds()) if when.tzinfo else None
+
+
+def _retry_delay(attempt: int, retry_after: float | None) -> float:
+    """Exponential backoff with full jitter, never shorter than the server's Retry-After."""
+    backoff = random.uniform(0, min(RETRY_CAP, RETRY_BASE * 2 ** attempt))
+    return min(RETRY_CAP, max(backoff, retry_after or 0.0))
+
+
 class ControllerClient:
+    """The worker's three controller routes. 429, 5xx and transport errors are retried here
+    with backoff and jitter, honouring Retry-After, waiting up to `budget` s per call; at
+    most MAX_CONCURRENCY requests are in flight (waits do not hold a slot). `stats` counts
+    requests, throttled (429) responses and retries for the worker's log."""
+
     def __init__(self, url: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None,
-                 incarnation: str | None = None) -> None:
+                 incarnation: str | None = None, max_concurrency: int = MAX_CONCURRENCY,
+                 sleep: Callable[[float], Awaitable[object]] | None = None) -> None:
         self.http = httpx.AsyncClient(base_url=url, headers={"Authorization": f"Bearer {token}"},
                                       timeout=httpx.Timeout(20, read=60), transport=transport)
         self.params = {"incarnation": incarnation} if incarnation else {}
+        self._slots = asyncio.Semaphore(max(1, max_concurrency))
+        self._sleep = sleep or asyncio.sleep
+        self.stats: Counter[str] = Counter()
 
-    async def commands(self, worker: str, wait: int) -> CommandBatch:
-        r = await self.http.get(f"/workers/{worker}/commands", params={"wait": wait, **self.params},
-                                timeout=httpx.Timeout(20, read=wait + 20))
-        r.raise_for_status()
+    async def _send(self, method: str, path: str, *, budget: float, **kw) -> httpx.Response:
+        """`budget`: seconds this call may spend waiting between attempts."""
+        waited = 0.0
+        attempt = 0
+        while True:
+            r: httpx.Response | None = None
+            err: httpx.TransportError | None = None
+            async with self._slots:
+                self.stats["requests"] += 1
+                try:
+                    r = await self.http.request(method, path, **kw)
+                except httpx.TransportError as e:
+                    err = e
+            if r is not None and r.status_code not in RETRY_STATUSES:
+                r.raise_for_status()
+                return r
+            if r is not None and r.status_code == 429:
+                self.stats["throttled"] += 1
+            delay = _retry_delay(attempt, _retry_after(r) if r is not None else None)
+            if waited + delay > budget:
+                if r is not None:
+                    r.raise_for_status()
+                raise err  # type: ignore[misc]
+            attempt += 1
+            self.stats["retries"] += 1
+            waited += delay
+            await self._sleep(delay)
+
+    async def commands(self, worker: str, wait: int, *, budget: float = 30.0) -> CommandBatch:
+        r = await self._send("GET", f"/workers/{worker}/commands", budget=budget,
+                             params={"wait": wait, **self.params},
+                             timeout=httpx.Timeout(20, read=wait + 20))
         return CommandBatch.model_validate(r.json() if r.content else {"commands": []})
 
-    async def heartbeat(self, hb: WorkerHeartbeat) -> None:
-        r = await self.http.post(f"/workers/{hb.worker}/heartbeat", content=hb.model_dump_json(),
-                                 params=self.params, headers={"content-type": "application/json"})
-        r.raise_for_status()
+    async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> None:
+        await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
+                         content=hb.model_dump_json(), params=self.params,
+                         headers={"content-type": "application/json"})
 
-    async def events(self, batch: EventBatch) -> None:
-        r = await self.http.post(f"/workers/{batch.worker}/events", content=batch.model_dump_json(),
-                                 headers={"content-type": "application/json"})
-        r.raise_for_status()
+    async def events(self, batch: EventBatch, *, budget: float = 30.0) -> None:
+        await self._send("POST", f"/workers/{batch.worker}/events", budget=budget,
+                         content=batch.model_dump_json(), params=self.params,
+                         headers={"content-type": "application/json"})
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -143,6 +211,11 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
 
             return PiAdapter(workdir, agent=name, model_config=pi_model_config(spec),
                              prices=type_price_table(spec))
+        if spec.harness.value == "llm":
+            from flock.controller.prices import type_price_table
+            from flock.worker.adapters.llm import LLMAdapter
+
+            return LLMAdapter(workdir, agent=name, prices=type_price_table(spec))
         from flock.worker.adapters.codex import CodexAdapter
 
         return CodexAdapter(workdir)
@@ -187,6 +260,7 @@ class Worker:
         self.stale = False
         self._restoring = 0  # setups (restores) in flight; a "wave" ends when it drops to 0
         self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
+        self._throttled_logged = 0
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -297,8 +371,9 @@ class Worker:
                     await self.dispatch(cmd)
                 except Exception:
                     log.exception("command %s failed", cmd.kind)
-            if not batch.commands:
-                await asyncio.sleep(max(0.0, self.cfg.poll_min_interval - (loop.time() - t0)))
+            # at most one poll per poll_min_interval, also when commands keep coming: prompts
+            # that arrive meanwhile ride in the next batch (fewer requests through the edge)
+            await asyncio.sleep(max(0.0, self.cfg.poll_min_interval - (loop.time() - t0)))
 
     def heartbeat_payload(self) -> WorkerHeartbeat:
         return WorkerHeartbeat(worker=self.cfg.worker_id, deadline=self.cfg.deadline,
@@ -306,8 +381,10 @@ class Worker:
                                agents=[a.heartbeat() for a in self.agents.values()])
 
     async def send_heartbeat(self) -> bool:
-        try:
-            await self.client.heartbeat(self.heartbeat_payload())
+        try:  # retried inside the client for most of an interval: the controller declares a
+            # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
+            await self.client.heartbeat(self.heartbeat_payload(),
+                                        budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)
@@ -320,10 +397,16 @@ class Worker:
         while True:
             await self.send_heartbeat()
             self._wake_heartbeat.clear()
-            try:
-                await asyncio.wait_for(self._wake_heartbeat.wait(), self.cfg.heartbeat_interval)
+            try:  # +-10% jitter keeps 40+ workers from lining up on the edge
+                await asyncio.wait_for(self._wake_heartbeat.wait(),
+                                       self.cfg.heartbeat_interval * random.uniform(0.9, 1.1))
             except TimeoutError:
                 pass
+            stats = getattr(self.client, "stats", None) or {}
+            if (n := stats.get("throttled", 0)) > self._throttled_logged:
+                log.warning("controller throttled %d requests so far (429); %d retries",
+                            n, stats.get("retries", 0))
+                self._throttled_logged = n
 
     async def flush_events(self) -> bool:
         while len(self.outbox):
