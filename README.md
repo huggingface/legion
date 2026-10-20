@@ -78,6 +78,16 @@ W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for
 uv run scripts/deploy-space.sh "$W" <you>/flock
 ```
 
+As an HF Job in the workers' network group (job mode, for swarms past a few dozen workers:
+no Spaces edge between workers and the controller; see [docs/deploy-job.md](docs/deploy-job.md)):
+
+```sh
+uv run scripts/deploy-job.sh "$W" --group <name>     # prints the job's two URLs
+export FLOCK_URL=https://<job id>--7860.hf.jobs       # API through the jobs proxy
+# the CLI sends HF_TOKEN to the proxy and FLOCK_TOKEN as X-Flock-Token;
+# https://<job id>--7861.hf.jobs is the public, read-only status page
+```
+
 Or locally:
 
 ```sh
