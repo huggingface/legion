@@ -34,8 +34,8 @@ with front matter.
   - One scrubber drives both panels. Alignment is either wall time since each run's first paint
     (the default; the slider spans the longer run, and the shorter one stays on its final frame),
     or % done.
-  - Play at 1x, 10x or 60x, an agent-map toggle for both panels, and "show target instead" on
-    the right (`target.png`, shipped with the page).
+  - Play at 1x, 10x or 60x and an agent-map toggle for both panels. The tab shows only the two
+    replays; the single-run Replay keeps the target.
   - A readout under each panel: time since first paint, done %, px/s over the last 10 s of log
     time, and agents with a paint in the last 10 s.
   - Both logs are decoded in the browser (`DecompressionStream`) and reduced to typed arrays.

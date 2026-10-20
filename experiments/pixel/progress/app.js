@@ -474,7 +474,6 @@ if (typeof document !== 'undefined') (() => {
     for (const i of [0, 1]) {
       const log = SBS.logs[i], rep = SBS.reps[i], side = i ? 'R' : 'L';
       if (!log || !rep) continue;
-      if (i === 1 && $('sbsTarget').checked) continue;
       const k = pct ? PX.indexAtDone(log, v / 1000) : PX.indexAtTime(log, v);
       const buf = $('sbsAgents').checked ? rep.agentFrame(k) : rep.frame(k);
       $(`sbs${side}`).getContext('2d').putImageData(new ImageData(buf, rep.w, rep.h), 0, 0);
@@ -521,11 +520,6 @@ if (typeof document !== 'undefined') (() => {
   $('sbsB').addEventListener('change', (e) => sbsLoad(1, e.target.value));
   $('sbsSlider').addEventListener('input', sbsDraw);
   $('sbsAgents').addEventListener('change', sbsDraw);
-  $('sbsTarget').addEventListener('change', (e) => {
-    $('sbsR').hidden = e.target.checked; $('sbsTimg').hidden = !e.target.checked;
-    $('sbsRc').textContent = e.target.checked ? 'target' : (runs.find((r) => r.id === SBS.ids[1])?.name || SBS.ids[1]);
-    sbsDraw();
-  });
   $('sbsAlign').addEventListener('change', () => {
     const was = +$('sbsSlider').value / Math.max(1, +$('sbsSlider').max);
     $('sbsSlider').max = sbsMax(); $('sbsSlider').value = Math.round(was * sbsMax()); sbsDraw();
