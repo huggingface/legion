@@ -60,6 +60,7 @@ from flock.models import (
 )
 
 MAX_WAIT = 30.0
+ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
 _COMMAND = TypeAdapter(Annotated[Command, Field(discriminator="kind")])
 
 
@@ -497,7 +498,11 @@ def create_app(
     secret_source = os.environ if secret_source is None else secret_source
     if enforce_max_working is None:
         enforce_max_working = os.environ.get("FLOCK_MAX_WORKING_ENFORCE", "1") != "0"
-    admitted: dict[str, float] = {}  # agent -> when a prompt was handed out to start a turn
+    # Admission overlay (max_working): what the controller learned about an agent's turn since
+    # its last heartbeat. agent -> (state, when): "admitted" (handed a prompt to start a turn),
+    # "working" (turn_started seen) or "idle" (turn_ended / turn_interrupted / prompt_deferred
+    # seen). A heartbeat that reports the agent replaces it (see `heartbeat_seen`).
+    live: dict[str, tuple[str, float]] = {}
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
     set_token_key(store, token)
@@ -749,42 +754,129 @@ def create_app(
         versions) are trusted, as before."""
         return incarnation is not None and w["incarnation"] != incarnation
 
+    def provider_cap(spec: SwarmSpec, type_name: str) -> tuple[str, int] | None:
+        """(provider name, max_working) when admission is enforced for this type's provider."""
+        ts = spec.types.get(type_name)
+        r = ts.resolved_model if ts else None
+        if not enforce_max_working or r is None or r.provider.max_working is None:
+            return None
+        return r.provider_name, r.provider.max_working
+
+    def busy(a: Row, w: Row | None, now: float) -> bool:
+        """In a turn, or handed a prompt to start one, as far as the controller knows."""
+        if w is None or worker_state(w, now) == WorkerState.dead:
+            live.pop(a["name"], None)
+            return False
+        seen = live.get(a["name"])
+        if seen is not None:
+            return seen[0] != "idle"
+        return agent_state(a, w, now) == AgentState.working
+
+    def admission_view(spec: SwarmSpec, provider: str, cap: int, now: float
+                       ) -> tuple[set[str], list[str], dict[str, str | None]]:
+        """(busy agents, admission window, agent -> worker) for one provider. The window is
+        the agents that get the provider's free slots: not busy, on a running worker, ordered
+        by their oldest pending prompt across all workers (FIFO), at most `cap - busy` long."""
+        users = {t for t, x in spec.types.items() if x.provider_name == provider}
+        workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
+        taken: set[str] = set()
+        owner: dict[str, str | None] = {}
+        for a in store.agent_states(spec.swarm, users):
+            owner[a["name"]] = a["worker"]
+            if busy(a, workers.get(a["worker"]), now):
+                taken.add(a["name"])
+        free = cap - len(taken)
+        window: list[str] = []
+        if free > 0:
+            for name in store.oldest_pending(spec.swarm, users):
+                w = workers.get(owner.get(name))
+                if name in taken or w is None or w["job_id"] is None or w["draining"] \
+                        or w["retire_at"] or worker_state(w, now) != WorkerState.running:
+                    continue  # a worker that cannot start the turn must not hold a slot
+                window.append(name)
+                if len(window) >= free:
+                    break
+        return taken, window, owner
+
     def admit(w: Row, prompts: list[Row]) -> list[Row]:
         """Provider `max_working` at prompt admission (design.md section 5). A prompt for an
-        agent that is not in a turn needs a free slot on its provider; without one it stays
-        queued here and goes out on a later poll. Slots: agents whose fresh heartbeat says
-        working, plus agents handed a prompt that no heartbeat has reported on since (so two
-        polls between heartbeats cannot both take the last slot). Soft by one heartbeat."""
-        if not enforce_max_working or not prompts:
+        agent in a turn always goes out (it joins that turn). A prompt that would start a turn
+        needs a free slot, and free slots go to pending prompts in FIFO order of creation
+        across all workers of the provider (`admission_view`), not to whichever worker polls
+        first: others stay queued here and go out on a later poll.
+
+        Slots: agents whose fresh heartbeat says working, overridden by what the controller
+        learned since that heartbeat (`live`): a prompt handed out takes the slot at once (so
+        two polls between heartbeats cannot both take the last slot), and a turn_ended /
+        turn_interrupted event releases it at once, without waiting for the next heartbeat.
+        Still soft by about one heartbeat: a heartbeat built before the worker saw an event
+        can briefly overrule it (see `heartbeat_seen`)."""
+        if not prompts:
             return prompts
         sw = store.get_swarm(w["swarm"])
-        ts = sw["spec"].types.get(w["type"]) if sw else None
-        r = ts.resolved_model if ts else None
-        if r is None or r.provider.max_working is None:
+        cap = provider_cap(sw["spec"], w["type"]) if sw else None
+        if cap is None:
             return prompts
-        spec, now = sw["spec"], clock().timestamp()
-        users = {t for t, x in spec.types.items() if x.provider_name == r.provider_name}
-        workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
-        busy: set[str] = set()
-        for a in store.list_agents(spec.swarm):
-            if a["type"] not in users:
-                continue
-            given = admitted.get(a["name"])
-            if agent_state(a, workers.get(a["worker"]), now) == AgentState.working:
-                busy.add(a["name"])
-            elif given is not None and (a["last_heartbeat"] or 0) < given:
-                busy.add(a["name"])  # handed a prompt; not reported since
-            elif given is not None:
-                del admitted[a["name"]]  # a later heartbeat is the source of truth now
+        now = clock().timestamp()
+        taken, window, _ = admission_view(sw["spec"], cap[0], cap[1], now)
+        allowed = set(window)
         out = []
         for p in prompts:
-            if p["agent"] not in busy:
-                if len(busy) >= r.provider.max_working:
-                    continue  # provider full: stays queued
-                busy.add(p["agent"])
-                admitted[p["agent"]] = now
+            name = p["agent"]
+            if name not in taken:
+                if name not in allowed:
+                    continue  # no slot for it yet: stays queued
+                taken.add(name)
+                live[name] = ("admitted", now)
             out.append(p)
         return out
+
+    def wake_window(swarm: str, providers: set[str]) -> None:
+        """A slot was released: wake the polls of the workers whose agents now get it."""
+        sw = store.get_swarm(swarm)
+        if sw is None:
+            return
+        spec, now = sw["spec"], clock().timestamp()
+        for prov in providers:
+            cap = spec.providers.get(prov)
+            if cap is None or cap.max_working is None:
+                continue
+            _, window, owner = admission_view(spec, prov, cap.max_working, now)
+            for wid in {owner[n] for n in window if owner.get(n)}:
+                notifier.notify(f"commands:{wid}")
+
+    def turn_seen(a: Row, evs: list, now: float) -> bool:
+        """Apply an agent's turn events to `live`; True if that released its slot. Events
+        are in the worker's order, and the batch is newer than any of them. A turn_ended with
+        no turn_started after a fresh admission belongs to an earlier turn: ignored."""
+        was = live.get(a["name"])
+        state = was[0] if was else None
+        for ev in evs:
+            if ev.type == "turn_started":
+                state = "working"
+            elif ev.type == "prompt_deferred" or (
+                ev.type in ("turn_ended", "turn_interrupted") and state != "admitted"
+            ):
+                state = "idle"
+        if state is None or (was and state == was[0]):
+            return False
+        live[a["name"]] = (state, now)
+        return state == "idle"
+
+    def heartbeat_seen(hb: WorkerHeartbeat, now: float) -> bool:
+        """A heartbeat is the source of truth again for the agents it reports, except a
+        fresh admission (< ADMIT_GRACE) it reports idle: that heartbeat was most likely
+        built before the worker received the prompt. True if it released a slot."""
+        released = False
+        for ah in hb.agents:
+            seen = live.get(ah.name)
+            if seen is None:
+                continue
+            if seen[0] == "admitted" and ah.state != "working" and now - seen[1] < ADMIT_GRACE:
+                continue
+            del live[ah.name]
+            released |= seen[0] != "idle" and ah.state != "working"
+        return released
 
     @api.get("/workers/{worker_id}/commands")
     async def commands(worker_id: str, wait: float = 25, incarnation: str | None = None):
@@ -828,6 +920,11 @@ def create_app(
             raise HTTPException(400, "heartbeat worker does not match the path")
         if not record_heartbeat(store, worker_id, hb, clock()):
             raise HTTPException(409, "worker slot has no live job")
+        w = store.get_worker(worker_id)
+        sw = store.get_swarm(w["swarm"]) if w else None
+        cap = provider_cap(sw["spec"], w["type"]) if sw else None
+        if cap is not None and heartbeat_seen(hb, clock().timestamp()):
+            wake_window(w["swarm"], {cap[0]})
         return {"ok": True}
 
     @api.post("/workers/{worker_id}/events")
@@ -836,9 +933,17 @@ def create_app(
         grouped: dict[str, list] = {}
         for ev in batch.events:
             grouped.setdefault(ev.agent, []).append(ev)
+        now = clock().timestamp()
+        sw = store.get_swarm(w["swarm"])
+        cap = provider_cap(sw["spec"], w["type"]) if sw else None
+        released = False
         for agent, evs in grouped.items():
             a = store.get_agent(agent)
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
+            if cap is not None and a is not None and a["worker"] == worker_id:
+                released |= turn_seen(a, evs, now)
+        if released:  # slots freed now, not at the next heartbeat (run-1k finding 1)
+            wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
 
     app.include_router(api)

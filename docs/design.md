@@ -365,8 +365,16 @@ low/medium/high and `thinking: disabled` for off.
 `GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. The controller
 enforces it at prompt admission: on a command poll, a prompt for an agent that is not in a turn
 goes out only while the provider has a free slot; otherwise it stays in `pending_prompts` and
-goes out on a later poll (never rejected). Slots are fresh heartbeat `working` agents plus
-agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s). A capped
+goes out on a later poll (never rejected). Free slots go to pending prompts in FIFO order of
+creation across all of the provider's workers (oldest pending prompt first), not to whichever
+worker polls first; a worker that is not running (dead, draining, launching) holds no place.
+Slots are fresh heartbeat `working` agents, overridden by what the controller learned since:
+a prompt handed out takes the slot at once, and a `turn_ended` / `turn_interrupted` /
+`prompt_deferred` event releases it at once and wakes the polls of the workers next in line
+(pixel run 1k: holding slots until the next heartbeat and first-poller-wins let 384 of 1,000
+agents run at `max_working: 128`). Still soft by about one heartbeat: an event batch arrives
+up to `flush_interval` (3 s) after the turn ends, and a heartbeat built before the worker
+saw a turn change can briefly overrule an event. A capped
 provider's `resume_prompt` is queued behind the assign so it is admitted the same way.
 `FLOCK_MAX_WORKING_ENFORCE=0` is an escape hatch (report only). Hard limits belong at the endpoint.
 

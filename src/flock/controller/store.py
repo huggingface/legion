@@ -341,6 +341,19 @@ class Store:
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         return self._q(f"SELECT * FROM agents {clause} ORDER BY swarm, type, slot", args)
 
+    def agent_states(self, swarm: str, types: Iterable[str]) -> list[Row]:
+        """Just the columns `agent_state` reads, for the agents of `types` (admission runs this
+        on every poll that carries prompts, so it skips the token columns)."""
+        types = sorted(types)
+        if not types:
+            return []
+        marks = ",".join("?" * len(types))
+        return self._q(
+            "SELECT name, type, worker, hb_state, last_heartbeat FROM agents "
+            f"WHERE swarm = ? AND type IN ({marks})",
+            [swarm, *types],
+        )
+
     def insert_agent(self, name: str, swarm: str, type_name: str, slot: int, now: float) -> None:
         self._x(
             "INSERT OR IGNORE INTO agents (name, swarm, type, slot, created_at) "
@@ -545,6 +558,21 @@ class Store:
             "WHERE a.worker = ? ORDER BY p.id",
             [worker_id],
         )
+
+    def oldest_pending(self, swarm: str, types: Iterable[str]) -> list[str]:
+        """Agents of `types` with pending prompts, oldest first prompt first (prompt ids grow
+        with creation): the FIFO order `max_working` admission hands out free slots in."""
+        types = sorted(types)
+        if not types:
+            return []
+        marks = ",".join("?" * len(types))
+        rows = self._q(
+            "SELECT p.agent, MIN(p.id) AS first FROM pending_prompts p "
+            "JOIN agents a ON a.name = p.agent "
+            f"WHERE a.swarm = ? AND a.type IN ({marks}) GROUP BY p.agent ORDER BY first",
+            [swarm, *types],
+        )
+        return [r["agent"] for r in rows]
 
     def delete_prompts(self, ids: list[int]) -> None:
         if ids:
