@@ -32,6 +32,8 @@ STATS_LOG_INTERVAL = 60.0
 DEFAULT_ALIAS = "controller"
 DEFAULT_STATUS_PORT = 7861
 STATUS_ROUTES = frozenset({"/", "/healthz"})
+GRACEFUL_SHUTDOWN = 5.0  # s for open requests (parked long-polls) once listeners are closed
+FINAL_PUSH_TIMEOUT = 30.0  # s; FLOCK_FINAL_PUSH_TIMEOUT overrides
 
 
 @dataclass
@@ -131,6 +133,8 @@ class Built:
     jobs: JobsClient
     state: StateSync | None
     settings: Settings
+    halt: object = None  # () -> None: cancel the reconcile and sync loops (shutdown)
+    final_push_timeout: float = FINAL_PUSH_TIMEOUT
 
 
 def build(env: Mapping[str, str] = os.environ) -> Built:
@@ -184,10 +188,14 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             except Exception:
                 log.exception("state push failed")
 
+    loops: list[asyncio.Task] = []  # cancelled by `halt` on shutdown, before the final push
+
     async def background(notifier: Notifier) -> None:
+        loops.append(asyncio.current_task())
         tasks = [asyncio.create_task(log_stats())]
         if state is not None:
             tasks.append(asyncio.create_task(sync_state()))
+        loops.extend(tasks)
         try:
             await run_reconciler(
                 store, jobs, settings, interval, wake=lambda t: notifier.wait("reconcile:", t)
@@ -196,8 +204,13 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             for t in tasks:
                 t.cancel()
 
+    def halt() -> None:
+        for t in loops:
+            t.cancel()
+
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace)
-    return Built(app, store, dep, jobs, state, settings)
+    timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
+    return Built(app, store, dep, jobs, state, settings, halt, timeout)
 
 
 def build_app():
@@ -205,8 +218,31 @@ def build_app():
     return b.app, b.deployment.port
 
 
+async def final_push(b: Built) -> bool:
+    """Last state push before exit, bounded by `b.final_push_timeout`. Always logs one line:
+    `final push: ok (N files)`, `final push: failed (...)` or `final push: off`."""
+    if b.state is None:
+        log.info("final push: off (no FLOCK_STATE_URL)")
+        return True
+    try:
+        n = await asyncio.wait_for(
+            asyncio.to_thread(b.state.push, b.store, force=True), b.final_push_timeout
+        )
+    except TimeoutError:
+        log.error("final push: failed (timeout after %g s)", b.final_push_timeout)
+        return False
+    except Exception as exc:  # noqa: BLE001 - any failure is logged, the exit goes on
+        log.error("final push: failed (%s: %s)", type(exc).__name__, str(exc)[:200])
+        return False
+    log.info("final push: ok (%d files)", n)
+    return True
+
+
 async def serve(b: Built, host: str = "0.0.0.0") -> None:
-    """Run the API (and the status port, if any) until SIGTERM/SIGINT, then push state."""
+    """Run the API (and the status port, if any) until SIGTERM/SIGINT. Shutdown, in order:
+    close the listeners and stop the reconcile and sync loops; push the state (bounded by
+    FLOCK_FINAL_PUSH_TIMEOUT) and log the result; give open requests GRACEFUL_SHUTDOWN s; exit.
+    The push runs before the drain, so a short platform grace period still gets it."""
     import uvicorn
 
     class Server(uvicorn.Server):
@@ -215,19 +251,24 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
             yield
 
     dep = b.deployment
-    servers = [Server(uvicorn.Config(b.app, host=host, port=dep.port, log_level="info"))]
+    graceful = {"timeout_graceful_shutdown": GRACEFUL_SHUTDOWN}
+    servers = [Server(uvicorn.Config(b.app, host=host, port=dep.port, log_level="info",
+                                     **graceful))]
     if dep.status_port:
         cfg = uvicorn.Config(status_only(b.app), host=host, port=dep.status_port,
-                             lifespan="off", log_level="warning")
+                             lifespan="off", log_level="warning", **graceful)
         servers.append(Server(cfg))
 
-    def stop() -> None:
-        for s in servers:
-            s.should_exit = True
-
+    stopping = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    def on_signal(sig: signal.Signals) -> None:
+        if not stopping.is_set():
+            log.info("%s: shutting down", sig.name)
+        stopping.set()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop)
+        loop.add_signal_handler(sig, on_signal, sig)
     log.info("flock controller (%s mode): API %s, workers use %s%s", dep.mode, dep.public_url,
              dep.worker_url, f", status {dep.status_url}" if dep.status_url else "")
 
@@ -235,15 +276,23 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
         try:
             await s.serve()
         finally:
-            stop()  # one server ending (a bind error, a signal) ends both
+            stopping.set()  # one server ending (a bind error) ends both
 
-    await asyncio.gather(*(run(s) for s in servers))
-    if b.state is not None:
-        log.info("state: final push before exit")
-        try:
-            await asyncio.to_thread(b.state.push, b.store, force=True)
-        except Exception:
-            log.exception("final state push failed")
+    tasks = [asyncio.create_task(run(s)) for s in servers]
+    try:
+        await stopping.wait()
+        for s in servers:
+            s.should_exit = True
+        if b.halt is not None:
+            b.halt()
+        await final_push(b)
+        _, pending = await asyncio.wait(tasks, timeout=GRACEFUL_SHUTDOWN + 5)
+        for t in pending:
+            t.cancel()
+    finally:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+    log.info("flock controller: exit")
 
 
 def main() -> None:

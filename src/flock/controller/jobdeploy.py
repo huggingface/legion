@@ -4,6 +4,9 @@ scripts/deploy-job.sh; stdlib plus huggingface_hub only, so it runs from a bare 
     python -m flock.controller.jobdeploy <wheel-url> [--flavor cpu-upgrade] [--group flock]
         [--timeout 48h] [--namespace NS] [--state-url hf://buckets/...] [--secret NAME ...]
         [--replace] [--dry-run]
+    python -m flock.controller.jobdeploy --down --group G [<wheel-url> | --state-url URL]
+        cancel the group's controller (final state push), then delete its state prefix, so the
+        next controller in the group starts empty
 """
 
 from __future__ import annotations
@@ -120,9 +123,46 @@ def _running_controllers(api, namespace: str, group: str) -> list:
             in ("SCHEDULING", "RUNNING")]
 
 
+def _cancel_and_wait(api, namespace: str, group: str, wait: float = 180) -> bool:
+    """Cancel the group's running controllers (SIGTERM: final state push); True once none run."""
+    old = _running_controllers(api, namespace, group)
+    for j in old:
+        print(f"cancelling controller {j.id} (final state push on SIGTERM)")
+        api.cancel_job(job_id=j.id, namespace=namespace)
+    deadline = time.monotonic() + wait
+    while old and time.monotonic() < deadline:
+        time.sleep(5)
+        old = _running_controllers(api, namespace, group)
+    return not old
+
+
+def down(api, namespace: str, group: str, state_url: str, *, dry_run: bool, env) -> int:
+    """Stop the group's controller, then delete `controller/<group>/` from the bucket, so the
+    next controller deployed in the group cannot restore a removed swarm."""
+    from flock.worker.sync import HubBucketStore
+
+    bucket = HubBucketStore(state_url, token=env.get("HF_TOKEN") or None)
+    if dry_run:
+        running = [j.id for j in _running_controllers(api, namespace, group)] or "none"
+        print(f"would cancel: {running}; would delete {len(bucket.list(''))} files "
+              f"under {state_url}")
+        return 0
+    if not _cancel_and_wait(api, namespace, group):
+        print("controller still running after 180 s; state left in place", file=sys.stderr)
+        return 1
+    files = bucket.list("")  # after the final push
+    if files:
+        bucket.delete(files)
+    print(f"deleted {len(files)} state files under {state_url}")
+    return 0
+
+
 def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> int:
     p = argparse.ArgumentParser(prog="deploy-job.sh", description=__doc__.split("\n\n")[0])
-    p.add_argument("wheel_url", help="hf://buckets/... wheel from scripts/publish-wheel.sh")
+    p.add_argument("wheel_url", nargs="?",
+                   help="hf://buckets/... wheel from scripts/publish-wheel.sh (launch)")
+    p.add_argument("--down", action="store_true",
+                   help="cancel the group's controller and delete its bucket state")
     p.add_argument("--flavor", default="cpu-upgrade")
     p.add_argument("--group", default="flock", help="network group (workers join it)")
     p.add_argument("--timeout", default="48h", help="job timeout, e.g. 48h or 7d")
@@ -133,15 +173,20 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
                    help="cancel the group's running controller first (SIGTERM: final state push)")
     p.add_argument("--dry-run", action="store_true", help="print the launch, secret names only")
     a = p.parse_args(argv)
+    if not a.wheel_url and not (a.down and a.state_url):
+        p.error("a wheel url is required (or --down with --state-url)")
+    state_url = a.state_url or default_state_url(a.wheel_url, a.group)
 
     from huggingface_hub import HfApi
 
     api = HfApi(token=env.get("HF_TOKEN") or None)
     namespace = a.namespace or api.whoami()["name"]
+    if a.down:
+        return down(api, namespace, a.group, state_url, dry_run=a.dry_run, env=env)
     secrets = collect_secrets(env, a.secret)
     kwargs = run_job_args(
         wheel_url=a.wheel_url, group=a.group, namespace=namespace, flavor=a.flavor,
-        timeout=a.timeout, state_url=a.state_url or default_state_url(a.wheel_url, a.group),
+        timeout=a.timeout, state_url=state_url,
         job_labels=env.get("JOB_LABELS", "experiment=flock-m1"), secrets=secrets,
     )
     if a.dry_run:
@@ -155,14 +200,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
         print(f"group {a.group!r} already has a running controller ({ids}). Two jobs claiming "
               "the alias would both receive worker traffic; pass --replace.", file=sys.stderr)
         return 1
-    for j in old:
-        print(f"cancelling controller {j.id} (final state push on SIGTERM)")
-        api.cancel_job(job_id=j.id, namespace=namespace)
-    deadline = time.monotonic() + 180
-    while old and time.monotonic() < deadline:
-        time.sleep(5)
-        old = _running_controllers(api, namespace, a.group)
-    if old:
+    if old and not _cancel_and_wait(api, namespace, a.group):
         print("old controller still running after 180 s; not launching", file=sys.stderr)
         return 1
     job = api.run_job(**kwargs)

@@ -104,6 +104,9 @@ class BucketStore(Protocol):
         ...
 
     def sync_down(self, prefix: str, local: Path) -> None: ...
+    def delete(self, paths: list[str]) -> None:
+        """Delete files (paths relative to the flock root). Used by the controller's state."""
+        ...
 
 
 def parse_bucket(url: str) -> tuple[str, str]:
@@ -148,6 +151,12 @@ class HubBucketStore:
         for _, local in files:
             local.parent.mkdir(parents=True, exist_ok=True)
         self.api.download_bucket_files(self.bucket_id, [(self.base + r, str(p)) for r, p in files])
+
+    def delete(self, paths: list[str]) -> None:
+        for i in range(0, len(paths), UPLOAD_CHUNK):
+            self.stats.add("ops", "batch_bucket_files")
+            chunk = paths[i : i + UPLOAD_CHUNK]
+            self.api.batch_bucket_files(self.bucket_id, delete=[self.base + r for r in chunk])
 
     def _url(self, prefix: str) -> str:
         return f"hf://buckets/{self.bucket_id}/{self.base}{prefix}".rstrip("/")

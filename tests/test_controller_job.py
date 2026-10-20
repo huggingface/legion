@@ -5,10 +5,12 @@ the public status port, and the launch arguments of scripts/deploy-job.sh."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -247,12 +249,18 @@ class FakeBucket:
         if (self.root / prefix).is_dir():
             shutil.copytree(self.root / prefix, local, dirs_exist_ok=True)
 
+    def delete(self, paths):
+        self.ops.append("delete")
+        for rel in paths:
+            (self.root / rel).unlink()
+
 
 def _event(agent: str, n: int) -> Event:
     return Event(type="note", ts=datetime(2026, 10, 20, tzinfo=UTC), agent=agent, data={"n": n})
 
 
-def test_state_round_trip_through_the_bucket(tmp_path):
+def test_state_round_trip_through_the_bucket(tmp_path, caplog):
+    caplog.set_level(logging.INFO, "flock.state")
     bucket = FakeBucket(tmp_path / "bucket")
     a = tmp_path / "a"
     store = Store(a)
@@ -260,13 +268,14 @@ def test_state_round_trip_through_the_bucket(tmp_path):
     store.put_swarm(make_spec(), 1.0)
     store.insert_agent("researcher-0000", "demo", "researcher", 0, 1.0)
     store.append_events("demo", "researcher-0000", [_event("researcher-0000", i) for i in range(3)])
-    assert sync.push(store) is True
-    assert sync.push(store) is False  # nothing changed: no upload
+    assert sync.push(store) == 2  # state.db + one event file
+    assert sync.push(store) == 0  # nothing changed: no upload
     assert bucket.ops == ["upload", "sync_up"]
     store.close()
 
     b = tmp_path / "b"
     assert StateSync(bucket, b).restore() is True
+    assert "restored 1 swarms (demo), 1 agents, 0 workers" in caplog.text
     restored = Store(b)
     assert restored.get_swarm("demo")["spec"] == make_spec()
     assert restored.get_agent("researcher-0000")["type"] == "researcher"
@@ -330,19 +339,130 @@ def test_build_restores_state_before_opening_the_store(tmp_path, monkeypatch):
     b.store.close()
 
 
-async def test_sigterm_stops_the_server_and_pushes_state(tmp_path, monkeypatch):
+def test_a_snapshot_without_swarms_is_not_restored(tmp_path, caplog):
+    """After `flock remove` of the last swarm, the next push writes an empty snapshot: a new
+    controller in the same group must start empty, not resurrect the removed swarm."""
+    caplog.set_level(logging.INFO, "flock.state")
+    bucket = FakeBucket(tmp_path / "bucket")
+    s = Store(tmp_path / "a")
+    sync = StateSync(bucket, tmp_path / "a")
+    s.put_swarm(make_spec(), 1.0)
+    sync.push(s)
+    s.delete_swarm("demo")
+    assert sync.push(s) >= 1
+    s.close()
+    assert StateSync(bucket, tmp_path / "b").restore() is False
+    assert "no swarms" in caplog.text
+    fresh = Store(tmp_path / "b")
+    assert fresh.list_swarms() == []
+    fresh.close()
+
+
+def test_clear_deletes_the_whole_state_prefix(tmp_path):
+    bucket = FakeBucket(tmp_path / "bucket")
+    s = Store(tmp_path / "a")
+    s.put_swarm(make_spec(), 1.0)
+    s.append_events("demo", "x-0000", [_event("x-0000", 0)])
+    sync = StateSync(bucket, tmp_path / "a")
+    sync.push(s)
+    s.close()
+    assert sync.clear() == 2 and bucket.list("") == []
+    assert StateSync(bucket, tmp_path / "b").restore() is False
+
+
+class SlowOrBrokenBucket(FakeBucket):
+    def __init__(self, root, *, fail=False, block: threading.Event | None = None):
+        super().__init__(root)
+        self.fail, self.block = fail, block
+
+    def upload(self, files):
+        if self.block is not None:
+            self.block.wait(10)
+        if self.fail:
+            raise RuntimeError("bucket down")
+        super().upload(files)
+
+
+async def _serve_then_sigterm(b, *, long_poll: bool = False) -> float:
+    """Start serve(), optionally park a 30 s long-poll, SIGTERM ourselves; seconds to exit."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(serve(b, host="127.0.0.1"))
+    client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{b.deployment.port}",
+                               headers={"X-Flock-Token": TOKEN}, timeout=60)
+    for _ in range(100):  # until the server answers
+        try:
+            if (await client.get("/healthz")).status_code == 200:
+                break
+        except httpx.TransportError:
+            await asyncio.sleep(0.05)
+    poll = None
+    if long_poll:
+        b.store.insert_agent("researcher-0000", "demo", "researcher", 0, 1.0)
+        poll = asyncio.create_task(client.get("/agents/researcher-0000/events?wait=30"))
+        await asyncio.sleep(0.3)
+    t0 = loop.time()
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(task, 20)
+    took = loop.time() - t0
+    if poll is not None:
+        poll.cancel()
+    await client.aclose()
+    return took
+
+
+async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
     bucket = FakeBucket(tmp_path / "bucket")
     import flock.controller.main as main_mod
 
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
-    b = _built(tmp_path, PORT="0", FLOCK_STATUS_PORT="0", FLOCK_STATE_URL="hf://x/y/z")
-    task = asyncio.create_task(serve(b, host="127.0.0.1"))
-    await asyncio.sleep(0.5)
-    os.kill(os.getpid(), signal.SIGTERM)
-    await asyncio.wait_for(task, 10)
-    assert b.state.pushes == 1 and "state.db" in bucket.list("state.db")
-    asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
-    asyncio.get_running_loop().remove_signal_handler(signal.SIGINT)
+    port = _free_port()
+    b = _built(tmp_path, PORT=str(port), FLOCK_STATUS_PORT="0",
+               FLOCK_STATE_URL="hf://x/y/z", FLOCK_STATE_SYNC_INTERVAL="0.1")
+    took = await _serve_then_sigterm(b, long_poll=True)
+    # the parked 30 s long-poll does not hold the exit past the graceful window
+    assert took < main_mod.GRACEFUL_SHUTDOWN + 3
+    lines = [r.getMessage() for r in caplog.records]
+    order = [next(i for i, m in enumerate(lines) if m.startswith(p))
+             for p in ("SIGTERM: shutting down", "final push: ok (", "flock controller: exit")]
+    assert order == sorted(order)
+    assert "final push: ok (1 files)" in lines  # state.db; no event files yet
+    pushes = b.state.pushes
+    await asyncio.sleep(0.3)  # the periodic sync loop was cancelled: no push after exit
+    assert b.state.pushes == pushes and "state.db" in bucket.list("state.db")
+    b.store.close()
+
+
+async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_path, monkeypatch,
+                                                                         caplog):
+    caplog.set_level(logging.INFO)
+    import flock.controller.main as main_mod
+
+    broken = SlowOrBrokenBucket(tmp_path / "b1", fail=True)
+    monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(broken, d))
+    b = _built(tmp_path / "one", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
+               FLOCK_STATE_URL="hf://x/y/z")
+    await _serve_then_sigterm(b)
+    assert "final push: failed (RuntimeError: bucket down)" in caplog.text
+    b.store.close()
+
+    release = threading.Event()
+    slow = SlowOrBrokenBucket(tmp_path / "b2", block=release)
+    monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(slow, d))
+    b = _built(tmp_path / "two", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
+               FLOCK_STATE_URL="hf://x/y/z", FLOCK_FINAL_PUSH_TIMEOUT="0.3")
+    took = await _serve_then_sigterm(b)
+    release.set()
+    assert "final push: failed (timeout after 0.3 s)" in caplog.text
+    assert took < main_mod.GRACEFUL_SHUTDOWN + 3
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 # --------------------------------------------------------------------------- deploy-job.sh
@@ -380,3 +500,57 @@ def test_deploy_job_dry_run_never_prints_secret_values(capsys):
     with pytest.raises(SystemExit, match="FLOCK_TOKEN"):
         jobdeploy.main(["hf://buckets/me/flock/dist/a/f.whl", "--namespace", "me", "--dry-run"],
                        {"HF_TOKEN": "h"})
+
+
+class FakeHub:
+    """list_jobs / cancel_job for --down: the controller stays RUNNING for `polls` lists."""
+
+    def __init__(self, polls: int = 1):
+        self.polls, self.cancelled = polls, []
+
+    def list_jobs(self, labels, namespace):
+        assert labels == {"flock-role": "controller", "flock-group": "g"} and namespace == "me"
+        if self.polls <= 0:
+            return []
+        self.polls -= 1
+        status = type("S", (), {"stage": "RUNNING"})()
+        return [type("J", (), {"id": "ctl-1", "status": status})()]
+
+    def cancel_job(self, job_id, namespace):
+        self.cancelled.append(job_id)
+
+
+def _down_bucket(tmp_path, monkeypatch) -> FakeBucket:
+    bucket = FakeBucket(tmp_path / "bucket")
+    (tmp_path / "bucket/events/demo").mkdir(parents=True)
+    (tmp_path / "bucket/state.db").write_text("x")
+    (tmp_path / "bucket/events/demo/a.jsonl").write_text("{}\n")
+    monkeypatch.setattr("flock.worker.sync.HubBucketStore", lambda url, token=None: bucket)
+    monkeypatch.setattr(jobdeploy.time, "sleep", lambda s: None)
+    return bucket
+
+
+def test_down_cancels_the_controller_then_deletes_its_state(tmp_path, monkeypatch, capsys):
+    bucket = _down_bucket(tmp_path, monkeypatch)
+    hub = FakeHub(polls=2)  # running at the first check, then gone after the cancel
+    rc = jobdeploy.down(hub, "me", "g", "hf://buckets/me/flock/controller/g", dry_run=False,
+                        env={})
+    assert rc == 0 and hub.cancelled == ["ctl-1"] and bucket.list("") == []
+    assert "deleted 2 state files" in capsys.readouterr().out
+
+
+def test_down_dry_run_and_stuck_controller_leave_the_state(tmp_path, monkeypatch):
+    bucket = _down_bucket(tmp_path, monkeypatch)
+    hub = FakeHub(polls=1)
+    assert jobdeploy.down(hub, "me", "g", "hf://b/n/p", dry_run=True, env={}) == 0
+    assert hub.cancelled == [] and len(bucket.list("")) == 2
+    clock = iter(range(0, 10_000, 100))
+    monkeypatch.setattr(jobdeploy.time, "monotonic", lambda: next(clock))
+    hub = FakeHub(polls=10**6)  # never ends
+    assert jobdeploy.down(hub, "me", "g", "hf://b/n/p", dry_run=False, env={}) == 1
+    assert len(bucket.list("")) == 2  # never delete under a live controller
+
+
+def test_down_needs_a_wheel_or_state_url():
+    with pytest.raises(SystemExit):
+        jobdeploy.main(["--down", "--group", "g", "--namespace", "me"], {})

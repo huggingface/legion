@@ -4,6 +4,21 @@ Added 2026-10-20. Decision 32 in [design.md](design.md). The Space deployment
 (`scripts/deploy-space.sh`) stays for small swarms; use job mode once a swarm has
 more than a few dozen worker jobs.
 
+## Results (2026-10-20)
+
+- **Smoke run** (controller job plus 4 cpu-basic workers):
+  - The jobs proxy forwards `X-Flock-Token`.
+  - After `--replace`, the alias stops resolving to the old controller once that job ends.
+  - Worker heartbeats paused for about 55 s during the replace. No worker was relaunched.
+  - Up to 60 s of state can be lost (one sync interval).
+- **Pixel run 3** (job mode, cpu-upgrade):
+  - 1,010 agents on 44 worker jobs.
+  - The controller served 36,218 requests: 0 errors from flock (1 x 4xx was a deliberate
+    permission test) and 0 x 429.
+  - Peak RSS was 508 MB.
+  - No worker was declared dead or relaunched. Run 2, through a Space, had 847 x 429 and
+    22 workers killed.
+
 ## Why
 
 Workers in a Space deployment reach the controller through the HF Spaces edge, which
@@ -94,8 +109,7 @@ ends in `.hf.jobs` or `FLOCK_PROXY_AUTH=hf`, it also sends `HF_TOKEN` (or the to
 `hf auth login`) as the bearer; otherwise it sends the flock token as the bearer, as before.
 `/` on 7860 still works through the proxy with an HF token.
 
-**Unverified until the smoke run:** whether the proxy forwards `X-Flock-Token` (the probe
-showed that extra headers pass harmlessly, but nothing echoed them).
+The 2026-10-20 smoke run confirmed that the proxy forwards `X-Flock-Token`.
 
 ## State
 
@@ -105,16 +119,38 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
 - **pushes every `FLOCK_STATE_SYNC_INTERVAL` s (60)**, and once more on SIGTERM.
   - `state.db` is a SQLite online-backup copy, consistent with WAL, made under the store lock.
   - Then `events/` is mirrored (`FLOCK_STATE_EVENTS=0` keeps event files local).
-  - A push is skipped when nothing was written since the last one.
+  - A push is skipped when nothing was written since the last one. The periodic push and the
+    final push never overlap.
 - **restores on start** (`FLOCK_STATE_RESTORE=1`, the default), before the store opens.
-  - It downloads `state.db`, drops any local WAL, then pulls `events/`.
+  - It downloads `state.db` and checks it. **A snapshot with no swarms is not restored**:
+    after `flock remove` of the last swarm, the next push writes an empty snapshot, so a later
+    controller in the same group starts empty.
+  - It drops any local WAL, then pulls `events/`.
+  - It logs what it restored: `state: restored N swarms (names), A agents, W workers`.
   - `Store.repair_events` cuts each event file back to the restored index, so `after=`
     cursors stay valid.
   - `rebuild_from_jobs` then adopts the live worker jobs by label, as after a Space restart.
+- **Shutdown on SIGTERM**, in this order:
+  1. Close the listeners and cancel the reconcile and sync loops.
+  2. Push the state. The push is bounded by `FLOCK_FINAL_PUSH_TIMEOUT` (30 s) and always
+     logs one line: `final push: ok (N files)` or `final push: failed (reason)`.
+  3. Give open requests (parked long-polls) 5 s.
+  4. Exit, logging `flock controller: exit`.
+
+  The push runs before the drain, so a short platform grace period still gets it. In the smoke
+  run, one of the two controllers never logged its final push. The likely cause is that
+  uvicorn waited on parked long-polls before reaching the push.
+- **Teardown:** `scripts/deploy-job.sh --down --group <g> (<wheel-url> | --state-url URL)`.
+  1. It cancels the group's controller and waits for it to end (the final push).
+  2. Only then does it delete everything under `controller/<g>/`.
+  If the controller does not stop within 180 s, it deletes nothing. Run it after `flock
+  remove` at the end of an experiment. To ignore a snapshot once, launch with
+  `FLOCK_STATE_RESTORE=0`.
 
 **Loss window.**
-- A clean stop (cancel, timeout, SIGTERM) loses nothing, provided the final push finishes
-  within the platform's grace period. That grace period is not documented and not measured.
+- A clean stop (cancel, timeout, SIGTERM) loses only what is written during the final push
+  and the 5 s drain, provided the push finishes within the platform's grace period. That grace
+  period is not documented and not measured.
 - A hard kill loses up to one interval (60 s) of controller writes.
 - What is lost:
   - **Prompts.** Ones queued in that window are lost. Ones already delivered are not.
@@ -136,8 +172,8 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
   may claim the same alias, which then resolves to all of them". So a new job can take
   `controller` while workers stay up. For this reason the script refuses to start a second
   controller in a group while one runs: workers would split their traffic between two
-  controllers. Whether the alias stops resolving to the old job the moment it ends is
-  **unverified** (the smoke run checks it).
+  controllers. In the smoke run, the alias stopped resolving to the old job once it ended,
+  and heartbeats paused for about 55 s during the replace.
 - **Workers during a restart.** They retry with backoff. They are declared dead only after
   180 s of silence measured by the new controller, which also resets the clock for the
   workers it adopts. A restart of under about 2 minutes therefore relaunches nothing. A
@@ -155,8 +191,5 @@ Pick cpu-basic ($0.01/h) for small swarms.
 
 - One namespace per controller (the network group's scope).
 - GPU flavors in the same group are untested beyond L4 (accepted) and A100 (refused).
-- Untested in a real job, to be checked by the smoke run:
-  - whether `X-Flock-Token` passes the proxy;
-  - SIGTERM grace on cancel;
-  - the bootstrap time of the controller job;
-  - how alias resolution behaves across a `--replace`.
+- Still unmeasured: the platform's SIGTERM grace period on cancel. The push is bounded at 30 s
+  and runs first, before the drain.
