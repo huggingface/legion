@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import sys
 import threading
 from collections.abc import Callable, Mapping
@@ -47,6 +48,23 @@ from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub
 log = logging.getLogger("flock.worker")
 
 DEFAULT_DRAIN_WINDOW = timedelta(minutes=10)
+_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_env(value: str, env: Mapping[str, str]) -> str:
+    """Expand `${NAME}` from `env`. A job-mode controller hands workers
+    `http://${HF_NETWORK_GROUP_PREFIX}controller:7860`: HF Jobs sets that prefix only inside
+    network-group members, and only the worker can read it (docs/deploy-job.md)."""
+
+    def sub(m: re.Match) -> str:
+        if m.group(1) not in env:
+            raise ValueError(
+                f"{value!r} needs ${{{m.group(1)}}}, which is not set: is this worker in the "
+                "controller's network group?"
+            )
+        return env[m.group(1)]
+
+    return _VAR.sub(sub, value)
 
 
 @dataclass
@@ -70,7 +88,7 @@ class WorkerConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
         return cls(
-            url=env["FLOCK_URL"].rstrip("/"),
+            url=expand_env(env["FLOCK_URL"], env).rstrip("/"),
             token=env["FLOCK_TOKEN"],
             worker_id=env["WORKER_ID"],
             swarm=env["SWARM"],

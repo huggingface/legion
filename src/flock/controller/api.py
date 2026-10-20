@@ -490,10 +490,13 @@ def create_app(
     secret_source: Mapping[str, str] | None = None,
     preflight_transport: httpx.AsyncBaseTransport | None = None,
     enforce_max_working: bool | None = None,
+    namespace: str | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
-    `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0")."""
+    `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
+    `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
+    network group spans one namespace, so workers elsewhere could never reach the controller."""
     secret_source = os.environ if secret_source is None else secret_source
     if enforce_max_working is None:
         enforce_max_working = os.environ.get("FLOCK_MAX_WORKING_ENFORCE", "1") != "0"
@@ -520,15 +523,23 @@ def create_app(
 
     app.add_middleware(make_stats)
 
-    def auth(request: Request, authorization: str = Header(default="")) -> None:
+    def auth(
+        request: Request,
+        authorization: str = Header(default=""),
+        x_flock_token: str = Header(default=""),
+    ) -> None:
         """The controller token has full access. An agent token (docs/spawn.md) acts as that
-        agent, scoped to itself, its subtree and prompting its parent."""
-        if token and secrets.compare_digest(authorization, f"Bearer {token}"):
-            return
+        agent, scoped to itself, its subtree and prompting its parent. Either token comes in
+        `X-Flock-Token` or as `Authorization: Bearer`; behind the HF Jobs proxy (job mode,
+        docs/deploy-job.md) `Authorization` carries the caller's HF token for the proxy, so
+        the flock token must use `X-Flock-Token` there. The header is checked first."""
         bearer = authorization.removeprefix("Bearer ")
-        agent = agent_for_token(store, bearer) if bearer != authorization else None
+        candidates = [t for t in (x_flock_token, bearer if bearer != authorization else "") if t]
+        if token and any(secrets.compare_digest(c, token) for c in candidates):
+            return
+        agent = next((a for c in candidates if (a := agent_for_token(store, c))), None)
         if agent is None:
-            raise HTTPException(401, "bad or missing bearer token")
+            raise HTTPException(401, "bad or missing flock token (X-Flock-Token or bearer)")
         route = getattr(request.scope.get("route"), "path", "")
         if not agent_may(
             store, agent, request.method, route, request.path_params, request.query_params
@@ -571,6 +582,12 @@ def create_app(
     def apply(swarm: str, spec: SwarmSpec) -> SwarmStatus:
         if spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
+        if namespace and spec.namespace != namespace:
+            raise HTTPException(
+                400,
+                f"this controller runs as a job in namespace {namespace!r} and its workers must "
+                f"join its network group there; spec.namespace is {spec.namespace!r}",
+            )
         for type_name in spec.types:
             owner = store.type_owner(type_name)
             if owner not in (None, swarm):
