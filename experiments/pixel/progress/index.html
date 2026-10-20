@@ -65,7 +65,7 @@
   <select id="run" aria-label="run"></select>
   <span id="pill" class="pill">-</span>
   <span id="when" class="muted"></span>
-  <label class="muted">view <select id="view" aria-label="view"><option value="canvas">canvas</option><option value="mask">painted mask (magenta)</option><option value="agents">agent map</option></select></label>
+  <label class="muted">view <select id="view" aria-label="view"><option value="canvas">canvas</option><option value="mask">painted mask (magenta)</option><option value="agents">agent map</option><option value="leaders">leader territory</option></select></label>
 </header>
 <div id="empty" class="empty" hidden>No run yet. The driver adds runs here (see experiments/pixel/progress/README.md).</div>
 <main id="main" hidden>
@@ -112,7 +112,7 @@
       <label>left <select id="sbsA" aria-label="left run"></select></label>
       <label>right <select id="sbsB" aria-label="right run"></select></label>
       <label>align <select id="sbsAlign" aria-label="alignment"><option value="time">wall time since first paint</option><option value="pct">% done</option></select></label>
-      <label><input type="checkbox" id="sbsAgents"> agent map (both)</label>
+      <label>view (both) <select id="sbsAgents" aria-label="view for both panels"><option value="canvas">canvas</option><option value="agent">agent map</option><option value="parent">leader territory</option></select></label>
     </div>
     <div class="imgs" style="margin-top:12px">
       <figure><canvas id="sbsL" width="1024" height="1024"></canvas><figcaption><b id="sbsLc">left</b><br><span id="sbsLr"></span></figcaption></figure>

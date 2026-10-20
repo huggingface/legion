@@ -130,8 +130,13 @@ PX.Replayer.prototype.ownerFrame = function (t) {
   for (let j = ends[k]; j < ends[t]; j++) o[idx[j]] = aid[j];
   return o;
 };
-PX.Replayer.prototype.agentFrame = function (t) {
-  if (!this.palette) this.palette = this.log.names.map(PX.agentColour);
+// Root ancestor of a flock name (`leader-0003-painter-a-0042` -> `leader-0003`); mirrors
+// canvas/world.py root_of. Children of one leader share its colour (leader territories).
+PX.rootOf = function (name) { const m = /^([a-z][a-z0-9-]*?-\d{4,})-/.exec(name); return m ? m[1] : name; };
+PX.Replayer.prototype.agentFrame = function (t, by = 'agent') {
+  const key = by === 'parent' ? 'ppalette' : 'palette';
+  if (!this[key]) this[key] = this.log.names.map((n) => PX.agentColour(by === 'parent' ? PX.rootOf(n) : n));
+  this.palette = this[key];
   const o = this.ownerFrame(t), buf = new Uint8ClampedArray(this.blank);
   for (let i = 0; i < o.length; i++) {
     if (o[i] < 0) continue;
@@ -249,7 +254,11 @@ if (typeof document !== 'undefined') (() => {
   const bust = () => `ts=${Date.now()}`;
   let runs = [], run = null, liveTimer = null, progTimer = null, replayer = null, playing = false;
   let view = 'canvas'; // canvas | mask | agents
-  function liveSrc(base) { return `${base}/${view === 'agents' ? 'agents.png' : 'canvas.png'}?${bust()}`; }
+  function liveSrc(base) {
+    if (view === 'agents') return `${base}/agents.png?${bust()}`;
+    if (view === 'leaders') return `${base}/agents.png?by=parent&${bust()}`;
+    return `${base}/canvas.png?${bust()}`;
+  }
   function setView(v) {
     view = v;
     for (const id of ['livefig', 'replayfig']) $(id).classList.toggle('masked', v === 'mask');
@@ -364,7 +373,8 @@ if (typeof document !== 'undefined') (() => {
 
   function draw(t) {
     if (!replayer) return;
-    const buf = view === 'agents' ? replayer.agentFrame(t) : replayer.frame(t);
+    const buf = view === 'agents' ? replayer.agentFrame(t)
+      : view === 'leaders' ? replayer.agentFrame(t, 'parent') : replayer.frame(t);
     if (view === 'mask') PX.overlayMask(buf, replayer.maskFrame(t));
     $('replay').getContext('2d').putImageData(new ImageData(buf, replayer.w, replayer.h), 0, 0);
     const e = replayer.log.entries[t - 1];
@@ -475,7 +485,8 @@ if (typeof document !== 'undefined') (() => {
       const log = SBS.logs[i], rep = SBS.reps[i], side = i ? 'R' : 'L';
       if (!log || !rep) continue;
       const k = pct ? PX.indexAtDone(log, v / 1000) : PX.indexAtTime(log, v);
-      const buf = $('sbsAgents').checked ? rep.agentFrame(k) : rep.frame(k);
+      const by = $('sbsAgents').value;
+      const buf = by === 'canvas' ? rep.frame(k) : rep.agentFrame(k, by);
       $(`sbs${side}`).getContext('2d').putImageData(new ImageData(buf, rep.w, rep.h), 0, 0);
       const r = PX.readout(log, k);
       $(`sbs${side}r`).textContent = `t ${mmss(r.t)} · done ${fmt(r.done, 1)}% · ` +

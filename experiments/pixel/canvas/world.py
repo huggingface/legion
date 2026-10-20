@@ -19,6 +19,7 @@ import io
 import json
 import math
 import os
+import re
 import threading
 import time
 from collections import OrderedDict, deque
@@ -95,6 +96,17 @@ def agent_colour(name: str) -> tuple[int, int, int]:
     p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
     r, g, b = [(v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)][i]
     return int(r * 255 + 0.5), int(g * 255 + 0.5), int(b * 255 + 0.5)
+
+
+ROOT_RE = re.compile(r"^([a-z][a-z0-9-]*?-\d{4,})-")
+
+
+def root_of(name: str) -> str:
+    """Top ancestor from a flock name: children are `<parent>-<type>-<NNNN>`, so the root is the
+    first `<type>-<NNNN>` prefix followed by '-'. `leader-0003-painter-a-0042` -> `leader-0003`.
+    Mirrored in progress/app.js (rootOf)."""
+    m = ROOT_RE.match(name)
+    return m.group(1) if m else name
 
 
 def mask_bytes(m: np.ndarray, style: str = "grey") -> bytes:
@@ -229,6 +241,10 @@ class World:
         self._last_sweep = 0.0
         # Region leases (leader -> children). region_map holds the lease id per pixel (-1 none).
         self.regions: dict[int, dict] = {}
+        # Per region: its own claim queue (pixels of the region in claim order + a requeue), so
+        # members draw from their region in O(1) and nobody scans other leaders' pixels.
+        self.rq: dict[int, dict] = {}
+        self.members: dict[str, set[int]] = {}  # agent -> regions it owns or was granted
         self.region_map = np.full(self.n, -1, dtype=np.int32)
         self.next_region = 1
         self.seq = 0
@@ -298,6 +314,13 @@ class World:
 
     # ----------------------------------------------------------------- claims
 
+    def _requeue(self, ids) -> None:
+        """Hand pixels back: to their live region's queue, else to the global queue."""
+        for i in ids:
+            rid = int(self.region_map[i])
+            q = self.rq.get(rid)
+            (q["requeue"] if q is not None else self.requeue).append(int(i))
+
     def _release_ids(self, aid: int, ids) -> int:
         ids = np.asarray(list(ids), dtype=np.int64)
         if not len(ids):
@@ -306,7 +329,7 @@ class World:
         ids = ids[own]
         self.lease_until[ids] = 0.0
         self.lease_owner[ids] = -1
-        self.requeue.extend(ids[~self.match[ids]].tolist())
+        self._requeue(ids[~self.match[ids]].tolist())
         return len(ids)
 
     def _expire(self, now: float) -> None:
@@ -316,11 +339,39 @@ class World:
             live = (self.lease_until[ids] == until) & (self.lease_owner[ids] == aid)
             back = ids[live & ~self.match[ids]]
             self.lease_owner[ids[live]] = -1
-            self.requeue.extend(back.tolist())
+            self._requeue(back.tolist())
 
-    def _take(self, need: int, now: float, blocked: list[int]) -> list[int]:
-        """Pop up to ``need`` free pixels: requeue first, then the order; lease them at once."""
+    def _take_region(self, rid: int, need: int, now: float, got: list[int]) -> int:
+        q = self.rq[rid]
+        until = now + self.cfg.claim_ttl
+        while need and q["requeue"]:
+            i = q["requeue"].popleft()
+            if self.match[i] or self.lease_until[i] > now:
+                continue
+            self.lease_until[i] = until
+            got.append(i)
+            need -= 1
+        order = q["order"]
+        while need and q["head"] < len(order):
+            cand = order[q["head"] : q["head"] + 4096]
+            pos = np.flatnonzero(~self.match[cand] & (self.lease_until[cand] <= now))[:need]
+            end = int(pos[-1]) + 1 if len(pos) else len(cand)
+            take = cand[pos]
+            self.lease_until[take] = until
+            got.extend(take.tolist())
+            need -= len(take)
+            q["head"] += end
+        return need
+
+    def _take(
+        self, need: int, now: float, blocked: list[int], mine: tuple[int, ...] = ()
+    ) -> list[int]:
+        """Pop up to ``need`` free pixels: the agent's regions first (their own queues), then
+        the global requeue and order; lease them at once."""
         got: list[int] = []
+        for rid in mine:
+            if need and rid in self.rq:
+                need = self._take_region(rid, need, now, got)
         held: list[int] = []  # blocked by a region for this agent: put back afterwards
         until = now + self.cfg.claim_ttl
         for _ in range(2):  # second pass only after a repair sweep
@@ -329,8 +380,8 @@ class World:
                 if self.match[i] or self.lease_until[i] > now:
                     continue
                 if blocked and int(self.region_map[i]) in blocked:
-                    held.append(i)
-                    continue
+                    continue  # it is in that region's own queue
+
                 self.lease_until[i] = until
                 got.append(i)
                 need -= 1
@@ -343,8 +394,6 @@ class World:
                     ok = free & ~bl
                 pos = np.flatnonzero(ok)[:need]
                 end = int(pos[-1]) + 1 if len(pos) else len(cand)
-                if blocked:
-                    held.extend(cand[:end][free[:end] & bl[:end]].tolist())
                 take = cand[pos]
                 self.lease_until[take] = until
                 got.extend(take.tolist())
@@ -355,8 +404,12 @@ class World:
             if not need or now - self._last_sweep < 1.0:
                 break
             self._last_sweep = now
-            mask = ~self.match & (self.lease_until <= now)
+            mask = ~self.match & (self.lease_until <= now) & (self.region_map < 0)
             self.requeue.extend(self.order[mask[self.order]].tolist())
+            for rq in self.rq.values():  # region queues get the same repair
+                if rq["head"] >= len(rq["order"]) and not rq["requeue"]:
+                    o = rq["order"]
+                    rq["requeue"].extend(o[~self.match[o] & (self.lease_until[o] <= now)].tolist())
             if not self.requeue:
                 break
         self.requeue.extendleft(reversed(held))
@@ -374,7 +427,17 @@ class World:
             self._release_ids(aid, self.agent_leases.pop(aid, []))
             self._expire(now)
             blocked = self._blocked_regions(agent, now)
-            ids = np.array(self._take(n, now, blocked), dtype=np.int64)
+            mine = tuple(sorted(r for r in self.members.get(agent, ()) if r in self.regions))
+            ids = np.array(self._take(n, now, blocked, mine), dtype=np.int64)
+            region_done = (
+                bool(mine)
+                and not len(ids)
+                and all(
+                    self._region_counts(self.regions[r])[0]
+                    >= self._region_counts(self.regions[r])[1]
+                    for r in mine
+                )
+            )
             until = now + self.cfg.claim_ttl
             self.lease_owner[ids] = aid
             self.agent_leases[aid] = ids.tolist()
@@ -396,6 +459,7 @@ class World:
             "expires": until,
             "remaining": remaining,
             "done": remaining == 0,
+            "region_done": region_done,
         }
 
     def release(self, agent: str, pixels: list[tuple[int, int]] | None = None) -> int:
@@ -413,18 +477,47 @@ class World:
         m = self.region_map.reshape(self.h, self.w)
         m[r["y"] : r["y"] + r["h"], r["x"] : r["x"] + r["w"]] = rid
 
+    def _drop_region(self, rid: int) -> None:
+        """Release a region: its not-done pixels go back to the global queue."""
+        r = self.regions.pop(rid)
+        ids = np.flatnonzero(self.region_map == rid)
+        self._paint_region(r, -1)
+        self.rq.pop(rid, None)
+        for a in [r["owner"], *r["grants"]]:
+            self.members.get(a, set()).discard(rid)
+        self.requeue.extend(ids[~self.match[ids]].tolist())
+
+    def _open_region(self, r: dict) -> None:
+        """Paint the region map and build the region's own claim queue (claim order kept)."""
+        rid = r["id"]
+        self._paint_region(r, rid)
+        o = self.order
+        self.rq[rid] = {
+            "order": o[(self.region_map[o] == rid) & ~self.match[o]],
+            "head": 0,
+            "requeue": deque(),
+        }
+        for a in [r["owner"], *r["grants"]]:
+            self.members.setdefault(a, set()).add(rid)
+
+    def _region_counts(self, r: dict) -> tuple[int, int]:
+        """(done work pixels, work pixels) inside a region."""
+        ys, xs = slice(r["y"], r["y"] + r["h"]), slice(r["x"], r["x"] + r["w"])
+        work = self.work_mask.reshape(self.h, self.w)[ys, xs]
+        done = self.match.reshape(self.h, self.w)[ys, xs] & work
+        return int(done.sum()), int(work.sum())
+
     def _expire_regions(self, now: float) -> None:
         for rid in [k for k, r in self.regions.items() if r["until"] <= now]:
-            self._paint_region(self.regions.pop(rid), -1)
+            self._drop_region(rid)
 
     def _blocked_regions(self, agent: str, now: float) -> list[int]:
         """Region ids this agent may not paint or pixel-claim in (REGION_ENFORCE=1 only)."""
         if not self.cfg.region_enforce or not self.regions:
             return []
         self._expire_regions(now)
-        return [
-            k for k, r in self.regions.items() if r["owner"] != agent and agent not in r["grants"]
-        ]
+        mine = self.members.get(agent, set())
+        return [k for k in self.regions if k not in mine]
 
     def claim_region(
         self,
@@ -444,6 +537,10 @@ class World:
         now = time.time() if now is None else now
         with self.lock:
             self._expire_regions(now)
+            for r in self.regions.values():
+                if r["owner"] == agent and (r["x"], r["y"], r["w"], r["h"]) == (x, y, w, h):
+                    r["until"] = now + ttl  # the holder re-claiming its own rect renews it
+                    return {**r, "grants": list(r["grants"]), "renewed": True}
             for r in self.regions.values():
                 if (
                     x < r["x"] + r["w"]
@@ -468,7 +565,7 @@ class World:
                 "grants": [],
             }
             self.regions[rid] = r
-            self._paint_region(r, rid)
+            self._open_region(r)
             self._stat(agent, now)
             return dict(r)
 
@@ -484,8 +581,10 @@ class World:
         return [r]
 
     def grant_region(
-        self, agent: str, grantee: str, rid: int | None = None, now: float | None = None
+        self, agent: str, grantee, rid: int | None = None, now: float | None = None
     ) -> list[dict]:
+        """Grant one agent or a list of agents (a leader hands its region to its children)."""
+        grantees = [grantee] if isinstance(grantee, str) else list(grantee)
         now = time.time() if now is None else now
         with self.lock:
             self._expire_regions(now)
@@ -493,9 +592,13 @@ class World:
             if not rs:
                 raise PaintError("you hold no region lease; POST /claim/region first")
             for r in rs:
-                if grantee not in r["grants"]:
-                    r["grants"].append(grantee)
-            return [dict(r) for r in rs]
+                have = set(r["grants"])
+                for g in grantees:
+                    if g not in have:
+                        r["grants"].append(g)
+                        have.add(g)
+                    self.members.setdefault(g, set()).add(r["id"])
+            return [{**r, "grants": list(r["grants"])} for r in rs]
 
     def release_region(self, agent: str, rid: int | None = None, now: float | None = None) -> int:
         now = time.time() if now is None else now
@@ -503,14 +606,64 @@ class World:
             self._expire_regions(now)
             rs = self._owned(agent, rid)
             for r in rs:
-                self._paint_region(self.regions.pop(r["id"]), -1)
+                self._drop_region(r["id"])
             return len(rs)
 
     def list_regions(self, now: float | None = None) -> list[dict]:
+        """Live leases with per-region progress (done work pixels / work pixels)."""
         now = time.time() if now is None else now
         with self.lock:
             self._expire_regions(now)
-            return [dict(r) for r in self.regions.values()]
+            out = []
+            for r in self.regions.values():
+                done, work = self._region_counts(r)
+                out.append(
+                    {
+                        **r,
+                        "grants": list(r["grants"]),
+                        "work": work,
+                        "done": done,
+                        "done_pct": round(100.0 * done / work, 2) if work else 100.0,
+                    }
+                )
+            return out
+
+    def bands(self, n: int) -> list[dict]:
+        """n horizontal full-width bands with about equal work each (the target's rows are far
+        from uniform: equal-height bands of the shipped image range from 389 to 92k work px)."""
+        if not 1 <= n <= self.h:
+            raise PaintError(f"n must be 1..{self.h}")
+        per_row = self.work_mask.reshape(self.h, self.w).sum(1)
+        cum = np.concatenate([[0], np.cumsum(per_row)])
+        total = int(cum[-1])
+        cuts = [0]
+        for k in range(1, n):
+            y = int(np.searchsorted(cum, total * k / n))
+            cuts.append(min(max(y, cuts[-1] + 1), self.h - (n - k)))
+        cuts.append(self.h)
+        return [
+            {
+                "band": i,
+                "x": 0,
+                "y": cuts[i],
+                "w": self.w,
+                "h": cuts[i + 1] - cuts[i],
+                "work": int(cum[cuts[i + 1]] - cum[cuts[i]]),
+            }
+            for i in range(n)
+        ]
+
+    def region_score(self, x: int, y: int, w: int, h: int) -> dict:
+        if w < 1 or h < 1 or x < 0 or y < 0 or x + w > self.w or y + h > self.h:
+            raise PaintError(f"region ({x},{y},{w}x{h}) outside canvas {self.w}x{self.h}")
+        with self.lock:
+            done, work = self._region_counts({"x": x, "y": y, "w": w, "h": h})
+        return {
+            "region": [x, y, w, h],
+            "work_total": work,
+            "work_done": done,
+            "coverage_pct": round(100.0 * done / work, 4) if work else 100.0,
+        }
 
     def claims_outstanding(self, now: float | None = None) -> int:
         now = time.time() if now is None else now
@@ -606,7 +759,7 @@ class World:
                     self.lease_owner[i] = -1
                     self.lease_until[i] = 0.0
                 if not ok and outcomes is None and self.lease_until[i] <= ts:
-                    self.requeue.append(i)  # needs paint again and nobody holds it
+                    self._requeue([i])  # needs paint again and nobody holds it
                 applied_idx.append(i)
                 applied_rgb.append((r, g, b))
             px_out.append([x, y, f"{r:02x}{g:02x}{b:02x}", out])
@@ -737,7 +890,7 @@ class World:
                         self.expiry.append((until, aid, np.array(ids, dtype=np.int64)))
                     for r in json.loads(str(z["regions"])) if "regions" in z else []:
                         self.regions[r["id"]] = r
-                        self._paint_region(r, r["id"])
+                        self._open_region(r)
                         self.next_region = max(self.next_region, r["id"] + 1)
                     for i in np.flatnonzero(self.lease_owner >= 0).tolist():
                         self.agent_leases.setdefault(int(self.lease_owner[i]), []).append(i)
@@ -916,34 +1069,39 @@ class World:
             xs = [g for t, g in self.gaps if now - t <= window]
         return round(float(np.median(xs)), 3) if xs else None
 
-    def colours(self) -> np.ndarray:
-        """Per agent id colour table (grows as agents appear). Call under the lock."""
-        if len(self._colours) < len(self.agent_names):
-            new = [agent_colour(n) for n in self.agent_names[len(self._colours) :]]
-            self._colours = np.concatenate([self._colours, np.array(new, np.uint8)])
-        return self._colours
+    def colours(self, by: str = "agent") -> np.ndarray:
+        """Per agent id colour table (grows as agents appear). Call under the lock.
+        by=parent: children share their root ancestor's colour (leader territories)."""
+        attr = "_colours" if by == "agent" else "_pcolours"
+        have = getattr(self, attr, np.zeros((0, 3), np.uint8))
+        if len(have) < len(self.agent_names):
+            key = agent_colour if by == "agent" else (lambda n: agent_colour(root_of(n)))
+            new = [key(n) for n in self.agent_names[len(have) :]]
+            have = np.concatenate([have, np.array(new, np.uint8)])
+            setattr(self, attr, have)
+        return have
 
-    def agent_map(self, owner: np.ndarray) -> np.ndarray:
+    def agent_map(self, owner: np.ndarray, by: str = "agent") -> np.ndarray:
         img = self._blank_frame.reshape(-1, 3).copy()
         with self.lock:
-            col = self.colours()
+            col = self.colours(by)
         on = owner >= 0
         img[on] = col[owner[on]]
         return img.reshape(self.h, self.w, 3)
 
-    def agents_png(self, fresh: bool = False) -> bytes:
+    def agents_png(self, fresh: bool = False, by: str = "agent") -> bytes:
         """Each painted pixel in its last painter's colour; cached per ``mask_every`` paints."""
         with self.lock:
-            hit = None if fresh else self._mask_cache.get(("agents", ""))
+            hit = None if fresh else self._mask_cache.get(("agents", by))
             if hit is not None and self.seq - hit[0] < max(1, self.cfg.mask_every):
                 return hit[1]
             owner, seq = self.owner.copy(), self.seq
-        data = png_bytes(self.agent_map(owner))
+        data = png_bytes(self.agent_map(owner, by))
         with self.lock:
-            self._mask_cache[("agents", "")] = (seq, data)
+            self._mask_cache[("agents", by)] = (seq, data)
         return data
 
-    def replay_agents(self, t: int) -> np.ndarray:
+    def replay_agents(self, t: int, by: str = "agent") -> np.ndarray:
         """Agent map after log entry ``t``: last painter per pixel, folded from the index."""
         with self.lock:
             t = max(0, min(int(t), self.seq))
@@ -954,7 +1112,7 @@ class World:
             rev = idx[::-1]
             u, first = np.unique(rev, return_index=True)
             owner[u] = aid[k - 1 - first]
-        return self.agent_map(owner)
+        return self.agent_map(owner, by)
 
     def replay_mask(self, t: int) -> np.ndarray:
         """Painted mask after log entry ``t``, folded from the replay index (vectorised)."""

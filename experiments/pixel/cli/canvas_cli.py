@@ -26,7 +26,13 @@ USAGE = """canvas <command> [args] [--json]
   release                 give back your leased pixels
   score                   progress: exact match %, MSE/PSNR, paint outcomes
   status                  service status: agents, claims, req/s
-  info                    target size, palette, limits"""
+  info | target-info      target size, palette, limits
+  bands N                 N full-width bands with equal work: "band I: claim-region 0 Y 1024 H"
+  regions                 region leases with owner, grants and progress
+  claim-region X Y W H [--ttl S]   lease a rectangle (leaders); re-claiming yours renews it
+  grant-region NAME ...   let agents paint in your region(s) ('-' reads names from stdin)
+  release-region          drop your region lease(s)
+  score --region X,Y,W,H  progress inside one rectangle"""
 
 
 class CliError(Exception):
@@ -101,6 +107,8 @@ def fmt_claim(out: dict) -> str:
     if not px:
         if out.get("done"):
             return "nothing to claim: the canvas matches the target. You are done."
+        if out.get("region_done"):
+            return "nothing to claim: your region is finished. You are done."
         return "nothing free to claim right now (all remaining pixels are leased); retry in ~1 min."
     lines = [f"claimed {len(px)} px, lease {out['lease_s']:g}s, {out['remaining']} px left overall"]
     if "hex" in px[0]:
@@ -158,7 +166,26 @@ def fmt_status(out: dict) -> str:
 
 def run(argv: list[str]) -> tuple[dict, str]:
     ap = argparse.ArgumentParser(prog="canvas", usage=USAGE, add_help=True)
-    ap.add_argument("cmd", choices=["claim", "get", "paint", "release", "score", "status", "info"])
+    ap.add_argument(
+        "cmd",
+        choices=[
+            "claim",
+            "get",
+            "paint",
+            "release",
+            "score",
+            "status",
+            "info",
+            "target-info",
+            "regions",
+            "claim-region",
+            "grant-region",
+            "release-region",
+            "bands",
+        ],
+    )
+    ap.add_argument("--ttl", type=float, default=None)
+    ap.add_argument("--region", default=None)
     ap.add_argument("args", nargs="*")
     ap.add_argument("-n", type=int, default=None)
     ap.add_argument("--json", action="store_true")
@@ -217,9 +244,56 @@ def run(argv: list[str]) -> tuple[dict, str]:
     if a.cmd == "release":
         out = call("POST", "/release", {})
         return out, f"released {out['released']} px"
+    if a.cmd == "score" and a.region:
+        out = call("GET", f"/score?region={urllib.parse.quote(a.region)}")
+        return out, (
+            f"region {a.region}: {out['coverage_pct']}% done "
+            f"({out['work_done']}/{out['work_total']} px)"
+        )
     if a.cmd == "score":
         out = call("GET", "/score?agents=false")
         return out, fmt_score(out)
+    if a.cmd == "bands":
+        n = a.args[0] if a.args else "10"
+        if not n.isdigit():
+            raise CliError("usage: canvas bands N")
+        out = call("GET", f"/target/bands?n={n}")
+        lines = [
+            f"band {b['band']}: claim-region {b['x']} {b['y']} {b['w']} {b['h']}  "
+            f"({b['work']} px of work)"
+            for b in out["bands"]
+        ]
+        return out, "\n".join(lines)
+    if a.cmd == "regions":
+        out = call("GET", "/regions")
+        lines = [f"{len(out['regions'])} region leases (enforce={out['enforce']}):"]
+        for r in out["regions"]:
+            lines.append(
+                f"  #{r['id']} {r['owner']} x={r['x']} y={r['y']} {r['w']}x{r['h']} "
+                f"{r['done_pct']}% done, {len(r['grants'])} granted, "
+                f"{max(0, r['until'] - time.time()):.0f}s left"
+            )
+        return out, "\n".join(lines)
+    if a.cmd == "claim-region":
+        if len(a.args) != 4 or not all(v.isdigit() for v in a.args):
+            raise CliError("usage: canvas claim-region X Y W H [--ttl SECONDS]")
+        x, y, w, h = (int(v) for v in a.args)
+        body = {"x": x, "y": y, "w": w, "h": h, "ttl": a.ttl}
+        out = call("POST", "/claim/region", body)
+        verb = "renewed" if out.get("renewed") else "leased"
+        return out, (
+            f"{verb} region #{out['id']} x={x} y={y} {w}x{h} until "
+            f"{time.strftime('%H:%M:%S', time.gmtime(out['until']))} UTC"
+        )
+    if a.cmd == "grant-region":
+        names = a.args if a.args != ["-"] else sys.stdin.read().split()
+        if not names:
+            raise CliError("usage: canvas grant-region NAME [NAME ...]  (or - to read stdin)")
+        out = call("POST", "/claim/region/grant", {"agents": names})
+        return out, f"granted {out['granted']} agents in {len(out['regions'])} region(s)"
+    if a.cmd == "release-region":
+        out = call("POST", "/release/region", {})
+        return out, f"released {out['released']} region(s)"
     if a.cmd == "status":
         out = call("GET", "/status")
         return out, fmt_status(out)

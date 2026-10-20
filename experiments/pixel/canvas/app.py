@@ -52,7 +52,8 @@ class RegionRef(BaseModel):
 
 
 class GrantBody(BaseModel):
-    agent: str
+    agent: str | None = None
+    agents: list[str] | None = None  # bulk: a leader grants its region to all children at once
     id: int | None = None
 
 
@@ -202,6 +203,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         reader(request)
         return _region_response(world, world.region(world.target, x, y, w, h), x, y, format)
 
+    @app.get("/target/bands")
+    def target_bands(request: Request, n: int = 10):
+        reader(request)
+        return {"bands": world.bands(n)}
+
     @app.get("/target/pixel")
     def target_pixel(request: Request, x: int, y: int):
         reader(request)
@@ -246,10 +252,14 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/agents.png")
-    def agents_png(request: Request, fresh: bool = False):
+    def agents_png(request: Request, fresh: bool = False, by: str = "agent"):
         reader(request)
+        if by not in ("agent", "parent"):
+            raise PaintError("by must be agent or parent")
         return Response(
-            world.agents_png(fresh), media_type="image/png", headers={"Cache-Control": "no-store"}
+            world.agents_png(fresh, by),
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/agents/active")
@@ -307,9 +317,15 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     @app.post("/claim/region/grant")
     def grant_region(request: Request, body: GrantBody):
         agent = writer(request)
-        if not NAME_RE.match(body.agent):
-            raise PaintError("bad agent name: use 1-64 chars of [A-Za-z0-9._:@-]")
-        return {"regions": world.grant_region(agent, body.agent, body.id)}
+        names = ([body.agent] if body.agent else []) + list(body.agents or [])
+        if not names:
+            raise PaintError("give agent or agents")
+        if len(names) > 1000:
+            raise PaintError("at most 1000 agents per grant")
+        for n in names:
+            if not NAME_RE.match(n):
+                raise PaintError(f"bad agent name {n!r}: use 1-64 chars of [A-Za-z0-9._:@-]")
+        return {"regions": world.grant_region(agent, names, body.id), "granted": len(names)}
 
     @app.post("/release/region")
     def release_region(request: Request, body: RegionRef | None = None):
@@ -329,8 +345,14 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     # ----------------------------------------------------------- score/status
 
     @app.get("/score")
-    async def score(request: Request, agents: bool = True):
+    async def score(request: Request, agents: bool = True, region: str | None = None):
         reader(request)
+        if region:
+            try:
+                x, y, w, h = (int(v) for v in region.split(","))
+            except ValueError:
+                raise PaintError("region must be x,y,w,h (integers)") from None
+            return world.region_score(x, y, w, h)
         return world.score(agents=agents)
 
     @app.get("/status")
@@ -378,9 +400,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/replay/agents")
-    def replay_agents(request: Request, t: int = 0):
+    def replay_agents(request: Request, t: int = 0, by: str = "agent"):
         reader(request)
-        return Response(png_bytes(world.replay_agents(t)), media_type="image/png")
+        if by not in ("agent", "parent"):
+            raise PaintError("by must be agent or parent")
+        return Response(png_bytes(world.replay_agents(t, by)), media_type="image/png")
 
     @app.get("/replay/mask")
     def replay_mask(request: Request, t: int = 0, style: str = "overlay"):

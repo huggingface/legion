@@ -115,3 +115,30 @@ def test_cli_served_by_canvas(server):
 
     src = urllib.request.urlopen(os.environ["CANVAS_URL"] + "/cli/canvas").read().decode()
     assert src.startswith("#!/usr/bin/env python3") and "def main(" in src
+
+
+def test_region_verbs(server, capsys, monkeypatch):
+    import io
+
+    monkeypatch.setenv("FLOCK_AGENT", "leader-0000")
+    assert canvas_cli.main(["claim-region", "1", "1", "4", "4", "--ttl", "600"]) == 0
+    assert "leased region #" in capsys.readouterr().out
+    assert canvas_cli.main(["claim-region", "1", "1", "4", "4"]) == 0
+    assert "renewed" in capsys.readouterr().out
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO("leader-0000-painter-a-0001\nleader-0000-painter-a-0002\n")
+    )
+    assert canvas_cli.main(["grant-region", "-"]) == 0
+    assert "granted 2 agents" in capsys.readouterr().out
+    assert canvas_cli.main(["regions"]) == 0
+    out = capsys.readouterr().out
+    assert "leader-0000" in out and "2 granted" in out and "% done" in out
+    assert canvas_cli.main(["score", "--region", "1,1,4,4"]) == 0
+    assert "region 1,1,4,4" in capsys.readouterr().out
+    assert canvas_cli.main(["target-info"]) == 0
+    capsys.readouterr()
+    assert canvas_cli.main(["bands", "2"]) == 0
+    assert capsys.readouterr().out.startswith("band 0: claim-region 0 0 8 ")
+    assert canvas_cli.main(["release-region"]) == 0
+    assert "released 1 region" in capsys.readouterr().out
+    assert canvas_cli.main(["claim-region", "1", "x", "4", "4"]) == 1
