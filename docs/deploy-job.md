@@ -1,6 +1,6 @@
 # Controller as an HF Job (job mode)
 
-Added 2026-10-20. Decision 31 in [design.md](design.md). The Space deployment
+Added 2026-10-20. Decision 32 in [design.md](design.md). The Space deployment
 (`scripts/deploy-space.sh`) stays for small swarms; use job mode once a swarm has
 more than a few dozen worker jobs.
 

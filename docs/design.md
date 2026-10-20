@@ -163,7 +163,7 @@ documented; anything inferred is marked.
 One Docker Space. FastAPI, SQLite on persistent storage, the reconcile loop as
 a background task in the same process. Since 2026-10-20 the same process can instead run as
 an HF Job in its workers' network group, with its SQLite synced to a bucket (job mode,
-decision 31, [deploy-job.md](deploy-job.md)). Single bearer token shared by CLI,
+decision 32, [deploy-job.md](deploy-job.md)). Single bearer token shared by CLI,
 workers and future callers (Space secret, job secret).
 
 Responsibilities: store specs; place agents on workers (fill in order, no bin
@@ -669,14 +669,14 @@ Condensed from the grilling session, 2026-10-13/14.
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
-| 31 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
+| 32 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
 
 ## 12. Road to 10k
 
 What the 1k and 10k runs say must change, in order. Item 1 gates everything else.
 
 1. **Take the control plane off the Spaces edge limit, then measure the limit.** Done for the
-   worker path by job mode (decision 31, [deploy-job.md](deploy-job.md)); the ramp below is
+   worker path by job mode (decision 32, [deploy-job.md](deploy-job.md)); the ramp below is
    still to do, now against the controller job itself. The options were, in
    order of how much they keep: a private Space with workers sending an HF token (needs the
    swarm token out of `Authorization`; whether authenticated traffic has a separate limit is
