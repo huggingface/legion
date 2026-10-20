@@ -38,7 +38,9 @@ harness on the wrong kind of provider.
 |---|---|---|---|
 | `codex` | `openai_compat` | OpenAI **Responses** (`POST {base_url}/responses`, streamed) | required, ends in `/v1` |
 | `claude` | `anthropic` | Anthropic Messages (`POST {base_url}/v1/messages`) | optional API root, no `/v1` |
-| either | none (native id) | the harness's own vendor | - |
+| `pi` | `openai_compat` | OpenAI Chat Completions (Pi's `openai-completions`) | required, ends in `/v1` |
+| `llm` | `openai_compat` (required) | OpenAI **Chat Completions** (`POST {base_url}/chat/completions`, not streamed) | required, ends in `/v1` |
+| claude, codex, pi | none (native id) | the harness's own vendor | - |
 
 Codex 0.162.1 (the pinned version) refuses `wire_api = "chat"`, so a server that only has
 `/v1/chat/completions` will not work with Codex. vLLM serves `/v1/responses`; for the HF router,
@@ -112,8 +114,10 @@ worker.
 A type's `reasoning` overrides its alias's. Whether a server honours the effort is up to the
 server; Qwen3 on vLLM turns thinking off through the chat template, not the effort. `extra`
 (raw request-body fields such as `chat_template_kwargs`) is accepted for swarmlab compatibility
-but neither harness can send body fields, so it is not used; set such defaults on the server
-(vLLM can set default chat-template arguments at startup).
+but Claude Code, Codex and Pi cannot send body fields, so for them it is not used; set such
+defaults on the server (vLLM can set default chat-template arguments at startup). The `llm`
+harness does send `extra`, merged into every request body, and ignores `reasoning`
+(docs/llm-harness.md).
 
 ## Cost
 
@@ -134,8 +138,10 @@ shows $0 today.
 
 `flock preflight spec.yaml` (or `POST /swarms/{swarm}/preflight` with the spec as the body)
 makes the controller probe each distinct provider-backed model the way a harness starts: two
-streamed turns on the Responses API for `openai_compat` (shaped like Codex's requests:
-`store: false`, encrypted reasoning, parallel tool calls) or the Messages API for `anthropic`.
+turns, streamed on the Responses API for `openai_compat` (shaped like Codex's requests:
+`store: false`, encrypted reasoning, parallel tool calls), non-streamed Chat Completions with
+`extra` for types on the `llm` harness (a tool call written as text passes with a warning,
+since that harness accepts it), or the Messages API for `anthropic`.
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
 `follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
@@ -158,15 +164,19 @@ enforces it, on by default:
 
 - **Queue, not reject.** A prompt for an agent that is not in a turn is accepted as usual
   (`POST /agents/{name}/prompt` never refuses it) but stays queued in the controller while the
-  provider is at its cap. It goes out on a worker's next command poll once a slot frees
-  (within one poll, about 25 s). A prompt for an agent already in a turn takes no new slot.
+  provider is at its cap. A prompt for an agent already in a turn takes no new slot.
+- **Oldest prompt first.** Free slots go to pending prompts in the order they were created,
+  across all workers of the provider, so a worker that polls often cannot keep re-taking
+  freed slots. The worker owning the next prompt in line is woken as soon as a slot frees.
 - **Every turn start is admitted the same way.** Admission happens where the controller hands
   queued prompts to workers, so it covers API prompts and `resume_prompt` after a crash (for a
   capped provider it is queued behind the assign instead of riding inside it). Anything that
   queues a prompt in the controller is covered too, e.g. a spawned child's first prompt.
-- **Counts come from worker heartbeats**, plus prompts handed out since the agent's last
-  heartbeat (so two polls between heartbeats cannot both take the last slot). The count lags
-  by up to one heartbeat (30 s), so the cap is **soft by one heartbeat**.
+- **Counts come from worker heartbeats, corrected by turn events.** A prompt handed out
+  takes its slot at once (two polls between heartbeats cannot both take the last slot), and
+  the agent's `turn_ended` event releases it at once (events reach the controller every 3 s),
+  not at the next heartbeat. The cap is still **soft by about one heartbeat**: a heartbeat
+  built before the worker saw a turn change can briefly overrule an event.
 - **The real limit belongs at the endpoint.** `max_working` keeps a swarm from overrunning a
   server it shares; it does not protect the server from other clients, and it counts agents,
   not requests. Set the server's own concurrency limits (vLLM `--max-num-seqs`, a gateway

@@ -139,6 +139,7 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 | DELETE | `/agents/{name}` | 200 `{removed: [names]}`, children first. A replica: 409 `not_spawned` (scale its type) |
 | GET | `/agents/{name}` | adds `parent`, `children`, `depth` |
 | GET | `/swarms/{s}/agents?parent=<name>` | the direct children of one agent |
+| POST | `/agents/{name}/children/prompts` `{type?, state?, text, timeout?, reply_to?, skip_pending?}` | the same prompt to every direct child (optionally one type / state) in one request; rules and counts as `POST /swarms/{s}/prompts` (`--state idle` skips children with a pending prompt): `{swarm, type, parent, matched, queued, pending, skipped_state, skipped_removing, skipped_pending}` |
 | GET | `/whoami` | `{kind: controller}` or `{kind: agent, name, swarm, type, parent, depth, children}` |
 
 Events: `spawned {child, type, depth, key}` and `child_removed {child, type, reason}` (`reason`:
@@ -159,8 +160,9 @@ agent's identity:
 | `FLOCK_AGENT_TOKEN` | the agent's scoped token |
 | `FLOCK_TOKEN` | empty: the worker's own token never reaches an agent |
 
-An agent token may: read its own status and events and call `whoami`; spawn under itself; read,
-prompt, spawn under and remove any agent in its subtree; prompt its parent. Everything else is
+An agent token may: read its own status and events and call `whoami`; spawn under itself and
+bulk-prompt its own children; read, prompt, spawn under, bulk-prompt the children of and remove
+any agent in its subtree; prompt its parent. Everything else is
 403 (its parent's status, siblings, itself as a prompt or removal target, swarms, workers). The
 controller token keeps full access.
 
@@ -179,10 +181,15 @@ always agent names.
 flock whoami                               # name, parent, depth, children
 flock spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
 flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
+flock prompt --children --state idle "text"   # all your idle children, one request
 flock status [<agent>]                     # JSON; yourself by default
 flock events <agent> --after N --wait      # blocks until something new (or --timeout, 600 s)
 flock remove <agent>                       # a descendant and its subtree
 ```
+
+The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up to
+5 attempts with exponential backoff and jitter, never sooner than `Retry-After`, so a thousand
+agents calling it through a Space edge do not fail on throttling.
 
 For the operator (controller token), `flock spawn <type> --parent <agent>` spawns on an agent's
 behalf, `flock agents <swarm> --parent <agent>` lists children, and `status` / `remove` take an

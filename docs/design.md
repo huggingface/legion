@@ -224,6 +224,20 @@ counts model calls and prices each one with the flock price table, and sends Pi 
 a call past either limit (turn ends `error`, `reason` max_turns|max_budget_usd).
 Packing numbers for Pi are not measured yet; idle VmRSS of one RPC process was 117 MB locally.
 
+The `llm` harness (`harness: llm`, docs/llm-harness.md) has no process: a "burst" is an asyncio
+task in the worker that runs a Chat Completions loop with one `bash` tool against an
+`openai_compat` provider (required). The session is a JSONL file of chat messages under
+`$FLOCK_LLM_HOME/sessions/<agent>/` (`/state/llm`), appended per step, reloaded on resume and
+compacted (system + a note + the newest messages and steps) when the prompt projected from the server's last `prompt_tokens` passes the type's `context_tokens`. A flock
+turn ends on a reply without tool calls; prompts sent mid-turn become the next user message;
+`max_turns` / `max_budget_usd` are checked before each model call, as for Pi and Codex. Usage
+is per call. `extra` is sent as body fields; `reasoning` is ignored. Tool calls written as
+text (`{"tool": "bash", ...}` or `[bash(command=...)]`) are accepted for small models. A type's
+`tool_choice` (`required` or `bash`) forces a call on every request; with the `done` tool
+(`done_tool`, default on for `required`) a turn runs until `done` or `max_turns` (50 if unset),
+without it each prompt is one action. Thinking (`reasoning_content` or inline `<think>`) is shown, never resent; the
+transcript keeps exactly one system message, first (LFM2's template requires it).
+
 ### Resume across workers
 
 `persist_workdir` defaults to true. The worker syncs, per agent, the workdir
@@ -277,7 +291,7 @@ models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: claude            # claude | codex | pi
+    harness: claude            # claude | codex | pi | llm
     model: claude-opus-5-5
     image: null                # default worker image; override to add tools/skills
     system_prompt_file: prompts/researcher.md   # written to the workdir as CLAUDE.md / AGENTS.md
@@ -294,6 +308,9 @@ types:
     idle_grace: 120s
     max_turns: 50              # model calls per prompt; enforced for every harness
     max_budget_usd: 2.0        # spend per prompt (flock price table); enforced likewise
+    context_tokens: null       # llm harness only: compaction threshold, default 32000
+    tool_choice: null          # llm harness only: auto | required | none | bash
+    done_tool: null            # llm harness only: offer `done` (default: on for tool_choice required)
     persist_workdir: true
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
@@ -324,7 +341,7 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 
 | Field | Meaning |
 |---|---|
-| `providers.<name>.type` | `openai_compat` (Codex; Responses API) or `anthropic` (Claude Code; Messages API) |
+| `providers.<name>.type` | `openai_compat` (Codex: Responses API; Pi and `llm`: Chat Completions) or `anthropic` (Claude Code; Messages API) |
 | `providers.<name>.base_url` | required for `openai_compat` (ends in `/v1`); optional for `anthropic` (API root, default Anthropic) |
 | `providers.<name>.api_key_env` | NAME of the secret holding the key; the value is never in the spec |
 | `providers.<name>.self_hosted` | price defaults to `[0, 0, 0]`; the real cost is the GPU job |
@@ -334,7 +351,7 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 | `providers.<name>.timeout_s`, `max_retries` | passed to the harness (Codex provider table; Claude `API_TIMEOUT_MS`, `CLAUDE_CODE_MAX_RETRIES`) |
 | `models.<alias>.model` | `"<provider>:<model id>"` |
 | `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
-| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); kept, not sent by either harness |
+| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); sent by the `llm` harness only |
 | `models.<alias>.pricing` | `[input, output, cached]`, overrides the provider's |
 | `types.<t>.model` | an alias, else `"<provider>:<model id>"`, else a harness-native id (v1) |
 | `types.<t>.reasoning` | overrides the alias's |
@@ -348,7 +365,8 @@ name (`[a-z][a-z0-9_-]*`, e.g. Bedrock's `anthropic.claude-...-v1:0`) is native.
 Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
 type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
 row for the id, or its `"*"` row, unless `self_hosted`; harness against provider type
-(`claude` needs `anthropic`, `codex` needs `openai_compat`; native ids always pass).
+(`claude` needs `anthropic`, `codex`, `pi` and `llm` need `openai_compat`; native ids pass,
+except on `llm`, which needs a provider).
 
 Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
 the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
@@ -369,8 +387,16 @@ low/medium/high and `thinking: disabled` for off.
 `GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. The controller
 enforces it at prompt admission: on a command poll, a prompt for an agent that is not in a turn
 goes out only while the provider has a free slot; otherwise it stays in `pending_prompts` and
-goes out on a later poll (never rejected). Slots are fresh heartbeat `working` agents plus
-agents handed a prompt since their last heartbeat. Soft by one heartbeat (30 s). A capped
+goes out on a later poll (never rejected). Free slots go to pending prompts in FIFO order of
+creation across all of the provider's workers (oldest pending prompt first), not to whichever
+worker polls first; a worker that is not running (dead, draining, launching) holds no place.
+Slots are fresh heartbeat `working` agents, overridden by what the controller learned since:
+a prompt handed out takes the slot at once, and a `turn_ended` / `turn_interrupted` /
+`prompt_deferred` event releases it at once and wakes the polls of the workers next in line
+(pixel run 1k: holding slots until the next heartbeat and first-poller-wins let 384 of 1,000
+agents run at `max_working: 128`). Still soft by about one heartbeat: an event batch arrives
+up to `flush_interval` (3 s) after the turn ends, and a heartbeat built before the worker
+saw a turn change can briefly overrule an event. A capped
 provider's `resume_prompt` is queued behind the assign so it is admitted the same way.
 `FLOCK_MAX_WORKING_ENFORCE=0` is an escape hatch (report only). Hard limits belong at the endpoint.
 
@@ -380,7 +406,8 @@ and inference runs elsewhere; flock does not colocate workers with GPU jobs.
 Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) probes each
 distinct provider-backed model from the controller (which holds the keys) with two streamed
 turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
-API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`. Best-effort: a
+API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`, non-streamed
+Chat Completions (with `extra`) for types on the `llm` harness. Best-effort: a
 failed probe refuses `flock apply` (`--skip-preflight` bypasses); a model not probed (key not
 in the controller's environment, or preflight skipped) is reported `unverified` with a warning
 and applied anyway unless `--strict`. Zero streamed usage is a warning.
@@ -403,8 +430,17 @@ did not mean to pass.
 | `working` | a harness process is running a turn for this agent |
 | `idle` | no process; `idle_since` is the end of the last turn |
 | `stuck` | a turn exceeded its timeout and was killed; cleared on the next turn |
-| `unknown` | worker heartbeat older than 90 s |
-| `dead` | worker heartbeat older than 180 s, or the job is terminal |
+| `unknown` | worker not seen for 90 s, or the agent's own report is older than 90 s |
+| `dead` | worker not seen for 180 s, or the job is terminal; or the worker's heartbeats arrive without this agent for 180 s |
+
+"Seen" is the worker's last heartbeat, command poll or event post from its current job
+(`workers.last_seen`): a Space edge can throttle heartbeats (HTTP 429) while other requests
+get through, so a worker is declared dead, cancelled and relaunched only after the full
+180 s with none of them arriving. Workers retry 429 and 5xx inside their controller client
+with exponential backoff and full jitter, never sooner than `Retry-After` (at most 30 s a
+wait; a heartbeat retries for up to 20 s, polls and event posts for 30 s), and keep at most
+three requests in flight: one poll, one heartbeat, one event batch (events are batched every
+3 s; polls are spaced at least 1 s apart even when commands keep coming).
 
 Per agent, status also carries `pending` (prompts held by the controller),
 `resumed` (bool), `worker`, `session_id`, harness, model, labels, token
@@ -426,6 +462,7 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`. Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |
@@ -439,17 +476,19 @@ steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
 
-Per-prompt limits: Claude, Codex and Pi all enforce `max_turns` (model calls) and
+Per-prompt limits: Claude, Codex, Pi and `llm` all enforce `max_turns` (model calls) and
 `max_budget_usd` (spend, priced from the flock table). Claude gets both as SDK options.
 Codex and Pi have no such option, so the worker adapter counts model calls (Codex: one
 `thread/tokenUsage/updated` per call) and prices each call; before the call that would
-pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`) and the turn ends
+pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`, `llm` simply does not
+call) and the turn ends
 `error` with `reason` max_turns|max_budget_usd, `subtype` error_max_turns|error_max_budget_usd
 and `num_turns`. The session stays usable. A Codex steer into a turn that has used its
 allowance is held and sent as the next turn once that turn ends.
 
 Each launch gets an incarnation token (job env `WORKER_INCARNATION`); workers send
-it as `?incarnation=` on command polls and heartbeats, and the controller answers 409
+it as `?incarnation=` on command polls, heartbeats and event posts (events from a replaced
+job are still stored but do not count as seen), and the controller answers 409
 when it is not the slot's current job, including to a poll that was parked when the
 slot was relaunched. A heartbeat that omits agents placed on that worker re-queues
 their assign. Both came from the e2e run (experiments/e2e/RESULTS.md, check 6).
@@ -659,6 +698,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 28 | Codex enforces `max_turns` / `max_budget_usd` in the worker (2026-10-19): one token count = one model call, flock-priced; `turn/interrupt` before a call past a limit, turn ends `error` with `reason`, as Claude and Pi; app-server has no native per-turn limit |
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
+| 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, compaction past `context_tokens` projected from the server's prompt_tokens (2026-10-20, run 3: chars/4 undercounted JSON 2x; context-length 400 compacts and retries once, else reason `context_overflow`), tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 
 ## 12. Road to 10k
 
@@ -674,6 +714,9 @@ What the 1k and 10k runs say must change, in order. Item 1 gates everything else
    its heartbeats stopped when many workers of a swarm fell silent together; cap cancels per
    pass; never relaunch into a block the controller can observe. Worker side: retry a failed
    heartbeat within seconds, honour `Retry-After`, back the command poll off on 429.
+   Partly done after the pixel run 1k (29 of 42 workers declared dead): workers retry 429/5xx
+   with backoff and jitter honouring `Retry-After`, and dead needs silence on every route
+   (heartbeat, poll, events) for 180 s. Still open: a cap on cancels per pass.
 3. **Fewer requests per agent-turn.** The 10k send phase was 120 req/s: prompters 50/s and the
    workers' immediate re-polls another 50/s. A batch `POST /prompts`, a swarm-level events
    stream, and command polls that batch for a few hundred ms would put the same round under
