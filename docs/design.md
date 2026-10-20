@@ -439,7 +439,7 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
-| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`. Controller token only |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`. Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |

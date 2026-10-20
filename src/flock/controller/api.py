@@ -729,6 +729,8 @@ def create_app(
             raise HTTPException(404, f"no type {req.type!r} in swarm {swarm!r}")
         now = clock().timestamp()
         workers = {w["id"]: w for w in store.list_workers(swarm)}
+        skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
+        pending = store.pending_counts(swarm) if skip_pending else {}
         ack = BulkPromptAck(swarm=swarm, type=req.type, matched=0, queued=0, pending=0)
         rows: list[tuple[str, str]] = []
         for a in sorted(store.list_agents(swarm, req.type), key=lambda a: a["name"]):
@@ -737,8 +739,11 @@ def create_app(
             if a["removing"]:
                 ack.skipped_removing += 1
                 continue
-            if req.state is not None and agent_state(a, w, now) != req.state:
+            if req.state is not None and turn_state(a, w, now) != req.state:
                 ack.skipped_state += 1
+                continue
+            if pending.get(a["name"]):
+                ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
                 continue
             cmd = PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
                                 timeout=req.timeout, reply_to=req.reply_to)
@@ -808,6 +813,34 @@ def create_app(
             return seen[0] != "idle"
         return agent_state(a, w, now) == AgentState.working
 
+    def turn_state(a: Row, w: Row | None, now: float) -> AgentState:
+        """`agent_state`, with working/idle corrected by what the controller learned since the
+        heartbeat (`live`): a prompt just handed out makes it working, a turn_ended event idle.
+        Used by the bulk prompt's `state` filter so it neither re-prompts an agent whose turn
+        is starting nor waits a heartbeat for one whose turn just ended."""
+        st = agent_state(a, w, now)
+        seen = live.get(a["name"])
+        if seen is None or st not in (AgentState.idle, AgentState.working):
+            return st
+        return AgentState.idle if seen[0] == "idle" else AgentState.working
+
+    def note_started(names: set[str], now: float) -> None:
+        """Uncapped providers: remember prompts handed to agents not in a turn (`live`), as
+        admission does for capped ones, so `turn_state` sees the turn start at once."""
+        workers: dict[str, Row | None] = {}
+        for name in names:
+            seen = live.get(name)
+            if seen is not None and seen[0] != "idle":
+                continue
+            a = store.get_agent(name)
+            if a is None:
+                continue
+            if a["worker"] not in workers:
+                workers[a["worker"]] = store.get_worker(a["worker"]) if a["worker"] else None
+            if seen is None and agent_state(a, workers[a["worker"]], now) == AgentState.working:
+                continue
+            live[name] = ("admitted", now)
+
     def admission_view(spec: SwarmSpec, provider: str, cap: int, now: float
                        ) -> tuple[set[str], list[str], dict[str, str | None]]:
         """(busy agents, admission window, agent -> worker) for one provider. The window is
@@ -851,9 +884,10 @@ def create_app(
             return prompts
         sw = store.get_swarm(w["swarm"])
         cap = provider_cap(sw["spec"], w["type"]) if sw else None
-        if cap is None:
-            return prompts
         now = clock().timestamp()
+        if cap is None:
+            note_started({p["agent"] for p in prompts}, now)
+            return prompts
         taken, window, _ = admission_view(sw["spec"], cap[0], cap[1], now)
         allowed = set(window)
         out = []
@@ -968,7 +1002,7 @@ def create_app(
         w = store.get_worker(worker_id)
         sw = store.get_swarm(w["swarm"]) if w else None
         cap = provider_cap(sw["spec"], w["type"]) if sw else None
-        if cap is not None and heartbeat_seen(hb, clock().timestamp()):
+        if heartbeat_seen(hb, clock().timestamp()) and cap is not None:
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True}
 
@@ -987,9 +1021,9 @@ def create_app(
         for agent, evs in grouped.items():
             a = store.get_agent(agent)
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
-            if cap is not None and a is not None and a["worker"] == worker_id:
+            if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
-        if released:  # slots freed now, not at the next heartbeat (run-1k finding 1)
+        if released and cap is not None:  # slots freed now, not at the next heartbeat (run-1k finding 1)
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
 

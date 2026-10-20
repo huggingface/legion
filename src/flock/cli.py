@@ -280,15 +280,23 @@ def prompt(
     swarm: str = typer.Option(None, "--swarm", help="with --type: the swarm"),
     type: str = typer.Option(None, "--type", help="prompt every agent of this type (one request)"),
     state: str = typer.Option(None, "--state", help="with --type: only agents in this state, e.g. idle"),
+    skip_pending: bool = typer.Option(
+        None, "--skip-pending/--stack",
+        help="with --type: skip agents that already have an undelivered prompt "
+             "(default: on with --state idle, off otherwise)"),
 ) -> None:
     """Send a prompt to an agent (`prompt NAME TEXT`), or to every agent of a type
-    (`prompt --swarm S --type T [--state idle] TEXT`); prints the ack (counts for --type)."""
+    (`prompt --swarm S --type T [--state idle] TEXT`); prints the ack (counts for --type).
+    With `--state idle` an agent that already has a pending prompt is skipped, so repeating
+    the call never stacks prompts (`skipped_pending` in the counts)."""
     body = {"timeout": timeout, "reply_to": reply_to}
     if type is not None:
         if swarm is None or len(args) != 1:
             typer.echo("usage: flock prompt --swarm S --type T [--state STATE] TEXT", err=True)
             raise typer.Exit(2)
         body.update(type=type, state=state, text=args[0])
+        if skip_pending is not None:
+            body["skip_pending"] = skip_pending
         typer.echo(json.dumps(_call("POST", f"/swarms/{swarm}/prompts", json=body)))
         return
     if swarm is not None or state is not None or len(args) != 2:

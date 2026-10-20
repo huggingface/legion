@@ -635,6 +635,9 @@ class BulkPromptRequest(BaseModel):
     text: str
     timeout: str | None = None
     reply_to: str | None = None
+    # Skip agents that already have a pending (undelivered) prompt. Default: on with
+    # state=idle ("only if idle and empty": repeated calls never stack prompts), off otherwise.
+    skip_pending: bool | None = None
 
 
 class BulkPromptAck(BaseModel):
@@ -645,6 +648,7 @@ class BulkPromptAck(BaseModel):
     pending: int  # prompts held until the agent's worker is up
     skipped_state: int = 0  # not in the requested state
     skipped_removing: int = 0  # being removed (spawn cascade)
+    skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
 
 
 class SpawnRequest(BaseModel):
