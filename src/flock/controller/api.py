@@ -43,6 +43,7 @@ from flock.models import (
     AgentStatus,
     BulkPromptAck,
     BulkPromptRequest,
+    ChildrenPromptRequest,
     Command,
     CommandBatch,
     EventBatch,
@@ -727,13 +728,33 @@ def create_app(
             raise HTTPException(409, f"swarm {swarm!r} is being removed")
         if req.type not in row["spec"].types:
             raise HTTPException(404, f"no type {req.type!r} in swarm {swarm!r}")
+        ack = BulkPromptAck(swarm=swarm, type=req.type, matched=0, queued=0, pending=0)
+        return prompt_many(swarm, store.list_agents(swarm, req.type), req, ack)
+
+    @api.post("/agents/{name}/children/prompts")
+    def children_prompt(name: str, req: ChildrenPromptRequest) -> BulkPromptAck:
+        """The same prompt to every direct child of `name` (optionally one type / state), in
+        one request, with the rules of `POST /swarms/{swarm}/prompts`. The agent's own token
+        may call it (docs/spawn.md), so a leader prompts 100 children in one request."""
+        parent = agent_or_404(name)
+        if parent["removing"]:
+            raise HTTPException(409, f"agent {name!r} is being removed")
+        kids = store.list_agents(parent["swarm"], req.type, parent=name)
+        ack = BulkPromptAck(swarm=parent["swarm"], type=req.type, parent=name, matched=0,
+                            queued=0, pending=0)
+        return prompt_many(parent["swarm"], kids, req, ack)
+
+    def prompt_many(swarm: str, agents: list[Row], req: BulkPromptRequest | ChildrenPromptRequest,
+                    ack: BulkPromptAck) -> BulkPromptAck:
+        """One pending prompt per matching agent, delivered and admitted (`max_working`)
+        exactly as `POST /agents/{name}/prompt` would. `skip_pending` (default on with
+        state=idle) skips agents that already have an undelivered prompt."""
         now = clock().timestamp()
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
         pending = store.pending_counts(swarm) if skip_pending else {}
-        ack = BulkPromptAck(swarm=swarm, type=req.type, matched=0, queued=0, pending=0)
         rows: list[tuple[str, str]] = []
-        for a in sorted(store.list_agents(swarm, req.type), key=lambda a: a["name"]):
+        for a in sorted(agents, key=lambda a: a["name"]):
             ack.matched += 1
             w = workers.get(a["worker"])
             if a["removing"]:

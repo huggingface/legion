@@ -33,7 +33,7 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
     r = await client.post("/swarms/demo/prompts", json={"type": "researcher", "state": "idle", "text": "go",
                                                          "reply_to": "pixel"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"swarm": "demo", "type": "researcher", "matched": 3, "queued": 1, "pending": 0,
+    assert r.json() == {"swarm": "demo", "type": "researcher", "parent": None, "matched": 3, "queued": 1, "pending": 0,
                         "skipped_state": 2, "skipped_removing": 0,
                         "skipped_pending": 0}
     [p] = await _prompts(client, W0)
