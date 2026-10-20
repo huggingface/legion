@@ -427,7 +427,7 @@ class World:
             self._release_ids(aid, self.agent_leases.pop(aid, []))
             self._expire(now)
             blocked = self._blocked_regions(agent, now)
-            mine = tuple(sorted(r for r in self.members.get(agent, ()) if r in self.regions))
+            mine = tuple(sorted(r for r in self._member_of(agent) if r in self.regions))
             ids = np.array(self._take(n, now, blocked, mine), dtype=np.int64)
             region_done = (
                 bool(mine)
@@ -511,12 +511,21 @@ class World:
         for rid in [k for k, r in self.regions.items() if r["until"] <= now]:
             self._drop_region(rid)
 
+    def _member_of(self, agent: str) -> set[int]:
+        """Regions an agent may use: granted by name, or by its root's pattern `<root>-*`
+        (a leader lending its band to another leader's whole team in one grant)."""
+        mine = set(self.members.get(agent, ()))
+        root = root_of(agent)
+        if root != agent:
+            mine |= self.members.get(root + "-*", set())
+        return mine
+
     def _blocked_regions(self, agent: str, now: float) -> list[int]:
         """Region ids this agent may not paint or pixel-claim in (REGION_ENFORCE=1 only)."""
         if not self.cfg.region_enforce or not self.regions:
             return []
         self._expire_regions(now)
-        mine = self.members.get(agent, set())
+        mine = self._member_of(agent)
         return [k for k in self.regions if k not in mine]
 
     def claim_region(

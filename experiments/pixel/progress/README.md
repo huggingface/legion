@@ -45,6 +45,9 @@ with front matter.
   - The agent map comes from the log, so it works for run 1 too, which has no `agents.png`.
   - `tests/test_sbs_js.py` checks both panels' frames and agent maps against the service, in
     both alignment modes.
+- **Leaders' message board** (experiment 2): when the run has `board_transcript`, the run view
+  lists the archived channel transcript (`final/<id>/board-transcript.jsonl`; author, time, body,
+  replies indented) under the replay.
 - **Painted mask:**
   - Live view: lays the canvas's `/mask.png?style=overlay` (magenta = painted, transparent elsewhere) over the dimmed live image. The server renders it, so the browser does no per-pixel work. It refreshes every 10 s with the canvas.
   - Replay: the same mask at position t, computed from the log with the same keyframe scheme.

@@ -257,10 +257,30 @@ class Publisher:
             files[f"{base}/score.json"] = json.dumps(score).encode()
             files[f"{base}/paint-log.jsonl.gz"] = gzip.compress(fetch_log(canvas), 6)
             self.run["final"] = base
+            tr = board_transcript()
+            if tr is not None:
+                files[f"{base}/board-transcript.jsonl"] = tr
+                self.run["board_transcript"] = f"{base}/board-transcript.jsonl"
         except (urllib.error.URLError, OSError) as e:
             print(f"final artefacts incomplete: {e}", flush=True)
         files["runs.json"] = json.dumps(self.runs, indent=1).encode()
         self.put(files, f"final {self.run['id']} ({status})")
+
+
+def board_transcript() -> bytes | None:
+    """Experiment 2: the leaders' msgboard channel as JSONL (run/board.py transcript), when
+    BOARD_URL and BOARD_TOKEN (a principal that can read the channel; never printed) are set.
+    The channel: BOARD_CHANNEL (id) or BOARD_CHANNEL_NAME (default flock-pixel-test)."""
+    if not (os.environ.get("BOARD_URL") and os.environ.get("BOARD_TOKEN")):
+        return None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import board  # run/board.py, stdlib only
+
+        return (board.transcript() + "\n").encode()
+    except Exception as e:  # noqa: BLE001 - the dashboard must not stop the run
+        print(f"board transcript not archived: {type(e).__name__}: {e}", flush=True)
+        return None
 
 
 def fetch_log(canvas: str) -> bytes:

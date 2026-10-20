@@ -385,6 +385,18 @@ if (typeof document !== 'undefined') (() => {
       Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ') : '';
   }
 
+  const esc = (x) => String(x ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  async function loadBoard(path) {
+    try {
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const msgs = (await r.text()).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      $('board').innerHTML = msgs.map((m) => `<div class="m${m.reply_to ? ' r' : ''}"><span class="t">#${m.id} ` +
+        `${m.ts ? new Date(m.ts * 1000).toISOString().slice(11, 19) + ' UTC' : ''}</span>` +
+        `<span class="who">${esc(m.author)}</span> ${esc(m.body)}</div>`).join('') || '<p class="muted">no messages</p>';
+    } catch (e) { $('board').innerHTML = `<p class="err">transcript unavailable: ${esc(e.message)}</p>`; }
+  }
+
   function links() {
     const l = [];
     if (run.controller_url) l.push(['controller status', run.controller_url]);
@@ -408,6 +420,8 @@ if (typeof document !== 'undefined') (() => {
     if (run.status === 'running') { refreshLive(); liveTimer = setInterval(refreshLive, 10000); }
     else if (run.canvas_url) refreshLive(); // may still answer if the job is up
     if (run.final) loadReplay();
+    $('boardsec').hidden = !run.board_transcript;
+    if (run.board_transcript) loadBoard(run.board_transcript);
   }
 
   // ---------------------------------------------------------------- compare

@@ -323,7 +323,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         if len(names) > 1000:
             raise PaintError("at most 1000 agents per grant")
         for n in names:
-            if not NAME_RE.match(n):
+            if not NAME_RE.match(n.removesuffix("-*")):
                 raise PaintError(f"bad agent name {n!r}: use 1-64 chars of [A-Za-z0-9._:@-]")
         return {"regions": world.grant_region(agent, names, body.id), "granted": len(names)}
 
@@ -371,6 +371,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     def cli_source():
         """The CLI itself, so a worker without the repo can fetch it (stdlib only)."""
         return FileResponse(HERE / "cli" / "canvas_cli.py", media_type="text/x-python")
+
+    @app.get("/cli/board")
+    def board_source():
+        """run/board.py (msgboard helper for experiment-2 leaders), stdlib only."""
+        return FileResponse(HERE / "run" / "board.py", media_type="text/x-python")
 
     @app.get("/healthz")
     def healthz():

@@ -129,3 +129,22 @@ def test_equal_work_bands_on_shipped_target():
     assert sum(b["work"] for b in bands) == w.work_total == 622_780
     works = [b["work"] for b in bands]
     assert max(works) - min(works) < 0.02 * w.work_total  # ~equal work (rows are discrete)
+
+
+def test_pattern_grant_lends_a_band_to_another_leaders_team(tmp_path):
+    w = _w(tmp_path)
+    w.claim_region("leader-0003", 0, 0, 32, 16)
+    w.claim_region("leader-0007", 0, 16, 32, 16)
+    helper = "leader-0007-painter-b-0042"
+    w.grant_region("leader-0007", ["leader-0007-*"])  # own team in one call
+    assert all(q["y"] >= 16 for q in w.claim(helper, 10)["pixels"])
+    w.release(helper)
+    w.grant_region("leader-0003", ["leader-0007-*"])  # 0003 asks 0007's team for help
+    ys = set()
+    for _ in range(80):
+        cl = w.claim(helper, 10)
+        ys |= {q["y"] for q in cl["pixels"]}
+        if cl["pixels"]:
+            _paint(w, helper, cl)
+    assert min(ys) < 16 <= max(ys)  # it painted in both bands
+    assert w.claim("leader-0009-painter-a-0001", 10)["pixels"] == []  # others still blocked

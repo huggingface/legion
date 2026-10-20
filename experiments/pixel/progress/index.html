@@ -56,6 +56,10 @@
   .links a { margin-right:12px; }
   .empty { padding:48px 16px; text-align:center; color:var(--muted); }
   .err { color:var(--bad); font-size:12px; }
+  .boardlog { max-height:420px; overflow:auto; font-size:13px; }
+  .boardlog .m { padding:4px 0; border-top:1px solid var(--line); }
+  .boardlog .m.r { padding-left:20px; }
+  .boardlog .who { font-weight:600; } .boardlog .t { color:var(--muted); font-size:11px; margin-right:6px; }
 </style>
 </head>
 <body>
@@ -103,6 +107,10 @@
       <select id="speed" aria-label="speed"><option value="10">10/tick</option><option value="100" selected>100/tick</option><option value="1000">1000/tick</option></select>
     </div>
     <p class="muted" id="entry"></p>
+  </section>
+  <section class="wide" id="boardsec" hidden>
+    <h2>Leaders' message board (channel transcript, archived at run end)</h2>
+    <div id="board" class="boardlog"></div>
   </section>
   <section class="wide links" id="links"></section>
 </main>

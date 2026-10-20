@@ -7,7 +7,7 @@ Nothing here has been launched. Files:
 | `painter.md` | agent instructions (19 lines): install step, then one chained command per prompt |
 | `spec-100.yaml`, `spec-smoke.yaml` | flock specs: 100 painters on 2 cpu-basic workers (+1 spare); smoke = 3 painters, 1 worker |
 | `driver.py` | keeps painters prompted until the canvas is done; writes `progress.jsonl`, `prompts.jsonl` |
-| `spec-spawn.yaml`, `leader.md`, `job-spawn.sh` | experiment 2: 10 Sonnet leaders x 100 painters on leased bands (below) |
+| `spec-spawn.yaml`, `leader.md`, `board.py`, `job-spawn.sh` | experiment 2: 10 Sonnet leaders x 100 painters on leased bands (below) |
 | `spec-1k.yaml`, `job-1k.sh` | the 1k run: 3 painter types x 3 providers, 3 rtx-pro-6000 jobs (below) |
 | `job.sh` | the single GPU job: vLLM (LFM2.5-2.6B, :8000) + canvas (:8765) in one container |
 
@@ -128,6 +128,46 @@ Same conditions as run 1, except agent count, GPUs and workers (Carlos):
   tick** instead, with backoff. This changes how fast idle agents get their next prompt, not what
   an agent does. For a strict comparison, rerun 100 agents with the bulk driver.
 
+### Leaders talk on the msgboard (#flock-pixel-test)
+- **`run/board.py`** (stdlib; the canvas serves it at `/cli/board`, and leader.md step 1 installs it):
+  - `join` redeems `BOARD_INVITE` as `$FLOCK_AGENT`. The token goes to `.board_token` (mode 600,
+    never printed), and the channel id is found by name and cached.
+  - `post`, `reply <id>`, `react <id> <emoji>`.
+  - `read`: new channel messages since the last read, from `/v1/activity`, with a cursor file.
+  - `transcript`: the whole channel as JSONL, for the observer.
+  - Writes carry an Idempotency-Key and retry 429/5xx with the same key.
+- **Invite:** one multi-use agent/guest invite scoped to `#flock-pixel-test`
+  (`join_open_channels: false`), so each leader becomes a member of exactly that channel. It goes
+  into the flock secret `BOARD_INVITE` at launch; never commit or print it. `BOARD_URL` is a
+  secret too. `spec-spawn.yaml` passes `BOARD_CHANNEL_NAME=flock-pixel-test`. Painters get none
+  of this.
+- **Protocol** (leader.md):
+  - After its lease, a leader posts "leader-000N: leasing region x,y,w,h". On a 409 it reads the
+    channel and takes the next band.
+  - The watch round posts one progress line every ~3 min (band done %, painters working, idle).
+  - When its band is done it posts "done, free capacity: 100 painters".
+  - A stalled leader (no progress for 5 min) @mentions a leader that posted done. The holder then
+    lends its band to the helper's whole team with one call: `canvas grant-region
+    "leader-0007-*"`. Region grants accept `<leader>-*` patterns; tests/test_leaders.py checks
+    that the helper's children then paint both bands while others stay blocked.
+  - Leaders read the channel once per round, post one line, and never paste raw tool output.
+- **Observer:** with `BOARD_URL`, `BOARD_TOKEN` (any principal that can read the channel; never
+  printed) and `BOARD_CHANNEL` or `BOARD_CHANNEL_NAME` set, `driver.py --observe` archives the
+  channel at run end to `final/<run>/board-transcript.jsonl`. The progress page's run view lists
+  it below the replay.
+- **Join schema:** `POST /v1/join {code, name, display_name}`. A *named* invite (`agent_name`
+  bound) would reject other names. Ours is unnamed and multi-use: one code serves all 10 leaders,
+  and a rejoin with the same name rotates the token and keeps the principal. Agents cannot create
+  channels or invites, which is why the operator makes the channel and invite first.
+- **Child reports:** painters do not `flock prompt "$FLOCK_PARENT"` on completion, and painter.md
+  stays run 1's.
+  - With the Claude harness each report would become a Sonnet turn: 100 per leader, ~1,000
+    billed turns.
+  - Leaders see completion from the canvas instead: the band's done %, and children that are idle
+    with `region_done`.
+  - Leaders never run `flock events --wait` per child; 1,000 long-polls would hit the Spaces edge.
+    They check `flock agents --parent $FLOCK_AGENT --state idle` once per 30-s round.
+
 ### Launch order
 1. `RUN_ID=run1k-YYYYMMDD experiments/pixel/run/job-1k.sh`. It launches 3 jobs (`$RUN_ID-gpu1..3`,
    `--timeout 75m`), one engine each with `--api-server-count 4 --max-num-seqs 512`. gpu1 also runs
@@ -198,7 +238,9 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
   painter types, providers and settings are exactly spec-1k's, with `replicas: 0`: every painter
   is a child named `<leader>-<type>-<NNNN>`.
 - **Limits:** `spawn: {leader: {types: {painter-a: 34, painter-b: 33, painter-c: 33}, depth: 1}}`
-  and `limits: {alive: 1100, spawned_total: 1200}`. It validates against the `pixel-run` wheel.
+  and `limits: {alive: 1100, spawned_total: 1500}`. `spawned_total` counts every spawn ever, so
+  1,500 leaves room for 500 replacements. The painter types set `max_working_per_worker: 25`
+  explicitly. The spec validates against the `pixel-run` wheel.
 - **Coordination is canvas region leases** (`job-spawn.sh` = `job-1k.sh` with `REGION_ENFORCE=1`):
   - Each leader leases one of 10 full-width bands. `canvas bands 10` gives equal-*work* bands;
     equal-height bands of this image range from 389 to 92k work pixels.
@@ -223,7 +265,8 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
    on gpu1 with `REGION_ENFORCE=1`. Fill `<JOB_ID_1..3>` in `spec-spawn.yaml`.
 2. Wait for `VLLM READY` x3 and canvas `/status`.
 3. Controller `cmpatino/flock-smoke` on the `pixel-run` wheel, restarted.
-   - Space secrets: `ANTHROPIC_API_KEY` (leaders), `HF_TOKEN`, `CANVAS_URL`, `CANVAS_TOKEN`.
+   - Space secrets: `ANTHROPIC_API_KEY` (leaders), `HF_TOKEN`, `CANVAS_URL`, `CANVAS_TOKEN`,
+     `BOARD_URL`, `BOARD_INVITE` (the #flock-pixel-test invite).
    - Turn on persistent storage: spawned rows live only in the controller's SQLite.
 4. `flock apply experiments/pixel/run/spec-spawn.yaml`. The 10 leaders appear and idle (2 workers,
    ~1 min). No painters exist yet.
@@ -243,8 +286,8 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
 | when | what |
 |---|---|
 | +0-1 min | leaders install, read bands, lease (409 -> next band) |
-| +1-2 min | 1,000 `flock spawn` calls (100 serial per leader, 10 leaders in parallel), bulk grants |
-| +1-3 min | painter workers boot as slots fill: 42 workers, ~30-45 s each, in parallel; the first prompt waits as pending |
+| +1-2 min | 1,000 `flock spawn` calls (100 serial per leader, 10 leaders in parallel; the controller handles ~300 spawns/s, local scale test), one grant per leader |
+| +1-3 min | painter workers boot as slots fill: `workers.initial` does NOT pre-create workers, so the first spawn of each type waits ~45 s for a job; 42 workers launch in one pass and boot in parallel; first prompts wait as pending |
 | +3-7 min | painting: ~62k calls at ~400 calls/s if all bands run at once, i.e. ~3 min; uneven leaders make it longer |
 | +7-8 min | leaders see BAND DONE within 30 s, reply "band N done" |
 

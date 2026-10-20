@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import uvicorn
 from conftest import make_target
+from test_board import fake_board
 
 from canvas.app import create_app
 from canvas.config import Settings
@@ -40,6 +41,30 @@ case "$1" in
   *) echo "fake flock: $*" >&2; exit 2 ;;
 esac
 """
+
+
+def _serve(app):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    threading.Thread(target=srv.run, daemon=True).start()
+    for _ in range(200):
+        if srv.started:
+            break
+        time.sleep(0.02)
+    return srv, f"http://127.0.0.1:{port}"
+
+
+def test_every_command_in_leader_md_is_valid_shell(tmp_path):
+    blocks = [_cmd(p) for p in ("python3 -c", "B=", ": >", "P=", "RC=")]
+    blocks += [
+        ln.strip() for ln in LEADER_MD.splitlines() if ln.strip().startswith("python3 board.py")
+    ]
+    for b in blocks:
+        r = subprocess.run(["bash", "-n", "-c", b], capture_output=True, text=True, check=False)
+        assert r.returncode == 0, (b, r.stderr)
+    assert len(LEADER_MD.splitlines()) <= 40
 
 
 def _cmd(prefix: str) -> str:
@@ -74,6 +99,8 @@ def canvas(tmp_path):
 
 def test_leader_md_commands_run_end_to_end(tmp_path, canvas):
     world, url = canvas
+    board_app, board_st = fake_board()
+    board_srv, board_url = _serve(board_app)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "flock").write_text(FAKE_FLOCK)
@@ -88,6 +115,8 @@ def test_leader_md_commands_run_end_to_end(tmp_path, canvas):
         "SWARM": "pixel-spawn",
         "FAKE_STATE": str(tmp_path / "st"),
         "HOME": str(tmp_path),
+        "BOARD_URL": board_url,
+        "BOARD_INVITE": "INV",
     }
 
     def run(cmd, extra=""):
@@ -109,7 +138,16 @@ def test_leader_md_commands_run_end_to_end(tmp_path, canvas):
     # another leader wanting band 3 gets the next free band
     env2 = {**env, "FLOCK_AGENT": "leader-0013"}
     (tmp_path / "leader2").mkdir()
-    (tmp_path / "leader2" / "canvas").write_bytes((wd / "canvas").read_bytes())
+    r2 = subprocess.run(
+        ["bash", "-c", _cmd("python3 -c")],
+        cwd=tmp_path / "leader2",
+        env=env2,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert "joined as leader-0013" in r2.stdout, r2.stderr
     r = subprocess.run(
         ["bash", "-c", _cmd("B=")],
         cwd=tmp_path / "leader2",
@@ -123,7 +161,7 @@ def test_leader_md_commands_run_end_to_end(tmp_path, canvas):
     out = run(_cmd(": >"))
     kids = (wd / "kids.txt").read_text().split()
     assert len(kids) == 100 and kids[0] == "leader-0003-painter-a-0001"
-    assert "granted 100 agents" in out
+    assert "granted 1 agents" in out  # the team pattern leader-0003-*
     assert re.search(r"started", run(_cmd("P=")))
     out = run(_cmd("RC="), extra="sleep(){ :; }; ")
     assert "BAND DONE" in out
@@ -135,3 +173,7 @@ def test_leader_md_commands_run_end_to_end(tmp_path, canvas):
     assert regs["leader-0003"]["done_pct"] == 100.0
     painters = {n for n, st in world.stats.items() if st.calls}
     assert painters and all(n.startswith("leader-0003-painter-") for n in painters)
+    posts = [(m["sender"]["external_id"], m["body"]) for m in board_st["msgs"]]
+    assert ("leader-0003", "leader-0003: leasing region " + ",".join(map(str, band))) in posts
+    assert any(a == "leader-0013" and "leasing region" in b for a, b in posts)
+    board_srv.should_exit = True

@@ -237,6 +237,30 @@ def test_observe_mode_records_leaders_and_regions(tmp_path):
     canvas_srv, canvas_url = _serve(app_c)
     app, ran, calls = fake_controller(canvas_url, tmp_path, 2, types=("leader",))
     ctl_srv, ctl_url = _serve(app)
+    from test_board import fake_board
+
+    board_app, bst = fake_board()
+    bst["tokens"]["obs-token"] = "observer"
+    for i, (who, body) in enumerate(
+        [
+            ("leader-0000", "leader-0000: leasing region 0,0,8,4"),
+            ("leader-0001", "@leader-0000 help?"),
+        ],
+        1,
+    ):
+        bst["msgs"].append(
+            {
+                "id": i,
+                "channel_id": 5,
+                "seq": i,
+                "body": body,
+                "reply_to": None,
+                "thread_id": None,
+                "created_at": 1.0 + i,
+                "sender": {"external_id": who, "display_name": who},
+            }
+        )
+    board_srv, board_url = _serve(board_app)
     try:
         r = subprocess.run(
             [
@@ -263,15 +287,32 @@ def test_observe_mode_records_leaders_and_regions(tmp_path):
                 str(tmp_path / "progress.jsonl"),
                 "--prompts-log",
                 str(tmp_path / "prompts.jsonl"),
+                "--publish-dir",
+                str(tmp_path / "space"),
+                "--run-id",
+                "e2",
             ],
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
-            env={**{k: v for k, v in os.environ.items() if k != "SPACE_ID"}, "FLOCK_TOKEN": "x"},
+            cwd=tmp_path,
+            env={
+                **{k: v for k, v in os.environ.items() if k != "SPACE_ID"},
+                "FLOCK_TOKEN": "x",
+                "BOARD_URL": board_url,
+                "BOARD_TOKEN": "obs-token",
+                "BOARD_CHANNEL_NAME": "flock-pixel-test",
+            },
         )
         assert r.returncode == 0, r.stdout + r.stderr
         assert "observe (leaders drive)" in r.stdout
+        tr_path = tmp_path / "space/final/e2/board-transcript.jsonl"
+        tr = [json.loads(x) for x in tr_path.read_text().splitlines()]
+        assert [x["author"] for x in tr] == ["leader-0000", "leader-0001"]
+        run = json.loads((tmp_path / "space/runs.json").read_text())[-1]
+        assert run["board_transcript"] == "final/e2/board-transcript.jsonl"
+        assert "obs-token" not in r.stdout + r.stderr
         assert not ran and calls["bulk"] == 0  # no prompts at all
         row = json.loads((tmp_path / "progress.jsonl").read_text().splitlines()[-1])
         ld = row["leaders"]["leader-0000"]
@@ -279,4 +320,4 @@ def test_observe_mode_records_leaders_and_regions(tmp_path):
         assert ld["first_child_s"] is not None and ld["all_children_s"] is not None
         assert row["regions"][0]["owner"] == "leader-0000" and row["regions"][0]["done_pct"] == 0.0
     finally:
-        canvas_srv.should_exit = ctl_srv.should_exit = True
+        canvas_srv.should_exit = ctl_srv.should_exit = board_srv.should_exit = True

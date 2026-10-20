@@ -65,8 +65,12 @@ types:
     harness: claude
     model: claude-sonnet-5-5
     system_prompt_file: leader.md
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN, CANVAS_URL, CANVAS_TOKEN]
-    env: {SWARM: pixel-spawn}    # leader.md lists children with `flock agents $SWARM --parent ...`
+    # BOARD_URL / BOARD_INVITE: the msgboard (one multi-use agent invite scoped to
+    # #flock-pixel-test; each leader joins under its flock name). Painters get none of this.
+    secrets: [ANTHROPIC_API_KEY, HF_TOKEN, CANVAS_URL, CANVAS_TOKEN, BOARD_URL, BOARD_INVITE]
+    # SWARM: leader.md lists children with `flock agents $SWARM --parent ...`;
+    # BOARD_CHANNEL_NAME: board.py finds the channel id by name after joining.
+    env: {SWARM: pixel-spawn, BOARD_CHANNEL_NAME: flock-pixel-test}
     replicas: 10
     agents_per_worker: 5         # 2 cpu-basic workers
     workers: {initial: 2, max_extra: 0}
@@ -128,4 +132,4 @@ types:
     labels: {experiment: pixel-spawn}
 spawn:
   leader: {types: {painter-a: 34, painter-b: 33, painter-c: 33}, depth: 1}
-limits: {alive: 1100, spawned_total: 1200}
+limits: {alive: 1100, spawned_total: 1500}   # spawned_total is lifetime: 500 replacements
