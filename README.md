@@ -156,6 +156,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | `GET /agents/{name}` | one agent's state, pending prompts, cost |
 | `POST /agents/{name}/prompt` | body `{text, timeout?, reply_to?}`; acks `queued` or `pending` |
+| `POST /swarms/{swarm}/prompts` | body `{type, state?, text, timeout?, reply_to?}`: the prompt to every agent of a type in one request (`flock prompt --swarm S --type T [--state idle] TEXT`); acks counts |
 | `GET /agents/{name}/events?after=&wait=` | event stream, long-poll |
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |

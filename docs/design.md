@@ -439,6 +439,7 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`. Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |

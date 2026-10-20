@@ -41,6 +41,8 @@ from flock.controller.store import Row, Store, agent_tokens
 from flock.models import (
     AgentState,
     AgentStatus,
+    BulkPromptAck,
+    BulkPromptRequest,
     Command,
     CommandBatch,
     EventBatch,
@@ -714,6 +716,39 @@ def create_app(
         return PromptAck(
             prompt_id=cmd.prompt_id, agent=name, status="queued" if live else "pending"
         )
+
+    @api.post("/swarms/{swarm}/prompts")
+    def bulk_prompt(swarm: str, req: BulkPromptRequest) -> BulkPromptAck:
+        """The same prompt to every agent of a type (optionally only those in `state`), in one
+        request: one pending prompt per agent, delivered and admitted (`max_working`) exactly
+        as `POST /agents/{name}/prompt` would."""
+        row = spec_or_404(swarm)
+        if row["removing"]:
+            raise HTTPException(409, f"swarm {swarm!r} is being removed")
+        if req.type not in row["spec"].types:
+            raise HTTPException(404, f"no type {req.type!r} in swarm {swarm!r}")
+        now = clock().timestamp()
+        workers = {w["id"]: w for w in store.list_workers(swarm)}
+        ack = BulkPromptAck(swarm=swarm, type=req.type, matched=0, queued=0, pending=0)
+        rows: list[tuple[str, str]] = []
+        for a in sorted(store.list_agents(swarm, req.type), key=lambda a: a["name"]):
+            ack.matched += 1
+            w = workers.get(a["worker"])
+            if a["removing"]:
+                ack.skipped_removing += 1
+                continue
+            if req.state is not None and agent_state(a, w, now) != req.state:
+                ack.skipped_state += 1
+                continue
+            cmd = PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
+                                timeout=req.timeout, reply_to=req.reply_to)
+            rows.append((a["name"], cmd.model_dump_json()))
+            if w is not None and worker_state(w, now) == WorkerState.running:
+                ack.queued += 1
+            else:
+                ack.pending += 1
+        store.add_prompts(rows, now)
+        return ack
 
     @api.get("/agents/{name}/events")
     async def events(name: str, after: int = 0, wait: float = 0, limit: int = 1000) -> dict:

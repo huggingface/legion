@@ -554,6 +554,20 @@ class Store:
         if row and row["worker"]:
             self.listener("commands", row["worker"])
 
+    def add_prompts(self, rows: list[tuple[str, str]], now: float) -> None:
+        """Many (agent, body) prompts in one transaction; each worker is woken once."""
+        if not rows:
+            return
+        with self.transaction():
+            self._db.executemany(
+                "INSERT INTO pending_prompts (agent, body, created_at) VALUES (?, ?, ?)",
+                [(agent, body, now) for agent, body in rows],
+            )
+        names = {agent for agent, _ in rows}
+        workers = {a["worker"] for a in self.list_agents() if a["name"] in names and a["worker"]}
+        for w in sorted(workers):
+            self.listener("commands", w)
+
     def prompts_for_worker(self, worker_id: str) -> list[Row]:
         return self._q(
             "SELECT p.id, p.agent, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
