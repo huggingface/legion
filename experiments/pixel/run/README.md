@@ -7,6 +7,7 @@ Nothing here has been launched. Files:
 | `painter.md` | agent instructions (19 lines): install step, then one chained command per prompt |
 | `spec-100.yaml`, `spec-smoke.yaml` | flock specs: 100 painters on 2 cpu-basic workers (+1 spare); smoke = 3 painters, 1 worker |
 | `driver.py` | keeps painters prompted until the canvas is done; writes `progress.jsonl`, `prompts.jsonl` |
+| `spec-spawn.yaml`, `leader.md`, `job-spawn.sh` | experiment 2: 10 Sonnet leaders x 100 painters on leased bands (below) |
 | `spec-1k.yaml`, `job-1k.sh` | the 1k run: 3 painter types x 3 providers, 3 rtx-pro-6000 jobs (below) |
 | `job.sh` | the single GPU job: vLLM (LFM2.5-2.6B, :8000) + canvas (:8765) in one container |
 
@@ -189,3 +190,87 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
   - The driver samples every 2 s, publishes every 30 s, and always uploads `final/`.
   - `agents.png` is fetched fresh at the end.
   - Replay keyframes are every 1,000 entries (~62 over the run).
+
+## Experiment 2: 10 leaders x 100 painters on leased bands (spec-spawn.yaml)
+
+- **Agents:** 10 `leader` agents (Claude Code, `claude-sonnet-5-5`, 5 per cpu-basic worker, so 2
+  workers). Each spawns 100 painters (34 `painter-a` + 33 `painter-b` + 33 `painter-c`). The
+  painter types, providers and settings are exactly spec-1k's, with `replicas: 0`: every painter
+  is a child named `<leader>-<type>-<NNNN>`.
+- **Limits:** `spawn: {leader: {types: {painter-a: 34, painter-b: 33, painter-c: 33}, depth: 1}}`
+  and `limits: {alive: 1100, spawned_total: 1200}`. It validates against the `pixel-run` wheel.
+- **Coordination is canvas region leases** (`job-spawn.sh` = `job-1k.sh` with `REGION_ENFORCE=1`):
+  - Each leader leases one of 10 full-width bands. `canvas bands 10` gives equal-*work* bands;
+    equal-height bands of this image range from 389 to 92k work pixels.
+  - It grants the band to its 100 children with one bulk grant. Children can claim and paint only
+    there: each region has its own claim queue, so this stays O(1) per claim.
+  - When the band is finished, a child's claim says "your region is finished. You are done."
+- **`leader.md`:** every step is ONE shell command, so a leader makes about 6-10 tool calls in
+  total: install, lease, spawn 100 plus grant, prompt 100, then watch and re-prompt loops of up to
+  ~8 min. Its messages are one line. Sonnet cost is paid per tool call, so the 100 spawns and
+  100 prompts are shell loops, never 100 tool calls.
+  - `tests/test_leader_md.py` runs these exact commands against a real canvas and a fake `flock`.
+    The leader leases band 3, spawns 100, grants, prompts, and watches until "BAND DONE". A second
+    leader asking for band 3 gets band 4. Only the leader's own children paint the band.
+- **Views:**
+  - The progress page's **leader territory** view (`/agents.png?by=parent`, and in the replays)
+    colours each pixel by its painter's leader.
+  - `canvas regions` and `/regions` show per-band done %.
+  - Compare and Side by side work as for any run.
+
+### Launch order
+1. `RUN_ID=spawn-YYYYMMDD experiments/pixel/run/job-spawn.sh`: 3 rtx-pro-6000 jobs; the canvas
+   on gpu1 with `REGION_ENFORCE=1`. Fill `<JOB_ID_1..3>` in `spec-spawn.yaml`.
+2. Wait for `VLLM READY` x3 and canvas `/status`.
+3. Controller `cmpatino/flock-smoke` on the `pixel-run` wheel, restarted.
+   - Space secrets: `ANTHROPIC_API_KEY` (leaders), `HF_TOKEN`, `CANVAS_URL`, `CANVAS_TOKEN`.
+   - Turn on persistent storage: spawned rows live only in the controller's SQLite.
+4. `flock apply experiments/pixel/run/spec-spawn.yaml`. The 10 leaders appear and idle (2 workers,
+   ~1 min). No painters exist yet.
+5. Start the observer (no prompts):
+   ```
+   python experiments/pixel/run/driver.py --observe --swarm pixel-spawn \
+     --types leader,painter-a,painter-b,painter-c --canvas-url <CANVAS_URL> --interval 3 \
+     --gpus 3 --gpu-usd-per-hour 8.25 --run-id $RUN_ID --run-name "10 leaders x 100" --max-minutes 40
+   ```
+   - It records per leader: children by state, `first_child_s` / `all_children_s` (spawn timing,
+     from `GET /swarms/{s}/agents?parent=`, one call per leader every 30 s), cost and turns.
+   - It also records per-region done %, and uploads to the progress Space every 30 s.
+6. Prompt the 10 leaders **once**: `flock prompt --swarm pixel-spawn --type leader "go"`. The
+   leaders do the rest; there is no central driver.
+
+### Expected timeline (from "go")
+| when | what |
+|---|---|
+| +0-1 min | leaders install, read bands, lease (409 -> next band) |
+| +1-2 min | 1,000 `flock spawn` calls (100 serial per leader, 10 leaders in parallel), bulk grants |
+| +1-3 min | painter workers boot as slots fill: 42 workers, ~30-45 s each, in parallel; the first prompt waits as pending |
+| +3-7 min | painting: ~62k calls at ~400 calls/s if all bands run at once, i.e. ~3 min; uneven leaders make it longer |
+| +7-8 min | leaders see BAND DONE within 30 s, reply "band N done" |
+
+### Teardown
+- `flock remove pixel-spawn` removes leaders and cascades to all 1,000 children (drain; a few minutes).
+- Check the bucket paint log (`$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`). The observer has
+  uploaded `final/`.
+- `hf jobs cancel` the three `$RUN_ID-gpuN` jobs and pause the Space.
+
+### Cost
+- **GPUs:** ~$8 (3 x rtx-pro-6000 for ~60 min including setup; cap 3 x 75 min = $10.3).
+- **Sonnet leaders:** `max_budget_usd: 1.0` per prompt, so at most $10 for the single "go" prompt.
+  Expect well under that at ~6-10 tool calls each. Workers: 2 + 42 cpu-basic for ~20 min (cents).
+
+### What needs a flock change
+- **Bulk prompts are controller-only.** The leader's scoped token (`FLOCK_AGENT_TOKEN`) cannot use
+  `POST /swarms/{s}/prompts`, and it must not get the controller token. So leaders prompt
+  children one by one: 1,000 prompts at start, plus re-prompts of idle children every 30 s. That
+  is up to ~30 req/s on the controller, the load that gave Space-edge 429s at 100 agents in
+  run 1. Asks:
+  - a scoped bulk prompt for one's own children (e.g. `POST /agents/{me}/children/prompts
+    {state, text}`);
+  - 429 retry in the `flock` CLI;
+  - a bulk spawn (`count: N`) for the 1,000 single spawn calls.
+- **No worker pre-warm:** `workers.initial` are slots, not started workers. The first child on
+  each new worker waits for its boot (docs/spawn.md "Not yet"), so the painters do not "place
+  instantly". The pending first prompt hides this, but spawn-to-first-paint is ~1 min.
+- **Idle state lags** (heartbeats). `leader.md` only re-prompts idle children with `pending == 0`
+  (column 6 of `flock agents`), which avoids most duplicate prompts.

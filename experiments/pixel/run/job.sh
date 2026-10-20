@@ -23,7 +23,7 @@
 # Multi-GPU runs (job-1k.sh): JOB_NAME (default RUN_ID), WITH_CANVAS (1; 0 = vLLM only, no
 # --expose-public), GPU_TAG (logs go to $BUCKET/pixel/runs/$RUN_ID/$GPU_TAG/), SKIP_SYNC=1 (code
 # already in the bucket). Canvas settings pass through as job env: MAX_PIXELS_PER_CALL (10),
-# CANVAS_CLAIM_ORDER (scattered).
+# CANVAS_CLAIM_ORDER (scattered), REGION_ENFORCE (0; experiment 2: 1), CANVAS_REGION_TTL_MAX.
 # Code + target ship through the bucket (experiments/pixel synced to pixel/code/$RUN_ID).
 # CANVAS_DATA lives on local disk and is copied to $BUCKET/pixel/runs/$RUN_ID every 60 s and on
 # exit; a restarted job with the same RUN_ID resumes from that copy (the log is the truth).
@@ -93,4 +93,5 @@ hf jobs run --detach --namespace cmpatino --flavor "${FLAVOR:-rtx-pro-6000}" --t
   -e WITH_CANVAS="$WITH_CANVAS" -e GPU_TAG="$GPU_TAG" \
   -e MAX_PIXELS_PER_CALL="${MAX_PIXELS_PER_CALL:-10}" \
   -e CANVAS_CLAIM_ORDER="${CANVAS_CLAIM_ORDER:-scattered}" \
+  -e REGION_ENFORCE="${REGION_ENFORCE:-0}" -e CANVAS_REGION_TTL_MAX="${CANVAS_REGION_TTL_MAX:-3600}" \
   "${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0}" bash -c "$INNER"

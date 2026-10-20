@@ -125,6 +125,20 @@ class Controller:
             if not cursor:
                 return out
 
+    def children(self, parent: str) -> list[dict]:
+        out, cursor = [], None
+        while True:
+            q = {"parent": parent, **({"cursor": cursor} if cursor else {})}
+            page = http(
+                "GET",
+                f"{self.url}/swarms/{self.swarm}/agents?{urllib.parse.urlencode(q)}",
+                self.token,
+            )
+            out += page["agents"]
+            cursor = page.get("cursor")
+            if not cursor:
+                return out
+
     def prompt(self, agent: str, text: str) -> dict:
         return http(
             "POST",
@@ -287,6 +301,15 @@ def main() -> int:
     )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
+        "--observe",
+        action="store_true",
+        help="experiment 2: send no prompts (leaders drive); record leaders' spawn "
+        "timings, children states and per-region progress",
+    )
+    ap.add_argument("--leader-type", default="leader")
+    ap.add_argument("--children-per-leader", type=int, default=100)
+    ap.add_argument("--leader-every", type=float, default=30.0)
+    ap.add_argument(
         "--space-id",
         default=os.environ.get("SPACE_ID"),
         help="progress Space, e.g. cmpatino/flock-pixel (needs HF_TOKEN)",
@@ -331,6 +354,57 @@ class Driver:
         self.stalled: dict[str, int] = {}
         self.last_check = 0.0
         self.plog = None
+        self.t0 = time.time()
+        self.leader_t: dict[str, dict] = {}  # leader -> first/all children seen (s since start)
+        self.last_leaders = 0.0
+        self.leader_row: dict = {}
+
+    def observe(self, now: float) -> dict:
+        """Experiment 2: per leader, children by state and spawn timings (controller token,
+        one request per leader every --leader-every s)."""
+        if now - self.last_leaders < self.a.leader_every:
+            return self.leader_row
+        self.last_leaders = now
+        try:
+            leaders = self.ctl.agents(self.a.leader_type)
+            row = {}
+            for ld in leaders:
+                kids = self.ctl.children(ld["name"])
+                st: dict[str, int] = {}
+                for k in kids:
+                    st[k["state"]] = st.get(k["state"], 0) + 1
+                tm = self.leader_t.setdefault(
+                    ld["name"], {"first_child_s": None, "all_children_s": None}
+                )
+                if kids and tm["first_child_s"] is None:
+                    tm["first_child_s"] = round(now - self.t0, 1)
+                if len(kids) >= self.a.children_per_leader and tm["all_children_s"] is None:
+                    tm["all_children_s"] = round(now - self.t0, 1)
+                row[ld["name"]] = {
+                    "state": ld["state"],
+                    "turns": ld.get("turns"),
+                    "cost_usd": ld.get("cost_usd"),
+                    "children": len(kids),
+                    "children_by_state": st,
+                    **tm,
+                }
+            regions = http("GET", f"{self.canvas}/regions").get("regions", [])
+            self.leader_row = {
+                "leaders": row,
+                "regions": [
+                    {
+                        "owner": r["owner"],
+                        "y": r["y"],
+                        "h": r["h"],
+                        "grants": len(r["grants"]),
+                        "done_pct": r.get("done_pct"),
+                    }
+                    for r in regions
+                ],
+            }
+        except (urllib.error.URLError, OSError) as e:
+            print(f"observe failed: {e}", flush=True)
+        return self.leader_row
 
     def log_prompt(self, name: str, ack: dict, kind: str) -> None:
         self.plog.write(
@@ -450,7 +524,14 @@ class Driver:
         a = self.a
         print(
             f"driver: swarm={a.swarm} types={','.join(a.types)} canvas={self.canvas} "
-            f"mode={'per-agent prompts' if a.per_agent else 'bulk POST /swarms/{s}/prompts'}",
+            "mode="
+            + (
+                "observe (leaders drive)"
+                if a.observe
+                else "per-agent prompts"
+                if a.per_agent
+                else "bulk POST /swarms/{s}/prompts"
+            ),
             flush=True,
         )
         t0 = time.time()
@@ -481,7 +562,9 @@ class Driver:
                     print(f"controller error: {e}", flush=True)
                 n_agents = sum(by_state.values())
                 sent = 0
-                if not done and n_agents:
+                if a.observe:
+                    extra = self.observe(now)
+                elif not done and n_agents:
                     try:
                         if not a.per_agent:
                             sent = self.tick_bulk(now)
@@ -524,6 +607,8 @@ class Driver:
                     "flock_cost_usd": cost,
                     "gpu_usd_est": round(gpu, 3),
                 }
+                if a.observe:
+                    row.update(extra)
                 prog.write(json.dumps(row) + "\n")
                 prog.flush()
                 print(

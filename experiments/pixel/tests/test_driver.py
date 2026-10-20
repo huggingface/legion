@@ -76,7 +76,17 @@ def fake_controller(
             return {"swarm": swarm, "type": body["type"], "matched": k, "queued": k, "pending": 0}
 
     @app.get("/swarms/{swarm}/agents")
-    def agents(swarm: str, type: str | None = None, cursor: str | None = None):
+    def agents(
+        swarm: str, type: str | None = None, cursor: str | None = None, parent: str | None = None
+    ):
+        if parent:  # three children per leader (experiment 2 observer)
+            return {
+                "agents": [
+                    {"name": f"{parent}-painter-a-{i:04d}", "state": "idle", "pending": 0}
+                    for i in range(3)
+                ],
+                "cursor": None,
+            }
         sel = names[type] if type else [x for v in names.values() for x in v]
         return {"agents": [{"name": x, "state": "idle", "pending": 0} for x in sel], "cursor": None}
 
@@ -214,5 +224,59 @@ def test_bulk_mode_two_types_with_backoff(tmp_path):
         run = json.loads((space / "runs.json").read_text())[-1]
         assert run["gpus"] == 3 and run["status"] == "finished"
         assert (space / "final/r2/agents.png").read_bytes()[:4] == b"\x89PNG"
+    finally:
+        canvas_srv.should_exit = ctl_srv.should_exit = True
+
+
+def test_observe_mode_records_leaders_and_regions(tmp_path):
+    """Experiment 2: the driver only observes (leaders prompt their children)."""
+    p = tmp_path / "t.png"
+    make_target(p)
+    app_c = create_app(Settings(target=p, rate_limit=0, token="tok", region_enforce=True))
+    app_c.state.world.claim_region("leader-0000", 0, 0, 8, 4)
+    canvas_srv, canvas_url = _serve(app_c)
+    app, ran, calls = fake_controller(canvas_url, tmp_path, 2, types=("leader",))
+    ctl_srv, ctl_url = _serve(app)
+    try:
+        r = subprocess.run(
+            [
+                sys.executable,
+                str(HERE / "run" / "driver.py"),
+                "--swarm",
+                "s",
+                "--observe",
+                "--types",
+                "leader",
+                "--canvas-url",
+                canvas_url,
+                "--flock-url",
+                ctl_url,
+                "--interval",
+                "0.05",
+                "--leader-every",
+                "0",
+                "--children-per-leader",
+                "3",
+                "--max-minutes",
+                "0.01",
+                "--out",
+                str(tmp_path / "progress.jsonl"),
+                "--prompts-log",
+                str(tmp_path / "prompts.jsonl"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={**{k: v for k, v in os.environ.items() if k != "SPACE_ID"}, "FLOCK_TOKEN": "x"},
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "observe (leaders drive)" in r.stdout
+        assert not ran and calls["bulk"] == 0  # no prompts at all
+        row = json.loads((tmp_path / "progress.jsonl").read_text().splitlines()[-1])
+        ld = row["leaders"]["leader-0000"]
+        assert ld["children"] == 3 and ld["children_by_state"] == {"idle": 3}
+        assert ld["first_child_s"] is not None and ld["all_children_s"] is not None
+        assert row["regions"][0]["owner"] == "leader-0000" and row["regions"][0]["done_pct"] == 0.0
     finally:
         canvas_srv.should_exit = ctl_srv.should_exit = True
