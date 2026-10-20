@@ -20,7 +20,7 @@
   select, button, input { font:inherit; color:var(--fg); background:var(--card);
            border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
   .tabs button { border-radius:0; } .tabs button:first-child { border-radius:6px 0 0 6px; }
-  .tabs button:last-child { border-radius:0 6px 6px 0; margin-left:-1px; }
+  .tabs button { margin-left:-1px; } .tabs button:last-child { border-radius:0 6px 6px 0; }
   .tabs button.on { background:var(--fg); color:var(--bg); }
   .grid4 { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:8px; }
   @media (max-width: 900px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -61,7 +61,7 @@
 <body>
 <header>
   <h1>flock pixel runs</h1>
-  <nav class="tabs"><button id="tabRun" class="on">Run</button><button id="tabCompare">Compare</button></nav>
+  <nav class="tabs"><button id="tabRun" class="on">Run</button><button id="tabCompare">Compare</button><button id="tabSbs">Side by side</button></nav>
   <select id="run" aria-label="run"></select>
   <span id="pill" class="pill">-</span>
   <span id="when" class="muted"></span>
@@ -105,6 +105,28 @@
     <p class="muted" id="entry"></p>
   </section>
   <section class="wide links" id="links"></section>
+</main>
+<main id="sbs" hidden>
+  <section class="wide">
+    <div class="row" style="margin-top:0">
+      <label>left <select id="sbsA" aria-label="left run"></select></label>
+      <label>right <select id="sbsB" aria-label="right run"></select></label>
+      <label>align <select id="sbsAlign" aria-label="alignment"><option value="time">wall time since first paint</option><option value="pct">% done</option></select></label>
+      <label><input type="checkbox" id="sbsAgents"> agent map (both)</label>
+      <label><input type="checkbox" id="sbsTarget"> show target instead (right)</label>
+    </div>
+    <div class="imgs" style="margin-top:12px">
+      <figure><canvas id="sbsL" width="1024" height="1024"></canvas><figcaption><b id="sbsLc">left</b><br><span id="sbsLr"></span></figcaption></figure>
+      <figure><canvas id="sbsR" width="1024" height="1024"></canvas><img id="sbsTimg" src="target.png" alt="target image" hidden><figcaption><b id="sbsRc">right</b><br><span id="sbsRr"></span></figcaption></figure>
+    </div>
+    <div class="row">
+      <button id="sbsPlay">Play</button>
+      <input type="range" id="sbsSlider" min="0" max="0" value="0" aria-label="position">
+      <select id="sbsSpeed" aria-label="speed"><option value="1">1x</option><option value="10" selected>10x</option><option value="60">60x</option></select>
+      <span class="muted" id="sbsPos"></span>
+    </div>
+    <p class="muted">One scrubber drives both panels. Wall-time mode spans the longer run; the shorter one stays on its final frame once done. Frames are rebuilt in the browser from each run's paint log.</p>
+  </section>
 </main>
 <main id="compare" hidden>
   <section class="wide">

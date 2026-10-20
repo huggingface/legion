@@ -46,7 +46,7 @@ PX.Replayer = class {
     }
     this.kf = new Map(); // keyframe entry -> RGBA, insertion order = LRU
   }
-  get length() { return this.log.entries.length; }
+  get length() { return this.log.count ?? this.log.entries.length; }
   apply(buf, lo, hi) {
     const { idx, rgb } = this.log;
     for (let k = lo; k < hi; k++) {
@@ -190,6 +190,54 @@ PX.summary = function (run, rows) {
     calls_mean: (l.seq - f.seq) / span, agents: Math.max(...rows.map((r) => r.agents || 0)),
     gpus: run.gpus ?? null, cost: (l.gpu_usd_est || 0) + (l.flock_cost_usd || 0), done: l.done_pct,
   };
+};
+
+
+// ------------------------------------------------- side-by-side replay core (node-tested)
+// Per-entry arrays for time / completion alignment, then the parsed entries are dropped so two
+// ~62k-entry logs fit comfortably in memory (only typed arrays are kept).
+PX.prepare = function (text, width, workTotal) {
+  const log = PX.index(PX.parseLog(text), width);
+  const n = log.entries.length;
+  log.ts = new Float64Array(n);
+  log.eagent = new Int32Array(n);
+  log.cum = new Int32Array(n + 1); // running max of done pixels (useful - overwritten)
+  const ids = new Map(log.names.map((nm, i) => [nm, i]));
+  let done = 0, best = 0;
+  log.entries.forEach((e, i) => {
+    log.ts[i] = e.ts;
+    log.eagent[i] = ids.get(e.agent);
+    for (const p of e.px) { if (p[3] === 'useful') done++; else if (p[3] === 'overwritten') done--; }
+    best = Math.max(best, done);
+    log.cum[i + 1] = best;
+  });
+  log.workTotal = workTotal;
+  log.count = n;
+  log.entries = null;
+  return log;
+};
+PX.upper = function (arr, v, n) { // number of elements <= v (arr ascending)
+  let lo = 0, hi = n;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] <= v) lo = m + 1; else hi = m; }
+  return lo;
+};
+PX.duration = function (log) { return log.count ? log.ts[log.count - 1] - log.ts[0] : 0; };
+// (a) wall time: entries with ts <= first paint + s (the shorter run freezes at its end).
+PX.indexAtTime = function (log, s) { return log.count ? PX.upper(log.ts, log.ts[0] + s, log.count) : 0; };
+// (b) completion: the first position whose done count reaches frac of the work set.
+PX.indexAtDone = function (log, frac) {
+  const want = Math.ceil(frac * log.workTotal);
+  let lo = 0, hi = log.count;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (log.cum[m] >= want) hi = m; else lo = m + 1; }
+  return lo;
+};
+PX.readout = function (log, k) {
+  if (!k) return { t: 0, done: 0, pxs: 0, active: 0 };
+  const now = log.ts[k - 1], k10 = PX.upper(log.ts, now - 10, k);
+  const seen = new Set();
+  for (let j = k10; j < k; j++) seen.add(log.eagent[j]);
+  return { t: now - log.ts[0], done: 100 * log.cum[k] / log.workTotal,
+           pxs: (log.cum[k] - log.cum[k10]) / 10, active: seen.size };
 };
 
 if (typeof module !== 'undefined') module.exports = PX;
@@ -407,15 +455,106 @@ if (typeof document !== 'undefined') (() => {
     for (const [run, f, a, cap] of [[A, 'fA', 'aA', 'fAc'], [B, 'fB', 'aB', 'fBc']]) {
       const base = run && run.final;
       $(f).src = base ? `${base}/canvas.png` : (run && run.canvas_url ? `${run.canvas_url}/canvas.png?${bust()}` : '');
+      $(a).onerror = () => { $(a).removeAttribute('src'); $(a).alt = 'no agents.png for this run (older run); the Side by side tab computes the agent map from its log'; };
       $(a).src = base ? `${base}/agents.png` : (run && run.canvas_url ? `${run.canvas_url}/agents.png?${bust()}` : '');
       $(cap).textContent = run ? `${run.name || run.id} (${run.status})` : '-';
     }
   }
+
+  // ------------------------------------------------------------- side by side
+  const SBS = { logs: [null, null], reps: [null, null], ids: [null, null], playing: false, loading: 0 };
+  function sbsMax() {
+    const [a, b] = SBS.logs;
+    if ($('sbsAlign').value === 'pct') return 1000;
+    return Math.ceil(Math.max(a ? PX.duration(a) : 0, b ? PX.duration(b) : 0));
+  }
+  function mmss(t) { const s = Math.max(0, Math.round(t)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+  function sbsDraw() {
+    const v = +$('sbsSlider').value, pct = $('sbsAlign').value === 'pct';
+    for (const i of [0, 1]) {
+      const log = SBS.logs[i], rep = SBS.reps[i], side = i ? 'R' : 'L';
+      if (!log || !rep) continue;
+      if (i === 1 && $('sbsTarget').checked) continue;
+      const k = pct ? PX.indexAtDone(log, v / 1000) : PX.indexAtTime(log, v);
+      const buf = $('sbsAgents').checked ? rep.agentFrame(k) : rep.frame(k);
+      $(`sbs${side}`).getContext('2d').putImageData(new ImageData(buf, rep.w, rep.h), 0, 0);
+      const r = PX.readout(log, k);
+      $(`sbs${side}r`).textContent = `t ${mmss(r.t)} · done ${fmt(r.done, 1)}% · ` +
+        `${fmt(r.pxs, 0)} px/s (last 10 s) · ${r.active} active agents (last 10 s)` +
+        (k >= log.count ? ' · finished' : '');
+    }
+    $('sbsPos').textContent = pct ? `${fmt(v / 10, 1)}% done` : `${mmss(v)} since first paint`;
+  }
+  async function sbsLoad(i, id) {
+    const r = runs.find((x) => x.id === id), side = i ? 'R' : 'L';
+    SBS.logs[i] = SBS.reps[i] = null; SBS.ids[i] = id;
+    $(`sbs${side}c`).textContent = r ? `${r.name || r.id}` : '-';
+    if (!r || !r.final) { $(`sbs${side}r`).textContent = 'no final/ paint log for this run'; return; }
+    $(`sbs${side}r`).textContent = 'loading paint log...';
+    try {
+      const score = await getJSON(`${r.final}/score.json`);
+      const blank = ((score.target || {}).blank || 'ffffff').match(/../g).map((x) => parseInt(x, 16));
+      const res = await fetch(`${r.final}/paint-log.jsonl.gz`);
+      if (!res.ok) throw new Error(`paint log: HTTP ${res.status}`);
+      const text = await PX.gunzipText(await res.arrayBuffer());
+      if (SBS.ids[i] !== id) return; // changed meanwhile
+      const log = PX.prepare(text, score.width, score.work_total);
+      SBS.logs[i] = log;
+      SBS.reps[i] = new PX.Replayer(log, score.width, score.height, blank, 2000, 4);
+      const cv = $(`sbs${side}`); cv.width = score.width; cv.height = score.height;
+    } catch (e) { $(`sbs${side}r`).textContent = `unavailable: ${e.message}`; }
+    $('sbsSlider').max = sbsMax();
+    sbsDraw();
+  }
+  function sbsInit() {
+    if ($('sbsA').options.length) return;
+    const opts = runs.slice().reverse().filter((r) => r.final)
+      .map((r) => `<option value="${r.id}">${r.name || r.id}</option>`).join('');
+    $('sbsA').innerHTML = opts; $('sbsB').innerHTML = opts;
+    const has = (id) => runs.some((r) => r.id === id && r.final);
+    const fin = runs.filter((r) => r.final);
+    $('sbsA').value = has('run1-20261019') ? 'run1-20261019' : fin[fin.length - 2]?.id ?? fin[0]?.id ?? '';
+    $('sbsB').value = has('run1k-20261019') ? 'run1k-20261019' : fin[fin.length - 1]?.id ?? '';
+    sbsLoad(0, $('sbsA').value); sbsLoad(1, $('sbsB').value);
+  }
+  $('sbsA').addEventListener('change', (e) => sbsLoad(0, e.target.value));
+  $('sbsB').addEventListener('change', (e) => sbsLoad(1, e.target.value));
+  $('sbsSlider').addEventListener('input', sbsDraw);
+  $('sbsAgents').addEventListener('change', sbsDraw);
+  $('sbsTarget').addEventListener('change', (e) => {
+    $('sbsR').hidden = e.target.checked; $('sbsTimg').hidden = !e.target.checked;
+    $('sbsRc').textContent = e.target.checked ? 'target' : (runs.find((r) => r.id === SBS.ids[1])?.name || SBS.ids[1]);
+    sbsDraw();
+  });
+  $('sbsAlign').addEventListener('change', () => {
+    const was = +$('sbsSlider').value / Math.max(1, +$('sbsSlider').max);
+    $('sbsSlider').max = sbsMax(); $('sbsSlider').value = Math.round(was * sbsMax()); sbsDraw();
+  });
+  $('sbsPlay').addEventListener('click', () => {
+    SBS.playing = !SBS.playing; $('sbsPlay').textContent = SBS.playing ? 'Pause' : 'Play';
+    if (SBS.playing && +$('sbsSlider').value >= +$('sbsSlider').max) $('sbsSlider').value = 0;
+    let last = performance.now();
+    const step = (now) => {
+      if (!SBS.playing) return;
+      const dt = (now - last) / 1000; last = now;
+      const speed = +$('sbsSpeed').value, max = +$('sbsSlider').max;
+      // time mode: speed x real time; % mode: the longer run's real pace x speed
+      const longest = Math.max(1, ...SBS.logs.filter(Boolean).map(PX.duration));
+      const inc = $('sbsAlign').value === 'pct' ? speed * dt * 1000 / longest : speed * dt;
+      SBS.acc = (SBS.acc || 0) + inc;
+      if (SBS.acc >= 1) { $('sbsSlider').value = Math.min(max, +$('sbsSlider').value + Math.floor(SBS.acc)); SBS.acc %= 1; sbsDraw(); }
+      if (+$('sbsSlider').value >= max) { SBS.playing = false; $('sbsPlay').textContent = 'Play'; return; }
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
   function showTab(name) {
-    const cmp = name === 'compare';
-    $('tabRun').classList.toggle('on', !cmp); $('tabCompare').classList.toggle('on', cmp);
-    $('compare').hidden = !cmp; $('main').hidden = cmp || !runs.length;
-    for (const id of ['run', 'pill', 'when']) $(id).style.display = cmp ? 'none' : '';
+    const cmp = name === 'compare', sbs = name === 'sbs', other = cmp || sbs;
+    $('tabRun').classList.toggle('on', !other); $('tabCompare').classList.toggle('on', cmp);
+    $('tabSbs').classList.toggle('on', sbs);
+    $('compare').hidden = !cmp; $('sbs').hidden = !sbs; $('main').hidden = other || !runs.length;
+    for (const id of ['run', 'pill', 'when']) $(id).style.display = other ? 'none' : '';
+    if (sbs) sbsInit();
     if (cmp) {
       const opts = runs.slice().reverse().map((r) => `<option value="${r.id}">${r.name || r.id} (${r.status})</option>`).join('');
       if (!$('cmpA').options.length) {
@@ -427,6 +566,7 @@ if (typeof document !== 'undefined') (() => {
   }
   $('tabRun').addEventListener('click', () => showTab('run'));
   $('tabCompare').addEventListener('click', () => showTab('compare'));
+  $('tabSbs').addEventListener('click', () => showTab('sbs'));
   $('cmpA').addEventListener('change', renderCompare);
   $('cmpB').addEventListener('change', renderCompare);
 
@@ -453,7 +593,7 @@ if (typeof document !== 'undefined') (() => {
     $('run').innerHTML = runs.slice().reverse().map((r) => `<option value="${r.id}">${r.name || r.id} (${r.status})</option>`).join('');
     const qp = new URLSearchParams(location.search);
     const want = qp.get('run');
-    if (qp.get('tab') === 'compare') setTimeout(() => showTab('compare'), 0);
+    if (['compare', 'sbs'].includes(qp.get('tab'))) setTimeout(() => showTab(qp.get('tab')), 0);
     select(want || runs[runs.length - 1].id);
     $('run').value = run.id;
     setInterval(async () => { // pick up status changes (finished, new final files)

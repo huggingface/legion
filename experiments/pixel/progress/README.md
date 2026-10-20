@@ -29,6 +29,22 @@ with front matter.
     p50, and model p50 when the driver records it.
   - A summary table: duration, px/s mean and peak, paint calls/s, agents, GPUs, cost.
   - Final canvases and agent maps side by side, from `final/<id>/agents.png`.
+- **Side by side tab** (`?tab=sbs`): the replay of two runs at once.
+  - Left and right runs are picked from `runs.json`; the default is run1-20261019 vs run1k-20261019.
+  - One scrubber drives both panels. Alignment is either wall time since each run's first paint
+    (the default; the slider spans the longer run, and the shorter one stays on its final frame),
+    or % done.
+  - Play at 1x, 10x or 60x, an agent-map toggle for both panels, and "show target instead" on
+    the right (`target.png`, shipped with the page).
+  - A readout under each panel: time since first paint, done %, px/s over the last 10 s of log
+    time, and agents with a paint in the last 10 s.
+  - Both logs are decoded in the browser (`DecompressionStream`) and reduced to typed arrays.
+    Frames use the same keyframe scheme (every 2000 entries, LRU of 4 per panel).
+  - Measured in node on the two real 62,278-entry logs (4.9 MB gz each): both parsed in 1.2 s, a
+    first frame in 8 ms, an agent-map frame in ~12 ms, 31 MB heap plus 58 MB typed arrays retained.
+  - The agent map comes from the log, so it works for run 1 too, which has no `agents.png`.
+  - `tests/test_sbs_js.py` checks both panels' frames and agent maps against the service, in
+    both alignment modes.
 - **Painted mask:**
   - Live view: lays the canvas's `/mask.png?style=overlay` (magenta = painted, transparent elsewhere) over the dimmed live image. The server renders it, so the browser does no per-pixel work. It refreshes every 10 s with the canvas.
   - Replay: the same mask at position t, computed from the log with the same keyframe scheme.
