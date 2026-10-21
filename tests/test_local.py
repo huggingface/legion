@@ -55,6 +55,18 @@ def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
         SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "types": types})
 
 
+def test_example_switches_compute_with_one_line():
+    from flock.cli import load_spec
+
+    path = Path(__file__).parent.parent / "examples" / "local.yaml"
+    assert load_spec(str(path)).compute.kind == "local"
+    text = path.read_text()
+    assert "\ncompute: local\n" in text
+    jobs = SwarmSpec.model_validate(yaml.safe_load(text.replace("\ncompute: local\n",
+                                                                "\ncompute: hf-jobs\n")))
+    assert jobs.compute.kind == "hf-jobs" and jobs.namespace and jobs.bucket
+
+
 def test_compute_local_short_and_long_form():
     short = local_spec()
     assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
@@ -128,7 +140,8 @@ def _wait(jobs: LocalJobsClient, job_id: str, stage: str, timeout: float = 10) -
 def test_local_jobs_env_contract_and_stages(tmp_path):
     base = {"PATH": os.environ["PATH"], "FLOCK_URL": "http://elsewhere", "HOME": "/h"}
     jobs = LocalJobsClient(root=tmp_path, command=_script(DUMP_ENV), base_env=base)
-    env = {"FLOCK_URL": "http://127.0.0.1:1", "WORKER_ID": "s-w-w0000", "HEARTBEAT_INTERVAL": "1"}
+    env = {"FLOCK_URL": "http://127.0.0.1:1", "WORKER_ID": "s-w-w0000", "HEARTBEAT_INTERVAL": "1",
+           "BUCKET": "hf://buckets/me/b"}
     jid = jobs.launch("s-w-w0000", local_spec().types["w"], env, {"FLOCK_TOKEN": "tok",
                       "FAKE_KEY": "k"}, {"swarm": "s"}, 60, namespace="")
     _wait(jobs, jid, "COMPLETED")
@@ -140,6 +153,7 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     assert seen["FLOCK_LOCAL_PARENT_PID"] == str(os.getpid())
     assert seen["HEARTBEAT_INTERVAL"] == "1"  # the type's env wins over the local default
     assert seen["HOME"] == "/h"
+    assert seen["BUCKET"] == ""  # no bucket sync locally, whatever the spec says
     assert "hello from s-w-w0000" in "\n".join(jobs.logs_tail(jid, namespace=""))
     assert [j.job_id for j in jobs.list({"swarm": "s"}, namespace="")] == [jid]
     assert jobs.list({"swarm": "other"}, namespace="") == []

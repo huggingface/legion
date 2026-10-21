@@ -4,7 +4,8 @@
 loop, placement, heartbeats, admission and events are unchanged: a "job" is a
 `python -m flock.worker.main` process with the job env contract (FLOCK_URL, FLOCK_TOKEN,
 WORKER_ID, WORKER_INCARNATION, SWARM, TYPE, DEADLINE, ...). What a job has and a process does
-not (image, flavor, network group, wheel bootstrap) is ignored; the namespace is unused.
+not (image, flavor, network group, wheel bootstrap) is ignored, and so are the spec's namespace
+and bucket: agent state stays on local disk.
 
 Stage mapping: running process -> RUNNING; exit 0 -> COMPLETED; other exit -> ERROR
 ("exit N"); alive past its timeout -> killed, ERROR "Job timeout" (what HF Jobs reports, so a
@@ -88,8 +89,10 @@ class LocalJobsClient:
             # The worker exits when the controller process is gone (no orphans after a kill -9).
             "FLOCK_LOCAL_PARENT_PID": str(os.getpid()),
         }
-        # secrets arrive as env, as on a job; the type's env can override the local defaults
-        return {**base, **LOCAL_ENV_DEFAULTS, **local, **env, **secrets}
+        # secrets arrive as env, as on a job; the type's env can override the local defaults.
+        # The spec's bucket is for hf-jobs: locally agent state stays on disk under `root`, so
+        # a spec keeps its namespace and bucket and `compute:` is the only line that changes.
+        return {**base, **LOCAL_ENV_DEFAULTS, **local, **env, **secrets, "BUCKET": ""}
 
     def launch(self, worker_id: str, spec: TypeSpec, env: dict[str, str],
                secrets: dict[str, str], labels: dict[str, str], timeout: float, *,
