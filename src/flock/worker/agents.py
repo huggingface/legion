@@ -123,7 +123,7 @@ class AgentRuntime:
         self.loop: LoopStartCommand | None = None
         self._loop_errors = 0
         self._loop_task: asyncio.Task | None = None
-        self._turn_tools = 0  # tool calls this turn, `done` excluded
+        self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
 
@@ -372,7 +372,7 @@ class AgentRuntime:
                 if self._usage_missing(ev.status):
                     extra["usage_missing"] = True
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
-                                         "tool_calls": self._turn_tools, **extra,
+                                         "tool_calls": self._turn_tool_calls, **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 summary = self._turn_summary or self._turn_text
                 if summary:
@@ -406,7 +406,7 @@ class AgentRuntime:
         self._turn_timeout = self._next_timeout or parse_duration(self.spec.turn_timeout).total_seconds()
         self._next_timeout = None
         self._turn_tokens = {}
-        self._turn_tools, self._turn_summary, self._turn_text = 0, None, None
+        self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
         self.emit("turn_started", dict(data))
 
     def _end_turn(self) -> None:
@@ -450,7 +450,7 @@ class AgentRuntime:
         if isinstance(content, str):
             texts = [content]
         text = "\n".join(t for t in texts if isinstance(t, str) and t.strip()).strip()
-        self._turn_tools += sum(1 for b in blocks if isinstance(b, dict)
+        self._turn_tool_calls += sum(1 for b in blocks if isinstance(b, dict)
                                 and b.get("type") == "toolCall" and b.get("name") != "done")
         if m.get("fromDoneTool") and text:
             self._turn_summary = text
