@@ -1138,7 +1138,7 @@ def create_app(
         if spec is not None and spec.comms is not None and w is not None:
             # comms rules and protocols are live (docs/comms.md): a re-apply reaches workers here
             ts = spec.types.get(w["type"])
-            out["comms"] = {**spec.comms.model_dump(mode="json"),
+            out["comms"] = {**spec.comms.model_dump(mode="json", exclude={"kickoff"}),
                             "tools": comms_tools(ts, spec.comms) if ts else []}
         return out
 
