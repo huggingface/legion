@@ -208,8 +208,13 @@ and finds the agent's tools through `FLOCK_TOOLS_PIN`, which the worker sets in 
 env from the process's start. The worker rewrites that pin file at each turn boundary (when a
 prompt starts a turn): a new version, tools enabled mid-burst and tools disabled (an empty
 toolset: calls fail with `unknown tool`) all reach a running harness at its next turn, without
-a restart. The call's environment is the harness env minus the provider key (the pin names
-it) and `FLOCK_TOKEN`, the same rule as for `llm` tools.
+a restart. A prompt that arrives before the harness has reported the turn it already started
+joins that turn and keeps its pin. The call's environment is the harness env minus the
+provider key under every name the harness holds it (`api_key_env`, and for Claude
+`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`; the pin lists them) and `FLOCK_TOKEN`, the same
+rule as for `llm` tools. A harness-native model's key (e.g. `secrets: [ANTHROPIC_API_KEY]`
+with no provider) is an ordinary declared secret and is not filtered. The generated section
+is added after the spec's system prompt, also in a workdir restored with an older file.
 Not yet: MCP for the CLI harnesses (the model sees the tools through the instructions file, not
 as native tools).
 

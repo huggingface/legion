@@ -436,6 +436,149 @@ def secrets_seen() -> dict:
         await rt.stop()
 
 
+KEYS_SEEN = ADD_V1 + '''
+
+def keys_seen() -> dict:
+    """Which credential names the tool process can see (names only)."""
+    import os
+    return {k: k in os.environ for k in ("PROVIDER_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+'''
+
+
+@pytest.mark.parametrize("auth, alias", [("x-api-key", "ANTHROPIC_API_KEY"),
+                                         ("bearer", "ANTHROPIC_AUTH_TOKEN")])
+async def test_flock_tool_drops_claude_key_aliases(tmp_path, monkeypatch, auth, alias):
+    """Claude gets a provider-backed key as ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN; neither
+    reaches a tool, nor the source name."""
+    from flock.worker.adapters.claude import claude_env
+
+    f = Fetcher()
+    b = pack(folder(tmp_path / "v1", KEYS_SEEN))
+    f.bundles = {b.version: b.data}
+    m = manager(tmp_path, f)
+    await m.ensure(b.version, "all")
+    tspec = SwarmSpec.model_validate({
+        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+        "providers": {"fake": {"type": "anthropic", "base_url": "http://127.0.0.1:9",
+                               "api_key_env": "PROVIDER_KEY", "auth": auth, "self_hosted": True}},
+        "types": {"dev": {"harness": "claude", "model": "fake:dummy", "idle_grace": "30s",
+                          "turn_timeout": "2s"}},
+    }).types["dev"]
+    rt, adapter = await _cli_runtime(tmp_path, m, tspec)
+    try:
+        await rt.prompt("first")
+        await until(lambda: rt.state.turns == 1, timeout=5)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        env = claude_env(tspec, adapter.envs[0])  # what the Claude CLI process gets
+        assert env[alias] == "dummy-key" and PIN_ENV in env
+        p = await run_tool_cli(Path(sys.executable).parent / "flock-tool", ["keys_seen"], env)
+        assert json.loads(p.stdout) == {"PROVIDER_KEY": False, "ANTHROPIC_API_KEY": False,
+                                        "ANTHROPIC_AUTH_TOKEN": False}
+    finally:
+        await rt.stop()
+
+
+def test_credential_names_per_harness():
+    from flock.worker.adapters.base import credential_env_names
+
+    def t(harness: str, ptype: str, model: str = "p:m") -> object:
+        return SwarmSpec.model_validate({
+            "swarm": "s", "namespace": "n", "bucket": "b",
+            "providers": {"p": {"type": ptype, "base_url": "http://x/v1", "api_key_env": "K",
+                                "self_hosted": True}},
+            "types": {"a": {"harness": harness, "model": model}}}).types["a"]
+
+    assert credential_env_names(t("claude", "anthropic")) == ["ANTHROPIC_API_KEY",
+                                                              "ANTHROPIC_AUTH_TOKEN", "K"]
+    for h in ("codex", "pi", "llm"):
+        assert credential_env_names(t(h, "openai_compat")) == ["K"]
+    assert credential_env_names(t("claude", "anthropic", "claude-opus-5-5")) == []  # native
+
+
+class DelayedStartAdapter(ScriptedAdapter):
+    """The harness runs its turn at once, but turn_started reaches the worker only on release."""
+
+    def __init__(self, home: Path) -> None:
+        super().__init__(home, hang=True)
+        self.release = asyncio.Event()
+
+    async def events(self):
+        async for ev in super().events():
+            if ev.kind == "turn_started":
+                await self.release.wait()
+            yield ev
+
+
+async def test_a_prompt_while_awaiting_turn_started_keeps_the_turns_pin(tmp_path):
+    """Steering a turn whose turn_started has not arrived yet must not repin it to a version
+    that landed meanwhile: the whole harness turn calls one version."""
+    f = Fetcher()
+    b1 = pack(folder(tmp_path / "v1"))
+    b2 = pack(folder(tmp_path / "v2", ADD_V2))
+    f.bundles = {b1.version: b1.data, b2.version: b2.data}
+    m = manager(tmp_path, f)
+    await m.ensure(b1.version, "all")
+    from .worker_fakes import spec as type_spec
+
+    adapter = DelayedStartAdapter(tmp_path / "home")
+    outbox = Outbox()
+    rt = AgentRuntime("dev-0000", "dev", type_spec(idle_grace="30s", turn_timeout="20s"),
+                      swarm="demo", work_root=tmp_path / "agents", adapter=adapter, outbox=outbox,
+                      toolbox=m.current)
+    await rt.setup(restore=False)
+    try:
+        await rt.prompt("first")
+        await until(lambda: len(adapter.sent) == 1, timeout=5)
+        assert rt.awaiting and rt.turn_id is None
+        assert read_pin(rt.pin_path)[0].version == b1.version
+        await m.ensure(b2.version, "all")
+        await rt.prompt("steer the same turn")
+        assert len(adapter.sent) == 2 and read_pin(rt.pin_path)[0].version == b1.version
+        adapter.release.set()
+        await until(lambda: rt.turn_id is not None, timeout=5)
+        started = [e for e in outbox.take() if e.type == "turn_started"]
+        assert [e.data.get("data", e.data).get("tools_version") for e in started] == [b1.version]
+        assert read_pin(rt.pin_path)[0].version == b1.version  # unchanged to the turn's end
+    finally:
+        adapter.release.set()
+        await rt.stop()
+    # the next turn boundary takes the new version
+    await rt.prompt("next")
+    await until(lambda: read_pin(rt.pin_path)[0].version == b2.version, timeout=5)
+    adapter.release.set()
+    await rt.stop()
+
+
+async def test_restored_workdir_keeps_the_tools_section(tmp_path):
+    """A workdir restored with an old CLAUDE.md, a spec system_prompt: the base text is written
+    first and the generated section is added to it."""
+    f = Fetcher()
+    b = pack(folder(tmp_path / "v1"))
+    f.bundles = {b.version: b.data}
+    m = manager(tmp_path, f)
+    await m.ensure(b.version, "all")
+    from .worker_fakes import spec as type_spec
+
+    wd = tmp_path / "agents" / "dev-0000"
+    wd.mkdir(parents=True)
+    (wd / "CLAUDE.md").write_text("Old instructions from the bucket.\n")
+    adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
+    rt = AgentRuntime("dev-0000", "dev", type_spec(system_prompt="System instructions.",
+                                                   idle_grace="30s"),
+                      swarm="demo", work_root=tmp_path / "agents", adapter=adapter,
+                      outbox=Outbox(), toolbox=m.current)
+    await rt.setup(restore=False)
+    try:
+        await rt.prompt("first")
+        await until(lambda: rt.state.turns == 1, timeout=5)
+        md = (wd / "CLAUDE.md").read_text()
+        assert md.startswith("System instructions.\n\n" + SECTION_START)
+        assert "Old instructions" not in md and "- `add`: Add two integers (v1)." in md
+    finally:
+        await rt.stop()
+
+
 def test_flock_tool_without_a_pin(tmp_path):
     tool = Path(sys.executable).parent / "flock-tool"
     env = {k: v for k, v in os.environ.items() if k != PIN_ENV}

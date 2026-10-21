@@ -23,7 +23,13 @@ from pydantic import BaseModel, Field
 
 from flock.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
 from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
-from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError, usage_sub
+from flock.worker.adapters.base import (
+    AdapterEvent,
+    HarnessAdapter,
+    ResumeError,
+    credential_env_names,
+    usage_sub,
+)
 from flock.worker.events import Outbox, SessionLog, utcnow
 
 if TYPE_CHECKING:
@@ -134,8 +140,7 @@ class AgentRuntime:
             return None
         ts = self.toolbox()
         if ts.version is not None or self.pin_path.exists():
-            r = self.spec.resolved_model
-            deny = [r.provider.api_key_env] if r is not None else []
+            deny = credential_env_names(self.spec)  # the key under every name the harness has it
             try:
                 ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
             except OSError as e:
@@ -209,9 +214,12 @@ class AgentRuntime:
     async def _forward(self, text: str) -> None:
         self._last_activity = self._now()
         if self.turn_id is None:
+            if not self.awaiting:
+                # a turn boundary: the prompt starts a turn, so pin the tools it will run with.
+                # While awaiting, an earlier prompt's turn may already run in the harness (its
+                # turn_started not seen yet): this prompt joins it and must not repin it.
+                self._pinned = self._pin_tools()
             self.awaiting = True
-            # a turn boundary: the prompt starts a turn, so pin the tools it will run with
-            self._pinned = self._pin_tools()
         try:
             await self.adapter.send(text)
         except Exception as e:  # noqa: BLE001 - process died under us: keep the prompt for the next burst
@@ -248,6 +256,7 @@ class AgentRuntime:
         if self.spec.system_prompt is not None:
             target.write_text(self.spec.system_prompt)
             self._instructions_written = True
+            self._tools_section = None  # the base file was replaced: its section is gone
             return
         if not self.spec.system_prompt_file:
             return
@@ -258,6 +267,7 @@ class AgentRuntime:
             if c.is_file():
                 target.write_text(c.read_text())
                 self._instructions_written = True
+                self._tools_section = None  # the base file was replaced: its section is gone
                 return
         log.warning("%s: system_prompt_file %s not found", self.name, src)
 
@@ -293,6 +303,7 @@ class AgentRuntime:
             if self._working_count and self._working_count() > self.spec.max_working_per_worker:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
+            self._write_instructions()  # before the tools section is generated into it
             tools = self._pin_tools()
             self._prepare_workdir(tools)
             env = await self.harness_env()
