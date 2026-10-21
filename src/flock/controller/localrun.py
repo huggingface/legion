@@ -104,6 +104,13 @@ def redacted_spec(spec: SwarmSpec) -> dict[str, Any]:
     return d
 
 
+def active_spec(store: Store, last: SwarmSpec) -> SwarmSpec:
+    """The swarm's spec as the controller stores it now (re-applied specs, `flock scale`), or
+    the last one seen once the swarm is gone."""
+    row = store.get_swarm(last.swarm)
+    return row["spec"] if row is not None else last
+
+
 def cli_hint(data_dir: Path) -> str:
     """How another terminal points the CLI at this run."""
     data_dir = Path(data_dir).resolve()
@@ -470,6 +477,7 @@ async def run_local(opts: RunOptions) -> RunResult:
         idle_streak = 0
         while not stop.is_set():
             elapsed = time.monotonic() - t0
+            spec = active_spec(store, spec)  # a live PUT (flock scale, apply) wins
             snap = tracker.snapshot(spec, time.time())
             if tty:
                 frame = render(spec, snap, elapsed=elapsed, url=url, current=current,
@@ -512,6 +520,7 @@ async def run_local(opts: RunOptions) -> RunResult:
         for sig in handled:
             loop.remove_signal_handler(sig)
         try:
+            spec = active_spec(store, spec)
             totals = write_bundle(run_dir, store, spec, started=started,
                                   ended=datetime.now(UTC), reason=reason, url=url,
                                   tracker=tracker)
