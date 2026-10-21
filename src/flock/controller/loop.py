@@ -180,8 +180,9 @@ class LoopEngine:
         return loop_status(self.store, swarm, type_name, detail=detail)
 
     # ------------------------------------------------------------------ events in
-    def on_events(self, a: Row, events: list[Event]) -> None:
-        """Turn and loop events from the agent's worker (post_events), in worker order."""
+    def on_events(self, a: Row, events: list[Event], spec: SwarmSpec | None = None) -> None:
+        """Turn and loop events from the agent's worker (post_events), in worker order. `spec`
+        is the agent's swarm spec when the caller has it at hand."""
         if not any(ev.type in ("loop_prompt", "loop_stopped", "turn_ended", "turn_interrupted")
                    for ev in events):
             return
@@ -189,8 +190,10 @@ class LoopEngine:
             st = self.store.get_loop_agent(a["name"])
             if st is None:
                 return
-            sw = self.store.get_swarm(a["swarm"])
-            ts = sw["spec"].types.get(a["type"]) if sw else None
+            if spec is None:
+                sw = self.store.get_swarm(a["swarm"])
+                spec = sw["spec"] if sw else None
+            ts = spec.types.get(a["type"]) if spec else None
             L = self.store.get_loops(a["swarm"]).get(a["type"])
             if ts is None or ts.loop is None or L is None:
                 return

@@ -46,6 +46,11 @@ them.
   other types with the `flock` CLI, under a `spawn:` policy (allowed types,
   caps, depth) and swarm `limits:`. Each agent calls the controller with its
   own scoped token. See [docs/spawn.md](docs/spawn.md).
+- **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
+  turn_end` or a duration, after an optional `first`) while `while:` holds
+  (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
+  round; `limits.budget_usd` stops the swarm. `flock loop` stops or restarts
+  a loop. See [docs/loop.md](docs/loop.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
@@ -177,6 +182,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /agents/{name}/events?after=&wait=` | event stream, long-poll |
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
+| `GET/POST /swarms/{swarm}/loop`, `GET /swarms/{swarm}/events` | loop state per type and agent, `{type, action: start\|stop, final}`, the swarm-level event stream ([docs/loop.md](docs/loop.md)) |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests

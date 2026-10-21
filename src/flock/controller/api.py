@@ -1138,7 +1138,7 @@ def create_app(
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
             if a is not None:
-                loops.on_events(a, evs)
+                loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
         if released and cap is not None:  # slots freed now, not at the next heartbeat (run-1k finding 1)
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
