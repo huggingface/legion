@@ -1,0 +1,52 @@
+# Pixel smoke: 3 LFM2.5-2.6B painters on one worker. Same as spec-100.yaml otherwise.
+# Pixel run 1 setup: on the `llm` harness (experiments/pixel/run/README.md).
+# Needs PR #7 (llm harness: `harness: llm`, `tool_choice`, `context_tokens`). Apply only after it
+# merges; on main today `harness: llm` is rejected.
+#
+# Model path: the GPU job's vLLM through the HF jobs proxy (job.sh: --expose 8000, vLLM
+# without --api-key). The proxy checks the HF token sent as the bearer, so the provider key IS
+# HF_TOKEN: give the controller a fine-grained read-only token under that name if you have one,
+# else the operator token. Fill <JOB_ID> from `hf jobs inspect` (URL format: verify at launch).
+# Network groups are not used: flock dropped provider network_group on purpose (0c1b4b2).
+swarm: pixel-smoke
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/flock/pixel-smoke
+providers:
+  gpu:
+    type: openai_compat
+    base_url: "https://<JOB_ID>--8000.hf.jobs/v1"   # FILL IN at launch (run/README.md step 3)
+    api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
+    self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
+    max_working: 64              # L4 sweet spot (probe: ~15-20 calls/s at c=32-64)
+    timeout_s: 60
+    max_retries: 4
+models:
+  lfm:
+    model: "gpu:LiquidAI/LFM2.5-2.6B"
+    extra:
+      max_tokens: 256
+      chat_template_kwargs: {enable_thinking: false}
+types:
+  painter:
+    harness: llm
+    model: lfm
+    tool_choice: required        # forced tool: every prompt is ONE bash step (PR #7)
+    # PR #7 head: done_tool is a boolean. false = one forced bash call per prompt; driver.py is
+    # the loop (and counts steps).
+    done_tool: false
+    max_turns: 25
+    max_budget_usd: 0.01         # per prompt; self-hosted price is 0, so this never binds
+    context_tokens: 6000         # compact well below vLLM --max-model-len 8192
+    turn_timeout: 2m
+    replicas: 3
+    agents_per_worker: 50
+    max_working_per_worker: 50   # default 20 would cap the swarm at 40 concurrent steps
+    workers: {initial: 1, max_extra: 0}
+    flavor: cpu-basic
+    # CANVAS_URL = https://<JOB_ID>--8765.hf.jobs (job.sh --expose-public 8765), set after the
+    # GPU job is up. CANVAS_TOKEN = the canvas shared secret (mode A); identity = FLOCK_AGENT.
+    secrets: [CANVAS_URL, CANVAS_TOKEN]
+    # The brief asked for `comms.instructions`; flock has no `comms` block (unknown keys are
+    # silently ignored), so the instructions go in as the agent's AGENTS.md.
+    system_prompt_file: painter.md
+    labels: {experiment: pixel-smoke}

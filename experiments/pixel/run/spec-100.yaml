@@ -1,0 +1,54 @@
+# Pixel run 1: 100 LFM2.5-2.6B painters on the `llm` harness (experiments/pixel/run/README.md).
+# RUN_ID run1-20261019 (job.sh, driver --run-id, progress Space). GPU: one rtx-pro-6000 job.
+# Needs PR #7 (`harness: llm`, `tool_choice`, `context_tokens`, `done_tool`): the controller runs
+# the `pixel-run` wheel (main + PR #7 + PR #8). Fill <JOB_ID> (base_url) at launch.
+#
+# Model path: the GPU job's vLLM through the HF jobs proxy (job.sh: --expose 8000, vLLM
+# without --api-key). The proxy checks the HF token sent as the bearer, so the provider key IS
+# HF_TOKEN (the operator token: workers also use HF_TOKEN for bucket sync, so read-only breaks
+# that). <JOB_ID>: `hf jobs inspect --json` -> status.expose_urls.
+# Network groups are not used: flock dropped provider network_group on purpose (0c1b4b2).
+swarm: pixel-100
+namespace: cmpatino
+bucket: hf://buckets/cmpatino/flock/pixel-100
+providers:
+  gpu:
+    type: openai_compat
+    base_url: "https://<JOB_ID>--8000.hf.jobs/v1"   # FILL IN at launch
+    api_key_env: HF_TOKEN        # what the jobs proxy checks; vLLM itself has no key
+    self_hosted: true            # price [0, 0, 0]; the real cost is the GPU job
+    max_working: 128             # rtx-pro-6000 probe knee: c=128, ~160 calls/s, p50 0.8 s
+    timeout_s: 60
+    max_retries: 4
+models:
+  lfm:
+    model: "gpu:LiquidAI/LFM2.5-2.6B"
+    extra:
+      max_tokens: 256
+      chat_template_kwargs: {enable_thinking: false}
+types:
+  painter:
+    harness: llm
+    model: lfm
+    tool_choice: required        # forced tool: every model call is a bash step (PR #7)
+    # PR #7 head: done_tool is a boolean. true = a prompt runs up to max_turns forced bash steps
+    # and ends when the model calls `done` or at max_turns (`turn_ended error, reason max_turns`,
+    # expected); fewer prompts for the big run. Driver: --repeat. Fallback if the model calls
+    # `done` after one step: false + re-apply, driver without --repeat. The smoke uses false.
+    done_tool: true
+    max_turns: 25
+    max_budget_usd: 0.05         # per prompt; self-hosted price is 0, so this never binds
+    context_tokens: 3000         # smoke: ~6k-token prompts at 6000; a step needs only the last result
+    turn_timeout: 6m             # 25 steps x ~3-6 s; past it the worker kills the turn (agent stuck)
+    replicas: 100
+    agents_per_worker: 25        # run 1: 50 per cpu-basic was CPU-bound (110 px/s); 25 gave 234 px/s
+    max_working_per_worker: 25   # run 1: 2 workers x 50 agents were CPU-bound (~9 s steps)
+    workers: {initial: 4, max_extra: 1}
+    flavor: cpu-basic
+    # CANVAS_URL = https://<JOB_ID>--8765.hf.jobs (job.sh --expose-public 8765), set after the
+    # GPU job is up. CANVAS_TOKEN = the canvas shared secret (mode A); identity = FLOCK_AGENT.
+    secrets: [CANVAS_URL, CANVAS_TOKEN]
+    # The brief asked for `comms.instructions`; flock has no `comms` block (unknown keys are
+    # silently ignored), so the instructions go in as the agent's AGENTS.md.
+    system_prompt_file: painter.md
+    labels: {experiment: pixel-100}

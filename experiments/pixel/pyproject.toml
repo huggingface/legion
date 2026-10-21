@@ -1,0 +1,25 @@
+[project]
+name = "flock-pixel"
+version = "0.0.1"
+description = "Pixel canvas world service for the flock pixel-painting test drive (experiment, not part of flock core)."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "numpy>=1.26",
+  "pillow>=10",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "cli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
