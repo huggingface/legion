@@ -193,6 +193,11 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
 
             return PiAdapter(workdir, agent=name, model_config=pi_model_config(spec),
                              prices=type_price_table(spec))
+        if spec.harness.value == "llm":
+            from flock.controller.prices import type_price_table
+            from flock.worker.adapters.llm import LLMAdapter
+
+            return LLMAdapter(workdir, agent=name, prices=type_price_table(spec))
         from flock.worker.adapters.codex import CodexAdapter
 
         return CodexAdapter(workdir)

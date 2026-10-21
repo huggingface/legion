@@ -173,9 +173,14 @@ def _provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
 
 
+# Harnesses that cannot add request-body fields, so a model's `extra` is kept but not sent.
+# The `llm` harness (and any harness not listed) sends it.
+EXTRA_NOT_SENT = frozenset({"claude", "codex", "pi"})
+
+
 def _warn_extra(spec: SwarmSpec) -> None:
     for name, ts in spec.types.items():
-        if ts.resolved_model is not None and ts.resolved_model.extra:
+        if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None and ts.resolved_model.extra:
             typer.echo(f"warning: type {name}: `extra` is kept in the spec but not sent by the "
                        f"{ts.harness.value} harness (docs/open-models.md)", err=True)
 

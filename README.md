@@ -13,10 +13,10 @@ them.
 ## Features
 
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
-  and one or more agent types. Each type sets the harness (`claude` or
-  `codex`), model, replicas, system prompt, job flavor, agents per worker,
+  and one or more agent types. Each type sets the harness (`claude`,
+  `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
   worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`
-  (enforced for every harness: Claude in its SDK, Codex and Pi in the worker).
+  (enforced for every harness: Claude in its SDK, Codex, Pi and `llm` in the worker).
   `apply`, `scale` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name
@@ -51,8 +51,14 @@ them.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
   `flock` wraps the HTTP API.
 
-Supported harnesses: Claude Code through the Python Agent SDK, Codex through
-`codex app-server`. Codex is verified locally, not yet inside a job.
+Supported harnesses:
+
+| `harness` | What runs | Providers | Notes |
+|---|---|---|---|
+| `claude` | Claude Code through the Python Agent SDK | native, `anthropic` | |
+| `codex` | `codex app-server` | native, `openai_compat` (Responses API) | verified locally, not yet in a job |
+| `pi` | `pi --mode rpc` | native, `openai_compat` | [docs/pi.md](docs/pi.md) |
+| `llm` | in-process Chat Completions loop, one `bash` tool | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
 
 ## Usage
 
