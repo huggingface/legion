@@ -235,6 +235,16 @@ calls: keep it in `ctx.data_dir` or the workdir. Startup is about 60 ms per call
 the worker's user with the same access as the agent's `bash`: this is isolation from failure,
 not a sandbox.
 
+## Built-in tools
+
+A type's tools can also be built-ins served by the worker instead of the folder: today the comms
+tools (`comms:post`, `comms:read`, `comms:search`, model names `post`, `read`, `search`;
+[docs/comms.md](comms.md)). They go through the same path: offered next to the folder tools in
+the `llm` harness and listed in the generated Tools section for `flock-tool`, pinned at the same
+turn boundaries. A built-in call runs in the worker (for `flock-tool`, through its local gateway
+on 127.0.0.1 with the agent's key from the pin), not in a subprocess, so it can use credentials
+the agent never sees.
+
 ## Follow-ups
 
 - Hot reload under `flock run` (local mode, a separate PR): watch the folder and re-apply on save.

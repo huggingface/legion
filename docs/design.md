@@ -353,6 +353,12 @@ uploads it and writes its content hash into the spec as `tools_version`; assigns
 (`AssignCommand.tools_version`) and heartbeat responses (`{"tools": {"version", "select"}}`)
 carry it to the workers, which switch at the next turn.
 
+Comms (docs/comms.md): a swarm-level `comms:` block (`kind: msgboard`, `url`, `invite_env`,
+`channel`, `kickoff_file`, `rules`, `protocols`, `wake`, `search`) and per-type `comms: true` or
+`comms:*` entries in `tools`. The controller resolves the channel id and posts the kickoff once
+at apply (`comms.channel_id`, `comms.kickoff_id`); assigns (`AssignCommand.comms`) and heartbeat
+responses (`{"comms": {...block, "tools"}}`) carry the block, so rules and protocols are live.
+
 ### Providers
 
 Open models (vLLM in a GPU job, the HF router, any OpenAI-compatible or Anthropic-compatible
@@ -724,6 +730,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, compaction past `context_tokens` projected from the server's prompt_tokens (2026-10-20, run 3: chars/4 undercounted JSON 2x; context-length 400 compacts and retries once, else reason `context_overflow`), tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 | 32 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
 | 33 | Tools folder (2026-10-21, thread 3063: tools live outside flock, are read at runtime and change while the swarm runs): public documented functions in `tools/*.py` are tools (schema from type hints, injected `Context`); `flock apply` ships the folder as a tar.gz named by its content hash; workers fetch it at assign and from heartbeat responses and switch at the next turn; one `python -I` subprocess per call (60 s, 1 MB); `llm` offers them as function tools, CLI harnesses through `flock-tool` and a generated Tools section |
+| 34 | Comms in the spec (2026-10-21, design note §10, threads 3063 and 3144): agents join the board under their flock name at their first prompt; the token stays in the worker (never in the agent env, workdir or pin); one activity long-poll per worker fans messages out as `comms_mention` / `comms_thread_reply` events; built-in `post` / `read` / `search` tools with rules enforced before the board call; search cut 1 is the board's own FTS5 search with query relaxation, no msgboard change; the kickoff is posted by `<swarm>-host`, never an agent (Carlos) |
 
 ## 12. Road to 10k
 

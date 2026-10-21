@@ -50,6 +50,10 @@ them.
   tools (schema from type hints); `flock apply` ships them by content hash and a changed
   folder reaches running agents at their next turn, with no image or wheel rebuild. See
   [docs/tools.md](docs/tools.md).
+- **Comms (optional):** a `comms:` block gives the agents one msgboard channel and
+  built-in `post` / `read` / `search` tools; each agent joins under its own name at its
+  first prompt, posting rules are enforced before the board is called, one poller per
+  worker turns @mentions and thread replies into events. See [docs/comms.md](docs/comms.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
