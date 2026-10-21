@@ -33,6 +33,7 @@ from flock.models import (
     AssignCommand,
     Command,
     CommandBatch,
+    CommsSpec,
     DrainCommand,
     EventBatch,
     PromptCommand,
@@ -40,10 +41,13 @@ from flock.models import (
     TypeSpec,
     UnassignCommand,
     WorkerHeartbeat,
+    comms_tools,
     parse_duration,
 )
+from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
+from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
 from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
@@ -257,6 +261,7 @@ class Worker:
         sync: BucketSync | None = None,
         identities: Identities | None = None,
         tools: ToolsManager | None = None,
+        comms: CommsHub | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
@@ -267,6 +272,9 @@ class Worker:
         self.identities = identities or Identities()
         self.outbox = Outbox()
         self.agents: dict[str, AgentRuntime] = {}
+        # comms (docs/comms.md): one hub per worker, one board poller for all its agents
+        self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
+                                       runtime=self.agents.get)
         self.draining = False
         self.drain_window = cfg.drain_window
         self._drained = asyncio.Event()
@@ -281,6 +289,11 @@ class Worker:
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
 
+    def _toolbox(self, agent: str) -> Callable[[], Toolset]:
+        """What a turn of `agent` may call: the folder tools of the current version plus the
+        agent's built-in comms tools."""
+        return lambda: self.comms.toolset_for(agent, self.tools.current())
+
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
 
@@ -289,10 +302,11 @@ class Worker:
         if isinstance(cmd, AssignCommand):
             if pending := self._unassigning.get(cmd.agent):  # re-assign right after unassign
                 await asyncio.shield(pending)
+            self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].spec = cmd.spec
                 self._set_lineage(self.agents[cmd.agent], cmd)
-                self.tools.want(cmd.tools_version, cmd.spec.tools)
+                self.tools.want(cmd.tools_version, cmd.spec.folder_tools)
                 return
             if self.draining:
                 log.warning("assign %s ignored while draining", cmd.agent)
@@ -301,7 +315,8 @@ class Worker:
                               work_root=self.cfg.work_root,
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
                               sync=self.sync, identities=self.identities,
-                              working_count=self.working_count, toolbox=self.tools.current)
+                              working_count=self.working_count, toolbox=self._toolbox(cmd.agent),
+                              comms=self.comms)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.drain_window = parse_duration(cmd.spec.drain_window)
@@ -347,7 +362,7 @@ class Worker:
         self._restoring += 1
         try:
             # the swarm's tools version is on disk before the agent's first turn (docs/tools.md)
-            await self.tools.ensure(cmd.tools_version, cmd.spec.tools)
+            await self.tools.ensure(cmd.tools_version, cmd.spec.folder_tools)
             await rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt)
         finally:
             self._restoring -= 1
@@ -362,6 +377,7 @@ class Worker:
         try:
             await rt.unassign()
         finally:
+            self.comms.forget(rt.name)
             self.agents.pop(rt.name, None)
             self._unassigning.pop(rt.name, None)
 
@@ -410,12 +426,29 @@ class Worker:
             if isinstance(resp, dict) and not self.draining:
                 tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
                 self.tools.want(tools.get("version"), tools.get("select"))
+                self._comms_from(resp.get("comms"))
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)
             if _stale(e) and not self.stale:
                 self._spawn(self.abandon(f"heartbeat: {e}"))
             return False
+
+    def _comms_from(self, raw: object) -> None:
+        """The swarm's comms block from a heartbeat response: rules and protocols changed by a
+        re-apply reach this worker here (docs/comms.md, "Live settings")."""
+        if not isinstance(raw, dict):
+            if self.comms.spec is not None:
+                self.comms.configure(None, [])
+            return
+        raw = dict(raw)
+        tools = raw.pop("tools", None)
+        try:
+            spec = CommsSpec.model_validate(raw)
+        except ValueError as e:
+            log.warning("heartbeat: unreadable comms block: %s", e)
+            return
+        self.comms.configure(spec, tools if isinstance(tools, list) else [])
 
     async def heartbeat_loop(self) -> None:
         await asyncio.sleep(random.random() * self.cfg.heartbeat_interval)
@@ -515,6 +548,7 @@ class Worker:
             await asyncio.sleep(_backoff(attempt))
         if not self.stale:
             await self.send_heartbeat()
+        await self.comms.aclose()
         await self.client.aclose()
         log.info("drained; exiting")
         return 0

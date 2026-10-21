@@ -8,7 +8,8 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
 
 - Session: `<home>/sessions/<agent>/<session id>.jsonl`, one OpenAI chat message per line
   (system, user, assistant, tool), appended as the turn runs. Resume reloads it; the system
-  message is rebuilt from the preamble and the workdir's AGENTS.md on every start. Keys starting
+  message is rebuilt from the preamble and the workdir's AGENTS.md on every start, and at a
+  turn start when either changed (a re-apply's comms protocols, docs/comms.md). Keys starting
   with `flock_` are ours and never sent.
 - Exactly one system message, first (LFM2's template requires it): compaction notes and
   steered prompts are user messages.
@@ -521,6 +522,18 @@ class LLMAdapter:
             text += "\n\n" + f.read_text()
         return text
 
+    def _refresh_system(self) -> None:
+        """Rebuild the system message at a turn start when AGENTS.md or the tools changed (a
+        re-apply's protocols or tools reach the next turn, not only the next start)."""
+        if not self.messages or self.messages[0].get("role") != "system":
+            return
+        text = self.system_prompt()
+        if self.messages[0].get("content") != text:
+            self.messages[0] = {"role": "system", "content": text}
+            self._last_prompt = None
+            with contextlib.suppress(OSError, AssertionError):
+                self._rewrite()
+
     def _load(self, path: Path) -> list[dict[str, Any]]:
         out = []
         try:
@@ -678,6 +691,7 @@ class LLMAdapter:
         if self._turn_tools is not None and self._turn_tools.error:
             started["tools_error"] = self._turn_tools.error
         self._queue.put(AdapterEvent("turn_started", data=started))
+        self._refresh_system()
         try:
             self._user(texts)
             while True:

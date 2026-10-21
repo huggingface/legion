@@ -170,6 +170,121 @@ class ResolvedModel(BaseModel):
         return f"{self.provider_name}:{self.model_id}"
 
 
+# --------------------------------------------------------------------------- comms (docs/comms.md)
+
+# Built-in comms tools a type may list in `tools:`; the model sees the bare name (`post`).
+COMMS_TOOLS = ("comms:post", "comms:read", "comms:search")
+COMMS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def comms_name(entry: str) -> str:
+    """`comms:post` -> `post`, the name the model sees."""
+    return entry.split(":", 1)[1]
+
+
+class CommsRules(BaseModel):
+    """Enforced by the worker before it calls the board; a refused post is a tool result
+    ("refused: ..."), never a board request. Live: a re-apply reaches workers by heartbeat."""
+
+    model_config = {"extra": "forbid"}
+
+    min_post_gap: str | None = None  # per agent, e.g. 20s
+    max_posts: int | None = None  # per agent, for the run (kept in the agent's synced state)
+    max_len: int | None = None  # characters per post
+    threads: Literal["per_topic"] | None = None  # posts must say thread: new or a root id
+    no_group_mentions: bool = False  # refuse @all / @agents / @humans (and @everyone, @people)
+
+    @field_validator("min_post_gap")
+    @classmethod
+    def _gap(cls, v: str | None) -> str | None:
+        if v is not None:
+            parse_duration(v)
+        return v
+
+    @field_validator("max_posts", "max_len")
+    @classmethod
+    def _positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
+    @property
+    def gap_s(self) -> float:
+        return parse_duration(self.min_post_gap).total_seconds() if self.min_post_gap else 0.0
+
+
+class CommsSpec(BaseModel):
+    """Swarm-level `comms:` (docs/comms.md). `url`, `invite_env` and `channel` are resolved
+    once by the controller at apply (channel name -> `channel_id`); `kickoff_file` and
+    `protocols` are files next to the spec that `flock apply` inlines (`kickoff`,
+    `protocols_text`), because the controller and workers cannot read the caller's files."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["msgboard"] = "msgboard"
+    url: str
+    invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
+    channel: str  # name, with or without `#`
+    kickoff_file: str | None = None
+    kickoff: str | None = None  # the file's text, inlined by `flock apply` (or given inline)
+    rules: CommsRules = Field(default_factory=CommsRules)
+    protocols: list[str] = Field(default_factory=list)  # files appended to the instructions
+    protocols_text: list[str] = Field(default_factory=list)  # inlined by `flock apply`
+    wake: list[Literal["mention", "thread"]] = Field(default_factory=lambda: ["mention", "thread"])
+    search: Literal["board", "index"] | None = "board"
+    # Written by the controller at apply; anything given by hand is replaced.
+    channel_id: int | None = None
+    kickoff_id: int | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError(f"url {v!r} must start with http:// or https://")
+        return v.rstrip("/")
+
+    @field_validator("invite_env")
+    @classmethod
+    def _env(cls, v: str) -> str:
+        if not ENV_NAME_RE.match(v):
+            raise ValueError(f"invite_env {v!r} must be an env var name (the invite never goes in the spec)")
+        return v
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, v: str) -> str:
+        v = v.strip().lstrip("#")
+        if not COMMS_NAME_RE.match(v):
+            raise ValueError(f"channel {v!r}: use the channel's name, e.g. prj-eliza-v1")
+        return v
+
+    @field_validator("search")
+    @classmethod
+    def _search(cls, v: str | None) -> str | None:
+        if v == "index":
+            raise ValueError("search: index (a per-worker FTS5 index) is not built yet; use "
+                             "search: board (docs/comms.md, cut 2)")
+        return v
+
+    @field_validator("wake")
+    @classmethod
+    def _wake(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(v))
+
+
+def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
+    """The built-in comms tools a type gets: the `comms:*` entries of its `tools`, else all of
+    them with `comms: true` (search only when the swarm's `comms.search` is set)."""
+    if comms is None or ts.comms is False:
+        return []
+    listed = [t for t in ts.tools if t in COMMS_TOOLS] if isinstance(ts.tools, list) else []
+    if listed:
+        return list(dict.fromkeys(listed))
+    if not ts.comms:
+        return []
+    return [t for t in COMMS_TOOLS if t != "comms:search" or comms.search]
+
+
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
@@ -218,9 +333,31 @@ class TypeSpec(BaseModel):
     # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
     # `flock apply` refuses a name the folder does not define. None: no folder tools.
     tools: list[str] | Literal["all"] | None = None
+    # Built-in comms tools (docs/comms.md): true gives all of them (`comms:post`, `comms:read`,
+    # `comms:search`), or list the ones wanted in `tools`. Needs the swarm-level `comms:`.
+    comms: bool | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
     # replaced. None means a harness-native model.
     resolved_model: ResolvedModel | None = None
+
+    @property
+    def folder_tools(self) -> list[str] | Literal["all"] | None:
+        """`tools` without the built-in `comms:*` entries: what the tools folder must define
+        (None when nothing is left)."""
+        if not isinstance(self.tools, list):
+            return self.tools
+        names = [t for t in self.tools if not t.startswith("comms:")]
+        return names or None
+
+    @field_validator("tools")
+    @classmethod
+    def _known_comms(cls, v: list[str] | str | None) -> list[str] | str | None:
+        if isinstance(v, list):
+            bad = [t for t in v if t.startswith("comms:") and t not in COMMS_TOOLS]
+            if bad:
+                raise ValueError(f"unknown comms tool(s) {', '.join(bad)}; comms tools: "
+                                 f"{', '.join(COMMS_TOOLS)}")
+        return v
 
     @property
     def harness_model(self) -> str:
@@ -302,6 +439,8 @@ class SwarmSpec(BaseModel):
     # Content hash of the tools bundle, written by `flock apply` after uploading the folder
     # (anything given by hand is replaced). Workers fetch that version; None: no tools.
     tools_version: str | None = None
+    # The team's message board (docs/comms.md); None: no comms.
+    comms: CommsSpec | None = None
 
     @field_validator("tools_version")
     @classmethod
@@ -356,6 +495,25 @@ class SwarmSpec(BaseModel):
             p = self.providers[r.provider_name]
             if p.self_hosted and r.model_id not in p.pricing and "*" not in p.pricing:
                 p.pricing[r.model_id] = list(SELF_HOSTED_PRICING)  # pin the default
+        return self
+
+    @model_validator(mode="after")
+    def _check_comms(self) -> SwarmSpec:
+        """A type that wants comms tools needs the swarm's `comms:` block; a listed
+        `comms:search` needs `comms.search`; `comms: false` with listed comms tools is a
+        contradiction."""
+        for name, ts in self.types.items():
+            listed = [t for t in ts.tools if t in COMMS_TOOLS] if isinstance(ts.tools, list) else []
+            if (ts.comms or listed) and self.comms is None:
+                raise ValueError(f"types.{name}: comms tools need the swarm-level `comms:` block "
+                                 "(kind, url, invite_env, channel)")
+            if ts.comms is False and listed:
+                raise ValueError(f"types.{name}: comms: false but tools lists {', '.join(listed)}")
+            if "comms:search" in listed and self.comms is not None and not self.comms.search:
+                raise ValueError(f"types.{name}.tools: comms:search needs comms.search (board)")
+        c = self.comms
+        if c is not None and c.protocols_text and len(c.protocols_text) != len(c.protocols):
+            raise ValueError("comms.protocols_text is written by `flock apply` (one per protocols file)")
         return self
 
     @field_validator("swarm")
@@ -550,6 +708,7 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
     return max(0, min(parent_depth - 1, root_depth(spec, type_name)))
 
 
+CommsSpec.model_rebuild()
 TypeSpec.model_rebuild()
 SwarmSpec.model_rebuild()
 
@@ -656,6 +815,7 @@ class AssignCommand(BaseModel):
     # The agent's scoped controller token, injected into its harness env as FLOCK_AGENT_TOKEN.
     agent_token: str | None = None
     tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
+    comms: CommsSpec | None = None  # the swarm's comms block (docs/comms.md), channel resolved
 
 
 class UnassignCommand(BaseModel):

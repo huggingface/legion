@@ -7,15 +7,24 @@ same thing from the agent's pin file, which the worker rewrites at each turn sta
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from dataclasses import asdict, dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from flock.tools import Context
 from flock.tools.loader import ToolDef
-from flock.tools.runner import DEFAULT_TIMEOUT_S, RESULT_MAX_BYTES, Result, context_dict, run_tool
+from flock.tools.runner import (
+    DEFAULT_TIMEOUT_S,
+    RESULT_MAX_BYTES,
+    Result,
+    check_args,
+    context_dict,
+    run_tool,
+)
 
 PIN_ENV = "FLOCK_TOOLS_PIN"  # path of the agent's pin file, in every harness env
 
@@ -32,6 +41,14 @@ class Toolset:
     error: str | None = None  # why the wanted version is not (yet) available
     timeout_s: float = DEFAULT_TIMEOUT_S
     max_bytes: int = RESULT_MAX_BYTES
+    # Built-in tools (ToolDef.builtin, e.g. comms:post; docs/comms.md) are served by the worker:
+    # in process for the `llm` harness (`builtin_call(entry, args)`, never in the pin file), and
+    # through the worker's local gateway (`gateway` host:port, this agent's `gateway_key`) for
+    # `flock-tool`.
+    gateway: str | None = None
+    gateway_key: str | None = None
+    builtin_call: Callable[[str, dict[str, Any]], Awaitable[Result]] | None = field(
+        default=None, compare=False, repr=False)
 
     def get(self, name: str) -> ToolDef | None:
         return next((t for t in self.tools if t.name == name), None)
@@ -49,6 +66,8 @@ class Toolset:
                    env: dict[str, str]) -> Result:
         """Run tool `name`; an unknown name is an error result, like any other failure."""
         tool = self.get(name)
+        if tool is not None and tool.builtin:
+            return await self._call_builtin(tool, args, agent)
         if tool is None or self.dir is None:
             known = ", ".join(self.names()) or "none"
             return Result(json.dumps({"error": f"unknown tool {name!r}; tools: {known}"}), True)
@@ -57,9 +76,21 @@ class Toolset:
         return await run_tool(tool, args, tools_dir=self.dir, workdir=workdir, ctx=ctx, env=env,
                               python=self.python, timeout=self.timeout_s, max_bytes=self.max_bytes)
 
+    async def _call_builtin(self, tool: ToolDef, args: Any, agent: str) -> Result:
+        assert tool.builtin is not None
+        if err := check_args(tool.parameters, args):
+            return Result(json.dumps({"error": f"{tool.name}: {err}"}), True)
+        if self.builtin_call is not None:
+            return await self.builtin_call(tool.builtin, args)
+        if self.gateway is None:
+            return Result(json.dumps({"error": f"{tool.name}: no worker gateway here"}), True)
+        return await gateway_call(self.gateway, self.gateway_key or "", agent, tool.builtin, args,
+                                  timeout=self.timeout_s)
+
     # ------------------------------------------------------------------ pin file
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
+        d.pop("builtin_call", None)
         for k in ("dir", "data_dir"):
             d[k] = None if d[k] is None else str(d[k])
         d["tools"] = [asdict(t) for t in self.tools]
@@ -71,6 +102,7 @@ class Toolset:
         d["dir"] = Path(d["dir"]) if d.get("dir") else None
         d["data_dir"] = Path(d["data_dir"])
         d["tools"] = tuple(ToolDef(**t) for t in d.get("tools") or [])
+        d.pop("builtin_call", None)
         return cls(**d)
 
     def write_pin(self, path: Path, *, agent: str, workdir: Path,
@@ -82,6 +114,31 @@ class Toolset:
         tmp.write_text(json.dumps({"agent": agent, "workdir": str(workdir), "toolset": self.to_json(),
                                    "env_deny": sorted(set(env_deny))}))
         os.replace(tmp, path)
+
+
+GATEWAY_LINE_MAX = 4 * 1024 * 1024
+
+
+async def gateway_call(address: str, key: str, agent: str, entry: str, args: Any, *,
+                       timeout: float = DEFAULT_TIMEOUT_S) -> Result:
+    """One built-in call through the worker's gateway (flock.worker.comms): a JSON line out,
+    a JSON line back, on 127.0.0.1."""
+    host, _, port = address.rpartition(":")
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, int(port), limit=GATEWAY_LINE_MAX), 10)
+    except (OSError, ValueError, TimeoutError) as e:
+        return Result(json.dumps({"error": f"cannot reach the worker gateway: {e}"}), True)
+    try:
+        writer.write(json.dumps({"agent": agent, "key": key, "tool": entry, "args": args}).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout)
+        resp = json.loads(line)
+        return Result(str(resp["output"]), bool(resp.get("error")), float(resp.get("duration_s") or 0))
+    except (OSError, ValueError, KeyError, TimeoutError) as e:
+        return Result(json.dumps({"error": f"worker gateway: {type(e).__name__}: {e}"}), True)
+    finally:
+        writer.close()
 
 
 def read_pin(path: str | Path) -> tuple[Toolset, str, Path]:
@@ -132,7 +189,8 @@ def instructions_section(ts: Toolset) -> str:
     how = ("Call these with the `flock-tool` command from your shell. It prints the result (JSON "
            "or text) and exits 1 on an error, whose message it prints as `{\"error\": ...}`. "
            "`flock-tool --list` shows each tool's parameters as JSON schema.")
-    lines = [SECTION_START, f"## Tools (version {ts.version})", "", how, ""]
+    title = f"## Tools (version {ts.version})" if ts.version else "## Tools"
+    lines = [SECTION_START, title, "", how, ""]
     for t in ts.tools:
         args = json.dumps(example_args(t), ensure_ascii=False)
         lines += [f"- `{t.name}`: {t.description or '(no description)'}",
@@ -141,12 +199,13 @@ def instructions_section(ts: Toolset) -> str:
     return "\n".join(lines)
 
 
-def replace_section(text: str, section: str) -> str:
-    """`text` with its generated section replaced by `section` (appended if absent; removed if
-    `section` is empty)."""
-    start, end = text.find(SECTION_START), text.find(SECTION_END)
+def replace_section(text: str, section: str, start_mark: str = SECTION_START,
+                    end_mark: str = SECTION_END) -> str:
+    """`text` with its generated section (between the markers) replaced by `section` (appended
+    if absent; removed if `section` is empty)."""
+    start, end = text.find(start_mark), text.find(end_mark)
     if start != -1 and end != -1 and end > start:
-        text = (text[:start].rstrip("\n") + "\n" + text[end + len(SECTION_END):].lstrip("\n")).strip("\n")
+        text = (text[:start].rstrip("\n") + "\n" + text[end + len(end_mark):].lstrip("\n")).strip("\n")
         text = text + "\n" if text else ""
     if not section:
         return text

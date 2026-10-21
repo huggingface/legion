@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from flock.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
 from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
+from flock.worker import comms as comms_mod
 from flock.worker.adapters.base import (
     AdapterEvent,
     HarnessAdapter,
@@ -33,6 +34,7 @@ from flock.worker.adapters.base import (
 from flock.worker.events import Outbox, SessionLog, utcnow
 
 if TYPE_CHECKING:
+    from flock.worker.comms import CommsHub
     from flock.worker.identity import Identities
     from flock.worker.sync import BucketSync
 
@@ -50,6 +52,11 @@ class AgentState(BaseModel):
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # cumulative, by model
     harness_cum: dict[str, TokenUsage] = Field(default_factory=dict)  # last cumulative snapshot
     harness_estimate_usd: float | None = None
+    # comms (docs/comms.md): posts made (max_posts), the last one's wall time (min_post_gap),
+    # and the threads the agent posted in (thread-reply wakes), so a relaunch keeps them
+    comms_posts: int = 0
+    comms_last_post: float | None = None
+    comms_threads: list[int] = Field(default_factory=list)
 
 
 def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path, why: str) -> str:
@@ -76,6 +83,7 @@ class AgentRuntime:
         working_count: Callable[[], int] | None = None,
         secret_source: Mapping[str, str] | None = None,
         toolbox: Callable[[], Toolset] | None = None,
+        comms: CommsHub | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
         self.work_root = Path(work_root)
@@ -120,6 +128,8 @@ class AgentRuntime:
         self._turn_tools: str | None = None  # tools version of the turn in flight
         self._tools_section: str | None = None  # last generated instructions section
         self._pinned: Toolset | None = None  # pinned when a prompt was forwarded between turns
+        self.comms = comms  # the worker's comms hub (docs/comms.md); None: no comms
+        self._comms_section: str | None = None  # last comms section written to the instructions
 
     # ------------------------------------------------------------------ paths and state
     @property
@@ -139,13 +149,14 @@ class AgentRuntime:
         if self.toolbox is None:
             return None
         ts = self.toolbox()
-        if ts.version is not None or self.pin_path.exists():
+        if ts.version is not None or ts.tools or self.pin_path.exists():
             deny = credential_env_names(self.spec)  # the key under every name the harness has it
             try:
                 ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
             except OSError as e:
                 log.warning("%s: cannot write the tools pin: %s", self.name, e)
         self._write_tools_section(ts)
+        self._write_comms_section()
         return ts
 
     @property
@@ -235,6 +246,20 @@ class AgentRuntime:
         self._write_instructions()
         if tools is not None:
             self._write_tools_section(tools)
+        self._write_comms_section()
+
+    def _write_comms_section(self) -> None:
+        """The comms section (board identity, rules, protocol files) of CLAUDE.md / AGENTS.md,
+        rewritten when it changes; the llm harness reads AGENTS.md into its system message."""
+        if self.comms is None or not self.workdir.is_dir():
+            return
+        section = self.comms.section(self.name)
+        if section != (self._comms_section or ""):
+            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
+            text = target.read_text() if target.is_file() else ""
+            target.write_text(replace_section(text, section, comms_mod.SECTION_START,
+                                              comms_mod.SECTION_END))
+        self._comms_section = section
 
     def _write_tools_section(self, tools: Toolset) -> None:
         """The generated Tools section of CLAUDE.md / AGENTS.md (CLI harnesses; llm gets function
@@ -303,6 +328,8 @@ class AgentRuntime:
             if self._working_count and self._working_count() > self.spec.max_working_per_worker:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
+            if self.comms is not None:  # join the board at the first prompt, not at assign
+                await self.comms.on_prompt(self.name, self.spec.harness.value)
             self._write_instructions()  # before the tools section is generated into it
             tools = self._pin_tools()
             self._prepare_workdir(tools)
