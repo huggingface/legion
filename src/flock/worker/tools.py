@@ -39,8 +39,9 @@ def _requirements(folder: Path) -> list[str]:
     return [ln.strip() for ln in f.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
 
 
-async def _run(cmd: list[str], timeout: float) -> None:
-    proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
+async def _run(cmd: list[str], timeout: float, cwd: Path | None = None) -> None:
+    proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(cwd) if cwd else None,
+                                                stdin=asyncio.subprocess.DEVNULL,
                                                 stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.STDOUT)
     try:
@@ -74,11 +75,13 @@ async def make_venv(folder: Path, venv: Path, *, timeout: float = INSTALL_TIMEOU
     parent = sorted({sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]})
     (purelib / "_flock_worker.pth").write_text(
         "".join(f"import site; site.addsitedir({p!r})\n" for p in parent))
-    req = str(folder / REQUIREMENTS)
+    # from the extracted bundle: `./dep.whl` or `-e ./pkg` in requirements.txt is the bundle's
     if uv:
-        await _run([uv, "pip", "install", "--quiet", "--python", str(py), "-r", req], timeout)
+        await _run([uv, "pip", "install", "--quiet", "--python", str(py), "-r", REQUIREMENTS],
+                   timeout, cwd=folder)
     else:
-        await _run([str(py), "-m", "pip", "install", "--quiet", "-r", req], timeout)
+        await _run([str(py), "-m", "pip", "install", "--quiet", "-r", REQUIREMENTS], timeout,
+                   cwd=folder)
     (venv / ".flock-ready").write_text("ok\n")
     return str(py)
 

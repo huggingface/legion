@@ -51,9 +51,14 @@ start with `_` and that has a docstring is a tool. A function without a docstrin
 | `list[X]` (or `list`) | `array` with `items` from `X` |
 | `dict` (or `dict[str, X]`) | `object` |
 | `Literal["a", "b"]` | `enum` |
-| `X \| None`, `Optional[X]` | the schema of `X`, not required |
+| `X \| None`, `Optional[X]` | the schema of `X` that also accepts null (`"type": ["integer", "null"]`; `None` added to an enum) |
 | `Any` | `{}` |
 | a default value | not required; the default is in the schema |
+
+Requiredness follows the Python signature: a parameter without a default is required, nullable
+or not (`x: int | None` must be passed, possibly as `null`); give it a default
+(`x: int | None = None`) to make it omittable. Null is accepted only where the hint says
+`| None`, array items included (`list[int | None]`).
 
 A parameter without an annotation, `*args` / `**kwargs`, positional-only parameters and other
 unions are refused at apply time, with the module, function and parameter in the message.
@@ -74,7 +79,7 @@ context and is never shown to the model:
 
 **Errors.** An exception becomes the result `{"error": "ValueError: <message>"}`;
 `raise flock.tools.ToolError("message")` gives `{"error": "message"}`. Arguments that do not fit
-the schema (a missing required argument, an unknown one, a string for an `integer`) are refused
+the schema (a missing required argument, an unknown one, a string or `null` for an `integer`) are refused
 before the call with the same shape. A tool error is a result the model reads and the turn goes
 on; it is marked `isError` in the event stream.
 
@@ -173,7 +178,8 @@ kept per swarm) and which one is current.
 worker creates a venv for that version (`<WORK_ROOT>/_tools/<version>.venv`, with `uv` when it
 is on `PATH`, else `python -m venv` and pip), installs the requirements, and runs that version's
 calls with its python. The venv also sees the worker's own packages (flock included), after its
-own. The install must finish within 10 minutes; a failure is reported as `tools_error`. `flock
+own. The install runs in the extracted bundle directory, so relative entries (`./wheels/dep.whl`,
+`-e ./pkg`) refer to files shipped in the folder. It must finish within 10 minutes; a failure is reported as `tools_error`. `flock
 apply` imports the modules with your local python, so the requirements must be installed
 locally too, or imported inside the functions.
 
@@ -198,7 +204,12 @@ changes, at the next harness start) listing each tool with its description and o
 The agent calls them from its shell with `flock-tool NAME --json '<args>'` (`--json -` reads
 stdin; `flock-tool --list` prints the schemas). It prints the result and exits 0, or prints
 `{"error": ...}` and exits 1. `flock-tool` is installed with flock (on `PATH` in the worker image)
-and finds the agent's tools through `FLOCK_TOOLS_PIN`, which the worker sets in the harness env.
+and finds the agent's tools through `FLOCK_TOOLS_PIN`, which the worker sets in every harness
+env from the process's start. The worker rewrites that pin file at each turn boundary (when a
+prompt starts a turn): a new version, tools enabled mid-burst and tools disabled (an empty
+toolset: calls fail with `unknown tool`) all reach a running harness at its next turn, without
+a restart. The call's environment is the harness env minus the provider key (the pin names
+it) and `FLOCK_TOKEN`, the same rule as for `llm` tools.
 Not yet: MCP for the CLI harnesses (the model sees the tools through the instructions file, not
 as native tools).
 

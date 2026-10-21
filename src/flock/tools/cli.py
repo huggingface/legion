@@ -5,8 +5,10 @@
     flock-tool --list                     the tools of this turn, with their JSON schemas
 
 The worker puts FLOCK_TOOLS_PIN (the agent's pin file: tools version, folder, selection) in the
-harness env and rewrites the file at each turn start, so a call runs the version the turn
-started with. The call itself is the same subprocess the `llm` harness uses.
+harness env and rewrites the file at each turn boundary (an empty toolset when the type has no
+tools), so a call runs the version the turn started with. The call gets the harness env minus
+the pin's `env_deny` (the provider key) and FLOCK_TOKEN, and is the same subprocess the `llm`
+harness uses.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import json
 import os
 import sys
 
-from flock.tools.toolset import PIN_ENV, read_pin
+from flock.tools.toolset import PIN_ENV, pin_env_deny, read_pin
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,7 +50,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     import asyncio
 
-    r = asyncio.run(ts.call(ns.name, args, agent=agent, workdir=workdir, env=dict(os.environ)))
+    # the harness's env minus the provider key (and FLOCK_TOKEN): what the llm path gives tools
+    deny = set(pin_env_deny(pin))
+    env = {k: v for k, v in os.environ.items() if k not in deny}
+    r = asyncio.run(ts.call(ns.name, args, agent=agent, workdir=workdir, env=env))
     print(r.output)
     return 1 if r.error else 0
 

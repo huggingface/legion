@@ -73,11 +73,14 @@ class Toolset:
         d["tools"] = tuple(ToolDef(**t) for t in d.get("tools") or [])
         return cls(**d)
 
-    def write_pin(self, path: Path, *, agent: str, workdir: Path) -> None:
-        """The agent's pin file: this Toolset plus who calls and from where (atomic)."""
+    def write_pin(self, path: Path, *, agent: str, workdir: Path,
+                  env_deny: list[str] | tuple[str, ...] = ()) -> None:
+        """The agent's pin file: this Toolset plus who calls, from where, and the environment
+        variables a call must not inherit (the provider key; atomic)."""
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".tmp{os.getpid()}")
-        tmp.write_text(json.dumps({"agent": agent, "workdir": str(workdir), "toolset": self.to_json()}))
+        tmp.write_text(json.dumps({"agent": agent, "workdir": str(workdir), "toolset": self.to_json(),
+                                   "env_deny": sorted(set(env_deny))}))
         os.replace(tmp, path)
 
 
@@ -87,20 +90,34 @@ def read_pin(path: str | Path) -> tuple[Toolset, str, Path]:
     return Toolset.from_json(d["toolset"]), d["agent"], Path(d["workdir"])
 
 
+# Never in a tool call's environment, whatever the harness env holds.
+ENV_DENY = ("FLOCK_TOKEN",)
+
+
+def pin_env_deny(path: str | Path) -> list[str]:
+    """The variables a call from this pin must not inherit: the pin's list plus ENV_DENY."""
+    d = json.loads(Path(path).read_text())
+    return sorted({*ENV_DENY, *(d.get("env_deny") or [])})
+
+
 def example_args(tool: ToolDef) -> dict[str, Any]:
     """Placeholder arguments for the instructions' example call (required parameters only)."""
     sample = {"string": "...", "integer": 1, "number": 1.0, "boolean": True, "array": [],
               "object": {}}
     out: dict[str, Any] = {}
     props = tool.parameters.get("properties") or {}
+    def first(schema: dict[str, Any]) -> str | None:  # ["integer", "null"] -> "integer"
+        t = schema.get("type")
+        return next((x for x in t if x != "null"), None) if isinstance(t, list) else t
+
     for name in tool.parameters.get("required") or []:
         p = props.get(name) or {}
         if "enum" in p:
             out[name] = p["enum"][0]
-        elif p.get("type") == "array" and (p.get("items") or {}).get("type") == "string":
+        elif first(p) == "array" and first(p.get("items") or {}) == "string":
             out[name] = ["..."]
         else:
-            out[name] = sample.get(p.get("type"), "...")
+            out[name] = sample.get(first(p) or "", "...")
     return out
 
 

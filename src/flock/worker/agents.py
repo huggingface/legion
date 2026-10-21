@@ -113,6 +113,7 @@ class AgentRuntime:
             adapter.toolbox = toolbox  # type: ignore[attr-defined]
         self._turn_tools: str | None = None  # tools version of the turn in flight
         self._tools_section: str | None = None  # last generated instructions section
+        self._pinned: Toolset | None = None  # pinned when a prompt was forwarded between turns
 
     # ------------------------------------------------------------------ paths and state
     @property
@@ -125,14 +126,21 @@ class AgentRuntime:
         return self.work_root / "_tools_pins" / f"{self.name}.json"
 
     def _pin_tools(self) -> Toolset | None:
+        """The current Toolset, written to the pin file `flock-tool` reads. The harness has the
+        pin's path from its start (PIN_ENV), so a version, an enable or a disable reaches a
+        running harness at the next turn boundary: with no tools the pin holds an empty
+        toolset (written once a pin exists; an agent that never had tools gets none)."""
         if self.toolbox is None:
             return None
         ts = self.toolbox()
-        if ts.version is not None:
+        if ts.version is not None or self.pin_path.exists():
+            r = self.spec.resolved_model
+            deny = [r.provider.api_key_env] if r is not None else []
             try:
-                ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir)
+                ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
             except OSError as e:
                 log.warning("%s: cannot write the tools pin: %s", self.name, e)
+        self._write_tools_section(ts)
         return ts
 
     @property
@@ -202,6 +210,8 @@ class AgentRuntime:
         self._last_activity = self._now()
         if self.turn_id is None:
             self.awaiting = True
+            # a turn boundary: the prompt starts a turn, so pin the tools it will run with
+            self._pinned = self._pin_tools()
         try:
             await self.adapter.send(text)
         except Exception as e:  # noqa: BLE001 - process died under us: keep the prompt for the next burst
@@ -215,13 +225,20 @@ class AgentRuntime:
 
     def _prepare_workdir(self, tools: Toolset | None = None) -> None:
         self._write_instructions()
-        if tools is not None and self.spec.harness.value != "llm":  # llm: function tools instead
-            section = instructions_section(tools)
-            if section != (self._tools_section or ""):
-                target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
-                text = target.read_text() if target.is_file() else ""
-                target.write_text(replace_section(text, section))
-            self._tools_section = section
+        if tools is not None:
+            self._write_tools_section(tools)
+
+    def _write_tools_section(self, tools: Toolset) -> None:
+        """The generated Tools section of CLAUDE.md / AGENTS.md (CLI harnesses; llm gets function
+        tools instead), rewritten when the toolset changes."""
+        if self.spec.harness.value == "llm" or not self.workdir.is_dir():
+            return
+        section = instructions_section(tools)
+        if section != (self._tools_section or ""):
+            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
+            text = target.read_text() if target.is_file() else ""
+            target.write_text(replace_section(text, section))
+        self._tools_section = section
 
     def _write_instructions(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -281,7 +298,7 @@ class AgentRuntime:
             env = await self.harness_env()
             old = self.state.session_id
             env.update(self.flock_env)
-            if tools is not None and tools.version is not None:
+            if tools is not None:  # always: tools enabled mid-burst must reach this process
                 env[PIN_ENV] = str(self.pin_path)
             first: list[str] = []
             data: dict[str, Any] = {"harness": self.spec.harness.value, "model": self.spec.model}
@@ -418,7 +435,8 @@ class AgentRuntime:
         self._turn_tokens = {}
         data = dict(data)
         if self.toolbox is not None and "tools_version" not in data:
-            ts = self._pin_tools()  # CLI harnesses: flock-tool uses this version until the next turn
+            # CLI harnesses: what the prompt pinned (else pin now); flock-tool uses it to turn end
+            ts, self._pinned = self._pinned or self._pin_tools(), None
             if ts is not None and ts.version is not None:
                 data["tools_version"] = ts.version
             if ts is not None and ts.error:
@@ -430,6 +448,7 @@ class AgentRuntime:
         self.state.turns += 1
         self.turn_id = None
         self._turn_tools = None
+        self._pinned = None
         self.awaiting = False
         self.idle_since = utcnow()
         self._last_activity = self._now()

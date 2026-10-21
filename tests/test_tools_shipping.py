@@ -237,11 +237,15 @@ async def test_manager_keeps_the_old_version_when_a_fetch_fails(tmp_path):
 
 @pytest.mark.skipif(not __import__("shutil").which("uv"), reason="needs uv")
 async def test_requirements_get_a_per_version_venv(tmp_path, monkeypatch):
-    """A local wheel in requirements.txt, installed offline into the version's venv; the tool
-    imports it and flock.tools at once."""
+    """A wheel shipped inside the folder and named by a relative path in requirements.txt,
+    installed offline into the version's venv from the extracted bundle (the source folder is
+    gone by then); the tool imports it and flock.tools at once."""
+    import shutil
     import zipfile
 
-    whl = tmp_path / "flockdep-0.1-py3-none-any.whl"
+    d = folder(tmp_path / "src", "")
+    (d / "wheels").mkdir()
+    whl = d / "wheels" / "flockdep-0.1-py3-none-any.whl"
     meta = "Metadata-Version: 2.1\nName: flockdep\nVersion: 0.1\n"
     wheel = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     with zipfile.ZipFile(whl, "w") as z:
@@ -258,10 +262,11 @@ async def test_requirements_get_a_per_version_venv(tmp_path, monkeypatch):
             import flockdep
             return flockdep.ANSWER + 1
     '''
-    d = folder(tmp_path / "src", src)
-    (d / "requirements.txt").write_text(f"# local wheel\n{whl}\n")
+    (d / "calc.py").write_text(textwrap.dedent(src))
+    (d / "requirements.txt").write_text("# a wheel shipped in the bundle\n./wheels/flockdep-0.1-py3-none-any.whl\n")
     monkeypatch.setenv("UV_OFFLINE", "1")
     b = pack(d)
+    shutil.rmtree(d)  # only the bundle remains
     f = Fetcher()
     f.bundles = {b.version: b.data}
     m = manager(tmp_path, f)
@@ -333,6 +338,104 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     await rt.stop()
 
 
+async def _cli_runtime(tmp_path: Path, m: ToolsManager, tspec=None) -> tuple[AgentRuntime, ScriptedAdapter]:
+    from .worker_fakes import spec as type_spec
+
+    adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
+    rt = AgentRuntime("dev-0000", "dev", tspec or type_spec(idle_grace="30s"), swarm="demo",
+                      work_root=tmp_path / "agents", adapter=adapter, outbox=Outbox(),
+                      toolbox=m.current, secret_source={"PROVIDER_KEY": "dummy-key"})
+    await rt.setup(restore=False)
+    return rt, adapter
+
+
+async def test_cli_harness_tools_enabled_then_disabled_in_one_burst(tmp_path):
+    f = Fetcher()
+    b = pack(folder(tmp_path / "v1"))
+    f.bundles = {b.version: b.data}
+    m = manager(tmp_path, f)
+    await m.ensure(b.version, "all")
+    rt, adapter = await _cli_runtime(tmp_path, m)
+    tool = Path(sys.executable).parent / "flock-tool"
+    try:
+        await rt.prompt("first")
+        await until(lambda: rt.state.turns == 1, timeout=5)
+        env = {**os.environ, **adapter.envs[0]}
+        assert (await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)).stdout.strip() == "5"
+        await m.ensure(None, None)  # the spec drops the tools; the harness keeps running
+        await rt.prompt("second")
+        await until(lambda: rt.state.turns == 2, timeout=5)
+        assert len(adapter.starts) == 1
+        p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
+        assert p.returncode == 1 and json.loads(p.stdout) == {"error": "unknown tool 'add'; tools: none"}
+        assert read_pin(rt.pin_path)[0].version is None
+        assert SECTION_START not in (tmp_path / "agents" / "dev-0000" / "CLAUDE.md").read_text()
+    finally:
+        await rt.stop()
+
+
+async def test_cli_harness_tools_enabled_mid_burst(tmp_path):
+    f = Fetcher()
+    b = pack(folder(tmp_path / "v1"))
+    f.bundles = {b.version: b.data}
+    m = manager(tmp_path, f)
+    rt, adapter = await _cli_runtime(tmp_path, m)
+    tool = Path(sys.executable).parent / "flock-tool"
+    try:
+        await rt.prompt("first")
+        await until(lambda: rt.state.turns == 1, timeout=5)
+        env = {**os.environ, **adapter.envs[0]}
+        assert env[PIN_ENV] == str(rt.pin_path)  # set from the start, before any tools exist
+        assert not rt.pin_path.exists()  # an agent that never had tools gets no pin file
+        p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
+        assert p.returncode == 2 and "no tools here" in p.stdout
+        await m.ensure(b.version, "all")
+        await rt.prompt("second")
+        await until(lambda: rt.state.turns == 2, timeout=5)
+        assert len(adapter.starts) == 1
+        p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
+        assert (p.returncode, p.stdout.strip()) == (0, "5")
+        md = (tmp_path / "agents" / "dev-0000" / "CLAUDE.md").read_text()
+        assert "- `add`: Add two integers (v1)." in md  # the section follows at the turn boundary
+    finally:
+        await rt.stop()
+
+
+async def test_flock_tool_never_passes_the_provider_key(tmp_path):
+    """A provider-backed CLI harness gets its key in its env; a tool called through flock-tool
+    does not (the same rule as the llm path), nor FLOCK_TOKEN."""
+    src = ADD_V1 + '''
+
+def secrets_seen() -> dict:
+    """Which credentials the tool process can see (names only)."""
+    import os
+    return {k: k in os.environ for k in ("PROVIDER_KEY", "FLOCK_TOKEN", "KEEP_ME")}
+'''
+    f = Fetcher()
+    b = pack(folder(tmp_path / "v1", src))
+    f.bundles = {b.version: b.data}
+    m = manager(tmp_path, f)
+    await m.ensure(b.version, "all")
+    tspec = SwarmSpec.model_validate({
+        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+        "providers": {"fake": {"type": "openai_compat", "base_url": "http://127.0.0.1:9/v1",
+                               "api_key_env": "PROVIDER_KEY", "self_hosted": True}},
+        "types": {"dev": {"harness": "pi", "model": "fake:dummy", "idle_grace": "30s",
+                          "turn_timeout": "2s", "env": {"KEEP_ME": "1"}}},
+    }).types["dev"]
+    rt, adapter = await _cli_runtime(tmp_path, m, tspec)
+    try:
+        await rt.prompt("first")
+        await until(lambda: rt.state.turns == 1, timeout=5)
+        env = {**os.environ, **adapter.envs[0], "FLOCK_TOKEN": "worker-secret"}
+        assert env["PROVIDER_KEY"] == "dummy-key"  # the harness itself needs it
+        tool = Path(sys.executable).parent / "flock-tool"
+        p = await run_tool_cli(tool, ["secrets_seen"], env)
+        assert json.loads(p.stdout) == {"PROVIDER_KEY": False, "FLOCK_TOKEN": False, "KEEP_ME": True}
+    finally:
+        await rt.stop()
+
+
 def test_flock_tool_without_a_pin(tmp_path):
     tool = Path(sys.executable).parent / "flock-tool"
     env = {k: v for k, v in os.environ.items() if k != PIN_ENV}
@@ -343,7 +446,7 @@ def test_flock_tool_without_a_pin(tmp_path):
 
 def test_instructions_section_round_trip():
     from flock.tools.loader import ToolDef
-    from flock.tools.toolset import instructions_section, replace_section
+    from flock.tools.toolset import example_args, instructions_section, replace_section
 
     ts = Toolset(version="v", dir=Path("/x"), swarm="s", type="t", data_dir=Path("/d"), tools=(
         ToolDef("run_bot", "Run a bot.", {"type": "object", "properties": {
@@ -351,6 +454,10 @@ def test_instructions_section_round_trip():
             "required": ["path", "messages"]}, "m", "run_bot"),))
     sec = instructions_section(ts)
     assert """flock-tool run_bot --json '{"path": "...", "messages": ["..."]}'""" in sec
+    nullable = ToolDef("f", "F.", {"type": "object", "properties": {
+        "n": {"type": ["integer", "null"]}, "xs": {"type": ["array", "null"], "items": {
+            "type": ["string", "null"]}}}, "required": ["n", "xs"]}, "m", "f")
+    assert example_args(nullable) == {"n": 1, "xs": ["..."]}
     once = replace_section("Hello.\n", sec)
     assert once == f"Hello.\n\n{sec}\n" and replace_section(once, sec) == once
     assert replace_section(once, "") == "Hello.\n"
