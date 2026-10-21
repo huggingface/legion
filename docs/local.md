@@ -100,9 +100,13 @@ uv run flock events writer-0001 --pretty --follow
 From elsewhere: `FLOCK_CURRENT=/path/to/.flock/current flock status`, or set `FLOCK_URL` and
 `FLOCK_TOKEN` from that file.
 
-**At the end** the run halts the reconcile loop (nothing relaunches), drains every worker
-(idle agents stop at once, in-flight turns get `--grace` seconds, then the processes are
-killed), waits for the last events and writes the bundle:
+**At the end** the run halts the reconcile loop (nothing relaunches) and drains every worker:
+idle agents stop at once, in-flight turns get `--grace` seconds. Then each remaining worker gets
+SIGTERM: it interrupts its turns (a `turn_interrupted` event) and its harness kills the tool
+processes it started. Up to 5 s later, anything still alive is killed, including tool processes
+in their own session. Finally the run waits for the last events and writes the bundle. The
+budget check, the view and the bundle use the spec as currently applied, so a re-apply or
+`flock scale` during the run counts: `limits.budget_usd`, for example.
 
 ```
 .flock/hello-20261021-161443/
@@ -147,23 +151,29 @@ Different:
    `<run>/state/llm`.
 3. **Secrets come from your shell.** The names a spec lists (`secrets:`, `api_key_env`,
    `msgboard_invite`) are read from the environment of `flock run` and passed to the workers as
-   env, as HF Jobs passes job secrets. Workers inherit your environment minus `FLOCK_*`; the
-   harness still gets only the allow-listed variables plus what the worker passes.
+   env, as HF Jobs passes job secrets. Workers inherit your environment minus your own flock
+   connection settings (`FLOCK_*`, except `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_PI_CLI`
+   and `FLOCK_PROMPTS_DIR`); the harness still gets only the allow-listed variables plus what the
+   worker passes.
 4. **Faster loop.** Reconcile every 1 s (jobs: 5 s) and worker heartbeats every 5 s (jobs: 30 s;
    a type's `env: {HEARTBEAT_INTERVAL: ...}` overrides it).
 5. **The controller is in-process.** 127.0.0.1 on a free port, a new random token per run, no
    status port, no state sync to a bucket, no jobs proxy auth. Each `flock run` is a new run
    directory: a run does not resume a previous one.
 6. **Workers die with the controller.** A worker exits when the `flock run` process is gone
-   (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphans; Ctrl-C reaches only
-   `flock run`, which drains the workers itself.
+   (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. Ctrl-C reaches only
+   `flock run`, which drains and stops the workers itself. A local worker handles SIGTERM by
+   interrupting its turns (a job worker keeps the default behaviour).
 7. **Logs are files.** `<run>/logs/<worker>.log` instead of `hf jobs logs`; `flock workers`
    says so.
 8. **No sandbox.** Agents' `bash` runs as you, on your machine, starting in the agent's workdir
    but not confined to it. Use a container or a throwaway user for untrusted tasks.
 9. **Harnesses other than `llm`.** `claude`, `codex` and `pi` use the CLIs on your `PATH` (or
-   `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_PI_CLI`) and your own `~/.claude`, `~/.codex`,
-   `~/.pi/agent` homes. They are wired the same way but not yet tested locally.
+   `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_PI_CLI`). Claude and Codex use your own
+   `~/.claude` and `~/.codex`. Pi gets one config dir per worker,
+   `<run>/state/pi/<worker>` (`PI_CODING_AGENT_DIR`), because it writes `models.json` for its
+   type there; your `~/.pi/agent` is never touched, and its login is not used. These harnesses
+   are wired the same way as `llm` but not yet tested locally.
 
 Known gaps: a worker that crashes is noticed by the reconcile loop's usual rules (60 s for a
 worker that never heartbeats, 90 s after its last heartbeat), not at once; `limits.budget_usd`

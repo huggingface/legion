@@ -147,3 +147,43 @@ def test_flock_run_second_terminal_and_ctrl_c(tmp_path, fake_server):
     assert one["turns_completed"] == 1
     assert yaml.safe_load(yaml.safe_dump(doc["spec"]))["compute"] == {"kind": "local"}
     assert not (tmp_path / ".flock" / "current").exists()
+
+
+def test_flock_run_ctrl_c_kills_running_tools(tmp_path, fake_server):
+    """--grace 0 and SIGINT while an agent's bash tool sleeps: the worker interrupts the turn,
+    the adapter kills the tool's own session, and nothing survives `flock run`."""
+    (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url).replace(
+        "replicas: 3", "replicas: 1"))
+    pids = tmp_path / "pids"
+    cmd = f"bash: sleep 60 & echo $$ $! > {pids}; wait"
+    proc = subprocess.Popen(_flock("run", "spec.yaml", "--prompt", cmd, "--grace", "0",
+                                   "--until", "50s", "--skip-preflight"),
+                            cwd=tmp_path, env=_env(tmp_path), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    alive: list[int] = []
+    try:
+        end = time.monotonic() + 30
+        while not (pids.exists() and len(pids.read_text().split()) == 2):
+            assert proc.poll() is None and time.monotonic() < end, proc.stdout.read()
+            time.sleep(0.1)
+        bash_pid, sleep_pid = (int(x) for x in pids.read_text().split())
+        proc.send_signal(signal.SIGINT)
+        out, _ = proc.communicate(timeout=40)
+        from flock.controller.local import _alive
+
+        end = time.monotonic() + 5
+        while (alive := [p for p in (bash_pid, sleep_pid) if _alive(p)]) and \
+                time.monotonic() < end:
+            time.sleep(0.05)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for p in alive:
+            os.kill(p, signal.SIGKILL)
+    assert proc.returncode == 0, out
+    assert alive == [], f"tool processes survived: {alive}"
+    run = _run_dir(tmp_path)
+    kinds = [e["type"] for e in _bundle_events(run, "writer-0000")]
+    assert "turn_interrupted" in kinds, kinds  # the worker stopped the turn, not just died
+    assert "terminating (SIGTERM)" in next((run / "logs").glob("hello-writer-w*.log")).read_text()

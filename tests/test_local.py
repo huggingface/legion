@@ -359,3 +359,88 @@ def test_cli_hint(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert "from this directory" in localrun.cli_hint(Path(".flock"))
     assert localrun.cli_hint(tmp_path / "x").startswith("FLOCK_CURRENT=")
+
+
+# --------------------------------------------------------------------------- review of #13
+
+
+def test_local_env_keeps_harness_overrides_and_isolates_pi(tmp_path):
+    from flock.worker.adapters.pi import PiModelConfig, write_models_json
+
+    home = tmp_path / "home"
+    user_pi = home / ".pi" / "agent"
+    user_pi.mkdir(parents=True)
+    (user_pi / "models.json").write_text('{"providers": {"mine": {}}}')
+    base = {"HOME": str(home), "FLOCK_CLAUDE_CLI": "/c/claude", "FLOCK_CODEX_CLI": "/c/codex",
+            "FLOCK_PI_CLI": "/c/pi", "FLOCK_URL": "http://mine", "FLOCK_TOKEN": "my-token",
+            "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
+    jobs = LocalJobsClient(root=tmp_path / "run", base_env=base)
+    a = jobs.process_env({"WORKER_ID": "s-a-w0000", "TYPE": "a"}, {})
+    b = jobs.process_env({"WORKER_ID": "s-b-w0000", "TYPE": "b"}, {})
+    for k in ("FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI"):
+        assert a[k] == base[k]  # documented executable overrides survive
+    for k in ("FLOCK_URL", "FLOCK_TOKEN", "FLOCK_AGENT_TOKEN", "FLOCK_CURRENT"):
+        assert k not in a  # the caller's connection and auth never reach a worker
+    pa, pb = Path(a["PI_CODING_AGENT_DIR"]), Path(b["PI_CODING_AGENT_DIR"])
+    assert pa != pb and tmp_path / "run" in pa.parents and tmp_path / "run" in pb.parents
+    write_models_json(pa, PiModelConfig("http://a/v1", "KA", "model-a", "a"))
+    write_models_json(pb, PiModelConfig("http://b/v1", "KB", "model-b", "b"))
+    assert list(json.loads((pa / "models.json").read_text())["providers"]) == ["a"]
+    assert list(json.loads((pb / "models.json").read_text())["providers"]) == ["b"]
+    assert json.loads((user_pi / "models.json").read_text()) == {"providers": {"mine": {}}}
+
+
+def _pid_dead(pid: int) -> bool:
+    from flock.controller.local import _alive
+
+    end = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < end:
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
+    # a "worker" that ignores SIGTERM and has a tool in its own session (as the llm harness
+    # starts bash): the group SIGKILL misses the tool, the descendant sweep does not
+    code = ("import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "p = subprocess.Popen(['sleep', '60'], start_new_session=True); "
+            "open('tool.pid', 'w').write(str(p.pid)); time.sleep(60)")
+    jobs = LocalJobsClient(root=tmp_path, command=_script(code),
+                           base_env={"PATH": os.environ["PATH"]})
+    jobs.launch("w", local_spec().types["w"], {"WORKER_ID": "w"}, {}, {}, 60, namespace="")
+    end = time.monotonic() + 10
+    while not (tmp_path / "tool.pid").exists() or not (tmp_path / "tool.pid").read_text():
+        assert time.monotonic() < end
+        time.sleep(0.05)
+    tool = int((tmp_path / "tool.pid").read_text())
+    jobs.kill_all(grace=0.5)
+    assert jobs.alive() == []
+    assert _pid_dead(tool)
+
+
+async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
+    spec = SwarmSpec.model_validate({
+        "swarm": "budget", "compute": "local", "limits": {"budget_usd": 10},
+        "types": {"w": {"harness": "claude", "model": "m", "replicas": 0}}})
+    out = io.StringIO()
+    task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
+        spec=spec, data_dir=tmp_path, until=30, refresh=0.1, grace=0, out=out)))
+    current = tmp_path / "current"
+    while not current.exists():
+        assert not task.done(), out.getvalue()
+        await asyncio.sleep(0.02)
+    info = json.loads(current.read_text())
+    async with httpx.AsyncClient(base_url=info["url"],
+                                 headers={"X-Flock-Token": info["token"]}) as c:
+        while (await c.get("/swarms/budget")).status_code == 404:
+            await asyncio.sleep(0.02)
+        live = spec.model_copy(deep=True)
+        live.limits.budget_usd = 0
+        live.types["w"].labels = {"applied": "live"}
+        r = await c.put("/swarms/budget", json=live.model_dump(mode="json"))
+        assert r.status_code == 200, r.text
+    result = await asyncio.wait_for(task, 20)
+    assert result.reason == "budget"
+    doc = json.loads((result.run_dir / "run.json").read_text())
+    assert doc["spec"]["limits"]["budget_usd"] == 0
+    assert doc["spec"]["types"]["w"]["labels"] == {"applied": "live"}
