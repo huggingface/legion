@@ -7,6 +7,8 @@ Replies, decided from the last message of each request:
 - last user text contains `bash: X` -> one `bash` tool call with command X
 - last user text contains `call: NAME {json}` and NAME is an offered tool -> one call of NAME
   with those arguments (also under a forcing `tool_choice`, until a tool result follows)
+- last user text contains `astext: NAME {json}` -> that call written as text:
+  `{"name": NAME, "arguments": {json}}`
 - last user text contains `json: X` -> the call written as text: `{"tool": "bash", "command": X}`
 - last user text contains `py: X`   -> the call written as text, pythonic: `[bash(command=X)]`
 - `tool_choice` forces a call (`required` or a named function) -> a `bash` call every time,
@@ -73,6 +75,10 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     tc = body.get("tool_choice")
     if last.get("role") == "user" and (named := _named_call(body, _text(last.get("content")))):
         return named
+    if last.get("role") == "user" and "astext: " in _text(last.get("content")):
+        name, _, args = _text(last.get("content")).split("astext: ", 1)[1].strip().partition(" ")
+        return {"content": json.dumps({"name": name, "arguments": json.loads(args or "{}")}),
+                "tool_calls": None}
     if tc == "required" or isinstance(tc, dict):
         user = next((_text(m.get("content")) for m in reversed(msgs) if m.get("role") == "user"), "")
         cmd = user.split("bash: ", 1)[1].splitlines()[0].strip() if "bash: " in user else "echo forced"

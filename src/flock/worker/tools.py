@@ -56,8 +56,8 @@ async def _run(cmd: list[str], timeout: float) -> None:
 
 async def make_venv(folder: Path, venv: Path, *, timeout: float = INSTALL_TIMEOUT_S) -> str:
     """A venv for the bundle's requirements that also sees the worker's own packages (flock
-    included, so `from flock.tools import Context` works): a .pth file appends the worker's
-    site-packages after the venv's. Returns the venv's python."""
+    included, so `from flock.tools import Context` works): a .pth file adds the worker's
+    site-packages after the venv's own. Returns the venv's python."""
     py = venv / "bin" / "python"
     if py.is_file() and (venv / ".flock-ready").is_file():
         return str(py)
@@ -70,8 +70,10 @@ async def make_venv(folder: Path, venv: Path, *, timeout: float = INSTALL_TIMEOU
     purelib = Path(sysconfig.get_paths(vars={"base": str(venv), "platbase": str(venv)})["purelib"])
     if not purelib.is_dir():  # the layout of the venv's own interpreter
         purelib = next(venv.glob("lib/python*/site-packages"))
-    parent = {sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]}
-    (purelib / "_flock_worker.pth").write_text("".join(f"{p}\n" for p in sorted(parent)))
+    # addsitedir (not a bare path line) so the worker's own .pth files (an editable flock) apply
+    parent = sorted({sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]})
+    (purelib / "_flock_worker.pth").write_text(
+        "".join(f"import site; site.addsitedir({p!r})\n" for p in parent))
     req = str(folder / REQUIREMENTS)
     if uv:
         await _run([uv, "pip", "install", "--quiet", "--python", str(py), "-r", req], timeout)
