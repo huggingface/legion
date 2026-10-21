@@ -57,6 +57,7 @@ class AgentState(BaseModel):
     harness_cum: dict[str, TokenUsage] = Field(default_factory=dict)  # last cumulative snapshot
     harness_estimate_usd: float | None = None
     loop_round: int = 0  # last loop round sent to this agent (docs/loop.md)
+    loop_run: str | None = None  # the loop run (LoopStartCommand.run) loop_round counts in
     last_summary: str | None = None  # what the agent last passed to `done` (else its last reply)
 
 
@@ -126,6 +127,7 @@ class AgentRuntime:
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
+        self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
 
     # ------------------------------------------------------------------ paths and state
     @property
@@ -191,7 +193,8 @@ class AgentRuntime:
             return
         if self.phase == "none" and (not self.allow_starts or self._stop_req):
             self.emit("prompt_deferred", {"prompt_id": prompt_id, "text": text,
-                                          "reason": "draining" if not self.allow_starts else self._stop_req})
+                                          "reason": "draining" if not self.allow_starts else self._stop_req,
+                                          **self._loop_untaken()})
             return
         self.buffer.append(text)
         if self.phase == "none":
@@ -210,7 +213,7 @@ class AgentRuntime:
 
     def _defer_buffer(self, reason: str) -> None:
         for text in self.buffer:
-            self.emit("prompt_deferred", {"text": text, "reason": reason})
+            self.emit("prompt_deferred", {"text": text, "reason": reason, **self._loop_untaken()})
         self.buffer.clear()
 
     def _prepare_workdir(self) -> None:
@@ -407,6 +410,7 @@ class AgentRuntime:
         self._next_timeout = None
         self._turn_tokens = {}
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
+        self._loop_inflight = None
         self.emit("turn_started", dict(data))
 
     def _end_turn(self) -> None:
@@ -470,15 +474,31 @@ class AgentRuntime:
             meta = meta.model_copy(update={"round": n})
         elif meta.kind == "final" and self.loop is not None:
             self._loop_end("final")
+        self._loop_inflight = meta
         self.emit("loop_prompt", {"kind": meta.kind, "round": meta.round, "why": meta.why,
                                   **({"add_tools": meta.add_tools} if meta.add_tools else {})})
         return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,
                       now=utcnow())
 
+    def _loop_untaken(self) -> dict[str, Any]:
+        """A deferred prompt that was a loop prompt: it does not count as a round, and the
+        controller learns which one it was (`loop`) so it can send it again."""
+        m, self._loop_inflight = self._loop_inflight, None
+        if m is None:
+            return {}
+        if m.kind == "loop" and m.round is not None:
+            self.state.loop_round = min(self.state.loop_round, max(0, m.round - 1))
+        return {"loop": {"kind": m.kind, "round": m.round}}
+
     def start_loop(self, cmd: LoopStartCommand) -> None:
-        """`loop_start`: send the loop prompt now if idle, then after every completed turn."""
+        """`loop_start`: send the loop prompt now if idle, then after every completed turn. A
+        new run (`flock loop --start`) counts rounds from the command's; a repeat of the same
+        run keeps the higher count."""
         self.loop = cmd
-        self.state.loop_round = max(self.state.loop_round, cmd.meta.round or 0)
+        if cmd.run is not None and cmd.run != self.state.loop_run:
+            self.state.loop_run, self.state.loop_round = cmd.run, cmd.meta.round or 0
+        else:
+            self.state.loop_round = max(self.state.loop_round, cmd.meta.round or 0)
         self._loop_errors = 0
         if self.turn_id is None and not self.awaiting and not self.buffer:
             self._loop_schedule(0.0, "start")

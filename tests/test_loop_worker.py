@@ -4,6 +4,7 @@ turns in a row, rendering of the built-in placeholders and `{last_summary}`."""
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from flock.models import LoopMeta, LoopStartCommand, TokenUsage
@@ -20,6 +21,8 @@ def meta(**kw) -> LoopMeta:
 
 
 def start(text: str = "round {round} ({why})", **kw) -> LoopStartCommand:
+    """A loop_start for a new run of the loop (each call: a fresh run id, as `--start` sends)."""
+    kw.setdefault("run", uuid.uuid4().hex[:12])
     return LoopStartCommand(agent="researcher-0001", text=text,
                             meta=meta(round=0, why="turn_end", started_at=datetime.now(UTC)), **kw)
 
@@ -135,3 +138,30 @@ async def test_controller_loop_prompts_render_with_summary_and_spend(tmp_path):
     assert custom(rt, "loop_prompt")[-1] == {"kind": "final", "round": 2, "why": "final: until",
                                              "add_tools": ["submit_final"]}
     await rt.stop()
+
+
+async def test_a_new_run_restarts_from_round_one_a_repeat_does_not(tmp_path):
+    """Finding 4: `flock loop --start` after an exhausted loop (new run id) starts at round
+    1; the same run sent again (a lost command, a live update) keeps its count."""
+    rt, ad = runtime(tmp_path, idle_grace="5s")
+    await rt.setup(restore=False)
+    first = start(max_rounds=1)
+    rt.start_loop(first)
+    await until(lambda: len(custom(rt, "loop_stopped")) == 1, timeout=5)
+    rt.start_loop(first.model_copy())  # same run again: already at max_rounds
+    await until(lambda: len(custom(rt, "loop_stopped")) == 2, timeout=5)
+    assert ad.sent == ["round 1 (start)"]
+    rt.start_loop(start(max_rounds=1))  # a new run
+    await until(lambda: len(custom(rt, "loop_stopped")) == 3, timeout=5)
+    assert ad.sent == ["round 1 (start)", "round 1 (start)"]
+    await rt.stop()
+
+
+async def test_a_deferred_loop_prompt_is_not_a_round(tmp_path):
+    rt, ad = runtime(tmp_path, idle_grace="5s")
+    await rt.setup(restore=False)
+    rt.allow_starts = False  # draining
+    await rt.prompt("r{round}", loop=meta(round=None, why="turn_end"))
+    [d] = custom(rt, "prompt_deferred")
+    assert d["loop"] == {"kind": "loop", "round": 1} and d["text"] == "r1"
+    assert rt.state.loop_round == 0 and ad.sent == []

@@ -851,6 +851,9 @@ class LoopStartCommand(BaseModel):
     meta: LoopMeta  # kind "loop"; `round` is the rounds done so far
     max_rounds: int | None = None
     deadline: datetime | None = None
+    # One run of the loop (`flock loop --start` begins a new one): a new run resets the
+    # worker's round counter; a repeat of the same run (lost command, live update) does not.
+    run: str | None = None
 
 
 class LoopStopCommand(BaseModel):
