@@ -44,6 +44,9 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   ignored). 429, 5xx and transport errors are retried `max_retries` times (default 3) with
   jittered exponential backoff (Retry-After honoured, capped at 30 s). `reasoning` is ignored.
 - Usage: one `usage` event per model call, not cumulative; `input` excludes cached prompt tokens.
+- Tools folder (docs/tools.md): with a `toolbox` (set by AgentRuntime), each turn takes one
+  Toolset and offers its tools next to `bash` / `done` for the whole turn; a call runs in a
+  subprocess (flock.tools.runner). Turn events carry `tools_version`.
 """
 
 from __future__ import annotations

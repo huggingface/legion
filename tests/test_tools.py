@@ -306,7 +306,7 @@ async def test_runner_context_cwd_env_and_isolation(run_env, tmp_path):
 
 def test_pack_is_deterministic_and_excludes_caches(tmp_path):
     folder = write(tmp_path / "tools", "t.py", "def f(x: int) -> int:\n    'Doc.'\n    return x\n").parent
-    describe(folder)  # leaves no __pycache__ (python -I -B is not used, so it may)
+    describe(folder)  # runs with -B: writes no __pycache__ into the folder
     (folder / "__pycache__").mkdir(exist_ok=True)
     (folder / "__pycache__" / "t.cpython-312.pyc").write_bytes(b"junk")
     (folder / ".DS_Store").write_bytes(b"junk")
@@ -399,3 +399,44 @@ def test_spec_fields_are_optional_and_checked():
     with pytest.raises(ValueError):
         SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "claude", "model": "m",
                                                             "tools": "some"}}})
+
+
+# --------------------------------------------------------------------------- the docs example
+
+
+async def test_example_folder_works(tmp_path):
+    """examples/tools-demo (the docs/tools.md example): its spec selects tools the folder has, and
+    ws_write + run_bot do what the docs say."""
+    import yaml
+
+    from flock.tools.toolset import Toolset
+
+    spec_file = Path(__file__).parent.parent / "examples" / "tools-demo" / "spec.yaml"
+    spec = SwarmSpec.model_validate(yaml.safe_load(spec_file.read_text()))
+    b = prepare(spec, spec_file)
+    assert b is not None and b.manifest.names() == ["ws_write", "run_bot"]
+    w = b.manifest.get("ws_write")
+    assert w.parameters["required"] == ["filename", "content", "reason"] and w.ctx == "ctx"
+    assert w.parameters["properties"]["filename"]["description"].startswith("a plain file name")
+    dest = extract(b.data, tmp_path / "tools" / b.version, b.version)
+    ts = Toolset(version=b.version, dir=dest, swarm="tools-demo", type="dev",
+                 data_dir=tmp_path / "data", tools=tuple(b.manifest.tools))
+    wd = tmp_path / "agents" / "dev-0000"
+    wd.mkdir(parents=True)
+    env = {"PATH": "/usr/bin:/bin"}
+    bot = "import sys\nfor line in sys.stdin:\n    print('You said: ' + line.strip())\n"
+    r = await ts.call("ws_write", {"filename": "bot.py", "content": bot, "reason": "first bot"},
+                      agent="dev-0000", workdir=wd, env=env)
+    assert not r.error and json.loads(r.output) == {"written": "ws/bot.py", "chars": len(bot)}
+    r = await ts.call("ws_write", {"filename": "bad.py", "content": "def (", "reason": "x"},
+                      agent="dev-0000", workdir=wd, env=env)
+    assert r.error and "not written: syntax error line 1" in r.output
+    r = await ts.call("run_bot", {"path": "ws/bot.py", "messages": ["hi", "bye"]},
+                      agent="dev-0000", workdir=wd, env=env)
+    assert json.loads(r.output) == {"conversation": [{"user": "hi", "bot": "You said: hi"},
+                                                     {"user": "bye", "bot": "You said: bye"}]}
+    r = await ts.call("run_bot", {"path": "../../etc/passwd", "messages": ["x"]},
+                      agent="dev-0000", workdir=wd, env=env)
+    assert r.error and "no such file in your workdir" in r.output
+    log = [json.loads(x) for x in (tmp_path / "data" / "writes.jsonl").read_text().splitlines()]
+    assert log[0]["agent"] == "dev-0000" and log[0]["tools_version"] == b.version

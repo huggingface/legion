@@ -255,7 +255,7 @@ def describe(folder: str | Path, *, python: str | None = None,
     folder = Path(folder).resolve()
     if not folder.is_dir():
         raise ToolsError(f"tools folder {folder} does not exist")
-    cmd = [python or sys.executable, "-I", "-m", "flock.tools.loader", str(folder)]
+    cmd = [python or sys.executable, "-I", "-B", "-m", "flock.tools.loader", str(folder)]
     try:
         p = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout,
                            cwd=str(folder.parent), stdin=subprocess.DEVNULL)
