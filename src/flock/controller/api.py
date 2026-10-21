@@ -1083,8 +1083,9 @@ def create_app(
             if w["job_id"] is None:
                 return None  # slot has no live job (stale process): give it nothing
             cmds = store.commands_for(worker_id)
-            # A draining worker starts no turns; its prompts wait for the replacement job.
-            draining = w["draining"] or w["retire_at"]
+            # A draining worker starts no turns; its prompts wait for the replacement job. Under
+            # the hard budget stop no prompt is delivered (a relaunch's resume prompt included).
+            draining = w["draining"] or w["retire_at"] or loops.hard_stopped(w["swarm"])
             prompts = [] if draining else admit(w, store.prompts_for_worker(worker_id))
             return (cmds, prompts) if cmds or prompts else None
 

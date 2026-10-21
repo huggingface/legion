@@ -315,7 +315,12 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     # A provider with max_working admits a resume prompt like any other (api.py `admit`): it
     # goes to pending_prompts after the assign instead of riding inside it.
     r = ts.resolved_model
-    held, resume = (resume, None) if resume and r and r.provider.max_working else (None, resume)
+    # Held as a pending prompt (not inside the assign) when admission must see it: a provider
+    # with max_working, or a swarm under the hard budget stop (docs/loop.md), where pending
+    # prompts are not delivered until the budget is raised.
+    hard = store.swarm_flags(a["swarm"]).get("budget_stop") == "hard"
+    hold = bool(resume) and (hard or bool(r and r.provider.max_working))
+    held, resume = (resume, None) if hold else (None, resume)
     cmd = AssignCommand(
         agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
