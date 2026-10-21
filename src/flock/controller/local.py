@@ -14,6 +14,7 @@ lifetime restart is a planned restart here too); cancelled -> CANCELED.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import signal
@@ -35,9 +36,65 @@ WORKER_COMMAND = [sys.executable, "-m", "flock.worker.main"]
 # Defaults a local worker gets unless the type's env sets them: a laptop run wants agent states
 # within seconds, not the 30 s job heartbeat.
 LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": "5", "PYTHONUNBUFFERED": "1"}
-# The caller's own flock config never leaks into a worker (it gets the controller's).
-_DROP_PREFIXES = ("FLOCK_",)
+# The caller's own flock connection and auth never leak into a worker (it gets the
+# controller's): FLOCK_* is dropped except these documented harness settings.
+KEEP_FLOCK_ENV = frozenset({"FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI",
+                            "FLOCK_PROMPTS_DIR"})
 STOP_GRACE = 5.0  # s between SIGTERM and SIGKILL on cancel
+
+
+def _children_map() -> dict[int, list[int]]:
+    """ppid -> pids of every process we can see (/proc on Linux, else `ps`)."""
+    out: dict[int, list[int]] = {}
+    proc = Path("/proc")
+    if proc.is_dir():
+        for d in proc.iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                stat = (d / "stat").read_text()
+            except OSError:
+                continue
+            fields = stat[stat.rfind(")") + 2:].split()  # after "pid (comm) "
+            if len(fields) > 1 and fields[0] != "Z":
+                out.setdefault(int(fields[1]), []).append(int(d.name))
+        return out
+    try:
+        ps = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid="], capture_output=True,
+                            text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return out
+    for line in ps.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            out.setdefault(int(parts[1]), []).append(int(parts[0]))
+    return out
+
+
+def descendants(pid: int) -> list[int]:
+    """Every live descendant of `pid`, also those in their own session (the `llm` harness starts
+    each bash tool with start_new_session, outside the worker's process group)."""
+    kids, found, todo = _children_map(), [], [pid]
+    while todo:
+        for child in kids.get(todo.pop(), []):
+            if child not in found:
+                found.append(child)
+                todo.append(child)
+    return found
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:  # a zombie is dead for our purposes
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat[stat.rfind(")") + 2:].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
 
 
 @dataclass
@@ -82,10 +139,15 @@ class LocalJobsClient:
 
     def process_env(self, env: dict[str, str], secrets: dict[str, str]) -> dict[str, str]:
         base = dict(os.environ if self.base_env is None else self.base_env)
-        base = {k: v for k, v in base.items() if not k.startswith(_DROP_PREFIXES)}
+        base = {k: v for k, v in base.items()
+                if not k.startswith("FLOCK_") or k in KEEP_FLOCK_ENV}
+        slot = env.get("WORKER_ID") or env.get("TYPE") or "worker"
         local = {
             "WORK_ROOT": str(self.work_root),
             "FLOCK_LLM_HOME": str(self.root / "state" / "llm"),
+            # Pi writes models.json for its worker's type into this dir: one per worker slot
+            # (a slot hosts one type), never the operator's ~/.pi/agent.
+            "PI_CODING_AGENT_DIR": str(self.root / "state" / "pi" / slot),
             # The worker exits when the controller process is gone (no orphans after a kill -9).
             "FLOCK_LOCAL_PARENT_PID": str(os.getpid()),
         }
@@ -130,7 +192,7 @@ class LocalJobsClient:
         rc = p.popen.poll()
         if rc is None and time.monotonic() - p.started > p.timeout:
             p.timed_out = True
-            self._kill(p)
+            self._stop([p], grace=0)
             rc = p.popen.poll()
         if rc is None:
             return JobState("RUNNING")
@@ -146,9 +208,7 @@ class LocalJobsClient:
         p = self.procs.get(job_id)
         if p is None or p.popen.poll() is not None:
             return
-        p.canceled = True
-        self._signal(p, signal.SIGTERM)
-        threading.Thread(target=self._reap, args=(p, STOP_GRACE), daemon=True).start()
+        threading.Thread(target=self._stop, args=([p], STOP_GRACE), daemon=True).start()
 
     def list(self, labels: dict[str, str], *, namespace: str) -> list[JobListing]:
         self.calls["list"] += 1
@@ -179,33 +239,41 @@ class LocalJobsClient:
         return not self.alive()
 
     def kill_all(self, grace: float = STOP_GRACE) -> None:
-        """SIGTERM every live process (and its children), SIGKILL what is left after `grace`."""
-        live = [p for p in self.procs.values() if p.popen.poll() is None]
-        for p in live:
-            p.canceled = True
-            self._signal(p, signal.SIGTERM)
-        end = time.monotonic() + grace
-        for p in live:
-            try:
-                p.popen.wait(max(0.0, end - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                self._signal(p, signal.SIGKILL)
-                p.popen.wait()
+        """Stop every live process; see `_stop`."""
+        self._stop([p for p in self.procs.values() if p.popen.poll() is None], grace)
         for p in self.procs.values():
             self._closed(p)
 
-    def _reap(self, p: _Proc, grace: float) -> None:
-        try:
-            p.popen.wait(grace)
-        except subprocess.TimeoutExpired:
-            self._kill(p)
-
-    def _kill(self, p: _Proc) -> None:
-        self._signal(p, signal.SIGKILL)
-        try:
-            p.popen.wait(5)
-        except subprocess.TimeoutExpired:
-            log.warning("%s (pid %d) did not exit after SIGKILL", p.job_id, p.popen.pid)
+    def _stop(self, procs: list[_Proc], grace: float) -> None:
+        """SIGTERM each worker's process group (a local worker then stops its agents, and the
+        adapters kill their tools), SIGKILL the group after `grace`, then SIGKILL any
+        descendant still alive: a worker's detached tool processes (own session) are recorded
+        before the worker can exit and leave them reparented."""
+        tree = {p.job_id: descendants(p.popen.pid) for p in procs}
+        for p in procs:
+            p.canceled = p.canceled or not p.timed_out
+            self._signal(p, signal.SIGTERM)
+        end = time.monotonic() + grace
+        for p in procs:
+            try:
+                p.popen.wait(max(0.0, end - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                tree[p.job_id] += [d for d in descendants(p.popen.pid) if d not in tree[p.job_id]]
+                self._signal(p, signal.SIGKILL)
+                try:
+                    p.popen.wait(5)
+                except subprocess.TimeoutExpired:
+                    log.warning("%s (pid %d) did not exit after SIGKILL", p.job_id, p.popen.pid)
+        own = os.getpgrp()
+        for pids in tree.values():
+            for pid in pids:
+                if not _alive(pid):
+                    continue
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    if os.getpgid(pid) == pid and pid != own:
+                        os.killpg(pid, signal.SIGKILL)  # a session leader: its group too
+                    os.kill(pid, signal.SIGKILL)
+                log.info("killed leftover process %d", pid)
 
     @staticmethod
     def _signal(p: _Proc, sig: signal.Signals) -> None:
