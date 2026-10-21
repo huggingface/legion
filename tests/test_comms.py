@@ -15,7 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from flock import cli
-from flock.comms.board import AsyncBoard, BoardError, same_board
+from flock.comms.board import AsyncBoard, BoardError, SyncBoard, same_board
 from flock.comms.tools import Refused, check_content, check_rate, query_terms, relaxed_search
 from flock.controller.comms import CommsError, resolve
 from flock.models import (
@@ -769,3 +769,26 @@ async def test_legacy_identities_with_a_trailing_slash_url_still_fan_out():
     finally:
         await hub.aclose()
         await ids._client.aclose()
+
+
+# --------------------------------------------------------------------------- sixth review of #16
+
+URLS = [("http://[::1]:8080/", "http://[::1]:8080"), ("https://[2001:db8::1]/", "https://[2001:db8::1]"),
+        ("http://[2001:DB8::1]:80/", "http://[2001:db8::1]"), ("http://Board.invalid:80/", "http://board.invalid"),
+        ("https://x.y:443", "https://x.y"), ("http://x.y:8080/path/", "http://x.y:8080/path"),
+        ("http://user@x.y/", "http://user@x.y")]
+
+
+@pytest.mark.parametrize(("url", "want"), URLS)
+async def test_normalised_board_urls_are_idempotent_and_build_clients(url, want):
+    once = normalize_board_url(url)
+    assert once == want and normalize_board_url(once) == once
+    spec = CommsSpec(url=url, invite_env="INV", channel="team")
+    assert spec.url == want
+    sync = SyncBoard(spec.url)
+    sync.close()
+    board = AsyncBoard(spec.url)
+    try:
+        assert board.url == want and same_board(board.url, url)
+    finally:
+        await board.aclose()

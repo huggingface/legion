@@ -180,11 +180,14 @@ COMMS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 def normalize_board_url(url: str) -> str:
     """The one spelling of a board url, used wherever board urls are stored or compared (spec,
     identities, board clients, message sources): scheme and host lowercased, default port and
-    trailing slashes dropped. `http://Board.invalid:80/` -> `http://board.invalid`."""
+    trailing slashes dropped, IPv6 brackets and userinfo kept, so it is idempotent.
+    `http://Board.invalid:80/` -> `http://board.invalid`; `http://[::1]:8080/` -> `http://[::1]:8080`."""
     from urllib.parse import urlsplit, urlunsplit
 
     u = urlsplit(url.strip())
     scheme, host = u.scheme.lower(), (u.hostname or "").lower()
+    if ":" in host:  # an IPv6 literal keeps its brackets: `http://[::1]:8080`
+        host = f"[{host}]"
     port = u.port
     netloc = host if port is None or (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
     if u.username or u.password:
