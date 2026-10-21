@@ -21,7 +21,7 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from flock.models import AGENT_NAME_RE, SwarmSpec
+from flock.models import AGENT_NAME_RE, SwarmSpec, loop_refusals
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -163,6 +163,13 @@ def _print_status(st: dict) -> None:
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
     for t in st["types"].values():
+        if t.get("loop"):
+            typer.echo(_loop_line(t["loop"]))
+    if st.get("budget_stop"):
+        what = ("final reserve reached: loops stopped, final rounds"
+                if st["budget_stop"] == "final_reserve" else "every agent stopped, prompts refused")
+        typer.echo(f"warning: limits.budget_usd: {what}")
+    for t in st["types"].values():
         if t.get("launch_error"):
             what = ("launch refused, not retrying until the next apply"
                     if t["health"] == "launch_refused" else "last launch error, retrying")
@@ -177,8 +184,34 @@ def _print_status(st: dict) -> None:
                        "turns with zero reported tokens; their cost is unknown (shown as $0)")
 
 
+def _loop_line(lp: dict) -> str:
+    rounds = (f"rounds {lp['rounds_min']}-{lp['rounds_max']}" if lp["rounds_min"] != lp["rounds_max"]
+              else f"round {lp['rounds_max']}")
+    line = (f"loop {lp['type']}: {lp['state']} ({lp['mode']}, every {lp['every']}), {rounds}, "
+            f"{lp['agents_done']}/{lp['agents']} agents done")
+    if lp.get("reason"):
+        line += f", stopped: {lp['reason']}"
+    if lp["final_sent"] or lp["state"] == "final":
+        line += f", final {lp['final_done']}/{lp['final_sent']} done"
+    return line
+
+
+def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
+    """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
+    name = getattr(holder, field)
+    if not name or getattr(holder, target) is not None:
+        return
+    src = Path(name)
+    src = src if src.is_absolute() else base / src
+    if not src.is_file():
+        typer.echo(f"{where}: {field} {src} not found", err=True)
+        raise typer.Exit(1)
+    setattr(holder, target, src.read_text(encoding="utf-8"))
+
+
 def load_spec(spec_file: str) -> SwarmSpec:
-    """Read a spec and inline each type's system_prompt_file (relative to the spec file)."""
+    """Read a spec and inline each type's system_prompt_file and loop prompt files (relative
+    to the spec file)."""
     path = Path(spec_file)
     try:
         spec = SwarmSpec.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
@@ -195,7 +228,23 @@ def load_spec(spec_file: str) -> SwarmSpec:
                 typer.echo(f"type {name}: system_prompt_file {src} not found", err=True)
                 raise typer.Exit(1)
             ts.system_prompt = src.read_text(encoding="utf-8")
+        if ts.loop is not None:
+            _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
+            if ts.loop.final is not None:
+                _inline(path.parent, ts.loop.final, "prompt_file", "prompt", f"type {name}: loop.final")
     return spec
+
+
+def _check_loops(spec: SwarmSpec) -> None:
+    """Refuse loop settings this version cannot run; say which `on:` sources have no feeder."""
+    if refused := loop_refusals(spec):
+        for r in refused:
+            typer.echo(f"refused: {r}", err=True)
+        raise typer.Exit(1)
+    for name, ts in spec.types.items():
+        for src in ts.loop.on if ts.loop else []:
+            typer.echo(f"warning: type {name}: loop.on {src}: no comms feeder in this version yet; "
+                       "wake-ups arrive once comms lands", err=True)
 
 
 def _provider_backed(spec: SwarmSpec) -> bool:
@@ -264,6 +313,7 @@ def apply(
     """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight; a model
     that could not be probed is reported as unverified and applied anyway unless --strict."""
     spec = load_spec(spec_file)
+    _check_loops(spec)
     _warn_extra(spec)
     if preflight is None:
         preflight = _provider_backed(spec)
@@ -457,13 +507,15 @@ def events(
 ) -> None:
     """Print an agent's event stream (JSONL); --follow keeps long-polling; --wait returns once
     something new arrived (the last line on stderr is the cursor for the next --after);
-    --pretty prints time, turn, kind and the text or a summary instead of JSON."""
+    --pretty prints time, turn, kind and the text or a summary instead of JSON. Given a swarm,
+    its swarm-level stream (loop_started, loop_tick, loop_stopped, final_round, budget_stop)."""
     deadline = time.monotonic() + timeout
+    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes
+    route = (f"/agents/{name}/events" if _as_agent() or AGENT_NAME_RE.match(name)
+             else f"/swarms/{name}/events")
     while True:
         poll = follow or wait
-        page = _call(
-            "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if poll else 0}
-        )
+        page = _call("GET", route, params={"after": after, "wait": 25 if poll else 0})
         for ev in page["events"]:
             typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
         after = page["next"]
@@ -472,6 +524,36 @@ def events(
             break
         if not poll:
             break
+
+
+@app.command()
+def loop(
+    swarm: str,
+    type: str = typer.Option(None, "--type", help="the agent type whose loop to stop or start"),
+    stop: bool = typer.Option(False, "--stop", help="stop the loop (then its final round)"),
+    start: bool = typer.Option(False, "--start", help="start the loop again from round 0"),
+    final: bool = typer.Option(True, "--final/--no-final", help="with --stop: run the final round"),
+) -> None:
+    """A swarm's loops (docs/loop.md): state per type and per agent, or --stop / --start one."""
+    if stop and start:
+        typer.echo("--stop or --start, not both", err=True)
+        raise typer.Exit(1)
+    if stop or start:
+        if not type:
+            typer.echo("--stop/--start need --type", err=True)
+            raise typer.Exit(1)
+        body = {"type": type, "action": "stop" if stop else "start", "final": final}
+        typer.echo(_loop_line(_call("POST", f"/swarms/{swarm}/loop", json=body)))
+        return
+    loops = [lp for lp in _call("GET", f"/swarms/{swarm}/loop") if not type or lp["type"] == type]
+    if not loops:
+        typer.echo("no loops")
+    for lp in loops:
+        typer.echo(_loop_line(lp))
+        rows = [[n, a["phase"], a["rounds"], a["done_reason"], a["final"], a["errors"]]
+                for n, a in (lp.get("per_agent") or {}).items()]
+        if rows:
+            _table(rows, ["agent", "phase", "rounds", "done", "final", "errors"])
 
 
 @app.command()
