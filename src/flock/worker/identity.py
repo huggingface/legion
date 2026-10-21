@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from flock.models import TypeSpec
+from flock.models import TypeSpec, normalize_board_url
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +33,9 @@ class MsgboardIdentity:
     principal: str  # external_id (the agent name) or the numeric id
     id: int | None = None  # the board's numeric principal id
 
+    def __post_init__(self) -> None:
+        self.url = normalize_board_url(self.url)  # the board this token may be sent to
+
     def __repr__(self) -> str:  # never the token
         return f"MsgboardIdentity(url={self.url!r}, principal={self.principal!r}, id={self.id})"
 
@@ -41,7 +44,7 @@ async def join(url: str, code: str, name: str, *, client: httpx.AsyncClient | No
     own = client is None
     client = client or httpx.AsyncClient(timeout=20)
     try:
-        r = await client.post(url.rstrip("/") + "/v1/join",
+        r = await client.post(normalize_board_url(url) + "/v1/join",
                               json={"code": code, "name": name, "display_name": name})
         r.raise_for_status()
         body = r.json()
@@ -67,11 +70,11 @@ class Identities:
         return next((i.principal for (_, a), i in self._ids.items() if a == agent), None)
 
     def get(self, agent: str, url: str) -> MsgboardIdentity | None:
-        return self._ids.get((url.rstrip("/"), agent))
+        return self._ids.get((normalize_board_url(url), agent))
 
     async def join(self, agent: str, url: str, code: str, *, again: bool = False) -> MsgboardIdentity:
         """The agent's identity on `url`, joining on first use (or `again`, after a 401)."""
-        key = (url.rstrip("/"), agent)
+        key = (normalize_board_url(url), agent)
         if again or key not in self._ids:
             self._ids[key] = await join(url, code, agent, client=self._client)
         return self._ids[key]
@@ -79,7 +82,8 @@ class Identities:
     def forget(self, agent: str, *, url: str | None = None) -> None:
         """Drop the agent's cached identities (on one board with `url`), so the next use joins
         again: after an unassign, or when the channel or invite changed (docs/comms.md)."""
-        for k in [k for k in self._ids if k[1] == agent and (url is None or k[0] == url.rstrip("/"))]:
+        for k in [k for k in self._ids if k[1] == agent
+                  and (url is None or k[0] == normalize_board_url(url))]:
             del self._ids[k]
 
     async def env_for(self, agent: str, spec: TypeSpec) -> dict[str, str]:

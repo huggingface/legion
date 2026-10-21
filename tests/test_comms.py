@@ -15,15 +15,23 @@ import yaml
 from pydantic import ValidationError
 
 from flock import cli
-from flock.comms.board import AsyncBoard, BoardError
+from flock.comms.board import AsyncBoard, BoardError, same_board
 from flock.comms.tools import Refused, check_content, check_rate, query_terms, relaxed_search
 from flock.controller.comms import CommsError, resolve
-from flock.models import COMMS_TOOLS, CommsRules, CommsSpec, SwarmSpec, comms_tools
+from flock.models import (
+    COMMS_TOOLS,
+    CommsRules,
+    CommsSpec,
+    SwarmSpec,
+    TypeSpec,
+    comms_tools,
+    normalize_board_url,
+)
 from flock.tools.toolset import PIN_ENV, Toolset, read_pin
 from flock.worker.agents import AgentRuntime
-from flock.worker.comms import CommsHub
+from flock.worker.comms import CommsHub, Source
 from flock.worker.events import Outbox
-from flock.worker.identity import MsgboardIdentity
+from flock.worker.identity import Identities, MsgboardIdentity
 
 from . import fake_msgboard
 from .worker_fakes import ScriptedAdapter, spec, until
@@ -708,3 +716,56 @@ async def test_a_post_finishing_on_the_old_board_never_hides_a_mention_on_the_ne
         await t.close()
         sa.shutdown()
         sb.shutdown()
+
+
+# --------------------------------------------------------------------------- fifth review of #16
+
+
+def test_board_urls_have_one_spelling():
+    for url in ("http://board.invalid/", "HTTP://Board.Invalid", "http://board.invalid:80//"):
+        assert normalize_board_url(url) == "http://board.invalid"
+    assert normalize_board_url("https://b.invalid:8443/x/") == "https://b.invalid:8443/x"
+    assert same_board("http://board.invalid/", "http://BOARD.invalid")
+    assert not same_board("http://board.invalid", "http://board.invalid:8080")
+    assert MsgboardIdentity(url="http://board.invalid/", token="t", principal="p").url == "http://board.invalid"
+    assert Source("http://board.invalid/", 12, 0) == Source("http://board.invalid", 12, 0)
+
+
+async def test_legacy_identities_with_a_trailing_slash_url_still_fan_out():
+    async def handler(request):
+        path = request.url.path
+        if path == "/v1/join":
+            name = json.loads(request.content)["name"]
+            return httpx.Response(200, json={"token": f"tok-{name}", "principal": {
+                "id": 1 if name == "dev-0000" else 2, "external_id": name}})
+        if path == "/v1/channels":
+            return httpx.Response(200, json={"channels": [{"id": 12, "member": True}]})
+        if path == "/v1/activity":
+            await asyncio.Event().wait()
+        if path.endswith("/messages"):
+            return httpx.Response(201, json={"id": 42, "channel_id": 12, "body": "@dev-0001 hello",
+                                             "sender": {"external_id": "dev-0000"},
+                                             "mentions": [{"id": 2, "external_id": "dev-0001",
+                                                           "as": "dev-0001"}]})
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handler)
+    ids = Identities(env={"INV": "inv"}, client=httpx.AsyncClient(transport=transport))
+    legacy = TypeSpec(harness="claude", model="m", msgboard_invite="INV",
+                      env={"MSGBOARD_URL": "http://board.invalid/"})
+    for name in ("dev-0000", "dev-0001"):  # the older msgboard_invite path joins first
+        assert (await ids.env_for(name, legacy))["MSGBOARD_URL"] == "http://board.invalid"
+    spec = CommsSpec(url="http://board.invalid/", invite_env="INV", channel="team", channel_id=12)
+    hub = CommsHub(swarm="sw", identities=ids, env={"INV": "inv"}, transport=transport)
+    hub.configure(spec, list(COMMS_TOOLS))
+    try:
+        for name in ("dev-0000", "dev-0001"):
+            await hub.on_prompt(name, "llm")
+            assert hub.members[name].ident is ids.get(name, "http://board.invalid")  # reused
+        r = await hub.call("dev-0000", "comms:post", {"text": "@dev-0001 hello", "thread": "new"})
+        assert not r.error, r.output
+        assert ("http://board.invalid", 12, 42) in hub._cache
+        assert hub.stats["mentions"] == 1 and 42 in hub.members["dev-0000"].threads
+    finally:
+        await hub.aclose()
+        await ids._client.aclose()

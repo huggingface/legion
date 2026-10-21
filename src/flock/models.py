@@ -177,6 +177,21 @@ COMMS_TOOLS = ("comms:post", "comms:read", "comms:search")
 COMMS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
+def normalize_board_url(url: str) -> str:
+    """The one spelling of a board url, used wherever board urls are stored or compared (spec,
+    identities, board clients, message sources): scheme and host lowercased, default port and
+    trailing slashes dropped. `http://Board.invalid:80/` -> `http://board.invalid`."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    u = urlsplit(url.strip())
+    scheme, host = u.scheme.lower(), (u.hostname or "").lower()
+    port = u.port
+    netloc = host if port is None or (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
+    if u.username or u.password:
+        netloc = u.netloc.rsplit("@", 1)[0] + "@" + netloc
+    return urlunsplit((scheme, netloc, u.path.rstrip("/"), u.query, ""))
+
+
 def comms_name(entry: str) -> str:
     """`comms:post` -> `post`, the name the model sees."""
     return entry.split(":", 1)[1]
@@ -241,7 +256,7 @@ class CommsSpec(BaseModel):
     def _url(cls, v: str) -> str:
         if not v.startswith(("http://", "https://")):
             raise ValueError(f"url {v!r} must start with http:// or https://")
-        return v.rstrip("/")
+        return normalize_board_url(v)
 
     @field_validator("invite_env")
     @classmethod

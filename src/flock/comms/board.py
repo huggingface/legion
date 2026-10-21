@@ -17,6 +17,8 @@ from urllib.parse import quote
 
 import httpx
 
+from flock.models import normalize_board_url
+
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 ATTEMPTS = 4
 BACKOFF_S = 1.0
@@ -69,7 +71,7 @@ class Credential(Protocol):
 
 def same_board(a: str, b: str) -> bool:
     """Same scheme, host and port (and path prefix): where a token may be sent."""
-    return a.rstrip("/") == b.rstrip("/")
+    return normalize_board_url(a) == normalize_board_url(b)
 
 
 class _Routes:
@@ -133,7 +135,7 @@ class AsyncBoard:
 
     def __init__(self, url: str, *, transport: httpx.AsyncBaseTransport | None = None,
                  backoff_s: float = BACKOFF_S) -> None:
-        self.url = url.rstrip("/")
+        self.url = normalize_board_url(url)
         self.http = httpx.AsyncClient(base_url=self.url, transport=transport,
                                       timeout=httpx.Timeout(20, read=45))
         self.backoff_s = backoff_s
@@ -209,7 +211,7 @@ class SyncBoard:
 
     def __init__(self, url: str, *, transport: httpx.BaseTransport | None = None,
                  backoff_s: float = BACKOFF_S) -> None:
-        self.http = httpx.Client(base_url=url.rstrip("/"), transport=transport, timeout=20)
+        self.http = httpx.Client(base_url=normalize_board_url(url), transport=transport, timeout=20)
         self.backoff_s = backoff_s
 
     def close(self) -> None:

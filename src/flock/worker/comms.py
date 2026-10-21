@@ -57,7 +57,7 @@ from flock.comms.tools import (
     thread_of,
     tool_def,
 )
-from flock.models import CommsSpec, comms_name
+from flock.models import CommsSpec, comms_name, normalize_board_url
 from flock.tools.runner import Result, check_args
 from flock.tools.toolset import GATEWAY_LINE_MAX, Toolset
 from flock.worker.identity import Identities, MsgboardIdentity
@@ -131,8 +131,11 @@ class Source:
     channel_id: int
     gen: int
 
+    def __post_init__(self) -> None:  # compared and keyed on the one spelling of the url
+        object.__setattr__(self, "url", normalize_board_url(self.url))
+
     def key(self, msg_id: int) -> tuple[str, int, int]:
-        return (self.url.rstrip("/"), self.channel_id, msg_id)
+        return (self.url, self.channel_id, msg_id)
 
 
 def _ok(out: Any, t0: float) -> Result:
@@ -190,12 +193,12 @@ class CommsHub:
         without waiting for its next harness start. Tools switched back on restart a stopped
         poller. Agents that never had a prompt still join only at their first one."""
         old, was_active = self.spec, self.active
-        key = (lambda c: (c.url, c.channel_id, c.invite_env))
+        key = (lambda c: (normalize_board_url(c.url), c.channel_id, c.invite_env))
         moved = old is not None and (spec is None or key(spec) != key(old))
         self.spec, self.entries = spec, list(entries or []) if spec is not None else []
         if moved:
             assert old is not None
-            self._reset(old, same_board=spec is not None and spec.url == old.url)
+            self._reset(old, same_board=spec is not None and same_board(spec.url, old.url))
         if self.active and self.members and (moved or not was_active):
             self._restore_members()
 
@@ -241,7 +244,7 @@ class CommsHub:
         """The client for the board at `url`: always the url of the credential in hand (an
         identity's own url, or the spec captured at the start of a join), never "the current
         spec" read after an await."""
-        key = url.rstrip("/")
+        key = normalize_board_url(url)
         if key not in self._boards:
             self._boards[key] = AsyncBoard(key, transport=self._transport, backoff_s=self.backoff_s)
         return self._boards[key]
