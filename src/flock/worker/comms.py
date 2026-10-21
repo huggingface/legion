@@ -69,6 +69,8 @@ log = logging.getLogger(__name__)
 
 POLL_WAIT_S = 25.0
 JOIN_RETRY_S = 30.0
+JOIN_ATTEMPTS = 3  # joins in a row made stale by a configure() before giving up
+BACKLOG_MESSAGES = 500  # per agent, kept for an agent whose re-join is pending
 CACHE_MESSAGES = 2000
 THREADS_KEPT = 500
 SECTION_START = "<!-- flock:comms -->"
@@ -87,6 +89,10 @@ class Member:
     retry_at: float = 0.0
     threads: set[int] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # set when a reconfiguration dropped the agent's identity: messages for it that arrive
+    # before it is back are kept in `backlog` and delivered once it has re-joined
+    pending: bool = False
+    backlog: list[dict] = field(default_factory=list)
     # fallbacks when the agent has no runtime (tests); otherwise its synced AgentState
     posts: int = 0
     last_post: float | None = None
@@ -128,6 +134,7 @@ class CommsHub:
         self._server: asyncio.base_events.Server | None = None
         self._gateway_lock = asyncio.Lock()  # one listener, however many first prompts race
         self._restore: asyncio.Task | None = None
+        self._gen = 0  # bumped by every reconfiguration that invalidates identities
         self.address: str | None = None
         self.stats: Counter[str] = Counter()
 
@@ -157,12 +164,18 @@ class CommsHub:
         """Message ids grow across the whole board, so on the same board the poller keeps its
         cursor: a message posted in the new channel after the change is never missed, however
         long the joins take. A new board starts from "now"."""
+        self._gen += 1
         if self._poller is not None:
             self._poller.cancel()
         self._poller, self._poll_agent = None, None
         if not same_board:
             self._cursor = None
         for m in self.members.values():
+            # only agents that had joined wait for their messages (one that never joined here
+            # has no subscription to restore); a new board has no shared cursor to keep
+            m.pending = same_board and (m.ident is not None or m.pending)
+            if not m.pending:
+                m.backlog.clear()
             m.ident, m.error, m.retry_at, m.rejoin = None, None, 0.0, True
             self.identities.forget(m.name, url=old.url)  # redeem the new invite, never reuse
         self._cache.clear()
@@ -278,40 +291,28 @@ class CommsHub:
             if self._clock() < m.retry_at and m.error:
                 raise BoardError(f"not on the board yet: {m.error} (retrying in "
                                  f"{int(m.retry_at - self._clock()) + 1} s)")
-            c = self.spec
-            assert c is not None and c.channel_id is not None
-            try:
-                code = self._env.get(c.invite_env)
-                if not code:
-                    raise BoardError(f"the invite secret {c.invite_env} is not set on this worker")
+            for _ in range(JOIN_ATTEMPTS):
+                # A configure() during the join's I/O (a new channel or invite) makes its
+                # result stale: never publish it, join again against the current settings.
+                gen, c = self._gen, self.spec
+                if not self.active or c is None:
+                    raise BoardError("comms is off for this agent")
                 try:
-                    ident = await self.identities.join(agent, c.url, code, again=m.rejoin)
-                except httpx.HTTPStatusError as e:
-                    raise BoardError(f"join refused: HTTP {e.response.status_code}") from None
-                except (httpx.HTTPError, KeyError, ValueError) as e:
-                    raise BoardError(f"join failed: {type(e).__name__}") from None
-                board = self._board()
-                # joined means the channel is readable: a lookup that does not find it is a
-                # failed join (an invite not scoped to a private channel), never a success
-                chans = await board.channels(ident.token, c.channel)
-                ch = next((x for x in chans if x.get("id") == c.channel_id), None)
-                if ch is None:
-                    raise BoardError(f"#{c.channel} (id {c.channel_id}) is not visible to {agent}: "
-                                     f"is the invite in {c.invite_env} scoped to it?")
-                if not ch.get("member") and ident.id is not None:
-                    try:
-                        await board.add_member(ident.token, c.channel_id, ident.id)
-                    except BoardError as e:
-                        raise BoardError(f"cannot join #{c.channel}: {e}") from None
-                if ident.id is not None:
-                    with contextlib.suppress(BoardError):  # cosmetic: the profile's runtime
-                        await board.set_runtime(ident.token, ident.id, {
-                            "harness": f"flock/{m.harness}", "host": f"flock swarm {self.swarm}"})
-            except BoardError as e:
-                m.error, m.retry_at = str(e), self._clock() + JOIN_RETRY_S
-                self._emit(agent, "comms_join_failed", {"error": m.error})
-                log.warning("%s: comms join failed: %s", agent, m.error)
-                raise
+                    ident = await self._join_once(m, c)
+                except BoardError as e:
+                    if gen != self._gen:
+                        m.rejoin = True
+                        continue
+                    m.error, m.retry_at = str(e), self._clock() + JOIN_RETRY_S
+                    self._emit(agent, "comms_join_failed", {"error": m.error})
+                    log.warning("%s: comms join failed: %s", agent, m.error)
+                    raise
+                if gen != self._gen:
+                    m.rejoin = True
+                    continue
+                break
+            else:
+                raise BoardError("the comms settings kept changing during the join; retry")
             m.ident, m.rejoin, m.error = ident, False, None
             rt = self._runtime(agent)
             if rt is not None:
@@ -319,8 +320,40 @@ class CommsHub:
             self.stats["joins"] += 1
             self._emit(agent, "comms_joined", {"principal": ident.principal, "principal_id": ident.id,
                                                "channel": c.channel, "channel_id": c.channel_id})
+            self._replay(m)
             self._ensure_poller()
             return m
+
+    async def _join_once(self, m: Member, c: CommsSpec) -> MsgboardIdentity:
+        """Redeem the invite under the agent's name and check the channel is readable (raises
+        BoardError). Joined means readable: a lookup that does not find the channel (an invite
+        not scoped to a private one) is a failed join, never a success."""
+        assert c.channel_id is not None
+        code = self._env.get(c.invite_env)
+        if not code:
+            raise BoardError(f"the invite secret {c.invite_env} is not set on this worker")
+        try:
+            ident = await self.identities.join(m.name, c.url, code, again=m.rejoin)
+        except httpx.HTTPStatusError as e:
+            raise BoardError(f"join refused: HTTP {e.response.status_code}") from None
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            raise BoardError(f"join failed: {type(e).__name__}") from None
+        board = self._board()
+        chans = await board.channels(ident.token, c.channel)
+        ch = next((x for x in chans if x.get("id") == c.channel_id), None)
+        if ch is None:
+            raise BoardError(f"#{c.channel} (id {c.channel_id}) is not visible to {m.name}: "
+                             f"is the invite in {c.invite_env} scoped to it?")
+        if not ch.get("member") and ident.id is not None:
+            try:
+                await board.add_member(ident.token, c.channel_id, ident.id)
+            except BoardError as e:
+                raise BoardError(f"cannot join #{c.channel}: {e}") from None
+        if ident.id is not None:
+            with contextlib.suppress(BoardError):  # cosmetic: the profile's runtime
+                await board.set_runtime(ident.token, ident.id, {
+                    "harness": f"flock/{m.harness}", "host": f"flock swarm {self.swarm}"})
+        return ident
 
     def forget(self, agent: str) -> None:
         """The agent left this worker (unassign)."""
@@ -393,15 +426,32 @@ class CommsHub:
             if sender in self.members:
                 self._add_thread(self.members[sender], root)
             for name, m in self.members.items():
-                if name == sender or m.ident is None:
+                if name == sender:
                     continue
-                data = {"msg_id": mid, "thread": root, "from": sender}
-                if "mention" in c.wake and self._mentions(x, m):
-                    self.stats["mentions"] += 1
-                    self._emit(name, "comms_mention", data)
-                elif "thread" in c.wake and x.get("thread_id") and x["thread_id"] in m.threads:
-                    self.stats["thread_replies"] += 1
-                    self._emit(name, "comms_thread_reply", data)
+                if m.ident is None:
+                    if m.pending:  # re-joining after a reconfiguration: deliver once it is back
+                        m.backlog = [*m.backlog, x][-BACKLOG_MESSAGES:]
+                    continue
+                self._deliver(m, x)
+
+    def _deliver(self, m: Member, x: dict) -> None:
+        c = self.spec
+        assert c is not None
+        sender = author(x)
+        data = {"msg_id": x["id"], "thread": thread_of(x), "from": sender}
+        if "mention" in c.wake and self._mentions(x, m):
+            self.stats["mentions"] += 1
+            self._emit(m.name, "comms_mention", data)
+        elif "thread" in c.wake and x.get("thread_id") and x["thread_id"] in m.threads:
+            self.stats["thread_replies"] += 1
+            self._emit(m.name, "comms_thread_reply", data)
+
+    def _replay(self, m: Member) -> None:
+        """An agent is back after a re-join: the messages the poller saw meanwhile."""
+        backlog, m.backlog, m.pending = m.backlog, [], False
+        for x in backlog:
+            if author(x) != m.name:
+                self._deliver(m, x)
 
     # ------------------------------------------------------------------ the poller
     def _ensure_poller(self) -> None:

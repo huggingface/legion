@@ -171,7 +171,10 @@ block in its next heartbeat response (every 30 s, ±10 %), the same path as the 
   joins every agent that had joined there again at once, redeeming the current invite, so the
   poller and its wake events come back without waiting for a new harness start (agents that never
   had a prompt still join at their first). On the same board the poller keeps its cursor (message
-  ids are board-wide), so nothing posted in the new channel after the change is missed;
+  ids are board-wide), so nothing posted in the new channel after the change is missed: the
+  poller restarts with the first agent back, and messages for agents still re-joining are kept
+  (up to 500 each) and delivered when each is back. A join whose I/O was in flight during the
+  change is never published: it is dropped and redone with the current channel and invite;
 - turning a type's comms tools off stops the worker's poller; turning them on again restarts it
   with the agents' cached identities.
 

@@ -510,3 +510,84 @@ async def test_concurrent_gateway_startup_opens_one_listener():
         for srv in started:
             srv.close()
         await hub.identities._client.aclose()
+
+
+# --------------------------------------------------------------------------- re-review of #16
+
+
+async def test_a_join_in_flight_during_reconfiguration_redeems_the_new_invite(tmp_path):
+    b, srv, url = fake_msgboard.serve(fake_msgboard.Board(
+        channels={12: "old-private", 13: "new-private"}, private={12, 13},
+        invites={"inv-old": [12], "inv-new": [13]}))
+    b.url = url
+    t = Team(tmp_path, b, ["dev-0000"], env={"OLD_INVITE": "inv-old", "NEW_INVITE": "inv-new"})
+    old = t.spec.model_copy(update={"invite_env": "OLD_INVITE", "channel": "old-private"})
+    hub = t.hub
+    hub.configure(old, list(COMMS_TOOLS))
+    started, release = asyncio.Event(), asyncio.Event()
+    real = hub.identities.join
+    codes = []
+
+    async def gated(agent, url, code, *, again=False):
+        codes.append(code)
+        if code == "inv-old":
+            started.set()
+            await release.wait()  # the old join is still in flight when the settings change
+        return await real(agent, url, code, again=again)
+
+    hub.identities.join = gated
+    try:
+        first = asyncio.create_task(hub.on_prompt("dev-0000", "llm"))
+        await asyncio.wait_for(started.wait(), 5)
+        hub.configure(old.model_copy(update={"invite_env": "NEW_INVITE", "channel": "new-private",
+                                             "channel_id": 13}), list(COMMS_TOOLS))
+        release.set()
+        await first
+        await hub._restore
+        assert codes == ["inv-old", "inv-new"]  # the stale result was dropped and joined again
+        b.post("carlos", 13, "welcome")
+        for _ in range(2):
+            out, err = await t.call("dev-0000", "read")
+            assert not err and [m["text"] for m in out["messages"]] == ["welcome"], out
+    finally:
+        release.set()
+        await t.close()
+        srv.shutdown()
+
+
+async def test_mentions_for_an_agent_still_rejoining_are_delivered_once_it_is_back(tmp_path):
+    b, srv, url = fake_msgboard.serve(fake_msgboard.Board(channels={12: "flock-test", 13: "new-team"}))
+    b.url = url
+    t = Team(tmp_path, b, ["dev-0000", "dev-0001"])
+    hub = t.hub
+    entered, release = asyncio.Event(), asyncio.Event()
+    real = hub.identities.join
+
+    async def gated(agent, url, code, *, again=False):
+        if agent == "dev-0001" and again:
+            entered.set()
+            await release.wait()
+        return await real(agent, url, code, again=again)
+
+    try:
+        await t.start()
+        await until(lambda: hub._cursor is not None)
+        hub.identities.join = gated
+        hub.configure(t.spec.model_copy(update={"channel": "new-team", "channel_id": 13}),
+                      list(COMMS_TOOLS))
+        await asyncio.wait_for(entered.wait(), 5)
+        assert hub.members["dev-0000"].ident is not None and hub.members["dev-0001"].ident is None
+        during = b.post("carlos", 13, "@dev-0001 while you rejoin")["id"]
+        b.post("dev-0001", 13, "my own words")  # never a wake for its sender
+        await until(lambda: hub._cursor >= during + 1)  # the poller has consumed both
+        release.set()
+        await hub._restore
+        after = b.post("carlos", 13, "@dev-0001 after the rejoin")["id"]
+        rt = t.agents["dev-0001"]
+        await until(lambda: len(custom(rt, "comms_mention")) == 2)
+        assert [x["msg_id"] for x in custom(rt, "comms_mention")] == [during, after]
+        assert not hub.members["dev-0001"].pending and not hub.members["dev-0001"].backlog
+    finally:
+        release.set()
+        await t.close()
+        srv.shutdown()
