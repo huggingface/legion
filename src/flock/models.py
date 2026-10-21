@@ -626,6 +626,27 @@ class PromptAck(BaseModel):
     turn_id: str | None = None  # set later via the event stream, may be None here
 
 
+class BulkPromptRequest(BaseModel):
+    """One prompt to every agent of a type (`POST /swarms/{swarm}/prompts`), optionally only
+    those in one state. Each agent gets its own pending prompt, admitted as a single one is."""
+
+    type: str
+    state: AgentState | None = None
+    text: str
+    timeout: str | None = None
+    reply_to: str | None = None
+
+
+class BulkPromptAck(BaseModel):
+    swarm: str
+    type: str
+    matched: int  # agents of the type
+    queued: int  # prompts for agents whose worker is up
+    pending: int  # prompts held until the agent's worker is up
+    skipped_state: int = 0  # not in the requested state
+    skipped_removing: int = 0  # being removed (spawn cascade)
+
+
 class SpawnRequest(BaseModel):
     type: str
     prompt: str | None = None  # first prompt, held until the child is placed

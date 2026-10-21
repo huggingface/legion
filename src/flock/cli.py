@@ -11,7 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -274,14 +274,28 @@ def agent(name: str) -> None:
 
 @app.command()
 def prompt(
-    name: str,
-    text: str,
+    args: Annotated[list[str], typer.Argument(metavar="[NAME] TEXT")],
     timeout: str = typer.Option(None, "--timeout"),
     reply_to: str = typer.Option(None, "--reply-to"),
+    swarm: str = typer.Option(None, "--swarm", help="with --type: the swarm"),
+    type: str = typer.Option(None, "--type", help="prompt every agent of this type (one request)"),
+    state: str = typer.Option(None, "--state", help="with --type: only agents in this state, e.g. idle"),
 ) -> None:
-    """Send a prompt to an agent; prints the ack."""
-    body = {"text": text, "timeout": timeout, "reply_to": reply_to}
-    typer.echo(json.dumps(_call("POST", f"/agents/{name}/prompt", json=body)))
+    """Send a prompt to an agent (`prompt NAME TEXT`), or to every agent of a type
+    (`prompt --swarm S --type T [--state idle] TEXT`); prints the ack (counts for --type)."""
+    body = {"timeout": timeout, "reply_to": reply_to}
+    if type is not None:
+        if swarm is None or len(args) != 1:
+            typer.echo("usage: flock prompt --swarm S --type T [--state STATE] TEXT", err=True)
+            raise typer.Exit(2)
+        body.update(type=type, state=state, text=args[0])
+        typer.echo(json.dumps(_call("POST", f"/swarms/{swarm}/prompts", json=body)))
+        return
+    if swarm is not None or state is not None or len(args) != 2:
+        typer.echo("usage: flock prompt NAME TEXT (or --swarm S --type T TEXT)", err=True)
+        raise typer.Exit(2)
+    body["text"] = args[1]
+    typer.echo(json.dumps(_call("POST", f"/agents/{args[0]}/prompt", json=body)))
 
 
 def _short(text: Any, n: int = 160) -> str:
