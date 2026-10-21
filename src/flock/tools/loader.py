@@ -119,8 +119,23 @@ def _is_context(hint: Any) -> bool:
     return hint is Context or (isinstance(hint, type) and issubclass(hint, Context))
 
 
+def nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` that also accepts null (an `Any` schema already does)."""
+    out = dict(schema)
+    t = out.get("type")
+    if isinstance(t, str):
+        out["type"] = [t, "null"]
+    elif isinstance(t, list) and "null" not in t:
+        out["type"] = [*t, "null"]
+    if "enum" in out and None not in out["enum"]:
+        out["enum"] = [*out["enum"], None]
+    return out
+
+
 def type_schema(hint: Any, where: str) -> tuple[dict[str, Any], bool]:
-    """(JSON schema, optional) for a type hint; optional = `X | None` / `Optional[X]`."""
+    """(JSON schema, nullable) for a type hint. `X | None` / `Optional[X]` is nullable: the
+    schema accepts null too (`type: [X, "null"]`, None added to an enum). Nullable is not
+    omittable: only a default makes a parameter optional."""
     if hint is inspect.Parameter.empty:
         raise ToolsError(f"{where}: needs a type annotation (str, int, float, bool, list[...], dict)")
     origin = typing.get_origin(hint)
@@ -129,8 +144,7 @@ def type_schema(hint: Any, where: str) -> tuple[dict[str, Any], bool]:
         rest = [a for a in args if a is not type(None)]
         if len(rest) != 1 or len(rest) == len(args):
             raise ToolsError(f"{where}: unions other than `X | None` are not supported")
-        schema, _ = type_schema(rest[0], where)
-        return schema, True
+        return nullable(type_schema(rest[0], where)[0]), True
     if hint is typing.Any:
         return {}, False
     if hint is str:
@@ -185,7 +199,7 @@ def tool_def(fn: Any, module: str) -> ToolDef:
             raise ToolsError(f"{where}: *args / **kwargs are not supported; name every parameter")
         if p.kind is p.POSITIONAL_ONLY:
             raise ToolsError(f"{where}: positional-only parameters are not supported")
-        schema, optional = type_schema(hint, f"{where}({p.name})")
+        schema, _ = type_schema(hint, f"{where}({p.name})")
         schema = dict(schema)
         if docs.get(p.name):
             schema["description"] = docs[p.name]
@@ -196,7 +210,7 @@ def tool_def(fn: Any, module: str) -> ToolDef:
                     schema["default"] = p.default
             except (TypeError, ValueError):
                 pass
-        elif not optional:
+        else:  # no default: required, nullable or not (the call has no value to fall back on)
             required.append(p.name)
         props[p.name] = schema
     params: dict[str, Any] = {"type": "object", "properties": props, "additionalProperties": False}

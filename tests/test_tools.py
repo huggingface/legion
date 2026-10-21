@@ -85,7 +85,7 @@ def test_schema_covers_every_annotation_type(tmp_path):
     assert t.ctx == "ctx" and t.module == "kinds" and not t.is_async
     p = t.parameters
     assert p["type"] == "object" and p["additionalProperties"] is False
-    assert p["required"] == ["s", "i", "f", "b", "tags", "d"]
+    assert p["required"] == ["s", "i", "f", "b", "tags", "d", "maybe"]  # nullable is not omittable
     props = p["properties"]
     assert "ctx" not in props
     assert props["s"] == {"type": "string", "description": "a string"}
@@ -93,7 +93,8 @@ def test_schema_covers_every_annotation_type(tmp_path):
     assert props["f"] == {"type": "number"} and props["b"] == {"type": "boolean"}
     assert props["tags"] == {"type": "array", "items": {"type": "string"}, "description": "some tags"}
     assert props["d"] == {"type": "object"}
-    assert props["maybe"] == {"type": "integer"} and props["m2"] == {"type": "string"}
+    assert props["maybe"] == {"type": ["integer", "null"]}
+    assert props["m2"] == {"type": ["string", "null"]}  # default None: optional, null allowed
     assert props["n"] == {"type": "integer", "default": 3}
     assert props["mode"] == {"enum": ["a", "b"], "type": "string", "default": "a"}
     assert m.get("later").is_async
@@ -152,6 +153,49 @@ def test_select_is_strict():
     assert select(m, None) == []
     with pytest.raises(ToolsError, match="types.dev.tools: unknown tool.s. mul; the tools folder has: add, sub"):
         select(m, ["add", "mul"], where="types.dev.tools")
+
+
+NULLABLE_SRC = """
+from typing import Literal
+
+
+def opt(x: int | None, tags: list[int | None], mode: Literal["a", "b"] | None,
+        y: int | None = None) -> str:
+    "Nullable parameters."
+    return f"{x}/{tags}/{mode}/{y}"
+
+
+def plain(x: int, xs: list[int]) -> str:
+    "Not nullable."
+    return "body ran"
+"""
+
+
+def test_nullable_means_null_accepted_not_omittable(tmp_path):
+    m = load_dir(write(tmp_path / "tools", "n.py", NULLABLE_SRC).parent)
+    opt, plain = m.get("opt").parameters, m.get("plain").parameters
+    assert opt["required"] == ["x", "tags", "mode"]
+    assert opt["properties"]["tags"]["items"] == {"type": ["integer", "null"]}
+    assert opt["properties"]["mode"] == {"enum": ["a", "b", None], "type": ["string", "null"]}
+    assert "missing required argument(s): x" in check_args(opt, {"tags": [], "mode": None})
+    assert check_args(opt, {"x": None, "tags": [1, None], "mode": None}) is None
+    assert check_args(opt, {"x": 1, "tags": [], "mode": "a", "y": None}) is None
+    assert "mode must be one of" in check_args(opt, {"x": 1, "tags": [], "mode": "c"})
+    assert check_args(plain, {"x": None, "xs": []}) == "x must be integer, got null"
+    assert check_args(plain, {"x": 1, "xs": [1, None]}) == "xs[1] must be integer, got null"
+
+
+async def test_nullable_calls_match_the_schema(tmp_path):
+    folder = write(tmp_path / "tools", "n.py", NULLABLE_SRC).parent
+    m = load_dir(folder)
+    wd = tmp_path / "wd"
+    r = await run_tool(m.get("opt"), {"x": None, "tags": [None], "mode": None}, tools_dir=folder,
+                       workdir=wd)
+    assert (r.output, r.error) == ("None/[None]/None/None", False)
+    r = await run_tool(m.get("opt"), {"tags": [], "mode": "a"}, tools_dir=folder, workdir=wd)
+    assert r.error and "missing required argument(s): x" in r.output
+    r = await run_tool(m.get("plain"), {"x": None, "xs": []}, tools_dir=folder, workdir=wd)
+    assert r.error and "x must be integer, got null" in r.output
 
 
 def test_check_args():

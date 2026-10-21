@@ -47,17 +47,32 @@ _JSON_TYPES: dict[str, tuple[type, ...]] = {
 }
 
 
-def _check(schema: dict[str, Any], value: Any, where: str) -> str | None:
-    if value is None:
-        return None  # `X | None` parameters; a required one fails inside the call if it matters
+def _types(schema: dict[str, Any]) -> list[str] | None:
     t = schema.get("type")
-    if isinstance(t, str) and t in _JSON_TYPES:
-        ok = isinstance(value, _JSON_TYPES[t]) and not (t in ("integer", "number") and isinstance(value, bool))
-        if not ok:
-            return f"{where} must be {t}, got {type(value).__name__} {json.dumps(value)[:60]}"
+    if isinstance(t, str):
+        return [t]
+    return list(t) if isinstance(t, list) else None
+
+
+def _is(value: Any, t: str) -> bool:
+    if t == "null":
+        return value is None
+    if t not in _JSON_TYPES:
+        return True
+    return isinstance(value, _JSON_TYPES[t]) and not (t in ("integer", "number") and isinstance(value, bool))
+
+
+def _check(schema: dict[str, Any], value: Any, where: str) -> str | None:
+    """Type and enum checks; null only where the schema allows it (`X | None`), array items
+    included. A schema without `type` (`Any`) accepts anything."""
+    types = _types(schema)
+    if types is not None and not any(_is(value, t) for t in types):
+        want = " or ".join("null" if t == "null" else t for t in types)
+        got = "null" if value is None else f"{type(value).__name__} {json.dumps(value)[:60]}"
+        return f"{where} must be {want}, got {got}"
     if "enum" in schema and value not in schema["enum"]:
         return f"{where} must be one of {schema['enum']}, got {json.dumps(value)[:60]}"
-    if t == "array" and isinstance(schema.get("items"), dict):
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
         for i, v in enumerate(value):
             if err := _check(schema["items"], v, f"{where}[{i}]"):
                 return err
