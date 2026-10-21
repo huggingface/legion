@@ -110,9 +110,29 @@ class _Op:
     m: Member
     ident: MsgboardIdentity
     c: CommsSpec
+    gen: int  # the hub's configuration generation when the call started
 
     def board(self, hub: CommsHub) -> AsyncBoard:
         return hub._board(self.ident.url)
+
+    @property
+    def source(self) -> Source:
+        assert self.c.channel_id is not None
+        return Source(self.ident.url, self.c.channel_id, self.gen)
+
+
+@dataclass(frozen=True)
+class Source:
+    """Where messages came from: their board and channel, and the hub generation of the request
+    that returned them. Message ids are only unique on one board, so every cache key carries
+    the board and channel, and data from a superseded generation is never fanned out."""
+
+    url: str
+    channel_id: int
+    gen: int
+
+    def key(self, msg_id: int) -> tuple[str, int, int]:
+        return (self.url.rstrip("/"), self.channel_id, msg_id)
 
 
 def _ok(out: Any, t0: float) -> Result:
@@ -146,7 +166,7 @@ class CommsHub:
         self._boards: dict[str, AsyncBoard] = {}
         self.members: dict[str, Member] = {}
         self._keys: dict[str, str] = {}
-        self._cache: OrderedDict[int, dict] = OrderedDict()
+        self._cache: OrderedDict[tuple[str, int, int], dict] = OrderedDict()  # (board, channel, id)
         self._cursor: int | None = None
         self._poller: asyncio.Task | None = None
         self._poll_agent: str | None = None
@@ -447,16 +467,29 @@ class CommsHub:
             return False
         return re.search(rf"(?<![\w@])@{re.escape(m.name)}(?![\w-])", msg.get("body") or "") is not None
 
-    def fanout(self, msgs: list[dict]) -> None:
-        """New channel messages (from the poller or this hub's own posts) -> wake events."""
+    def current(self) -> Source | None:
+        """The subscription messages are fanned out for: the current board, channel and
+        generation."""
         c = self.spec
-        if c is None:
+        if c is None or c.channel_id is None:
+            return None
+        return Source(c.url, c.channel_id, self._gen)
+
+    def fanout(self, msgs: list[dict], source: Source) -> None:
+        """New channel messages (from the poller or this hub's own posts) -> wake events. Only
+        messages of the current subscription count: data returned by a request of an older
+        generation, another board or another channel is dropped (no cache entry, no event)."""
+        c = self.spec
+        if c is None or source != self.current():
             return
         for x in sorted(msgs, key=lambda x: x.get("id") or 0):
             mid = x.get("id")
-            if not isinstance(mid, int) or mid in self._cache or x.get("channel_id") not in (None, c.channel_id):
+            if not isinstance(mid, int) or x.get("channel_id") not in (None, source.channel_id):
                 continue
-            self._cache[mid] = x
+            key = source.key(mid)
+            if key in self._cache:
+                continue
+            self._cache[key] = x
             while len(self._cache) > CACHE_MESSAGES:
                 self._cache.popitem(last=False)
             sender, root = author(x), thread_of(x)
@@ -514,6 +547,7 @@ class CommsHub:
                 return  # the next join starts it again
             assert c.channel_id is not None
             board = self._board(ident.url)  # the identity's own board, whatever the spec says
+            source = Source(ident.url, c.channel_id, self._gen)
             try:
                 if self._cursor is None:  # "now": history before the poller is not news
                     page = await board.activity(ident, c.channel_id, None)
@@ -523,7 +557,7 @@ class CommsHub:
                 page = await board.activity(ident, c.channel_id, self._cursor, wait=self.poll_wait)
                 attempt = 0
                 self._cursor = int(page.get("next_cursor") or self._cursor)
-                self.fanout([x for x in page.get("messages") or [] if isinstance(x, dict)])
+                self.fanout([x for x in page.get("messages") or [] if isinstance(x, dict)], source)
             except asyncio.CancelledError:
                 raise
             except BoardError as e:
@@ -550,7 +584,7 @@ class CommsHub:
         for attempt in (0, 1):
             try:
                 m = await self._member(agent)
-                op = _Op(m, m.ident, self.spec)  # one identity and its own board per call
+                op = _Op(m, m.ident, self.spec, self._gen)  # one identity, its own board
                 if op.ident is None or op.c is None or not same_board(op.ident.url, op.c.url):
                     raise BoardError("comms settings changed during the call; try again")
                 fn = {"comms:post": self._post, "comms:read": self._read,
@@ -570,8 +604,9 @@ class CommsHub:
         return _err("unreachable", t0)
 
     async def _message(self, op: _Op, msg_id: int) -> dict | None:
-        if msg_id in self._cache:
-            return self._cache[msg_id]
+        """A message of the call's own board and channel (the cache is keyed by both)."""
+        if (cached := self._cache.get(op.source.key(msg_id))) is not None:
+            return cached
         try:
             msg = await op.board(self).message(op.ident, msg_id)
         except BoardError as e:
@@ -616,7 +651,7 @@ class CommsHub:
         self.stats["posts"] += 1
         if isinstance(msg, dict) and isinstance(msg.get("id"), int):
             msg.setdefault("channel_id", c.channel_id)
-            self.fanout([msg])
+            self.fanout([msg], op.source)  # dropped if the settings changed during the post
         out: dict[str, Any] = {"posted": msg.get("id"), "thread": thread_of(msg) if msg.get("id") else None}
         if rules.max_posts:
             out["posts_left"] = max(0, rules.max_posts - n)

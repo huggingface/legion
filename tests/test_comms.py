@@ -662,3 +662,49 @@ async def test_a_join_in_flight_when_the_board_url_changes_never_sends_its_token
         release.set()
         await hub.aclose()
         await hub.identities._client.aclose()
+
+
+# --------------------------------------------------------------------------- fourth review of #16
+
+
+async def test_a_post_finishing_on_the_old_board_never_hides_a_mention_on_the_new_one(tmp_path):
+    a, sa, ua = fake_msgboard.serve()
+    a.url = ua
+    b, sb, ub = fake_msgboard.serve()  # the same ids and channel id as board A
+    b.url = ub
+    t = Team(tmp_path, a, ["dev-0000", "dev-0001"])
+    hub = t.hub
+    entered, release = asyncio.Event(), asyncio.Event()
+    try:
+        await t.start()
+        await until(lambda: hub._cursor is not None)
+        old = hub._board(ua)
+        real = old.post
+
+        async def gated(*args, **kw):
+            entered.set()
+            await release.wait()
+            return await real(*args, **kw)
+
+        old.post = gated
+        pending = asyncio.create_task(t.call("dev-0000", "post", text="@dev-0001 from board A",
+                                             thread="new"))
+        await asyncio.wait_for(entered.wait(), 5)
+        hub.configure(t.spec.model_copy(update={"url": ub}), list(COMMS_TOOLS))
+        release.set()
+        out, err = await pending
+        assert not err and a.msgs[-1]["id"] == out["posted"]  # it did post, on board A
+        await hub._restore
+        await until(lambda: hub._cursor is not None)
+        mid = b.post("carlos", CH, "@dev-0001 a real mention on board B")["id"]
+        assert mid == out["posted"]  # the same id on both boards
+        rt = t.agents["dev-0001"]
+        await until(lambda: custom(rt, "comms_mention"))
+        assert custom(rt, "comms_mention") == [{"msg_id": mid, "thread": mid, "from": "carlos"}]
+        assert hub._cache[(ub, CH, mid)]["body"] == "@dev-0001 a real mention on board B"
+        assert (ua, CH, mid) not in hub._cache  # the superseded post fed nothing
+    finally:
+        release.set()
+        await t.close()
+        sa.shutdown()
+        sb.shutdown()

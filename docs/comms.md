@@ -75,7 +75,10 @@ from the harness environment even if a type lists it in `secrets`. The pin's den
 A token only ever goes to the board that issued it: the worker's identity record carries the
 board's url, every request uses that board's own client, and the client refuses (without sending
 anything) a credential issued by another board. A join that a reconfiguration overtakes is dropped
-before its next request, so a token from the old board never reaches a new `url`.
+before its next request, so a token from the old board never reaches a new `url`. The same holds for
+data coming back: the worker's message cache is keyed by board, channel and id (ids are only
+unique on one board), and a result returned to a request that a reconfiguration overtook (a post
+finishing on the old board) is never cached or fanned out for the new subscription.
 
 The older per-type `msgboard_invite` (MSGBOARD_URL/MSGBOARD_TOKEN in the harness env, for agents
 that call the board themselves) still works and shares the same identity cache, so the two never
