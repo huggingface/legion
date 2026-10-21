@@ -664,9 +664,8 @@ class LoopSpec(BaseModel):
     @field_validator("every")
     @classmethod
     def _every(cls, v: str) -> str:
-        if v not in ("turn_end", "rounds"):
-            if parse_duration(v).total_seconds() <= 0:
-                raise ValueError("every must be turn_end, rounds or a duration > 0")
+        if v not in ("turn_end", "rounds") and parse_duration(v).total_seconds() <= 0:
+            raise ValueError("every must be turn_end, rounds or a duration > 0")
         return v
 
     @field_validator("stagger")
@@ -832,6 +831,13 @@ class PromptCommand(BaseModel):
     timeout: str | None = None
     reply_to: str | None = None  # opaque, for the caller's bookkeeping
     loop: LoopMeta | None = None  # a loop prompt: `text` is a template the worker renders
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):  # plain prompts keep their wire shape
+        out = handler(self)
+        if isinstance(out, dict) and out.get("loop", 0) is None:
+            out.pop("loop")
+        return out
 
 
 class LoopStartCommand(BaseModel):
@@ -1002,11 +1008,11 @@ class WorkerStatus(BaseModel):
 
 
 class LoopStatus(BaseModel):
-    """A type's loop (docs/loop.md). `state`: waiting (not started), running, final (final
-    round in flight), done (final round over, or stopped without one)."""
+    """A type's loop (docs/loop.md). `state`: running, final (final round in flight), done
+    (final round over, or stopped without one)."""
 
     type: str
-    state: Literal["waiting", "running", "final", "done"]
+    state: Literal["running", "final", "done"]
     mode: Literal["worker", "controller"]  # who sends `every: turn_end` prompts
     every: str
     started_at: datetime | None = None

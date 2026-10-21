@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import os
 import resource
 import secrets
@@ -23,6 +24,7 @@ from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 
+from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
 from flock.controller.spawn import (
@@ -48,6 +50,8 @@ from flock.models import (
     CommandBatch,
     EventBatch,
     Harness,
+    LoopRequest,
+    LoopStatus,
     PreflightReport,
     PromptAck,
     PromptCommand,
@@ -60,6 +64,7 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorkerStatus,
+    loop_refusals,
 )
 
 MAX_WAIT = 30.0
@@ -271,6 +276,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
             workers_by_state=dict(w_state),
             cost_usd=round(sum(a["cost"] for a in mine), 6),
             launch_error=store.launch_error(spec.swarm, type_name)[0],
+            loop=loop_status(store, spec.swarm, type_name),
         )
     providers: dict[str, ProviderStatus] = {}
     for name, prov in spec.providers.items():
@@ -296,6 +302,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
         workers_total=len(workers),
         pending_prompts=sum(pending.values()),
         cost_usd=round(sum(t.cost_usd for t in types.values()), 6),
+        budget_stop=store.swarm_flags(spec.swarm).get("budget_stop"),
     )
 
 
@@ -496,13 +503,18 @@ def create_app(
     preflight_transport: httpx.AsyncBaseTransport | None = None,
     enforce_max_working: bool | None = None,
     namespace: str | None = None,
+    loop_interval: float | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
     `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
     `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
-    network group spans one namespace, so workers elsewhere could never reach the controller."""
+    network group spans one namespace, so workers elsewhere could never reach the controller.
+    `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
+    default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`)."""
     secret_source = os.environ if secret_source is None else secret_source
+    if loop_interval is None:
+        loop_interval = float(os.environ.get("FLOCK_LOOP_INTERVAL", "1"))
     if enforce_max_working is None:
         enforce_max_working = os.environ.get("FLOCK_MAX_WORKING_ENFORCE", "1") != "0"
     # Admission overlay (max_working): what the controller learned about an agent's turn since
@@ -514,16 +526,38 @@ def create_app(
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
     set_token_key(store, token)
 
+    def loop_send(swarm: str, type_name: str, agents: list[Row], build) -> list[str]:
+        """The loop engine's prompts: the bulk-prompt path with state=idle, skip_pending."""
+        req = BulkPromptRequest(type=type_name, state=AgentState.idle, text="", skip_pending=True)
+        ack = BulkPromptAck(swarm=swarm, type=type_name, matched=0, queued=0, pending=0)
+        sent: list[str] = []
+        prompt_many(swarm, agents, req, ack, build=build, sent=sent)
+        return sent
+
+    loops = LoopEngine(store, send=loop_send, clock=clock,
+                       capped=lambda spec, t: provider_cap(spec, t) is not None,
+                       turn_state=lambda a, w, now: turn_state(a, w, now))
+
+    async def loop_ticker() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(loops.tick)
+            except Exception:
+                logging.getLogger("flock.loop").exception("loop tick failed")
+            await asyncio.sleep(loop_interval)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         notifier._loop = asyncio.get_running_loop()
         task = asyncio.create_task(background(notifier)) if background else None
+        ticker = asyncio.create_task(loop_ticker()) if loop_interval and loop_interval > 0 else None
         yield
-        if task:
-            task.cancel()
+        for t in (task, ticker):
+            if t:
+                t.cancel()
 
     app = FastAPI(title="flock controller", lifespan=lifespan)
-    app.state.store, app.state.notifier = store, notifier
+    app.state.store, app.state.notifier, app.state.loops = store, notifier, loops
     request_stats: dict[str, RequestStats] = {}
 
     def make_stats(app):
@@ -603,6 +637,8 @@ def create_app(
                 raise HTTPException(409, f"type {type_name!r} already belongs to swarm {owner!r}")
         if conflicts := worker_cap_conflicts(store, spec):
             raise HTTPException(409, "; ".join(conflicts))
+        if refused := loop_refusals(spec):
+            raise HTTPException(400, "; ".join(refused))
         store.put_swarm(spec, clock().timestamp())
         return swarm_status(store, spec, clock().timestamp())
 
@@ -717,9 +753,15 @@ def create_app(
             "children": [c["name"] for c in store.list_agents(parent=a["name"])],
         }
 
+    def not_budget_stopped(swarm: str) -> None:
+        if loops.hard_stopped(swarm):
+            raise HTTPException(409, f"swarm {swarm!r} reached limits.budget_usd: every agent was "
+                                     "stopped; raise the budget (flock apply) to prompt again")
+
     @api.post("/agents/{name}/prompt")
     def prompt(name: str, req: PromptRequest) -> PromptAck:
         a = agent_or_404(name)
+        not_budget_stopped(a["swarm"])
         cmd = PromptCommand(
             agent=name,
             prompt_id=uuid.uuid4().hex,
@@ -745,6 +787,7 @@ def create_app(
             raise HTTPException(409, f"swarm {swarm!r} is being removed")
         if req.type not in row["spec"].types:
             raise HTTPException(404, f"no type {req.type!r} in swarm {swarm!r}")
+        not_budget_stopped(swarm)
         ack = BulkPromptAck(swarm=swarm, type=req.type, matched=0, queued=0, pending=0)
         return prompt_many(swarm, store.list_agents(swarm, req.type), req, ack)
 
@@ -756,16 +799,19 @@ def create_app(
         parent = agent_or_404(name)
         if parent["removing"]:
             raise HTTPException(409, f"agent {name!r} is being removed")
+        not_budget_stopped(parent["swarm"])
         kids = store.list_agents(parent["swarm"], req.type, parent=name)
         ack = BulkPromptAck(swarm=parent["swarm"], type=req.type, parent=name, matched=0,
                             queued=0, pending=0)
         return prompt_many(parent["swarm"], kids, req, ack)
 
     def prompt_many(swarm: str, agents: list[Row], req: BulkPromptRequest | ChildrenPromptRequest,
-                    ack: BulkPromptAck) -> BulkPromptAck:
+                    ack: BulkPromptAck, build=None, sent: list[str] | None = None) -> BulkPromptAck:
         """One pending prompt per matching agent, delivered and admitted (`max_working`)
         exactly as `POST /agents/{name}/prompt` would. `skip_pending` (default on with
-        state=idle) skips agents that already have an undelivered prompt."""
+        state=idle) skips agents that already have an undelivered prompt. `build(agent)` makes
+        each agent's command (the loop engine's per-agent loop prompts); `sent` collects the
+        names that got one."""
         now = clock().timestamp()
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
@@ -783,15 +829,45 @@ def create_app(
             if pending.get(a["name"]):
                 ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
                 continue
-            cmd = PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
-                                timeout=req.timeout, reply_to=req.reply_to)
+            cmd = build(a) if build else PromptCommand(
+                agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text, timeout=req.timeout,
+                reply_to=req.reply_to)
             rows.append((a["name"], cmd.model_dump_json()))
+            if sent is not None:
+                sent.append(a["name"])
             if w is not None and worker_state(w, now) == WorkerState.running:
                 ack.queued += 1
             else:
                 ack.pending += 1
         store.add_prompts(rows, now)
         return ack
+
+    # ------------------------------------------------------------- loops (docs/loop.md)
+
+    @api.get("/swarms/{swarm}/loop")
+    def get_loop(swarm: str) -> list[LoopStatus]:
+        spec = spec_or_404(swarm)["spec"]
+        return [st for t in sorted(spec.types)
+                if (st := loops.status(swarm, t, detail=True)) is not None]
+
+    @api.post("/swarms/{swarm}/loop")
+    def control_loop(swarm: str, req: LoopRequest) -> LoopStatus:
+        spec_or_404(swarm)
+        try:
+            return loops.control(swarm, req.type, req.action, final=req.final)
+        except KeyError as e:
+            raise HTTPException(404, str(e.args[0])) from None
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
+
+    @api.get("/swarms/{swarm}/events")
+    async def swarm_events(swarm: str, after: int = 0, wait: float = 0, limit: int = 1000) -> dict:
+        """Swarm-level events: loop_started, loop_tick, loop_stopped, final_round, budget_stop."""
+        spec_or_404(swarm)
+        key, after = swarm_stream(swarm), max(0, after)
+        await notifier.long_poll(f"events:{key}", lambda: store.event_count(key) > after, wait)
+        evs = store.read_events(key, after, limit=max(1, min(limit, 5000)))
+        return {"events": evs, "next": after + len(evs)}
 
     @api.get("/agents/{name}/events")
     async def events(name: str, after: int = 0, wait: float = 0, limit: int = 1000) -> dict:
@@ -1061,6 +1137,8 @@ def create_app(
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
+            if a is not None:
+                loops.on_events(a, evs)
         if released and cap is not None:  # slots freed now, not at the next heartbeat (run-1k finding 1)
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
