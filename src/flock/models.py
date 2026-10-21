@@ -72,6 +72,7 @@ TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 # (e.g. Bedrock's "anthropic.claude-...-v1:0") is a harness-native id, not a provider reference.
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+TOOLS_VERSION_RE = re.compile(r"^[0-9a-f]{16}$")
 SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
 
 Reasoning = Literal["off", "low", "medium", "high"]
@@ -214,6 +215,9 @@ class TypeSpec(BaseModel):
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
+    # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
+    # `flock apply` refuses a name the folder does not define. None: no folder tools.
+    tools: list[str] | Literal["all"] | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
     # replaced. None means a harness-native model.
     resolved_model: ResolvedModel | None = None
@@ -292,6 +296,19 @@ class SwarmSpec(BaseModel):
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
+    # The tools folder (docs/tools.md), relative to the spec file; None: `tools/` next to it.
+    # Read by `flock apply` only.
+    tools_dir: str | None = None
+    # Content hash of the tools bundle, written by `flock apply` after uploading the folder
+    # (anything given by hand is replaced). Workers fetch that version; None: no tools.
+    tools_version: str | None = None
+
+    @field_validator("tools_version")
+    @classmethod
+    def _valid_tools_version(cls, v: str | None) -> str | None:
+        if v is not None and not TOOLS_VERSION_RE.match(v):
+            raise ValueError("tools_version is written by `flock apply` (16 hex digits)")
+        return v
 
     @field_validator("providers")
     @classmethod
@@ -638,6 +655,7 @@ class AssignCommand(BaseModel):
     parent: str | None = None  # the spawning agent, None for a replica
     # The agent's scoped controller token, injected into its harness env as FLOCK_AGENT_TOKEN.
     agent_token: str | None = None
+    tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
 
 
 class UnassignCommand(BaseModel):
