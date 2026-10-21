@@ -397,3 +397,31 @@ async def test_live_change_and_removal(sim):
     assert {c["kind"] for c in await sim.commands()} == {"loop_stop"}
     assert sim.swarm_events()[-1] == ("loop_stopped", {"type": "researcher", "reason": "loop_removed"})
     assert (await sim.c.get("/swarms/demo/loop")).json() == []
+
+
+async def test_stagger_spreads_the_first_prompts(sim):
+    await sim.apply({"first": "boot", "prompt": "p", "every": "1h", "stagger": "4s"})
+    await sim.heartbeat()
+    sim.tick()
+    assert list(prompts(await sim.commands())) == [A0]
+    sim.tick(3)
+    assert await sim.commands() == []
+    await sim.heartbeat()  # keep A1 fresh on the fake clock
+    sim.tick(1)
+    got = prompts(await sim.commands())
+    assert list(got) == [A1] and got[A1]["text"] == "boot"
+
+
+async def test_type_budget_usd_stops_the_loop(sim):
+    await sim.apply({"prompt": "p", "every": "5s", "while": {"budget_usd": 0.6},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.cost.update({A0: 15_000, A1: 15_000})  # $0.30 each
+    await sim.heartbeat()
+    sim.tick(5)
+    fin = prompts(await sim.commands())
+    assert {p["loop"]["why"] for p in fin.values()} == {"final: budget_usd"}
