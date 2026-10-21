@@ -1,7 +1,8 @@
 """`flock` CLI: a thin client over the controller API.
 
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
-FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
+FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
+a live `flock run` in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
 agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
 docs/spawn.md for what an agent may call.
 """
@@ -55,10 +56,27 @@ def auth_headers(url: str, env=os.environ) -> dict[str, str]:
     return headers
 
 
+CURRENT_FILE = Path(".flock") / "current"  # written by `flock run` (docs/local.md)
+
+
+def local_run(env=os.environ) -> dict | None:
+    """The live `flock run` this CLI talks to when FLOCK_URL is unset: `$FLOCK_CURRENT` or
+    `.flock/current` in the working directory, if its process is still alive."""
+    if env.get("FLOCK_URL"):
+        return None
+    from flock.current import read_current
+
+    return read_current(Path(env.get("FLOCK_CURRENT") or CURRENT_FILE))
+
+
 def client() -> httpx.Client:
     """Overridden in tests to point at an in-process app."""
-    url = os.environ.get("FLOCK_URL", "http://localhost:7860")
-    return httpx.Client(base_url=url, headers=auth_headers(url), timeout=60)
+    env = os.environ
+    if (run := local_run(env)) is not None:
+        env = {**env, "FLOCK_URL": run["url"], "FLOCK_TOKEN": run["token"]}
+        env.pop("FLOCK_AGENT_TOKEN", None)
+    url = env.get("FLOCK_URL", "http://localhost:7860")
+    return httpx.Client(base_url=url, headers=auth_headers(url, env), timeout=60)
 
 
 RETRY_ATTEMPTS = 5  # requests in all, per call
@@ -279,6 +297,63 @@ def apply(
             raise typer.Exit(1)
     st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     _print_status(st)
+
+
+@app.command()
+def run(
+    spec_file: str,
+    data_dir: str = typer.Option(".flock", "--data-dir",
+                                  help="Where the run dir and `current` go."),
+    until: str = typer.Option(
+        None, "--until",
+        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle with nothing "
+             "pending, after at least one turn (and one per agent with --prompt)."),
+    prompt_text: str = typer.Option(None, "--prompt",
+                                    help="Send this prompt to every agent once at start."),
+    preflight: bool = typer.Option(
+        None, "--preflight/--skip-preflight",
+        help="Probe provider-backed models first (default: on when the spec has any)."),
+    strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
+    grace: float = typer.Option(10.0, "--grace",
+                                help="Seconds in-flight turns get to finish at stop."),
+) -> None:
+    """Run a `compute: local` swarm on this machine: controller on 127.0.0.1, workers as
+    subprocesses, a live view in the terminal, a run bundle at the end (docs/local.md). Other
+    commands (`status`, `agents`, `prompt`, `events`, ...) reach it from this directory."""
+    import asyncio
+
+    from flock.models import parse_duration
+
+    try:
+        from flock.controller.localrun import RunOptions, run_local
+    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
+        typer.echo(f"flock run needs the controller extra (pip install 'flock[controller]'): {e}",
+                   err=True)
+        raise typer.Exit(1) from None
+    spec = load_spec(spec_file)
+    if spec.compute.kind != "local":
+        typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}; `flock run` runs "
+                   "`compute: local` specs. For hf-jobs, deploy a controller and use "
+                   "`flock apply` (docs/deploy-job.md), or set `compute: local`.", err=True)
+        raise typer.Exit(1)
+    _warn_extra(spec)
+    seconds, idle = None, False
+    if until == "idle":
+        idle = True
+    elif until:
+        try:
+            seconds = parse_duration(until).total_seconds()
+        except ValueError as e:
+            typer.echo(f"--until: {e} (or `idle`)", err=True)
+            raise typer.Exit(2) from None
+    if preflight is None:
+        preflight = _provider_backed(spec)
+    elif not preflight and (unprobed := _unprobed(spec)):
+        _warn_unverified(unprobed, "preflight skipped")
+    opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
+                      prompt=prompt_text, preflight=preflight, strict=strict, grace=grace)
+    result = asyncio.run(run_local(opts))
+    raise typer.Exit(result.exit_code)
 
 
 @app.command("preflight")
@@ -522,6 +597,7 @@ def whoami() -> None:
 @app.command()
 def workers(swarm: str) -> None:
     """List a swarm's workers."""
+    found = _call("GET", "/workers", params={"swarm": swarm})
     rows = [
         [
             w["id"],
@@ -534,11 +610,14 @@ def workers(swarm: str) -> None:
             w["last_heartbeat"],
             w.get("last_error") or "",
         ]
-        for w in _call("GET", "/workers", params={"swarm": swarm})
+        for w in found
     ]
     _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
                   "last_error"])
-    typer.echo("full job logs: hf jobs logs <job>", err=True)
+    if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
+        typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
+    else:
+        typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
 if __name__ == "__main__":
