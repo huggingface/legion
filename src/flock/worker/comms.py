@@ -164,6 +164,13 @@ class CommsHub:
     def tooldefs(self) -> tuple:
         return tuple(tool_def(e) for e in self.entries) if self.active else ()
 
+    def deny_env(self) -> list[str]:
+        """Variables a tool call never inherits: the comms invite (and MSGBOARD_TOKEN, the
+        older msgboard_invite's token). The comms token itself is in no environment at all."""
+        if self.spec is None:
+            return []
+        return sorted({self.spec.invite_env, "MSGBOARD_TOKEN"})
+
     def key(self, agent: str) -> str:
         if agent not in self._keys:
             self._keys[agent] = secrets.token_urlsafe(24)

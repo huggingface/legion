@@ -151,6 +151,8 @@ class AgentRuntime:
         ts = self.toolbox()
         if ts.version is not None or ts.tools or self.pin_path.exists():
             deny = credential_env_names(self.spec)  # the key under every name the harness has it
+            if self.comms is not None:  # and the board's credentials (docs/comms.md)
+                deny += self.comms.deny_env()
             try:
                 ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
             except OSError as e:
@@ -306,6 +308,10 @@ class AgentRuntime:
         env.update(self.spec.env)
         if self.identities is not None:
             env.update(await self.identities.env_for(self.name, self.spec))
+        if self.comms is not None:  # the board invite stays in the worker: it joins any name
+            for k in self.comms.deny_env():
+                if k != "MSGBOARD_TOKEN":
+                    env.pop(k, None)
         r = self.spec.resolved_model
         if r is not None:
             key = source.get(r.provider.api_key_env)
