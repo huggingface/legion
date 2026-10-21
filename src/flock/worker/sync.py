@@ -10,13 +10,21 @@ session and harness files go through `batch_bucket_files`, only those whose (mti
 changed since the last push by this worker. `restore` brings all three areas back to the
 same absolute paths (workdir and work root are fixed, harness homes are fixed by the image)
 before the first resume.
+
+Buckets store bytes, not file modes: a restored file comes back 0644, so an executable script
+would stop running after a move (pixel run 1, 2026-10-19: `./canvas: Permission denied`). Each
+push therefore writes `<workdir>/.flock-modes.json` ({relative path: octal mode} for every file
+with an executable bit) when it changed, and restore re-applies it after `sync_down`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
+import stat
 import threading
 from collections import Counter
 from dataclasses import dataclass, field
@@ -29,6 +37,66 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 UPLOAD_CHUNK = 200
+MODES_FILE = ".flock-modes.json"
+
+
+def collect_modes(workdir: Path) -> dict[str, str]:
+    """{relative posix path: "0o755"} for regular files with any executable bit (symlinks and
+    the manifest itself excluded)."""
+    out: dict[str, str] = {}
+    for root, dirs, files in os.walk(workdir):
+        dirs.sort()
+        for f in files:
+            p = Path(root) / f
+            try:
+                st = p.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
+                rel = p.relative_to(workdir).as_posix()
+                if rel != MODES_FILE:
+                    out[rel] = oct(stat.S_IMODE(st.st_mode))
+    return dict(sorted(out.items()))
+
+
+def write_modes(workdir: Path) -> bool:
+    """(Re)write the manifest if its content changed, remove it when nothing is executable.
+    Returns whether the file changed."""
+    path = workdir / MODES_FILE
+    modes = collect_modes(workdir)
+    old = path.read_text() if path.is_file() else None
+    if not modes:
+        if old is not None:
+            path.unlink()
+            return True
+        return False
+    new = json.dumps(modes, indent=0, sort_keys=True) + "\n"
+    if new == old:
+        return False
+    path.write_text(new)
+    return True
+
+
+def apply_modes(workdir: Path) -> int:
+    """chmod the files listed in the manifest (inside the workdir, regular files only)."""
+    path = workdir / MODES_FILE
+    try:
+        modes = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return 0
+    n = 0
+    root = workdir.resolve()
+    for rel, mode in (modes.items() if isinstance(modes, dict) else []):
+        p = workdir / rel
+        try:
+            if ".." in Path(rel).parts or not p.resolve().is_relative_to(root) or p.is_symlink() \
+                    or not p.is_file():
+                continue
+            os.chmod(p, int(mode, 8) & 0o7777)
+            n += 1
+        except (OSError, ValueError, TypeError):
+            continue
+    return n
 
 
 @dataclass
@@ -225,6 +293,7 @@ class BucketSync:
 
     async def _push(self, rt: AgentRuntime) -> int:
         if rt.spec.persist_workdir and rt.workdir.is_dir():
+            await asyncio.to_thread(write_modes, rt.workdir)
             await asyncio.to_thread(self.store.sync_up, rt.workdir, self.prefix(rt) + "workdir")
         files = self._changed(self.collect(rt))
         if files:
@@ -260,6 +329,8 @@ class BucketSync:
                 res.harness += 1
         if res.workdir and rt.spec.persist_workdir:
             await asyncio.to_thread(self.store.sync_down, pre + "workdir", rt.workdir)
+            if n := await asyncio.to_thread(apply_modes, rt.workdir):
+                log.info("%s: restored the mode of %d file(s)", rt.name, n)
         if plan:
             await asyncio.to_thread(self.store.download, plan)
             self._mark([(p, r) for r, p in plan])

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from flock.worker.sync import BucketSync, parse_bucket
+import json
+import os
+
+from flock.worker.sync import MODES_FILE, BucketSync, apply_modes, collect_modes, parse_bucket
 
 from .worker_fakes import MemoryStore, runtime, until
 
@@ -83,3 +86,54 @@ async def test_sync_counts_push_and_restore_failures(tmp_path):
     assert sync.stats.snapshot()["errors"] == {"restore_failed": 1, "push_failed": 1}
     assert rt.dirty
     await rt.stop()
+
+
+async def test_file_modes_survive_a_bucket_round_trip(tmp_path):
+    """The bucket keeps bytes only (MemoryStore, like the Hub, writes 0644 on download); the
+    manifest pushed with the workdir brings executable bits back on restore."""
+    store = MemoryStore()
+    rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"))
+    await rt.setup(restore=False)
+    rt.workdir.mkdir(parents=True, exist_ok=True)
+    (rt.workdir / "canvas").write_text("#!/bin/sh\necho ok\n")
+    os.chmod(rt.workdir / "canvas", 0o755)
+    (rt.workdir / "bin").mkdir()
+    (rt.workdir / "bin" / "tool").write_text("x")
+    os.chmod(rt.workdir / "bin" / "tool", 0o700)
+    (rt.workdir / "data.txt").write_text("d")
+    os.chmod(rt.workdir / "data.txt", 0o644)
+    await rt.sync_now("test")
+    pre = "sw/researcher/researcher-0001/workdir/"
+    assert json.loads(store.files[pre + MODES_FILE]) == {"bin/tool": "0o700", "canvas": "0o755"}
+    mtime = (rt.workdir / MODES_FILE).stat().st_mtime_ns
+    await rt.sync_now("again")  # unchanged modes: the manifest is not rewritten
+    assert (rt.workdir / MODES_FILE).stat().st_mtime_ns == mtime
+    await rt.stop()
+
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    await rt2.sync.restore(rt2)
+    mode = lambda p: (rt2.workdir / p).stat().st_mode & 0o777
+    assert (mode("canvas"), mode("bin/tool"), mode("data.txt")) == (0o755, 0o700, 0o644)
+
+    # nothing executable any more: the manifest goes away (and from the bucket)
+    for f in ("canvas", "bin/tool"):
+        os.chmod(rt2.workdir / f, 0o644)
+    await rt2.sync.push(rt2)
+    assert not (rt2.workdir / MODES_FILE).exists() and pre + MODES_FILE not in store.files
+
+
+def test_apply_modes_ignores_paths_outside_the_workdir(tmp_path):
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    outside = tmp_path / "secret"
+    outside.write_text("s")
+    os.chmod(outside, 0o600)
+    (wd / "link").symlink_to(outside)
+    (wd / "ok").write_text("x")
+    (wd / MODES_FILE).write_text(json.dumps({"../secret": "0o777", "link": "0o777", "ok": "0o750",
+                                             "missing": "0o755", "bad": "nope"}))
+    assert apply_modes(wd) == 1
+    assert outside.stat().st_mode & 0o777 == 0o600 and (wd / "ok").stat().st_mode & 0o777 == 0o750
+    assert collect_modes(wd) == {"ok": "0o750"}  # the symlink is not followed
+    (wd / MODES_FILE).write_text("not json")
+    assert apply_modes(wd) == 0
