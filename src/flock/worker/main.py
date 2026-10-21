@@ -87,6 +87,8 @@ class WorkerConfig:
     sync_interval: float = 180.0
     drain_window: timedelta = DEFAULT_DRAIN_WINDOW  # from the job env; assigns may update it
     incarnation: str | None = None  # WORKER_INCARNATION: binds our polls to this job
+    # compute local (docs/local.md): the controller's pid; the worker exits once it is gone
+    parent_pid: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -103,6 +105,8 @@ class WorkerConfig:
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
             drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
             incarnation=env.get("WORKER_INCARNATION") or None,
+            parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
+            else None,
         )
 
 
@@ -448,6 +452,15 @@ class Worker:
             await asyncio.sleep(min(left, 30))
         await self.drain("deadline")
 
+    async def parent_loop(self, every: float = 2.0) -> None:
+        """compute local: a worker whose controller process died (kill -9, a crash) would poll
+        a dead URL until its deadline. Exit like a stale slot instead: stop, no sync."""
+        if self.cfg.parent_pid is None:
+            return
+        while os.getppid() == self.cfg.parent_pid:
+            await asyncio.sleep(every)
+        await self.abandon(f"controller process {self.cfg.parent_pid} is gone")
+
     async def drain(self, reason: str) -> None:
         if self.draining:
             return
@@ -476,7 +489,7 @@ class Worker:
 
     async def run(self) -> int:
         loops = [self.poll_loop(), self.heartbeat_loop(), self.flush_loop(), self.sync_loop(),
-                 self.deadline_loop()]
+                 self.deadline_loop(), self.parent_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
         try:
             await self._drained.wait()

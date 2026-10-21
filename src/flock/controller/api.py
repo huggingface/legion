@@ -496,12 +496,15 @@ def create_app(
     preflight_transport: httpx.AsyncBaseTransport | None = None,
     enforce_max_working: bool | None = None,
     namespace: str | None = None,
+    compute: str | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
     `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
     `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
-    network group spans one namespace, so workers elsewhere could never reach the controller."""
+    network group spans one namespace, so workers elsewhere could never reach the controller.
+    `compute`, when set ("hf-jobs" or "local"), is the only `compute.kind` a spec may ask for:
+    this controller's jobs client launches workers one way (docs/local.md)."""
     secret_source = os.environ if secret_source is None else secret_source
     if enforce_max_working is None:
         enforce_max_working = os.environ.get("FLOCK_MAX_WORKING_ENFORCE", "1") != "0"
@@ -596,6 +599,13 @@ def create_app(
                 400,
                 f"this controller runs as a job in namespace {namespace!r} and its workers must "
                 f"join its network group there; spec.namespace is {spec.namespace!r}",
+            )
+        if compute and spec.compute.kind != compute:
+            raise HTTPException(
+                400,
+                f"this controller launches workers with compute {compute!r}; the spec asks for "
+                f"compute {spec.compute.kind!r} (docs/local.md: `flock run` for local, a "
+                "deployed controller and `flock apply` for hf-jobs)",
             )
         for type_name in spec.types:
             owner = store.type_owner(type_name)
