@@ -105,6 +105,15 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
   nonce TEXT NOT NULL,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tool_bundles (
+  swarm TEXT NOT NULL,
+  version TEXT NOT NULL,
+  body BLOB NOT NULL,
+  tools TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  created_at REAL NOT NULL,
+  PRIMARY KEY (swarm, version)
+);
 CREATE TABLE IF NOT EXISTS spawn_keys (
   parent TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -298,6 +307,47 @@ class Store:
         with self.transaction():
             self._x("DELETE FROM swarms WHERE name = ?", [name])
             self._x("DELETE FROM types WHERE swarm = ?", [name])
+            self._x("DELETE FROM tool_bundles WHERE swarm = ?", [name])
+
+    # ----------------------------------------------------------------- tools bundles (docs/tools.md)
+
+    TOOL_BUNDLES_KEPT = 10  # per swarm, newest first, plus the one the spec names
+
+    def put_tool_bundle(self, swarm: str, version: str, body: bytes, tools: list[str],
+                        now: float) -> None:
+        """Store a bundle (idempotent) and drop the oldest beyond TOOL_BUNDLES_KEPT, never the
+        version the applied spec names."""
+        with self.transaction():
+            self._x(
+                "INSERT INTO tool_bundles (swarm, version, body, tools, size, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(swarm, version) DO UPDATE SET "
+                "created_at = excluded.created_at",
+                [swarm, version, body, json.dumps(tools), len(body), now],
+            )
+            sw = self.get_swarm(swarm)
+            current = sw["spec"].tools_version if sw else None
+            old = self._q("SELECT version FROM tool_bundles WHERE swarm = ? "
+                          "ORDER BY created_at DESC LIMIT -1 OFFSET ?",
+                          [swarm, self.TOOL_BUNDLES_KEPT])
+            for row in old:
+                if row["version"] != current:
+                    self._x("DELETE FROM tool_bundles WHERE swarm = ? AND version = ?",
+                            [swarm, row["version"]])
+
+    def get_tool_bundle(self, swarm: str, version: str, *, body: bool = True) -> Row | None:
+        cols = "*" if body else "swarm, version, tools, size, created_at"
+        row = self._one(f"SELECT {cols} FROM tool_bundles WHERE swarm = ? AND version = ?",
+                        [swarm, version])
+        if row:
+            row["tools"] = json.loads(row["tools"])
+        return row
+
+    def list_tool_bundles(self, swarm: str) -> list[Row]:
+        rows = self._q("SELECT version, tools, size, created_at FROM tool_bundles WHERE swarm = ? "
+                       "ORDER BY created_at DESC", [swarm])
+        for row in rows:
+            row["tools"] = json.loads(row["tools"])
+        return rows
 
     def type_names(self, swarm: str) -> list[str]:
         """Types with any state in the store (spec'd or leftover from a removed type)."""

@@ -59,7 +59,7 @@ import re
 import signal
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +67,7 @@ import httpx
 
 from flock.controller.prices import Price, price_for
 from flock.models import TokenUsage, TypeSpec
+from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env, pi_usage
 
 log = logging.getLogger(__name__)
@@ -130,6 +131,8 @@ DONE_TOOL: dict[str, Any] = {
     },
 }
 DONE_PREAMBLE = "\nWhen the task is done, call the `done` tool with a one-line summary."
+TOOLS_PREAMBLE = ("\nBesides `bash` you have task tools, offered as functions next to it; their "
+                  "descriptions say what they do. Call them directly, not through bash.")
 
 
 def llm_home() -> Path:
@@ -405,7 +408,8 @@ class LLMAdapter:
 
     def __init__(self, workdir: Path, *, agent: str | None = None, home: Path | None = None,
                  prices: dict[str, Price] | None = None, backoff_s: float = BACKOFF_S,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 transport: httpx.AsyncBaseTransport | None = None,
+                 toolbox: Callable[[], Toolset] | None = None) -> None:
         self.workdir = Path(workdir)
         self.agent = agent or self.workdir.name
         self.home = Path(home) if home else llm_home()
@@ -427,6 +431,10 @@ class LLMAdapter:
         self._exited = True
         self.chars_per_token = DEFAULT_CHARS_PER_TOKEN  # calibrated online
         self._last_prompt: tuple[int, int] | None = None  # (reported prompt tokens, chars sent)
+        # Tools folder (docs/tools.md): the worker's current Toolset, taken once per turn, so a
+        # new version applies from the next turn and never mid-turn. Set by AgentRuntime.
+        self.toolbox = toolbox
+        self._turn_tools: Toolset | None = None
 
     @property
     def session_dir(self) -> Path:
@@ -503,6 +511,8 @@ class LLMAdapter:
         text = PREAMBLE.format(agent=self.agent, workdir=self.workdir)
         if self.done_enabled:
             text += DONE_PREAMBLE
+        if self.toolbox is not None and self.toolbox().tools:
+            text += TOOLS_PREAMBLE
         f = self.workdir / INSTRUCTIONS
         if f.is_file():
             text += "\n\n" + f.read_text()
@@ -636,7 +646,15 @@ class LLMAdapter:
 
     def _end(self, status: str, error: str | None = None, **data: Any) -> None:
         self.in_turn = False
+        if self._turn_tools is not None and self._turn_tools.version is not None:
+            data.setdefault("tools_version", self._turn_tools.version)
         self._queue.put(AdapterEvent("turn_ended", status=status, error=error, data=data))
+
+    @property
+    def folder_tools(self) -> Toolset | None:
+        """The turn's tools-folder tools, when it has any."""
+        ts = self._turn_tools
+        return ts if ts is not None and ts.tools else None
 
     async def _turn(self, texts: list[str]) -> None:
         spec = self._spec
@@ -650,7 +668,13 @@ class LLMAdapter:
         if max_turns is None and self.forced and self.done_enabled:
             max_turns = FORCED_DEFAULT_MAX_TURNS
         limits = {"max_turns": max_turns, "max_budget_usd": spec.max_budget_usd}
-        self._queue.put(AdapterEvent("turn_started"))
+        self._turn_tools = self.toolbox() if self.toolbox is not None else None
+        started: dict[str, Any] = {}
+        if self._turn_tools is not None and self._turn_tools.version is not None:
+            started["tools_version"] = self._turn_tools.version
+        if self._turn_tools is not None and self._turn_tools.error:
+            started["tools_error"] = self._turn_tools.error
+        self._queue.put(AdapterEvent("turn_started", data=started))
         try:
             self._user(texts)
             while True:
@@ -729,7 +753,9 @@ class LLMAdapter:
                               "name": fn.get("name"), "arguments": _parse_args(fn.get("arguments"))})
                 c.setdefault("id", calls[-1]["id"])
         elif parsed := (text_tool_calls(content)
-                        or (text_tool_calls(content, "done") if self.done_enabled else [])):
+                        or (text_tool_calls(content, "done") if self.done_enabled else [])
+                        or next((c for n in (self.folder_tools.names() if self.folder_tools else [])
+                                 if (c := text_tool_calls(content, n))), [])):
             n = sum(1 for m in self.messages if m.get("role") == "assistant")
             stored = {"role": "assistant", "content": None, "flock_from_text": content, "tool_calls": [
                 {"id": f"text_{n}_{i}", "type": "function",
@@ -768,18 +794,29 @@ class LLMAdapter:
             "provider": r.provider_name if r else None, "model": model, "usage": pi_usage(TokenUsage()),
             "stopReason": "stop", "fromDoneTool": True, "timestamp": _ms()}))
 
-    def _tool_result(self, call: dict[str, Any], out: str, err: bool) -> None:
+    def _tool_result(self, call: dict[str, Any], out: str, err: bool, **extra: Any) -> None:
         self._append({"role": "tool", "tool_call_id": call["id"], "content": out})
         self._queue.put(AdapterEvent("message", message={
             "role": "toolResult", "toolCallId": call["id"], "toolName": call["name"],
-            "content": [{"type": "text", "text": out}], "isError": err, "timestamp": _ms()}))
+            "content": [{"type": "text", "text": out}], "isError": err, "timestamp": _ms(), **extra}))
 
     async def _run_tool(self, call: dict[str, Any]) -> None:
         args = call["arguments"]
+        folder = self.folder_tools
         if isinstance(args, str):
             out, err = args, True
+        elif folder is not None and folder.get(call["name"]) is not None:
+            r = await folder.call(call["name"], args, agent=self.agent, workdir=self.workdir,
+                                  env=self.tool_env)
+            spec = self._spec
+            out = _truncate(r.output, (spec.tool_output_chars if spec else None) or OUTPUT_LIMIT)
+            self._tool_result(call, out, r.error, toolsVersion=folder.version,
+                              durationMs=int(r.duration_s * 1000))
+            return
         elif call["name"] != "bash":
-            tools = "bash and done" if self.done_enabled else "bash"
+            names = ["bash", *(["done"] if self.done_enabled else []),
+                     *(folder.names() if folder else [])]
+            tools = ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
             out, err = f"unknown tool {call['name']!r}; the tools are {tools}", True
         elif not isinstance(args.get("command"), str) or not args["command"].strip():
             out, err = "bash needs a non-empty `command` string", True
@@ -824,8 +861,11 @@ class LLMAdapter:
         spec = self._spec
         assert spec is not None and spec.resolved_model is not None and self._client is not None
         r = spec.resolved_model
+        tools = [BASH_TOOL, DONE_TOOL] if self.done_enabled else [BASH_TOOL]
+        if self.folder_tools is not None:
+            tools += [t.openai() for t in self.folder_tools.tools]
         body: dict[str, Any] = {"model": r.model_id, "messages": wire_messages(self.messages),
-                                "tools": [BASH_TOOL, DONE_TOOL] if self.done_enabled else [BASH_TOOL],
+                                "tools": tools,
                                 "tool_choice": "auto", "temperature": 0,
                                 "max_tokens": DEFAULT_MAX_TOKENS, **(r.extra or {})}
         body.pop("stream", None)

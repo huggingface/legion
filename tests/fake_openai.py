@@ -5,6 +5,8 @@ Run: python fake_openai.py <port|0> <log.jsonl>   (prints "PORT <n>" once listen
 Replies, decided from the last message of each request:
 - last message is a tool result     -> a final text "done: <first 40 chars of the result>"
 - last user text contains `bash: X` -> one `bash` tool call with command X
+- last user text contains `call: NAME {json}` and NAME is an offered tool -> one call of NAME
+  with those arguments (also under a forcing `tool_choice`, until a tool result follows)
 - last user text contains `json: X` -> the call written as text: `{"tool": "bash", "command": X}`
 - last user text contains `py: X`   -> the call written as text, pythonic: `[bash(command=X)]`
 - `tool_choice` forces a call (`required` or a named function) -> a `bash` call every time,
@@ -51,11 +53,26 @@ def _text(content: Any) -> str:
     return ""
 
 
+def _named_call(body: dict[str, Any], user: str) -> dict[str, Any] | None:
+    """`call: NAME {json args}` -> a native call of NAME, when the request offers that tool."""
+    if "call: " not in user:
+        return None
+    name, _, args = user.split("call: ", 1)[1].splitlines()[0].strip().partition(" ")
+    offered = {t.get("function", {}).get("name") for t in body.get("tools") or []}
+    if name not in offered:
+        return None
+    n = sum(1 for m in body.get("messages") or [] if m.get("role") == "assistant")
+    return {"content": None, "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {
+        "name": name, "arguments": args.strip() or "{}"}}]}
+
+
 def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     """{'content': str|None, 'tool_calls': list|None} for this request."""
     msgs = body.get("messages") or []
     last = msgs[-1] if msgs else {}
     tc = body.get("tool_choice")
+    if last.get("role") == "user" and (named := _named_call(body, _text(last.get("content")))):
+        return named
     if tc == "required" or isinstance(tc, dict):
         user = next((_text(m.get("content")) for m in reversed(msgs) if m.get("role") == "user"), "")
         cmd = user.split("bash: ", 1)[1].splitlines()[0].strip() if "bash: " in user else "echo forced"

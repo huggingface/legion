@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from flock.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
+from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
 from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError, usage_sub
 from flock.worker.events import Outbox, SessionLog, utcnow
 
@@ -68,6 +69,7 @@ class AgentRuntime:
         identities: Identities | None = None,
         working_count: Callable[[], int] | None = None,
         secret_source: Mapping[str, str] | None = None,
+        toolbox: Callable[[], Toolset] | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
         self.work_root = Path(work_root)
@@ -104,11 +106,34 @@ class AgentRuntime:
         self._instructions_written = False
         self.parent: str | None = None  # the spawning agent (AssignCommand.parent)
         self.flock_env: dict[str, str] = {}  # FLOCK_AGENT, FLOCK_AGENT_TOKEN, ... (worker sets)
+        # Tools folder (docs/tools.md): the worker's current Toolset, read at each turn start.
+        # An adapter with a `toolbox` attribute (llm) takes its own snapshot per turn.
+        self.toolbox = toolbox
+        if toolbox is not None and getattr(adapter, "toolbox", False) is None:
+            adapter.toolbox = toolbox  # type: ignore[attr-defined]
+        self._turn_tools: str | None = None  # tools version of the turn in flight
+        self._tools_section: str | None = None  # last generated instructions section
 
     # ------------------------------------------------------------------ paths and state
     @property
     def state_path(self) -> Path:
         return self.sessions_dir / f"{self.name}.state.json"
+
+    @property
+    def pin_path(self) -> Path:
+        """The Toolset `flock-tool` uses (FLOCK_TOOLS_PIN), rewritten at each turn start."""
+        return self.work_root / "_tools_pins" / f"{self.name}.json"
+
+    def _pin_tools(self) -> Toolset | None:
+        if self.toolbox is None:
+            return None
+        ts = self.toolbox()
+        if ts.version is not None:
+            try:
+                ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir)
+            except OSError as e:
+                log.warning("%s: cannot write the tools pin: %s", self.name, e)
+        return ts
 
     @property
     def idle_grace(self) -> float:
@@ -188,7 +213,17 @@ class AgentRuntime:
             self.emit("prompt_deferred", {"text": text, "reason": reason})
         self.buffer.clear()
 
-    def _prepare_workdir(self) -> None:
+    def _prepare_workdir(self, tools: Toolset | None = None) -> None:
+        self._write_instructions()
+        if tools is not None and self.spec.harness.value != "llm":  # llm: function tools instead
+            section = instructions_section(tools)
+            if section != (self._tools_section or ""):
+                target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
+                text = target.read_text() if target.is_file() else ""
+                target.write_text(replace_section(text, section))
+            self._tools_section = section
+
+    def _write_instructions(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)
         if self._instructions_written:
             return
@@ -241,10 +276,13 @@ class AgentRuntime:
             if self._working_count and self._working_count() > self.spec.max_working_per_worker:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
-            self._prepare_workdir()
+            tools = self._pin_tools()
+            self._prepare_workdir(tools)
             env = await self.harness_env()
             old = self.state.session_id
             env.update(self.flock_env)
+            if tools is not None and tools.version is not None:
+                env[PIN_ENV] = str(self.pin_path)
             first: list[str] = []
             data: dict[str, Any] = {"harness": self.spec.harness.value, "model": self.spec.model}
             if self.spec.resolved_model is not None:
@@ -345,6 +383,8 @@ class AgentRuntime:
                 extra = {}
                 if self._usage_missing(ev.status):
                     extra["usage_missing"] = True
+                if self._turn_tools is not None:
+                    extra["tools_version"] = self._turn_tools
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
                                          **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
@@ -376,11 +416,20 @@ class AgentRuntime:
         self._turn_timeout = self._next_timeout or parse_duration(self.spec.turn_timeout).total_seconds()
         self._next_timeout = None
         self._turn_tokens = {}
-        self.emit("turn_started", dict(data))
+        data = dict(data)
+        if self.toolbox is not None and "tools_version" not in data:
+            ts = self._pin_tools()  # CLI harnesses: flock-tool uses this version until the next turn
+            if ts is not None and ts.version is not None:
+                data["tools_version"] = ts.version
+            if ts is not None and ts.error:
+                data["tools_error"] = ts.error
+        self._turn_tools = data.get("tools_version")
+        self.emit("turn_started", data)
 
     def _end_turn(self) -> None:
         self.state.turns += 1
         self.turn_id = None
+        self._turn_tools = None
         self.awaiting = False
         self.idle_since = utcnow()
         self._last_activity = self._now()
@@ -388,7 +437,8 @@ class AgentRuntime:
 
     def _interrupt(self, reason: str) -> None:
         if self.turn_id is not None:
-            self.emit("turn_interrupted", {"reason": reason})
+            extra = {"tools_version": self._turn_tools} if self._turn_tools is not None else {}
+            self.emit("turn_interrupted", {"reason": reason, **extra})
             self._end_turn()
         self.awaiting = False
 
