@@ -112,6 +112,13 @@ budget threshold), when every agent has left it (`max_rounds`, `agent_usd`, `idl
 when `loop:` is removed from the spec (no final round then). Stopping drops the type's
 undelivered loop prompts and sends `loop_stop` to worker-side loops.
 
+**Undelivered prompts.** A worker that takes a loop prompt and then defers it (draining,
+stopping) reports `prompt_deferred` with the prompt's `{kind, round}`: the controller undoes
+what the prompt advanced and sends the same prompt again (a `first` again, the same round
+number, the final prompt again), without counting another round. A `first` or final prompt that
+no worker took within 30 s is sent again too; both go through `state: idle, skip_pending`, so a
+retry never joins a running turn or stacks on a queued prompt.
+
 **Final round.** Then, if `final:` is set, every live agent gets the final prompt once: after
 its worker confirmed the `loop_stop` (or 60 s passed), and only when it is idle, so the final
 prompt never joins a loop turn. Agents that are dead are skipped. When every final turn has
@@ -127,7 +134,11 @@ was checked only at spawn):
    prompts are dropped, every placed agent gets `stop` (its harness is killed, it stays
    assigned), and the prompt routes answer 409 until the budget is raised.
 
-Re-applying the spec with a budget above the cost lifts the stop (`budget_cleared`). Cost is
+While the hard stop holds, no pending prompt is delivered to any worker, a relaunched worker's
+resume prompt is held as a pending prompt instead of riding in the assign, and any agent seen
+working again (a worker that crashed before its `stop` arrived) gets `stop` again, at most every
+30 s. Re-applying the spec with a budget above the cost lifts the stop (`budget_cleared`); held
+prompts are then delivered. Cost is
 what the controller's ledger knows, which is updated by heartbeats (every 30 s), so the overshoot
 is bounded by about one heartbeat of spend of the working agents; Eliza's `log_overshoot` makes
 the same point.
@@ -135,7 +146,12 @@ the same point.
 **Live settings** (worlds-design §4.4). `flock apply` with a changed `loop:` takes effect at the
 next tick: controller-side settings (`every`, `while`, `final`, `stagger`) are read every tick,
 and worker-side loops get a fresh `loop_start` with the new prompt and limits (`loop_updated`
-event). A stopped loop stays stopped until `flock loop --start`. `limits.budget_usd` is live too.
+event). The mode is recomputed on every tick from `every` and the provider's `max_working`, so a
+re-apply can move the cadence: worker to controller sends `loop_stop {reason: mode_change}` and
+the controller prompts an agent only after its worker confirmed (or 60 s passed); controller to
+worker drops the type's queued loop prompts before the `loop_start`s go out. Removing `final`
+while the final round is in flight ends it (`final_done`, note "final removed from the spec").
+A stopped loop stays stopped until `flock loop --start`. `limits.budget_usd` is live too.
 
 **Restart.** Loop state is in the controller's SQLite (`loops`, `loop_agents`, `swarm_flags`),
 so a controller restart resumes the loops; only queued wake-ups are lost.
@@ -170,8 +186,9 @@ is what `idle_rounds` counts). The controller also writes `final_round` into the
 - `PromptCommand.loop: LoopMeta` (new, optional, omitted from the wire when unset): `text` is a
   template; `LoopMeta {kind, type, round, started_at, wall_s, cap_usd, why, add_tools}` is what
   the worker renders it with. `round: null` lets the worker number it.
-- `LoopStartCommand {agent, text, meta, max_rounds, deadline}` and `LoopStopCommand {agent,
-  reason}`: worker-side `turn_end`. A worker older than this PR rejects them, so deploy the
+- `LoopStartCommand {agent, text, meta, max_rounds, deadline, run}` and `LoopStopCommand {agent,
+  reason}`: worker-side `turn_end`. `run` names one run of the loop: a new run (after `flock
+  loop --start`) resets the worker's round counter, a repeat of the same run keeps it. A worker older than this PR rejects them, so deploy the
   worker wheel with the controller before applying a `turn_end` loop.
 - `GET /swarms/{s}/loop`: `LoopStatus` per type with per-agent detail; `POST /swarms/{s}/loop
   {type, action: start|stop, final: true}`; `TypeStatus.loop` and `SwarmStatus.budget_stop` in

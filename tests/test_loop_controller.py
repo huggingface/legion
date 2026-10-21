@@ -41,6 +41,7 @@ class Sim:
 
     async def heartbeat(self, working: tuple[str, ...] = ()) -> None:
         agents = [AgentHeartbeat(name=n, state="working" if n in working else "idle",
+                                 turn_id="t-1" if n in working else None,
                                  tokens={"claude-opus-5-5": TokenUsage(output=self.cost[n])})
                   for n in (A0, A1)]
         r = await self.c.post(f"/workers/{W0}/heartbeat", json=hb_body(self.clock, W0, agents))
@@ -432,3 +433,138 @@ async def test_type_budget_usd_stops_the_loop(sim):
     sim.tick(5)
     fin = prompts(await sim.commands())
     assert {p["loop"]["why"] for p in fin.values()} == {"final: budget_usd"}
+
+
+# --------------------------------------------------------------------------- after review (PR #15)
+
+
+def provider_spec(loop: dict, max_working: int | None = None) -> dict:
+    prov = {"type": "openai_compat", "base_url": "http://unused/v1", "api_key_env": "K",
+            "self_hosted": True, **({"max_working": max_working} if max_working else {})}
+    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": {"p": prov},
+            "types": {"researcher": {"harness": "codex", "model": "p:m", "replicas": 2,
+                                     "agents_per_worker": 2, "loop": loop}}}
+
+
+@pytest.mark.parametrize("change", ["max_working", "every"])
+async def test_live_change_moves_the_loop_between_worker_and_controller(store, clock, tick, change):
+    """Finding 1: a provider gaining max_working, or `every` leaving turn_end, takes the
+    cadence away from the workers (loop_stop first), and the controller sends the rounds."""
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0, enforce_max_working=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        sim = Sim(store, clock, tick, c)
+        sim.loops = app.state.loops
+        loop = {"prompt": "go", "every": "turn_end"}
+        assert (await c.put("/swarms/demo", json=provider_spec(loop))).status_code == 200
+        sim.reconcile()
+        await sim.commands()
+        await sim.heartbeat()
+        sim.tick()
+        assert {x["kind"] for x in await sim.commands()} == {"loop_start"}
+        body = (provider_spec(loop, max_working=1) if change == "max_working"
+                else provider_spec({**loop, "every": "30s"}))
+        assert (await c.put("/swarms/demo", json=body)).status_code == 200
+        sim.tick()
+        assert {(x["kind"], x["reason"]) for x in await sim.commands()} == {("loop_stop", "mode_change")}
+        st = (await c.get("/swarms/demo/loop")).json()[0]
+        assert st["mode"] == "controller" and st["every"] == ("turn_end" if change == "max_working" else "30s")
+        sim.tick(31)
+        assert await sim.commands() == []  # no worker loop_start again, and no prompt before the ack
+        for a in (A0, A1):
+            await sim.events(a, ("loop_stopped", {"reason": "mode_change", "round": 0, "active": True}))
+        sim.tick()
+        got = prompts(await sim.commands())
+        assert got and all(p["loop"]["kind"] == "loop" for p in got.values())
+        if change == "max_working":
+            assert len(got) == 1 and sum(store.pending_counts("demo").values()) == 1  # admitted one at a time
+        back = provider_spec(loop)  # and back to the workers: queued controller rounds are dropped
+        assert (await c.put("/swarms/demo", json=back)).status_code == 200
+        sim.tick()
+        assert store.pending_counts("demo") == {}
+        assert (await c.get("/swarms/demo/loop")).json()[0]["mode"] == "worker"
+
+
+async def test_hard_stop_survives_a_worker_relaunch(sim, jobs):
+    """Finding 2: a worker crashing before its `stop` arrived is relaunched without its resume
+    prompt running, and an agent seen working again under the stop gets `stop` again."""
+    await sim.apply(None, limits={"budget_usd": 0.5}, resume_prompt="continue after crash")
+    sim.cost[A0] = 25_000
+    await sim.heartbeat(working=(A0,))
+    sim.tick()
+    assert sim.loops.hard_stopped("demo")
+    jobs.set_stage(jobs.job_for(W0), "ERROR", "crash before the stop arrived")
+    for dt in (61, 600, 61):
+        sim.clock.advance(dt)
+        sim.reconcile()
+    cmds = await sim.commands()
+    assert [x["kind"] for x in cmds] == ["assign", "assign"]
+    assert all(x["resume_prompt"] is None for x in cmds)  # held, not run inside the assign
+    assert [r["agent"] for r in sim.store.prompts_for_worker(W0)] == [A0]
+    sim.tick()
+    assert await sim.commands() == []  # and not delivered while the budget is exhausted
+    await sim.heartbeat(working=(A1,))  # something runs anyway: stop it again
+    sim.tick()
+    assert [(x["kind"], x["agent"]) for x in await sim.commands()] == [("stop", A1)]
+    sim.tick(5)
+    assert await sim.commands() == []  # at most every 30 s
+    sim.tick(30)
+    assert [(x["kind"], x["agent"]) for x in await sim.commands()] == [("stop", A1)]
+
+
+@pytest.mark.parametrize("case", ["first", "last_round", "final"])
+async def test_a_deferred_loop_prompt_is_sent_again(sim, case):
+    """Finding 3: the worker took a first / last-round / final prompt, then deferred it
+    (draining): the same prompt goes again, not counted as another round, and the loop ends."""
+    lp = {"prompt": "go", "every": "1s", "while": {"max_rounds": 1}, "final": {"prompt": "finish"}}
+    if case == "first":
+        lp["first"] = "setup"
+    await sim.apply(lp)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    if case == "final":
+        for a in (A0, A1):
+            await sim.turn(a, got[a])
+        sim.tick()
+        got = prompts(await sim.commands())
+    kind = got[A0]["loop"]["kind"]
+    for a in (A0, A1):
+        m = got[a]["loop"]
+        await sim.events(a, ("loop_prompt", {"kind": m["kind"], "round": m["round"]}),
+                         ("prompt_deferred", {"reason": "draining",
+                                              "loop": {"kind": m["kind"], "round": m["round"]}}))
+    sim.clock.advance(60)
+    await sim.heartbeat()
+    sim.tick()
+    again = prompts(await sim.commands())
+    assert {(p["loop"]["kind"], p["loop"]["round"], p["text"]) for p in again.values()} == {
+        (kind, got[A0]["loop"]["round"], got[A0]["text"])}
+    assert set(again) == {A0, A1}
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["rounds_max"] <= 1
+    # now the turns run: the loop goes on to its end
+    for _ in range(4):
+        for a, p in again.items():
+            await sim.turn(a, p)
+        sim.tick(1)
+        again = prompts(await sim.commands())
+        if not again:
+            break
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert (st["state"], st["rounds_max"], st["final_done"]) == ("done", 1, 2)
+
+
+async def test_removing_final_during_the_final_round_ends_it(sim):
+    """Finding 5: a re-apply without `final` while the final round is in flight."""
+    await sim.apply({"prompt": "round", "every": "30s", "final": {"prompt": "final"}})
+    await sim.heartbeat()
+    sim.tick()
+    r = await sim.c.post("/swarms/demo/loop", json={"type": "researcher", "action": "stop"})
+    assert r.json()["state"] == "final"
+    await sim.apply({"prompt": "round", "every": "30s"})
+    sim.tick()
+    sim.tick(10)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["state"] == "done"
+    assert sim.swarm_events()[-1][1]["note"] == "final removed from the spec"
