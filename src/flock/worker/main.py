@@ -35,6 +35,8 @@ from flock.models import (
     CommandBatch,
     DrainCommand,
     EventBatch,
+    LoopStartCommand,
+    LoopStopCommand,
     PromptCommand,
     StopCommand,
     TypeSpec,
@@ -291,7 +293,15 @@ class Worker:
             if rt is None:
                 log.warning("prompt %s for unknown agent %s dropped", cmd.prompt_id, cmd.agent)
                 return
-            await rt.prompt(cmd.text, prompt_id=cmd.prompt_id, timeout=cmd.timeout)
+            await rt.prompt(cmd.text, prompt_id=cmd.prompt_id, timeout=cmd.timeout, loop=cmd.loop)
+        elif isinstance(cmd, LoopStartCommand | LoopStopCommand):
+            rt = self.agents.get(cmd.agent)
+            if rt is None:
+                log.warning("%s for unknown agent %s dropped", cmd.kind, cmd.agent)
+            elif isinstance(cmd, LoopStartCommand):
+                rt.start_loop(cmd)
+            else:
+                rt.stop_loop(cmd.reason)
         elif isinstance(cmd, StopCommand):
             if rt := self.agents.get(cmd.agent):
                 self._spawn(rt.stop())
