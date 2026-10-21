@@ -105,6 +105,23 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
   nonce TEXT NOT NULL,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS loops (
+  swarm TEXT NOT NULL,
+  type TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (swarm, type)
+);
+CREATE TABLE IF NOT EXISTS loop_agents (
+  agent TEXT PRIMARY KEY,
+  swarm TEXT NOT NULL,
+  type TEXT NOT NULL,
+  body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS loop_agents_by_type ON loop_agents (swarm, type);
+CREATE TABLE IF NOT EXISTS swarm_flags (
+  swarm TEXT PRIMARY KEY,
+  body TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS spawn_keys (
   parent TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -298,6 +315,9 @@ class Store:
         with self.transaction():
             self._x("DELETE FROM swarms WHERE name = ?", [name])
             self._x("DELETE FROM types WHERE swarm = ?", [name])
+            self._x("DELETE FROM loops WHERE swarm = ?", [name])
+            self._x("DELETE FROM loop_agents WHERE swarm = ?", [name])
+            self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
 
     def type_names(self, swarm: str) -> list[str]:
         """Types with any state in the store (spec'd or leftover from a removed type)."""
@@ -420,6 +440,7 @@ class Store:
         self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
         self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
+        self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
 
     def mark_removing(self, name: str) -> None:
         """First phase of a cascade removal: refuse new children, revoke the token."""
@@ -632,6 +653,19 @@ class Store:
             marks = ",".join("?" * len(ids))
             self._x(f"DELETE FROM pending_prompts WHERE id IN ({marks})", ids)
 
+    def drop_prompts(self, swarm: str, keep=None, type_name: str | None = None) -> int:
+        """Delete the swarm's pending prompts (of one type, if given), except those whose body
+        `keep(body)` says to keep. Returns how many were dropped."""
+        sql = ("SELECT p.id, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
+               "WHERE a.swarm = ?")
+        args: list[Any] = [swarm]
+        if type_name is not None:
+            sql += " AND a.type = ?"
+            args.append(type_name)
+        ids = [r["id"] for r in self._q(sql, args) if keep is None or not keep(r["body"])]
+        self.delete_prompts(ids)
+        return len(ids)
+
     def pending_counts(self, swarm: str | None = None) -> dict[str, int]:
         sql = "SELECT p.agent, COUNT(*) AS n FROM pending_prompts p"
         args: list[Any] = []
@@ -639,6 +673,54 @@ class Store:
             sql += " JOIN agents a ON a.name = p.agent WHERE a.swarm = ?"
             args.append(swarm)
         return {r["agent"]: r["n"] for r in self._q(sql + " GROUP BY p.agent", args)}
+
+    # ----------------------------------------------------------------- loops (controller/loop.py)
+
+    def get_loops(self, swarm: str) -> dict[str, dict[str, Any]]:
+        rows = self._q("SELECT type, body FROM loops WHERE swarm = ?", [swarm])
+        return {r["type"]: json.loads(r["body"]) for r in rows}
+
+    def put_loop(self, swarm: str, type_name: str, body: dict[str, Any]) -> None:
+        self._x(
+            "INSERT INTO loops (swarm, type, body) VALUES (?, ?, ?) "
+            "ON CONFLICT(swarm, type) DO UPDATE SET body = excluded.body",
+            [swarm, type_name, json.dumps(body, sort_keys=True)],
+        )
+
+    def delete_loop(self, swarm: str, type_name: str) -> None:
+        with self.transaction():
+            self._x("DELETE FROM loops WHERE swarm = ? AND type = ?", [swarm, type_name])
+            self._x("DELETE FROM loop_agents WHERE swarm = ? AND type = ?", [swarm, type_name])
+
+    def loop_agents(self, swarm: str, type_name: str) -> dict[str, dict[str, Any]]:
+        rows = self._q("SELECT agent, body FROM loop_agents WHERE swarm = ? AND type = ?",
+                       [swarm, type_name])
+        return {r["agent"]: json.loads(r["body"]) for r in rows}
+
+    def get_loop_agent(self, agent: str) -> dict[str, Any] | None:
+        row = self._one("SELECT body FROM loop_agents WHERE agent = ?", [agent])
+        return json.loads(row["body"]) if row else None
+
+    def put_loop_agent(self, agent: str, swarm: str, type_name: str, body: dict[str, Any]) -> None:
+        self._x(
+            "INSERT INTO loop_agents (agent, swarm, type, body) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(agent) DO UPDATE SET body = excluded.body",
+            [agent, swarm, type_name, json.dumps(body, sort_keys=True)],
+        )
+
+    def delete_loop_agent(self, agent: str) -> None:
+        self._x("DELETE FROM loop_agents WHERE agent = ?", [agent])
+
+    def swarm_flags(self, swarm: str) -> dict[str, Any]:
+        row = self._one("SELECT body FROM swarm_flags WHERE swarm = ?", [swarm])
+        return json.loads(row["body"]) if row else {}
+
+    def put_swarm_flags(self, swarm: str, body: dict[str, Any]) -> None:
+        self._x(
+            "INSERT INTO swarm_flags (swarm, body) VALUES (?, ?) "
+            "ON CONFLICT(swarm) DO UPDATE SET body = excluded.body",
+            [swarm, json.dumps(body, sort_keys=True)],
+        )
 
     # ----------------------------------------------------------------- launch budget
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 # --------------------------------------------------------------------------- durations
 
@@ -214,6 +214,8 @@ class TypeSpec(BaseModel):
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
+    # Re-prompt this type's agents on a cadence, then a final round (docs/loop.md). None: off.
+    loop: LoopSpec | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
     # replaced. None means a harness-native model.
     resolved_model: ResolvedModel | None = None
@@ -339,6 +341,12 @@ class SwarmSpec(BaseModel):
             p = self.providers[r.provider_name]
             if p.self_hosted and r.model_id not in p.pricing and "*" not in p.pricing:
                 p.pricing[r.model_id] = list(SELF_HOSTED_PRICING)  # pin the default
+        for type_name, ts in self.types.items():
+            cap = ts.loop.while_.agent_usd if ts.loop else None
+            if isinstance(cap, dict) and agent_cap(ts) is None:
+                raise ValueError(
+                    f"types.{type_name}.loop.while.agent_usd: no entry for model {ts.model!r} "
+                    f"(keys: {sorted(cap)}); key it by the type's model alias or model id")
         return self
 
     @field_validator("swarm")
@@ -464,7 +472,10 @@ class SpawnRule(BaseModel):
 class LimitsSpec(BaseModel):
     """Swarm-wide limits checked when an agent spawns (None: no limit). `alive` counts agents
     not removed, replicas included; `spawned_total` the spawn counter; `budget_usd` the cost
-    of every agent in the swarm, removed ones included."""
+    of every agent in the swarm, removed ones included. `budget_usd` is also a hard stop
+    (docs/loop.md): at `budget_usd` minus the types' `loop.final.reserve_usd` the controller
+    stops loops, drops pending prompts and runs the final rounds; at `budget_usd` it stops
+    every agent and refuses new prompts."""
 
     alive: int | None = None
     spawned_total: int | None = None
@@ -531,6 +542,197 @@ def root_depth(spec: SwarmSpec, type_name: str) -> int:
 
 def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
     return max(0, min(parent_depth - 1, root_depth(spec, type_name)))
+
+
+# --------------------------------------------------------------------------- loop (docs/loop.md)
+
+# Placeholders the worker fills in loop prompts; any other `{name}` is left as written.
+LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
+NEEDS_WORLD = "needs a world (not in this version)"
+_LOOP_SOURCE_RE = re.compile(r"^(comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
+
+
+class LoopWhile(BaseModel):
+    """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
+    the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
+    `agent_usd` (the agent's cost; a map is keyed by model alias or model id), `idle_rounds`
+    (that many loop turns in a row without a tool call). `score_<op>: {metric: value}`
+    conditions are kept under `score` and need a world (refused at apply in this version)."""
+
+    model_config = {"extra": "forbid"}
+
+    until: str | None = None
+    max_rounds: int | None = None
+    budget_usd: float | None = None
+    agent_usd: float | dict[str, float] | None = None
+    idle_rounds: int | None = None
+    score: dict[str, dict[str, float]] = Field(default_factory=dict)  # op -> {metric: value}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _score_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict) and any(str(k).startswith("score_") for k in data):
+            data = dict(data)
+            score = dict(data.pop("score", None) or {})
+            for k in [k for k in data if str(k).startswith("score_")]:
+                score[k.removeprefix("score_")] = data.pop(k)
+            data["score"] = score
+        return data
+
+    @field_validator("until")
+    @classmethod
+    def _until(cls, v: str | None) -> str | None:
+        if v is not None:
+            parse_duration(v)
+        return v
+
+    @field_validator("max_rounds", "idle_rounds")
+    @classmethod
+    def _positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
+    @field_validator("budget_usd")
+    @classmethod
+    def _usd(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("agent_usd")
+    @classmethod
+    def _agent_usd(cls, v: float | dict[str, float] | None) -> float | dict[str, float] | None:
+        values = v.values() if isinstance(v, dict) else [] if v is None else [v]
+        if any(x < 0 for x in values):
+            raise ValueError("must be >= 0")
+        return v
+
+
+class LoopFinal(BaseModel):
+    """One last prompt per live agent when the loop stops (any reason but `--no-final`).
+    `reserve_usd` is held back from `limits.budget_usd` for it. `add_tools` are tool names the
+    final prompt unlocks; carried in the prompt and its events for the tools layer."""
+
+    model_config = {"extra": "forbid"}
+
+    prompt: str | None = None
+    prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
+    reserve_usd: float = 0.0
+    add_tools: list[str] = Field(default_factory=list)
+
+    @field_validator("reserve_usd")
+    @classmethod
+    def _usd(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+    @model_validator(mode="after")
+    def _has_prompt(self) -> LoopFinal:
+        if self.prompt is None and self.prompt_file is None:
+            raise ValueError("final needs prompt or prompt_file")
+        return self
+
+
+class LoopSpec(BaseModel):
+    """A type's prompting loop (docs/loop.md). `first` goes alone to each agent; the loop
+    prompt follows once that turn ended, then on every `every` (`turn_end`: re-sent by the
+    worker when a turn completes; a duration: the controller prompts idle agents that long
+    after their last loop prompt; `rounds` needs a world) and on each `on` wake-up, while
+    `while` holds. Then `final`, once per live agent, then idle."""
+
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
+    prompt: str | None = None
+    prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
+    first: str | None = None
+    every: str = "turn_end"
+    on: list[str] = Field(default_factory=list)  # comms.mention, comms.thread, world.event:*
+    context: list[str] = Field(default_factory=list)  # needs comms / artifacts / a world
+    stagger: str | None = None  # agent i gets its first prompt i * stagger after the start
+    while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
+    final: LoopFinal | None = None
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):  # `while` on the wire, as written in specs
+        out = handler(self)
+        if isinstance(out, dict) and "while_" in out:
+            out["while"] = out.pop("while_")
+        return out
+
+    @field_validator("every")
+    @classmethod
+    def _every(cls, v: str) -> str:
+        if v not in ("turn_end", "rounds"):
+            if parse_duration(v).total_seconds() <= 0:
+                raise ValueError("every must be turn_end, rounds or a duration > 0")
+        return v
+
+    @field_validator("stagger")
+    @classmethod
+    def _stagger(cls, v: str | None) -> str | None:
+        if v is not None:
+            parse_duration(v)
+        return v
+
+    @field_validator("on", "context")
+    @classmethod
+    def _sources(cls, v: list[str]) -> list[str]:
+        for x in v:
+            if not _LOOP_SOURCE_RE.match(x):
+                raise ValueError(f"{x!r}: expected comms.<name>, world.<name> or artifacts.<name>")
+        return v
+
+    @model_validator(mode="after")
+    def _has_prompt(self) -> LoopSpec:
+        if self.prompt is None and self.prompt_file is None:
+            raise ValueError("loop needs prompt or prompt_file")
+        return self
+
+    @property
+    def every_s(self) -> float | None:
+        """Seconds between loop prompts for a duration `every`, else None."""
+        if self.every in ("turn_end", "rounds"):
+            return None
+        return parse_duration(self.every).total_seconds()
+
+
+def agent_cap(ts: TypeSpec) -> float | None:
+    """The type's per-agent loop cap (`loop.while.agent_usd`), resolved for its model."""
+    cap = ts.loop.while_.agent_usd if ts.loop else None
+    if not isinstance(cap, dict):
+        return cap
+    r = ts.resolved_model
+    for key in (ts.model, r.model_id if r else None, r.qualified if r else None):
+        if key is not None and key in cap:
+            return cap[key]
+    return None
+
+
+def loop_refusals(spec: SwarmSpec) -> list[str]:
+    """Loop settings this version accepts in the model but cannot run: world-backed ones, and
+    context sources whose feeders are not built yet. `flock apply` and the controller refuse a
+    spec with any of them."""
+    out: list[str] = []
+    for name, ts in spec.types.items():
+        lp = ts.loop
+        if lp is None:
+            continue
+        where = f"types.{name}.loop"
+        if lp.every == "rounds":
+            out.append(f"{where}.every: rounds {NEEDS_WORLD}")
+        for op in lp.while_.score:
+            out.append(f"{where}.while.score_{op} {NEEDS_WORLD}")
+        out += [f"{where}.on: {x} {NEEDS_WORLD}" for x in lp.on if x.startswith("world.")]
+        for x in lp.context:
+            why = NEEDS_WORLD if x.startswith("world.") else "is not in this version"
+            out.append(f"{where}.context: {x} {why}")
+        if lp.prompt is None:
+            out.append(f"{where}.prompt_file: not inlined (use `flock apply`, which reads it)")
+        if lp.final is not None and lp.final.prompt is None:
+            out.append(f"{where}.final.prompt_file: not inlined (use `flock apply`, which reads it)")
+    return out
 
 
 TypeSpec.model_rebuild()
@@ -608,6 +810,20 @@ class EventBatch(BaseModel):
 # --------------------------------------------------------------------------- controller -> worker
 
 
+class LoopMeta(BaseModel):
+    """What the worker needs to render a loop prompt (docs/loop.md): it fills the
+    LOOP_PLACEHOLDERS from these plus its own spend and last `done` summary."""
+
+    kind: Literal["first", "loop", "final"]
+    type: str
+    round: int | None = None  # None: the worker numbers it (its own next round)
+    started_at: datetime | None = None  # when the loop started, for {elapsed}
+    wall_s: float | None = None  # `while.until` in seconds, for {wall}
+    cap_usd: float | None = None  # `while.agent_usd` for this agent, for {cap}
+    why: str = ""
+    add_tools: list[str] = Field(default_factory=list)  # final round: tools it unlocks
+
+
 class PromptCommand(BaseModel):
     kind: Literal["prompt"] = "prompt"
     agent: str
@@ -615,6 +831,26 @@ class PromptCommand(BaseModel):
     text: str
     timeout: str | None = None
     reply_to: str | None = None  # opaque, for the caller's bookkeeping
+    loop: LoopMeta | None = None  # a loop prompt: `text` is a template the worker renders
+
+
+class LoopStartCommand(BaseModel):
+    """`every: turn_end` on the worker: send `text` (rendered) now if the agent is idle and
+    again whenever a turn ends completed, until `max_rounds`, `deadline`, a `loop_stop`, or 3
+    failed turns in a row. Idempotent: a repeat updates the settings."""
+
+    kind: Literal["loop_start"] = "loop_start"
+    agent: str
+    text: str
+    meta: LoopMeta  # kind "loop"; `round` is the rounds done so far
+    max_rounds: int | None = None
+    deadline: datetime | None = None
+
+
+class LoopStopCommand(BaseModel):
+    kind: Literal["loop_stop"] = "loop_stop"
+    agent: str  # end the worker-side loop; the turn in flight finishes
+    reason: str = "stop"
 
 
 class StopCommand(BaseModel):
@@ -645,7 +881,8 @@ class UnassignCommand(BaseModel):
     agent: str  # stop, final sync, forget
 
 
-Command = PromptCommand | StopCommand | DrainCommand | AssignCommand | UnassignCommand
+Command = (PromptCommand | StopCommand | DrainCommand | AssignCommand | UnassignCommand
+           | LoopStartCommand | LoopStopCommand)
 
 
 class CommandBatch(BaseModel):
@@ -764,6 +1001,27 @@ class WorkerStatus(BaseModel):
     last_error: str | None = None  # last launch failure or crash: job status, log tail
 
 
+class LoopStatus(BaseModel):
+    """A type's loop (docs/loop.md). `state`: waiting (not started), running, final (final
+    round in flight), done (final round over, or stopped without one)."""
+
+    type: str
+    state: Literal["waiting", "running", "final", "done"]
+    mode: Literal["worker", "controller"]  # who sends `every: turn_end` prompts
+    every: str
+    started_at: datetime | None = None
+    stopped_at: datetime | None = None
+    reason: str | None = None  # why it stopped
+    agents: int = 0
+    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors)
+    rounds_min: int = 0
+    rounds_max: int = 0
+    rounds_total: int = 0
+    final_sent: int = 0
+    final_done: int = 0
+    per_agent: dict[str, dict[str, Any]] | None = None  # GET /swarms/{s}/loop only
+
+
 class TypeStatus(BaseModel):
     name: str
     health: TypeHealth
@@ -774,6 +1032,7 @@ class TypeStatus(BaseModel):
     # Last worker-launch error for this type (the backend's message), cleared by a successful
     # launch or a new apply. With health launch_refused it is why launches stopped.
     launch_error: str | None = None
+    loop: LoopStatus | None = None
 
 
 class ProviderStatus(BaseModel):
@@ -797,6 +1056,17 @@ class SwarmStatus(BaseModel):
     workers_total: int
     pending_prompts: int
     cost_usd: float = 0.0
+    # limits.budget_usd as a stop (docs/loop.md): None (under the threshold or no budget),
+    # "final_reserve" (loops stopped, final rounds) or "hard" (every agent stopped).
+    budget_stop: Literal["final_reserve", "hard"] | None = None
+
+
+class LoopRequest(BaseModel):
+    """`POST /swarms/{swarm}/loop`: stop or (re)start one type's loop."""
+
+    type: str
+    action: Literal["start", "stop"]
+    final: bool = True  # stop: run the final round (if the type has one)
 
 
 class PreflightResult(BaseModel):
