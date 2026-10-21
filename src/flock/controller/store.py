@@ -17,6 +17,8 @@ from typing import Any
 
 from flock.models import Event, SwarmSpec, TokenUsage
 
+DB_NAME = "controller.db"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS swarms (
   name TEXT PRIMARY KEY,
@@ -136,7 +138,7 @@ class Store:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._db = sqlite3.connect(
-            self.data_dir / "controller.db", check_same_thread=False, isolation_level=None
+            self.data_dir / DB_NAME, check_same_thread=False, isolation_level=None
         )
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -219,6 +221,41 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def changes(self) -> int:
+        """Rows changed through this connection since it opened (every write goes through it)."""
+        with self._lock:
+            return self._db.total_changes
+
+    def backup_to(self, path: str | Path) -> None:
+        """Consistent copy of the database, WAL included (SQLite online backup API)."""
+        path = Path(path)
+        path.unlink(missing_ok=True)
+        dst = sqlite3.connect(path)
+        try:
+            with self._lock:
+                self._db.backup(dst)
+        finally:
+            dst.close()
+
+    def repair_events(self) -> int:
+        """After a restore, make each event file and its index agree: a file longer than the
+        index (lines appended after the DB snapshot) is cut back, a missing or shorter one sets
+        the index to what is there. Returns the number of agents fixed."""
+        fixed = 0
+        with self._lock:
+            for row in self._q("SELECT agent, swarm, lines FROM event_index"):
+                path = self._events_path(row["swarm"], row["agent"])
+                lines = path.read_bytes().splitlines(keepends=True) if path.exists() else []
+                lines = [ln for ln in lines if ln.endswith(b"\n")]  # drop a torn last line
+                if len(lines) == row["lines"]:
+                    continue
+                keep = lines[: row["lines"]]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"".join(keep))
+                self._x("UPDATE event_index SET lines = ? WHERE agent = ?", [len(keep), row["agent"]])
+                fixed += 1
+        return fixed
 
     # ----------------------------------------------------------------- swarms and types
 

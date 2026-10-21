@@ -1,6 +1,7 @@
 """`flock` CLI: a thin client over the controller API.
 
-Config: FLOCK_URL and FLOCK_TOKEN. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
+Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
+FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
 agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
 docs/spawn.md for what an agent may call.
 """
@@ -25,11 +26,39 @@ from flock.models import AGENT_NAME_RE, SwarmSpec
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
 
+def proxy_auth(url: str, env=os.environ) -> bool:
+    """True when `url` is behind the HF Jobs proxy (a job-mode controller seen from outside its
+    network group): the proxy wants `Authorization: Bearer <HF token>` (docs/deploy-job.md)."""
+    if env.get("FLOCK_PROXY_AUTH") == "hf":
+        return True
+    return (httpx.URL(url).host or "").endswith(".hf.jobs")
+
+
+def auth_headers(url: str, env=os.environ) -> dict[str, str]:
+    """`X-Flock-Token` always. `Authorization` carries the HF token behind the jobs proxy, and
+    the flock token otherwise (what Space-mode controllers before X-Flock-Token expect)."""
+    token = env.get("FLOCK_AGENT_TOKEN") or env.get("FLOCK_TOKEN", "")
+    headers = {"X-Flock-Token": token}
+    if proxy_auth(url, env):
+        hf = env.get("HF_TOKEN")
+        if not hf:
+            from huggingface_hub import get_token
+
+            hf = get_token()
+        if not hf:
+            typer.echo(f"{url} is behind the HF Jobs proxy: set HF_TOKEN (or `hf auth login`)",
+                       err=True)
+            raise typer.Exit(1)
+        headers["Authorization"] = f"Bearer {hf}"
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def client() -> httpx.Client:
     """Overridden in tests to point at an in-process app."""
     url = os.environ.get("FLOCK_URL", "http://localhost:7860")
-    token = os.environ.get("FLOCK_AGENT_TOKEN") or os.environ.get("FLOCK_TOKEN", "")
-    return httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    return httpx.Client(base_url=url, headers=auth_headers(url), timeout=60)
 
 
 RETRY_ATTEMPTS = 5  # requests in all, per call

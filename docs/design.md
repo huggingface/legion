@@ -62,6 +62,18 @@ documented; anything inferred is marked.
   No HF_TOKEN injected; outbound HTTP works; inbound only via `--expose`
   (+$0.01/h per job).
 - Pricing: cpu-basic (2 vCPU, 16 GB) $0.01/h, cpu-upgrade $0.03/h.
+- Added 2026-10-20 (`huggingface_hub` 2.2.0, Hub OpenAPI, docs hub/jobs-configuration):
+  - `timeoutSeconds` is bounded only by 2^53 in the schema, and the docs name no maximum.
+  - Every container gets `JOB_ID`. The proxy URL of a port is
+    `https://<JOB_ID>--<port>.hf.jobs`, also listed in `status.expose_urls`.
+  - `--expose` requires a read token for the namespace, and `--expose-public` requires none.
+    Both can be changed on a running job (`update_job_expose`). Env and secrets cannot.
+  - Network groups: `network_group` puts jobs of one namespace and resource group together on
+    every port. Members get `HF_NETWORK_GROUP_HOSTNAME` (all members) and
+    `HF_NETWORK_GROUP_PREFIX`, and `${HF_NETWORK_GROUP_PREFIX}<alias>` resolves to every member
+    claiming the alias. Several jobs may claim one alias. Members resolve before they are
+    ready, so callers retry.
+  - Env names must match `^[a-zA-Z][_a-zA-Z0-9]+$`, which is why one-letter names are rejected.
 
 ### msgboard (Space, schema v12)
 
@@ -149,7 +161,9 @@ documented; anything inferred is marked.
 ### Controller
 
 One Docker Space. FastAPI, SQLite on persistent storage, the reconcile loop as
-a background task in the same process. Single bearer token shared by CLI,
+a background task in the same process. Since 2026-10-20 the same process can instead run as
+an HF Job in its workers' network group, with its SQLite synced to a bucket (job mode,
+decision 32, [deploy-job.md](deploy-job.md)). Single bearer token shared by CLI,
 workers and future callers (Space secret, job secret).
 
 Responsibilities: store specs; place agents on workers (fill in order, no bin
@@ -699,12 +713,15 @@ Condensed from the grilling session, 2026-10-13/14.
 | 29 | Pi as a third harness (2026-10-16): `pi --mode rpc` per burst, steer-mode prompts, `agent_settled` ends a turn, per-call usage, allow-listed env; the Pi resume gate runs in a job before real use |
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
 | 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, compaction past `context_tokens` projected from the server's prompt_tokens (2026-10-20, run 3: chars/4 undercounted JSON 2x; context-length 400 compacts and retries once, else reason `context_overflow`), tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
+| 32 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
 
 ## 12. Road to 10k
 
 What the 1k and 10k runs say must change, in order. Item 1 gates everything else.
 
-1. **Take the control plane off the Spaces edge limit, then measure the limit.** Options, in
+1. **Take the control plane off the Spaces edge limit, then measure the limit.** Done for the
+   worker path by job mode (decision 32, [deploy-job.md](deploy-job.md)); the ramp below is
+   still to do, now against the controller job itself. The options were, in
    order of how much they keep: a private Space with workers sending an HF token (needs the
    swarm token out of `Authorization`; whether authenticated traffic has a separate limit is
    unknown); the controller as an HF Job with `--expose` (its own ingress, $0.01/h); or another
