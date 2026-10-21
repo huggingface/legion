@@ -225,6 +225,13 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
         sim.tick()  # A0's turn ended: its round 2 is due at once, but A1 is first in line
         got = prompts(await sim.commands())
         assert list(got) == [A1] and got[A1]["loop"]["round"] == 1
+        # A1's prompt is deferred on the worker (draining): no turn_ended ever comes for it
+        await sim.events(A1, ("prompt_deferred", {"reason": "draining"}))
+        sim.tick(29)
+        assert list(prompts(await sim.commands())) == [A0]  # A0's round 2
+        sim.tick(2)  # queued again after 30 s, behind A0's slot (max_working 1)
+        [row] = [r for r in store.prompts_for_worker(W0) if r["agent"] == A1]
+        assert json.loads(row["body"])["loop"]["round"] == 2
 
 
 async def test_while_until_stops_and_runs_final(sim):

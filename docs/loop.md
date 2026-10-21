@@ -97,7 +97,9 @@ every turn is admitted under the provider's `max_working` like any other prompt.
 - `controller` (a duration `every`, or `turn_end` under `max_working`): the controller sends
   each round itself, on the `turn_ended` event or when `every` has passed. Under `max_working`
   this matters: a worker-side loop would keep its slot from turn to turn and starve the agents
-  queued behind it, while controller-sent rounds queue FIFO with everybody else's.
+  queued behind it, while controller-sent rounds queue FIFO with everybody else's. A `turn_end`
+  round whose prompt never started a turn (deferred by a draining worker, or lost) is sent again
+  after 30 s.
 
 **Rounds.** A round is one loop prompt to one agent. The counter is per agent; `max_rounds`
 counts loop prompts (not `first`, not the final prompt, wake-ups included). In controller mode

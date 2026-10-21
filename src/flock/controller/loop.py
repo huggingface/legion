@@ -516,6 +516,8 @@ class LoopEngine:
                 why = "start"
             elif every is None and st["turn_done"]:
                 why = "turn_end"
+            elif every is None and now - (st["last_activity"] or 0.0) >= STALL_AFTER:
+                why = "turn_end"  # its prompt never started a turn (deferred, or lost): again
             elif every is not None and now - (st["last_sent"] or 0.0) >= every:
                 why = f"every {lp.every}"
             if why:
