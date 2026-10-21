@@ -17,6 +17,7 @@ import logging
 import os
 import random
 import re
+import signal
 import sys
 import threading
 from collections import Counter
@@ -265,6 +266,7 @@ class Worker:
         self._restoring = 0  # setups (restores) in flight; a "wave" ends when it drops to 0
         self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
         self._throttled_logged = 0
+        self._terminating = False
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -461,6 +463,20 @@ class Worker:
             await asyncio.sleep(every)
         await self.abandon(f"controller process {self.cfg.parent_pid} is gone")
 
+    async def terminate(self, reason: str) -> None:
+        """compute local: SIGTERM from `flock run` at stop. Interrupt every turn now (the
+        adapters kill their harness and tool processes), then exit through the normal path:
+        flush events, last heartbeat. No sync (a local worker has no bucket)."""
+        if self._terminating or self.stale:
+            return
+        log.info("terminating (%s)", reason)
+        self._terminating = self.draining = True
+        for rt in self.agents.values():
+            rt.allow_starts = False
+        await asyncio.gather(*(rt.stop("terminated") for rt in list(self.agents.values())),
+                             return_exceptions=True)
+        self._drained.set()
+
     async def drain(self, reason: str) -> None:
         if self.draining:
             return
@@ -491,9 +507,16 @@ class Worker:
         loops = [self.poll_loop(), self.heartbeat_loop(), self.flush_loop(), self.sync_loop(),
                  self.deadline_loop(), self.parent_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
+        loop = asyncio.get_running_loop()
+        on_term = self.cfg.parent_pid is not None  # compute local only; jobs keep the default
+        if on_term:
+            loop.add_signal_handler(signal.SIGTERM,
+                                    lambda: self._spawn(self.terminate("SIGTERM")))
         try:
             await self._drained.wait()
         finally:
+            if on_term:
+                loop.remove_signal_handler(signal.SIGTERM)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
