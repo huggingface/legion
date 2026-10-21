@@ -154,7 +154,10 @@ the controller prompts an agent only after its worker confirmed (or 60 s passed)
 worker drops the type's queued loop prompts before the `loop_start`s go out, and since they
 were never delivered their rounds are taken back, so the `loop_start` carries the rounds actually
 sent. Removing `final`
-while the final round is in flight ends it (`final_done`, note "final removed from the spec").
+while the final round is in flight ends it (`final_done`, note "final removed from the spec");
+its final prompts not yet fetched by a worker are dropped, and one already fetched is not sent
+again. Any end of a final round (also `--stop --no-final` during it, and the hard budget stop)
+drops its undelivered final prompts.
 A stopped loop stays stopped until `flock loop --start`. `limits.budget_usd` is live too.
 
 **Restart.** Loop state is in the controller's SQLite (`loops`, `loop_agents`, `swarm_flags`),

@@ -605,3 +605,48 @@ async def test_handover_to_the_workers_rolls_back_dropped_rounds(store, clock, t
         await until(lambda: [e for e in list(rt.outbox._q) if e.type == "loop_stopped"], timeout=5)
         assert ad.sent == ["go 1"]
         await rt.stop()
+
+
+async def test_removing_final_drops_its_queued_prompts(sim):
+    """Third pass: finals queued, `final` removed before any worker fetched them, a tick: the
+    queued finals are dropped (a command poll delivers nothing); one already fetched by its
+    worker is not sent again."""
+    await sim.apply({"prompt": "round", "every": "30s", "final": {"prompt": "submit final"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    r = await sim.c.post("/swarms/demo/loop", json={"type": "researcher", "action": "stop"})
+    assert r.json()["state"] == "final"
+    sim.tick()
+    assert sim.store.pending_counts("demo") == {A0: 1, A1: 1}  # finals queued, not fetched
+    spec = make_spec(researcher={"replicas": 2, "agents_per_worker": 2,
+                                 "loop": {"prompt": "round", "every": "30s"}})  # final removed
+    assert (await sim.c.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
+    sim.tick()
+    assert await sim.commands() == []
+    assert sim.store.pending_counts("demo") == {}
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert (st["state"], st["final_sent"]) == ("done", 0)
+    assert sim.swarm_events()[-1][1]["dropped"] == 2
+
+
+async def test_finish_never_resends_a_fetched_final(sim):
+    await sim.apply({"prompt": "round", "every": "30s", "final": {"prompt": "submit final"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    await sim.c.post("/swarms/demo/loop", json={"type": "researcher", "action": "stop"})
+    sim.tick()
+    fin = prompts(await sim.commands())  # both fetched by the worker
+    assert set(fin) == {A0, A1}
+    await sim.turn(A0, fin[A0])  # A0 ran it; A1's is still running
+    await sim.apply({"prompt": "round", "every": "30s"})
+    sim.tick()
+    sim.tick(60)
+    assert await sim.commands() == []
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert (st["state"], st["final_done"]) == ("done", 1)

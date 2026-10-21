@@ -82,12 +82,12 @@ def _custom(ev: Event) -> dict[str, Any]:
     return inner if isinstance(inner, dict) else {}
 
 
-def _is_loop_body(body: str) -> bool:
+def _is_loop_body(body: str, kinds: tuple[str, ...] = LOOP_KINDS) -> bool:
     try:
         meta = json.loads(body).get("loop") or {}
     except ValueError:
         return False
-    return meta.get("kind") in LOOP_KINDS
+    return meta.get("kind") in kinds
 
 
 def _new_agent() -> dict[str, Any]:
@@ -362,12 +362,15 @@ class LoopEngine:
             return "final_reserve"
         return phase
 
-    def _drop(self, swarm: str, type_name: str | None = None) -> int:
-        """Drop undelivered prompts: every prompt of the swarm, or the loop prompts of one
-        type. A dropped loop prompt was never a round (docs/loop.md: a round is one prompt to
-        one agent), so its agent's counters go back to before it was queued."""
+    def _drop(self, swarm: str, type_name: str | None = None,
+              kinds: tuple[str, ...] = LOOP_KINDS) -> int:
+        """Drop undelivered prompts: every prompt of the swarm, or one type's loop prompts of
+        `kinds`. A dropped loop prompt was never a round (docs/loop.md: a round is one prompt
+        to one agent), so its agent's counters go back to before it was queued. Prompts a
+        worker already fetched are not pending any more, so they are never dropped twice or
+        sent again."""
         out: list[tuple[str, str]] = []
-        keep = None if type_name is None else (lambda b: not _is_loop_body(b))
+        keep = None if type_name is None else (lambda b: not _is_loop_body(b, kinds))
         n = self.store.drop_prompts(swarm, keep=keep, type_name=type_name, dropped=out)
         for agent, body in out:
             try:
@@ -497,13 +500,16 @@ class LoopEngine:
                 self.store.put_loop_agent(a["name"], swarm, type_name, st)
 
     def _finish(self, swarm: str, type_name: str, L: dict, now: float, note: str = "") -> None:
+        """The final round is over (or cut short): its undelivered final prompts are dropped."""
+        dropped = self._drop(swarm, type_name, kinds=("final",))
         agents = self.store.loop_agents(swarm, type_name).values()
         L["state"] = "done"
         self.store.put_loop(swarm, type_name, L)
         self._event(swarm, "final_done", {
             "type": type_name, "sent": sum(1 for s in agents if s["final"]),
             "done": sum(1 for s in agents if s["final"] == "done"),
-            "skipped": sum(1 for s in agents if s["final"] == "skipped"), "note": note})
+            "skipped": sum(1 for s in agents if s["final"] == "skipped"), "dropped": dropped,
+            "note": note})
 
     def _agent_done(self, a: Row, st: dict, L: dict, reason: str, now: float) -> None:
         st["phase"], st["done_reason"] = "done", reason
