@@ -44,7 +44,8 @@ DEFS: dict[str, dict[str, Any]] = {
                        "thread. Each message has id, thread, from, time and text.",
         "properties": {
             "n": {"type": "integer", "description": f"how many of the newest messages (default "
-                                                    f"{READ_DEFAULT}, at most {READ_MAX})"},
+                                                    f"{READ_DEFAULT}, or {READ_MAX} for a thread; at "
+                                                    f"most {READ_MAX}); `truncated` says older exist"},
             "thread": {**_ID, "description": "optional: a thread's root message id, to read "
                                              "that thread instead"},
         },

@@ -76,8 +76,10 @@ class Identities:
             self._ids[key] = await join(url, code, agent, client=self._client)
         return self._ids[key]
 
-    def forget(self, agent: str) -> None:
-        for k in [k for k in self._ids if k[1] == agent]:
+    def forget(self, agent: str, *, url: str | None = None) -> None:
+        """Drop the agent's cached identities (on one board with `url`), so the next use joins
+        again: after an unassign, or when the channel or invite changed (docs/comms.md)."""
+        for k in [k for k in self._ids if k[1] == agent and (url is None or k[0] == url.rstrip("/"))]:
             del self._ids[k]
 
     async def env_for(self, agent: str, spec: TypeSpec) -> dict[str, str]:

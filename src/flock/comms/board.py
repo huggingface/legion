@@ -94,7 +94,10 @@ class _Routes:
 
     @staticmethod
     def thread(channel: int, root: int, n: int) -> tuple[str, str, dict]:
-        return "GET", f"/v1/channels/{channel}/messages", {"params": {"thread": root, "limit": n}}
+        """The newest `n` of a thread (`before=` reads from the tail; the page comes back
+        oldest first with `has_more` when older messages exist)."""
+        return "GET", f"/v1/channels/{channel}/messages", {"params": {"thread": root, "before": NEWEST,
+                                                                       "limit": n}}
 
     @staticmethod
     def activity(channel: int, after: int | None, wait: float) -> tuple[str, str, dict]:
@@ -163,11 +166,13 @@ class AsyncBoard:
     async def message(self, token: str, msg_id: int) -> dict:
         return await self.request(_Routes.message(msg_id), token)
 
-    async def latest(self, token: str, channel: int, n: int) -> list[dict]:
-        return (await self.request(_Routes.latest(channel, n), token)).get("messages") or []
+    async def latest(self, token: str, channel: int, n: int) -> dict:
+        """{messages (the newest n, oldest first), has_more, next_cursor}."""
+        return await self.request(_Routes.latest(channel, n), token)
 
-    async def thread(self, token: str, channel: int, root: int, n: int = 100) -> list[dict]:
-        return (await self.request(_Routes.thread(channel, root, n), token)).get("messages") or []
+    async def thread(self, token: str, channel: int, root: int, n: int = 100) -> dict:
+        """{messages (the thread's newest n, oldest first), has_more, next_cursor}."""
+        return await self.request(_Routes.thread(channel, root, n), token)
 
     async def activity(self, token: str, channel: int, after: int | None, wait: float = 0) -> dict:
         return await self.request(_Routes.activity(channel, after, wait), token)

@@ -126,6 +126,8 @@ class CommsHub:
         self._poller: asyncio.Task | None = None
         self._poll_agent: str | None = None
         self._server: asyncio.base_events.Server | None = None
+        self._gateway_lock = asyncio.Lock()  # one listener, however many first prompts race
+        self._restore: asyncio.Task | None = None
         self.address: str | None = None
         self.stats: Counter[str] = Counter()
 
@@ -136,24 +138,56 @@ class CommsHub:
 
     def configure(self, spec: CommsSpec | None, entries: list[str] | None) -> None:
         """The swarm's comms block (from an assign or a heartbeat response) and this worker
-        type's comms tools. A changed board or channel starts over (joins, poller, cursor)."""
-        old = self.spec
-        moved = old is not None and (spec is None or (spec.url, spec.channel_id) != (old.url, old.channel_id))
+        type's comms tools. A changed board, channel or invite starts over: the cached
+        identities are dropped, the poller and its cursor reset, and every agent that already
+        joined here joins again at once with the (new) invite, so its subscription comes back
+        without waiting for its next harness start. Tools switched back on restart a stopped
+        poller. Agents that never had a prompt still join only at their first one."""
+        old, was_active = self.spec, self.active
+        key = (lambda c: (c.url, c.channel_id, c.invite_env))
+        moved = old is not None and (spec is None or key(spec) != key(old))
         self.spec, self.entries = spec, list(entries or []) if spec is not None else []
         if moved:
-            self._reset()
+            assert old is not None
+            self._reset(old, same_board=spec is not None and spec.url == old.url)
+        if self.active and self.members and (moved or not was_active):
+            self._restore_members()
 
-    def _reset(self) -> None:
+    def _reset(self, old: CommsSpec, *, same_board: bool) -> None:
+        """Message ids grow across the whole board, so on the same board the poller keeps its
+        cursor: a message posted in the new channel after the change is never missed, however
+        long the joins take. A new board starts from "now"."""
         if self._poller is not None:
             self._poller.cancel()
-        self._poller, self._poll_agent, self._cursor = None, None, None
+        self._poller, self._poll_agent = None, None
+        if not same_board:
+            self._cursor = None
         for m in self.members.values():
-            m.ident, m.error, m.retry_at = None, None, 0.0
+            m.ident, m.error, m.retry_at, m.rejoin = None, None, 0.0, True
+            self.identities.forget(m.name, url=old.url)  # redeem the new invite, never reuse
         self._cache.clear()
         if self.board is not None:
             board, self.board = self.board, None
             with contextlib.suppress(RuntimeError):
                 asyncio.get_running_loop().create_task(board.aclose())
+
+    def _restore_members(self) -> None:
+        """(Re)join every agent that joined before, in the background; the poller starts with
+        the first one back."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._restore is not None and not self._restore.done():
+            self._restore.cancel()
+
+        async def run() -> None:
+            for name in list(self.members):
+                with contextlib.suppress(BoardError, ValueError):
+                    await self._member(name)
+            self._ensure_poller()
+
+        self._restore = loop.create_task(run(), name="comms-restore")
 
     def _board(self) -> AsyncBoard:
         assert self.spec is not None
@@ -235,9 +269,11 @@ class CommsHub:
     async def _member(self, agent: str) -> Member:
         m = self.members.setdefault(agent, Member(agent))
         if m.ident is not None:
+            self._ensure_poller()  # it may have stopped while the tools were off
             return m
         async with m.lock:
             if m.ident is not None:
+                self._ensure_poller()
                 return m
             if self._clock() < m.retry_at and m.error:
                 raise BoardError(f"not on the board yet: {m.error} (retrying in "
@@ -255,11 +291,20 @@ class CommsHub:
                 except (httpx.HTTPError, KeyError, ValueError) as e:
                     raise BoardError(f"join failed: {type(e).__name__}") from None
                 board = self._board()
-                with contextlib.suppress(BoardError):  # the invite usually adds the channel
-                    chans = await board.channels(ident.token, c.channel)
-                    if chans and not chans[0].get("member") and ident.id is not None:
+                # joined means the channel is readable: a lookup that does not find it is a
+                # failed join (an invite not scoped to a private channel), never a success
+                chans = await board.channels(ident.token, c.channel)
+                ch = next((x for x in chans if x.get("id") == c.channel_id), None)
+                if ch is None:
+                    raise BoardError(f"#{c.channel} (id {c.channel_id}) is not visible to {agent}: "
+                                     f"is the invite in {c.invite_env} scoped to it?")
+                if not ch.get("member") and ident.id is not None:
+                    try:
                         await board.add_member(ident.token, c.channel_id, ident.id)
-                    if ident.id is not None:
+                    except BoardError as e:
+                        raise BoardError(f"cannot join #{c.channel}: {e}") from None
+                if ident.id is not None:
+                    with contextlib.suppress(BoardError):  # cosmetic: the profile's runtime
                         await board.set_runtime(ident.token, ident.id, {
                             "harness": f"flock/{m.harness}", "host": f"flock swarm {self.swarm}"})
             except BoardError as e:
@@ -360,6 +405,8 @@ class CommsHub:
 
     # ------------------------------------------------------------------ the poller
     def _ensure_poller(self) -> None:
+        if not self.active:
+            return
         if self._poller is None or self._poller.done():
             self._poller = asyncio.get_running_loop().create_task(self._poll_loop(), name="comms-poll")
 
@@ -491,18 +538,30 @@ class CommsHub:
         assert c is not None and c.channel_id is not None and m.ident is not None
         thread = as_id(args.get("thread"), "thread")
         board = self._board()
+        # the newest n (a thread: READ_MAX unless asked), read from the tail of the history;
+        # `truncated` says older messages exist, never a first page passed off as the whole
+        n = args.get("n") or (READ_MAX if thread is not None else READ_DEFAULT)
+        n = max(1, min(int(n), READ_MAX))
+        out: dict[str, Any] = {"channel": f"#{c.channel}"}
         if thread is not None:
-            msgs = await board.thread(m.ident.token, c.channel_id, thread)
-            if len(msgs) == 1 and msgs[0].get("thread_id"):  # a reply's id: read its thread
-                thread = int(msgs[0]["thread_id"])
-                msgs = await board.thread(m.ident.token, c.channel_id, thread)
+            page = await board.thread(m.ident.token, c.channel_id, thread, n)
+            msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
+            if msgs and msgs[0].get("id") == thread and msgs[0].get("thread_id"):
+                thread = int(msgs[0]["thread_id"])  # a reply's id: read its thread
+                page = await board.thread(m.ident.token, c.channel_id, thread, n)
+                msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
             if not msgs:
                 raise ValueError(f"no thread {thread} in #{c.channel}")
-            return {"channel": f"#{c.channel}", "thread": thread, "messages": [brief(x) for x in msgs]}
-        n = args.get("n") or READ_DEFAULT
-        n = max(1, min(int(n), READ_MAX))
-        msgs = await board.latest(m.ident.token, c.channel_id, n)
-        return {"channel": f"#{c.channel}", "messages": [brief(x) for x in msgs]}
+            out["thread"] = thread
+        else:
+            page = await board.latest(m.ident.token, c.channel_id, n)
+            msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
+        out["messages"] = [brief(x) for x in msgs]
+        if page.get("has_more"):
+            out["truncated"] = True
+            out["note"] = (f"only the newest {len(msgs)} messages; older ones exist"
+                           + (f" (n is at most {READ_MAX})" if n < READ_MAX else ""))
+        return out
 
     async def _search(self, m: Member, args: dict[str, Any]) -> dict[str, Any]:
         c = self.spec
@@ -522,11 +581,12 @@ class CommsHub:
     async def start_gateway(self) -> str:
         """The local endpoint `flock-tool` calls for built-ins (127.0.0.1, one JSON line each
         way; each agent's key is in its pin file)."""
-        if self._server is None:
-            self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0,
-                                                      limit=GATEWAY_LINE_MAX)
-            port = self._server.sockets[0].getsockname()[1]
-            self.address = f"127.0.0.1:{port}"
+        async with self._gateway_lock:
+            if self._server is None:
+                self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0,
+                                                          limit=GATEWAY_LINE_MAX)
+                port = self._server.sockets[0].getsockname()[1]
+                self.address = f"127.0.0.1:{port}"
         assert self.address is not None
         return self.address
 
@@ -547,6 +607,8 @@ class CommsHub:
             writer.close()
 
     async def aclose(self) -> None:
+        if self._restore is not None:
+            self._restore.cancel()
         if self._poller is not None:
             self._poller.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

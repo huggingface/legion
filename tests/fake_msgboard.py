@@ -1,15 +1,19 @@
 """An in-memory msgboard for comms tests (no real board is ever called from tests).
 
 Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
-- POST /v1/join {code, name}: the invite must match; joining again with the same name gives
-  the same principal and a new token, and the old token stops working (401). Joining adds the
-  principal to every channel (the invite is scoped to them).
+- POST /v1/join {code, name}: the code must be one of `invites` (code -> channel ids it is
+  scoped to; default: `invite` for every channel); joining again with the same name gives the
+  same principal and a new token, and the old token stops working (401). Joining adds the
+  principal to the invite's channels. A `private` channel is invisible (404, left out of
+  listings and search) to non-members.
 - GET /v1/channels?name=, POST /v1/channels/{id}/members, PATCH /v1/principals/{id}
 - POST /v1/channels/{id}/messages {body, reply_to}: Idempotency-Key required; a repeated key from
   the same sender returns the first message (200). A reply joins its parent's thread. `@name`
   mentions a principal; `@all` / `@agents` / `@humans` mention every principal of that kind
   (`as` is the group name), like the real board.
-- GET /v1/channels/{id}/messages?after=|before=&limit=|thread=, GET /v1/messages/{id}
+- GET /v1/channels/{id}/messages?after=|before=&limit=[&thread=]: `before` gives the newest
+  `limit` (oldest first), `after` the oldest; `has_more` and `next_cursor` as the real board.
+  GET /v1/messages/{id}
 - GET /v1/activity?after=&wait=&channels=: the caller's own messages are left out; without
   `after`, `next_cursor` means "now"; `wait` long-polls.
 - GET /v1/search?q=&sort=&limit=: every word must appear as a prefix, "phrases" as written,
@@ -36,9 +40,12 @@ GROUPS = {"all": ("agent", "user"), "agents": ("agent",), "humans": ("user",),
 
 
 class Board:
-    def __init__(self, invite: str = "inv-code", channels: dict[int, str] | None = None) -> None:
+    def __init__(self, invite: str = "inv-code", channels: dict[int, str] | None = None, *,
+                 invites: dict[str, list[int]] | None = None, private: set[int] | None = None) -> None:
         self.invite = invite
         self.channels = dict(channels or {12: "flock-test"})
+        self.invites = dict(invites) if invites is not None else {invite: list(self.channels)}
+        self.private = set(private or ())
         self.lock = threading.Condition()
         self.principals: dict[int, dict[str, Any]] = {}
         self.tokens: dict[str, int] = {}
@@ -71,6 +78,9 @@ class Board:
             for c in self.channels:
                 self.members[c].add(p["id"])
             return tok
+
+    def visible(self, pid: int, channel: int) -> bool:
+        return channel in self.channels and (channel not in self.private or pid in self.members[channel])
 
     def names(self) -> set[str]:
         return {p["external_id"] for p in self.principals.values()}
@@ -116,7 +126,7 @@ class Board:
         return out
 
     # ------------------------------------------------------------------ search
-    def search(self, q: str, sort: str, limit: int) -> dict:
+    def search(self, q: str, sort: str, limit: int, me: int | None = None) -> dict:
         tokens = re.findall(r'"[^"]*"|\S+', q)
         words, phrases, where = [], [], []
         for t in tokens:
@@ -129,6 +139,8 @@ class Board:
                 words.append(t.lower())
         out = []
         for msg in self.msgs:
+            if me is not None and not self.visible(me, msg["channel_id"]):
+                continue
             body = msg["body"].lower()
             toks = re.findall(r"\w+", body)
             ok = all(any(x.startswith(w2) for x in toks) for w in words for w2 in re.findall(r"\w+", w))
@@ -198,14 +210,20 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
             me = self.who()
             board.requests.append((method, u.path, q, board.principals[me]["external_id"] if me else None))
             if method == "POST" and u.path == "/v1/join":
-                if body.get("code") != board.invite:
+                scope = board.invites.get(body.get("code"))
+                if scope is None:
                     return self.fail(404, "not_found", "this invite link is not valid")
                 name = body.get("name") or ""
                 with board.lock:
                     p = board.principal(name)
                     created = name not in board.joins
                     board.joins.append(name)
-                tok = board.token_for(name)
+                    board._n += 1
+                    tok = f"fbt_{name}_{board._n}"
+                    board.tokens = {t: i for t, i in board.tokens.items() if i != p["id"]}
+                    board.tokens[tok] = p["id"]
+                    for c in scope:
+                        board.members[c].add(p["id"])
                 return self.send(201 if created else 200, {"token": tok, "principal": p,
                                                            "created": created})
             if me is None:
@@ -213,20 +231,25 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
             if method == "GET" and u.path == "/v1/channels":
                 out = [{"id": c, "name": n, "kind": "public", "member": me in board.members[c],
                         "last_seq": board.seq[c]} for c, n in board.channels.items()
-                       if q.get("name") in (None, n)]
+                       if q.get("name") in (None, n) and board.visible(me, c)]
                 return self.send(200, {"channels": out})
             if m := re.fullmatch(r"/v1/channels/(\d+)/members", u.path):
-                board.members[int(m.group(1))].add(int(body.get("principal_id")))
+                ch = int(m.group(1))
+                if not board.visible(me, ch):
+                    return self.fail(404, "not_found", "channel not found")
+                board.members[ch].add(int(body.get("principal_id")))
                 return self.send(200, {"members": []})
             if re.fullmatch(r"/v1/principals/\d+", u.path):
                 return self.send(200, {})
             if method == "GET" and (m := re.fullmatch(r"/v1/messages/(\d+)", u.path)):
                 msg = next((x for x in board.msgs if x["id"] == int(m.group(1))), None)
-                return self.send(200, board._view(msg)) if msg else self.fail(404, "not_found")
+                if msg is None or not board.visible(me, msg["channel_id"]):
+                    return self.fail(404, "not_found")
+                return self.send(200, board._view(msg))
             if m := re.fullmatch(r"/v1/channels/(\d+)/messages", u.path):
                 ch = int(m.group(1))
-                if ch not in board.channels:
-                    return self.fail(404, "not_found")
+                if not board.visible(me, ch):
+                    return self.fail(404, "not_found", "channel not found")
                 if method == "POST":
                     key = self.headers.get("Idempotency-Key")
                     if not key:
@@ -240,21 +263,27 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                             return self.fail(404, "not_found", "reply_to not found")
                         board.idem[(me, key)] = msg
                     return self.send(201, board._view(msg))
-                limit = int(q.get("limit") or 50)
+                limit = min(int(q.get("limit") or 100), 500)
                 with board.lock:
                     rows = [x for x in board.msgs if x["channel_id"] == ch]
                     if "thread" in q:
                         r = int(q["thread"])
-                        rows = [x for x in rows if x["id"] == r or x["thread_id"] == r][:limit]
-                    elif "before" in q:
-                        rows = [x for x in rows if x["seq"] < int(q["before"])][-limit:]
+                        rows = [x for x in rows if x["id"] == r or x["thread_id"] == r]
+                    if "before" in q:
+                        rows = [x for x in rows if x["seq"] < int(q["before"])]
+                        page, more = rows[-limit:], len(rows) > limit
+                        cursor = page[0]["seq"] if page else int(q["before"]) - 1
                     else:
-                        rows = [x for x in rows if x["seq"] > int(q.get("after") or 0)][:limit]
-                    out = [board._view(x) for x in rows]
-                return self.send(200, {"messages": out, "next_cursor": out[-1]["seq"] if out else 0,
-                                       "has_more": False})
+                        after = int(q.get("after") or 0)
+                        rows = [x for x in rows if x["seq"] > after]
+                        page, more = rows[:limit], len(rows) > limit
+                        cursor = page[-1]["seq"] if page else after
+                    out = [board._view(x) for x in page]
+                return self.send(200, {"messages": out, "next_cursor": cursor, "has_more": more})
             if method == "GET" and u.path == "/v1/activity":
                 follow = [int(x) for x in (q.get("channels") or "").split(",") if x.strip().isdigit()]
+                if any(not board.visible(me, c) for c in follow):
+                    return self.fail(404, "not_found", "channel not found")
                 wait = float(q.get("wait") or 0)
                 with board.lock:
                     if "after" not in q:
@@ -278,7 +307,7 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
             if method == "GET" and u.path == "/v1/search":
                 with board.lock:
                     return self.send(200, board.search(q.get("q") or "", q.get("sort") or "newest",
-                                                       int(q.get("limit") or 20)))
+                                                       int(q.get("limit") or 20), me))
             if method == "PUT" and (m := re.fullmatch(r"/v1/channels/(\d+)/messages/(\d+)/reactions/(.+)", u.path)):
                 with board.lock:
                     msg = next((x for x in board.msgs if x["id"] == int(m.group(2))), None)

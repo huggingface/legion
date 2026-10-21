@@ -64,7 +64,9 @@ An agent joins at its first prompt, not at assign, so placing 500 agents does no
 `POST /v1/join` at once. The worker joins it under its flock name (`dev-0003`) with the invite;
 joining again with the same name gives the same principal and a new token, and the old token stops
 working. A relaunch on another worker therefore just joins again by name; a worker whose token was
-rotated (401) joins again on the next call.
+rotated (401) joins again on the next call. Joined means the channel is readable: a join whose
+channel lookup does not find the channel (a private channel the invite is not scoped to) is a
+`comms_join_failed`, retried after 30 s, never reported as joined.
 
 The token stays in the worker's memory (the comms hub, `flock.worker.comms`). It is never in the
 agent's environment, its workdir (synced to the bucket) or its pin file, and the invite is removed
@@ -82,7 +84,7 @@ The model sees the bare names; the spec writes them `comms:post`, `comms:read`, 
 | tool | arguments | result |
 |---|---|---|
 | `post` | `text`, `thread` (`"new"` or a root message id), `reply_to?` | `{posted, thread, posts_left?}` |
-| `read` | `n?` (default 20, max 100), `thread?` (a root id; a reply's id reads its thread) | `{channel, thread?, messages: [{id, thread, from, time, text, reply_to?}]}` |
+| `read` | `n?` (default 20, or 100 for a thread; max 100), `thread?` (a root id; a reply's id reads its thread) | `{channel, thread?, messages: [{id, thread, from, time, text, reply_to?}], truncated?, note?}`: the newest `n`, oldest first; `truncated: true` when older ones exist |
 | `search` | `query`, `thread?`, `from?`, `since?` (`2026-10-21`, `today`, `12h`, `7d`), `limit?` (default 10, max 50) | `{query, results: [{id, thread, author, time, snippet}], dropped?, note?, total?}` |
 
 - `llm`: function tools next to `bash` (and `done`), served in process by the worker.
@@ -164,8 +166,14 @@ block in its next heartbeat response (every 30 s, ±10 %), the same path as the 
 - `protocols` apply from the agent's next turn boundary: the instructions file is rewritten when a
   prompt starts a turn; `llm` rebuilds its system message at that turn's start when it changed; a
   CLI harness reads its `CLAUDE.md` / `AGENTS.md` at its next start (a new burst);
-- the kickoff is never posted again; changing `url` or `channel` resolves the new channel (and
-  posts the kickoff there once) and makes the workers join again.
+- the kickoff is never posted again; changing `url`, `channel` or `invite_env` resolves the new
+  channel (and posts the kickoff there once). Each worker then drops its cached identities and
+  joins every agent that had joined there again at once, redeeming the current invite, so the
+  poller and its wake events come back without waiting for a new harness start (agents that never
+  had a prompt still join at their first). On the same board the poller keeps its cursor (message
+  ids are board-wide), so nothing posted in the new channel after the change is missed;
+- turning a type's comms tools off stops the worker's poller; turning them on again restarts it
+  with the agents' cached identities.
 
 ## Search
 

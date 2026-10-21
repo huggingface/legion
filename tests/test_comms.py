@@ -4,8 +4,10 @@ channel resolution and kickoff. No real board is called."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -53,13 +55,15 @@ def posted(board) -> int:
 class Team:
     """N agents of one worker sharing one CommsHub, against the fake board."""
 
-    def __init__(self, tmp_path, board, names, *, harness="claude", protocols=None, **rules):
+    def __init__(self, tmp_path, board, names, *, harness="claude", protocols=None, env=None,
+                 **rules):
         self.board = board
         self.agents: dict[str, AgentRuntime] = {}
         self.spec = CommsSpec(url=board.url, invite_env=INVITE_ENV, channel="flock-test",
                               channel_id=CH, rules=CommsRules(**rules),
                               protocols=list(protocols or {}), protocols_text=list((protocols or {}).values()))
-        self.hub = CommsHub(swarm="sw", runtime=self.agents.get, env={INVITE_ENV: board.invite},
+        self.hub = CommsHub(swarm="sw", runtime=self.agents.get,
+                            env=env if env is not None else {INVITE_ENV: board.invite},
                             poll_wait=0.3, backoff_s=0.01)
         self.hub.configure(self.spec, list(COMMS_TOOLS))
         base = Toolset(version=None, dir=None, swarm="sw", type="dev", data_dir=tmp_path / "data")
@@ -376,3 +380,133 @@ def test_controller_resolves_channel_and_posts_kickoff_once(board):
                 {INVITE_ENV: board.invite})
     with pytest.raises(CommsError, match="invite link is not valid"):
         resolve(SwarmSpec.model_validate(swarm_raw(url=board.url)), None, {INVITE_ENV: "wrong"})
+
+
+# --------------------------------------------------------------------------- review of #16
+
+
+def polling(hub) -> bool:
+    return hub._poller is not None and not hub._poller.done()
+
+
+async def test_tools_off_then_on_restarts_the_poller(tmp_path, board):
+    t = Team(tmp_path, board, ["dev-0000"])
+    rt = t.agents["dev-0000"]
+    try:
+        await t.start()
+        await until(lambda: t.hub._cursor is not None)
+        t.hub.configure(t.spec, [])  # a re-apply that turns the type's comms tools off
+        await until(lambda: not polling(t.hub))
+        t.hub.configure(t.spec, list(COMMS_TOOLS))  # and on again, inside the same burst
+        await until(lambda: polling(t.hub))
+        await until(lambda: t.hub._cursor is not None)
+        board.post("carlos", CH, "@dev-0000 still there?")
+        await until(lambda: custom(rt, "comms_mention"))
+        assert board.joins == ["dev-0000"]  # the cached identity was enough
+    finally:
+        await t.close()
+
+
+async def test_channel_move_rejoins_active_agents_without_a_new_burst(tmp_path):
+    b, srv, url = fake_msgboard.serve(fake_msgboard.Board(channels={12: "flock-test", 13: "new-team"}))
+    b.url = url
+    t = Team(tmp_path, b, ["dev-0000", "dev-0001"])
+    t.agents["dev-0001"].spec.idle_grace = "30s"
+    try:
+        await t.start("dev-0000")  # dev-0001 has had no prompt: it joins only at its first
+        old = t.hub.members["dev-0000"].ident.token
+        await until(lambda: t.hub._cursor is not None)  # the poller is running
+        t.hub.configure(t.spec.model_copy(update={"channel": "new-team", "channel_id": 13}),
+                        list(COMMS_TOOLS))
+        b.post("carlos", 13, "@dev-0000 over here now")  # before the rejoin is done: not missed
+        await until(lambda: t.hub.members["dev-0000"].ident is not None and polling(t.hub))
+        assert t.hub.members["dev-0000"].ident.token != old  # joined again, not the cached token
+        assert b.joins == ["dev-0000", "dev-0000"] and "dev-0001" not in t.hub.members
+        await until(lambda: custom(t.agents["dev-0000"], "comms_mention"))
+        out, err = await t.call("dev-0000", "read")
+        assert not err and out["channel"] == "#new-team"
+    finally:
+        await t.close()
+        srv.shutdown()
+
+
+async def test_invite_change_redeems_the_new_invite_for_a_private_channel(tmp_path):
+    b, srv, url = fake_msgboard.serve(fake_msgboard.Board(
+        channels={12: "old-private", 13: "new-private"}, private={12, 13},
+        invites={"inv-old": [12], "inv-new": [13]}))
+    b.url = url
+    env = {"OLD_INVITE": "inv-old", "NEW_INVITE": "inv-new"}
+    t = Team(tmp_path, b, ["dev-0000"], env=env)
+    t.spec = t.spec.model_copy(update={"invite_env": "OLD_INVITE", "channel": "old-private"})
+    t.hub.configure(t.spec, list(COMMS_TOOLS))
+    rt = t.agents["dev-0000"]
+    try:
+        await t.start()
+        out, err = await t.call("dev-0000", "read")
+        assert not err, out
+        # the channel moves, but the invite does not cover it: a failed join, never "joined"
+        t.hub.configure(t.spec.model_copy(update={"channel": "new-private", "channel_id": 13}),
+                        list(COMMS_TOOLS))
+        await until(lambda: custom(rt, "comms_join_failed"))
+        assert t.hub.members["dev-0000"].ident is None
+        assert "not visible to dev-0000" in custom(rt, "comms_join_failed")[-1]["error"]
+        out, err = await t.call("dev-0000", "read")
+        assert err and "not on the board yet" in out["error"]
+        # with the invite that is scoped to it, the agent redeems it and reads
+        t.hub.configure(t.spec.model_copy(update={"channel": "new-private", "channel_id": 13,
+                                                  "invite_env": "NEW_INVITE"}), list(COMMS_TOOLS))
+        await until(lambda: t.hub.members["dev-0000"].ident is not None)
+        b.post("carlos", 13, "hello new team")
+        out, err = await t.call("dev-0000", "read")
+        assert not err and out["channel"] == "#new-private"
+        assert [m["text"] for m in out["messages"]] == ["hello new team"]
+        assert len(custom(rt, "comms_joined")) == 2
+    finally:
+        await t.close()
+        srv.shutdown()
+
+
+async def test_thread_read_gives_the_newest_messages_and_says_when_truncated(tmp_path, board):
+    t = Team(tmp_path, board, ["dev-0000"])
+    try:
+        await t.start()
+        root = board.post("carlos", CH, "root")["id"]
+        ids = [board.post("carlos", CH, f"reply {i}", reply_to=root)["id"] for i in range(105)]
+        out, err = await t.call("dev-0000", "read", thread=root, n=5)
+        assert not err and [m["id"] for m in out["messages"]] == ids[-5:]
+        assert out["truncated"] is True and "older ones exist" in out["note"]
+        out, err = await t.call("dev-0000", "read", thread=root)  # default: the newest 100
+        got = [m["id"] for m in out["messages"]]
+        assert len(got) == 100 and got[-1] == ids[-1] and out["truncated"] is True
+        out, err = await t.call("dev-0000", "read", thread=ids[50], n=200)  # a reply: its thread
+        assert out["thread"] == root and len(out["messages"]) == 100
+        short = board.post("carlos", CH, "short topic")["id"]
+        board.post("carlos", CH, "one reply", reply_to=short)
+        out, err = await t.call("dev-0000", "read", thread=short)
+        assert not err and len(out["messages"]) == 2 and "truncated" not in out
+        out, err = await t.call("dev-0000", "read", n=1)
+        assert [m["text"] for m in out["messages"]] == ["one reply"] and out["truncated"] is True
+    finally:
+        await t.close()
+
+
+async def test_concurrent_gateway_startup_opens_one_listener():
+    hub = CommsHub(swarm="sw", env={})
+    started = []
+    real = asyncio.start_server
+
+    async def capture(*a, **kw):
+        srv = await real(*a, **kw)
+        started.append(srv)
+        return srv
+
+    try:
+        with patch("flock.worker.comms.asyncio.start_server", capture):
+            addresses = await asyncio.gather(*(hub.start_gateway() for _ in range(8)))
+        assert len(started) == 1 and len(set(addresses)) == 1
+        await hub.aclose()
+        assert not started[0].is_serving()
+    finally:
+        for srv in started:
+            srv.close()
+        await hub.identities._client.aclose()
