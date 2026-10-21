@@ -635,16 +635,35 @@ class BulkPromptRequest(BaseModel):
     text: str
     timeout: str | None = None
     reply_to: str | None = None
+    # Skip agents that already have a pending (undelivered) prompt. Default: on with
+    # state=idle ("only if idle and empty": repeated calls never stack prompts), off otherwise.
+    skip_pending: bool | None = None
+
+
+class ChildrenPromptRequest(BaseModel):
+    """One prompt to an agent's direct children (`POST /agents/{name}/children/prompts`),
+    optionally only those of one type and/or state; same rules as BulkPromptRequest. Allowed
+    for that agent's own scoped token (and its ancestors'), so a leader prompts its idle
+    children in one request."""
+
+    type: str | None = None
+    state: AgentState | None = None
+    text: str
+    timeout: str | None = None
+    reply_to: str | None = None
+    skip_pending: bool | None = None  # default: on with state=idle
 
 
 class BulkPromptAck(BaseModel):
     swarm: str
-    type: str
+    type: str | None  # None: any type (children route without `type`)
+    parent: str | None = None  # set by the children route
     matched: int  # agents of the type
     queued: int  # prompts for agents whose worker is up
     pending: int  # prompts held until the agent's worker is up
     skipped_state: int = 0  # not in the requested state
     skipped_removing: int = 0  # being removed (spawn cascade)
+    skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
 
 
 class SpawnRequest(BaseModel):
