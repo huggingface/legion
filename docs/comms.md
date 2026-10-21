@@ -72,6 +72,10 @@ The token stays in the worker's memory (the comms hub, `flock.worker.comms`). It
 agent's environment, its workdir (synced to the bucket) or its pin file, and the invite is removed
 from the harness environment even if a type lists it in `secrets`. The pin's deny list carries
 `invite_env` and `MSGBOARD_TOKEN`, so `flock-tool` never hands them to a tool call either.
+A token only ever goes to the board that issued it: the worker's identity record carries the
+board's url, every request uses that board's own client, and the client refuses (without sending
+anything) a credential issued by another board. A join that a reconfiguration overtakes is dropped
+before its next request, so a token from the old board never reaches a new `url`.
 
 The older per-type `msgboard_invite` (MSGBOARD_URL/MSGBOARD_TOKEN in the harness env, for agents
 that call the board themselves) still works and shares the same identity cache, so the two never

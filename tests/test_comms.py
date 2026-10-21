@@ -9,11 +9,13 @@ import json
 import re
 from unittest.mock import patch
 
+import httpx
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from flock import cli
+from flock.comms.board import AsyncBoard, BoardError
 from flock.comms.tools import Refused, check_content, check_rate, query_terms, relaxed_search
 from flock.controller.comms import CommsError, resolve
 from flock.models import COMMS_TOOLS, CommsRules, CommsSpec, SwarmSpec, comms_tools
@@ -21,6 +23,7 @@ from flock.tools.toolset import PIN_ENV, Toolset, read_pin
 from flock.worker.agents import AgentRuntime
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox
+from flock.worker.identity import MsgboardIdentity
 
 from . import fake_msgboard
 from .worker_fakes import ScriptedAdapter, spec, until
@@ -591,3 +594,71 @@ async def test_mentions_for_an_agent_still_rejoining_are_delivered_once_it_is_ba
         release.set()
         await t.close()
         srv.shutdown()
+
+
+# --------------------------------------------------------------------------- third review of #16
+
+
+async def test_a_board_client_refuses_a_token_from_another_board():
+    seen = []
+    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(
+        lambda r: seen.append(r) or httpx.Response(200, json={"channels": []})))
+    try:
+        with pytest.raises(BoardError) as e:
+            await board.channels(MsgboardIdentity(url="http://a.invalid", token="tok-a", principal="x"))
+        assert e.value.code == "wrong_board" and "tok-a" not in str(e.value)
+        assert seen == []  # nothing was sent
+        await board.channels(MsgboardIdentity(url="http://b.invalid/", token="tok-b", principal="x"))
+        assert [r.headers["authorization"] for r in seen] == ["Bearer tok-b"]
+    finally:
+        await board.aclose()
+
+
+async def test_a_join_in_flight_when_the_board_url_changes_never_sends_its_token_to_the_new_board():
+    blocked, release = asyncio.Event(), asyncio.Event()
+    requests: list[tuple[str, str, str]] = []  # (host, path, bearer)
+
+    async def handler(request):
+        host, path = request.url.host, request.url.path
+        bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        requests.append((host, path, bearer))
+        if path == "/v1/join":
+            code = json.loads(request.content)["code"]
+            if code == "old-invite":
+                blocked.set()
+                await release.wait()
+            return httpx.Response(200, json={"token": f"tok-{host}",
+                                             "principal": {"id": 1, "external_id": "dev-0000"}})
+        if path == "/v1/channels":
+            return httpx.Response(200, json={"channels": [{"id": 12 if host == "old.invalid" else 13,
+                                                           "member": True}]})
+        if path == "/v1/activity":
+            await asyncio.Event().wait()
+        if path.endswith("/messages"):
+            return httpx.Response(200, json={"messages": [], "has_more": False})
+        return httpx.Response(200, json={})
+
+    hub = CommsHub(swarm="sw", env={"OLD": "old-invite", "NEW": "new-invite"},
+                   transport=httpx.MockTransport(handler), poll_wait=0.1)
+    old = CommsSpec(url="http://old.invalid", invite_env="OLD", channel="team", channel_id=12)
+    try:
+        hub.configure(old, list(COMMS_TOOLS))
+        first = asyncio.create_task(hub.on_prompt("dev-0000", "llm"))
+        await asyncio.wait_for(blocked.wait(), 5)
+        hub.configure(old.model_copy(update={"url": "http://new.invalid", "invite_env": "NEW",
+                                             "channel_id": 13}), list(COMMS_TOOLS))
+        release.set()
+        await first
+        await hub._restore
+        r = await hub.call("dev-0000", "comms:read", {})
+        assert not r.error, r.output
+        assert hub.members["dev-0000"].ident.token == "tok-new.invalid"
+        # the old board's token went to the old board's /v1/join answer only, never anywhere
+        assert not [x for x in requests if x[2] == "tok-old.invalid"]
+        assert all(b in ("", f"tok-{h}") for h, _, b in requests)
+        assert [(h, p) for h, p, _ in requests if p == "/v1/join"] == [
+            ("old.invalid", "/v1/join"), ("new.invalid", "/v1/join")]
+    finally:
+        release.set()
+        await hub.aclose()
+        await hub.identities._client.aclose()

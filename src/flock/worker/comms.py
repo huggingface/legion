@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from flock.comms.board import AsyncBoard, BoardError
+from flock.comms.board import AsyncBoard, BoardError, same_board
 from flock.comms.tools import (
     GROUP_NAMES,
     READ_DEFAULT,
@@ -98,6 +98,23 @@ class Member:
     last_post: float | None = None
 
 
+class _Stale(Exception):
+    """A join attempt overtaken by a reconfiguration: dropped, nothing more is sent."""
+
+
+@dataclass
+class _Op:
+    """One tool call: the member, its identity and the spec, captured once at the start; every
+    request of the call goes to the identity's own board."""
+
+    m: Member
+    ident: MsgboardIdentity
+    c: CommsSpec
+
+    def board(self, hub: CommsHub) -> AsyncBoard:
+        return hub._board(self.ident.url)
+
+
 def _ok(out: Any, t0: float) -> Result:
     return Result(json.dumps(out, ensure_ascii=False), False, time.monotonic() - t0)
 
@@ -124,7 +141,9 @@ class CommsHub:
         self.backoff_s = backoff_s
         self.spec: CommsSpec | None = None
         self.entries: list[str] = []
-        self.board: AsyncBoard | None = None
+        # one client per board url; a credential is only ever sent through its own board's
+        # client (and AsyncBoard refuses a credential issued by another board)
+        self._boards: dict[str, AsyncBoard] = {}
         self.members: dict[str, Member] = {}
         self._keys: dict[str, str] = {}
         self._cache: OrderedDict[int, dict] = OrderedDict()
@@ -179,10 +198,6 @@ class CommsHub:
             m.ident, m.error, m.retry_at, m.rejoin = None, None, 0.0, True
             self.identities.forget(m.name, url=old.url)  # redeem the new invite, never reuse
         self._cache.clear()
-        if self.board is not None:
-            board, self.board = self.board, None
-            with contextlib.suppress(RuntimeError):
-                asyncio.get_running_loop().create_task(board.aclose())
 
     def _restore_members(self) -> None:
         """(Re)join every agent that joined before, in the background; the poller starts with
@@ -202,11 +217,14 @@ class CommsHub:
 
         self._restore = loop.create_task(run(), name="comms-restore")
 
-    def _board(self) -> AsyncBoard:
-        assert self.spec is not None
-        if self.board is None:
-            self.board = AsyncBoard(self.spec.url, transport=self._transport, backoff_s=self.backoff_s)
-        return self.board
+    def _board(self, url: str) -> AsyncBoard:
+        """The client for the board at `url`: always the url of the credential in hand (an
+        identity's own url, or the spec captured at the start of a join), never "the current
+        spec" read after an await."""
+        key = url.rstrip("/")
+        if key not in self._boards:
+            self._boards[key] = AsyncBoard(key, transport=self._transport, backoff_s=self.backoff_s)
+        return self._boards[key]
 
     def tooldefs(self) -> tuple:
         return tuple(tool_def(e) for e in self.entries) if self.active else ()
@@ -298,7 +316,10 @@ class CommsHub:
                 if not self.active or c is None:
                     raise BoardError("comms is off for this agent")
                 try:
-                    ident = await self._join_once(m, c)
+                    ident = await self._join_once(m, c, gen)
+                except _Stale:
+                    m.rejoin = True
+                    continue
                 except BoardError as e:
                     if gen != self._gen:
                         m.rejoin = True
@@ -324,35 +345,51 @@ class CommsHub:
             self._ensure_poller()
             return m
 
-    async def _join_once(self, m: Member, c: CommsSpec) -> MsgboardIdentity:
+    async def _join_once(self, m: Member, c: CommsSpec, gen: int) -> MsgboardIdentity:
         """Redeem the invite under the agent's name and check the channel is readable (raises
         BoardError). Joined means readable: a lookup that does not find the channel (an invite
-        not scoped to a private one) is a failed join, never a success."""
+        not scoped to a private one) is a failed join, never a success.
+
+        Every request of the attempt goes to the board captured at its start (`c.url`), and
+        after each await the generation is checked before anything else is sent: a
+        reconfiguration during the attempt drops it (_Stale) without one more request, so a
+        token is never sent to a board that did not issue it."""
         assert c.channel_id is not None
+        board = self._board(c.url)
+
+        def fresh() -> None:
+            if gen != self._gen:
+                raise _Stale
         code = self._env.get(c.invite_env)
         if not code:
             raise BoardError(f"the invite secret {c.invite_env} is not set on this worker")
         try:
             ident = await self.identities.join(m.name, c.url, code, again=m.rejoin)
         except httpx.HTTPStatusError as e:
+            fresh()
             raise BoardError(f"join refused: HTTP {e.response.status_code}") from None
         except (httpx.HTTPError, KeyError, ValueError) as e:
+            fresh()
             raise BoardError(f"join failed: {type(e).__name__}") from None
-        board = self._board()
-        chans = await board.channels(ident.token, c.channel)
+        fresh()
+        chans = await board.channels(ident, c.channel)
+        fresh()
         ch = next((x for x in chans if x.get("id") == c.channel_id), None)
         if ch is None:
             raise BoardError(f"#{c.channel} (id {c.channel_id}) is not visible to {m.name}: "
                              f"is the invite in {c.invite_env} scoped to it?")
         if not ch.get("member") and ident.id is not None:
             try:
-                await board.add_member(ident.token, c.channel_id, ident.id)
+                await board.add_member(ident, c.channel_id, ident.id)
             except BoardError as e:
+                fresh()
                 raise BoardError(f"cannot join #{c.channel}: {e}") from None
+            fresh()
         if ident.id is not None:
             with contextlib.suppress(BoardError):  # cosmetic: the profile's runtime
-                await board.set_runtime(ident.token, ident.id, {
+                await board.set_runtime(ident, ident.id, {
                     "harness": f"flock/{m.harness}", "host": f"flock swarm {self.swarm}"})
+            fresh()
         return ident
 
     def forget(self, agent: str) -> None:
@@ -472,18 +509,18 @@ class CommsHub:
         attempt = 0
         while self.active:
             m = self._poll_member()
-            if m is None or m.ident is None:
+            ident, c = (m.ident if m else None), self.spec
+            if m is None or ident is None or c is None:
                 return  # the next join starts it again
-            c = self.spec
-            assert c is not None and c.channel_id is not None
+            assert c.channel_id is not None
+            board = self._board(ident.url)  # the identity's own board, whatever the spec says
             try:
                 if self._cursor is None:  # "now": history before the poller is not news
-                    page = await self._board().activity(m.ident.token, c.channel_id, None)
+                    page = await board.activity(ident, c.channel_id, None)
                     self._cursor = int(page.get("next_cursor") or 0)
                     continue
                 self.stats["polls"] += 1
-                page = await self._board().activity(m.ident.token, c.channel_id, self._cursor,
-                                                    wait=self.poll_wait)
+                page = await board.activity(ident, c.channel_id, self._cursor, wait=self.poll_wait)
                 attempt = 0
                 self._cursor = int(page.get("next_cursor") or self._cursor)
                 self.fanout([x for x in page.get("messages") or [] if isinstance(x, dict)])
@@ -513,9 +550,12 @@ class CommsHub:
         for attempt in (0, 1):
             try:
                 m = await self._member(agent)
+                op = _Op(m, m.ident, self.spec)  # one identity and its own board per call
+                if op.ident is None or op.c is None or not same_board(op.ident.url, op.c.url):
+                    raise BoardError("comms settings changed during the call; try again")
                 fn = {"comms:post": self._post, "comms:read": self._read,
                       "comms:search": self._search}[entry]
-                return _ok(await fn(m, args), t0)
+                return _ok(await fn(op, args), t0)
             except Refused as e:
                 self.stats["refused"] += 1
                 self._emit(agent, "comms_refused", {"rule": e.rule, "error": str(e)})
@@ -529,21 +569,20 @@ class CommsHub:
                 return _err(f"{comms_name(entry)}: {e}", t0)
         return _err("unreachable", t0)
 
-    async def _message(self, m: Member, msg_id: int) -> dict | None:
+    async def _message(self, op: _Op, msg_id: int) -> dict | None:
         if msg_id in self._cache:
             return self._cache[msg_id]
-        assert m.ident is not None
         try:
-            msg = await self._board().message(m.ident.token, msg_id)
+            msg = await op.board(self).message(op.ident, msg_id)
         except BoardError as e:
             if e.status in (403, 404):
                 return None
             raise
         return msg if isinstance(msg, dict) and "id" in msg else None
 
-    async def _post(self, m: Member, args: dict[str, Any]) -> dict[str, Any]:
-        c = self.spec
-        assert c is not None and c.channel_id is not None and m.ident is not None
+    async def _post(self, op: _Op, args: dict[str, Any]) -> dict[str, Any]:
+        m, c = op.m, op.c
+        assert c.channel_id is not None
         rules = c.rules
         text, raw = args.get("text"), args.get("thread")
         check_content(rules, text, raw)
@@ -557,7 +596,7 @@ class CommsHub:
             check_rate(rules, posts, last, self._clock())
             reply_to = reply
             if thread is not None:
-                root = await self._message(m, thread)
+                root = await self._message(op, thread)
                 if root is None or root.get("channel_id") not in (None, c.channel_id):
                     raise ValueError(f"no message {thread} in #{c.channel}")
                 if root.get("thread_id"):
@@ -566,13 +605,13 @@ class CommsHub:
                                                  f"use thread: {root['thread_id']}")
                     thread = int(root["thread_id"])
                 if reply is not None and reply != thread:
-                    r = await self._message(m, reply)
+                    r = await self._message(op, reply)
                     if r is None or thread_of(r) != thread:
                         raise ValueError(f"reply_to {reply} is not in thread {thread}")
                 reply_to = reply or thread
             elif reply is not None and rules.threads == "per_topic":
                 raise Refused("threads", "say the thread too: thread: <root id> with reply_to")
-            msg = await self._board().post(m.ident.token, c.channel_id, text, reply_to)
+            msg = await op.board(self).post(op.ident, c.channel_id, text, reply_to)
             n = self._record_post(m, self._clock())
         self.stats["posts"] += 1
         if isinstance(msg, dict) and isinstance(msg.get("id"), int):
@@ -583,28 +622,28 @@ class CommsHub:
             out["posts_left"] = max(0, rules.max_posts - n)
         return out
 
-    async def _read(self, m: Member, args: dict[str, Any]) -> dict[str, Any]:
-        c = self.spec
-        assert c is not None and c.channel_id is not None and m.ident is not None
+    async def _read(self, op: _Op, args: dict[str, Any]) -> dict[str, Any]:
+        c, ident = op.c, op.ident
+        assert c.channel_id is not None
         thread = as_id(args.get("thread"), "thread")
-        board = self._board()
+        board = op.board(self)
         # the newest n (a thread: READ_MAX unless asked), read from the tail of the history;
         # `truncated` says older messages exist, never a first page passed off as the whole
         n = args.get("n") or (READ_MAX if thread is not None else READ_DEFAULT)
         n = max(1, min(int(n), READ_MAX))
         out: dict[str, Any] = {"channel": f"#{c.channel}"}
         if thread is not None:
-            page = await board.thread(m.ident.token, c.channel_id, thread, n)
+            page = await board.thread(ident, c.channel_id, thread, n)
             msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
             if msgs and msgs[0].get("id") == thread and msgs[0].get("thread_id"):
                 thread = int(msgs[0]["thread_id"])  # a reply's id: read its thread
-                page = await board.thread(m.ident.token, c.channel_id, thread, n)
+                page = await board.thread(ident, c.channel_id, thread, n)
                 msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
             if not msgs:
                 raise ValueError(f"no thread {thread} in #{c.channel}")
             out["thread"] = thread
         else:
-            page = await board.latest(m.ident.token, c.channel_id, n)
+            page = await board.latest(ident, c.channel_id, n)
             msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
         out["messages"] = [brief(x) for x in msgs]
         if page.get("has_more"):
@@ -613,14 +652,12 @@ class CommsHub:
                            + (f" (n is at most {READ_MAX})" if n < READ_MAX else ""))
         return out
 
-    async def _search(self, m: Member, args: dict[str, Any]) -> dict[str, Any]:
-        c = self.spec
-        assert c is not None and m.ident is not None
-        token = m.ident.token
+    async def _search(self, op: _Op, args: dict[str, Any]) -> dict[str, Any]:
+        c, board = op.c, op.board(self)
 
         async def search(q: str, limit: int) -> dict:
             self.stats["searches"] += 1
-            return await self._board().search(token, q, sort="relevance", limit=limit)
+            return await board.search(op.ident, q, sort="relevance", limit=limit)
 
         return await relaxed_search(search, query=args["query"], channel=c.channel,
                                     thread=as_id(args.get("thread"), "thread"),
@@ -667,5 +704,5 @@ class CommsHub:
             self._server.close()
             with contextlib.suppress(Exception):
                 await self._server.wait_closed()
-        if self.board is not None:
-            await self.board.aclose()
+        for board in self._boards.values():
+            await board.aclose()

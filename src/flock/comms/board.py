@@ -12,7 +12,7 @@ import asyncio
 import random
 import time
 import uuid
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -58,6 +58,18 @@ def _delay(attempt: int, r: httpx.Response | None, base: float) -> float:
 
 def _query(params: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in params.items() if v is not None}
+
+
+class Credential(Protocol):
+    """A board token together with the board it belongs to (MsgboardIdentity)."""
+
+    url: str
+    token: str
+
+
+def same_board(a: str, b: str) -> bool:
+    """Same scheme, host and port (and path prefix): where a token may be sent."""
+    return a.rstrip("/") == b.rstrip("/")
 
 
 class _Routes:
@@ -115,7 +127,9 @@ class _Routes:
 
 
 class AsyncBoard:
-    """One board, async; `token` per call (a worker speaks for many agents)."""
+    """One board, async; a credential per call (a worker speaks for many agents). A
+    credential carries the url of the board that issued it, and `request` refuses to send it
+    anywhere else."""
 
     def __init__(self, url: str, *, transport: httpx.AsyncBaseTransport | None = None,
                  backoff_s: float = BACKOFF_S) -> None:
@@ -127,9 +141,15 @@ class AsyncBoard:
     async def aclose(self) -> None:
         await self.http.aclose()
 
-    async def request(self, route: tuple[str, str, dict], token: str | None = None) -> dict:
+    async def request(self, route: tuple[str, str, dict], cred: Credential | None = None) -> dict:
         method, path, kw = route
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        headers = {}
+        if cred is not None:
+            # a token is only ever sent to the board that issued it
+            if not same_board(cred.url, self.url):
+                raise BoardError(f"board: refusing to send a token issued by {cred.url} to "
+                                 f"{self.url}", code="wrong_board")
+            headers["Authorization"] = f"Bearer {cred.token}"
         if method in ("POST", "PUT", "PATCH"):
             headers["Idempotency-Key"] = idem_key()
         for attempt in range(ATTEMPTS):
@@ -151,37 +171,37 @@ class AsyncBoard:
     async def join(self, code: str, name: str) -> dict:
         return await self.request(_Routes.join(code, name))
 
-    async def channels(self, token: str, name: str | None = None) -> list[dict]:
-        return (await self.request(_Routes.channels(name), token)).get("channels") or []
+    async def channels(self, cred: Credential, name: str | None = None) -> list[dict]:
+        return (await self.request(_Routes.channels(name), cred)).get("channels") or []
 
-    async def add_member(self, token: str, channel: int, principal: int) -> None:
-        await self.request(_Routes.add_member(channel, principal), token)
+    async def add_member(self, cred: Credential, channel: int, principal: int) -> None:
+        await self.request(_Routes.add_member(channel, principal), cred)
 
-    async def set_runtime(self, token: str, principal: int, runtime: dict) -> None:
-        await self.request(_Routes.runtime(principal, runtime), token)
+    async def set_runtime(self, cred: Credential, principal: int, runtime: dict) -> None:
+        await self.request(_Routes.runtime(principal, runtime), cred)
 
-    async def post(self, token: str, channel: int, body: str, reply_to: int | None = None) -> dict:
-        return await self.request(_Routes.post(channel, body, reply_to), token)
+    async def post(self, cred: Credential, channel: int, body: str, reply_to: int | None = None) -> dict:
+        return await self.request(_Routes.post(channel, body, reply_to), cred)
 
-    async def message(self, token: str, msg_id: int) -> dict:
-        return await self.request(_Routes.message(msg_id), token)
+    async def message(self, cred: Credential, msg_id: int) -> dict:
+        return await self.request(_Routes.message(msg_id), cred)
 
-    async def latest(self, token: str, channel: int, n: int) -> dict:
+    async def latest(self, cred: Credential, channel: int, n: int) -> dict:
         """{messages (the newest n, oldest first), has_more, next_cursor}."""
-        return await self.request(_Routes.latest(channel, n), token)
+        return await self.request(_Routes.latest(channel, n), cred)
 
-    async def thread(self, token: str, channel: int, root: int, n: int = 100) -> dict:
+    async def thread(self, cred: Credential, channel: int, root: int, n: int = 100) -> dict:
         """{messages (the thread's newest n, oldest first), has_more, next_cursor}."""
-        return await self.request(_Routes.thread(channel, root, n), token)
+        return await self.request(_Routes.thread(channel, root, n), cred)
 
-    async def activity(self, token: str, channel: int, after: int | None, wait: float = 0) -> dict:
-        return await self.request(_Routes.activity(channel, after, wait), token)
+    async def activity(self, cred: Credential, channel: int, after: int | None, wait: float = 0) -> dict:
+        return await self.request(_Routes.activity(channel, after, wait), cred)
 
-    async def search(self, token: str, q: str, *, sort: str = "relevance", limit: int = 20) -> dict:
-        return await self.request(_Routes.search(q, sort, limit), token)
+    async def search(self, cred: Credential, q: str, *, sort: str = "relevance", limit: int = 20) -> dict:
+        return await self.request(_Routes.search(q, sort, limit), cred)
 
-    async def react(self, token: str, channel: int, msg_id: int, emoji: str) -> dict:
-        return await self.request(_Routes.react(channel, msg_id, emoji), token)
+    async def react(self, cred: Credential, channel: int, msg_id: int, emoji: str) -> dict:
+        return await self.request(_Routes.react(channel, msg_id, emoji), cred)
 
 
 class SyncBoard:
