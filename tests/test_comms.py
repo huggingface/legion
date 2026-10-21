@@ -151,7 +151,7 @@ def test_content_rules():
         with pytest.raises(Refused) as e:
             check_content(r, text, thread)
         assert e.value.rule == rule and str(e.value).startswith("refused: ")
-    check_content(r, "mail a@agents", "new")  # not a group mention
+    check_content(r, "a@agents", "new")  # an address, not a group mention
     check_content(CommsRules(), "hi @agents", None)  # no rules: anything goes
 
 
@@ -200,7 +200,7 @@ async def test_join_at_first_prompt_token_stays_in_worker(tmp_path, board):
         await until(lambda: t.hub.members.get("dev-0000") and t.hub.members["dev-0000"].ident)
         assert board.joins == ["dev-0000"]
         token = t.hub.members["dev-0000"].ident.token
-        assert [x for x in custom(rt, "comms_joined")][0]["channel_id"] == CH
+        assert custom(rt, "comms_joined")[0]["channel_id"] == CH
         # never in the harness env, the workdir or the pin file
         env = rt.adapter.envs[0]
         assert token not in json.dumps(env) and "MSGBOARD_TOKEN" not in env
@@ -282,7 +282,6 @@ async def test_each_rule_refuses_before_the_board(tmp_path, board):
         assert err and re.match(r"refused: wait (29|30) s", out["error"]), out
         assert posted(board) == before + 1
         reply = board.post("carlos", CH, "a reply", reply_to=out_root(board))
-        t.hub.members["dev-0000"].ident  # still joined
         rt = t.agents["dev-0000"]
         rt.state.comms_last_post = 0.0  # as if 30 s had passed
         out, err = await t.call("dev-0000", "post", text="in a reply's thread", thread=reply["id"])

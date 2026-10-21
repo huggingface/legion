@@ -88,7 +88,7 @@ class Board:
         for p in self.principals.values():
             if p["id"] != pid and re.search(rf"(?<![\w@])@{re.escape(p['external_id'])}(?![\w-])", body):
                 mentions.append({**p, "as": p["external_id"]})
-        for g in re.findall(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", body, re.I):
+        for g in re.findall(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", body, re.IGNORECASE):
             for p in self.principals.values():
                 if p["id"] != pid and p["identity_type"] in GROUPS[g.lower()] and p not in mentions:
                     mentions.append({**p, "as": g.lower()})

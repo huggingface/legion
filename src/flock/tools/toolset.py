@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +89,7 @@ class Toolset:
 
     # ------------------------------------------------------------------ pin file
     def to_json(self) -> dict[str, Any]:
-        d = asdict(self)
-        d.pop("builtin_call", None)
+        d = {f.name: getattr(self, f.name) for f in fields(self) if f.name != "builtin_call"}
         for k in ("dir", "data_dir"):
             d[k] = None if d[k] is None else str(d[k])
         d["tools"] = [asdict(t) for t in self.tools]
