@@ -568,3 +568,40 @@ async def test_removing_final_during_the_final_round_ends_it(sim):
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
     assert st["state"] == "done"
     assert sim.swarm_events()[-1][1]["note"] == "final removed from the spec"
+
+
+async def test_handover_to_the_workers_rolls_back_dropped_rounds(store, clock, tick, tmp_path):
+    """Re-review: capped turn_end with max_rounds 1, round 1 queued for both agents, then
+    max_working removed before any command poll. The queued rounds are dropped, so they were
+    never rounds: the workers start from round 0 and each sends exactly one prompt."""
+    from flock.models import LoopStartCommand
+
+    from .worker_fakes import runtime, until
+
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0, enforce_max_working=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        sim = Sim(store, clock, tick, c)
+        sim.loops = app.state.loops
+        loop = {"prompt": "go {round}", "every": "turn_end", "while": {"max_rounds": 1}}
+        assert (await c.put("/swarms/demo", json=provider_spec(loop, max_working=1))).status_code == 200
+        sim.reconcile()
+        await sim.commands()
+        await sim.heartbeat()
+        sim.tick()
+        assert store.pending_counts("demo") == {A0: 1, A1: 1}  # round 1 queued, not yet polled
+        assert (await c.put("/swarms/demo", json=provider_spec(loop))).status_code == 200
+        sim.tick()
+        assert store.pending_counts("demo") == {}
+        starts = {x["agent"]: x for x in await sim.commands()}
+        assert {x["kind"] for x in starts.values()} == {"loop_start"}
+        assert {(x["meta"]["round"], x["max_rounds"]) for x in starts.values()} == {(0, 1)}
+        st = (await c.get("/swarms/demo/loop")).json()[0]
+        assert (st["mode"], st["rounds_total"], st["agents_done"]) == ("worker", 0, 0)
+
+        rt, ad = runtime(tmp_path, A0, idle_grace="5s")  # the worker side of that command
+        await rt.setup(restore=False)
+        rt.start_loop(LoopStartCommand.model_validate(starts[A0]))
+        await until(lambda: [e for e in list(rt.outbox._q) if e.type == "loop_stopped"], timeout=5)
+        assert ad.sent == ["go 1"]
+        await rt.stop()

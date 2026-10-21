@@ -104,7 +104,9 @@ every turn is admitted under the provider's `max_working` like any other prompt.
 **Rounds.** A round is one loop prompt to one agent. The counter is per agent; `max_rounds`
 counts loop prompts (not `first`, not the final prompt, wake-ups included). In controller mode
 an agent leaves the loop at `max_rounds` only once its last round's turn ended, so a queued
-round is never dropped.
+round is never dropped. When the controller does drop undelivered loop prompts (a loop stop, a
+handover to the workers, the budget stop) their rounds are taken back: only delivered prompts
+count.
 
 **Stopping.** The loop stops when a type-wide condition fails (`until`, `budget_usd`, the
 budget threshold), when every agent has left it (`max_rounds`, `agent_usd`, `idle_rounds`,
@@ -149,7 +151,9 @@ and worker-side loops get a fresh `loop_start` with the new prompt and limits (`
 event). The mode is recomputed on every tick from `every` and the provider's `max_working`, so a
 re-apply can move the cadence: worker to controller sends `loop_stop {reason: mode_change}` and
 the controller prompts an agent only after its worker confirmed (or 60 s passed); controller to
-worker drops the type's queued loop prompts before the `loop_start`s go out. Removing `final`
+worker drops the type's queued loop prompts before the `loop_start`s go out, and since they
+were never delivered their rounds are taken back, so the `loop_start` carries the rounds actually
+sent. Removing `final`
 while the final round is in flight ends it (`final_done`, note "final removed from the spec").
 A stopped loop stays stopped until `flock loop --start`. `limits.budget_usd` is live too.
 

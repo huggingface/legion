@@ -336,7 +336,7 @@ class LoopEngine:
                     self._stop(spec.swarm, type_name, ts, L, "budget", final=False, now=now)
                 elif L["state"] == "final":
                     self._finish(spec.swarm, type_name, L, now, "budget exhausted")
-            dropped = self.store.drop_prompts(spec.swarm)
+            dropped = self._drop(spec.swarm)
             stopped = 0
             for a in self.store.list_agents(spec.swarm):
                 if a["worker"] and not a["removing"]:
@@ -352,7 +352,7 @@ class LoopEngine:
                 "threshold_usd": round(budget - reserve, 6)})
             self.store.put_swarm_flags(spec.swarm, {"budget_stop": "final_reserve",
                                                     "budget_usd": budget, "at": now})
-            dropped = self.store.drop_prompts(spec.swarm)
+            dropped = self._drop(spec.swarm)
             for type_name, L in loops.items():
                 ts = spec.types.get(type_name)
                 if ts is not None and L["state"] == "running":
@@ -361,6 +361,38 @@ class LoopEngine:
                         "stopped, %d prompts dropped", spec.swarm, budget, reserve, cost, dropped)
             return "final_reserve"
         return phase
+
+    def _drop(self, swarm: str, type_name: str | None = None) -> int:
+        """Drop undelivered prompts: every prompt of the swarm, or the loop prompts of one
+        type. A dropped loop prompt was never a round (docs/loop.md: a round is one prompt to
+        one agent), so its agent's counters go back to before it was queued."""
+        out: list[tuple[str, str]] = []
+        keep = None if type_name is None else (lambda b: not _is_loop_body(b))
+        n = self.store.drop_prompts(swarm, keep=keep, type_name=type_name, dropped=out)
+        for agent, body in out:
+            try:
+                meta = json.loads(body).get("loop") or {}
+            except ValueError:
+                continue
+            st = self.store.get_loop_agent(agent)
+            if st is None or not meta:
+                continue
+            kind, rnd = meta.get("kind"), meta.get("round")
+            if kind == "loop" and isinstance(rnd, int):
+                st["rounds"] = min(st["rounds"], max(0, rnd - 1))
+                st["last_sent"], st["turn_done"] = None, True
+                if st["phase"] == "done" and st["done_reason"] == "max_rounds":
+                    st["phase"], st["done_reason"] = "looping", None
+            elif kind == "first" and st["phase"] == "first":
+                st["phase"], st["first_delivered"], st["last_activity"] = "new", False, None
+            elif kind == "final" and st["final"] == "sent":
+                st["final"], st["final_sent"] = None, None
+            else:
+                continue
+            a = self.store.get_agent(agent)
+            if a is not None:
+                self.store.put_loop_agent(agent, a["swarm"], a["type"], st)
+        return n
 
     def _keep_stopped(self, spec: SwarmSpec, now: float) -> None:
         """Hard-stopped: any agent seen working again (a relaunched worker, a stop that never
@@ -431,8 +463,7 @@ class LoopEngine:
                 st["wstarted"], st["turn_done"], st["last_sent"] = None, True, now
                 self.store.put_loop_agent(a["name"], spec.swarm, type_name, st)
         elif old == "controller" and new == "worker":
-            self.store.drop_prompts(spec.swarm, keep=lambda b: not _is_loop_body(b),
-                                    type_name=type_name)
+            self._drop(spec.swarm, type_name)
         elif new == "worker":
             for a in self.store.list_agents(spec.swarm, type_name):
                 st = self.store.get_loop_agent(a["name"])
@@ -443,8 +474,7 @@ class LoopEngine:
     def _stop(self, swarm: str, type_name: str, ts: TypeSpec, L: dict, reason: str, *,
               final: bool, now: float) -> None:
         L["stopped_at"], L["reason"] = now, reason
-        dropped = self.store.drop_prompts(swarm, keep=lambda b: not _is_loop_body(b),
-                                          type_name=type_name)
+        dropped = self._drop(swarm, type_name)
         rounds = [st["rounds"] for st in self.store.loop_agents(swarm, type_name).values()]
         self._event(swarm, "loop_stopped", {"type": type_name, "reason": reason,
                                             "rounds_total": sum(rounds), "dropped": dropped})

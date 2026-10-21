@@ -653,18 +653,22 @@ class Store:
             marks = ",".join("?" * len(ids))
             self._x(f"DELETE FROM pending_prompts WHERE id IN ({marks})", ids)
 
-    def drop_prompts(self, swarm: str, keep=None, type_name: str | None = None) -> int:
+    def drop_prompts(self, swarm: str, keep=None, type_name: str | None = None,
+                     dropped: list[tuple[str, str]] | None = None) -> int:
         """Delete the swarm's pending prompts (of one type, if given), except those whose body
-        `keep(body)` says to keep. Returns how many were dropped."""
-        sql = ("SELECT p.id, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
+        `keep(body)` says to keep. Returns how many were dropped; `dropped` collects their
+        (agent, body)."""
+        sql = ("SELECT p.id, p.agent, p.body FROM pending_prompts p JOIN agents a ON a.name = p.agent "
                "WHERE a.swarm = ?")
         args: list[Any] = [swarm]
         if type_name is not None:
             sql += " AND a.type = ?"
             args.append(type_name)
-        ids = [r["id"] for r in self._q(sql, args) if keep is None or not keep(r["body"])]
-        self.delete_prompts(ids)
-        return len(ids)
+        rows = [r for r in self._q(sql, args) if keep is None or not keep(r["body"])]
+        self.delete_prompts([r["id"] for r in rows])
+        if dropped is not None:
+            dropped.extend((r["agent"], r["body"]) for r in rows)
+        return len(rows)
 
     def pending_counts(self, swarm: str | None = None) -> dict[str, int]:
         sql = "SELECT p.agent, COUNT(*) AS n FROM pending_prompts p"
