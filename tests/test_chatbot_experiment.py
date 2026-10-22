@@ -249,7 +249,8 @@ def test_chatbot_experiment_dry_run(tmp_path, fakes):
     systems = [r["messages"][0]["content"] for r in reqs]
     assert any("## World: chatbot (version 0.1.0-teams)" in s and "You are on TEAM A" in s
                for s in systems)
-    assert any("Team B's direction" in s for s in systems)
+    assert any("TEAM B" in s and "Your team chooses its own direction" in s for s in systems)
+    assert not any("persona + small" in s or "intent-driven" in s for s in systems)
     assert any("## World: chatbot (version 0.1.0-merged)" in s and "PHASE 2" in s
                and "Merged team rules" in s for s in systems)
     users = [json.dumps(r["messages"]) for r in reqs]
@@ -307,8 +308,11 @@ def test_phase2_spec_changes_only_prompts():
         "interviewer-strong"].system_prompt
     assert {n: (r.types, r.max) for n, r in one.spawn.items()} == {
         t: (["interviewer-mid", "interviewer-strong"], 2) for t in ("ds-a", "glm-a", "ds-b", "glm-b")}
-    assert (one.limits.budget_usd, one.limits.spawned_total) == (100, 64)
-    assert one.types["ds-a"].loop.while_.agent_usd == {"deepseek": 10.0, "glm": 6.0}
+    assert (one.limits.budget_usd, one.limits.spawned_total) == (150, 64)
+    assert {t.loop.while_.agent_usd for t in one.types.values() if t.loop} == {16.0}
+    assert {t.max_budget_usd for n, t in one.types.items() if not t.loop} == {0.15}
+    kickoff = one.comms.kickoff
+    assert "persona" not in kickoff and "intent" not in kickoff and "[direction]" in kickoff
     lp = one.types["glm-b"].loop
     assert (lp.every, lp.stagger, lp.while_.until) == ("90s", "4s", "4h")
     assert one.world.token_env == "CHATBOT_WORLD_TOKEN"
@@ -348,7 +352,7 @@ def test_job_scripts_parse():
         assert os.access(f, os.X_OK), f
 
 
-def _job(tmp_path, model_url, board, board_url, variant: str = "one") -> tuple[
+def _job(tmp_path, model_url, board, board_url, variant: str = "one", **extra: str) -> tuple[
         subprocess.Popen, dict, Path]:
     """The job's bootstrap.sh, run locally: CHATBOT_PREINSTALLED (this flock), a directory as
     the bucket, its payload (repo.tar.gz) made from this checkout with the fakes in the specs.
@@ -382,7 +386,7 @@ def _job(tmp_path, model_url, board, board_url, variant: str = "one") -> tuple[
            "CHATBOT_BOARD_INVITE": board.invite, "CHATBOT_WORLD_TOKEN": "w0rld-t0ken",
            "CHATBOT_SYNC_S": "3", "CHATBOT_CHECK_S": "1", "CHATBOT_TICK_S": "1",
            "CHATBOT_FLOCK_ARGS": "--skip-preflight", "CHATBOT_VARIANT": variant,
-           "CHATBOT_CHANNEL_B": "chatbot-b"}
+           "CHATBOT_CHANNEL_B": "chatbot-b", **extra}
     out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
     proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
                             stdout=out, stderr=subprocess.STDOUT, text=True,

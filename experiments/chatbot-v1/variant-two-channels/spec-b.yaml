@@ -62,18 +62,15 @@ types:
     loop:
       first: "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n\
         2. If you are ds-b-0000: call `post` with thread \"new\" and this text, then go to step 3:\n \
-        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001): intent-driven dialogue\
-        \ with topic threads and follow-up questions. No lead: propose a [split] here, answer with agree\
-        \ <id>.\"\n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
+        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree\
+        \ on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>.\"\
+        \n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
       prompt_file: ../prompts/round-b.md
       every: 90s
       stagger: 4s
       'on': [comms.mention, comms.thread]
       wake: {min_gap: 30s, max: 10}
-      while:
-        until: 4h
-        max_rounds: 200
-        agent_usd: {deepseek: 10.0, glm: 6.0}
+      while: {until: 4h, max_rounds: 200, agent_usd: 16.0}
       final: {prompt_file: ../prompts/final.md, reserve_usd: 0.3}
   glm-b:
     harness: llm
@@ -94,18 +91,15 @@ types:
     loop:
       first: "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n\
         2. If you are ds-b-0000: call `post` with thread \"new\" and this text, then go to step 3:\n \
-        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001): intent-driven dialogue\
-        \ with topic threads and follow-up questions. No lead: propose a [split] here, answer with agree\
-        \ <id>.\"\n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
+        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree\
+        \ on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>.\"\
+        \n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
       prompt_file: ../prompts/round-b.md
       every: 90s
       stagger: 4s
       'on': [comms.mention, comms.thread]
       wake: {min_gap: 30s, max: 10}
-      while:
-        until: 4h
-        max_rounds: 200
-        agent_usd: {deepseek: 10.0, glm: 6.0}
+      while: {until: 4h, max_rounds: 200, agent_usd: 16.0}
       final: {prompt_file: ../prompts/final.md, reserve_usd: 0.3}
   interviewer-mid:
     harness: llm
@@ -141,4 +135,4 @@ spawn:
     max: 2
     depth: 1
   glm-b: *id001
-limits: {budget_usd: 50.0, spawned_total: 32}
+limits: {budget_usd: 75.0, spawned_total: 32}

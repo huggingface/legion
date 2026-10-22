@@ -5,10 +5,12 @@ talk, explicitly not a therapist or ELIZA reflection. The agents are 4 DeepSeek-
 4 GLM-5.3-Flash on the HF router.
 
 - **Phase 1 (0-2 h): two teams of four, apart.**
-  - Team A is `ds-a` ×2 and `glm-a` ×2. Its direction: a persona plus a small-talk engine
-    with memory of the user.
-  - Team B is `ds-b` ×2 and `glm-b` ×2. Its direction: intent-driven dialogue with topic
-    threads and follow-up questions.
+  - Team A is `ds-a` ×2 and `glm-a` ×2; team B is `ds-b` ×2 and `glm-b` ×2.
+  - Nobody sets the teams' directions. In its first minutes each team agrees on its own
+    direction in its own thread: one `[direction?]` proposal, the others agree or amend, then
+    a one-line `[direction] Team A: ...` post. The two directions must differ.
+  - The fixed constraints: a conversational, natural chatbot, not a therapist or ELIZA
+    reflection, pure Python stdlib, stdin/stdout.
   - There is no lead. Each team organises itself in its own board thread.
 - **Phase 2 (2-4 h): one team of eight.** After the operator's switch, everything is readable,
   `promote_best` opens, and all 8 build `best/bot.py`. A final round ends the run with
@@ -27,10 +29,10 @@ the spawn policy are this folder's specs. There is no loop code.
 |---|---|
 | `spec.yaml` | phase 1: models, world, comms, 4 team types + 2 interviewer types, loops, spawn, budget |
 | `phase2/spec.yaml` | phase 2: the same spec with the phase-2 prompts (a test checks that only prompts differ) |
-| `prompts/system-{a,b}.md`, `round-{a,b}.md`, `final.md` | phase-1 team prompts (directions, round steps, final verdict) |
+| `prompts/system-{a,b}.md`, `round-{a,b}.md`, `final.md` | phase-1 team prompts (the task, how to choose a direction, round steps, final verdict) |
 | `prompts/kickoff.md` | posted once by the host when the run starts |
 | `prompts/interviewer.md` | the interviewers' system prompt |
-| `protocols/team.md`, `protocols/chatbot.md` | phase-1 rules: own thread, leaderless splits, review by talking |
+| `protocols/team.md`, `protocols/chatbot.md` | phase-1 rules: own thread, the team's own direction, leaderless splits, review by talking |
 | `phase2/system.md`, `round.md`, `final.md`, `protocol.md` | phase-2 prompts and the merged-team rules |
 | `tools/interview.py` | `spawn_interviewer`: the team agents' spawn tool (flock spawn through the controller API) |
 | `job/bootstrap.sh`, `job/switch.sh`, `job/launch.sh` | the HF Job: container entrypoint, phase switch, payload upload |
@@ -113,14 +115,16 @@ Caps:
 In phase 1 the cross-team rule applies to interviewers too: team A's interviewer cannot reach
 `teams/b/`.
 
-## Budget (placeholders, one place each in `spec.yaml`)
+## Budget (one place each in `spec.yaml`; pending the operator's ok)
 
-- **Per team agent:** `while.agent_usd: {deepseek: 10.00, glm: 6.00}` in `loop: &loop-a`.
-  Every team type inherits it.
+- **Per team agent:** `while.agent_usd: 16.00`, for every team type (set once, in
+  `loop: &loop-a`).
 - **Per interviewer:** `max_budget_usd: 0.15` on `&interviewer`.
-- **Total:** `limits.budget_usd: 100`, the hard stop. The loops stop at $98.80 to leave the
+- **Total:** `limits.budget_usd: 150`, the hard stop. The loops stop at $148.80 to leave the
   4 final rounds their $0.30 reserve each.
 - **Per prompt:** `max_budget_usd: 0.20` for team agents.
+- **Expected spend:** the smoke job spent about $0.06 per agent per round, so expect roughly
+  $55-70 at the 90 s cadence; 8 × $16 = $128 is the most the team agents can spend.
 
 ## Run it locally
 
@@ -252,7 +256,7 @@ What changes:
   - In phase 2, `phase2/spec-b.yaml` moves team B to the main channel.
   - When B moves, its host posts `kickoff-b-joins.md` there once.
 - **Runs and budget.** There are two `flock run`s, each with its own data dir (`.flock-a`,
-  `.flock-b`), bundle and budget: $50 each, `spawned_total` 32 each.
+  `.flock-b`), bundle and budget: $75 each, `spawned_total` 32 each.
 - **The switch** is one merge plus two updates (`job/switch.sh` with
   `CHATBOT_VARIANT=two-channels`).
 

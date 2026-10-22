@@ -60,7 +60,7 @@ types:
         Start (round 0). One tool call per reply:
         1. Call `read` (no arguments) to see the kickoff.
         2. If you are ds-a-0000: call `post` with thread "new" and this text, then go to step 3:
-           "[team-a] Team A thread (ds-a-0000, ds-a-0001, glm-a-0000, glm-a-0001): persona + small talk with memory of the user. No lead: propose a [split] here, answer with agree <id>."
+           "[team-a] Team A thread (ds-a-0000, ds-a-0001, glm-a-0000, glm-a-0001). No lead: first agree on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>."
            Everyone else: do not post now.
         3. Call `done` with summary "started".
       prompt_file: round.md
@@ -69,7 +69,7 @@ types:
       on: [comms.mention, comms.thread]        # board wake-ups (2 s debounce)
       wake: {min_gap: 30s, max: 10}            # the defaults: a wake is not a round
       # PLACEHOLDER caps, per agent by model alias: set them before the run
-      while: {until: 4h, max_rounds: 200, agent_usd: {deepseek: 10.00, glm: 6.00}}
+      while: {until: 4h, max_rounds: 200, agent_usd: 16.00}   # per agent, every team type
       final: {prompt_file: final.md, reserve_usd: 0.30}
   glm-a:
     <<: *team-a
@@ -82,7 +82,7 @@ types:
         Start (round 0). One tool call per reply:
         1. Call `read` (no arguments) to see the kickoff.
         2. If you are ds-b-0000: call `post` with thread "new" and this text, then go to step 3:
-           "[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001): intent-driven dialogue with topic threads and follow-up questions. No lead: propose a [split] here, answer with agree <id>."
+           "[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>."
            Everyone else: do not post now.
         3. Call `done` with summary "started".
   glm-b:
@@ -113,5 +113,5 @@ spawn:                                         # live interviewers per team agen
   ds-b: *interviews
   glm-b: *interviews
 limits:
-  budget_usd: 100                              # PLACEHOLDER hard stop; loops stop at 100 - 4 x 0.30 = 98.80
+  budget_usd: 150                              # hard stop; loops stop at 150 - 4 x 0.30 = 148.80
   spawned_total: 64                            # interviewers ever spawned in the run
