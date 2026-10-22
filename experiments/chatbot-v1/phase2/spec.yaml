@@ -67,7 +67,7 @@ types:
       every: 90s
       stagger: 4s
       on: [comms.mention, comms.thread]        # board wake-ups (2 s debounce)
-      wake: {min_gap: 30s, max: 6, window: 30m}  # at most 6 wake prompts per agent per 30 min
+      wake: {min_gap: 30s, max: 3, window: 30m}  # at most 3 wake prompts per agent per 30 min
       # PLACEHOLDER caps, per agent by model alias: set them before the run
       while: {until: 4h, max_rounds: 200, agent_usd: 16.00}   # per agent, every team type
       final: {prompt_file: final.md, reserve_usd: 0.30}
