@@ -803,8 +803,13 @@ class LLMAdapter:
             blocks.append({"type": "thinking", "thinking": thinking})
         if isinstance(content, str) and content:
             blocks.append({"type": "text", "text": content})
+        # `readonly` from the turn's pinned tools (the version that runs the call), for the
+        # worker's `state_calls` (loop `idle_rounds`, docs/loop.md)
+        folder = self.folder_tools
         blocks += [{"type": "toolCall", "id": c["id"], "name": c["name"],
-                    "arguments": c["arguments"] if isinstance(c["arguments"], dict) else {}} for c in calls]
+                    "arguments": c["arguments"] if isinstance(c["arguments"], dict) else {},
+                    **({"readonly": True} if folder is not None and (t := folder.get(c["name"]))
+                       is not None and t.readonly else {})} for c in calls]
         r = self._spec.resolved_model if self._spec else None
         pi_msg = {"role": "assistant", "content": blocks, "api": "openai-completions",
                   "provider": r.provider_name if r else None, "model": model, "usage": pi_usage(usage),

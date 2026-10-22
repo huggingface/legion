@@ -117,7 +117,7 @@ async def test_duration_loop_first_rounds_then_final(sim):
     assert list(r1) == [A0] and r1[A0]["text"] == "round {round}"  # rendered on the worker
     assert r1[A0]["loop"] | {"started_at": None} == {
         "kind": "loop", "type": "researcher", "round": 1, "started_at": None, "wall_s": None,
-        "cap_usd": None, "why": "start", "add_tools": [], "counted": True}
+        "cap_usd": None, "why": "start", "add_tools": [], "counted": True, "wake": False}
     await sim.turn(A1, got[A1])
     await sim.turn(A0, r1[A0])
     sim.tick(10)
@@ -874,3 +874,34 @@ async def test_finished_agents_leave_only_under_stop_when(sim, monkeypatch):
     sim.tick()
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
     assert (st["state"], st["reason"]) == ("final", "done")
+
+
+@pytest.mark.parametrize("how", ["deferred", "dropped"])
+async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
+    """Review of #19: with `counts_as_round: true` and `wake.max: 1`, a wake prompt the worker
+    deferred, or one dropped while still queued, gives back both its round and its wake, so
+    the next wake is accepted and is round 2 again."""
+    await sim.apply({"prompt": "round {round}", "every": "100s", "on": ["comms.mention"],
+                     "wake": {"max": 1, "counts_as_round": True}})
+    await sim.heartbeat()
+    sim.tick()
+    for a, p in prompts(await sim.commands()).items():
+        await sim.turn(a, p)
+    sim.clock.advance(50)
+    await sim.heartbeat()
+    assert sim.loops.wake(A0, "comms.mention")
+    sim.tick(2.1)
+    if how == "deferred":
+        w = prompts(await sim.commands())[A0]["loop"]
+        assert (w["round"], w["counted"], w["wake"]) == (2, True, True)
+        await sim.events(A0, ("loop_prompt", w), ("prompt_deferred", {
+            "reason": "draining", "loop": {"kind": "loop", "round": 2, "wake": True}}))
+    else:  # still queued for the worker when the loop drops its prompts
+        with sim.loops._lock:
+            assert sim.loops._drop("demo", "researcher") == 1
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
+    assert (st["rounds"], st["wakes"]) == (1, 0)
+    assert sim.loops.wake(A0, "comms.mention")  # the allowance is back
+    sim.tick(2.1)
+    w = prompts(await sim.commands())[A0]["loop"]
+    assert (w["round"], w["why"], w["wake"]) == (2, "wake: comms.mention", True)

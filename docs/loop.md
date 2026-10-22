@@ -62,7 +62,7 @@ limits:
 | `context` | per-prompt context sources (`world.state`, `comms.recent:20`, `artifacts.recent:15`): accepted by the model, refused at apply until their feeders exist |
 | `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
 | `while.max_rounds`, `while.agent_usd`, `while.idle_rounds` | per agent: the agent leaves the loop; when every agent has left, the loop stops |
-| `while.idle_rounds` | a loop turn is idle when it made no state-changing call. Not state-changing: `done`, the comms `read` and `search` tools, and folder tools marked read-only (`@flock.tools.readonly`, `readonly: true` in the manifest; docs/tools.md). Everything else counts, `bash` included, so with a CLI harness (tools through `flock-tool` in its shell) every call counts |
+| `while.idle_rounds` | a loop turn is idle when it made no state-changing call. Not state-changing: `done`, the comms `read` and `search` tools, and folder tools marked read-only (`@flock.tools.readonly`, `readonly: true` in the manifest; docs/tools.md). Everything else counts, `bash` included, so with a CLI harness (tools through `flock-tool` in its shell) every call counts. The `llm` harness marks each call `readonly` from the tools version pinned for the turn (the one that ran it), so a re-apply mid-turn does not change the count |
 | `final.prompt` / `prompt_file` | sent once to every live agent when the loop stops (any reason except `flock loop --stop --no-final` and the hard budget stop) |
 | `final.reserve_usd` | subtracted from `limits.budget_usd` to get the point where loops stop; summed over the types that have a final round |
 | `final.add_tools` | tool names the final round unlocks; carried in the final prompt's `LoopMeta` and its events for the tools layer to honour (not enforced here) |
@@ -191,8 +191,9 @@ caps the wakes. A wake is accepted only for an agent in a running loop whose `on
 reason (or its prefix before `:`, so `comms.mention:42` matches `comms.mention`), under
 `wake.max`, and never in a swarm stopped by the hard budget stop; wakes for an agent that is
 working wait until it is idle and then give one prompt. A cadence prompt that goes out first
-takes the queued wakes with it. A wake prompt a worker defers is taken back from the wake count
-(and is not sent again).
+takes the queued wakes with it. A wake prompt a worker defers, or one dropped while still
+queued, is taken back from the wake count, and from the round count when it counted one
+(`LoopMeta.wake` marks it either way); it is not sent again as a wake.
 
 Why: in a thread of five agents each reply woke the four others, and each wake was a full round,
 so `max_rounds` went on board chatter in minutes. With the defaults one agent gets at most one
@@ -223,7 +224,7 @@ prompt outside the round count has `counted: false` in its `loop_prompt`. The co
 ### Commands and API
 
 - `PromptCommand.loop: LoopMeta` (new, optional, omitted from the wire when unset): `text` is a
-  template; `LoopMeta {kind, type, round, started_at, wall_s, cap_usd, why, add_tools, counted}` is what
+  template; `LoopMeta {kind, type, round, started_at, wall_s, cap_usd, why, add_tools, counted, wake}` is what
   the worker renders it with. `round: null` lets the worker number it.
 - `LoopStartCommand {agent, text, meta, max_rounds, deadline, run}` and `LoopStopCommand {agent,
   reason}`: worker-side `turn_end`. `run` names one run of the loop: a new run (after `flock

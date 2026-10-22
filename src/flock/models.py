@@ -1116,6 +1116,7 @@ class LoopMeta(BaseModel):
     # False: a wake prompt outside `max_rounds` (`wake.counts_as_round: false`); it carries the
     # current round and does not advance the worker's round counter
     counted: bool = True
+    wake: bool = False  # a wake prompt (`on:`), counted or not: a deferral gives back its wake
     add_tools: list[str] = Field(default_factory=list)  # final round: tools it unlocks
 
 
