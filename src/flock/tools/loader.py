@@ -47,6 +47,8 @@ class ToolDef:
     function: str
     ctx: str | None = None  # the parameter that receives the Context, if any
     is_async: bool = False
+    # A built-in served by the worker itself, not the folder (`comms:post`, docs/comms.md).
+    builtin: str | None = None
 
     def openai(self) -> dict[str, Any]:
         """The Chat Completions function tool."""

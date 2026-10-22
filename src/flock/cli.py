@@ -250,6 +250,19 @@ def load_spec(spec_file: str) -> SwarmSpec:
             _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
             if ts.loop.final is not None:
                 _inline(path.parent, ts.loop.final, "prompt_file", "prompt", f"type {name}: loop.final")
+    c = spec.comms
+    if c is not None:  # kickoff and protocol files, next to the spec (docs/comms.md)
+        def read(rel: str, what: str) -> str:
+            src = Path(rel)
+            src = src if src.is_absolute() else path.parent / src
+            if not src.is_file():
+                typer.echo(f"comms.{what}: {src} not found", err=True)
+                raise typer.Exit(1)
+            return src.read_text(encoding="utf-8")
+
+        if c.kickoff_file:
+            c.kickoff = read(c.kickoff_file, "kickoff_file")
+        c.protocols_text = [read(f, "protocols") for f in c.protocols]
     return spec
 
 
