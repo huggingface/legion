@@ -299,8 +299,8 @@ def test_phase2_spec_changes_only_prompts():
     assert [t.replicas for t in one.types.values()] == [2, 2, 2, 2, 0, 0]
     assert {n: t.model for n, t in one.types.items()} == {
         "ds-a": "deepseek", "glm-a": "glm", "ds-b": "deepseek", "glm-b": "glm",
-        "interviewer-mid": "qwen9b", "interviewer-strong": "glm"}
-    assert one.models["qwen9b"].model == "hf:Qwen/Qwen3.5-9B"
+        "interviewer-mid": "qwen9b", "interviewer-strong": "deepseek"}
+    assert one.models["qwen9b"].model == "hf:Qwen/Qwen3.5-9B:deepinfra"
     assert {t.system_prompt_file for t in two.types.values()} == {
         "system.md", "../prompts/interviewer.md"}
     assert one.types["interviewer-strong"].system_prompt == two.types[

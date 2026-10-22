@@ -13,7 +13,7 @@ talk, explicitly not a therapist or ELIZA reflection. The agents are 4 DeepSeek-
 - **Phase 2 (2-4 h): one team of eight.** After the operator's switch, everything is readable,
   `promote_best` opens, and all 8 build `best/bot.py`. A final round ends the run with
   GREEN/RED verdicts.
-- **Interviews.** A team can spawn a short-lived interviewer (a 9B model or a flash model).
+- **Interviews.** A team can spawn a short-lived interviewer (Qwen3.5-9B or DeepSeek-V4.1-Flash).
   The interviewer chats with a candidate bot and judges whether it talked to an AI agent or
   to a script. The team's goal is to be taken for an agent.
 
@@ -74,9 +74,9 @@ What the phase changes:
    empty or repeated reply. There is no quality score. If the bot passes, the world records
    the file's hash in `qualified.json`. The result shows what failed and the team's quota.
 2. **The agent calls `spawn_interviewer(level, path, thread)`** (`tools/interview.py`).
-   - `level` is `mid` (`interviewer-mid`, Qwen/Qwen3.5-9B) or `strong` (`interviewer-strong`,
-     GLM-5.3-Flash). To use DeepSeek instead, change `model: glm` on that type to `deepseek`
-     (one line).
+   - `level` is `mid` (`interviewer-mid`, Qwen/Qwen3.5-9B on deepinfra) or `strong`
+     (`interviewer-strong`, DeepSeek-V4.1-Flash). To use GLM-5.3-Flash instead, change
+     `model: deepseek` on that type to `glm` (one line).
    - The tool spawns the child through the controller API with the agent's own token
      (`POST /agents/<me>/spawn`).
    - It waits until the child's worker reports the child, then sends the prompt (the

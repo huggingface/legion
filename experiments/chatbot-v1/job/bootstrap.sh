@@ -8,6 +8,7 @@
 #          CHATBOT_SYNC_S   seconds between bucket syncs (default 300)
 #          CHATBOT_CHECK_S  seconds between looks for the control marker (default 30)
 #          CHATBOT_FLOCK_ARGS  extra `flock run` flags (e.g. --skip-preflight)
+#          CHATBOT_SMOKE=1  a short run: job/smoke.json's loop and budget on every rendered spec
 #          CHATBOT_SWITCH_AT  optional: seconds after start for the phase switch (else: the
 #                           control marker <bucket>/control/switch, uploaded by the operator)
 # secrets: HF_TOKEN (router + bucket), CHATBOT_BOARD_INVITE, CHATBOT_WORLD_TOKEN
@@ -23,7 +24,7 @@ SYNC_S=${CHATBOT_SYNC_S:-300}
 export PYTHON=${PYTHON:-python3} CHATBOT_VARIANT=$VARIANT CHATBOT_WS=$H/ws CHATBOT_BUCKET=$B
 t0=$(date +%s)
 mkdir -p "$H/logs"
-log() { echo "bootstrap $(($(date +%s) - t0))s: $*"; }
+log() { echo "bootstrap $(date -u +%H:%M:%S) +$(($(date +%s) - t0))s: $*" | tee -a "$H/logs/bootstrap.log"; }
 
 remote() { [[ $1 == hf://* || $2 == hf://* ]]; }
 pull() { if remote "$1" "$2"; then hf buckets sync "$1" "$2" -q >/dev/null; else mkdir -p "$2"; cp -a "$1/." "$2/"; fi; }
@@ -51,6 +52,25 @@ for f in spec.yaml phase2/spec.yaml variant-two-channels/spec-a.yaml variant-two
       -e "s|your-team-b-channel|${CHATBOT_CHANNEL_B:-your-team-b-channel}|" \
       -e "s|your-chatbot-channel|$CHATBOT_CHANNEL|" "$EXP/$f" > "$EXP/${f%.yaml}.local.yaml"
 done
+if [ -n "${CHATBOT_SMOKE:-}" ]; then  # job/smoke.json: rounds, cadence, caps
+  for f in "$EXP"/spec.local.yaml "$EXP"/phase2/spec.local.yaml "$EXP"/variant-two-channels/*.local.yaml \
+           "$EXP"/variant-two-channels/phase2/*.local.yaml; do
+    "$PYTHON" - "$f" "$EXP/job/smoke.json" <<'PY'
+import json, sys, yaml
+from flock.models import load_spec_yaml
+f, o = sys.argv[1], json.load(open(sys.argv[2]))
+d = load_spec_yaml(open(f).read())
+for t in d["types"].values():
+    if t.get("loop"):
+        lp = t["loop"] = {**t["loop"], "every": o["every"]}
+        lp["while"] = {**lp["while"], **o["while"]}
+        lp["final"] = {**lp["final"], "reserve_usd": o["reserve_usd"]}
+d["limits"] = {**d["limits"], **o["limits"]}
+open(f, "w").write(yaml.safe_dump(d, sort_keys=False))
+PY
+  done
+  log "smoke settings: $(cat "$EXP/job/smoke.json" | tr -d '\n ')"
+fi
 log "installed $(flock --help >/dev/null && echo flock) $($PYTHON --version); variant $VARIANT"
 
 PIDS=()
@@ -77,6 +97,16 @@ sync_out() {
   for d in "${RUNS[@]}"; do [ -d "$d" ] && { push "$d" "$B/flock/$(basename "$d")" || log "sync $d failed"; }; done
   push "$H/logs" "$B/logs" || log "sync logs failed"
 }
+report() {  # flock's start lines and its latest status line, into the job log
+  for o in "$H"/logs/run*.out; do
+    [ -f "$o" ] || continue
+    local n; n=$(wc -l < "$o"); local k="seen_${o//[^a-z]/_}"; local s=${!k:-0}
+    [ "$n" -gt "$s" ] && tail -n +"$((s + 1))" "$o" | head -n "$((n - s))" | grep -aE \
+      '^(preflight|tools:|apply|prompt to|flock run|stopping|run |bundle:|update:)' | sed "s|^|$(basename "$o"): |" || true
+    printf -v "$k" '%s' "$n"
+    tail -n 30 "$o" | grep -a '^\[' | tail -1 | sed "s|^|$(basename "$o"): |" || true
+  done
+}
 STOP=0
 on_term() { log "stop requested: stopping flock (drain, bundle)"; STOP=1; kill -TERM "${PIDS[@]}" 2>/dev/null || true; }
 trap on_term TERM INT
@@ -101,10 +131,12 @@ while alive; do
     fi
   fi
   if [ "$STOP" = 0 ] && [ $((now - last_sync)) -ge "$SYNC_S" ]; then sync_out; last_sync=$now; fi
+  if [ $((now - ${last_report:-0})) -ge "${CHATBOT_REPORT_S:-60}" ]; then report; last_report=$now; fi
 done
 code=0
 for p in "${PIDS[@]}"; do wait "$p" || code=$?; done
 [ -n "${WORLD:-}" ] && kill -TERM "$WORLD" 2>/dev/null || true
+report
 log "flock exited with $code; final sync"
 sync_out
 log "done"

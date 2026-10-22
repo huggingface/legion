@@ -14,7 +14,7 @@ providers:
     pricing:
       deepseek-ai/DeepSeek-V4.1-Flash-1017:novita: [0.3, 1.2, 0.3]
       zai-org/GLM-5.3-Flash:novita: [0.15, 0.5, 0.15]
-      Qwen/Qwen3.5-9B: [0.1, 0.3, 0.1]
+      Qwen/Qwen3.5-9B:deepinfra: [0.1, 0.15, 0.1]
 models:
   deepseek:
     model: hf:deepseek-ai/DeepSeek-V4.1-Flash-1017:novita
@@ -29,7 +29,7 @@ models:
       temperature: 0.6
       chat_template_kwargs: {enable_thinking: false}
   qwen9b:
-    model: hf:Qwen/Qwen3.5-9B
+    model: hf:Qwen/Qwen3.5-9B:deepinfra
     extra:
       max_tokens: 1024
       temperature: 0.7
@@ -124,7 +124,7 @@ types:
     tool_output_chars: 4000
   interviewer-strong:
     harness: llm
-    model: glm
+    model: deepseek
     replicas: 0
     agents_per_worker: 8
     workers: {initial: 0, max_extra: 2}
