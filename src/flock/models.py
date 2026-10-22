@@ -14,6 +14,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
+from flock.world.protocol import TOOL_NAME_RE as WORLD_TOOL_RE
+from flock.world.protocol import WorldManifest
+
 # --------------------------------------------------------------------------- spec YAML
 
 
@@ -326,6 +329,76 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
     return [t for t in COMMS_TOOLS if t != "comms:search" or comms.search]
 
 
+# --------------------------------------------------------------------------- world (docs/world.md)
+
+
+class WorldSpec(BaseModel):
+    """Swarm-level `world:` (docs/world.md): an HTTP service speaking World API v1 whose tools
+    the agents get. `command` (run in `dir`) is started by the controller as a child process
+    with `compute: local`; `url` names a world already running (required with `compute:
+    hf-jobs`, where starting one is not in this version). `token_env` names the secret sent as
+    `X-World-Token`; a started world without it gets a generated one. `endpoint` and `manifest`
+    are written by the controller at apply."""
+
+    model_config = {"extra": "forbid"}
+
+    dir: str | None = None  # relative to the spec file; `flock apply` / `flock run` resolve it
+    command: list[str] | None = None  # `{port}` and `{python}` are filled in by flock
+    url: str | None = None
+    token_env: str | None = None
+    # Written by the controller at apply; anything given by hand is replaced.
+    endpoint: str | None = None
+    manifest: WorldManifest | None = None
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _command(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            import shlex
+
+            v = shlex.split(v)
+        if v is not None and (not isinstance(v, list) or not v):
+            raise ValueError("command must be a non-empty list (or a string), e.g. "
+                             "[flock, world, serve, \"taskboard:TaskBoard\"]")
+        return [str(x) for x in v] if v is not None else None
+
+    @field_validator("url", "endpoint")
+    @classmethod
+    def _url(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError(f"url {v!r} must start with http:// or https://")
+        return v.rstrip("/") if v else v
+
+    @field_validator("token_env")
+    @classmethod
+    def _env(cls, v: str | None) -> str | None:
+        if v is not None and not ENV_NAME_RE.match(v):
+            raise ValueError(f"token_env {v!r} must be an env var name (the token never goes in "
+                             "the spec)")
+        return v
+
+    @model_validator(mode="after")
+    def _how(self) -> WorldSpec:
+        if self.command is None and self.url is None:
+            raise ValueError("world needs `command` (started by flock, compute: local) or `url` "
+                             "(a world already running)")
+        if self.dir is not None and self.command is None:
+            raise ValueError("world.dir is where `command` runs; give the command too")
+        return self
+
+
+def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
+    """The world tools a type gets (model-visible names): the `world:*` entries of its `tools`,
+    else every tool of the world's manifest; none with `world: false`."""
+    if world is None or ts.world is False:
+        return []
+    listed = ([t.split(":", 1)[1] for t in ts.tools if t.startswith("world:")]
+              if isinstance(ts.tools, list) else [])
+    if listed:
+        return list(dict.fromkeys(listed))
+    return world.manifest.names() if world.manifest is not None else []
+
+
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
@@ -379,17 +452,20 @@ class TypeSpec(BaseModel):
     # Built-in comms tools (docs/comms.md): true gives all of them (`comms:post`, `comms:read`,
     # `comms:search`), or list the ones wanted in `tools`. Needs the swarm-level `comms:`.
     comms: bool | None = None
+    # World tools (docs/world.md): every tool of the swarm's `world:` unless `tools` lists
+    # `world:<name>` entries (then only those); false: none.
+    world: bool | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
     # replaced. None means a harness-native model.
     resolved_model: ResolvedModel | None = None
 
     @property
     def folder_tools(self) -> list[str] | Literal["all"] | None:
-        """`tools` without the built-in `comms:*` entries: what the tools folder must define
-        (None when nothing is left)."""
+        """`tools` without the built-in `comms:*` and the `world:*` entries: what the tools
+        folder must define (None when nothing is left)."""
         if not isinstance(self.tools, list):
             return self.tools
-        names = [t for t in self.tools if not t.startswith("comms:")]
+        names = [t for t in self.tools if not t.startswith(("comms:", "world:"))]
         return names or None
 
     @field_validator("tools")
@@ -400,6 +476,9 @@ class TypeSpec(BaseModel):
             if bad:
                 raise ValueError(f"unknown comms tool(s) {', '.join(bad)}; comms tools: "
                                  f"{', '.join(COMMS_TOOLS)}")
+            bad = [t for t in v if t.startswith("world:") and not WORLD_TOOL_RE.match(t[6:])]
+            if bad:
+                raise ValueError(f"bad world tool name(s) {', '.join(bad)}: world:<tool name>")
         return v
 
     @property
@@ -496,6 +575,8 @@ class SwarmSpec(BaseModel):
     tools_version: str | None = None
     # The team's message board (docs/comms.md); None: no comms.
     comms: CommsSpec | None = None
+    # The swarm's world (docs/world.md); None: no world.
+    world: WorldSpec | None = None
 
     @field_validator("tools_version")
     @classmethod
@@ -572,6 +653,14 @@ class SwarmSpec(BaseModel):
                 raise ValueError(f"types.{name}: comms: false but tools lists {', '.join(listed)}")
             if "comms:search" in listed and self.comms is not None and not self.comms.search:
                 raise ValueError(f"types.{name}.tools: comms:search needs comms.search (board)")
+        for name, ts in self.types.items():  # world tools (docs/world.md)
+            listed = ([t for t in ts.tools if t.startswith("world:")]
+                      if isinstance(ts.tools, list) else [])
+            if (ts.world or listed) and self.world is None:
+                raise ValueError(f"types.{name}: world tools need the swarm-level `world:` block "
+                                 "(command or url)")
+            if ts.world is False and listed:
+                raise ValueError(f"types.{name}: world: false but tools lists {', '.join(listed)}")
         c = self.comms
         if c is not None and c.protocols_text and len(c.protocols_text) != len(c.protocols):
             raise ValueError("comms.protocols_text is written by `flock apply` (one per protocols file)")
@@ -602,6 +691,10 @@ class SwarmSpec(BaseModel):
             if missing:
                 raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
                                  "(or set `compute: local`, docs/local.md)")
+            if self.world is not None and self.world.url is None:
+                raise ValueError("world.url is required for compute hf-jobs: run the world as a "
+                                 "Job or Space and give its url (starting it from `command` is "
+                                 "compute: local only, docs/world.md)")
         return self
 
     @field_validator("spawn")
@@ -984,6 +1077,7 @@ def loop_refusals(spec: SwarmSpec) -> list[str]:
 
 
 CommsSpec.model_rebuild()
+WorldSpec.model_rebuild()
 TypeSpec.model_rebuild()
 SwarmSpec.model_rebuild()
 
@@ -1135,6 +1229,7 @@ class AssignCommand(BaseModel):
     agent_token: str | None = None
     tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
     comms: CommsSpec | None = None  # the swarm's comms block (docs/comms.md), channel resolved
+    world: WorldSpec | None = None  # the swarm's world (docs/world.md), manifest fetched
 
 
 class UnassignCommand(BaseModel):

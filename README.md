@@ -62,6 +62,11 @@ them.
   built-in `post` / `read` / `search` tools; each agent joins under its own name at its
   first prompt, posting rules are enforced before the board is called, one poller per
   worker turns @mentions and thread replies into events. See [docs/comms.md](docs/comms.md).
+- **Worlds (optional):** a `world:` block names an HTTP service holding the swarm's shared state
+  (World API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); its tools reach the
+  agents like folder tools, each call carrying the agent's name. `flock run` starts a local world
+  as a child process; `flock world serve module:Class` serves a `flock.world.World` subclass;
+  `worlds/taskboard` is an example. See [docs/world.md](docs/world.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;

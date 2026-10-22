@@ -6,7 +6,7 @@ controller) on 127.0.0.1 with a generated token; the reconcile loop launches wor
 
     controller/   the controller's SQLite store and raw event streams
     agents/       agent workdirs (WORK_ROOT)     state/   harness state (FLOCK_LLM_HOME)
-    logs/         controller.log, <worker>.log
+    logs/         controller.log, <worker>.log, world-<swarm>.log (a started world)
     run.json      the bundle: spec (secret-looking env values redacted), totals, per agent,
                   each type's loop and the budget
     events.jsonl  every agent's events and the swarm-level ones (loop_*, final_*, budget_*),
@@ -50,6 +50,7 @@ from flock.controller.reconcile import Settings, agent_state, run_reconciler, wo
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
 from flock.models import DrainCommand, SwarmSpec, SwarmStatus, TokenUsage
+from flock.world.host import WorldHost
 
 log = logging.getLogger("flock.run")
 
@@ -489,8 +490,9 @@ async def run_local(opts: RunOptions) -> RunResult:
         await run_reconciler(store, jobs, settings, opts.reconcile_interval,
                              wake=lambda t: notifier.wait("reconcile:", t))
 
+    worlds = WorldHost(log_dir=run_dir / "logs")  # a spec's `world.command` (docs/world.md)
     app = create_app(store, token, background=background, compute="local",
-                     stats=lambda: {"mode": "local", "public_url": url})
+                     stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds)
     server = _Server(app, sock)
     started = datetime.now(UTC)
     t0 = time.monotonic()
@@ -578,6 +580,7 @@ async def run_local(opts: RunOptions) -> RunResult:
                                   ended=datetime.now(UTC), reason=reason, url=url,
                                   tracker=tracker)
         finally:
+            await asyncio.to_thread(worlds.stop_all)  # after the workers, before the server
             # parked long-polls of exited workers are cancelled at shutdown: not an error
             uv_log = logging.getLogger("uvicorn.error")
             level = uv_log.level

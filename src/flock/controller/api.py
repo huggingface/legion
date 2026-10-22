@@ -69,10 +69,13 @@ from flock.models import (
     WorkerStatus,
     comms_tools,
     loop_refusals,
+    world_tools,
 )
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
 from flock.tools.spec import comms_clashes
+from flock.world.host import WorldError, WorldHost
+from flock.world.host import resolve as world_resolve
 
 log = logging.getLogger(__name__)
 # Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
@@ -518,6 +521,8 @@ def create_app(
     loop_interval: float | None = None,
     comms_transport: httpx.BaseTransport | None = None,
     on_comms: Callable[[str, str, dict], None] | None = None,
+    worlds: WorldHost | None = None,
+    world_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -531,8 +536,12 @@ def create_app(
     `comms_transport` lets tests fake the message board (docs/comms.md). Every `comms_mention`
     (reason "mention") and `comms_thread_reply` (reason "thread") event a worker posts goes to
     the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
-    `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer."""
+    `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
+    `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
+    WorldHost logging to the controller's output); they stop with the app or `remove`.
+    `world_transport` lets tests fake a `url` world."""
     secret_source = os.environ if secret_source is None else secret_source
+    worlds = WorldHost() if worlds is None else worlds
     if loop_interval is None:
         loop_interval = float(os.environ.get("FLOCK_LOOP_INTERVAL", "1"))
     if enforce_max_working is None:
@@ -586,6 +595,7 @@ def create_app(
         for t in (task, ticker):
             if t:
                 t.cancel()
+        await asyncio.to_thread(worlds.stop_all)  # started worlds end with the controller
 
     app = FastAPI(title="flock controller", lifespan=lifespan)
     app.state.store, app.state.notifier, app.state.loops = store, notifier, loops
@@ -684,8 +694,23 @@ def create_app(
                           transport=comms_transport)
         except CommsError as e:
             raise HTTPException(400, str(e)) from None
+        try:  # start or reach the world, fetch and check its manifest (docs/world.md)
+            world_resolve(spec, host=worlds, controller_token=token, secrets=secret_source,
+                          folder=lambda t: folder_names(swarm, spec, t),
+                          transport=world_transport)
+        except WorldError as e:
+            raise HTTPException(400, str(e)) from None
         store.put_swarm(spec, clock().timestamp())
+        if spec.world is None or spec.world.endpoint != worlds.url(swarm):
+            worlds.stop(swarm)  # the block went away or now names a url
         return swarm_status(store, spec, clock().timestamp())
+
+    def folder_names(swarm: str, spec: SwarmSpec, type_name: str) -> list[str]:
+        sel = spec.types[type_name].folder_tools
+        if sel != "all":
+            return list(sel or [])
+        b = store.get_tool_bundle(swarm, spec.tools_version, body=False) if spec.tools_version else None
+        return list(b["tools"]) if b else []
 
     def check_tools(swarm: str, spec: SwarmSpec) -> None:
         """The spec's tools bundle was uploaded and has every tool a type selects."""
@@ -765,6 +790,7 @@ def create_app(
     def remove(swarm: str) -> dict:
         spec_or_404(swarm)
         store.set_removing(swarm)
+        worlds.stop(swarm)  # a world flock started ends with its swarm (docs/world.md)
         return {"swarm": swarm, "removing": True}
 
     @api.get("/swarms/{swarm}/agents")
@@ -1226,6 +1252,11 @@ def create_app(
             ts = spec.types.get(w["type"])
             out["comms"] = {**spec.comms.model_dump(mode="json", exclude={"kickoff"}),
                             "tools": comms_tools(ts, spec.comms) if ts else []}
+        if spec is not None and spec.world is not None and w is not None:
+            # the world's manifest, re-fetched at every apply (docs/world.md)
+            ts = spec.types.get(w["type"])
+            out["world"] = {**spec.world.model_dump(mode="json"),
+                            "tools": world_tools(ts, spec.world) if ts else []}
         return out
 
     @api.post("/workers/{worker_id}/events")
