@@ -310,6 +310,15 @@ class Worker:
         return lambda: self.world.toolset_for(
             agent, self.comms.toolset_for(agent, self.tools.current()), self.comms)
 
+    def _world_credential(self) -> None:
+        """The world now belongs to another secret than the one this worker was launched with
+        (a re-apply changed its endpoint or secret): drain, so the controller relaunches the
+        worker with the new one. Until then the hub refuses calls under the new configuration;
+        turns pinned to the old one finish against the old world (docs/world.md)."""
+        if self.world.needs_restart() and not self.draining:
+            log.warning("world credential changed; draining to be relaunched with the new one")
+            self._spawn(self.drain("world credential changed"))
+
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
 
@@ -320,6 +329,7 @@ class Worker:
                 await asyncio.shield(pending)
             self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
             self.world.configure(cmd.world, world_tools(cmd.spec, cmd.world))
+            self._world_credential()
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].spec = cmd.spec
                 self._set_lineage(self.agents[cmd.agent], cmd)
@@ -454,6 +464,7 @@ class Worker:
                 self.tools.want(tools.get("version"), tools.get("select"))
                 self._comms_from(resp.get("comms"))
                 self.world.configure_raw(resp.get("world"))
+                self._world_credential()
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)

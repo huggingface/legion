@@ -55,14 +55,17 @@ carry both, and `compute:` is the only line that changes.
    `FLOCK_WORLD_TOKEN` (the secret) and `FLOCK_SWARM`. It also inherits the controller's
    environment, minus every `FLOCK_*` variable. The controller waits up to 30 s for
    `GET /manifest`. A re-apply keeps the running world unless `command`, `dir`, the secret or a
-   `*.py` file under `dir` changed; then it restarts it. A world that exited is started again.
+   `*.py` file under `dir` changed. In that case the replacement starts next to the running world
+   on another port, and the running world stops only after the replacement passed every check
+   below and the spec was stored. A world that exited is started again.
 2. It calls `GET /manifest` with the secret and validates it: `world_api: v1`, a name, a version,
    unique tool names that are not `bash` or `done`, and object schemas.
 3. It checks the types. Every listed `world:<name>` must exist, and no world tool a type gets may
    share a name with one of its folder or comms tools.
 
-If any step fails, the apply is refused with HTTP 400 and nothing is applied. The message says
-why, for example:
+If any step fails, the apply is refused with HTTP 400 and nothing is applied. A replacement
+that was started is stopped, and the running world and the stored spec stay as they were. The
+message says why, for example:
 
 ```
 world: cannot reach http://127.0.0.1:8770/manifest: ConnectError: [Errno 111] Connection refused
@@ -73,7 +76,9 @@ types.worker.tools: unknown world tool(s) fly; world taskboard has: list_tasks, 
 ```
 
 A started world stops when its swarm is removed (`flock remove`), when its block is removed, and
-at the end of `flock run`, after the workers. Its output goes to
+at the end of `flock run`, after the workers. Stopping sends SIGTERM to the world's whole process
+group (it runs in its own session). After 5 s, SIGKILL goes to whatever is left in the group,
+including helpers that outlived the main process. Its output goes to
 `<run>/logs/world-<swarm>.log` under `flock run`; a standalone local controller lets it inherit
 its own output.
 
@@ -95,9 +100,25 @@ response.
 - **Changes reach the next turn.** A re-apply re-fetches the manifest, and the next turn sees
   the new tools. If the version changed, that turn's World section also carries a note: "the
   world changed since your last turn (version 0.1.0 -> 0.2.0)".
-- **The secret stays in the worker.** The worker gets it as the job secret `FLOCK_WORLD_TOKEN`.
-  It is removed from the harness environment, even if a type lists it in `secrets`, and every
-  tool call is denied it.
+- **A turn is pinned.** A turn keeps the configuration it started with until it ends: the
+  endpoint, the manifest's schemas, the selection, and whether the worker's secret belongs to
+  them. This holds for in-process calls and for `flock-tool` calls through the gateway (the
+  pinned tool names the configuration).
+- **The secret stays in the worker.** The worker gets it as the job secret `FLOCK_WORLD_TOKEN`,
+  which every worker of a swarm with a world receives at launch. It is removed from the harness
+  environment, even if a type lists it in `secrets`, and every tool call is denied it.
+- **One secret per world.** The world block never carries the secret. It names the secret by
+  `credential_origin` and `credential_id`:
+  - `credential_origin` is the endpoint, or `local:<swarm>` for a world flock started, which is
+    always on 127.0.0.1;
+  - `credential_id` is HMAC(secret, origin).
+
+  A worker sends its secret only when its own HMAC for that origin matches. After a re-apply
+  that points the world at another endpoint or secret, the worker's calls under the new
+  configuration are refused ("world ... now uses another secret or endpoint; this worker
+  restarts ..."), and nothing is sent. The worker then drains, and the controller relaunches it
+  with the new secret. Turns pinned to the old configuration finish against the old world.
+  Restarting a started world keeps its origin and secret, so its workers keep running.
 
 ## Protocol: World API v1
 
@@ -192,9 +213,11 @@ curl -s -H 'X-World-Token: dev' -H 'X-Flock-Agent: me' -d '{"args": {"by": 2}}' 
 `$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default `127.0.0.1:8765`, or `--host` / `--port`) and
 requires `$FLOCK_WORLD_TOKEN` (`--token-env NAME` for another variable; `--insecure` for none).
 Synchronous tools and hooks run one at a time, so the world needs no locks of its own;
-`async def` tools run concurrently. A tool that raises anything other than `ToolError` returns
-`{"code": "internal"}` with the exception text. Overriding `manifest()` and `call(tool, args,
-agent)` serves tools that are not methods. It needs the `controller` extra (FastAPI, uvicorn),
+`async def` tools and hooks run concurrently. A tool that raises anything other than `ToolError`
+returns `{"code": "internal"}` with the exception text. Overriding `manifest()` and `call(tool,
+args, agent)` serves tools that are not methods. The server checks each call against
+`manifest()` as served at that moment, so what `GET /manifest` advertises is exactly what
+`POST /tools/<name>` accepts, also after the manifest changes. It needs the `controller` extra (FastAPI, uvicorn),
 which `flock run` needs too.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.

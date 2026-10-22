@@ -701,6 +701,7 @@ def create_app(
         except WorldError as e:
             raise HTTPException(400, str(e)) from None
         store.put_swarm(spec, clock().timestamp())
+        worlds.commit(swarm)  # a replaced world stops only now, after every check passed
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
         return swarm_status(store, spec, clock().timestamp())

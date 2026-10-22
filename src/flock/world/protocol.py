@@ -14,6 +14,8 @@ is pydantic-only, so the worker, the controller and a world written with `flock.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from typing import Any
 
@@ -121,6 +123,13 @@ class WorldManifest(BaseModel):
 
     def get(self, name: str) -> WorldTool | None:
         return next((t for t in self.tools if t.name == name), None)
+
+
+def credential_id(token: str, origin: str) -> str:
+    """Names a (secret, origin) pair without revealing the secret: the controller writes it
+    into the world block, a worker compares it with its own secret's before sending it."""
+    return hmac.new(token.encode(), f"flock-world-credential\0{origin}".encode(),
+                    hashlib.sha256).hexdigest()[:32]
 
 
 def manifest_error(exc: Exception) -> str:

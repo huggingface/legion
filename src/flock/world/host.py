@@ -36,6 +36,7 @@ from flock.world.protocol import (
     TOKEN_ENV,
     TOKEN_HEADER,
     WorldManifest,
+    credential_id,
     manifest_error,
 )
 
@@ -43,7 +44,8 @@ log = logging.getLogger("flock.world")
 
 START_TIMEOUT_S = 30.0
 MANIFEST_TIMEOUT_S = 10.0
-STOP_GRACE_S = 5.0
+STOP_GRACE_S = 5.0  # for the whole process group, then SIGKILL
+KILL_WAIT_S = 2.0
 LOG_TAIL = 1500
 
 
@@ -56,6 +58,15 @@ def derived_token(controller_token: str, swarm: str) -> str:
     token and the swarm, so a relaunched worker and a restarted world agree without storing it."""
     return hmac.new(controller_token.encode(), f"flock-world:{swarm}".encode(),
                     hashlib.sha256).hexdigest()
+
+
+def credential_origin(spec: SwarmSpec, endpoint: str) -> str:
+    """What a world's secret is bound to: the endpoint, or `local:<swarm>` for a world flock
+    starts (every process it starts for the swarm gets the same secret, on 127.0.0.1)."""
+    w = spec.world
+    if w is not None and w.command is not None and spec.compute.kind == "local":
+        return f"local:{spec.swarm}"
+    return endpoint
 
 
 def world_token(spec: SwarmSpec, controller_token: str, secrets: Mapping[str, str]) -> str | None:
@@ -147,14 +158,20 @@ class _Proc:
 
 class WorldHost:
     """The worlds this controller started, one per swarm (`compute: local`). Thread-safe: the
-    API's apply runs in a thread pool."""
+    API's apply runs in a thread pool.
+
+    A changed world is replaced in two steps: `ensure` starts the candidate next to the running
+    one (the incumbent), and only `commit` (after the apply passed every check and was stored)
+    stops the incumbent; `discard` drops a refused candidate and leaves the incumbent as it was."""
 
     def __init__(self, log_dir: Path | None = None, *, host: str = "127.0.0.1",
-                 start_timeout: float = START_TIMEOUT_S) -> None:
+                 start_timeout: float = START_TIMEOUT_S, stop_grace: float = STOP_GRACE_S) -> None:
         self.log_dir = Path(log_dir) if log_dir else None
         self.host = host
         self.start_timeout = start_timeout
+        self.stop_grace = stop_grace
         self._procs: dict[str, _Proc] = {}
+        self._pending: dict[str, _Proc] = {}
         self._lock = threading.RLock()
 
     def url(self, swarm: str) -> str | None:
@@ -162,8 +179,9 @@ class WorldHost:
         return p.url if p is not None and p.alive() else None
 
     def ensure(self, swarm: str, w: WorldSpec, token: str | None) -> tuple[str, bool]:
-        """The url of the swarm's started world: the running one when its command, dir and
-        Python files are unchanged, else a new process. Returns (url, started now)."""
+        """The url of the swarm's started world: the running one when its command, dir, secret
+        and Python files are unchanged, else a new candidate process (the running one is left
+        alone until `commit`). Returns (url, started now)."""
         assert w.command is not None
         cwd = Path(w.dir).resolve() if w.dir else Path.cwd()
         if not cwd.is_dir():
@@ -172,15 +190,38 @@ class WorldHost:
         with self._lock:
             p = self._procs.get(swarm)
             if p is not None and p.alive() and p.key == key:
+                self.discard(swarm)
                 return p.url, False
             if p is not None:
-                log.info("world for %s: %s; restarting", swarm,
+                log.info("world for %s: %s; starting a replacement", swarm,
                          "changed" if p.alive() else f"exited ({p.popen.returncode})")
-                self.stop(swarm)
-            return self._start(swarm, w.command, cwd, key, token), True
+            self.discard(swarm)
+            proc = self._start(swarm, w.command, cwd, key, token)
+            self._pending[swarm] = proc
+            return proc.url, True
+
+    def commit(self, swarm: str) -> None:
+        """The apply was stored: the candidate (if any) becomes the swarm's world and the one it
+        replaces stops."""
+        with self._lock:
+            new = self._pending.pop(swarm, None)
+            if new is None:
+                return
+            old = self._procs.get(swarm)
+            self._procs[swarm] = new
+        if old is not None:
+            self._terminate(old)
+            log.info("world for %s: replaced", swarm)
+
+    def discard(self, swarm: str) -> None:
+        """Drop the candidate of a refused apply; the running world is untouched."""
+        with self._lock:
+            p = self._pending.pop(swarm, None)
+        if p is not None:
+            self._terminate(p)
 
     def _start(self, swarm: str, command: list[str], cwd: Path, key: tuple,
-               token: str | None) -> str:
+               token: str | None) -> _Proc:
         port = _free_port(self.host)
         argv = [x.replace("{port}", str(port)).replace("{python}", sys.executable)
                 for x in command]
@@ -203,23 +244,22 @@ class WorldHost:
             raise WorldError(f"world.command: cannot start {argv[0]!r} in {cwd}: {e}") from None
         url = f"http://{self.host}:{port}"
         proc = _Proc(popen, key, url, log_path, log_file)
-        self._procs[swarm] = proc
         log.info("world for %s: started %s (pid %d) at %s", swarm, " ".join(argv), popen.pid, url)
         deadline = time.monotonic() + self.start_timeout
         while True:
             if not proc.alive():
-                self.stop(swarm)
+                self._terminate(proc)
                 raise WorldError(f"world.command exited with {popen.returncode} before serving "
                                  f"GET /manifest{self._tail(log_path)}")
             try:
                 r = httpx.get(f"{url}/manifest", timeout=2,
                               headers={TOKEN_HEADER: token} if token else {})
                 if r.status_code < 500:
-                    return url
+                    return proc
             except httpx.HTTPError:
                 pass
             if time.monotonic() > deadline:
-                self.stop(swarm)
+                self._terminate(proc)
                 raise WorldError(f"world.command did not serve GET /manifest on port {port} "
                                  f"within {self.start_timeout:g} s (it gets the port as "
                                  f"${PORT_ENV} or {{port}}){self._tail(log_path)}")
@@ -233,37 +273,72 @@ class WorldHost:
         return f"; its log ({path}) ends with:\n{text}" if text else ""
 
     def stop(self, swarm: str) -> None:
+        """Stop the swarm's world (and a candidate, if one is pending)."""
         with self._lock:
             p = self._procs.pop(swarm, None)
-        if p is None:
-            return
-        if p.alive():
+            q = self._pending.pop(swarm, None)
+        for proc in (p, q):
+            if proc is not None:
+                self._terminate(proc)
+                log.info("world for %s: stopped", swarm)
+
+    def stop_all(self) -> None:
+        for swarm in {*self._procs, *self._pending}:
+            self.stop(swarm)
+
+    def _terminate(self, p: _Proc) -> None:
+        """SIGTERM the world's whole process group (it runs in its own session), wait up to
+        `stop_grace` for the leader and every other member, then SIGKILL what is left: a helper
+        that ignores SIGTERM does not outlive its world."""
+        pgid = p.popen.pid
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + self.stop_grace
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.popen.wait(max(0.0, deadline - time.monotonic()))
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if p.alive() or _group_alive(pgid):
             with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(p.popen.pid, signal.SIGTERM)
-            try:
-                p.popen.wait(STOP_GRACE_S)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(p.popen.pid, signal.SIGKILL)
-                p.popen.wait()
-            log.info("world for %s: stopped", swarm)
+                os.killpg(pgid, signal.SIGKILL)
+            p.popen.wait()
+            end = time.monotonic() + KILL_WAIT_S  # SIGKILL lands asynchronously
+            while _group_alive(pgid) and time.monotonic() < end:
+                time.sleep(0.02)
         if p.log_file is not None:
             p.log_file.close()
 
-    def stop_all(self) -> None:
-        for swarm in list(self._procs):
-            self.stop(swarm)
+
+def _group_alive(pgid: int) -> bool:
+    """Any process left in the group, zombies of exited members excepted."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    proc = Path("/proc")
+    if not proc.is_dir():  # no procfs: trust killpg
+        return True
+    for stat in proc.glob("[0-9]*/stat"):
+        with contextlib.suppress(OSError, IndexError, ValueError):
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+            if int(fields[2]) == pgid and fields[0] != "Z":
+                return True
+    return False
 
 
 def resolve(spec: SwarmSpec, *, host: WorldHost | None, controller_token: str,
             secrets: Mapping[str, str], folder: Callable[[str], list[str]],
             transport: httpx.BaseTransport | None = None) -> None:
-    """Fill `spec.world.endpoint` and `spec.world.manifest` (raises WorldError). Starts or
-    restarts a `command` world with `compute: local`; values a client sent are replaced."""
+    """Fill `spec.world.endpoint`, `manifest` and the credential's origin and id (raises
+    WorldError); values a client sent are replaced. A `command` world with `compute: local`
+    that is new or changed is started as a candidate: the caller stores the spec, then
+    `host.commit(swarm)`; on any refusal the candidate is dropped and the running world kept."""
     w = spec.world
     if w is None:
         return
-    w.endpoint = w.manifest = None
+    w.endpoint = w.manifest = w.credential_origin = w.credential_id = None
     token = world_token(spec, controller_token, secrets)
     if w.token_env and not token:
         raise WorldError(f"world.token_env: the secret {w.token_env} is not set on the controller "
@@ -283,5 +358,8 @@ def resolve(spec: SwarmSpec, *, host: WorldHost | None, controller_token: str,
         check_tools(spec, folder)
     except WorldError:
         if started and host is not None:
-            host.stop(spec.swarm)
+            host.discard(spec.swarm)  # the running world stays as it was
         raise
+    if token:
+        w.credential_origin = credential_origin(spec, url)
+        w.credential_id = credential_id(token, w.credential_origin)

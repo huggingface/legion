@@ -60,7 +60,11 @@ def create_app(world: World, token: str | None) -> FastAPI:
     network); otherwise every route needs `X-World-Token: <token>`."""
     app = FastAPI(title=f"world {world.name}", docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
-    schemas = {t["name"]: t["parameters"] for t in world.manifest()["tools"]}
+
+    def schemas() -> dict[str, dict]:
+        """From the manifest as served now: what GET /manifest advertises is what is called."""
+        return {t["name"]: t.get("parameters") or {"type": "object", "properties": {}}
+                for t in world.manifest().get("tools") or []}
 
     def locked(fn, *args: Any) -> Any:
         with lock:
@@ -74,7 +78,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
 
     @app.get("/manifest")
     async def manifest() -> dict:
-        return world.manifest()
+        return await run_in_threadpool(locked, world.manifest)
 
     @app.post("/tools/{name}")
     async def call(name: str, request: Request):
@@ -87,10 +91,11 @@ def create_app(world: World, token: str | None) -> FastAPI:
         agent = _agent(request.headers)
         if not agent.name:
             return _error("no_agent", f"{AGENT_HEADER} is required", 400)
-        if name not in schemas:
-            return _error("unknown_tool", f"no tool {name!r}; tools: {', '.join(schemas) or 'none'}",
+        tools = await run_in_threadpool(locked, schemas)
+        if name not in tools:
+            return _error("unknown_tool", f"no tool {name!r}; tools: {', '.join(tools) or 'none'}",
                           404)
-        if err := check_args(schemas[name], args):
+        if err := check_args(tools[name], args):
             return _error("bad_args", f"{name}: {err}")
         try:
             result = await run_in_threadpool(locked, world.call, name, args, agent)
@@ -118,7 +123,9 @@ def create_app(world: World, token: str | None) -> FastAPI:
         fn = getattr(world, f"on_{event}")
         hook_args = (agent,) if event == "agent_start" else (agent, body.get("data") or {})
         try:
-            await run_in_threadpool(locked, fn, *hook_args)
+            result = await run_in_threadpool(locked, fn, *hook_args)
+            if inspect.isawaitable(result):  # an `async def` hook
+                await result
         except Exception:
             log.exception("hook %s failed for %s", event, agent.name)
         return {"ok": True}

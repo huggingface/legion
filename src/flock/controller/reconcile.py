@@ -45,7 +45,6 @@ from flock.models import (
     comms_tools,
     max_workers,
     parse_duration,
-    world_tools,
 )
 from flock.world.host import world_token
 from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
@@ -464,8 +463,10 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         names.append(spec.comms.invite_env)
     if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
         names.append(ts.resolved_model.provider.api_key_env)
-    if world_tools(ts, spec.world) and (wt := world_token(spec, s.token, s.secret_source)):
-        secrets[WORLD_TOKEN_ENV] = wt  # the world's shared secret (docs/world.md)
+    if spec.world is not None and (wt := world_token(spec, s.token, s.secret_source)):
+        # the world's shared secret (docs/world.md), as of this launch: a worker whose secret no
+        # longer matches the world's `credential_id` drains and is relaunched with the new one
+        secrets[WORLD_TOKEN_ENV] = wt
     for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]

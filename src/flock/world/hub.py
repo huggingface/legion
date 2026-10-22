@@ -9,7 +9,14 @@ the agent's instructions.
   the `llm` harness calls them in process (`call`), `flock-tool` through the worker's local
   gateway (the comms hub's listener, which routes `world:*` here).
 - The secret arrives as the job secret `FLOCK_WORLD_TOKEN`; it stays in the worker (removed from
-  the harness env and from every tool call's env).
+  the harness env and from every tool call's env). It is sent only to the configuration it
+  belongs to: the world block names it (`credential_origin`, `credential_id` =
+  HMAC(secret, origin)); when a re-apply binds the world to another secret or endpoint, calls
+  under the new configuration are refused here and `needs_restart()` tells the worker to drain,
+  so the controller relaunches it with the new secret.
+- A turn is pinned: `toolset_for` snapshots endpoint, manifest, selection and whether the secret
+  belongs to them, and every call of that turn (in process, or through the gateway with the
+  snapshot id in the pinned tool's `builtin`, `world:<name>@<id>`) uses that snapshot.
 - Hooks the manifest lists are POSTed to `/hooks` in the background: `agent_start` at an agent's
   first prompt on this worker, `turn` at each turn end, `agent_done` at unassign. Best effort.
 """
@@ -17,14 +24,19 @@ the agent's instructions.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import ipaddress
 import json
 import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -40,6 +52,8 @@ from flock.world.protocol import (
     TOKEN_HEADER,
     TURN_HEADER,
     TYPE_HEADER,
+    WorldManifest,
+    credential_id,
 )
 
 log = logging.getLogger(__name__)
@@ -50,6 +64,7 @@ SECTION_END = "<!-- /flock:world -->"
 RETRIES = 2  # extra attempts after a 429 / 503
 RETRY_CAP_S = 10.0
 HOOK_TIMEOUT_S = 5.0
+SNAPSHOTS_KEPT = 32
 
 
 def _err(msg: str, t0: float) -> Result:
@@ -61,6 +76,31 @@ def _retry_after(r: httpx.Response) -> float:
         return max(0.0, min(float(r.headers.get("retry-after", "1")), RETRY_CAP_S))
     except ValueError:
         return 1.0
+
+
+def _loopback(url: str) -> bool:
+    host = urlsplit(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """One world configuration as a turn sees it, for the whole turn."""
+
+    id: str
+    endpoint: str
+    manifest: WorldManifest
+    names: tuple[str, ...]
+    send_token: bool  # the worker's secret belongs to this configuration
+    refused: str | None  # why calls under this configuration are refused (credential)
+
+    def get(self, name: str):
+        return self.manifest.get(name) if name in self.names else None
 
 
 class WorldHub:
@@ -77,6 +117,7 @@ class WorldHub:
         self.names: list[str] = []
         self._client: httpx.AsyncClient | None = None
         self._started: set[str] = set()  # agents whose agent_start hook was sent
+        self._snaps: OrderedDict[str, Snapshot] = OrderedDict()
         self._shown: dict[str, str] = {}  # agent -> world version its instructions show
         self._acked: dict[str, str] = {}  # agent -> world version of its last finished turn
         self._tasks: set[asyncio.Task] = set()
@@ -111,27 +152,70 @@ class WorldHub:
             return
         self.configure(spec, names if isinstance(names, list) else [])
 
-    def tooldefs(self) -> tuple[ToolDef, ...]:
+    # ------------------------------------------------------------------ credential
+    def _credential(self, s: WorldSpec) -> tuple[bool, str | None]:
+        """(send the secret, why calls are refused) for configuration `s`."""
+        token = self._env.get(TOKEN_ENV) or ""
+        if s.credential_id is None:
+            return False, None  # a world without a secret: none is sent
+        name = s.manifest.name if s.manifest else "?"
+        restart = "this worker restarts to get the new one; try again shortly"
+        if not token:
+            return False, f"this worker has no secret for world {name}; {restart}"
+        origin = s.credential_origin or ""
+        bound = (origin.startswith("local:") and _loopback(s.endpoint or "")) or \
+            (origin == s.endpoint)
+        if not bound or not hmac.compare_digest(credential_id(token, origin), s.credential_id):
+            return False, f"world {name} now uses another secret or endpoint; {restart}"
+        return True, None
+
+    def needs_restart(self) -> bool:
+        """This worker's types use the world, but its secret is not the current one."""
+        return self.active and self._credential(self.spec)[1] is not None  # type: ignore[arg-type]
+
+    def snapshot(self) -> Snapshot | None:
+        """The current configuration, kept by id (the last SNAPSHOTS_KEPT) for pinned turns."""
         if not self.active:
+            return None
+        s = self.spec
+        assert s is not None and s.endpoint is not None and s.manifest is not None
+        send, refused = self._credential(s)
+        key = json.dumps([s.endpoint, s.manifest.model_dump(mode="json"), self.names,
+                          s.credential_id, send, refused], sort_keys=True)
+        sid = hashlib.sha256(key.encode()).hexdigest()[:12]
+        if sid not in self._snaps:
+            self._snaps[sid] = Snapshot(sid, s.endpoint, s.manifest, tuple(self.names), send,
+                                        refused)
+            while len(self._snaps) > SNAPSHOTS_KEPT:
+                self._snaps.popitem(last=False)
+        self._snaps.move_to_end(sid)
+        return self._snaps[sid]
+
+    # ------------------------------------------------------------------ tools
+    def tooldefs(self, snap: Snapshot | None = None) -> tuple[ToolDef, ...]:
+        snap = snap or self.snapshot()
+        if snap is None:
             return ()
-        m = self.spec.manifest  # type: ignore[union-attr]
         return tuple(ToolDef(name=t.name, description=t.description, parameters=t.parameters,
-                             module=BUILTIN_MODULE, function=t.name, builtin=f"world:{t.name}")
-                     for n in self.names if (t := m.get(n)) is not None)
+                             module=BUILTIN_MODULE, function=t.name,
+                             builtin=f"world:{t.name}@{snap.id}")
+                     for n in snap.names if (t := snap.manifest.get(n)) is not None)
 
     def toolset_for(self, agent: str, base: Toolset, gateway: Any = None) -> Toolset:
-        """`base` (folder and comms tools of this turn) plus the agent's world tools. Built-in
-        calls are routed by prefix: `world:*` here, the rest to `base`'s own handler.
-        `gateway` (the comms hub) serves them to `flock-tool`."""
-        defs = self.tooldefs()
-        if not defs:
+        """`base` (folder and comms tools of this turn) plus the agent's world tools, pinned to
+        the current configuration. Built-in calls are routed by prefix: `world:*` here, the rest
+        to `base`'s own handler. `gateway` (the comms hub) serves them to `flock-tool`."""
+        snap = self.snapshot()
+        defs = self.tooldefs(snap)
+        if snap is None or not defs:
             return base
         have = set(base.names())
         prev = base.builtin_call
 
         async def route(entry: str, args: dict[str, Any]) -> Result:
             if entry.startswith("world:"):
-                return await self.call(agent, entry, args)
+                name = entry.split(":", 1)[1].split("@", 1)[0]
+                return await self._call(snap, agent, name, args)
             if prev is not None:
                 return await prev(entry, args)
             return _err(f"{entry} is not available here", time.monotonic())
@@ -154,7 +238,7 @@ class WorldHub:
         if not self.active:
             return ""
         m = self.spec.manifest  # type: ignore[union-attr]
-        names = ", ".join(f"`{d.name}`" for d in self.tooldefs())
+        names = ", ".join(f"`{n}`" for n in self.names if m.get(n) is not None)
         lines = [SECTION_START, f"## World: {m.name} (version {m.version})", ""]
         if m.description.strip():
             lines += [m.description.strip(), ""]
@@ -202,18 +286,22 @@ class WorldHub:
         s = self.spec
         if s is None or s.manifest is None or event not in s.manifest.hooks or s.endpoint is None:
             return
+        send, refused = self._credential(s)
+        if refused is not None:
+            return  # never our secret to another world; the worker is about to restart
         body = {"event": event, "agent": agent, "type": self.type, "swarm": self.swarm,
                 "turn": turn or "", "data": data or {}}
         try:
-            t = asyncio.get_running_loop().create_task(self._post_hook(s.endpoint, body))
+            t = asyncio.get_running_loop().create_task(self._post_hook(s.endpoint, body, send))
         except RuntimeError:
             return
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
 
-    async def _post_hook(self, endpoint: str, body: dict[str, Any]) -> None:
+    async def _post_hook(self, endpoint: str, body: dict[str, Any], send: bool) -> None:
         try:
-            r = await self._http().post(f"{endpoint}/hooks", json=body, headers=self._auth(),
+            r = await self._http().post(f"{endpoint}/hooks", json=body,
+                                        headers=self._auth() if send else {},
                                         timeout=HOOK_TIMEOUT_S)
             if r.status_code >= 400:
                 log.info("world hook %s for %s: HTTP %d", body["event"], body["agent"], r.status_code)
@@ -231,26 +319,36 @@ class WorldHub:
         return {TOKEN_HEADER: token} if token else {}
 
     async def call(self, agent: str, entry: str, args: dict[str, Any]) -> Result:
-        """One world tool call by `agent`. Never raises: errors are results the model reads."""
+        """One world tool call by `agent` (the gateway's route): `world:<name>@<snapshot id>`
+        runs under that pinned configuration, `world:<name>` under the current one. Never
+        raises: errors are results the model reads."""
+        name, _, sid = entry.split(":", 1)[-1].partition("@")
+        snap = self._snaps.get(sid) if sid else self.snapshot()
+        if snap is None:
+            why = ("this turn's world configuration is gone; try again in your next turn" if sid
+                   else f"{name} is not enabled for this agent")
+            return _err(why, time.monotonic())
+        return await self._call(snap, agent, name, args)
+
+    async def _call(self, snap: Snapshot, agent: str, name: str, args: dict[str, Any]) -> Result:
         t0 = time.monotonic()
-        name = entry.split(":", 1)[-1]
-        s = self.spec
-        if not self.active or s is None or name not in self.names:
-            return _err(f"{name} is not enabled for this agent", t0)
-        tool = s.manifest.get(name)  # type: ignore[union-attr]
+        tool = snap.get(name)
         if tool is None:
-            return _err(f"the world has no tool {name!r}", t0)
+            return _err(f"{name} is not enabled for this agent", t0)
+        if snap.refused is not None:
+            return _err(f"{name}: {snap.refused}", t0)
         if err := check_args(tool.parameters, args):
             return _err(f"{name}: {err}", t0)
-        headers = {**self._auth(), AGENT_HEADER: agent, TYPE_HEADER: self.type,
-                   SWARM_HEADER: self.swarm, REQUEST_HEADER: uuid.uuid4().hex}
+        headers = {**(self._auth() if snap.send_token else {}), AGENT_HEADER: agent,
+                   TYPE_HEADER: self.type, SWARM_HEADER: self.swarm,
+                   REQUEST_HEADER: uuid.uuid4().hex}
         rt = self._runtime(agent)
         if rt is not None and getattr(rt, "turn_id", None):
             headers[TURN_HEADER] = rt.turn_id
-        wname = s.manifest.name  # type: ignore[union-attr]
+        wname = snap.manifest.name
         for attempt in range(RETRIES + 1):
             try:
-                r = await self._http().post(f"{s.endpoint}/tools/{name}", json={"args": args},
+                r = await self._http().post(f"{snap.endpoint}/tools/{name}", json={"args": args},
                                             headers=headers, timeout=self.timeout)
             except httpx.TimeoutException:
                 return _err(f"{name}: world {wname} did not answer within {self.timeout:g} s", t0)

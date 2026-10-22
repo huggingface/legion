@@ -349,6 +349,11 @@ class WorldSpec(BaseModel):
     # Written by the controller at apply; anything given by hand is replaced.
     endpoint: str | None = None
     manifest: WorldManifest | None = None
+    # Which credential this configuration belongs to, without the credential: the origin it is
+    # bound to (`endpoint`, or `local:<swarm>` for a world flock started) and
+    # HMAC(secret, origin). A worker sends its secret only when its own HMAC matches.
+    credential_origin: str | None = None
+    credential_id: str | None = None
 
     @field_validator("command", mode="before")
     @classmethod

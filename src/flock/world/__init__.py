@@ -123,11 +123,16 @@ class World:
         return out
 
     def manifest(self) -> dict[str, Any]:
+        """Built on every call (the server serves and dispatches from it), from the class
+        attributes as they are now; the tool schemas are computed once."""
         hooks = self.hooks()
         caps = list(dict.fromkeys([*self.capabilities, *(["hooks"] if hooks else [])]))
+        schemas = self.__dict__.get("_flock_schemas")
+        if schemas is None:
+            schemas = [tool_schema(fn) for fn in self.tools().values()]
+            self.__dict__["_flock_schemas"] = schemas
         return {"world_api": WORLD_API, "name": self.name, "version": self.version,
-                "description": self.description,
-                "tools": [tool_schema(fn) for fn in self.tools().values()],
+                "description": self.description, "tools": [dict(t) for t in schemas],
                 "capabilities": caps, "hooks": hooks}
 
     def call(self, tool: str, args: dict[str, Any], agent: Agent) -> Any:

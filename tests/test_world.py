@@ -42,7 +42,7 @@ from flock.worker.events import Outbox
 from flock.world import Agent, ToolError, World, tool
 from flock.world.host import WorldError, WorldHost, check_tools, derived_token, fetch_manifest
 from flock.world.hub import WorldHub
-from flock.world.protocol import TOKEN_ENV, WorldManifest
+from flock.world.protocol import TOKEN_ENV, WorldManifest, credential_id
 from flock.world.server import create_app
 
 from .conftest import TOKEN, Clock
@@ -382,20 +382,34 @@ def _copy_taskboard(dst: Path) -> Path:
     return dst
 
 
-def test_world_host_starts_keeps_restarts_and_stops_a_command_world(tmp_path):
+def test_world_host_starts_keeps_replaces_and_stops_a_command_world(tmp_path):
     d = _copy_taskboard(tmp_path / "tb")
     host = WorldHost(log_dir=tmp_path / "logs")
     w = WorldSpec(dir=str(d), command=["{python}", "-m", "flock.cli", "world", "serve",
                                        "taskboard:TaskBoard"])
     try:
         url, started = host.ensure("sw", w, "tok")
-        assert started and fetch_manifest(url, "tok").name == "taskboard"
+        assert started and host.url("sw") is None  # a candidate until committed
+        host.commit("sw")
+        assert host.url("sw") == url and fetch_manifest(url, "tok").name == "taskboard"
         assert (d / "taskboard.db").is_file()  # state in the world's dir
         assert host.ensure("sw", w, "tok") == (url, False)  # unchanged: kept
         src = d / "taskboard.py"
         src.write_text(src.read_text().replace('version = "0.1.0"', 'version = "0.2.0"'))
         url2, started = host.ensure("sw", w, "tok")
-        assert started and fetch_manifest(url2, "tok").version == "0.2.0"
+        # the candidate runs next to the incumbent; a discard leaves the incumbent as it was
+        assert started and url2 != url and fetch_manifest(url2, "tok").version == "0.2.0"
+        assert fetch_manifest(url, "tok").version == "0.1.0"
+        host.discard("sw")
+        with pytest.raises(WorldError, match="cannot reach"):
+            fetch_manifest(url2, "tok")
+        assert host.url("sw") == url and fetch_manifest(url, "tok").version == "0.1.0"
+        url3, started = host.ensure("sw", w, "tok")
+        old_pid = host._procs["sw"].popen.pid
+        host.commit("sw")  # the replacement takes over, then the incumbent stops
+        assert host.url("sw") == url3 and fetch_manifest(url3, "tok").version == "0.2.0"
+        with pytest.raises(ProcessLookupError):
+            os.kill(old_pid, 0)
         pid = host._procs["sw"].popen.pid
         host.stop("sw")
         assert host.url("sw") is None
@@ -407,6 +421,93 @@ def test_world_host_starts_keeps_restarts_and_stops_a_command_world(tmp_path):
             host.ensure("bad", bad, None)
     finally:
         host.stop_all()
+
+
+TINY_WORLD = """import json, os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        data = json.dumps({"world_api": "v1", "name": "tiny", "version": "1",
+                           "tools": [{"name": "ping"}]}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(data)))
+        self.end_headers(); self.wfile.write(data)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", int(os.environ["FLOCK_WORLD_PORT"])), H).serve_forever()
+"""
+
+
+async def test_a_refused_reapply_keeps_the_running_world(store, tmp_path):
+    """A changed command whose apply is refused (unknown selected tool) leaves the running
+    world and the stored endpoint as they were (review of PR #20)."""
+    (tmp_path / "world.py").write_text(TINY_WORLD)
+    host = WorldHost(log_dir=tmp_path / "logs", start_timeout=10)
+    app = controller_app(store, TOKEN, worlds=host, compute="local", loop_interval=0,
+                         secret_source={})
+    body = {"swarm": "sw", "compute": "local",
+            "world": {"dir": str(tmp_path), "command": [sys.executable, "world.py"]},
+            "types": {"dev": {"harness": "claude", "model": "m", "replicas": 0}}}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                     headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+            assert (await c.put("/swarms/sw", json=body)).status_code == 200
+            endpoint = store.get_swarm("sw")["spec"].world.endpoint
+            incumbent = host._procs["sw"].popen
+            bad = json.loads(json.dumps(body))
+            bad["world"]["command"].append("changed")
+            bad["types"]["dev"]["tools"] = ["world:missing"]
+            r = await c.put("/swarms/sw", json=bad)
+            assert r.status_code == 400 and "unknown world tool(s) missing" in r.text
+            assert incumbent.poll() is None and host.url("sw") == endpoint
+            assert store.get_swarm("sw")["spec"].world.endpoint == endpoint
+            assert (await asyncio.to_thread(httpx.get, f"{endpoint}/manifest")).status_code == 200
+            assert not host._pending  # the refused candidate is gone
+    finally:
+        host.stop_all()
+
+
+HELPER_WORLD = """import os, subprocess, sys, time
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
+subprocess.Popen([sys.executable, "-c", "import os, signal, time; from pathlib import Path; "
+                  "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                  "Path('helper.pid').write_text(str(os.getpid())); time.sleep(60)"])
+while not Path("helper.pid").exists():
+    time.sleep(0.01)
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers()
+        self.wfile.write(b"{}")
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", int(os.environ["FLOCK_WORLD_PORT"])), H).serve_forever()
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="needs procfs")
+def test_stop_kills_a_helper_that_ignores_sigterm(tmp_path):
+    """The world's leader exits on SIGTERM at once; a helper in its process group ignores it
+    and is SIGKILLed before the world counts as stopped (review of PR #20)."""
+    (tmp_path / "world.py").write_text(HELPER_WORLD)
+    host = WorldHost(log_dir=tmp_path / "logs", start_timeout=10, stop_grace=1.0)
+    helper = None
+    try:
+        host.ensure("sw", WorldSpec(dir=str(tmp_path), command=[sys.executable, "world.py"]), "t")
+        host.commit("sw")
+        leader = host._procs["sw"].popen
+        helper = int((tmp_path / "helper.pid").read_text())
+        assert _alive(helper)
+        host.stop("sw")
+        assert leader.poll() is not None and not _alive(helper)
+    finally:
+        host.stop_all()
+        if helper is not None and _alive(helper):
+            os.kill(helper, 9)
 
 
 async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path):
@@ -441,12 +542,18 @@ async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path)
 # --------------------------------------------------------------------------- worker hub
 
 
+def world_block(url: str, manifest: WorldManifest, secret: str | None = SECRET) -> WorldSpec:
+    """The block the controller hands the workers: the credential named, never included."""
+    return WorldSpec(url=url, endpoint=url, manifest=manifest,
+                     credential_origin=url if secret else None,
+                     credential_id=credential_id(secret, url) if secret else None)
+
+
 def hub_for(served: Served, names=None, *, token=SECRET, runtime=None) -> WorldHub:
     hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: token} if token else {},
                    runtime=runtime)
     m = WorldManifest.model_validate(served.world.manifest())
-    hub.configure(WorldSpec(url=served.url, endpoint=served.url, manifest=m),
-                  names if names is not None else m.names())
+    hub.configure(world_block(served.url, m), names if names is not None else m.names())
     return hub
 
 
@@ -467,14 +574,19 @@ async def test_hub_forwards_calls_with_the_agent_and_the_token(recorder):
         assert r.error and "not enabled" in r.output
     finally:
         await hub.aclose()
-    bad = hub_for(recorder, token="wrong")
+    bad = hub_for(recorder, token="wrong")  # the controller named another secret: never sent
+    n = len(recorder.world.calls)
     try:
         r = await bad.call("dev-0001", "world:echo", {"text": "hi"})
-        assert r.error and "refused flock's token (401)" in r.output
+        assert r.error and "now uses another secret or endpoint" in r.output
+        assert bad.needs_restart() and len(recorder.world.calls) == n
+        bad.configure(world_block(recorder.url, bad.spec.manifest, "wrong"), ["echo"])
+        r = await bad.call("dev-0001", "world:echo", {"text": "hi"})  # ours, but the world says no
+        assert r.error and "refused flock's token (401)" in r.output and not bad.needs_restart()
     finally:
         await bad.aclose()
     gone = hub_for(recorder)
-    gone.spec.endpoint = "http://127.0.0.1:9"
+    gone.configure(world_block("http://127.0.0.1:9", gone.spec.manifest), gone.names)
     r = await gone.call("dev-0001", "world:echo", {"text": "hi"})
     assert r.error and "unreachable" in r.output
     await gone.aclose()
@@ -492,7 +604,7 @@ async def test_hub_retries_429_then_gives_the_result():
     hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
                    transport=httpx.MockTransport(handler))
     m = WorldManifest(world_api="v1", name="w", version="1", tools=[{"name": "a"}])
-    hub.configure(WorldSpec(url="http://w", endpoint="http://w", manifest=m), ["a"])
+    hub.configure(world_block("http://w", m, "t"), ["a"])
     r = await hub.call("x", "world:a", {})
     assert (r.output, r.error, seen) == ("fine", False, ["t", "t"])
     await hub.aclose()
@@ -512,7 +624,7 @@ async def test_world_tools_sit_next_to_comms_tools_and_reach_flock_tool_via_the_
     try:
         await comms.start_gateway()
         ts = world.toolset_for("dev-0001", base, comms)
-        assert ts.names() == ["echo"] and ts.get("echo").builtin == "world:echo"
+        assert ts.names() == ["echo"] and ts.get("echo").builtin.startswith("world:echo@")
         assert ts.gateway == comms.address and ts.gateway_key == comms.key("dev-0001")
         r = await ts.call("echo", {"text": "in process"}, agent="dev-0001", workdir=tmp_path, env={})
         assert json.loads(r.output)["text"] == "in process"
@@ -566,8 +678,7 @@ async def test_runtime_section_hooks_and_the_secret_stays_in_the_worker(tmp_path
                                                           "tool_calls": 0, "turn": "t-1"})
         # a re-apply with a new manifest version: noted once, at the next turn boundary
         rec.version = "2.0"
-        world.configure(WorldSpec(url=recorder.url, endpoint=recorder.url,
-                                  manifest=WorldManifest.model_validate(rec.manifest())),
+        world.configure(world_block(recorder.url, WorldManifest.model_validate(rec.manifest())),
                         ["echo"])
         await until(lambda: rt.turn_id is None)
         await rt.prompt("second")
@@ -584,5 +695,183 @@ async def test_runtime_section_hooks_and_the_secret_stays_in_the_worker(tmp_path
         assert [h[0] for h in rec.hooks_seen].count("agent_start") == 1
     finally:
         await rt.stop()
+        await comms.aclose()
+        await world.aclose()
+
+
+# --------------------------------------------------------------------------- review of PR #20
+
+
+class Changing(World):
+    """A world whose manifest() and call() are overridden and change at run time."""
+
+    name, version = "changing", "1"
+
+    def manifest(self):
+        names = ["first"] if self.version == "1" else ["second"]
+        return {"world_api": "v1", "name": self.name, "version": self.version,
+                "tools": [{"name": n, "description": "d",
+                           "parameters": {"type": "object", "properties": {"x": {"type": "integer"}}}}
+                          for n in names]}
+
+    def call(self, tool, args, agent):
+        return {"called": tool, "version": self.version}
+
+
+class AsyncHook(World):
+    name = "async-hook"
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    async def on_agent_done(self, agent: Agent, data: dict) -> None:
+        await asyncio.sleep(0)
+        self.seen.append(agent.name)
+
+
+def test_server_dispatches_from_the_manifest_it_serves_and_awaits_async_hooks():
+    w = Changing()
+    c = TestClient(create_app(w, SECRET))
+    assert c.post("/tools/first", json={"args": {"x": 1}}, headers=H).json()["ok"]
+    w.version = "2"
+    assert [t["name"] for t in c.get("/manifest", headers=H).json()["tools"]] == ["second"]
+    assert c.post("/tools/second", json={"args": {"x": 2}}, headers=H).json() == {
+        "ok": True, "result": {"called": "second", "version": "2"}}
+    assert c.post("/tools/first", json={"args": {}}, headers=H).status_code == 404
+    assert c.post("/tools/second", json={"args": {"x": "no"}}, headers=H).json()["error"][
+        "code"] == "bad_args"
+    rec = Recorder()  # the base class: a changed version is served and dispatched alike
+    c = TestClient(create_app(rec, SECRET))
+    rec.version = "9"
+    assert c.get("/manifest", headers=H).json()["version"] == "9"
+    hooked = AsyncHook()
+    c = TestClient(create_app(hooked, SECRET))
+    assert c.post("/hooks", json={"event": "agent_done", "agent": "dev-0001"},
+                  headers=H).json() == {"ok": True}
+    assert hooked.seen == ["dev-0001"]
+
+
+async def test_reapply_to_another_world_never_sends_the_old_secret(store, tmp_path):
+    """World A (secret A) then world B (secret B): the running worker never sends secret A to
+    B; calls under B are refused until it drains and is relaunched with secret B; a turn pinned
+    to A keeps calling A (review of PR #20)."""
+    secrets = {"WORLD_A": "dummy-a", "WORLD_B": "dummy-b"}
+    seen: list[tuple[str, str, str | None]] = []
+    manifest = {"world_api": "v1", "name": "w", "version": "1", "tools": [{"name": "act"}]}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        want = secrets["WORLD_A" if req.url.host == "a.invalid" else "WORLD_B"]
+        seen.append((req.url.host, req.url.path, req.headers.get("x-world-token")))
+        if req.headers.get("x-world-token") != want:
+            return httpx.Response(401, json={"ok": False})
+        if req.url.path == "/manifest":
+            return httpx.Response(200, json=manifest)
+        return httpx.Response(200, json={"ok": True, "result": req.url.host})
+
+    mock = httpx.MockTransport(handler)
+    clock, jobs = Clock(), FakeJobsClient()
+    app = controller_app(store, TOKEN, clock=clock, secret_source=secrets, loop_interval=0,
+                         world_transport=mock)
+    settings = Settings(token=TOKEN, secret_source=secrets, rng=random.Random(0))
+
+    def spec_for(host: str, env: str) -> dict:
+        return SwarmSpec.model_validate({
+            "swarm": "sw", "compute": "local",
+            "world": {"url": f"http://{host}.invalid", "token_env": env},
+            "types": {"dev": {"harness": "claude", "model": "m", "replicas": 1}},
+        }).model_dump(mode="json")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        assert (await c.put("/swarms/sw", json=spec_for("a", "WORLD_A"))).status_code == 200
+        stored = store.get_swarm("sw")["spec"].world
+        assert stored.credential_origin == "http://a.invalid" and stored.credential_id
+        assert "dummy-a" not in json.dumps(stored.model_dump(mode="json"))
+        reconcile(store, jobs, clock(), settings)
+        (launch,) = jobs.launches
+        wid = launch["worker_id"]
+        hub = WorldHub(swarm="sw", type_name="dev", env=dict(launch["secrets"]), transport=mock)
+        hub.configure(stored, ["act"])
+        base = Toolset(None, None, "sw", "dev", tmp_path / "data")
+        pinned_a = hub.toolset_for("dev-0000", base)
+        r = await pinned_a.call("act", {}, agent="dev-0000", workdir=tmp_path, env={})
+        assert (r.output, r.error) == ("a.invalid", False)
+
+        assert (await c.put("/swarms/sw", json=spec_for("b", "WORLD_B"))).status_code == 200
+        hb = {"worker": wid, "deadline": "2030-01-01T00:00:00Z", "draining": False, "agents": []}
+        block = (await c.post(f"/workers/{wid}/heartbeat", json=hb)).json()["world"]
+        assert "dummy" not in json.dumps(block)
+        hub.configure_raw(block)
+        assert hub.needs_restart()
+        new = hub.toolset_for("dev-0000", base)
+        r = await new.call("act", {}, agent="dev-0000", workdir=tmp_path, env={})
+        assert r.error and "now uses another secret or endpoint" in r.output
+        # the turn pinned to A still calls A, with A's secret
+        r = await pinned_a.call("act", {}, agent="dev-0000", workdir=tmp_path, env={})
+        assert (r.output, r.error) == ("a.invalid", False)
+        assert ("b.invalid", "/tools/act", "dummy-a") not in seen
+        assert all(tok == secrets["WORLD_A" if host == "a.invalid" else "WORLD_B"]
+                   for host, _, tok in seen)
+        await hub.aclose()
+
+        # the worker drains (needs_restart), its job completes: relaunched with secret B
+        hb["draining"] = True
+        await c.post(f"/workers/{wid}/heartbeat", json=hb)
+        jobs.set_stage(launch["job_id"], "COMPLETED")
+        reconcile(store, jobs, clock(), settings)
+        reconcile(store, jobs, clock(), settings)
+        assert len(jobs.launches) == 2 and jobs.launches[1]["secrets"][TOKEN_ENV] == "dummy-b"
+        hub2 = WorldHub(swarm="sw", type_name="dev", env=dict(jobs.launches[1]["secrets"]),
+                        transport=mock)
+        hub2.configure_raw(block)
+        assert not hub2.needs_restart()
+        r = await hub2.toolset_for("dev-0000", base).call("act", {}, agent="dev-0000",
+                                                          workdir=tmp_path, env={})
+        assert (r.output, r.error) == ("b.invalid", False)
+        await hub2.aclose()
+
+
+async def test_a_worker_drains_when_its_world_secret_is_no_longer_current(tmp_path):
+    from .test_worker_main import FakeController, make_worker
+
+    worker, _ = make_worker(tmp_path, FakeController())
+    m = WorldManifest(world_api="v1", name="w", version="1", tools=[{"name": "act"}])
+    worker.world = WorldHub(swarm="sw", type_name="researcher", env={TOKEN_ENV: "dummy-a"})
+    a = AssignCommand(agent="researcher-0001", type="researcher", spec=spec(), restore=False,
+                      world=world_block("http://a.invalid", m, "dummy-a"))
+    await worker.dispatch(a)
+    assert not worker.draining
+    b = a.model_copy(update={"world": world_block("http://b.invalid", m, "dummy-b")})
+    await worker.dispatch(b)
+    await until(lambda: worker.draining)
+    await worker.world.aclose()
+
+
+async def test_a_pinned_turn_keeps_its_world_through_the_gateway(tmp_path, recorder):
+    """flock-tool calls of a turn pinned before a re-apply go to the pinned configuration
+    (endpoint, schema, selection), not the new one (review of PR #20)."""
+    comms = CommsHub(swarm="sw", env={})
+    world = hub_for(recorder, ["echo"])
+    comms.routes["world"] = world.call
+    base = Toolset(version=None, dir=None, swarm="sw", type="dev", data_dir=tmp_path / "data")
+    other = Served(Recorder())
+    try:
+        await comms.start_gateway()
+        world.toolset_for("dev-0001", base, comms).write_pin(tmp_path / "pin.json",
+                                                             agent="dev-0001", workdir=tmp_path)
+        rec2 = other.world
+        rec2.version = "2"
+        world.configure(world_block(other.url, WorldManifest.model_validate(rec2.manifest())),
+                        ["refuse"])
+        pinned, agent, workdir = read_pin(tmp_path / "pin.json")
+        r = await pinned.call("echo", {"text": "old turn"}, agent=agent, workdir=workdir, env={})
+        assert not r.error and json.loads(r.output)["text"] == "old turn"
+        assert recorder.world.calls[-1].name == "dev-0001" and not rec2.calls
+        new = world.toolset_for("dev-0001", base, comms)
+        assert new.names() == ["refuse"]
+        r = await new.call("refuse", {}, agent="dev-0001", workdir=tmp_path, env={})
+        assert json.loads(r.output) == {"error": "not today"}
+    finally:
+        other.close()
         await comms.aclose()
         await world.aclose()
