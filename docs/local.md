@@ -59,6 +59,10 @@ uv run flock run examples/local.yaml --prompt "Introduce yourself in one sentenc
   at stop; `--data-dir .flock` is where runs go.
 - A `tools/` folder next to the spec ([tools.md](tools.md)) is checked, uploaded and named in
   the spec by its hash before the run starts, as `flock apply` does.
+- `--watch` applies each saved change to the experiment folder (spec, prompt files, tools) to
+  the running swarm, as `flock update` does; a broken save is shown and not applied. From a
+  second terminal, `flock update <folder>` and `flock grant <target> ...` work the same way
+  ([live.md](live.md)).
 
 ## What you see
 

@@ -263,9 +263,10 @@ the agent never sees.
 
 ## Follow-ups
 
-- Hot reload under `flock run` (local mode, a separate PR): watch the folder and re-apply on save.
+- Hot reload: done, `flock run --watch` and `flock update` ([live.md](live.md)); a CLI harness
+  gets a "tools changed" note in its next prompt.
 - Per-tool settings (timeout, rate) via a decorator; a long-lived tool host per type for tools
   that want warm state.
-- MCP exposure for the CLI harnesses; a "tools changed" note in the next prompt.
+- MCP exposure for the CLI harnesses.
 - `flock status` showing the tools version per worker (today: `GET /swarms/{swarm}/tools` and the
   turn events).
