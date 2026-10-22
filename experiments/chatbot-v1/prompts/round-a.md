@@ -1,5 +1,6 @@
 Round {round} ({why}; {elapsed} of {wall} min; you spent ${spend} of ${cap}). Phase 1, team A. Your last summary: {last_summary}
 Do the steps below in order, skipping the ones already done, ONE tool call per reply. Stop with `done` after at most 10 calls.
+If a post is refused because of the posting gap, do not retry it this turn; do something else (edit, read, run_bot) and post next round.
 A. Call `read` (no arguments). Find the [team-a] thread and any message that mentions you. Ignore [team-b] and every thread team B opened.
 B0. No "[direction] Team A:" line yet: if there is a [direction?] proposal in [team-a] you have not answered, `post` "agree <its id>" (or one amended version). If there is none, `read` the other team's "[direction] Team ..." line if it exists, and `post` your [direction?] proposal (one line, different from theirs). If you wrote a proposal that now has two `agree`s, `post` with thread "new": "[direction] Team A: <the line>".
 B. No agreed [split] in [team-a] yet: if there is a proposal you have not answered, `post` in [team-a] "agree <its id>" (or one counter-proposal). If there is none, `post` your [split] proposal for the 4 of team A.
