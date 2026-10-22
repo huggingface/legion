@@ -48,7 +48,7 @@ limits:
 | `first` | sent alone to each agent before its first loop prompt; the loop prompt follows only after that turn ended (run 3's "install and paint folded into one turn" cannot recur) |
 | `every` | `turn_end`: the next loop prompt as soon as the agent's turn completes. A duration: an idle agent gets the next one that long after its previous loop prompt was sent. `rounds`: needs a world |
 | `stagger` | spreads the first prompts (`first`, or round 1 without it) over `i * stagger`, agents in name order |
-| `on` | wake sources (`comms.mention`, `comms.thread`, ...): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world |
+| `on` | wake sources (`comms.mention`, `comms.thread`, ...): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `flock apply` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key and `"on":` quoting is no longer needed |
 | `context` | per-prompt context sources (`world.state`, `comms.recent:20`, `artifacts.recent:15`): accepted by the model, refused at apply until their feeders exist |
 | `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
 | `while.max_rounds`, `while.agent_usd`, `while.idle_rounds` | per agent: the agent leaves the loop; when every agent has left, the loop stops |

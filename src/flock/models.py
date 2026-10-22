@@ -11,7 +11,30 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+
+# --------------------------------------------------------------------------- spec YAML
+
+
+class _SpecLoader(yaml.SafeLoader):
+    """SafeLoader with YAML 1.2 booleans: only true/false. YAML 1.1 (PyYAML's default) also
+    reads on/off/yes/no as booleans, so the documented `on: [comms.mention]` key became `True`.
+    Dropping them in the loader protects every key and value of a spec, not just `loop.on`."""
+
+
+_BOOL = "tag:yaml.org,2002:bool"
+_SpecLoader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in rs if tag != _BOOL]
+    for ch, rs in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_SpecLoader.add_implicit_resolver(_BOOL, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+                                  list("tTfF"))
+
+
+def load_spec_yaml(text: str) -> Any:
+    """Parse spec YAML (safe, YAML 1.2 booleans); validate with `SwarmSpec.model_validate`."""
+    return yaml.load(text, Loader=_SpecLoader)  # a SafeLoader subclass
 
 # --------------------------------------------------------------------------- durations
 

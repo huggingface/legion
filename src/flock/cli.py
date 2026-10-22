@@ -18,10 +18,9 @@ from typing import Annotated, Any
 
 import httpx
 import typer
-import yaml
 from pydantic import ValidationError
 
-from flock.models import AGENT_NAME_RE, SwarmSpec, loop_refusals
+from flock.models import AGENT_NAME_RE, SwarmSpec, load_spec_yaml, loop_refusals
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -214,7 +213,7 @@ def load_spec(spec_file: str) -> SwarmSpec:
     to the spec file)."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+        spec = SwarmSpec.model_validate(load_spec_yaml(path.read_text(encoding="utf-8")))
     except ValidationError as e:
         for err in e.errors():
             where = ".".join(str(x) for x in err["loc"])
