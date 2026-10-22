@@ -7,6 +7,10 @@ Replies, decided from the last message of each request:
 - last user text contains `bash: X` -> one `bash` tool call with command X
 - last user text contains `call: NAME {json}` and NAME is an offered tool -> one call of NAME
   with those arguments (also under a forcing `tool_choice`, until a tool result follows)
+- the latest user message contains `script: [[NAME, {args}], ...]` (JSON on that line) -> the
+  k-th of those calls, k = tool results since that message (also under a forcing `tool_choice`);
+  `{me}` in it is the agent's name from the system message ("You are <name>, ..."); after the
+  last one `done {summary: "script done"}` when `done` is offered, else a text reply
 - last user text contains `astext: NAME {json}` -> that call written as text:
   `{"name": NAME, "arguments": {json}}`
 - last user text contains `json: X` -> the call written as text: `{"tool": "bash", "command": X}`
@@ -68,11 +72,35 @@ def _named_call(body: dict[str, Any], user: str) -> dict[str, Any] | None:
         "name": name, "arguments": args.strip() or "{}"}}]}
 
 
+def _scripted(body: dict[str, Any]) -> dict[str, Any] | None:
+    """`script: [[NAME, {args}], ...]` in the latest user message: one call per model request."""
+    msgs = body.get("messages") or []
+    since = next((i for i in range(len(msgs) - 1, -1, -1) if msgs[i].get("role") == "user"), None)
+    if since is None or "script: " not in (user := _text(msgs[since].get("content"))):
+        return None
+    system = _text(msgs[0].get("content")) if msgs[0].get("role") == "system" else ""
+    me = m.group(1) if (m := re.search(r"You are ([^\s,]+),", system)) else "?"
+    steps = json.loads(user.split("script: ", 1)[1].splitlines()[0].replace("{me}", me))
+    k = sum(1 for m in msgs[since:] if m.get("role") == "tool")
+    offered = {t.get("function", {}).get("name") for t in body.get("tools") or []}
+    if k < len(steps):
+        name, args = steps[k]
+    elif "done" in offered:
+        name, args = "done", {"summary": "script done"}
+    else:
+        return {"content": "script done", "tool_calls": None}
+    n = sum(1 for m in msgs if m.get("role") == "assistant")
+    return {"content": None, "tool_calls": [{"id": f"call_{n}", "type": "function", "function": {
+        "name": name, "arguments": json.dumps(args)}}]}
+
+
 def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     """{'content': str|None, 'tool_calls': list|None} for this request."""
     msgs = body.get("messages") or []
     last = msgs[-1] if msgs else {}
     tc = body.get("tool_choice")
+    if scripted := _scripted(body):
+        return scripted
     if last.get("role") == "user" and (named := _named_call(body, _text(last.get("content")))):
         return named
     if last.get("role") == "user" and "astext: " in _text(last.get("content")):

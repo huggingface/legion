@@ -1,0 +1,6 @@
+?
+asdkjh qwe zzz
+ok
+I am Sam and I like hiking => sam|hiking
+yes
+no
