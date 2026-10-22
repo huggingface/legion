@@ -12,7 +12,9 @@
 #          CHATBOT_SWITCH_AT  optional: seconds after start for the phase switch (else: the
 #                           control marker <bucket>/control/switch, uploaded by the operator)
 # secrets: HF_TOKEN (router + bucket), CHATBOT_BOARD_INVITE, CHATBOT_WORLD_TOKEN
-# `hf jobs cancel` (SIGTERM): stop flock (drain, bundle), then the last sync. Exit: flock's code.
+# Stop: upload <bucket>/control/stop: flock drains and writes its bundle, then the last sync.
+# `hf jobs cancel` (SIGTERM) tries the same, but the platform killed the smoke job ~3 s after
+# the cancel: only what the periodic sync already pushed survives. Exit: flock's code.
 # A local rehearsal: CHATBOT_PREINSTALLED=1 (flock on PATH) and a local directory as the bucket.
 set -euo pipefail
 : "${CHATBOT_BUCKET:?}" "${CHATBOT_BOARD_URL:?}" "${CHATBOT_CHANNEL:?}" "${CHATBOT_WORLD_TOKEN:?}"
@@ -121,9 +123,12 @@ while alive; do
   if [ "$STOP" = 1 ] && [ -z "${stop_synced:-}" ]; then  # the workspace first, while flock drains
     stop_synced=1; if [ -d "$CHATBOT_WS" ]; then push "$CHATBOT_WS" "$B/ws" || log "sync ws failed"; fi
   fi
-  if [ "$switched" = 0 ] && [ "$STOP" = 0 ] && [ $((now - last_check)) -ge "${CHATBOT_CHECK_S:-30}" ]; then
+  if [ "$STOP" = 0 ] && [ $((now - last_check)) -ge "${CHATBOT_CHECK_S:-30}" ]; then
     last_check=$now
-    if { [ -n "${CHATBOT_SWITCH_AT:-}" ] && [ $((now - t0)) -ge "$CHATBOT_SWITCH_AT" ]; } || exists "$B/control/switch"; then
+    if exists "$B/control/stop"; then  # a graceful stop: `hf jobs cancel` leaves only ~3 s
+      log "stop marker found"; on_term
+    elif [ "$switched" = 0 ] && { { [ -n "${CHATBOT_SWITCH_AT:-}" ] &&
+         [ $((now - t0)) -ge "$CHATBOT_SWITCH_AT" ]; } || exists "$B/control/switch"; }; then
       log "phase switch"
       if bash "$EXP/job/switch.sh" > "$H/logs/switch.log" 2>&1; then log "phase switch ok"; else log "phase switch FAILED (logs/switch.log)"; fi
       switched=1

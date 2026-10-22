@@ -214,15 +214,21 @@ Two other ways to trigger the switch:
 - By hand (untested): add `--ssh` at launch, then `hf jobs ssh <job id>` and run
   `bash /opt/chatbot/repo/experiments/chatbot-v1/job/switch.sh` with the env set.
 
-**Stop it.** `hf jobs cancel <job id>` sends SIGTERM. The bootstrap then:
-1. passes the SIGTERM on to `flock run`, which drains its turns (up to 10 s) and writes the
-   run bundle (`stop_reason: interrupted`);
-2. syncs the workspace at once, while flock drains;
-3. runs the final sync of the bundle and the logs.
+**Stop it.** Upload a stop marker; do not rely on `hf jobs cancel`:
 
-The platform's grace period after SIGTERM is not documented and has not been measured. The
-periodic sync limits the loss to 5 minutes. A run that ends by itself (`--until idle`, after
-the final round) exits 0 after the final sync.
+```sh
+echo stop > stop && hf buckets cp stop hf://buckets/<ns>/<bucket>/<run>/control/stop
+```
+
+Within `CHATBOT_CHECK_S` (30 s) the bootstrap passes a SIGTERM to `flock run`, which drains
+its turns (up to 10 s) and writes the run bundle (`stop_reason: interrupted`). The bootstrap
+then runs the final sync and the job exits.
+
+`hf jobs cancel <job id>` sends SIGTERM too, but in the smoke job (2026-10-22) the container
+was gone about 3 s later: no drain, no bundle, no final sync. Only what the periodic sync had
+pushed survived (`CHATBOT_SYNC_S`, 300 s: the workspace, the run dir with `controller.db`,
+`events/` and the session logs, and the logs). A run that ends by itself (`--until idle`,
+after the final round) exits 0 after the final sync.
 
 **Where to look.**
 - `hf jobs logs <job id>` shows the bootstrap's lines. `<bucket>/logs/run.out` holds flock's

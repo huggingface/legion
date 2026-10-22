@@ -482,3 +482,18 @@ def test_job_bootstrap_two_channel_variant(tmp_path, fakes):
     switch = (bucket / "control" / "switch.log").read_text()
     assert switch.count("prompts changed") == 2 and '"phase":"merged"' in switch
     _no_secrets(bucket, board)
+
+
+def test_job_bootstrap_stop_marker_writes_the_bundle(tmp_path, fakes):
+    """<bucket>/control/stop: the graceful stop (a cancel leaves the job only ~3 s)."""
+    model_url, board, board_url = fakes
+    proc, _, bucket = _job(tmp_path, model_url, board, board_url)
+    (bucket / "control").mkdir()
+    (bucket / "control" / "stop").write_text("stop\n")
+    _wait(proc, 90)
+    out = (tmp_path / "job.out").read_text()
+    assert "stop marker found" in out and "final sync" in out and "done" in out, out
+    (run,) = (bucket / "flock" / ".flock").iterdir()
+    assert json.loads((run / "run.json").read_text())["stop_reason"] == "interrupted"
+    assert "stop marker found" in (bucket / "logs" / "bootstrap.log").read_text()
+    _no_secrets(bucket, board)
