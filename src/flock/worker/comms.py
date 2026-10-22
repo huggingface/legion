@@ -664,6 +664,7 @@ class CommsHub:
         c, ident = op.c, op.ident
         assert c.channel_id is not None
         thread = as_id(args.get("thread"), "thread")
+        since = as_id(args.get("since"), "since")
         board = op.board(self)
         # the newest n (a thread: READ_MAX unless asked), read from the tail of the history;
         # `truncated` says older messages exist, never a first page passed off as the whole
@@ -683,11 +684,23 @@ class CommsHub:
         else:
             page = await board.latest(ident, c.channel_id, n)
             msgs = [x for x in page.get("messages") or [] if isinstance(x, dict)]
+        default = since is None and thread is None and c.kickoff_id is not None
+        if default:
+            since = c.kickoff_id  # on a reused channel, history from before the run stays out
+        reached = older = False  # reached: the page goes back to `since`, nothing after it is cut
+        if since is not None:
+            kept = [x for x in msgs if isinstance(x.get("id"), int) and x["id"] >= since]
+            reached = len(kept) < len(msgs) or (bool(kept) and kept[0]["id"] == since)
+            older = len(kept) < len(msgs) or bool(page.get("has_more"))
+            msgs, out["since"] = kept, since
         out["messages"] = [brief(x) for x in msgs]
-        if page.get("has_more"):
+        if page.get("has_more") and not reached:
             out["truncated"] = True
             out["note"] = (f"only the newest {len(msgs)} messages; older ones exist"
                            + (f" (n is at most {READ_MAX})" if n < READ_MAX else ""))
+        elif default and reached and older:
+            out["note"] = (f"from the kickoff (message {since}) on; for older ones read with "
+                           "since: <message id>")
         return out
 
     async def _search(self, op: _Op, args: dict[str, Any]) -> dict[str, Any]:
