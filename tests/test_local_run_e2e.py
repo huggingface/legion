@@ -287,6 +287,7 @@ def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_s
     lp = doc["loops"]["writer"]
     assert (lp["state"], lp["reason"], lp["rounds_total"], lp["final_sent"], lp["final_done"]) == (
         "done", "max_rounds", 4, 2, 2), lp
+    assert lp["wakes_total"] == 0  # wake prompts are counted apart from rounds (none here)
     assert doc["budget"] == {"budget_usd": 1.0, "final_reserve_usd": 0.0, "cost_usd": 0.0,
                              "stop": None}
 

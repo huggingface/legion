@@ -150,6 +150,8 @@ class AgentRuntime:
         self._loop_errors = 0
         self._loop_task: asyncio.Task | None = None
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
+        self._turn_state_calls = 0  # of those, the ones that are not read-only (idle_rounds)
+        self._turn_finished = False  # `done(finished: true)` this turn (stop_when.all_agents_done)
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
         self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
@@ -476,13 +478,20 @@ class AgentRuntime:
                     extra["usage_missing"] = True
                 if self._turn_tools is not None:
                     extra["tools_version"] = self._turn_tools
+                if self._turn_finished:
+                    extra["finished"] = True
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
-                                         "tool_calls": self._turn_tool_calls, **extra,
+                                         "tool_calls": self._turn_tool_calls,
+                                         "state_calls": self._turn_state_calls, **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 summary = self._turn_summary or self._turn_text
                 if summary:
                     self.state.last_summary = summary
+                finished = self._turn_finished
                 self._end_turn()
+                lp = self.spec.loop
+                if finished and self.loop is not None and lp is not None and lp.stop_when.all_agents_done:
+                    self._loop_end("done")  # no next round; the controller takes it out too
                 self._after_turn(ev.status or "completed",
                                  "max_turns" if hit_max_turns(ev.data) else None)
         elif k == "error":
@@ -522,6 +531,7 @@ class AgentRuntime:
                 data["tools_error"] = ts.error
         self._turn_tools = data.get("tools_version")
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
+        self._turn_state_calls, self._turn_finished = 0, False
         self._loop_inflight = None
         self.emit("turn_started", data)
 
@@ -560,7 +570,9 @@ class AgentRuntime:
 
     # ------------------------------------------------------------------ loop (docs/loop.md)
     def _note_message(self, m: dict[str, Any]) -> None:
-        """Per turn: tool calls (not `done`), `done`'s summary and the last assistant text."""
+        """Per turn: tool calls (not `done`), those that are not read-only (the `llm` adapter
+        marks a call `readonly` from the tools version it ran with: comms read/search,
+        `readonly` folder tools), `done`'s summary and the last assistant text."""
         if m.get("role") != "assistant":
             return
         content = m.get("content")
@@ -569,8 +581,12 @@ class AgentRuntime:
         if isinstance(content, str):
             texts = [content]
         text = "\n".join(t for t in texts if isinstance(t, str) and t.strip()).strip()
-        self._turn_tool_calls += sum(1 for b in blocks if isinstance(b, dict)
-                                and b.get("type") == "toolCall" and b.get("name") != "done")
+        calls = [b for b in blocks if isinstance(b, dict)
+                 and b.get("type") == "toolCall" and b.get("name") != "done"]
+        self._turn_tool_calls += len(calls)
+        self._turn_state_calls += sum(1 for b in calls if b.get("readonly") is not True)
+        if m.get("fromDoneTool") and m.get("finished") is True:
+            self._turn_finished = True
         if m.get("fromDoneTool") and text:
             self._turn_summary = text
         elif text:
@@ -584,14 +600,18 @@ class AgentRuntime:
     def _loop_prompt(self, template: str, meta: LoopMeta) -> str:
         """Number and render a loop prompt; record it as a `loop_prompt` event."""
         if meta.kind == "loop":
-            n = meta.round if meta.round is not None else self.state.loop_round + 1
+            # a wake prompt outside max_rounds (counted false) keeps the current round
+            n = (meta.round if meta.round is not None
+                 else self.state.loop_round + int(meta.counted))
             self.state.loop_round = max(self.state.loop_round, n)
             meta = meta.model_copy(update={"round": n})
         elif meta.kind == "final" and self.loop is not None:
             self._loop_end("final")
         self._loop_inflight = meta
         self.emit("loop_prompt", {"kind": meta.kind, "round": meta.round, "why": meta.why,
-                                  **({"add_tools": meta.add_tools} if meta.add_tools else {})})
+                                  **({"add_tools": meta.add_tools} if meta.add_tools else {}),
+                                  **({} if meta.counted else {"counted": False}),
+                                  **({"wake": True} if meta.wake else {})})
         return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,
                       now=utcnow())
 
@@ -601,9 +621,12 @@ class AgentRuntime:
         m, self._loop_inflight = self._loop_inflight, None
         if m is None:
             return {}
+        wake = {"wake": True} if m.wake else {}
+        if not m.counted:
+            return {"loop": {"kind": m.kind, "round": m.round, "counted": False, **wake}}
         if m.kind == "loop" and m.round is not None:
             self.state.loop_round = min(self.state.loop_round, max(0, m.round - 1))
-        return {"loop": {"kind": m.kind, "round": m.round}}
+        return {"loop": {"kind": m.kind, "round": m.round, **wake}}
 
     def start_loop(self, cmd: LoopStartCommand) -> None:
         """`loop_start`: send the loop prompt now if idle, then after every completed turn. A

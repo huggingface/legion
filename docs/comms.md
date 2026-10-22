@@ -147,7 +147,10 @@ One event per message and agent, the mention first. Also on the stream: `comms_j
 **Wake-ups.** The controller passes every `comms_mention` and `comms_thread_reply` it receives to
 the loop's wake queue as `wake(agent, "comms.mention")` or `wake(agent, "comms.thread")`: an agent
 whose type has `loop.on: [comms.mention, comms.thread]` gets its loop prompt early (2 s debounce,
-one prompt per burst, never while it is working; docs/loop.md "Wake queue"). A type without that
+one prompt per burst, never while it is working, at most one per `loop.wake.min_gap` (30 s) and
+`loop.wake.max` (10) per run, not a round by default; each one is a `loop_wake` event;
+docs/loop.md "Wake queue"). The `read` and `search` tools are read-only: a loop turn that only
+reads the board is idle for `while.idle_rounds`. A type without that
 `on:` entry, or without a running loop, is not prompted by a message; the events are in
 `flock events` either way. `create_app(..., on_comms=fn)` also hands each one to
 `fn(agent, reason, data)` with reason `mention` or `thread` and
