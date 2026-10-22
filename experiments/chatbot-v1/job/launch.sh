@@ -23,7 +23,7 @@ fi
 echo "payload: $DEST/payload/ ($(cd "$OUT" && ls | tr '\n' ' '))" >&2
 rm -rf "$OUT"
 cat <<CMD
-hf jobs run --detach --flavor cpu-upgrade --timeout 4h30m --name chatbot-v1 \\
+hf jobs run --detach --flavor cpu-upgrade --timeout 270m --name chatbot-v1 \\
   --label experiment=chatbot-v1 \\
   --secrets HF_TOKEN --secrets CHATBOT_BOARD_INVITE --secrets CHATBOT_WORLD_TOKEN \\
   -e CHATBOT_BUCKET=$DEST -e CHATBOT_BOARD_URL=<board url> -e CHATBOT_CHANNEL=<channel> \\

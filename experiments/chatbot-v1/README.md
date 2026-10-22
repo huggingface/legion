@@ -183,7 +183,7 @@ hf buckets create <ns>/<bucket> --private
 experiments/chatbot-v1/job/launch.sh hf://buckets/<ns>/<bucket>/chatbot-v1-run1
 # 3. the job (secrets are read from your environment: HF_TOKEN, CHATBOT_BOARD_INVITE,
 #    CHATBOT_WORLD_TOKEN; nothing secret is on the command line)
-hf jobs run --detach --flavor cpu-upgrade --timeout 4h30m --name chatbot-v1 \
+hf jobs run --detach --flavor cpu-upgrade --timeout 270m --name chatbot-v1 \
   --label experiment=chatbot-v1 \
   --secrets HF_TOKEN --secrets CHATBOT_BOARD_INVITE --secrets CHATBOT_WORLD_TOKEN \
   -e CHATBOT_BUCKET=hf://buckets/<ns>/<bucket>/chatbot-v1-run1 \
