@@ -344,6 +344,32 @@ async def test_read_and_search(tmp_path, board):
         await t.close()
 
 
+async def test_read_defaults_to_the_run_since_the_kickoff(tmp_path, board):
+    """Defect 8: on a reused channel `read` leaves out history from before the kickoff unless
+    asked with `since`; a thread read is not cut by default."""
+    old = [board.post("carlos", CH, f"old {i}")["id"] for i in range(3)]
+    kickoff = board.post("sw-host", CH, "kickoff")["id"]
+    t = Team(tmp_path, board, ["dev-0000"])
+    t.spec.kickoff_id = kickoff  # set at apply, carried in the spec the worker gets
+    try:
+        await t.start()
+        board.post("ds-1", CH, "new 1", reply_to=kickoff)
+        out, err = await t.call("dev-0000", "read")
+        assert not err and [m["text"] for m in out["messages"]] == ["kickoff", "new 1"]
+        assert out["since"] == kickoff and "truncated" not in out and "since:" in out["note"]
+        out, err = await t.call("dev-0000", "read", since=f"#{old[1]}")
+        assert not err and [m["text"] for m in out["messages"]] == ["old 1", "old 2", "kickoff", "new 1"]
+        assert "truncated" not in out and "note" not in out
+        out, err = await t.call("dev-0000", "read", n=1)
+        assert [m["text"] for m in out["messages"]] == ["new 1"] and out["truncated"] is True
+        out, err = await t.call("dev-0000", "read", thread=old[0])  # an explicit thread: as asked
+        assert not err and [m["text"] for m in out["messages"]] == ["old 0"]
+        out, err = await t.call("dev-0000", "read", since="yesterday")
+        assert err and "since must be a message id" in out["error"]
+    finally:
+        await t.close()
+
+
 async def test_flock_tool_reaches_comms_through_the_gateway(tmp_path, board):
     t = Team(tmp_path, board, ["dev-0000"])
     try:
@@ -391,6 +417,19 @@ def test_controller_resolves_channel_and_posts_kickoff_once(board):
                 {INVITE_ENV: board.invite})
     with pytest.raises(CommsError, match="invite link is not valid"):
         resolve(SwarmSpec.model_validate(swarm_raw(url=board.url)), None, {INVITE_ENV: "wrong"})
+
+
+def test_controller_refuses_an_archived_channel_before_any_post_or_join():
+    """Defect 7: an archived channel is refused at resolve, not at the kickoff post (409)."""
+    b, srv, url = fake_msgboard.serve(fake_msgboard.Board(archived={CH}))
+    try:
+        with pytest.raises(CommsError, match=r"channel flock-test \(id 12\) is archived"):
+            resolve(SwarmSpec.model_validate(swarm_raw(url=url, kickoff="Kickoff.")), None,
+                    {INVITE_ENV: b.invite})
+        assert [(m, p) for m, p, _, _ in b.requests] == [("POST", "/v1/join"), ("GET", "/v1/channels")]
+        assert b.msgs == []
+    finally:
+        srv.shutdown()
 
 
 # --------------------------------------------------------------------------- review of #16

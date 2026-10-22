@@ -63,6 +63,9 @@ def resolve(spec: SwarmSpec, previous: SwarmSpec | None, secrets: Mapping[str, s
             raise CommsError(f"comms.channel: no channel #{c.channel} visible to "
                              f"{host_name(spec.swarm)} on {c.url} (is the invite scoped to it?)")
         ch = chans[0]
+        if ch.get("archived"):  # refused before the host joins it or the kickoff is posted
+            raise CommsError(f"comms.channel: channel {c.channel} (id {ch['id']}) is archived on "
+                             f"{c.url}; unarchive it or use another channel")
         pid = (joined.get("principal") or {}).get("id")
         if not ch.get("member") and isinstance(pid, int):
             try:
