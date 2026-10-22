@@ -421,6 +421,8 @@ class Worker:
     async def _unassign(self, rt: AgentRuntime) -> None:
         try:
             await rt.unassign()
+            if rt.base_spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
+                rt.purge()
         finally:
             self.comms.forget(rt.name)
             self.world.on_done(rt.name, "unassigned")

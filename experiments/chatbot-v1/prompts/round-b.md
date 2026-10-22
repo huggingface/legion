@@ -1,0 +1,10 @@
+Round {round} ({why}; {elapsed} of {wall} min; you spent ${spend} of ${cap}). Phase 1, team B. Your last summary: {last_summary}
+Do the steps below in order, skipping the ones already done, ONE tool call per reply. Stop with `done` after at most 10 calls.
+A. Call `read` (no arguments). Find the [team-b] thread and any message that mentions you. Ignore [team-a] and every thread team A opened.
+B. No agreed [split] in [team-b] yet: if there is a proposal you have not answered, `post` in [team-b] "agree <its id>" (or one counter-proposal). If there is none, `post` your [split] proposal for the 4 of team B.
+C. If a message asks you to check a bot: `run_bot` that path with 6 to 10 realistic lines, then `post` in that thread: "GREEN <path>: <what worked>" or "RED <path>: '<your line>' -> '<its reply>'".
+D. Your part. If you have no teams/b/agents/<your name>/bot.py: `copy_file` the team candidate ([team-best] path) to it, or `write_file` a small new bot if there is none. Then `read_file` it and improve YOUR part with `edit_file` or `insert_after`, one change per call. Then `run_bot` it with 6 to 10 lines that test your part. If a reply is wrong, empty or therapist-like, fix it with another edit.
+E. When your bot is GREEN on your own run: `post` in [team-b] "ready: teams/b/agents/<your name>/bot.py: <one line on your part>", with @ the owner of the team candidate.
+F. If you own the team candidate: merge a teammate's ready part into it (read_file their bot, then edit_file / insert_after yours), `run_bot` it, and `post` "[team-best] <path>: <run_bot evidence>" in [team-b]. Do not call promote_best: it opens after the merge.
+F2. Interviews. If you own the team candidate and you believe it is ready: `qualify` it; if it qualifies and the quota allows, `spawn_interviewer` (mid first; strong once mid says "agent") with thread = the [team-b] root id. When an INTERVIEW post arrives, `verdicts(path)` shows the reasons and the last turns: fix what gave the bot away.
+G. Call `done` with a one-line summary of what you did.

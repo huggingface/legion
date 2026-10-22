@@ -30,19 +30,36 @@ SHIM = (f"import resource as r,runpy,sys\nfor k,v in {LIMITS}: r.setrlimit(k,(v,
 
 class ElizaWorld(World):
     name, version, description = "eliza", "0.1.0", (HERE / "rules.md").read_text()
+    dirs, probes_src = ("agents", "best", "probes"), HERE / "probes"
 
     def __init__(self, root: str | None = None) -> None:
         self.ws = Path(root or os.environ.get("ELIZA_WS", "ws")).resolve()
-        for d in ("agents", "best", "probes"):
+        for d in self.dirs:
             (self.ws / d).mkdir(parents=True, exist_ok=True)
         if not any((self.ws / "probes").glob("*.txt")):
-            shutil.copytree(HERE / "probes", self.ws / "probes", dirs_exist_ok=True)
+            shutil.copytree(self.probes_src, self.ws / "probes", dirs_exist_ok=True)
         self._promote = asyncio.Lock()
 
-    def _path(self, path: str, must_exist: bool = True) -> Path:
+    def _home(self, agent: Agent) -> Path:
+        """The one directory `agent` may write under."""
+        return self.ws / "agents" / agent.name
+
+    def _refuse(self, agent: Agent, tool: str, rel: str) -> str | None:
+        """Why `agent` may not use `tool` on the workspace path `rel`, or None (here: never)."""
+        return None
+
+    def _promoted(self, rec: dict) -> None:
+        """Called after each promotion, outside the promotion lock (here: nothing)."""
+
+    def _path(self, path: str, must_exist: bool = True, agent: Agent | None = None,
+              tool: str = "") -> Path:
         p = (self.ws / path.strip().lstrip("/")).resolve()
         if p != self.ws and self.ws not in p.parents:
             raise ToolError(f"{path!r} is outside the workspace", "bad_path")
+        if agent is not None and (why := self._refuse(agent, tool, p.relative_to(self.ws)
+                                                      .as_posix())):
+            self._log(agent, "refused", tool=tool, path=path)
+            raise ToolError(why, "refused")
         if must_exist and not p.is_file():
             raise ToolError(f"no file {path!r}; list_files shows what exists", "not_found")
         return p
@@ -80,7 +97,8 @@ class ElizaWorld(World):
                     "turns": [{"user": u, "bot": r} for u, r in zip(lines, bots)]}
 
     def _probes(self) -> dict[str, list[tuple[str, list[str]]]]:
-        """probes/*.txt: a user line per line, optionally ` => kw1|kw2` (the reply holds one)."""
+        """probes/*.txt: a user line per line, optionally ` => kw1|kw2` (the reply holds one;
+        `!kw`: the reply must not hold it)."""
         return {p.name: [(m.strip(), [k.strip().lower() for k in kws.split("|") if k.strip()])
                          for m, _, kws in (x.partition(" => ") for x in p.read_text().splitlines())
                          if m.strip() and not m.startswith("#")]
@@ -95,10 +113,13 @@ class ElizaWorld(World):
             fails = [] if r["status"] == "ok" else [r["status"]]
             for (msg, kws), t in zip(rows, r["turns"]):
                 reply = (t["bot"] or "").strip().lower()
-                hit = bool(kws) and any(k in reply for k in kws)
+                pos, neg = [k for k in kws if k[0] != "!"], [k[1:] for k in kws if k[0] == "!"]
+                bad = [k for k in neg if k in reply]
+                hit = bool(kws) and (not pos or any(k in reply for k in pos)) and not bad
                 got += bool(reply) + hit
                 if not reply or (kws and not hit):
-                    fails.append(f"{msg!r}: no reply" if not reply else f"{msg!r}: none of {kws}")
+                    fails.append(f"{msg!r}: no reply" if not reply else f"{msg!r}: says {bad[0]!r}"
+                                 if bad else f"{msg!r}: none of {pos}")
             got += r["status"] == "ok"
             total += 1 + len(rows) + sum(1 for _, k in rows if k)
             report[name] = "GREEN" if not fails else "RED: " + "; ".join(fails[:3])
@@ -109,12 +130,12 @@ class ElizaWorld(World):
         return [json.loads(x) for x in hist.read_text().splitlines()] if hist.is_file() else []
 
     def _own(self, agent: Agent, tool: str, path: str, must_exist: bool) -> Path:
-        """`path` resolved, if it is under agents/<agent>/ (by flock's X-Flock-Agent)."""
-        p = self._path(path, must_exist=False)
-        if self.ws / "agents" / agent.name not in p.parents:
+        """`path` resolved, if it is under the agent's home (by flock's X-Flock-Agent)."""
+        p, home = self._path(path, must_exist=False), self._home(agent)
+        if home not in p.parents:
             self._log(agent, "refused", tool=tool, path=path)
-            raise ToolError(f"refused: you ({agent.name}) may write only under agents/"
-                            f"{agent.name}/, not {path!r}. best/bot.py changes by promote_best.",
+            raise ToolError(f"refused: you ({agent.name}) may write only under {self._rel(home)}"
+                            f"/, not {path!r}. best/bot.py changes by promote_best.",
                             "not_yours")
         if must_exist and not p.is_file():
             raise ToolError(f"no file {path!r}; create it with write_file or copy_file",
@@ -163,7 +184,8 @@ class ElizaWorld(World):
         return text.index(needle)
 
     @tool
-    def read_file(self, path: str, start: int | None = None, end: int | None = None) -> str:
+    def read_file(self, path: str, start: int | None = None, end: int | None = None,
+                  agent: Agent | None = None) -> str:
         """Read a workspace file (any agent's, best/bot.py, probes/*.txt), or some of its lines.
         The first line of the result says which lines you got and how many the file has.
 
@@ -172,7 +194,8 @@ class ElizaWorld(World):
             start: first line to return (1-based); from the top when left out
             end: last line to return (inclusive); to the end when left out
         """
-        lines = self._path(path).read_text(errors="replace").splitlines(keepends=True)
+        p = self._path(path, agent=agent, tool="read_file")
+        lines = p.read_text(errors="replace").splitlines(keepends=True)
         a, b = max(1, start or 1), min(len(lines), end or len(lines))
         text = "".join(lines[a - 1:b])
         if len(text) > READ_CAP:
@@ -199,7 +222,7 @@ class ElizaWorld(World):
             src: the file to copy, e.g. best/bot.py or agents/ds-0001/bot.py
             path: the new file, e.g. agents/<your name>/bot.py
         """
-        text = self._path(src).read_text(errors="replace")
+        text = self._path(src, agent=agent, tool="copy_file").read_text(errors="replace")
         return self._save(agent, "copy_file", self._own(agent, "copy_file", path, False), text)
 
     @tool
@@ -237,27 +260,30 @@ class ElizaWorld(World):
         return self._save(agent, "insert_after", p, head + text.rstrip("\n") + "\n" + old[at:])
 
     @tool
-    def list_files(self, prefix: str = "") -> dict:
+    def list_files(self, prefix: str = "", agent: Agent | None = None) -> dict:
         """List workspace files, newest first, with size and age in seconds.
 
         Args:
             prefix: only paths starting with this, e.g. agents/glm-0000/ or best/
         """
+        seen = (lambda r: True) if agent is None else (
+            lambda r: not self._refuse(agent, "list_files", r))
         files = sorted((p for p in self.ws.rglob("*") if p.is_file() and p.name != "log.jsonl"
-                        and self._rel(p).startswith(prefix)), key=lambda p: -p.stat().st_mtime)
+                        and self._rel(p).startswith(prefix) and seen(self._rel(p))),
+                       key=lambda p: -p.stat().st_mtime)
         return {"total": len(files), "files": [
             {"path": self._rel(p), "bytes": p.stat().st_size,
              "age_s": int(time.time() - p.stat().st_mtime)} for p in files[:200]]}
 
     @tool
-    async def run_bot(self, path: str, lines: list[str]) -> dict:
+    async def run_bot(self, path: str, lines: list[str], agent: Agent | None = None) -> dict:
         """Talk to a bot: run it on one fresh conversation and return the transcript.
 
         Args:
             path: the bot file, e.g. agents/ds-0002/bot.py or best/bot.py
             lines: the user's messages in order (1 to 20, one line each)
         """
-        p = self._path(path)
+        p = self._path(path, agent=agent, tool="run_bot")
         if not 0 < len(lines) <= 20:
             raise ToolError("give 1 to 20 lines", "bad_lines")
         return await asyncio.to_thread(self._run, p, [" ".join(x.split())[:500] for x in lines])
@@ -270,7 +296,7 @@ class ElizaWorld(World):
             path: the candidate bot file, e.g. agents/ds-0001/bot.py
             reason: one line: what it does better, and your run_bot evidence
         """
-        p = self._path(path)
+        p = self._path(path, agent=agent, tool="promote_best")
         async with self._promote:
             cand, hist = await asyncio.to_thread(self._score, p), self._history()
             best = self.ws / "best" / "bot.py"
@@ -289,7 +315,8 @@ class ElizaWorld(World):
                 dst.write_text(text)
             self._append("best/history.jsonl", rec)
             self._log(agent, "promote", path=rec["path"], score=cand["score"], n=n)
-            return {"promoted": True, "best": rec, "probes": cand["probes"]}
+        await asyncio.to_thread(self._promoted, rec)
+        return {"promoted": True, "best": rec, "probes": cand["probes"]}
 
     @tool
     def best_status(self) -> dict:

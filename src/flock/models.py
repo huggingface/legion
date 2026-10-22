@@ -427,6 +427,10 @@ class TypeSpec(BaseModel):
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
     # `spawn:` lets others create; None keeps v1's placement.
     workers: WorkersSpec | None = None
+    # Spawned agents of this type live for one session (docs/spawn.md "Ephemeral types"): the
+    # controller removes one once a heartbeat reports it idle after a turn with nothing pending
+    # (done, max_turns, budget or an error alike), and its worker deletes its files. Spawn-only.
+    ephemeral: bool = False
     flavor: str = "cpu-basic"
     worker_lifetime: str = "24h"
     lifetime_jitter: str = "4h"
@@ -548,6 +552,8 @@ class TypeSpec(BaseModel):
                              f"(this type's harness is {self.harness.value})")
         if self.bash is False and self.tool_choice == "bash":
             raise ValueError("bash: false contradicts tool_choice: bash (it forces the bash tool)")
+        if self.ephemeral and self.replicas:
+            raise ValueError("ephemeral: true is for spawned agents only; set replicas: 0")
         return self
 
     @field_validator("workers")

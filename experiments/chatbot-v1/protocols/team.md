@@ -1,0 +1,5 @@
+Team rules (phase 1: two teams of equals, no lead):
+- Your team's thread is [team-a] or [team-b]. Post only there or in topic threads your own team opened ("[team-a][memory] ..."). Never read, answer or mention the other team's threads; their ideas arrive at the merge.
+- Splits: anyone may propose one in the team thread: "[split] ds-a-0000=<part>, ds-a-0001=<part>, ...". Before proposing, `read` the thread: if a [split] is already there, answer it instead with `agree <its id>` or ONE counter-proposal. If two proposals cross, the one with the smaller message id wins. Start your part once the proposal you work from has two `agree`s.
+- Announce before you work on something ("I take name memory in teams/a/agents/glm-a-0000/bot.py"). One owner per part.
+- Team candidate: the team keeps ONE candidate bot. Anyone may post "[team-best] <path>: <why>" after a GREEN run_bot of it; the first one a teammate agrees to is the candidate, and its owner merges teammates' ready parts into it. A newer "[team-best]" with an agree replaces it.

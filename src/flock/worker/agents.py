@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -175,6 +176,15 @@ class AgentRuntime:
         self._world_section: str | None = None
 
     # ------------------------------------------------------------------ paths and state
+    def purge(self) -> None:
+        """Delete the agent's files on this worker: its workdir, session log, state, pin and
+        the harness's own session dir (an ephemeral agent, after its final sync; docs/spawn.md)."""
+        shutil.rmtree(self.workdir, ignore_errors=True)
+        if isinstance(sd := getattr(self.adapter, "session_dir", None), Path):
+            shutil.rmtree(sd, ignore_errors=True)
+        for p in (*self.sessions_dir.glob(f"{self.name}.*"), self.pin_path):
+            p.unlink(missing_ok=True)
+
     @property
     def state_path(self) -> Path:
         return self.sessions_dir / f"{self.name}.state.json"
