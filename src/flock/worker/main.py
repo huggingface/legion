@@ -17,6 +17,7 @@ import logging
 import os
 import random
 import re
+import signal
 import sys
 import threading
 from collections import Counter
@@ -49,6 +50,7 @@ from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
 from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
+from flock.worker.tools import ToolsManager, tools_root
 
 log = logging.getLogger("flock.worker")
 
@@ -89,6 +91,8 @@ class WorkerConfig:
     sync_interval: float = 180.0
     drain_window: timedelta = DEFAULT_DRAIN_WINDOW  # from the job env; assigns may update it
     incarnation: str | None = None  # WORKER_INCARNATION: binds our polls to this job
+    # compute local (docs/local.md): the controller's pid; the worker exits once it is gone
+    parent_pid: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -105,6 +109,8 @@ class WorkerConfig:
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
             drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
             incarnation=env.get("WORKER_INCARNATION") or None,
+            parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
+            else None,
         )
 
 
@@ -186,10 +192,22 @@ class ControllerClient:
                              timeout=httpx.Timeout(20, read=wait + 20))
         return CommandBatch.model_validate(r.json() if r.content else {"commands": []})
 
-    async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> None:
-        await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
-                         content=hb.model_dump_json(), params=self.params,
-                         headers={"content-type": "application/json"})
+    async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> dict:
+        """The controller's answer: {"ok": true} plus, for a swarm with a tools folder,
+        {"tools": {"version", "select"}} (docs/tools.md)."""
+        r = await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
+                             content=hb.model_dump_json(), params=self.params,
+                             headers={"content-type": "application/json"})
+        try:
+            body = r.json() if r.content else {}
+        except ValueError:
+            body = {}
+        return body if isinstance(body, dict) else {}
+
+    async def tools_bundle(self, swarm: str, version: str, *, budget: float = 60.0) -> bytes:
+        r = await self._send("GET", f"/swarms/{swarm}/tools/{version}", budget=budget,
+                             timeout=httpx.Timeout(20, read=120))
+        return r.content
 
     async def events(self, batch: EventBatch, *, budget: float = 30.0) -> None:
         await self._send("POST", f"/workers/{batch.worker}/events", budget=budget,
@@ -245,9 +263,12 @@ class Worker:
         adapter_factory: Callable[[str, TypeSpec], HarnessAdapter] | None = None,
         sync: BucketSync | None = None,
         identities: Identities | None = None,
+        tools: ToolsManager | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
+        self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
+                                           type_name=cfg.type, fetch=self._fetch_tools)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg)
         self.sync = sync
         self.identities = identities or Identities()
@@ -263,6 +284,10 @@ class Worker:
         self._restoring = 0  # setups (restores) in flight; a "wave" ends when it drops to 0
         self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
         self._throttled_logged = 0
+        self._terminating = False
+
+    async def _fetch_tools(self, version: str) -> bytes:
+        return await self.client.tools_bundle(self.cfg.swarm, version)
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -275,6 +300,7 @@ class Worker:
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].spec = cmd.spec
                 self._set_lineage(self.agents[cmd.agent], cmd)
+                self.tools.want(cmd.tools_version, cmd.spec.tools)
                 return
             if self.draining:
                 log.warning("assign %s ignored while draining", cmd.agent)
@@ -283,7 +309,7 @@ class Worker:
                               work_root=self.cfg.work_root,
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
                               sync=self.sync, identities=self.identities,
-                              working_count=self.working_count)
+                              working_count=self.working_count, toolbox=self.tools.current)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.drain_window = parse_duration(cmd.spec.drain_window)
@@ -336,6 +362,8 @@ class Worker:
         self._wave = (start, n + 1, snap)
         self._restoring += 1
         try:
+            # the swarm's tools version is on disk before the agent's first turn (docs/tools.md)
+            await self.tools.ensure(cmd.tools_version, cmd.spec.tools)
             await rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt)
         finally:
             self._restoring -= 1
@@ -393,8 +421,11 @@ class Worker:
     async def send_heartbeat(self) -> bool:
         try:  # retried inside the client for most of an interval: the controller declares a
             # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
-            await self.client.heartbeat(self.heartbeat_payload(),
-                                        budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
+            resp = await self.client.heartbeat(self.heartbeat_payload(),
+                                               budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
+            if isinstance(resp, dict) and not self.draining:
+                tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
+                self.tools.want(tools.get("version"), tools.get("select"))
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)
@@ -458,6 +489,29 @@ class Worker:
             await asyncio.sleep(min(left, 30))
         await self.drain("deadline")
 
+    async def parent_loop(self, every: float = 2.0) -> None:
+        """compute local: a worker whose controller process died (kill -9, a crash) would poll
+        a dead URL until its deadline. Exit like a stale slot instead: stop, no sync."""
+        if self.cfg.parent_pid is None:
+            return
+        while os.getppid() == self.cfg.parent_pid:
+            await asyncio.sleep(every)
+        await self.abandon(f"controller process {self.cfg.parent_pid} is gone")
+
+    async def terminate(self, reason: str) -> None:
+        """compute local: SIGTERM from `flock run` at stop. Interrupt every turn now (the
+        adapters kill their harness and tool processes), then exit through the normal path:
+        flush events, last heartbeat. No sync (a local worker has no bucket)."""
+        if self._terminating or self.stale:
+            return
+        log.info("terminating (%s)", reason)
+        self._terminating = self.draining = True
+        for rt in self.agents.values():
+            rt.allow_starts = False
+        await asyncio.gather(*(rt.stop("terminated") for rt in list(self.agents.values())),
+                             return_exceptions=True)
+        self._drained.set()
+
     async def drain(self, reason: str) -> None:
         if self.draining:
             return
@@ -486,11 +540,18 @@ class Worker:
 
     async def run(self) -> int:
         loops = [self.poll_loop(), self.heartbeat_loop(), self.flush_loop(), self.sync_loop(),
-                 self.deadline_loop()]
+                 self.deadline_loop(), self.parent_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
+        loop = asyncio.get_running_loop()
+        on_term = self.cfg.parent_pid is not None  # compute local only; jobs keep the default
+        if on_term:
+            loop.add_signal_handler(signal.SIGTERM,
+                                    lambda: self._spawn(self.terminate("SIGTERM")))
         try:
             await self._drained.wait()
         finally:
+            if on_term:
+                loop.remove_signal_handler(signal.SIGTERM)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

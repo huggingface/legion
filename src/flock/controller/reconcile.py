@@ -290,7 +290,7 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
             counts[w["id"]] += 1
             store.update_agent(a["name"], worker=w["id"])
             if w["job_id"]:
-                _send_assign(store, w["id"], a, type_name, ts)
+                _send_assign(store, w["id"], a, type_name, ts, spec.tools_version)
             p.act("assign", a["name"], w["id"])
 
     for w in workers:
@@ -308,7 +308,8 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
         fill(store.get_worker(wid))
 
 
-def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec) -> None:
+def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec,
+                 tools_version: str | None = None) -> None:
     if a["removing"]:
         return  # mid-removal (docs/spawn.md): never re-assign it or re-issue its token
     resume = ts.resume_prompt if a["resume_pending"] else None
@@ -324,6 +325,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     cmd = AssignCommand(
         agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
+        tools_version=tools_version,
     )
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:
@@ -494,7 +496,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         next_launch_at=None,
     )
     for a in store.list_agents(worker=wid):
-        _send_assign(store, wid, a, type_name, ts)
+        _send_assign(store, wid, a, type_name, ts, spec.tools_version)
     p.act("launch", wid, job_id)
 
 
@@ -579,7 +581,7 @@ def _reassign_missing(store: Store, w: Row, reported: set[str], queued: set[str]
     for a in missing:
         if a["name"] not in pending:
             log.warning("re-sending assign for %s: missing from %s heartbeat", a["name"], w["id"])
-            _send_assign(store, w["id"], a, w["type"], ts)
+            _send_assign(store, w["id"], a, w["type"], ts, sw["spec"].tools_version)
 
 
 # --------------------------------------------------------------------------- startup and runner

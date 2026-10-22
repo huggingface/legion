@@ -95,6 +95,7 @@ TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 # (e.g. Bedrock's "anthropic.claude-...-v1:0") is a harness-native id, not a provider reference.
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+TOOLS_VERSION_RE = re.compile(r"^[0-9a-f]{16}$")
 SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
 
 Reasoning = Literal["off", "low", "medium", "high"]
@@ -237,6 +238,9 @@ class TypeSpec(BaseModel):
     persist_workdir: bool = True
     resume_prompt: str | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
+    # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
+    # `flock apply` refuses a name the folder does not define. None: no folder tools.
+    tools: list[str] | Literal["all"] | None = None
     # Re-prompt this type's agents on a cadence, then a final round (docs/loop.md). None: off.
     loop: LoopSpec | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
@@ -310,13 +314,38 @@ class TypeSpec(BaseModel):
         return v
 
 
+class ComputeSpec(BaseModel):
+    """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
+    `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
+    (`flock run`). The spec also accepts the short form `compute: local`."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["hf-jobs", "local"] = "hf-jobs"
+
+
 class SwarmSpec(BaseModel):
     swarm: str
-    namespace: str  # HF namespace jobs are launched under
-    bucket: str  # e.g. hf://buckets/cmpatino/flock
+    # HF namespace jobs are launched under, and the bucket agents sync to (e.g.
+    # hf://buckets/cmpatino/flock). Required for compute hf-jobs; optional for compute local.
+    namespace: str = ""
+    bucket: str = ""
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
+    # The tools folder (docs/tools.md), relative to the spec file; None: `tools/` next to it.
+    # Read by `flock apply` only.
+    tools_dir: str | None = None
+    # Content hash of the tools bundle, written by `flock apply` after uploading the folder
+    # (anything given by hand is replaced). Workers fetch that version; None: no tools.
+    tools_version: str | None = None
+
+    @field_validator("tools_version")
+    @classmethod
+    def _valid_tools_version(cls, v: str | None) -> str | None:
+        if v is not None and not TOOLS_VERSION_RE.match(v):
+            raise ValueError("tools_version is written by `flock apply` (16 hex digits)")
+        return v
 
     @field_validator("providers")
     @classmethod
@@ -383,6 +412,21 @@ class SwarmSpec(BaseModel):
     # absent from `spawn` cannot spawn.
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
     limits: LimitsSpec = Field(default_factory=lambda: LimitsSpec())
+    compute: ComputeSpec = Field(default_factory=ComputeSpec)
+
+    @field_validator("compute", mode="before")
+    @classmethod
+    def _compute_short(cls, v: Any) -> Any:
+        return {"kind": v} if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _job_fields(self) -> SwarmSpec:
+        if self.compute.kind == "hf-jobs":
+            missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
+            if missing:
+                raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
+                                 "(or set `compute: local`, docs/local.md)")
+        return self
 
     @field_validator("spawn")
     @classmethod
@@ -912,6 +956,7 @@ class AssignCommand(BaseModel):
     parent: str | None = None  # the spawning agent, None for a replica
     # The agent's scoped controller token, injected into its harness env as FLOCK_AGENT_TOKEN.
     agent_token: str | None = None
+    tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
 
 
 class UnassignCommand(BaseModel):

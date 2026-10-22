@@ -12,6 +12,9 @@ them.
 
 ## Features
 
+- **Local mode:** `compute: local` and `flock run spec.yaml` run the same spec on a laptop
+  (controller in-process, workers as subprocesses, terminal view, run bundle);
+  `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
   and one or more agent types. Each type sets the harness (`claude`,
   `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
@@ -46,6 +49,10 @@ them.
   other types with the `flock` CLI, under a `spawn:` policy (allowed types,
   caps, depth) and swarm `limits:`. Each agent calls the controller with its
   own scoped token. See [docs/spawn.md](docs/spawn.md).
+- **Tools folder:** plain Python functions in `tools/` next to the spec become agent
+  tools (schema from type hints); `flock apply` ships them by content hash and a changed
+  folder reaches running agents at their next turn, with no image or wheel rebuild. See
+  [docs/tools.md](docs/tools.md).
 - **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
   turn_end` or a duration, after an optional `first`) while `while:` holds
   (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
@@ -63,7 +70,7 @@ Supported harnesses:
 | `claude` | Claude Code through the Python Agent SDK | native, `anthropic` | |
 | `codex` | `codex app-server` | native, `openai_compat` (Responses API) | verified locally, not yet in a job |
 | `pi` | `pi --mode rpc` | native, `openai_compat` | [docs/pi.md](docs/pi.md) |
-| `llm` | in-process Chat Completions loop, one `bash` tool | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
+| `llm` | in-process Chat Completions loop: `bash` plus the type's [tools folder](docs/tools.md) functions | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
 
 ## Usage
 
@@ -77,6 +84,16 @@ uv sync --all-extras                 # or: pip install -e ".[controller,worker,d
 `uv sync` does not activate the environment, so the commands below go through `uv run` (or
 run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,
 a different program; `uv run` also gives the scripts a Python with `huggingface_hub`.
+
+### On your laptop: `flock run`
+
+The same spec with `compute: local` runs the controller and its workers on your machine, with
+a live view in the terminal and a run bundle at the end; no HF token or bucket needed for a
+local model endpoint. See [docs/local.md](docs/local.md):
+
+```sh
+uv run flock run examples/local.yaml --prompt "Introduce yourself." --until idle
+```
 
 ### Run the controller
 
