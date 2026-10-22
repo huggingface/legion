@@ -308,8 +308,8 @@ def test_phase2_spec_changes_only_prompts():
         "interviewer-strong"].system_prompt
     assert {n: (r.types, r.max) for n, r in one.spawn.items()} == {
         t: (["interviewer-mid", "interviewer-strong"], 2) for t in ("ds-a", "glm-a", "ds-b", "glm-b")}
-    assert (one.limits.budget_usd, one.limits.spawned_total) == (150, 64)
-    assert {t.loop.while_.agent_usd for t in one.types.values() if t.loop} == {16.0}
+    assert (one.limits.budget_usd, one.limits.spawned_total) == (170, 64)
+    assert one.types["ds-a"].loop.while_.agent_usd == {"deepseek": 25.0, "glm": 16.0}
     assert {t.max_budget_usd for n, t in one.types.items() if not t.loop} == {0.15}
     kickoff = one.comms.kickoff
     assert "persona" not in kickoff and "intent" not in kickoff and "[direction]" in kickoff

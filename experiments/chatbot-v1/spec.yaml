@@ -72,7 +72,7 @@ types:
       on: [comms.mention, comms.thread]        # board wake-ups (2 s debounce)
       wake: {min_gap: 30s, max: 3, window: 30m}  # at most 3 wake prompts per agent per 30 min
       # PLACEHOLDER caps, per agent by model alias: set them before the run
-      while: {until: 4h, max_rounds: 200, agent_usd: 16.00}   # per agent, every team type
+      while: {until: 4h, max_rounds: 200, agent_usd: {deepseek: 25.00, glm: 16.00}}   # per agent, by model
       final: {prompt_file: prompts/final.md, reserve_usd: 0.30}
   glm-a:
     <<: *team-a
@@ -118,5 +118,5 @@ spawn:                                         # live interviewers per team agen
   ds-b: *interviews
   glm-b: *interviews
 limits:
-  budget_usd: 150                              # hard stop; loops stop at 150 - 4 x 0.30 = 148.80
+  budget_usd: 170                              # hard stop; loops stop at 170 - 4 x 0.30 = 168.80
   spawned_total: 64                            # interviewers ever spawned in the run

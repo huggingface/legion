@@ -70,7 +70,10 @@ types:
       stagger: 4s
       'on': [comms.mention, comms.thread]
       wake: {min_gap: 30s, max: 3, window: 30m}
-      while: {until: 4h, max_rounds: 200, agent_usd: 16.0}
+      while:
+        until: 4h
+        max_rounds: 200
+        agent_usd: {deepseek: 25.0, glm: 16.0}
       final: {prompt_file: ../../phase2/final.md, reserve_usd: 0.3}
   glm-b:
     harness: llm
@@ -99,7 +102,10 @@ types:
       stagger: 4s
       'on': [comms.mention, comms.thread]
       wake: {min_gap: 30s, max: 3, window: 30m}
-      while: {until: 4h, max_rounds: 200, agent_usd: 16.0}
+      while:
+        until: 4h
+        max_rounds: 200
+        agent_usd: {deepseek: 25.0, glm: 16.0}
       final: {prompt_file: ../../phase2/final.md, reserve_usd: 0.3}
   interviewer-mid:
     harness: llm
@@ -135,4 +141,4 @@ spawn:
     max: 2
     depth: 1
   glm-b: *id001
-limits: {budget_usd: 75.0, spawned_total: 32}
+limits: {budget_usd: 85.0, spawned_total: 32}
