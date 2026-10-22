@@ -152,10 +152,18 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     if state is not None and (fixed := store.repair_events()):
         log.info("state: trimmed %d event streams to the restored index", fixed)
     jobs: JobsClient
-    if env.get("FLOCK_FAKE_JOBS") == "1":
+    compute: str | None = None  # the spec `compute.kind` this controller accepts
+    if env.get("FLOCK_COMPUTE") == "local":  # docs/local.md: workers as local subprocesses
+        if dep.mode == "job":
+            raise SystemExit("FLOCK_COMPUTE=local cannot run with FLOCK_MODE=job")
+        from flock.controller.local import LocalJobsClient
+
+        jobs, compute = LocalJobsClient(root=data_dir), "local"
+    elif env.get("FLOCK_FAKE_JOBS") == "1":
         jobs = FakeJobsClient(network_group=dep.network_group)
     else:
         jobs = HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
+        compute = "hf-jobs"
     settings = Settings(
         public_url=dep.worker_url,
         token=token,
@@ -208,7 +216,8 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         for t in loops:
             t.cancel()
 
-    app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace)
+    app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
+                     compute=compute)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
     return Built(app, store, dep, jobs, state, settings, halt, timeout)
 
