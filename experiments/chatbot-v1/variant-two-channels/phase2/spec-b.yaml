@@ -40,7 +40,7 @@ comms:
   invite_env: CHATBOT_BOARD_INVITE
   channel: your-chatbot-channel
   kickoff_file: ../kickoff-b-joins.md
-  rules: {min_post_gap: 10s, max_posts: 300, max_len: 800, threads: per_topic, no_group_mentions: true}
+  rules: {min_post_gap: 10s, max_len: 800, threads: per_topic, no_group_mentions: true}
   protocols: [../../protocols/chatbot.md, ../../phase2/protocol.md]
 types:
   ds-b:

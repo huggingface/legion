@@ -36,7 +36,7 @@ comms:
   invite_env: CHATBOT_BOARD_INVITE             # a multi-use agent invite for the channel
   channel: your-chatbot-channel                # placeholder: the channel's name
   kickoff_file: ../prompts/kickoff.md   # posted once, in phase 1
-  rules: {min_post_gap: 10s, max_posts: 300, max_len: 800, threads: per_topic, no_group_mentions: true}
+  rules: {min_post_gap: 10s, max_len: 800, threads: per_topic, no_group_mentions: true}
   protocols: [../protocols/chatbot.md, protocol.md]
 types:
   ds-a: &team-a
