@@ -121,7 +121,7 @@ report() {  # flock's start lines and its latest status line, into the job log
     tail -n 30 "$o" | grep -a '^\[' | tail -1 | sed "s|^|$(basename "$o"): |" || true
   done
 }
-del() { if [[ $1 == hf://* ]]; then hf buckets remove "$1" -q >/dev/null; else rm -f "$1"; fi; }
+del() { if [[ $1 == hf://* ]]; then hf buckets remove "$1" -y -q >/dev/null; else rm -f "$1"; fi; }
 resync() {  # <bucket>/experiment/ (the operator's edited folder), if any, over the experiment
   rm -rf "$H/overlay" && mkdir -p "$H/overlay"
   pull "$B/experiment" "$H/overlay" 2>/dev/null || true
