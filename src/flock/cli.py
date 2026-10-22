@@ -409,6 +409,7 @@ def run(
                    "`compute: local` specs. For hf-jobs, deploy a controller and use "
                    "`flock apply` (docs/deploy-job.md), or set `compute: local`.", err=True)
         raise typer.Exit(1)
+    _check_loops(spec)
     _warn_extra(spec)
     bundle = _tools_bundle(spec, spec_file)
     seconds, idle = None, False
