@@ -720,6 +720,12 @@ class LoopSpec(BaseModel):
         return parse_duration(self.every).total_seconds()
 
 
+def hit_max_turns(turn_ended: dict) -> bool:
+    """A `turn_ended` that stopped at the type's `max_turns` (llm, Pi, Codex: `reason`; Claude:
+    `subtype`). Not a failed turn for a loop: with `tool_choice: required` it is how turns end."""
+    return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
+
+
 def agent_cap(ts: TypeSpec) -> float | None:
     """The type's per-agent loop cap (`loop.while.agent_usd`), resolved for its model."""
     cap = ts.loop.while_.agent_usd if ts.loop else None

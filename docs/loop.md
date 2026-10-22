@@ -88,9 +88,11 @@ every turn is admitted under the provider's `max_working` like any other prompt.
 
 - `worker` (provider without `max_working`): the controller sends one `loop_start` command per
   agent once its `first` turn ended. The worker then sends the rendered prompt when the agent is
-  idle and again each time a turn ends `completed`, with no controller round trip (no idle gap,
+  idle and again each time a turn ends `completed` (or at `max_turns`), with no controller round trip (no idle gap,
   run 1 lost ~17 % of agent time there). It stops at `max_rounds`, at the `until` deadline, on
   a `loop_stop` command, or after 3 failed turns in a row (a failed turn is retried after 2 s).
+  A turn that ends at the type's `max_turns` is not a failed turn, on either side: with
+  `tool_choice: required` it is how turns normally end. Each one is a `loop_max_turns` event.
   Each prompt it sends is a `loop_prompt` event, which is how the controller counts rounds. An
   agent idle for 30 s with no loop activity (a lost command, a relaunched worker) gets its
   `loop_start` again; the command is idempotent.
@@ -181,7 +183,9 @@ Swarm stream (`GET /swarms/{s}/events`, `flock events <swarm>`): `loop_started {
 every, restart}`, `loop_tick {type, prompted, first, rounds}` (only on ticks that sent
 something), `loop_updated {type}`, `loop_stopped {type, reason, rounds_total, dropped}`,
 `final_round {type, agent, add_tools}`, `final_done {type, sent, done, skipped}`,
-`budget_stop {phase, cost_usd, budget_usd, threshold_usd?}`, `budget_cleared`.
+`budget_stop {phase, cost_usd, budget_usd, threshold_usd?}`, `budget_cleared`,
+`loop_max_turns {type, agent, kind: first|loop|final, round, calls}` (a turn ended at
+`max_turns`; also in the agent's stream).
 
 Agent stream (from the worker): `loop_prompt {kind: first|loop|final, round, why, add_tools?}`
 right before the turn it starts, `loop_stopped {reason, round, active}` when a worker-side loop

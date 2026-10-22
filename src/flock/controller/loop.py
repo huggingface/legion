@@ -10,7 +10,8 @@ under `max_working` like any other.
 Who sends the loop prompt (`mode`):
 - `worker`: `every: turn_end` on a provider without `max_working`. The controller sends one
   `loop_start` per agent; the worker re-sends the prompt each time a turn completes, until
-  `max_rounds`, the deadline, a `loop_stop` or 3 failed turns in a row.
+  `max_rounds`, the deadline, a `loop_stop` or 3 failed turns in a row (a turn that hit
+  `max_turns` is not a failure; the controller logs it as `loop_max_turns`).
 - `controller`: a duration `every`, or `turn_end` under `max_working` (a worker-side loop
   would keep its slot from turn to turn and starve the agents queued behind it). The controller
   prompts on `turn_ended` events or when `every` has passed since the agent's last loop prompt.
@@ -49,6 +50,7 @@ from flock.models import (
     SwarmSpec,
     TypeSpec,
     agent_cap,
+    hit_max_turns,
     parse_duration,
 )
 
@@ -58,7 +60,7 @@ WAKE_DEBOUNCE = 2.0  # s of quiet after the last wake before the prompt goes out
 WAKE_MAX_DELAY = 10.0  # s, a wake is never held longer than this by a stream of new wakes
 STALL_AFTER = 30.0  # s idle in a worker-side loop with nothing in flight: send loop_start again
 ACK_TIMEOUT = 60.0  # s to wait for a worker's loop_stopped before the final prompt goes anyway
-ERROR_LIMIT = 3  # failed loop turns in a row end an agent's loop (worker and controller side)
+ERROR_LIMIT = 3  # failed loop turns in a row (not max_turns) end an agent's loop (both sides)
 RESTOP_EVERY = 30.0  # s, hard budget stop: min gap between repeated stops to one working agent
 LOOP_KINDS = ("first", "loop")
 
@@ -224,6 +226,13 @@ class LoopEngine:
                         st["phase"], st["done_reason"] = "done", d["reason"]
                 elif ev.type in ("turn_ended", "turn_interrupted"):
                     st["last_activity"] = now
+                    max_turns = ev.type == "turn_ended" and hit_max_turns(d)
+                    if max_turns:  # not an error (below), but the operator sees each one
+                        kind = ("final" if st["final"] == "delivered"
+                                else "first" if st["phase"] == "first" else "loop")
+                        self._event(a["swarm"], "loop_max_turns",
+                                    {"type": a["type"], "kind": kind, "round": st["rounds"],
+                                     "calls": d.get("num_turns")}, agent=a["name"])
                     if st["final"] == "delivered":
                         st["final"] = "done"
                         continue
@@ -239,7 +248,7 @@ class LoopEngine:
                         if st["idle_streak"] >= w.idle_rounds:
                             stop_reason = "idle_rounds"
                     if L.get("mode") == "controller":
-                        st["errors"] = 0 if status == "completed" else st["errors"] + 1
+                        st["errors"] = 0 if status == "completed" or max_turns else st["errors"] + 1
                         if st["errors"] >= ERROR_LIMIT:
                             stop_reason = "errors"
                         st["turn_done"] = True

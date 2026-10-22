@@ -28,6 +28,7 @@ from flock.models import (
     LoopStartCommand,
     TokenUsage,
     TypeSpec,
+    hit_max_turns,
     parse_duration,
 )
 from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError, usage_sub
@@ -381,7 +382,8 @@ class AgentRuntime:
                 if summary:
                     self.state.last_summary = summary
                 self._end_turn()
-                self._after_turn(ev.status or "completed")
+                self._after_turn(ev.status or "completed",
+                                 "max_turns" if hit_max_turns(ev.data) else None)
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
         self.dirty = True
@@ -518,7 +520,7 @@ class AgentRuntime:
     def _after_turn(self, status: str, reason: str | None = None) -> None:
         if self.loop is None:
             return
-        if status == "completed":
+        if status == "completed" or reason == "max_turns":  # max_turns: a full turn, not a failure
             self._loop_errors = 0
             self._loop_schedule(0.0, "turn_end")
             return
