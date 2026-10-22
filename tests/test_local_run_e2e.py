@@ -224,3 +224,44 @@ def test_flock_run_ships_the_tools_folder(tmp_path, fake_server):
     tool = [e for e in evs if e["type"] == "message"
             and e["data"]["message"].get("role") == "toolResult"]
     assert tool and "hello flock via folder tool" in json.dumps(tool[0]), tool
+
+
+LOOP_SPEC = """\
+swarm: looped
+compute: local
+providers:
+  fake: {{type: openai_compat, base_url: "{url}", api_key_env: FAKE_KEY, self_hosted: true}}
+types:
+  writer:
+    harness: llm
+    model: fake:fake-model
+    replicas: 2
+    agents_per_worker: 2
+    loop:
+      prompt: "bash: echo round {{round}}"
+      every: 5s
+      while: {{max_rounds: 2}}
+      final: {{prompt: "bash: echo final"}}
+"""
+LOOP_AGENTS = ["writer-0000", "writer-0001"]
+
+
+def _run_loop_spec(tmp_path: Path, url: str) -> subprocess.CompletedProcess:
+    (tmp_path / "spec.yaml").write_text(LOOP_SPEC.format(url=url))
+    return subprocess.run(
+        _flock("run", "spec.yaml", "--until", "idle", "--skip-preflight"),
+        cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120,
+        check=False)
+
+
+def test_flock_run_until_idle_waits_for_the_loop(tmp_path, fake_server):
+    """`--until idle` with a duration `every`: agents are idle between rounds, but the run goes
+    on until the loop is done (both rounds and the final round), then stops on idle."""
+    p = _run_loop_spec(tmp_path, fake_server.url)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "stopping (idle)" in p.stdout and "2 agents, 6 turns" in p.stdout, p.stdout
+    run = _run_dir(tmp_path)
+    for name in LOOP_AGENTS:
+        prompts = [(e["data"]["data"]["kind"], e["data"]["data"]["round"])
+                   for e in _bundle_events(run, name) if e["type"] == "loop_prompt"]
+        assert prompts == [("loop", 1), ("loop", 2), ("final", 2)], (name, prompts)

@@ -50,7 +50,8 @@ uv run flock run examples/local.yaml --prompt "Introduce yourself in one sentenc
 - `--prompt TEXT` sends one prompt to every agent at start (optional; without it the agents
   wait for prompts from a second terminal).
 - `--until idle` stops once every agent is idle with nothing pending, after each prompted agent
-  finished a turn. `--until 10m` stops after a duration. Without `--until` the run goes until
+  finished a turn, and once every type's `loop:` is over (its final round done, or stopped
+  without one); agents idle between loop rounds do not count. `--until 10m` stops after a duration. Without `--until` the run goes until
   Ctrl-C (a second Ctrl-C forces) or the spec's `limits.budget_usd`.
 - `--skip-preflight` skips the tool-call probe of each model (on by default for
   provider-backed models, as with `flock apply`); `--grace 10` is how long in-flight turns get

@@ -380,7 +380,7 @@ def run(
     until: str = typer.Option(
         None, "--until",
         help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle with nothing "
-             "pending, after at least one turn (and one per agent with --prompt)."),
+             "pending, after at least one turn (and one per agent with --prompt), every loop over."),
     prompt_text: str = typer.Option(None, "--prompt",
                                     help="Send this prompt to every agent once at start."),
     preflight: bool = typer.Option(
