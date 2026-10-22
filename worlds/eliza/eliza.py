@@ -1,7 +1,8 @@
 """The Eliza world (experiments/eliza): agents write ELIZA-style bots in a shared workspace
 `$ELIZA_WS` (default ws/ here): agents/<agent>/ (writable only by that agent, by X-Flock-Agent),
-best/ (bot.py, v<n>.py, history.jsonl), probes/ (seeded from probes/ here), log.jsonl. Bots run
-as `python -I bot.py` in an empty temp dir under rlimits and a timeout: not a sandbox."""
+best/ (bot.py, v<n>.py, history.jsonl), probes/ (seeded from probes/ here), log.jsonl. Writes and
+edits are atomic, and a .py change that does not compile is refused. Bots run as
+`python -I bot.py` in an empty temp dir under rlimits and a timeout: not a sandbox."""
 
 from __future__ import annotations
 
@@ -21,6 +22,8 @@ from flock.world import Agent, ToolError, World, tool
 HERE = Path(__file__).resolve().parent
 TIMEOUT_S, MEM, OUT_CAP, READ_CAP, WRITE_CAP = 5, 256 << 20, 64 << 10, 60_000, 200_000
 LIMITS = f"((r.RLIMIT_AS,{MEM}),(r.RLIMIT_FSIZE,{OUT_CAP}),(r.RLIMIT_CPU,{TIMEOUT_S}))"
+COMPILE = ("import py_compile as c,sys\ntry: c.compile(sys.argv[1], sys.argv[2], sys.argv[3], True)"
+           "\nexcept c.PyCompileError as e: print(e.msg); sys.exit(1)")
 SHIM = (f"import resource as r,runpy,sys\nfor k,v in {LIMITS}: r.setrlimit(k,(v,v))\n"
         "sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
 
@@ -105,36 +108,133 @@ class ElizaWorld(World):
         hist = self.ws / "best" / "history.jsonl"
         return [json.loads(x) for x in hist.read_text().splitlines()] if hist.is_file() else []
 
+    def _own(self, agent: Agent, tool: str, path: str, must_exist: bool) -> Path:
+        """`path` resolved, if it is under agents/<agent>/ (by flock's X-Flock-Agent)."""
+        p = self._path(path, must_exist=False)
+        if self.ws / "agents" / agent.name not in p.parents:
+            self._log(agent, "refused", tool=tool, path=path)
+            raise ToolError(f"refused: you ({agent.name}) may write only under agents/"
+                            f"{agent.name}/, not {path!r}. best/bot.py changes by promote_best.",
+                            "not_yours")
+        if must_exist and not p.is_file():
+            raise ToolError(f"no file {path!r}; create it with write_file or copy_file",
+                            "not_found")
+        return p
+
+    def _save(self, agent: Agent, tool: str, p: Path, text: str) -> dict:
+        """Write `text` to `p` atomically (temp file + rename). A .py file must compile first:
+        on a syntax error the file keeps its previous content and the agent reads the error."""
+        rel, data = self._rel(p), text.encode()
+        before = p.stat().st_size if p.is_file() else 0
+        if len(data) > WRITE_CAP:
+            raise ToolError(f"refused: {len(data)} bytes, the limit is {WRITE_CAP}", "too_big")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / p.name
+            src.write_bytes(data)
+            if p.suffix == ".py":
+                try:
+                    r = subprocess.run([sys.executable, "-I", "-c", COMPILE, str(src),
+                                        str(src) + "c", rel], capture_output=True, text=True,
+                                       timeout=10, env={}, check=False)
+                    err = (r.stdout or r.stderr).strip() if r.returncode else ""
+                except subprocess.TimeoutExpired:
+                    err = "compile check timed out"
+                if err:
+                    self._log(agent, "syntax_error", tool=tool, path=rel, bytes_before=before,
+                              bytes_after=len(data))
+                    raise ToolError(f"{rel} NOT changed (it keeps its previous content): "
+                                    f"syntax error\n{err[-1200:]}", "syntax_error")
+            tmp_dst = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+            shutil.copyfile(src, tmp_dst)
+            os.replace(tmp_dst, p)
+        self._log(agent, tool, path=rel, bytes_before=before, bytes_after=len(data))
+        return {"written": rel, "bytes": len(data), "lines": text.count("\n") + 1}
+
+    @staticmethod
+    def _unique(text: str, needle: str, what: str, path: str) -> int:
+        """The index of `needle` in `text` if it occurs exactly once, else a refusal."""
+        n = text.count(needle) if needle else 0
+        if n != 1:
+            hint = ("copy it exactly from read_file" if n == 0 else
+                    "add neighbouring lines to `" + what + "` so it matches one place")
+            raise ToolError(f"refused: `{what}` occurs {n} times in {path}; it must occur "
+                            f"exactly once ({hint}). The file is unchanged.", f"matches_{n}")
+        return text.index(needle)
+
     @tool
-    def read_file(self, path: str) -> str:
-        """Read a workspace file (any agent's, best/bot.py, probes/*.txt).
+    def read_file(self, path: str, start: int | None = None, end: int | None = None) -> str:
+        """Read a workspace file (any agent's, best/bot.py, probes/*.txt), or some of its lines.
+        The first line of the result says which lines you got and how many the file has.
 
         Args:
             path: e.g. agents/ds-0001/bot.py or best/bot.py
+            start: first line to return (1-based); from the top when left out
+            end: last line to return (inclusive); to the end when left out
         """
-        text = self._path(path).read_text(errors="replace")
-        return text if len(text) <= READ_CAP else text[:READ_CAP] + "\n[... truncated]"
+        lines = self._path(path).read_text(errors="replace").splitlines(keepends=True)
+        a, b = max(1, start or 1), min(len(lines), end or len(lines))
+        text = "".join(lines[a - 1:b])
+        if len(text) > READ_CAP:
+            text = text[:READ_CAP] + "\n[... truncated: read the rest with start/end]\n"
+        return f"# {path}: lines {a}-{b} of {len(lines)}\n{text}"
 
     @tool
     def write_file(self, agent: Agent, path: str, content: str) -> dict:
-        """Write a whole file under agents/<your name>/ (replaces it if it exists).
+        """Create a file under agents/<your name>/ (replaces it if it exists). To change an
+        existing file use edit_file or insert_after instead of writing it again.
 
         Args:
             path: e.g. agents/<your name>/bot.py or agents/<your name>/notes.md
             content: the complete file content
         """
-        p, size = self._path(path, must_exist=False), len(content.encode())
-        if self.ws / "agents" / agent.name not in p.parents:
-            self._log(agent, "write_refused", path=path)
-            raise ToolError(f"refused: you ({agent.name}) may write only under agents/"
-                            f"{agent.name}/, not {path!r}. best/bot.py changes by promote_best.",
-                            "not_yours")
-        if size > WRITE_CAP:
-            raise ToolError(f"refused: {size} bytes, the limit is {WRITE_CAP}", "too_big")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-        self._log(agent, "write", path=self._rel(p), bytes=size)
-        return {"written": self._rel(p), "bytes": size}
+        return self._save(agent, "write_file", self._own(agent, "write_file", path, False), content)
+
+    @tool
+    def copy_file(self, agent: Agent, src: str, path: str) -> dict:
+        """Copy any workspace file (e.g. best/bot.py) to a file under agents/<your name>/, as a
+        starting point for edit_file.
+
+        Args:
+            src: the file to copy, e.g. best/bot.py or agents/ds-0001/bot.py
+            path: the new file, e.g. agents/<your name>/bot.py
+        """
+        text = self._path(src).read_text(errors="replace")
+        return self._save(agent, "copy_file", self._own(agent, "copy_file", path, False), text)
+
+    @tool
+    def edit_file(self, agent: Agent, path: str, old: str, new: str) -> dict:
+        """Change one of your files: replace the exact text `old` (it must occur exactly once)
+        with `new`. An empty `new` deletes `old`.
+
+        Args:
+            path: a file under agents/<your name>/
+            old: the exact current text to replace, copied from read_file (with enough lines
+                to be unique)
+            new: the replacement text (may be empty)
+        """
+        p = self._own(agent, "edit_file", path, True)
+        text = p.read_text(errors="replace")
+        i = self._unique(text, old, "old", path)
+        return self._save(agent, "edit_file", p, text[:i] + new + text[i + len(old):])
+
+    @tool
+    def insert_after(self, agent: Agent, path: str, anchor: str, text: str) -> dict:
+        """Insert new lines into one of your files, right after the line that holds `anchor`
+        (which must occur exactly once).
+
+        Args:
+            path: a file under agents/<your name>/
+            anchor: exact text from the line to insert after, e.g. "def reply(self, line):"
+            text: the line(s) to insert
+        """
+        p = self._own(agent, "insert_after", path, True)
+        old = p.read_text(errors="replace")
+        i = self._unique(old, anchor, "anchor", path) + len(anchor)
+        eol = old.find("\n", i)
+        at = len(old) if eol < 0 else eol + 1
+        head = old[:at] if eol >= 0 or not old else old + "\n"
+        return self._save(agent, "insert_after", p, head + text.rstrip("\n") + "\n" + old[at:])
 
     @tool
     def list_files(self, prefix: str = "") -> dict:

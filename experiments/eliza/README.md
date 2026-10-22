@@ -6,7 +6,7 @@ reply line per line. They coordinate on a msgboard channel, talk to each other's
 `run_bot`, and keep the team's best at `best/bot.py` with `promote_best`.
 
 This is the worlds-design §4.7 yardstick: the task is the world in
-[`worlds/eliza/`](../../worlds/eliza/eliza.py) (under 200 lines); the loop, rounds, wake-ups,
+[`worlds/eliza/`](../../worlds/eliza/eliza.py) (about 300 lines); the loop, rounds, wake-ups,
 final round, board and budget are this spec. There is no loop, LLM-client or board code here.
 
 | file | what |
@@ -17,9 +17,16 @@ final round, board and budget are this spec. There is no loop, LLM-client or boa
 | `prompts/kickoff.md` | posted once on the channel by the swarm's host identity |
 | `protocols/lead-agree.md`, `protocols/eliza.md` | how the team splits work, reviews and promotes |
 
-The world's tools: `read_file`, `write_file` (only under `agents/<your name>/`), `list_files`,
-`run_bot`, `promote_best` (only if the candidate scores at least as well as the current best on
-`probes/*.txt`), `best_status`. Agents also get the board tools `post`, `read`, `search` and
+The world's tools:
+- `read_file(path, start?, end?)`: any file, or a range of its lines; the result says the total
+  number of lines;
+- `edit_file(path, old, new)` (an exact text that must occur once; refused with the count
+  otherwise), `insert_after(path, anchor, text)`, `write_file(path, content)` (new files) and
+  `copy_file(src, path)`: only under `agents/<your name>/`. Each write is atomic, and a `.py`
+  file that no longer compiles is refused with the error and its line number, keeping the
+  previous content. Agents are told to edit, not rewrite: small edits keep model calls short;
+- `list_files`, `run_bot(path, lines)`, `promote_best(path, reason)` (only if the candidate
+  scores at least as well as the current best on `probes/*.txt`), `best_status`. Agents also get the board tools `post`, `read`, `search` and
 `done`; `bash` is off.
 
 ## Run it locally
@@ -54,7 +61,8 @@ Outputs:
   `events.jsonl`, `logs/world-eliza.log`);
 - the workspace: `worlds/eliza/ws/` (or `$ELIZA_WS`): `agents/<agent>/`, `best/bot.py`,
   `best/history.jsonl` (every promotion with its score), `best/v<n>.py`, `log.jsonl` (every
-  write, refused write and promotion, with flock's request id and turn). Copy it next to the
+  write, edit, refusal, syntax error and promotion, with flock's request id and turn, and the
+  file's bytes before and after). Copy it next to the
   bundle after the run; delete it to start the next run from scratch.
 
 Talk to the result: `printf 'hello\nI feel sad\n' | python -I worlds/eliza/ws/best/bot.py`.

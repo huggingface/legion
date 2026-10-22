@@ -33,8 +33,14 @@ def script(*steps: tuple[str, dict]) -> str:
     return "script: " + json.dumps([list(s) for s in steps])
 
 
+EDITED = BOT.replace("import sys\n", "import sys\n# tuned by {me}\n")
 FIRST = script(("write_file", {"path": "agents/{me}/bot.py", "content": BOT}),
                ("write_file", {"path": "best/bot.py", "content": "print('mine now')"}),
+               ("insert_after", {"path": "agents/{me}/bot.py", "anchor": "import sys",
+                                 "text": "# tuned by {me}"}),
+               ("edit_file", {"path": "agents/{me}/bot.py", "old": "line.strip()",
+                              "new": "line.strip("}),  # does not compile: refused
+               ("read_file", {"path": "agents/{me}/bot.py", "start": 1, "end": 2}),
                ("read", {}))
 ROUND = script(("run_bot", {"path": "agents/{me}/bot.py", "lines": ["hello", "I feel sad"]}),
                ("promote_best", {"path": "agents/{me}/bot.py", "reason": "GREEN on run_bot"}),
@@ -98,15 +104,19 @@ def test_eliza_experiment_dry_run(tmp_path, fakes):
         res = _results(run, a)
         # write_file outside its own dir: refused, as a result the agent reads
         assert any(f"refused: you ({a}) may write only under agents/{a}/" in r for r in res), res
-        assert (ws / "agents" / a / "bot.py").read_text() == BOT
+        # the insert went in; the edit that broke the syntax was refused, the file kept
+        assert (ws / "agents" / a / "bot.py").read_text() == EDITED.replace("{me}", a)
+        assert any("NOT changed" in r and "syntax error" in r for r in res), res
+        assert any("lines 1-2 of 5" in r and f"tuned by {a}" in r for r in res), res
         # run_bot talked to the seeded bot; promote_best answered; the final verdict was posted
         assert any("Hello, you said: i feel sad." in r for r in res), res
         assert any('\\"promoted\\": true' in r for r in res), res
         assert {(w["action"], w["path"]) for w in wlog if w["agent"] == a} >= {
-            ("write", f"agents/{a}/bot.py"), ("write_refused", "best/bot.py"),
+            ("write_file", f"agents/{a}/bot.py"), ("refused", "best/bot.py"),
+            ("insert_after", f"agents/{a}/bot.py"), ("syntax_error", f"agents/{a}/bot.py"),
             ("promote", f"agents/{a}/bot.py")}
         assert all(w["turn"] and w["req"] for w in wlog if w["agent"] == a)
-    assert (ws / "best" / "bot.py").read_text() == BOT
+    assert (ws / "best" / "bot.py").read_text() in {EDITED.replace("{me}", a) for a in AGENTS}
     hist = [json.loads(x) for x in (ws / "best" / "history.jsonl").read_text().splitlines()]
     assert len(hist) == 2 * len(AGENTS) and all(h["score"] == h["of"] for h in hist), hist
     verdicts = [m for m in board.msgs if "VERDICT GREEN" in m["body"]]
@@ -115,8 +125,9 @@ def test_eliza_experiment_dry_run(tmp_path, fakes):
     # the agents had the world and board tools, no bash, and the world's rules
     reqs = [json.loads(x)["body"] for x in (tmp_path / "requests.jsonl").read_text().splitlines()]
     offered = {t["function"]["name"] for t in reqs[0]["tools"]}
-    assert offered == {"read_file", "write_file", "list_files", "run_bot", "promote_best",
-                       "best_status", "post", "read", "search", "done"}, offered
+    assert offered == {"read_file", "write_file", "copy_file", "edit_file", "insert_after",
+                       "list_files", "run_bot", "promote_best", "best_status", "post", "read",
+                       "search", "done"}, offered
     assert "## World: eliza (version 0.1.0)" in reqs[0]["messages"][0]["content"]
 
     # the bundle: run.json with each type's loop (2 rounds + final) and the budget summary
