@@ -252,9 +252,10 @@ not a sandbox.
 
 ## Built-in tools
 
-A type's tools can also be built-ins served by the worker instead of the folder: today the comms
+A type's tools can also be built-ins served by the worker instead of the folder: the comms
 tools (`comms:post`, `comms:read`, `comms:search`, model names `post`, `read`, `search`;
-[docs/comms.md](comms.md)). They go through the same path: offered next to the folder tools in
+[docs/comms.md](comms.md)) and a world's tools (`world:<name>`, model name `<name>`;
+[docs/world.md](world.md)). They go through the same path: offered next to the folder tools in
 the `llm` harness and listed in the generated Tools section for `flock-tool`, pinned at the same
 turn boundaries. A built-in call runs in the worker (for `flock-tool`, through its local gateway
 on 127.0.0.1 with the agent's key from the pin), not in a subprocess, so it can use credentials

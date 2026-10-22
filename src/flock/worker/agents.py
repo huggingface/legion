@@ -42,11 +42,13 @@ from flock.worker.adapters.base import (
 )
 from flock.worker.events import Outbox, SessionLog, utcnow
 from flock.worker.loop import render
+from flock.world import hub as world_hub
 
 if TYPE_CHECKING:
     from flock.worker.comms import CommsHub
     from flock.worker.identity import Identities
     from flock.worker.sync import BucketSync
+    from flock.world.hub import WorldHub
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +103,7 @@ class AgentRuntime:
         secret_source: Mapping[str, str] | None = None,
         toolbox: Callable[[], Toolset] | None = None,
         comms: CommsHub | None = None,
+        world: WorldHub | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
         self.work_root = Path(work_root)
@@ -157,6 +160,8 @@ class AgentRuntime:
         self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
         self.comms = comms  # the worker's comms hub (docs/comms.md); None: no comms
         self._comms_section: str | None = None  # last comms section written to the instructions
+        self.world = world  # the worker's world hub (docs/world.md); None: no world
+        self._world_section: str | None = None
 
     # ------------------------------------------------------------------ paths and state
     @property
@@ -180,12 +185,15 @@ class AgentRuntime:
             deny = credential_env_names(self.spec)  # the key under every name the harness has it
             if self.comms is not None:  # and the board's credentials (docs/comms.md)
                 deny += self.comms.deny_env()
+            if self.world is not None:  # and the world's secret (docs/world.md)
+                deny += self.world.deny_env()
             try:
                 ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
             except OSError as e:
                 log.warning("%s: cannot write the tools pin: %s", self.name, e)
         self._write_tools_section(ts)
         self._write_comms_section()
+        self._write_world_section()
         return ts
 
     @property
@@ -280,6 +288,20 @@ class AgentRuntime:
         if tools is not None:
             self._write_tools_section(tools)
         self._write_comms_section()
+        self._write_world_section()
+
+    def _write_world_section(self) -> None:
+        """The World section (name, version, tools, a "world changed" note) of CLAUDE.md /
+        AGENTS.md, rewritten when it changes (docs/world.md)."""
+        if self.world is None or not self.workdir.is_dir():
+            return
+        section = self.world.section(self.name)
+        if section != (self._world_section or ""):
+            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
+            text = target.read_text() if target.is_file() else ""
+            target.write_text(replace_section(text, section, world_hub.SECTION_START,
+                                              world_hub.SECTION_END))
+        self._world_section = section
 
     def _write_comms_section(self) -> None:
         """The comms section (board identity, rules, protocol files) of CLAUDE.md / AGENTS.md,
@@ -343,6 +365,9 @@ class AgentRuntime:
             for k in self.comms.deny_env():
                 if k != "MSGBOARD_TOKEN":
                     env.pop(k, None)
+        if self.world is not None:  # the world's secret stays in the worker
+            for k in self.world.deny_env():
+                env.pop(k, None)
         r = self.spec.resolved_model
         if r is not None:
             key = source.get(r.provider.api_key_env)
@@ -367,6 +392,8 @@ class AgentRuntime:
                             self.name, self._working_count(), self.spec.max_working_per_worker)
             if self.comms is not None:  # join the board at the first prompt, not at assign
                 await self.comms.on_prompt(self.name, self.spec.harness.value)
+            if self.world is not None:  # open the gateway for flock-tool; agent_start hook
+                await self.world.on_prompt(self.name, self.spec.harness.value, self.comms)
             self._write_instructions()  # before the tools section is generated into it
             tools = self._pin_tools()
             self._prepare_workdir(tools)
@@ -484,6 +511,10 @@ class AgentRuntime:
                                          "tool_calls": self._turn_tool_calls,
                                          "state_calls": self._turn_state_calls, **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
+                if self.world is not None:  # the `turn` hook (docs/world.md)
+                    self.world.on_turn(self.name, self.turn_id,
+                                       {"status": ev.status or "completed",
+                                        "tool_calls": self._turn_tool_calls})
                 summary = self._turn_summary or self._turn_text
                 if summary:
                     self.state.last_summary = summary

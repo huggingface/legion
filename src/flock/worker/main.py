@@ -46,6 +46,7 @@ from flock.models import (
     WorkerHeartbeat,
     comms_tools,
     parse_duration,
+    world_tools,
 )
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
@@ -55,6 +56,7 @@ from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
 from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
 from flock.worker.tools import ToolsManager, tools_root
+from flock.world.hub import WorldHub
 
 log = logging.getLogger("flock.worker")
 
@@ -269,6 +271,7 @@ class Worker:
         identities: Identities | None = None,
         tools: ToolsManager | None = None,
         comms: CommsHub | None = None,
+        world: WorldHub | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
@@ -282,6 +285,10 @@ class Worker:
         # comms (docs/comms.md): one hub per worker, one board poller for all its agents
         self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
                                        runtime=self.agents.get)
+        # the swarm's world (docs/world.md): its tools, reached through the same gateway
+        self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
+                                       runtime=self.agents.get)
+        self.comms.routes["world"] = self.world.call
         self.draining = False
         self.drain_window = cfg.drain_window
         self._drained = asyncio.Event()
@@ -299,8 +306,18 @@ class Worker:
 
     def _toolbox(self, agent: str) -> Callable[[], Toolset]:
         """What a turn of `agent` may call: the folder tools of the current version plus the
-        agent's built-in comms tools."""
-        return lambda: self.comms.toolset_for(agent, self.tools.current())
+        agent's built-in comms and world tools."""
+        return lambda: self.world.toolset_for(
+            agent, self.comms.toolset_for(agent, self.tools.current()), self.comms)
+
+    def _world_credential(self) -> None:
+        """The world now belongs to another secret than the one this worker was launched with
+        (a re-apply changed its endpoint or secret): drain, so the controller relaunches the
+        worker with the new one. Until then the hub refuses calls under the new configuration;
+        turns pinned to the old one finish against the old world (docs/world.md)."""
+        if self.world.needs_restart() and not self.draining:
+            log.warning("world credential changed; draining to be relaunched with the new one")
+            self._spawn(self.drain("world credential changed"))
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -311,6 +328,8 @@ class Worker:
             if pending := self._unassigning.get(cmd.agent):  # re-assign right after unassign
                 await asyncio.shield(pending)
             self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
+            self.world.configure(cmd.world, world_tools(cmd.spec, cmd.world))
+            self._world_credential()
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].spec = cmd.spec
                 self._set_lineage(self.agents[cmd.agent], cmd)
@@ -324,7 +343,7 @@ class Worker:
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
                               sync=self.sync, identities=self.identities,
                               working_count=self.working_count, toolbox=self._toolbox(cmd.agent),
-                              comms=self.comms)
+                              comms=self.comms, world=self.world)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.drain_window = parse_duration(cmd.spec.drain_window)
@@ -394,6 +413,7 @@ class Worker:
             await rt.unassign()
         finally:
             self.comms.forget(rt.name)
+            self.world.on_done(rt.name, "unassigned")
             self.agents.pop(rt.name, None)
             self._unassigning.pop(rt.name, None)
 
@@ -443,6 +463,8 @@ class Worker:
                 tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
                 self.tools.want(tools.get("version"), tools.get("select"))
                 self._comms_from(resp.get("comms"))
+                self.world.configure_raw(resp.get("world"))
+                self._world_credential()
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)
@@ -595,6 +617,7 @@ class Worker:
         if not self.stale:
             await self.send_heartbeat()
         await self.comms.aclose()
+        await self.world.aclose()
         await self.client.aclose()
         log.info("drained; exiting")
         return 0

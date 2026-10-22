@@ -262,6 +262,13 @@ def load_spec(spec_file: str) -> SwarmSpec:
         if c.kickoff_file:
             c.kickoff = read(c.kickoff_file, "kickoff_file")
         c.protocols_text = [read(f, "protocols") for f in c.protocols]
+    w = spec.world
+    if w is not None and w.command is not None:  # the world runs in its dir (docs/world.md)
+        d = Path(w.dir or ".")
+        w.dir = str((d if d.is_absolute() else path.parent / d).resolve())
+        if not Path(w.dir).is_dir():
+            typer.echo(f"world.dir: {w.dir} not found", err=True)
+            raise typer.Exit(1)
     return spec
 
 
@@ -755,6 +762,30 @@ def workers(swarm: str) -> None:
         typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
     else:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
+
+
+world_app = typer.Typer(help="Worlds: shared state behind tools (docs/world.md).",
+                        no_args_is_help=True)
+app.add_typer(world_app, name="world")
+
+
+@world_app.command("serve")
+def world_serve(
+    target: str = typer.Argument(..., help="module:Class, imported from the current directory."),
+    host: str = typer.Option(None, "--host", help="Default: $FLOCK_WORLD_HOST or 127.0.0.1."),
+    port: int = typer.Option(None, "--port", help="Default: $FLOCK_WORLD_PORT or 8765."),
+    token_env: str = typer.Option("FLOCK_WORLD_TOKEN", "--token-env",
+                                  help="The variable holding the shared secret (X-World-Token)."),
+    insecure: bool = typer.Option(False, "--insecure", help="Serve without a secret."),
+) -> None:
+    """Serve a flock.world.World subclass over HTTP (World API v1). A world flock starts gets
+    its port and secret in the environment."""
+    try:
+        from flock.world.server import serve
+    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
+        typer.echo(f"flock world serve needs the controller extra: {e}", err=True)
+        raise typer.Exit(1) from None
+    serve(target, host=host, port=port, token_env=token_env, insecure=insecure)
 
 
 if __name__ == "__main__":

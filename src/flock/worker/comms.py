@@ -179,6 +179,8 @@ class CommsHub:
         self._gen = 0  # bumped by every reconfiguration that invalidates identities
         self.address: str | None = None
         self.stats: Counter[str] = Counter()
+        # Other built-ins the gateway serves, by entry prefix (`world`: flock.world.hub)
+        self.routes: dict[str, Callable[[str, str, dict[str, Any]], Any]] = {}
 
     # ------------------------------------------------------------------ configuration
     @property
@@ -735,7 +737,9 @@ class CommsHub:
             if agent not in self._keys or not hmac.compare_digest(key, self._keys[agent]):
                 r = Result(json.dumps({"error": "gateway: unknown agent or key"}), True)
             else:
-                r = await self.call(agent, str(req.get("tool")), req.get("args") or {})
+                tool = str(req.get("tool"))
+                handler = self.routes.get(tool.split(":", 1)[0], self.call)
+                r = await handler(agent, tool, req.get("args") or {})
             writer.write(json.dumps({"output": r.output, "error": r.error,
                                      "duration_s": r.duration_s}).encode() + b"\n")
             await writer.drain()
