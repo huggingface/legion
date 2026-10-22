@@ -135,11 +135,15 @@ def _bind(host: str) -> socket.socket:
 def loops_settled(spec: SwarmSpec, status: SwarmStatus) -> bool:
     """Every type with a `loop:` has a loop that is over (docs/loop.md): `done` after its final
     round, or stopped without one (max_rounds, `until`, budget, `flock loop --stop`). A loop not
-    started yet, running (agents idle between rounds) or in its final round keeps the swarm busy."""
+    started yet, running (agents idle between rounds) or in its final round keeps the swarm busy.
+    A dormant type (`replicas: 0` and no agents, e.g. one only spawned into) has no rounds to
+    run and does not count until an agent of it exists."""
     for name, ts in spec.types.items():
         if ts.loop is None:
             continue
         t = status.types.get(name)
+        if ts.replicas == 0 and (t is None or not sum(t.agents_by_state.values())):
+            continue
         if t is None or t.loop is None or t.loop.state != "done":
             return False
     return True

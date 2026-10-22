@@ -713,3 +713,42 @@ async def test_finish_never_resends_a_fetched_final(sim):
     assert await sim.commands() == []
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
     assert (st["state"], st["final_done"]) == ("done", 1)
+
+
+async def test_until_idle_ignores_a_dormant_looping_type(sim):
+    """`flock run --until idle` (localrun.Tracker): a `replicas: 0` type with a loop and no
+    agents never runs a round, so it must not hold a finished run open. A type whose replicas
+    are not created yet, or one just spawned into, still counts (review of PR #17)."""
+    from flock.controller.api import swarm_status
+    from flock.controller.localrun import Tracker, loops_settled
+
+    lp = {"prompt": "work", "every": "30s", "while": {"max_rounds": 1}}
+    spec = make_spec(researcher={"replicas": 2, "agents_per_worker": 2, "loop": lp},
+                     unused={"replicas": 0, "loop": lp})
+    r = await sim.c.put("/swarms/demo", json=spec.model_dump(mode="json"))
+    assert r.status_code == 200, r.text
+    sim.loops.tick()
+    now = sim.clock().timestamp()
+    assert not loops_settled(spec, swarm_status(sim.store, spec, now))  # replicas not created yet
+    sim.reconcile()
+    await sim.commands()
+    await sim.heartbeat()
+    sim.tick()
+    for a, p in prompts(await sim.commands()).items():
+        await sim.turn(a, p)
+    tracker = Tracker(sim.store, "demo")
+    for _ in range(3):
+        sim.clock.advance(60)
+        await sim.heartbeat()
+        sim.tick()
+    assert {k: v["state"] for k, v in sim.store.get_loops("demo").items()} == {
+        "researcher": "done", "unused": "running"}
+    snap = tracker.snapshot(spec, sim.clock().timestamp())
+    assert snap["completed"] == 2 and snap["pending"] == 0
+    assert snap["loops_settled"] and tracker.idle(snap)
+
+    # spawned into: the type has an agent now, and its running loop counts again
+    sim.store.insert_child("researcher-0000-unused-1", "demo", "unused", 1, A0, 1,
+                           sim.clock().timestamp())
+    snap = tracker.snapshot(spec, sim.clock().timestamp())
+    assert not snap["loops_settled"] and not tracker.idle(snap)
