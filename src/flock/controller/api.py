@@ -18,7 +18,7 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -61,6 +61,8 @@ from flock.models import (
     WorkerState,
     WorkerStatus,
 )
+from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
+from flock.tools.loader import ToolsError
 
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
@@ -613,8 +615,57 @@ def create_app(
                 raise HTTPException(409, f"type {type_name!r} already belongs to swarm {owner!r}")
         if conflicts := worker_cap_conflicts(store, spec):
             raise HTTPException(409, "; ".join(conflicts))
+        check_tools(swarm, spec)
         store.put_swarm(spec, clock().timestamp())
         return swarm_status(store, spec, clock().timestamp())
+
+    def check_tools(swarm: str, spec: SwarmSpec) -> None:
+        """The spec's tools bundle was uploaded and has every tool a type selects."""
+        selecting = {n: ts.tools for n, ts in spec.types.items() if ts.tools is not None}
+        if spec.tools_version is None:
+            if selecting:
+                raise HTTPException(400, f"types {', '.join(selecting)} select tools but the spec "
+                                         "has no tools_version: apply it with `flock apply`, "
+                                         "which uploads the tools folder (docs/tools.md)")
+            return
+        b = store.get_tool_bundle(swarm, spec.tools_version, body=False)
+        if b is None:
+            raise HTTPException(400, f"tools bundle {spec.tools_version} was not uploaded to "
+                                     f"swarm {swarm!r} (POST /swarms/{swarm}/tools first)")
+        for name, sel in selecting.items():
+            unknown = [] if sel == "all" else [t for t in sel if t not in b["tools"]]
+            if unknown:
+                raise HTTPException(400, f"types.{name}.tools: unknown tool(s) {', '.join(unknown)}; "
+                                         f"bundle {spec.tools_version} has: "
+                                         f"{', '.join(b['tools']) or 'none'}")
+
+    @api.post("/swarms/{swarm}/tools", status_code=201)
+    async def upload_tools(swarm: str, request: Request) -> dict:
+        """Store a tools bundle (the tar.gz `flock apply` packs) under its content hash. The
+        swarm need not exist yet; the spec then names the version (`tools_version`)."""
+        body = await request.body()
+        if len(body) > MAX_BUNDLE_BYTES:
+            raise HTTPException(413, f"tools bundle over {MAX_BUNDLE_BYTES} bytes")
+        try:
+            manifest = read_manifest(body)
+        except ToolsError as e:
+            raise HTTPException(400, str(e)) from None
+        version = version_of(body)
+        store.put_tool_bundle(swarm, version, body, manifest.names(), clock().timestamp())
+        return {"swarm": swarm, "version": version, "size": len(body), "tools": manifest.names()}
+
+    @api.get("/swarms/{swarm}/tools")
+    def list_tools(swarm: str) -> dict:
+        row = store.get_swarm(swarm)
+        return {"swarm": swarm, "current": row["spec"].tools_version if row else None,
+                "bundles": store.list_tool_bundles(swarm)}
+
+    @api.get("/swarms/{swarm}/tools/{version}")
+    def get_tools(swarm: str, version: str) -> Response:
+        b = store.get_tool_bundle(swarm, version)
+        if b is None:
+            raise HTTPException(404, f"no tools bundle {version!r} for swarm {swarm!r}")
+        return Response(b["body"], media_type="application/gzip")
 
     @api.post("/swarms/{swarm}/preflight")
     async def preflight(
@@ -1052,7 +1103,13 @@ def create_app(
         cap = provider_cap(sw["spec"], w["type"]) if sw else None
         if heartbeat_seen(hb, clock().timestamp()) and cap is not None:
             wake_window(w["swarm"], {cap[0]})
-        return {"ok": True}
+        out: dict[str, Any] = {"ok": True}
+        spec = sw["spec"] if sw else None
+        if spec is not None and spec.tools_version is not None and w is not None:
+            # the swarm's current tools (docs/tools.md): a re-apply reaches running workers here
+            ts = spec.types.get(w["type"])
+            out["tools"] = {"version": spec.tools_version, "select": ts.tools if ts else None}
+        return out
 
     @api.post("/workers/{worker_id}/events")
     def post_events(worker_id: str, batch: EventBatch, incarnation: str | None = None) -> dict:

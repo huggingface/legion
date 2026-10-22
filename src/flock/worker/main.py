@@ -48,6 +48,7 @@ from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
 from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
+from flock.worker.tools import ToolsManager, tools_root
 
 log = logging.getLogger("flock.worker")
 
@@ -189,10 +190,22 @@ class ControllerClient:
                              timeout=httpx.Timeout(20, read=wait + 20))
         return CommandBatch.model_validate(r.json() if r.content else {"commands": []})
 
-    async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> None:
-        await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
-                         content=hb.model_dump_json(), params=self.params,
-                         headers={"content-type": "application/json"})
+    async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> dict:
+        """The controller's answer: {"ok": true} plus, for a swarm with a tools folder,
+        {"tools": {"version", "select"}} (docs/tools.md)."""
+        r = await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
+                             content=hb.model_dump_json(), params=self.params,
+                             headers={"content-type": "application/json"})
+        try:
+            body = r.json() if r.content else {}
+        except ValueError:
+            body = {}
+        return body if isinstance(body, dict) else {}
+
+    async def tools_bundle(self, swarm: str, version: str, *, budget: float = 60.0) -> bytes:
+        r = await self._send("GET", f"/swarms/{swarm}/tools/{version}", budget=budget,
+                             timeout=httpx.Timeout(20, read=120))
+        return r.content
 
     async def events(self, batch: EventBatch, *, budget: float = 30.0) -> None:
         await self._send("POST", f"/workers/{batch.worker}/events", budget=budget,
@@ -248,9 +261,12 @@ class Worker:
         adapter_factory: Callable[[str, TypeSpec], HarnessAdapter] | None = None,
         sync: BucketSync | None = None,
         identities: Identities | None = None,
+        tools: ToolsManager | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
+        self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
+                                           type_name=cfg.type, fetch=self._fetch_tools)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg)
         self.sync = sync
         self.identities = identities or Identities()
@@ -268,6 +284,9 @@ class Worker:
         self._throttled_logged = 0
         self._terminating = False
 
+    async def _fetch_tools(self, version: str) -> bytes:
+        return await self.client.tools_bundle(self.cfg.swarm, version)
+
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
 
@@ -279,6 +298,7 @@ class Worker:
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].spec = cmd.spec
                 self._set_lineage(self.agents[cmd.agent], cmd)
+                self.tools.want(cmd.tools_version, cmd.spec.tools)
                 return
             if self.draining:
                 log.warning("assign %s ignored while draining", cmd.agent)
@@ -287,7 +307,7 @@ class Worker:
                               work_root=self.cfg.work_root,
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
                               sync=self.sync, identities=self.identities,
-                              working_count=self.working_count)
+                              working_count=self.working_count, toolbox=self.tools.current)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.drain_window = parse_duration(cmd.spec.drain_window)
@@ -332,6 +352,8 @@ class Worker:
         self._wave = (start, n + 1, snap)
         self._restoring += 1
         try:
+            # the swarm's tools version is on disk before the agent's first turn (docs/tools.md)
+            await self.tools.ensure(cmd.tools_version, cmd.spec.tools)
             await rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt)
         finally:
             self._restoring -= 1
@@ -389,8 +411,11 @@ class Worker:
     async def send_heartbeat(self) -> bool:
         try:  # retried inside the client for most of an interval: the controller declares a
             # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
-            await self.client.heartbeat(self.heartbeat_payload(),
-                                        budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
+            resp = await self.client.heartbeat(self.heartbeat_payload(),
+                                               budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
+            if isinstance(resp, dict) and not self.draining:
+                tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
+                self.tools.want(tools.get("version"), tools.get("select"))
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)

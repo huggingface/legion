@@ -69,6 +69,25 @@ def minimal_env(
     return env
 
 
+# Where the Claude adapter puts a provider-backed type's key (claude_env): x-api-key / bearer.
+CLAUDE_KEY_ALIASES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def credential_env_names(spec: TypeSpec) -> list[str]:
+    """Every environment variable through which a harness process holds its provider key: the
+    provider's `api_key_env` plus the names an adapter copies it to (Claude: ANTHROPIC_API_KEY or
+    ANTHROPIC_AUTH_TOKEN; Codex, Pi and llm read `api_key_env` itself). Tool calls
+    (`flock-tool`, docs/tools.md) get none of them. Empty for a harness-native model, whose keys
+    are ordinary declared `secrets`."""
+    r = spec.resolved_model
+    if r is None:
+        return []
+    names = [r.provider.api_key_env]
+    if spec.harness.value == "claude":
+        names += CLAUDE_KEY_ALIASES
+    return sorted(set(names))
+
+
 class ResumeError(RuntimeError):
     """The harness could not resume the requested session; start fresh instead."""
 
