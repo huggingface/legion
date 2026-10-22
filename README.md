@@ -53,6 +53,11 @@ them.
   tools (schema from type hints); `flock apply` ships them by content hash and a changed
   folder reaches running agents at their next turn, with no image or wheel rebuild. See
   [docs/tools.md](docs/tools.md).
+- **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
+  turn_end` or a duration, after an optional `first`) while `while:` holds
+  (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
+  round; `limits.budget_usd` stops the swarm. `flock loop` stops or restarts
+  a loop. See [docs/loop.md](docs/loop.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
@@ -194,6 +199,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /agents/{name}/events?after=&wait=` | event stream, long-poll |
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
+| `GET/POST /swarms/{swarm}/loop`, `GET /swarms/{swarm}/events` | loop state per type and agent, `{type, action: start\|stop, final}`, the swarm-level event stream ([docs/loop.md](docs/loop.md)) |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests
