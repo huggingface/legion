@@ -878,6 +878,45 @@ class LoopFinal(BaseModel):
         return self
 
 
+class LoopWake(BaseModel):
+    """How `on:` wake-ups spend rounds (docs/loop.md, "Wake queue"). Per agent: at least
+    `min_gap` between two wake prompts (wakes in between are coalesced into the next one), at
+    most `max` wake prompts per run of the loop, or per `window` when set (None: no cap).
+    `counts_as_round: false` keeps wake prompts out of `max_rounds` (they carry the current
+    round number and do not advance it); `true` is the behaviour before this setting."""
+
+    model_config = {"extra": "forbid"}
+
+    min_gap: str = "30s"
+    max: int | None = 10
+    window: str | None = None
+    counts_as_round: bool = False
+
+    @field_validator("min_gap", "window")
+    @classmethod
+    def _duration(cls, v: str | None, info) -> str | None:
+        if v is not None and parse_duration(v).total_seconds() <= 0 and info.field_name == "window":
+            raise ValueError("window must be a duration > 0")
+        return v
+
+    @field_validator("max")
+    @classmethod
+    def _max(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+
+class LoopStopWhen(BaseModel):
+    """Extra ways for a loop to end. `all_agents_done`: an agent that calls `done` with
+    `finished: true` (the `llm` harness offers that argument then) leaves the loop, and the
+    loop stops once every live agent has left it."""
+
+    model_config = {"extra": "forbid"}
+
+    all_agents_done: bool = False
+
+
 class LoopSpec(BaseModel):
     """A type's prompting loop (docs/loop.md). `first` goes alone to each agent; the loop
     prompt follows once that turn ended, then on every `every` (`turn_end`: re-sent by the
@@ -896,6 +935,8 @@ class LoopSpec(BaseModel):
     stagger: str | None = None  # agent i gets its first prompt i * stagger after the start
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
+    wake: LoopWake = Field(default_factory=LoopWake)
+    stop_when: LoopStopWhen = Field(default_factory=LoopStopWhen)
 
     @model_serializer(mode="wrap")
     def _dump(self, handler):  # `while` on the wire, as written in specs
@@ -980,6 +1021,8 @@ def loop_refusals(spec: SwarmSpec) -> list[str]:
             out.append(f"{where}.prompt_file: not inlined (use `flock apply`, which reads it)")
         if lp.final is not None and lp.final.prompt is None:
             out.append(f"{where}.final.prompt_file: not inlined (use `flock apply`, which reads it)")
+        if lp.stop_when.all_agents_done and (ts.harness != Harness.llm or ts.done_tool is False):
+            out.append(f"{where}.stop_when.all_agents_done needs harness llm with the done tool")
     return out
 
 
@@ -1070,6 +1113,9 @@ class LoopMeta(BaseModel):
     wall_s: float | None = None  # `while.until` in seconds, for {wall}
     cap_usd: float | None = None  # `while.agent_usd` for this agent, for {cap}
     why: str = ""
+    # False: a wake prompt outside `max_rounds` (`wake.counts_as_round: false`); it carries the
+    # current round and does not advance the worker's round counter
+    counted: bool = True
     add_tools: list[str] = Field(default_factory=list)  # final round: tools it unlocks
 
 
@@ -1274,10 +1320,11 @@ class LoopStatus(BaseModel):
     stopped_at: datetime | None = None
     reason: str | None = None  # why it stopped
     agents: int = 0
-    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors)
+    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors, done)
     rounds_min: int = 0
     rounds_max: int = 0
     rounds_total: int = 0
+    wakes_total: int = 0  # wake prompts sent (`on:`); in rounds_total too only with counts_as_round
     final_sent: int = 0
     final_done: int = 0
     per_agent: dict[str, dict[str, Any]] | None = None  # GET /swarms/{s}/loop only

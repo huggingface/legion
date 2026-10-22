@@ -134,6 +134,14 @@ DONE_TOOL: dict[str, Any] = {
         },
     },
 }
+# `loop.stop_when.all_agents_done` (docs/loop.md): `done` also takes `finished`
+FINISHED_ARG: dict[str, Any] = {
+    "type": "boolean",
+    "description": "true only when your whole task is complete and you need no more rounds; "
+                   "you then get no further loop prompts."}
+DONE_TOOL_FINISHED: dict[str, Any] = {"type": "function", "function": {
+    **DONE_TOOL["function"], "parameters": {"type": "object", "properties": {
+        **DONE_TOOL["function"]["parameters"]["properties"], "finished": FINISHED_ARG}}}}
 DONE_PREAMBLE = "\nWhen the task is done, call the `done` tool with a one-line summary."
 TOOLS_PREAMBLE = ("\nBesides `bash` you have task tools, offered as functions next to it; their "
                   "descriptions say what they do. Call them directly, not through bash.")
@@ -472,9 +480,17 @@ class LLMAdapter:
             return False
         if spec.done_tool is not None:
             return spec.done_tool
+        if self.done_finished:
+            return True
         r = spec.resolved_model
         choice = spec.tool_choice or ((r.extra or {}).get("tool_choice") if r else None)
         return choice == "required"
+
+    @property
+    def done_finished(self) -> bool:
+        """`done` takes `finished` (the type's `loop.stop_when.all_agents_done`)."""
+        lp = self._spec.loop if self._spec else None
+        return lp is not None and lp.stop_when.all_agents_done
 
     def projected_tokens(self) -> int:
         """Prompt size of the next request: the server's count for the previous request plus
@@ -806,10 +822,11 @@ class LLMAdapter:
         text = summary.strip() if isinstance(summary, str) and summary.strip() else "done"
         self._append({"role": "assistant", "content": text})
         r = self._spec.resolved_model if self._spec else None
+        finished = {"finished": True} if self.done_finished and args.get("finished") is True else {}
         self._queue.put(AdapterEvent("message", message={
             "role": "assistant", "content": [{"type": "text", "text": text}], "api": "openai-completions",
             "provider": r.provider_name if r else None, "model": model, "usage": pi_usage(TokenUsage()),
-            "stopReason": "stop", "fromDoneTool": True, "timestamp": _ms()}))
+            "stopReason": "stop", "fromDoneTool": True, "timestamp": _ms(), **finished}))
 
     def _tool_result(self, call: dict[str, Any], out: str, err: bool, **extra: Any) -> None:
         self._append({"role": "tool", "tool_call_id": call["id"], "content": out})
@@ -878,7 +895,8 @@ class LLMAdapter:
         spec = self._spec
         assert spec is not None and spec.resolved_model is not None and self._client is not None
         r = spec.resolved_model
-        tools = [BASH_TOOL, DONE_TOOL] if self.done_enabled else [BASH_TOOL]
+        done = DONE_TOOL_FINISHED if self.done_finished else DONE_TOOL
+        tools = [BASH_TOOL, done] if self.done_enabled else [BASH_TOOL]
         if self.folder_tools is not None:
             tools += [t.openai() for t in self.folder_tools.tools]
         body: dict[str, Any] = {"model": r.model_id, "messages": wire_messages(self.messages),

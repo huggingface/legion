@@ -144,6 +144,31 @@ def test_helpers_and_imported_functions_are_not_tools(tmp_path):
     assert describe(folder).names() == ["loud", "use"]
 
 
+def test_readonly_tools_are_flagged_in_the_manifest(tmp_path):
+    """`@flock.tools.readonly` puts `readonly: true` in the manifest; other tools leave the key
+    out, so a folder without the flag keeps its manifest and version."""
+    folder = tmp_path / "tools"
+    write(folder, "board.py", """
+        from flock.tools import readonly
+
+        @readonly
+        def task_board() -> str:
+            '''Show the task board.'''
+            return "ok"
+
+        def claim(task: str) -> str:
+            '''Claim a task.'''
+            return task
+    """)
+    m = describe(folder)
+    assert {t.name: t.readonly for t in m.tools} == {"task_board": True, "claim": False}
+    assert {t["name"]: t.get("readonly") for t in m.to_json()["tools"]} == {"task_board": True,
+                                                                       "claim": None}
+    from flock.comms.tools import tool_def as comms_tool
+    assert [comms_tool(e).readonly for e in ("comms:post", "comms:read", "comms:search")] == [
+        False, True, True]
+
+
 def test_select_is_strict():
     from flock.tools.loader import Manifest, ToolDef
 

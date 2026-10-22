@@ -18,7 +18,9 @@ Who sends the loop prompt (`mode`):
 
 `first` goes alone, and the loop prompt only after the turn that followed it ended. Wake-ups
 (`wake(agent, reason)`, fed by the workers' comms events for `on: comms.*`) queue the loop
-prompt after a 2 s debounce.
+prompt after a 2 s debounce, at most one per `wake.min_gap` per agent and `wake.max` per run
+(or `wake.window`); by default a wake prompt is not a round (`wake.counts_as_round`). Each one
+sent is a `loop_wake` event.
 
 State lives in the store (`loops`, `loop_agents`, `swarm_flags`), so a controller restart
 picks the loops up where they were. Swarm-level events go to the stream `_swarm.<swarm>`
@@ -93,11 +95,32 @@ def _is_loop_body(body: str, kinds: tuple[str, ...] = LOOP_KINDS) -> bool:
     return meta.get("kind") in kinds
 
 
+def _wake_capped(lp: LoopSpec, st: dict, now: float) -> bool:
+    """The agent has had `wake.max` wake prompts in this run (or in the last `wake.window`)."""
+    cap = lp.wake.max
+    if cap is None:
+        return False
+    if lp.wake.window is None:
+        return st.get("wakes", 0) >= cap
+    window = parse_duration(lp.wake.window).total_seconds()
+    return sum(1 for t in st.get("wake_times", []) if now - t < window) >= cap
+
+
+def _unwake(st: dict) -> None:
+    """A wake prompt outside the round count was dropped or deferred: not a wake after all."""
+    st["wakes"] = max(0, st.get("wakes", 0) - 1)
+    if st.get("wake_times"):
+        st["wake_times"] = st["wake_times"][:-1]
+    st["wake_last"] = st["wake_times"][-1] if st.get("wake_times") else None
+    st["turn_done"] = True  # no turn runs; the cadence (`last_sent`) is left as it was
+
+
 def _new_agent() -> dict[str, Any]:
     return {"phase": "new", "rounds": 0, "last_sent": None, "first_delivered": False,
             "wstarted": None, "stop_sent": None, "acked": False, "last_activity": None,
             "turn_done": False, "idle_streak": 0, "errors": 0, "done_reason": None,
             "final": None, "final_sent": None,
+            "wakes": 0, "wake_last": None, "wake_times": [],  # wake prompts sent (`on:`)
             "inflight": None}  # {kind, round} of a loop prompt the worker took, until its turn starts
 
 
@@ -120,7 +143,8 @@ class LoopEngine:
         self.capped = capped or (lambda spec, t: False)
         self.turn_state = turn_state or agent_state
         self._lock = threading.RLock()
-        self._wakes: dict[str, tuple[float, float, list[str]]] = {}  # agent -> first, last, why
+        # agent -> first, last, why, events: queued wakes not yet sent
+        self._wakes: dict[str, tuple[float, float, list[str], int]] = {}
         self._stops: dict[str, float] = {}  # agent -> last StopCommand under the hard budget stop
 
     # ------------------------------------------------------------------ events out
@@ -133,9 +157,10 @@ class LoopEngine:
 
     # ------------------------------------------------------------------ public seams
     def wake(self, agent: str, reason: str) -> bool:
-        """Queue the agent's loop prompt (debounced WAKE_DEBOUNCE s, skip_pending), e.g. for a
-        comms mention. Only for a running loop whose `on:` lists `reason` (or its prefix
-        before ':') in a swarm the hard budget stop has not stopped; returns False when the
+        """Queue the agent's loop prompt (debounced WAKE_DEBOUNCE s, held until `wake.min_gap`
+        after its last wake prompt, skip_pending), e.g. for a comms mention. Only for a running
+        loop whose `on:` lists `reason` (or its prefix before ':') in a swarm the hard budget
+        stop has not stopped, and while the agent is under `wake.max`; returns False when the
         wake was ignored."""
         with self._lock:
             a = self.store.get_agent(agent)
@@ -152,8 +177,11 @@ class LoopEngine:
             if not L or L["state"] != "running" or not st or st["phase"] != "looping":
                 return False
             now = self.clock().timestamp()
-            first, _, why = self._wakes.get(agent, (now, now, []))
-            self._wakes[agent] = (first, now, [*why, reason][-10:])
+            if _wake_capped(ts.loop, st, now):
+                self._wakes.pop(agent, None)
+                return False
+            first, _, why, n = self._wakes.get(agent, (now, now, [], 0))
+            self._wakes[agent] = (first, now, [*why, reason][-10:], n + 1)
             return True
 
     def control(self, swarm: str, type_name: str, action: str, final: bool = True) -> LoopStatus:
@@ -212,7 +240,8 @@ class LoopEngine:
                 d = _custom(ev)
                 if ev.type == "loop_prompt":
                     st["last_activity"] = now
-                    st["inflight"] = {"kind": d.get("kind"), "round": d.get("round")}
+                    st["inflight"] = {"kind": d.get("kind"), "round": d.get("round"),
+                                      "counted": d.get("counted", True)}
                     if d.get("kind") == "first":
                         st["first_delivered"] = True
                     elif d.get("kind") == "final":
@@ -226,7 +255,8 @@ class LoopEngine:
                 elif ev.type == "loop_stopped":
                     st["acked"] = True
                     st["wstarted"] = None
-                    if d.get("reason") in ("max_rounds", "errors", "deadline") and st["phase"] == "looping":
+                    if (d.get("reason") in ("max_rounds", "errors", "deadline", "done")
+                            and st["phase"] == "looping"):
                         st["phase"], st["done_reason"] = "done", d["reason"]
                 elif ev.type in ("turn_ended", "turn_interrupted"):
                     st["last_activity"] = now
@@ -240,17 +270,26 @@ class LoopEngine:
                     if st["final"] == "delivered":
                         st["final"] = "done"
                         continue
+                    # `done(finished: true)` under `stop_when.all_agents_done`: out of the loop
+                    finished = (ts.loop.stop_when.all_agents_done and ev.type == "turn_ended"
+                                and d.get("finished") is True)
                     if st["phase"] == "first" and st["first_delivered"]:
                         st["phase"] = "looping"
+                        stop_reason = "done" if finished else stop_reason
                         continue
                     if st["phase"] != "looping":
                         continue
                     status = d.get("status") if ev.type == "turn_ended" else "interrupted"
                     w = ts.loop.while_
                     if w.idle_rounds is not None and ev.type == "turn_ended":
-                        st["idle_streak"] = 0 if d.get("tool_calls", 1) else st["idle_streak"] + 1
+                        # read-only calls (`done`, comms read/search, `readonly` folder tools)
+                        # are not activity; a worker older than `state_calls` sends tool_calls
+                        busy = d.get("state_calls", d.get("tool_calls", 1))
+                        st["idle_streak"] = 0 if busy else st["idle_streak"] + 1
                         if st["idle_streak"] >= w.idle_rounds:
                             stop_reason = "idle_rounds"
+                    if finished:
+                        stop_reason = "done"
                     if L.get("mode") == "controller":
                         st["errors"] = 0 if status == "completed" or max_turns else st["errors"] + 1
                         if st["errors"] >= ERROR_LIMIT:
@@ -274,6 +313,8 @@ class LoopEngine:
         elif kind == "final":
             if st["final"] in ("sent", "delivered"):
                 st["final"], st["final_sent"] = None, None
+        elif kind == "loop" and took.get("counted") is False:
+            _unwake(st)
         elif kind == "loop" and isinstance(took.get("round"), int):
             st["rounds"] = min(st["rounds"], max(0, took["round"] - 1))
             st["last_sent"], st["turn_done"] = None, True
@@ -394,7 +435,9 @@ class LoopEngine:
             if st is None or not meta:
                 continue
             kind, rnd = meta.get("kind"), meta.get("round")
-            if kind == "loop" and isinstance(rnd, int):
+            if kind == "loop" and meta.get("counted") is False:
+                _unwake(st)
+            elif kind == "loop" and isinstance(rnd, int):
                 st["rounds"] = min(st["rounds"], max(0, rnd - 1))
                 st["last_sent"], st["turn_done"] = None, True
                 if st["phase"] == "done" and st["done_reason"] == "max_rounds":
@@ -533,12 +576,12 @@ class LoopEngine:
 
     # ------------------------------------------------------------------ running
     def _meta(self, ts: TypeSpec, type_name: str, L: dict, kind: str, *, round: int | None,
-              why: str) -> LoopMeta:
+              why: str, counted: bool = True) -> LoopMeta:
         assert ts.loop is not None
         until = ts.loop.while_.until
         return LoopMeta(kind=kind, type=type_name, round=round, started_at=_ts(L["started_at"]),
                         wall_s=parse_duration(until).total_seconds() if until else None,
-                        cap_usd=agent_cap(ts), why=why,
+                        cap_usd=agent_cap(ts), why=why, counted=counted,
                         add_tools=list(ts.loop.final.add_tools) if kind == "final" and ts.loop.final else [])
 
     def _loop_start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, a: Row,
@@ -587,6 +630,7 @@ class LoopEngine:
         max_rounds = lp.while_.max_rounds
         every = lp.every_s
         due: dict[str, PromptCommand] = {}
+        wakes: dict[str, int] = {}  # agent -> wake events folded into its due prompt
         changed: set[str] = set()
         for i, a in enumerate(sorted(agents, key=lambda r: r["name"])):
             name = a["name"]
@@ -616,7 +660,7 @@ class LoopEngine:
                 continue
             if st["phase"] != "looping":
                 continue
-            woken = self._woken(name, now)
+            woken = self._woken(name, st, lp, now)
             if L["mode"] == "worker":
                 if not a["worker"]:
                     continue
@@ -632,7 +676,9 @@ class LoopEngine:
                     changed.add(name)
                 elif woken and idle:
                     due[name] = self._prompt(a, lp.prompt or "", self._meta(
-                        ts, type_name, L, "loop", round=None, why=woken))
+                        ts, type_name, L, "loop", round=None, why=woken[0],
+                        counted=lp.wake.counts_as_round))
+                    wakes[name] = woken[1]
                 continue
             if st["stop_sent"] and not st["acked"] and now - st["stop_sent"] < ACK_TIMEOUT:
                 continue  # its worker-side loop (before a mode change) has not confirmed the stop
@@ -643,7 +689,7 @@ class LoopEngine:
                 continue
             why = None
             if woken:
-                why = woken
+                why, wakes[name] = woken
             elif st["rounds"] == 0:
                 why = "start"
             elif every is None and st["turn_done"]:
@@ -653,8 +699,10 @@ class LoopEngine:
             elif every is not None and now - (st["last_sent"] or 0.0) >= every:
                 why = f"every {lp.every}"
             if why:
+                counted = name not in wakes or lp.wake.counts_as_round
                 due[name] = self._prompt(a, lp.prompt or "", self._meta(
-                    ts, type_name, L, "loop", round=st["rounds"] + 1, why=why))
+                    ts, type_name, L, "loop", round=st["rounds"] + int(counted), why=why,
+                    counted=counted))
         sent = set(self.send(spec.swarm, type_name, [a for a in agents if a["name"] in due],
                              lambda a: due[a["name"]])) if due else set()
         for name in sent:
@@ -668,6 +716,14 @@ class LoopEngine:
             st["last_activity"] = now
             self._wakes.pop(name, None)
             changed.add(name)
+            if name in wakes:
+                st["wakes"] = st.get("wakes", 0) + 1
+                st["wake_last"] = now
+                st["wake_times"] = [*st.get("wake_times", []), now][-(lp.wake.max or 1):]
+                self._event(spec.swarm, "loop_wake", {
+                    "type": type_name, "agent": name, "reason": meta.why.removeprefix("wake: "),
+                    "events": wakes[name], "coalesced": wakes[name] - 1, "round": meta.round,
+                    "counted": meta.counted, "wakes": st["wakes"]}, agent=name)
         for name in changed:
             self.store.put_loop_agent(name, spec.swarm, type_name, states[name])
         if sent:
@@ -681,14 +737,23 @@ class LoopEngine:
             self._stop(spec.swarm, type_name, ts, L, reasons.pop() if len(reasons) == 1
                        else "agents_done", final=True, now=now)
 
-    def _woken(self, name: str, now: float) -> str | None:
+    def _woken(self, name: str, st: dict, lp: LoopSpec, now: float) -> tuple[str, int] | None:
+        """The queued wake that is due now, as (why, events): after WAKE_DEBOUNCE s of quiet
+        (at most WAKE_MAX_DELAY s after the first), and `wake.min_gap` after the agent's last
+        wake prompt; wakes held by the gap are coalesced into this one."""
         w = self._wakes.get(name)
         if w is None:
             return None
-        first, last, why = w
-        if now - last >= WAKE_DEBOUNCE or now - first >= WAKE_MAX_DELAY:
-            return "wake: " + ", ".join(dict.fromkeys(why))
-        return None
+        if _wake_capped(lp, st, now):  # e.g. `wake.max` lowered by a re-apply
+            self._wakes.pop(name, None)
+            return None
+        first, last, why, n = w
+        if now - last < WAKE_DEBOUNCE and now - first < WAKE_MAX_DELAY:
+            return None
+        gap = parse_duration(lp.wake.min_gap).total_seconds()
+        if st.get("wake_last") is not None and now - st["wake_last"] < gap:
+            return None
+        return "wake: " + ", ".join(dict.fromkeys(why)), n
 
     def _prompt(self, a: Row, text: str, meta: LoopMeta) -> PromptCommand:
         return PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=text, loop=meta)
@@ -748,8 +813,9 @@ def loop_status(store: Store, swarm: str, type_name: str, *, detail: bool = Fals
     rounds = [st["rounds"] for st in agents.values()]
     per = None
     if detail:
-        per = {name: {k: st[k] for k in ("phase", "rounds", "done_reason", "final", "errors",
-                                         "idle_streak")} for name, st in sorted(agents.items())}
+        per = {name: {**{k: st[k] for k in ("phase", "rounds", "done_reason", "final", "errors",
+                                            "idle_streak")}, "wakes": st.get("wakes", 0)}
+               for name, st in sorted(agents.items())}
     return LoopStatus(
         type=type_name, state=L["state"], mode=L["mode"], every=L["every"],
         started_at=_ts(L["started_at"]) if L.get("started_at") else None,
@@ -757,7 +823,7 @@ def loop_status(store: Store, swarm: str, type_name: str, *, detail: bool = Fals
         reason=L.get("reason"), agents=len(agents),
         agents_done=sum(1 for st in agents.values() if st["phase"] == "done"),
         rounds_min=min(rounds, default=0), rounds_max=max(rounds, default=0),
-        rounds_total=sum(rounds),
+        rounds_total=sum(rounds), wakes_total=sum(st.get("wakes", 0) for st in agents.values()),
         final_sent=sum(1 for st in agents.values() if st["final"] in ("sent", "delivered", "done")),
         final_done=sum(1 for st in agents.values() if st["final"] == "done"),
         per_agent=per)

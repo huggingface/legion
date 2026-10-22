@@ -17,6 +17,7 @@ from flock.models import CommsRules, comms_name
 from flock.tools.loader import ToolDef
 
 BUILTIN_MODULE = "flock:comms"
+READONLY = frozenset({"comms:read", "comms:search"})  # change nothing: idle for `idle_rounds`
 GROUP_RE = re.compile(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", re.IGNORECASE)
 GROUP_NAMES = frozenset({"all", "agents", "humans", "everyone", "people"})
 READ_DEFAULT, READ_MAX = 20, 100
@@ -81,7 +82,8 @@ def tool_def(entry: str) -> ToolDef:
     return ToolDef(name=comms_name(entry), description=d["description"],
                    parameters={"type": "object", "additionalProperties": False,
                                "properties": d["properties"], "required": d["required"]},
-                   module=BUILTIN_MODULE, function=comms_name(entry), builtin=entry)
+                   module=BUILTIN_MODULE, function=comms_name(entry), builtin=entry,
+                   readonly=entry in READONLY)
 
 
 class Refused(Exception):

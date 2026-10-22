@@ -49,6 +49,11 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'claude-opus-5-5'"),
+    ({"prompt": "x", "wake": {"min_gap": "soon"}}, "bad duration"),
+    ({"prompt": "x", "wake": {"window": "0s"}}, "window must be a duration > 0"),
+    ({"prompt": "x", "wake": {"max": -1}}, ">= 0"),
+    ({"prompt": "x", "wake": {"gap": "5s"}}, "Extra inputs"),
+    ({"prompt": "x", "stop_when": {"all_done": True}}, "Extra inputs"),
 ])
 def test_bad_loops_are_rejected(loop, msg):
     with pytest.raises(ValidationError, match=msg):
@@ -179,3 +184,18 @@ def test_documented_examples_load_with_an_unquoted_on_key(heading, tmp_path):
 def test_spec_yaml_keeps_yes_no_on_off_as_strings():
     raw = load_spec_yaml("on: [a]\noff: 1\nyes: no\nflag: true\nOther: False\n")
     assert raw == {"on": ["a"], "off": 1, "yes": "no", "flag": True, "Other": False}
+
+
+def test_wake_and_stop_when_defaults_and_refusal():
+    lp = LoopSpec.model_validate({"prompt": "x"})
+    assert lp.wake.model_dump() == {"min_gap": "30s", "max": 10, "window": None,
+                                    "counts_as_round": False}
+    assert lp.stop_when.all_agents_done is False
+    lp = LoopSpec.model_validate({"prompt": "x", "wake": {"min_gap": "0s", "max": None, "window": "10m",
+                                                          "counts_as_round": True},
+                                  "stop_when": {"all_agents_done": True}})
+    assert (lp.wake.max, lp.wake.window, lp.stop_when.all_agents_done) == (None, "10m", True)
+    # `finished` is an argument of the llm harness's `done` tool
+    s = spec_with({"prompt": "x", "stop_when": {"all_agents_done": True}})
+    assert loop_refusals(s) == [
+        "types.researcher.loop.stop_when.all_agents_done needs harness llm with the done tool"]

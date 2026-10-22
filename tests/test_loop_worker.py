@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from flock.models import LoopMeta, LoopStartCommand, TokenUsage
+from flock.tools.loader import ToolDef
+from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import AdapterEvent
 from flock.worker.loop import render
 
@@ -193,3 +195,59 @@ async def test_a_deferred_loop_prompt_is_not_a_round(tmp_path):
     [d] = custom(rt, "prompt_deferred")
     assert d["loop"] == {"kind": "loop", "round": 1} and d["text"] == "r1"
     assert rt.state.loop_round == 0 and ad.sent == []
+
+
+async def test_a_wake_outside_the_round_count_keeps_the_round(tmp_path):
+    """`counted: false` (wake.counts_as_round false): the prompt carries the current round,
+    the counter does not move, and a deferral gives nothing back."""
+    rt, ad = runtime(tmp_path, idle_grace="5s")
+    await rt.setup(restore=False)
+    rt.state.loop_round = 3
+    wake = meta(round=None, why="wake: comms.mention", counted=False)
+    rt.allow_starts = False  # draining
+    await rt.prompt("r{round}", loop=wake)
+    [d] = custom(rt, "prompt_deferred")
+    assert d["loop"] == {"kind": "loop", "round": 3, "counted": False} and rt.state.loop_round == 3
+    rt.allow_starts = True
+    await rt.prompt("r{round} {why}", loop=wake)
+    await until(lambda: rt.state.turns == 1)
+    assert ad.sent == ["r3 wake: comms.mention"] and rt.state.loop_round == 3
+    assert custom(rt, "loop_prompt")[-1] == {"kind": "loop", "round": 3, "why": "wake: comms.mention",
+                                             "counted": False}
+    await rt.stop()
+
+
+async def test_state_calls_and_finished(tmp_path):
+    """`turn_ended.state_calls` leaves out `done` and read-only tools (the toolset's `readonly`);
+    `done(finished: true)` under `stop_when.all_agents_done` ends the worker-side loop."""
+    rt, _ = runtime(tmp_path, idle_grace="5s",
+                    loop={"prompt": "p", "stop_when": {"all_agents_done": True}})
+    await rt.setup(restore=False)
+
+    def td(name: str, ro: bool = False) -> ToolDef:
+        return ToolDef(name=name, description="", parameters={}, module="m", function=name,
+                       readonly=ro)
+
+    rt.toolbox = lambda: Toolset(version=None, dir=None, swarm="sw", type="researcher",
+                                 data_dir=tmp_path / "data",
+                                 tools=(td("read", True), td("task_board", True), td("claim")))
+
+    def turn(*names: str, finished: bool = False) -> None:
+        rt.on_adapter_event(AdapterEvent("turn_started"))
+        rt.on_adapter_event(AdapterEvent("message", message={"role": "assistant", "content": [
+            {"type": "toolCall", "id": str(i), "name": n, "arguments": {}} for i, n in enumerate(names)]}))
+        rt.on_adapter_event(AdapterEvent("message", message={
+            "role": "assistant", "fromDoneTool": True, "content": [{"type": "text", "text": "ok"}],
+            **({"finished": True} if finished else {})}))
+        rt.on_adapter_event(AdapterEvent("turn_ended", status="completed"))
+
+    turn("read", "task_board", "done")
+    turn("read", "bash")
+    turn("claim")
+    rt.loop = start()
+    turn("read", "done", finished=True)
+    ended = custom(rt, "turn_ended")
+    assert [(d["tool_calls"], d["state_calls"], d.get("finished")) for d in ended] == [
+        (2, 0, None), (2, 1, None), (1, 1, None), (1, 0, True)]
+    assert rt.loop is None and custom(rt, "loop_stopped")[-1]["reason"] == "done"
+    await rt.stop()

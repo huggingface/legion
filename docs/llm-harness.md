@@ -62,7 +62,10 @@ types:
   `max_turns` still caps model calls (`reason: max_turns`); with no `max_turns`, a forced turn
   with `done` is capped at 50 calls so a model that never calls `done` cannot loop until
   `turn_timeout`. `tool_choice: bash` offers only `bash` (one action per prompt) unless
-  `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too.
+  `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too. With the type's
+  `loop.stop_when: {all_agents_done: true}` (docs/loop.md), `done` is offered whatever the
+  `tool_choice` (unless `done_tool: false`, which `flock apply` refuses with it) and takes
+  `finished?: boolean`: `done(finished: true)` takes the agent out of its loop.
 - `response_format` goes in `extra` and is sent as is, nested objects included. A JSON schema
   shaped like `{"tool": "bash", "command": ...}` makes every reply a call through the text
   fallback below; any other schema'd reply is the turn's final answer.
