@@ -59,13 +59,13 @@ class Sim:
         assert r.status_code == 200, r.text
 
     async def turn(self, agent: str, prompt: dict | None = None, status: str = "completed",
-                   tool_calls: int = 1) -> None:
+                   tool_calls: int = 1, **ended) -> None:
         """The worker delivered `prompt` (its loop meta) and ran one turn."""
         kinds = []
         if prompt is not None and prompt.get("loop"):
             m = prompt["loop"]
             kinds.append(("loop_prompt", {"kind": m["kind"], "round": m["round"], "why": m["why"]}))
-        kinds += [("turn_started", {}), ("turn_ended", {"status": status, "tool_calls": tool_calls})]
+        kinds += [("turn_started", {}), ("turn_ended", {"status": status, "tool_calls": tool_calls, **ended})]
         await self.events(agent, *kinds)
 
     def tick(self, seconds: float = 0) -> None:
@@ -233,6 +233,33 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
         sim.tick(2)  # queued again after 30 s, behind A0's slot (max_working 1)
         [row] = [r for r in store.prompts_for_worker(W0) if r["agent"] == A1]
         assert json.loads(row["body"])["loop"]["round"] == 2
+
+
+async def test_max_turns_is_not_a_failed_turn_but_is_logged(sim):
+    """Defect 5: a controller-side loop counts real errors (3 in a row end the agent's loop)
+    but not turns that ended at max_turns; each of those is a `loop_max_turns` event."""
+    await sim.apply({"prompt": "p", "every": "5s"})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for _ in range(4):
+        await sim.turn(A0, got[A0], status="error", reason="max_turns", num_turns=8)
+        sim.tick(5)
+        got = prompts(await sim.commands())
+        assert A0 in got
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
+    assert (st["phase"], st["errors"]) == ("looping", 0)
+    hits = [d for k, d in sim.swarm_events() if k == "loop_max_turns"]
+    assert hits == [{"type": "researcher", "kind": "loop", "round": r, "calls": 8} for r in (1, 2, 3, 4)]
+    assert [e["type"] for e in sim.store.read_events(A0, 0)].count("loop_max_turns") == 4
+
+    for i in range(3):  # real errors still count
+        await sim.turn(A0, got[A0], status="error", reason="api_error")
+        sim.tick(5)
+        got = prompts(await sim.commands())
+        assert (A0 in got) == (i < 2)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
+    assert (st["phase"], st["done_reason"], st["errors"]) == ("done", "errors", 3)
 
 
 async def test_while_until_stops_and_runs_final(sim):

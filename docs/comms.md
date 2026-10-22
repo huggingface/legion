@@ -48,15 +48,16 @@ The controller, at `PUT /swarms/{swarm}`:
 1. joins as `<swarm>-host` with the invite from its own environment (`invite_env` must be set on
    the controller, as provider keys are for preflight; it also hands that secret to the workers
    of every type with comms tools, as a job secret);
-2. resolves `channel` to its id (`GET /v1/channels?name=`), joining it if the host is not a
-   member, and stores it as `comms.channel_id`;
+2. resolves `channel` to its id (`GET /v1/channels?name=`), refuses it if the listing says
+   `archived` ("channel X (id N) is archived", before any post or member change), joins it if
+   the host is not a member, and stores it as `comms.channel_id`;
 3. posts the kickoff once, as the host (never as an agent), and stores `comms.kickoff_id`. The
    post's Idempotency-Key is `flock-kickoff-<swarm>-<channel id>`, so even a lost record never
    posts it twice.
 
 A re-apply with the same `url` and `channel` copies the id and the kickoff id from the stored spec
-and makes no board call. A missing invite, a wrong invite or a channel the host cannot see is a
-400 and nothing is applied.
+and makes no board call. A missing invite, a wrong invite, a channel the host cannot see or an
+archived channel is a 400 and nothing is applied.
 
 ## Joining
 
@@ -94,7 +95,7 @@ The model sees the bare names; the spec writes them `comms:post`, `comms:read`, 
 | tool | arguments | result |
 |---|---|---|
 | `post` | `text`, `thread` (`"new"` or a root message id), `reply_to?` | `{posted, thread, posts_left?}` |
-| `read` | `n?` (default 20, or 100 for a thread; max 100), `thread?` (a root id; a reply's id reads its thread) | `{channel, thread?, messages: [{id, thread, from, time, text, reply_to?}], truncated?, note?}`: the newest `n`, oldest first; `truncated: true` when older ones exist |
+| `read` | `n?` (default 20, or 100 for a thread; max 100), `thread?` (a root id; a reply's id reads its thread), `since?` (a message id: only messages from it on) | `{channel, thread?, since?, messages: [{id, thread, from, time, text, reply_to?}], truncated?, note?}`: the newest `n`, oldest first; `truncated: true` when older ones exist (from `since` on). A channel read without `since` starts at the kickoff (`comms.kickoff_id`), so a reused channel's history from before the run stays out; `since: <older id>` reads it |
 | `search` | `query`, `thread?`, `from?`, `since?` (`2026-10-21`, `today`, `12h`, `7d`), `limit?` (default 10, max 50) | `{query, results: [{id, thread, author, time, snippet}], dropped?, note?, total?}` |
 
 - `llm`: function tools next to `bash` (and `done`), served in process by the worker.

@@ -40,14 +40,18 @@ DEFS: dict[str, dict[str, Any]] = {
         "required": ["text"],
     },
     "comms:read": {
-        "description": "Read your team's board channel: the newest messages, or one whole "
-                       "thread. Each message has id, thread, from, time and text.",
+        "description": "Read your team's board channel: the newest messages since the run's "
+                       "kickoff, or one whole thread. Each message has id, thread, from, time "
+                       "and text.",
         "properties": {
             "n": {"type": "integer", "description": f"how many of the newest messages (default "
                                                     f"{READ_DEFAULT}, or {READ_MAX} for a thread; at "
                                                     f"most {READ_MAX}); `truncated` says older exist"},
             "thread": {**_ID, "description": "optional: a thread's root message id, to read "
                                              "that thread instead"},
+            "since": {**_ID, "description": "optional: a message id; only messages from it on "
+                                            "(default: the kickoff, so pass an older id to read "
+                                            "history from before the run)"},
         },
         "required": [],
     },
