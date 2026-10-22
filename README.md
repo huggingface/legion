@@ -12,6 +12,9 @@ them.
 
 ## Features
 
+- **Local mode:** `compute: local` and `flock run spec.yaml` run the same spec on a laptop
+  (controller in-process, workers as subprocesses, terminal view, run bundle);
+  `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
   and one or more agent types. Each type sets the harness (`claude`,
   `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
@@ -72,6 +75,16 @@ uv sync --all-extras                 # or: pip install -e ".[controller,worker,d
 `uv sync` does not activate the environment, so the commands below go through `uv run` (or
 run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,
 a different program; `uv run` also gives the scripts a Python with `huggingface_hub`.
+
+### On your laptop: `flock run`
+
+The same spec with `compute: local` runs the controller and its workers on your machine, with
+a live view in the terminal and a run bundle at the end; no HF token or bucket needed for a
+local model endpoint. See [docs/local.md](docs/local.md):
+
+```sh
+uv run flock run examples/local.yaml --prompt "Introduce yourself." --until idle
+```
 
 ### Run the controller
 

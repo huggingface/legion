@@ -285,10 +285,22 @@ class TypeSpec(BaseModel):
         return v
 
 
+class ComputeSpec(BaseModel):
+    """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
+    `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
+    (`flock run`). The spec also accepts the short form `compute: local`."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["hf-jobs", "local"] = "hf-jobs"
+
+
 class SwarmSpec(BaseModel):
     swarm: str
-    namespace: str  # HF namespace jobs are launched under
-    bucket: str  # e.g. hf://buckets/cmpatino/flock
+    # HF namespace jobs are launched under, and the bucket agents sync to (e.g.
+    # hf://buckets/cmpatino/flock). Required for compute hf-jobs; optional for compute local.
+    namespace: str = ""
+    bucket: str = ""
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
@@ -352,6 +364,21 @@ class SwarmSpec(BaseModel):
     # absent from `spawn` cannot spawn.
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
     limits: LimitsSpec = Field(default_factory=lambda: LimitsSpec())
+    compute: ComputeSpec = Field(default_factory=ComputeSpec)
+
+    @field_validator("compute", mode="before")
+    @classmethod
+    def _compute_short(cls, v: Any) -> Any:
+        return {"kind": v} if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _job_fields(self) -> SwarmSpec:
+        if self.compute.kind == "hf-jobs":
+            missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
+            if missing:
+                raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
+                                 "(or set `compute: local`, docs/local.md)")
+        return self
 
     @field_validator("spawn")
     @classmethod
