@@ -289,3 +289,29 @@ def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_s
         "done", "max_rounds", 4, 2, 2), lp
     assert doc["budget"] == {"budget_usd": 1.0, "final_reserve_usd": 0.0, "cost_usd": 0.0,
                              "stop": None}
+
+
+def test_flock_run_reads_unquoted_on_and_bundles_loop_max_turns(tmp_path, fake_server):
+    """The documented unquoted `on: [comms.mention]` loads under `flock run` (YAML 1.2 loader,
+    so it is the key "on", not True), the CLI loop check warns that this type is not on the
+    board, and each turn that stops at `max_turns: 1` is a `loop_max_turns` event in
+    events.jsonl (once: it is the agent's, also on the swarm stream), not a loop error."""
+    spec = LOOP_SPEC.replace("      every: 5s\n", "      every: 5s\n      on: [comms.mention]\n")
+    spec = spec.replace("    agents_per_worker: 2\n", "    agents_per_worker: 2\n    max_turns: 1\n")
+    (tmp_path / "spec.yaml").write_text(spec.format(url=fake_server.url))
+    p = subprocess.run(
+        _flock("run", "spec.yaml", "--until", "idle", "--skip-preflight"),
+        cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120,
+        check=False)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "loop.on comms.mention: no comms feeder: the type is not on the board" in p.stderr
+    assert "stopping (idle)" in p.stdout and "2 agents, 6 turns" in p.stdout, p.stdout
+    run = _run_dir(tmp_path)
+    doc = json.loads((run / "run.json").read_text())
+    assert doc["spec"]["types"]["writer"]["loop"]["on"] == ["comms.mention"]
+    assert doc["loops"]["writer"]["reason"] == "max_rounds"  # not `errors`
+    merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    hits = [(e["agent"], e["data"]["kind"], e["data"]["round"]) for e in merged
+            if e["type"] == "loop_max_turns"]
+    assert sorted(hits) == sorted((a, k, r) for a in LOOP_AGENTS
+                                  for k, r in (("loop", 1), ("loop", 2), ("final", 2))), hits
