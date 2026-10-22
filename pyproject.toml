@@ -20,6 +20,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "fastapi>=0.115", "uvic
 flock = "flock.cli:app"
 flock-controller = "flock.controller.main:main"
 flock-worker = "flock.worker.main:main"
+flock-tool = "flock.tools.cli:main"
 
 [build-system]
 requires = ["hatchling"]

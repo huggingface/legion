@@ -124,6 +124,10 @@ current tool results, inside the same turn (several queued prompts go in togethe
 
 ## Tool
 
+Task tools from the swarm's tools folder (`types.<t>.tools`, [docs/tools.md](tools.md)) are
+offered next to `bash` as function tools, taken once per turn, and run in a subprocess each;
+the rest of this section is about `bash`.
+
 One tool, `bash` (plus `done` when `done_tool` is on, see above) (`command`, optional `timeout` seconds, default 120, max 600): `bash -c` in the
 workdir, stdin closed, stdout and stderr combined, output truncated to `tool_output_chars`
 (default 8000) characters (head and tail) plus `[exit code N]`; a non-zero exit is `isError`. It runs in its own process group,

@@ -280,9 +280,12 @@ def apply(
         False, "--strict", help="Treat models that were not probed (unverified) as failures."),
 ) -> None:
     """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight; a model
-    that could not be probed is reported as unverified and applied anyway unless --strict."""
+    that could not be probed is reported as unverified and applied anyway unless --strict.
+    A tools folder (docs/tools.md) is checked, uploaded and named in the spec by its hash;
+    re-applying with a changed folder switches running agents at their next turn."""
     spec = load_spec(spec_file)
     _warn_extra(spec)
+    bundle = _tools_bundle(spec, spec_file)
     if preflight is None:
         preflight = _provider_backed(spec)
     if preflight:
@@ -295,6 +298,13 @@ def apply(
         if strict:
             typer.echo("--strict: not applying unverified models", err=True)
             raise typer.Exit(1)
+    spec.tools_version = None
+    if bundle is not None:
+        up = _call("POST", f"/swarms/{spec.swarm}/tools", content=bundle.data,
+                   headers={"content-type": "application/gzip"}, timeout=120)
+        spec.tools_version = up["version"]
+        names = ", ".join(up["tools"]) or "none"
+        typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
     st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     _print_status(st)
 
@@ -354,6 +364,19 @@ def run(
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace)
     result = asyncio.run(run_local(opts))
     raise typer.Exit(result.exit_code)
+
+
+def _tools_bundle(spec: SwarmSpec, spec_file: str):
+    """The spec's tools folder packed and checked (None: the spec uses none); exit 1 on a bad
+    module or an unknown tool name."""
+    from flock.tools.loader import ToolsError
+    from flock.tools.spec import prepare
+
+    try:
+        return prepare(spec, spec_file)
+    except ToolsError as e:
+        typer.echo(f"{spec_file}: tools: {e}", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command("preflight")

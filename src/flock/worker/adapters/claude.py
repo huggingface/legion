@@ -145,6 +145,7 @@ def claude_env(spec: TypeSpec, env: dict[str, str]) -> dict[str, str]:
         p = r.provider
         key = env.get(p.api_key_env) if p.api_key_env in spec.secrets else env.pop(p.api_key_env, None)
         if key is not None:  # `auth: bearer` -> Authorization: Bearer instead of x-api-key
+            # keep in step with base.CLAUDE_KEY_ALIASES (what tool calls must not inherit)
             env["ANTHROPIC_AUTH_TOKEN" if p.auth == "bearer" else "ANTHROPIC_API_KEY"] = key
         if p.base_url:
             env["ANTHROPIC_BASE_URL"] = p.base_url
