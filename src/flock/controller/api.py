@@ -24,6 +24,8 @@ from pydantic import Field, TypeAdapter
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 
+from flock.controller.comms import CommsError
+from flock.controller.comms import resolve as comms_resolve
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
@@ -48,6 +50,7 @@ from flock.models import (
     ChildrenPromptRequest,
     Command,
     CommandBatch,
+    Event,
     EventBatch,
     Harness,
     LoopRequest,
@@ -64,10 +67,16 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorkerStatus,
+    comms_tools,
     loop_refusals,
 )
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
+from flock.tools.spec import comms_clashes
+
+log = logging.getLogger(__name__)
+# Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
+COMMS_WAKE_EVENTS = {"comms_mention": "mention", "comms_thread_reply": "thread"}
 
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
@@ -507,6 +516,8 @@ def create_app(
     namespace: str | None = None,
     compute: str | None = None,
     loop_interval: float | None = None,
+    comms_transport: httpx.BaseTransport | None = None,
+    on_comms: Callable[[str, str, dict], None] | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -516,7 +527,11 @@ def create_app(
     `compute`, when set ("hf-jobs" or "local"), is the only `compute.kind` a spec may ask for:
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
-    default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`)."""
+    default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`).
+    `comms_transport` lets tests fake the message board (docs/comms.md). Every `comms_mention`
+    (reason "mention") and `comms_thread_reply` (reason "thread") event a worker posts goes to
+    the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
+    `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer."""
     secret_source = os.environ if secret_source is None else secret_source
     if loop_interval is None:
         loop_interval = float(os.environ.get("FLOCK_LOOP_INTERVAL", "1"))
@@ -550,6 +565,17 @@ def create_app(
             except Exception:
                 logging.getLogger("flock.loop").exception("loop tick failed")
             await asyncio.sleep(loop_interval)
+
+    def comms_event(agent: str, ev: Event) -> None:
+        data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
+        reason = COMMS_WAKE_EVENTS[ev.type]
+        try:
+            woke = loops.wake(agent, f"comms.{reason}")
+            log.debug("comms %s for %s (wake %s): %s", reason, agent, woke, data)
+            if on_comms is not None:
+                on_comms(agent, reason, {"agent": agent, **data})
+        except Exception:  # a hook never breaks event ingestion
+            log.exception("comms hook failed for %s", agent)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -652,12 +678,18 @@ def create_app(
         check_tools(swarm, spec)
         if refused := loop_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
+        prev = store.get_swarm(swarm)
+        try:  # channel name -> id once, kickoff once (docs/comms.md)
+            comms_resolve(spec, prev["spec"] if prev else None, secret_source,
+                          transport=comms_transport)
+        except CommsError as e:
+            raise HTTPException(400, str(e)) from None
         store.put_swarm(spec, clock().timestamp())
         return swarm_status(store, spec, clock().timestamp())
 
     def check_tools(swarm: str, spec: SwarmSpec) -> None:
         """The spec's tools bundle was uploaded and has every tool a type selects."""
-        selecting = {n: ts.tools for n, ts in spec.types.items() if ts.tools is not None}
+        selecting = {n: ts.folder_tools for n, ts in spec.types.items() if ts.folder_tools is not None}
         if spec.tools_version is None:
             if selecting:
                 raise HTTPException(400, f"types {', '.join(selecting)} select tools but the spec "
@@ -674,6 +706,9 @@ def create_app(
                 raise HTTPException(400, f"types.{name}.tools: unknown tool(s) {', '.join(unknown)}; "
                                          f"bundle {spec.tools_version} has: "
                                          f"{', '.join(b['tools']) or 'none'}")
+            clash = comms_clashes(spec.types[name], spec.comms, b["tools"] if sel == "all" else sel)
+            if clash:
+                raise HTTPException(400, f"types.{name}.tools: {clash}")
 
     @api.post("/swarms/{swarm}/tools", status_code=201)
     async def upload_tools(swarm: str, request: Request) -> dict:
@@ -1185,7 +1220,12 @@ def create_app(
         if spec is not None and spec.tools_version is not None and w is not None:
             # the swarm's current tools (docs/tools.md): a re-apply reaches running workers here
             ts = spec.types.get(w["type"])
-            out["tools"] = {"version": spec.tools_version, "select": ts.tools if ts else None}
+            out["tools"] = {"version": spec.tools_version, "select": ts.folder_tools if ts else None}
+        if spec is not None and spec.comms is not None and w is not None:
+            # comms rules and protocols are live (docs/comms.md): a re-apply reaches workers here
+            ts = spec.types.get(w["type"])
+            out["comms"] = {**spec.comms.model_dump(mode="json", exclude={"kickoff"}),
+                            "tools": comms_tools(ts, spec.comms) if ts else []}
         return out
 
     @api.post("/workers/{worker_id}/events")
@@ -1203,6 +1243,9 @@ def create_app(
         for agent, evs in grouped.items():
             a = store.get_agent(agent)
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
+            for ev in evs:
+                if ev.type in COMMS_WAKE_EVENTS:
+                    comms_event(agent, ev)
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
             if a is not None:

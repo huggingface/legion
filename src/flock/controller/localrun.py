@@ -7,8 +7,10 @@ controller) on 127.0.0.1 with a generated token; the reconcile loop launches wor
     controller/   the controller's SQLite store and raw event streams
     agents/       agent workdirs (WORK_ROOT)     state/   harness state (FLOCK_LLM_HOME)
     logs/         controller.log, <worker>.log
-    run.json      the bundle: spec (secret-looking env values redacted), totals, per agent
-    events.jsonl  every agent's events, merged by time;  events/<agent>.jsonl  per agent
+    run.json      the bundle: spec (secret-looking env values redacted), totals, per agent,
+                  each type's loop and the budget
+    events.jsonl  every agent's events and the swarm-level ones (loop_*, final_*, budget_*),
+                  merged by time;  events/<agent>.jsonl  per agent
 
 `<data-dir>/current` (mode 0600) holds the URL and token while the run is up, so `flock status`
 and friends work from a second terminal in the same directory.
@@ -43,10 +45,11 @@ import httpx
 
 from flock.controller.api import create_app, swarm_status
 from flock.controller.local import LocalJobsClient
+from flock.controller.loop import loop_status, swarm_stream
 from flock.controller.reconcile import Settings, agent_state, run_reconciler, worker_state
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
-from flock.models import DrainCommand, SwarmSpec, TokenUsage
+from flock.models import DrainCommand, SwarmSpec, SwarmStatus, TokenUsage
 
 log = logging.getLogger("flock.run")
 
@@ -72,6 +75,7 @@ class RunOptions:
     out: TextIO = field(default_factory=lambda: sys.stdout)
     tty: bool | None = None  # None: out.isatty()
     worker_command: list[str] | None = None  # tests
+    tools: bytes | None = None  # the packed tools folder (docs/tools.md), uploaded before the PUT
 
 
 @dataclass
@@ -126,6 +130,23 @@ def _bind(host: str) -> socket.socket:
     sock.listen(128)
     sock.set_inheritable(False)
     return sock
+
+
+def loops_settled(spec: SwarmSpec, status: SwarmStatus) -> bool:
+    """Every type with a `loop:` has a loop that is over (docs/loop.md): `done` after its final
+    round, or stopped without one (max_rounds, `until`, budget, `flock loop --stop`). A loop not
+    started yet, running (agents idle between rounds) or in its final round keeps the swarm busy.
+    A dormant type (`replicas: 0` and no agents, e.g. one only spawned into) has no rounds to
+    run and does not count until an agent of it exists."""
+    for name, ts in spec.types.items():
+        if ts.loop is None:
+            continue
+        t = status.types.get(name)
+        if ts.replicas == 0 and (t is None or not sum(t.agents_by_state.values())):
+            continue
+        if t is None or t.loop is None or t.loop.state != "done":
+            return False
+    return True
 
 
 def _clock(seconds: float) -> str:
@@ -192,8 +213,10 @@ class Tracker:
         for a in agents:
             for model, u in agent_tokens(a).items():
                 tokens[model] = tokens.get(model, TokenUsage()) + u
+        status = swarm_status(self.store, spec, now)
         return {
-            "status": swarm_status(self.store, spec, now),
+            "status": status,
+            "loops_settled": loops_settled(spec, status),
             "agents": agents,
             "states": states,
             "workers": {wid: worker_state(w, now).value for wid, w in workers.items()},
@@ -205,9 +228,10 @@ class Tracker:
         }
 
     def idle(self, snap: dict[str, Any]) -> bool:
-        """Every agent idle, nothing pending, no turn open, at least one turn done overall, and
-        every agent `--prompt` went to has finished a turn."""
-        if not snap["agents"] or snap["pending"] or self.open_turns:
+        """Every agent idle, nothing pending, no turn open, at least one turn done overall, every
+        agent `--prompt` went to has finished a turn, and every type's loop is over (agents are
+        idle between loop rounds)."""
+        if not snap["agents"] or snap["pending"] or self.open_turns or not snap["loops_settled"]:
             return False
         if any(s != "idle" for s in snap["states"].values()):
             return False
@@ -260,7 +284,8 @@ def status_line(snap: dict[str, Any], elapsed: float) -> str:
 
 def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datetime,
                  ended: datetime, reason: str, url: str, tracker: Tracker) -> dict[str, Any]:
-    """run.json, events.jsonl (merged by time) and events/<agent>.jsonl. Returns the totals."""
+    """run.json, events.jsonl (agents' and swarm-level events merged by time) and
+    events/<agent>.jsonl. Returns the totals."""
     ev_dir = run_dir / "events"
     ev_dir.mkdir(parents=True, exist_ok=True)
     merged: list[tuple[str, int, dict]] = []
@@ -286,6 +311,12 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
             "events": len(evs), "events_file": f"events/{a['name']}.jsonl",
         })
 
+    # The swarm-level stream (docs/loop.md "Events"). Its per-agent events (`final_round`) are
+    # also on the agent's stream, so only the swarm's own (agent "") are added.
+    for i, ev in enumerate(store.read_events(swarm_stream(spec.swarm), 0, limit=10**9)):
+        if not ev.get("agent"):
+            merged.append((str(ev.get("ts", "")), i, ev))
+
     def ts_key(item: tuple[str, int, dict]) -> tuple[float, str, int]:
         try:
             t = datetime.fromisoformat(item[0]).timestamp()
@@ -305,6 +336,15 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         "cost_usd": round(store.swarm_cost(spec.swarm), 6),
         "tokens": {m: u.model_dump() for m, u in tokens.items()},
     }
+    loops = {t: st.model_dump(mode="json", exclude={"per_agent"}) for t in sorted(spec.types)
+             if (st := loop_status(store, spec.swarm, t)) is not None}
+    budget = {
+        "budget_usd": spec.limits.budget_usd,
+        "final_reserve_usd": round(sum(ts.loop.final.reserve_usd for ts in spec.types.values()
+                                       if ts.loop is not None and ts.loop.final is not None), 6),
+        "cost_usd": totals["cost_usd"],
+        "stop": store.swarm_flags(spec.swarm).get("budget_stop"),  # final_reserve, hard or None
+    }
     doc = {
         "run": run_dir.name,
         "swarm": spec.swarm,
@@ -316,6 +356,8 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         "controller_url": url,
         "spec": redacted_spec(spec),
         "totals": totals,
+        "loops": loops,
+        "budget": budget,
         "agents": per_agent,
         "workers": [{"id": w["id"], "type": w["type"], "crashes": w["crashes"],
                      "last_error": w.get("last_error"), "log": f"logs/{w['id']}.log"}
@@ -387,7 +429,18 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
         if not rep["ok"] or (opts.strict and rep.get("unverified")):
             say("preflight failed: not starting (fix the provider or pass --skip-preflight)")
             return False
-    r = await http.put(f"/swarms/{spec.swarm}", json=body)
+    spec.tools_version = None
+    if opts.tools is not None:  # as `flock apply`: upload the folder, name it in the spec by hash
+        r = await http.post(f"/swarms/{spec.swarm}/tools", content=opts.tools,
+                            headers={"content-type": "application/gzip"}, timeout=120)
+        if r.status_code >= 400:
+            say(f"tools upload refused ({r.status_code}): {r.text}")
+            return False
+        up = r.json()
+        spec.tools_version = up["version"]
+        say(f"tools: version {up['version']} ({len(opts.tools)} bytes): "
+            f"{', '.join(up['tools']) or 'none'}")
+    r = await http.put(f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     if r.status_code >= 400:
         say(f"apply refused ({r.status_code}): {r.text}")
         return False

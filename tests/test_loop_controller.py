@@ -383,6 +383,42 @@ async def test_wake_queue_debounces_and_skips_pending(sim):
     assert list(prompts(await sim.commands())) == [A0]
 
 
+async def test_comms_events_wake_the_loop(sim):
+    """The worker's comms events reach the wake queue (`on_comms` -> `wake(agent, comms.<reason>)`):
+    two mentions of A0 give it one prompt; a thread reply to A1 (not in `on:`) gives none."""
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"]})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    msg = {"msg_id": 7, "thread": 7, "from": "carlos"}
+    await sim.events(A0, ("comms_mention", msg), ("comms_mention", {**msg, "msg_id": 8}))
+    await sim.events(A1, ("comms_thread_reply", msg))
+    sim.tick(2.1)
+    got = prompts(await sim.commands())
+    assert list(got) == [A0] and got[A0]["loop"]["why"] == "wake: comms.mention"
+    assert got[A0]["loop"]["round"] == 2
+    await sim.turn(A0, got[A0])
+    sim.tick(3)
+    assert await sim.commands() == []
+
+
+async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"]},
+                    limits={"budget_usd": 1.0})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.store.put_swarm_flags("demo", {"budget_stop": "hard", "budget_usd": 1.0, "at": 0})
+    assert not sim.loops.wake(A0, "comms.mention")  # the loop has not seen the stop yet
+    await sim.events(A0, ("comms_mention", {"msg_id": 7, "thread": 7, "from": "carlos"}))
+    sim.tick(2.1)
+    assert not [c for c in await sim.commands() if c["kind"] == "prompt"]
+
+
 async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     from fastapi.testclient import TestClient
     from typer.testing import CliRunner
@@ -677,3 +713,42 @@ async def test_finish_never_resends_a_fetched_final(sim):
     assert await sim.commands() == []
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
     assert (st["state"], st["final_done"]) == ("done", 1)
+
+
+async def test_until_idle_ignores_a_dormant_looping_type(sim):
+    """`flock run --until idle` (localrun.Tracker): a `replicas: 0` type with a loop and no
+    agents never runs a round, so it must not hold a finished run open. A type whose replicas
+    are not created yet, or one just spawned into, still counts (review of PR #17)."""
+    from flock.controller.api import swarm_status
+    from flock.controller.localrun import Tracker, loops_settled
+
+    lp = {"prompt": "work", "every": "30s", "while": {"max_rounds": 1}}
+    spec = make_spec(researcher={"replicas": 2, "agents_per_worker": 2, "loop": lp},
+                     unused={"replicas": 0, "loop": lp})
+    r = await sim.c.put("/swarms/demo", json=spec.model_dump(mode="json"))
+    assert r.status_code == 200, r.text
+    sim.loops.tick()
+    now = sim.clock().timestamp()
+    assert not loops_settled(spec, swarm_status(sim.store, spec, now))  # replicas not created yet
+    sim.reconcile()
+    await sim.commands()
+    await sim.heartbeat()
+    sim.tick()
+    for a, p in prompts(await sim.commands()).items():
+        await sim.turn(a, p)
+    tracker = Tracker(sim.store, "demo")
+    for _ in range(3):
+        sim.clock.advance(60)
+        await sim.heartbeat()
+        sim.tick()
+    assert {k: v["state"] for k, v in sim.store.get_loops("demo").items()} == {
+        "researcher": "done", "unused": "running"}
+    snap = tracker.snapshot(spec, sim.clock().timestamp())
+    assert snap["completed"] == 2 and snap["pending"] == 0
+    assert snap["loops_settled"] and tracker.idle(snap)
+
+    # spawned into: the type has an agent now, and its running loop counts again
+    sim.store.insert_child("researcher-0000-unused-1", "demo", "unused", 1, A0, 1,
+                           sim.clock().timestamp())
+    snap = tracker.snapshot(spec, sim.clock().timestamp())
+    assert not snap["loops_settled"] and not tracker.idle(snap)
