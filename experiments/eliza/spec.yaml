@@ -43,6 +43,8 @@ types:
     tool_choice: required                      # every model call is a tool call; `done` ends a turn
     max_turns: 8                               # model calls per prompt
     max_budget_usd: 0.20                       # per prompt
+    tool_output_chars: 32000                   # read_file of a whole bot (default 8000 cuts it)
+    context_tokens: 64000                      # compaction threshold (default 32000)
     loop:
       first: |
         Start (round 0). One tool call per reply:

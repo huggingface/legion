@@ -9,6 +9,7 @@ The bot:
       print(reply(line.strip()), flush=True)
 - Good bots: reflect the user's words (I -> you, my -> your), ask follow-up questions, remember names and facts the user gave, vary their replies, never crash, never print an empty line.
 - It runs as `python -I bot.py` with 5 s in total. Keep it fast and deterministic enough to test.
+- Keep bot.py under 30 KB, so a teammate can read it whole and you can write it in one call.
 
 Your tools (world): read_file, write_file, list_files, run_bot, promote_best, best_status. Board: post, read, search. And `done`.
 - write_file works ONLY under agents/<your name>/. Always write the whole file.
