@@ -19,6 +19,7 @@ from typing import Annotated, Any
 
 import httpx
 import typer
+import yaml
 from pydantic import ValidationError
 
 from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, load_spec_yaml, loop_refusals
@@ -213,6 +214,15 @@ def _loop_line(lp: dict) -> str:
     return line
 
 
+class SpecError(Exception):
+    """A spec that cannot be applied: the lines say why (printed to stderr by the CLI, shown in
+    the `flock run --watch` view)."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__("; ".join(lines))
+        self.lines = lines
+
+
 def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
     """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
     name = getattr(holder, field)
@@ -221,29 +231,40 @@ def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
     src = Path(name)
     src = src if src.is_absolute() else base / src
     if not src.is_file():
-        typer.echo(f"{where}: {field} {src} not found", err=True)
-        raise typer.Exit(1)
+        raise SpecError([f"{where}: {field} {src} not found"])
     setattr(holder, target, src.read_text(encoding="utf-8"))
 
 
 def load_spec(spec_file: str) -> SwarmSpec:
-    """Read a spec and inline each type's system_prompt_file and loop prompt files (relative
-    to the spec file)."""
+    """`read_spec`, exiting 1 with the reasons on stderr."""
+    try:
+        return read_spec(spec_file)
+    except SpecError as e:
+        for line in e.lines:
+            typer.echo(line, err=True)
+        raise typer.Exit(1) from None
+
+
+def read_spec(spec_file: str) -> SwarmSpec:
+    """Read a spec and inline each type's system_prompt_file and loop prompt files, and the
+    comms kickoff and protocol files (relative to the spec file). Raises SpecError."""
     path = Path(spec_file)
     try:
         spec = SwarmSpec.model_validate(load_spec_yaml(path.read_text(encoding="utf-8")))
     except ValidationError as e:
+        lines = []
         for err in e.errors():
             where = ".".join(str(x) for x in err["loc"])
-            typer.echo(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}", err=True)
-        raise typer.Exit(1) from None
+            lines.append(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}")
+        raise SpecError(lines) from None
+    except (OSError, yaml.YAMLError) as e:  # unreadable file, broken YAML (a save in progress)
+        raise SpecError([f"{spec_file}: {' '.join(str(e).split())}"]) from None
     for name, ts in spec.types.items():
         if ts.system_prompt_file and ts.system_prompt is None:
             src = Path(ts.system_prompt_file)
             src = src if src.is_absolute() else path.parent / src
             if not src.is_file():
-                typer.echo(f"type {name}: system_prompt_file {src} not found", err=True)
-                raise typer.Exit(1)
+                raise SpecError([f"type {name}: system_prompt_file {src} not found"])
             ts.system_prompt = src.read_text(encoding="utf-8")
         if ts.loop is not None:
             _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
@@ -255,8 +276,7 @@ def load_spec(spec_file: str) -> SwarmSpec:
             src = Path(rel)
             src = src if src.is_absolute() else path.parent / src
             if not src.is_file():
-                typer.echo(f"comms.{what}: {src} not found", err=True)
-                raise typer.Exit(1)
+                raise SpecError([f"comms.{what}: {src} not found"])
             return src.read_text(encoding="utf-8")
 
         if c.kickoff_file:
@@ -282,16 +302,23 @@ def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
     return None
 
 
+def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
+    """(refusals, warnings): loop settings this version cannot run, and `on:` sources that
+    have no feeder."""
+    refused = [f"refused: {r}" for r in loop_refusals(spec)]
+    warnings = [f"warning: type {name}: loop.on {src}: {why}"
+                for name, ts in spec.types.items() for src in (ts.loop.on if ts.loop else [])
+                if (why := _unfed(spec, ts, src))]
+    return refused, warnings
+
+
 def _check_loops(spec: SwarmSpec) -> None:
     """Refuse loop settings this version cannot run; say which `on:` sources have no feeder."""
-    if refused := loop_refusals(spec):
-        for r in refused:
-            typer.echo(f"refused: {r}", err=True)
+    refused, warnings = loop_problems(spec)
+    for line in refused or warnings:
+        typer.echo(line, err=True)
+    if refused:
         raise typer.Exit(1)
-    for name, ts in spec.types.items():
-        for src in ts.loop.on if ts.loop else []:
-            if why := _unfed(spec, ts, src):
-                typer.echo(f"warning: type {name}: loop.on {src}: {why}", err=True)
 
 
 def _provider_backed(spec: SwarmSpec) -> bool:
@@ -303,11 +330,17 @@ def _provider_backed(spec: SwarmSpec) -> bool:
 EXTRA_NOT_SENT = frozenset({"claude", "codex", "pi"})
 
 
+def extra_warnings(spec: SwarmSpec) -> list[str]:
+    return [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
+            f"{ts.harness.value} harness (docs/open-models.md)"
+            for name, ts in spec.types.items()
+            if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
+            and ts.resolved_model.extra]
+
+
 def _warn_extra(spec: SwarmSpec) -> None:
-    for name, ts in spec.types.items():
-        if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None and ts.resolved_model.extra:
-            typer.echo(f"warning: type {name}: `extra` is kept in the spec but not sent by the "
-                       f"{ts.harness.value} harness (docs/open-models.md)", err=True)
+    for line in extra_warnings(spec):
+        typer.echo(line, err=True)
 
 
 def _warn_unverified(models: list[str], why: str) -> None:
@@ -388,6 +421,202 @@ def apply(
     _print_status(st)
 
 
+def _detail(r: httpx.Response) -> str:
+    try:
+        d = r.json().get("detail")
+    except ValueError:
+        d = None
+    return d if isinstance(d, str) else r.text
+
+
+def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = None,
+                 strict: bool = False) -> list[str]:
+    """Re-read the experiment folder and apply it to the running swarm (docs/live.md): the
+    spec, its prompt files and the tools folder, as `flock apply` reads them. Returns the
+    lines to show (warnings, then what changed, or "no changes"); raises SpecError with the
+    refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
+    by default only when the spec names a provider-backed model the running one does not."""
+    from flock.live import diff_specs
+    from flock.tools.loader import ToolsError
+    from flock.tools.spec import prepare
+
+    spec = read_spec(spec_file)
+    refused, warnings = loop_problems(spec)
+    if refused:
+        raise SpecError(refused)
+    warnings += extra_warnings(spec)
+    try:
+        bundle = prepare(spec, spec_file)
+    except ToolsError as e:
+        raise SpecError([f"{spec_file}: tools: {e}"]) from None
+    r = _request(c, "GET", f"/swarms/{spec.swarm}")
+    if r.status_code == 404:
+        raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
+                          "with `flock run` (compute: local) or `flock apply`")])
+    if r.status_code >= 400:
+        raise SpecError([f"error {r.status_code}: {_detail(r)}"])
+    old = SwarmSpec.model_validate(r.json()["spec"])
+    if preflight is None:
+        preflight = bool(set(_unprobed(spec)) - set(_unprobed(old)))
+    if preflight:
+        r = _request(c, "POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
+                     extensions={"timeout": httpx.Timeout(300).as_dict()})
+        if r.status_code >= 400:
+            raise SpecError([f"preflight error {r.status_code}: {_detail(r)}"])
+        rep = r.json()
+        bad = [f"preflight {x['model']}: {'unverified' if x.get('unverified') else 'FAIL'}"
+               + (f" ({x['error']})" if x.get("error") else "")
+               for x in rep["results"] if not x["ok"] and (strict or not x.get("unverified"))]
+        if bad:
+            raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
+                                    "--skip-preflight)")])
+    spec.tools_version = None
+    names: tuple[list[str], list[str]] | None = None
+    if bundle is not None:
+        r = _request(c, "POST", f"/swarms/{spec.swarm}/tools", content=bundle.data,
+                     headers={"content-type": "application/gzip"},
+                     extensions={"timeout": httpx.Timeout(120).as_dict()})
+        if r.status_code >= 400:
+            raise SpecError([f"refused: tools upload ({r.status_code}): {_detail(r)}"])
+        spec.tools_version = r.json()["version"]
+        if spec.tools_version != old.tools_version:
+            listed = _request(c, "GET", f"/swarms/{spec.swarm}/tools").json().get("bundles", [])
+            before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
+            names = (before, r.json()["tools"])
+    lines = diff_specs(old, spec, names)
+    if not lines:
+        return [*warnings, "no changes"]
+    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    if r.status_code >= 400:
+        raise SpecError([f"refused: {_detail(r)}"])
+    return [*warnings, *lines]
+
+
+@app.command()
+def update(
+    target: str = typer.Argument(..., metavar="FOLDER_OR_SPEC"),
+    preflight: bool = typer.Option(
+        None, "--preflight/--skip-preflight",
+        help="Probe provider-backed models first (default: only when the update adds one)."),
+    strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
+) -> None:
+    """Re-read an experiment folder (spec.yaml, prompts, tools/) and apply what changed to the
+    running swarm (docs/live.md): new tools version, prompts, loop and comms settings, limits,
+    replicas. Running agents take tools, prompts and grants at their next turn boundary.
+    Prints what changed; a refused change applies nothing."""
+    path = Path(target)
+    spec_file = path / "spec.yaml" if path.is_dir() else path
+    try:
+        with client() as c:
+            lines = update_swarm(c, str(spec_file), preflight=preflight, strict=strict)
+    except SpecError as e:
+        for line in e.lines:
+            typer.echo(line, err=True)
+        raise typer.Exit(1) from None
+    for line in lines:
+        typer.echo(line, err=line.startswith("warning:"))
+
+
+def _grant_swarm(target: str, swarm: str | None) -> str:
+    """The swarm a grant target is in: --swarm, else the agent's swarm, else the one swarm
+    with a type of that name."""
+    if swarm:
+        return swarm
+    with client() as c:
+        if AGENT_NAME_RE.match(target):
+            r = _request(c, "GET", f"/agents/{target}")
+            if r.status_code == 200:
+                return r.json()["swarm"]
+        r = _request(c, "GET", "/swarms")
+    if r.status_code >= 400:
+        typer.echo(f"error {r.status_code}: {r.text}", err=True)
+        raise typer.Exit(1)
+    found = [st["swarm"] for st in r.json() if target in st["types"]]
+    if len(found) != 1:
+        typer.echo(f"{target!r}: no agent of that name and {len(found)} swarms with such a type; "
+                   "pass --swarm", err=True)
+        raise typer.Exit(1)
+    return found[0]
+
+
+def _current_grant(swarm: str, target: str):
+    from flock.models import Grant
+
+    rows = _call("GET", f"/swarms/{swarm}/grants")["grants"]
+    row = next((g for g in rows if g["target"] == target), None)
+    return Grant.model_validate(row["grant"]) if row else Grant()
+
+
+def _print_grant(ack: dict) -> None:
+    from flock.models import Grant
+
+    g = Grant.model_validate(ack["grant"])
+    what = "revoked" if g.empty() else g.describe()
+    typer.echo(f"{ack['kind']} {ack['target']}: {what} (from each agent's next turn)")
+
+
+@app.command()
+def grant(
+    target: str = typer.Argument(..., help="a type (every agent of it) or one agent"),
+    capabilities: Annotated[list[str] | None, typer.Argument(metavar="CAPABILITY[=VALUE]...")] = None,
+    swarm: str = typer.Option(None, "--swarm", help="default: the swarm of the target"),
+) -> None:
+    """Grant capabilities to a running type or agent, from each agent's next turn
+    (docs/live.md): `tools=+name,-name` (folder or comms tools; `+name` alone works too),
+    `comms.post=on|off`, `bash=on|off` (llm harness), `limits.max_turns=N`,
+    `limits.budget_usd=X`. Grants are an overlay on the spec: `flock update` keeps them."""
+    from flock.live import grant_patch
+
+    if not capabilities:
+        typer.echo("usage: flock grant TARGET CAPABILITY[=VALUE]... (e.g. tools=+mul bash=off)",
+                   err=True)
+        raise typer.Exit(2)
+    swarm = _grant_swarm(target, swarm)
+    try:
+        g = grant_patch(_current_grant(swarm, target), capabilities)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from None
+    _print_grant(_call("PUT", f"/swarms/{swarm}/grants/{target}", json=g.model_dump(mode="json")))
+
+
+@app.command()
+def revoke(
+    target: str,
+    capabilities: Annotated[list[str] | None, typer.Argument(metavar="[CAPABILITY]...")] = None,
+    swarm: str = typer.Option(None, "--swarm", help="default: the swarm of the target"),
+) -> None:
+    """Take back a target's grant (all of it, or the named capabilities: `tools`,
+    `tools=name`, `comms.post`, `bash`, `limits`, `limits.max_turns`, `limits.budget_usd`)."""
+    from flock.live import revoke_patch
+
+    swarm = _grant_swarm(target, swarm)
+    if not capabilities:
+        _call("DELETE", f"/swarms/{swarm}/grants/{target}")
+        typer.echo(f"{target}: all grants revoked (from each agent's next turn)")
+        return
+    try:
+        g = revoke_patch(_current_grant(swarm, target), capabilities)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from None
+    _print_grant(_call("PUT", f"/swarms/{swarm}/grants/{target}", json=g.model_dump(mode="json")))
+
+
+@app.command()
+def grants(swarm: str = typer.Argument(None, help="default: every swarm")) -> None:
+    """List the grants in force (docs/live.md)."""
+    from flock.models import Grant
+
+    names = [swarm] if swarm else [st["swarm"] for st in _call("GET", "/swarms")]
+    rows = [[sw, g["kind"], g["target"], Grant.model_validate(g["grant"]).describe()]
+            for sw in names for g in _call("GET", f"/swarms/{sw}/grants")["grants"]]
+    if not rows:
+        typer.echo("no grants")
+        return
+    _table(rows, ["swarm", "kind", "target", "grant"])
+
+
 @app.command()
 def run(
     spec_file: str,
@@ -405,6 +634,10 @@ def run(
     strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
     grace: float = typer.Option(10.0, "--grace",
                                 help="Seconds in-flight turns get to finish at stop."),
+    watch: bool = typer.Option(
+        False, "--watch",
+        help="Watch the experiment folder (spec, prompts, tools/) and apply each saved change "
+             "to the running swarm, as `flock update` does (docs/live.md)."),
 ) -> None:
     """Run a `compute: local` swarm on this machine: controller on 127.0.0.1, workers as
     subprocesses, a live view in the terminal, a run bundle at the end (docs/local.md). Other
@@ -443,7 +676,8 @@ def run(
         _warn_unverified(unprobed, "preflight skipped")
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
-                      tools=bundle.data if bundle is not None else None)
+                      tools=bundle.data if bundle is not None else None,
+                      watch=Path(spec_file) if watch else None)
     result = asyncio.run(run_local(opts))
     raise typer.Exit(result.exit_code)
 

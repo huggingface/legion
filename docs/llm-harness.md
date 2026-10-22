@@ -63,6 +63,10 @@ types:
   with `done` is capped at 50 calls so a model that never calls `done` cannot loop until
   `turn_timeout`. `tool_choice: bash` offers only `bash` (one action per prompt) unless
   `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too.
+- `bash` (`llm` only; default on): `false` takes the `bash` tool away, leaving the folder and
+  comms tools (and `done`); the preamble then says the agent has no shell. Usually switched
+  live with `flock grant <target> bash=off` ([docs/live.md](live.md)); refused with
+  `tool_choice: bash`.
 - `response_format` goes in `extra` and is sent as is, nested objects included. A JSON schema
   shaped like `{"tool": "bash", "command": ...}` makes every reply a call through the text
   fallback below; any other schema'd reply is the turn's final answer.

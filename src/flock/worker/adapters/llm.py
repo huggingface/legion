@@ -137,6 +137,10 @@ DONE_TOOL: dict[str, Any] = {
 DONE_PREAMBLE = "\nWhen the task is done, call the `done` tool with a one-line summary."
 TOOLS_PREAMBLE = ("\nBesides `bash` you have task tools, offered as functions next to it; their "
                   "descriptions say what they do. Call them directly, not through bash.")
+# `bash: false` (usually `flock grant <target> bash=off`, docs/live.md)
+NO_BASH_PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
+You have no shell. Use the tools offered as functions; their descriptions say what they do.
+When the task is done, reply in plain text without a tool call."""
 
 
 def llm_home() -> Path:
@@ -463,6 +467,22 @@ class LLMAdapter:
         return choice is not None and choice not in ("auto", "none")
 
     @property
+    def bash_enabled(self) -> bool:
+        """The `bash` tool is offered (the type's `bash`, a `flock grant` switch; default on)."""
+        return self._spec is None or self._spec.bash is not False
+
+    def update_spec(self, spec: TypeSpec) -> None:
+        """A live change at a turn boundary (docs/live.md): limits, the bash switch and the
+        model id apply from the next turn. A provider change waits for the next start, where
+        the key and the HTTP client are set up."""
+        old = self._spec
+        if old is None or spec.resolved_model is None or old.resolved_model is None:
+            return
+        if spec.resolved_model.provider != old.resolved_model.provider:
+            return
+        self._spec = spec
+
+    @property
     def done_enabled(self) -> bool:
         """`done` is offered: the type's `done_tool`, by default on when `required` is forced.
         With it a forced turn runs until `done` (or a limit); without it a forced turn is one
@@ -512,10 +532,11 @@ class LLMAdapter:
 
     # ------------------------------------------------------------------ transcript file
     def system_prompt(self) -> str:
-        text = PREAMBLE.format(agent=self.agent, workdir=self.workdir)
+        bash = self.bash_enabled
+        text = (PREAMBLE if bash else NO_BASH_PREAMBLE).format(agent=self.agent, workdir=self.workdir)
         if self.done_enabled:
             text += DONE_PREAMBLE
-        if self.toolbox is not None and self.toolbox().tools:
+        if bash and self.toolbox is not None and self.toolbox().tools:
             text += TOOLS_PREAMBLE
         f = self.workdir / INSTRUCTIONS
         if f.is_file():
@@ -769,7 +790,7 @@ class LLMAdapter:
                 calls.append({"id": c.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                               "name": fn.get("name"), "arguments": _parse_args(fn.get("arguments"))})
                 c.setdefault("id", calls[-1]["id"])
-        elif parsed := (text_tool_calls(content)
+        elif parsed := ((text_tool_calls(content) if self.bash_enabled else [])
                         or (text_tool_calls(content, "done") if self.done_enabled else [])
                         or next((c for n in (self.folder_tools.names() if self.folder_tools else [])
                                  if (c := text_tool_calls(content, n))), [])):
@@ -830,10 +851,11 @@ class LLMAdapter:
             self._tool_result(call, out, r.error, toolsVersion=folder.version,
                               durationMs=int(r.duration_s * 1000))
             return
-        elif call["name"] != "bash":
-            names = ["bash", *(["done"] if self.done_enabled else []),
+        elif call["name"] != "bash" or not self.bash_enabled:
+            names = [*(["bash"] if self.bash_enabled else []), *(["done"] if self.done_enabled else []),
                      *(folder.names() if folder else [])]
-            tools = ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
+            tools = (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1
+                     else names[0] if names else "none")
             out, err = f"unknown tool {call['name']!r}; the tools are {tools}", True
         elif not isinstance(args.get("command"), str) or not args["command"].strip():
             out, err = "bash needs a non-empty `command` string", True
@@ -878,7 +900,7 @@ class LLMAdapter:
         spec = self._spec
         assert spec is not None and spec.resolved_model is not None and self._client is not None
         r = spec.resolved_model
-        tools = [BASH_TOOL, DONE_TOOL] if self.done_enabled else [BASH_TOOL]
+        tools = [*([BASH_TOOL] if self.bash_enabled else []), *([DONE_TOOL] if self.done_enabled else [])]
         if self.folder_tools is not None:
             tools += [t.openai() for t in self.folder_tools.tools]
         body: dict[str, Any] = {"model": r.model_id, "messages": wire_messages(self.messages),
@@ -888,6 +910,9 @@ class LLMAdapter:
         body.pop("stream", None)
         if spec.tool_choice is not None:  # the type's setting wins over the alias's extra
             body["tool_choice"] = wire_tool_choice(spec.tool_choice)
+        if not tools:  # bash off and nothing else to call: a plain chat request
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
         url = f"{r.provider.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
         retries = r.provider.max_retries if r.provider.max_retries is not None else DEFAULT_MAX_RETRIES

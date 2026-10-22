@@ -55,6 +55,7 @@ log = logging.getLogger("flock.run")
 
 SECRET_NAME = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL)", re.IGNORECASE)
 RECENT_EVENTS = 8
+RECENT_UPDATES = 6  # `--watch`: update lines kept in the view
 # Event types too chatty for the "recent events" pane.
 QUIET_EVENTS = frozenset({"sync"})
 
@@ -76,6 +77,11 @@ class RunOptions:
     tty: bool | None = None  # None: out.isatty()
     worker_command: list[str] | None = None  # tests
     tools: bytes | None = None  # the packed tools folder (docs/tools.md), uploaded before the PUT
+    # `--watch` (docs/live.md): the spec file whose folder is polled; a settled change runs
+    # `flock update` on the live swarm
+    watch: Path | None = None
+    watch_interval: float = 1.0  # s between polls of the folder's files
+    watch_quiet: float = 1.0  # s without a further change before the update runs
 
 
 @dataclass
@@ -225,6 +231,7 @@ class Tracker:
             "completed": sum(self.completed.values()),
             "cost": self.store.swarm_cost(self.swarm),
             "tokens": tokens,
+            "grants": len(self.store.list_grants(self.swarm)),
         }
 
     def idle(self, snap: dict[str, Any]) -> bool:
@@ -241,13 +248,17 @@ class Tracker:
 
 
 def render(spec: SwarmSpec, snap: dict[str, Any], *, elapsed: float, url: str,
-           current: Path, recent: list[str], note: str = "", width: int = 120) -> str:
+           current: Path, recent: list[str], note: str = "", width: int = 120,
+           updates: list[str] | None = None, watching: Path | None = None) -> str:
     st = snap["status"]
     agent_states = Counter(snap["states"].values())
     worker_states = Counter(snap["workers"].values())
     toks = " ".join(f"{m} in={u.input} out={u.output}" for m, u in snap["tokens"].items())
+    live = "".join([f" · tools {spec.tools_version[:8]}" if spec.tools_version else "",
+                    f" · {snap['grants']} grant{'s' * (snap['grants'] != 1)}"
+                    if snap.get("grants") else ""])
     lines = [
-        f"flock run · {spec.swarm} · compute local · {_clock(elapsed)} · {url}",
+        f"flock run · {spec.swarm} · compute local · {_clock(elapsed)} · {url}{live}",
         "",
         f"agents   {len(snap['agents']):<4} {_counts(agent_states)}",
         f"workers  {len(snap['workers']):<4} {_counts(worker_states)}",
@@ -268,6 +279,10 @@ def render(spec: SwarmSpec, snap: dict[str, Any], *, elapsed: float, url: str,
     cut = max(40, width - 3)
     lines += ["", "recent events"] + (
         [f"  {x if len(x) <= cut else x[: cut - 1] + '…'}" for x in recent] or ["  (none yet)"])
+    if watching is not None:
+        lines += ["", f"live updates (watching {watching.parent}/)"] + (
+            [f"  {x if len(x) <= cut else x[: cut - 1] + '…'}" for x in updates or []]
+            or ["  (no change yet)"])
     lines += ["", f"second terminal: {cli_hint(current.parent)}"]
     lines.append(note or "Ctrl-C stops the run (twice: force)")
     return "\n".join(lines)
@@ -459,6 +474,40 @@ async def _prompt_all(http: httpx.AsyncClient, opts: RunOptions, store: Store,
     return True
 
 
+async def _watch(opts: RunOptions, url: str, token: str, post) -> None:
+    """`--watch` (docs/live.md): poll the experiment folder; once a change settled, run
+    `flock update` against this run's controller and post its lines (what changed, or the
+    refusal: the running spec then stays as it was)."""
+    from flock.cli import SpecError, read_spec, update_swarm
+    from flock.live import FolderWatch
+
+    assert opts.watch is not None
+    spec_file = opts.watch
+    watch = FolderWatch(spec_file, opts.spec, quiet=opts.watch_quiet)
+
+    def update() -> tuple[list[str], SwarmSpec | None]:
+        with httpx.Client(base_url=url, headers={"X-Flock-Token": token}, timeout=60) as c:
+            lines = update_swarm(c, str(spec_file), strict=opts.strict)
+        return lines, read_spec(str(spec_file))
+
+    while True:
+        await asyncio.sleep(opts.watch_interval)
+        if not watch.poll(time.monotonic()):
+            continue
+        try:
+            lines, spec = await asyncio.to_thread(update)
+        except SpecError as e:
+            lines, spec = [*e.lines, "not applied: the swarm keeps running as it was"], None
+        except Exception as e:  # the run goes on whatever an update does
+            log.exception("update failed")
+            lines, spec = [f"update failed: {type(e).__name__}: {e}"], None
+        if spec is not None:
+            watch.retarget(spec)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        for line in lines:
+            post(f"{stamp} {line}")
+
+
 async def run_local(opts: RunOptions) -> RunResult:
     """Run the swarm until a stop condition; always stops the workers and writes the bundle."""
     spec = opts.spec
@@ -495,6 +544,8 @@ async def run_local(opts: RunOptions) -> RunResult:
     started = datetime.now(UTC)
     t0 = time.monotonic()
     tracker = Tracker(store, spec.swarm)
+    updates: deque[str] = deque(maxlen=RECENT_UPDATES)
+    watcher: asyncio.Task | None = None
     stop = asyncio.Event()
     force = asyncio.Event()
     reason = "error"
@@ -527,6 +578,13 @@ async def run_local(opts: RunOptions) -> RunResult:
             elif opts.prompt and not await _prompt_all(http, opts, store, tracker, say):
                 reason, code = "prompt_failed", 1
                 stop.set()
+        if opts.watch is not None and not stop.is_set():
+            def post(line: str) -> None:
+                updates.append(line)
+                if not tty:
+                    say(f"update: {line}")
+
+            watcher = asyncio.create_task(_watch(opts, url, token, post), name="watch")
         idle_streak = 0
         while not stop.is_set():
             elapsed = time.monotonic() - t0
@@ -535,7 +593,8 @@ async def run_local(opts: RunOptions) -> RunResult:
             if tty:
                 frame = render(spec, snap, elapsed=elapsed, url=url, current=current,
                                recent=list(tracker.recent),
-                               width=shutil.get_terminal_size((120, 24)).columns)
+                               width=shutil.get_terminal_size((120, 24)).columns,
+                               updates=list(updates), watching=opts.watch)
                 opts.out.write("\x1b[H\x1b[J" + frame + "\n")
                 opts.out.flush()
                 tracker.new_lines.clear()
@@ -560,6 +619,8 @@ async def run_local(opts: RunOptions) -> RunResult:
         else:
             if reason == "error":
                 reason = "interrupted"
+        if watcher is not None:
+            watcher.cancel()
         if jobs.alive():
             say(f"stopping ({reason}): draining workers, up to {opts.grace:g} s for in-flight "
                 "turns (Ctrl-C again to force)")
@@ -570,6 +631,8 @@ async def run_local(opts: RunOptions) -> RunResult:
         reason, code = "error", 1
         await _stop_workers(store, jobs, spec, reconcile_task, 0, force)
     finally:
+        if watcher is not None:
+            watcher.cancel()
         for sig in handled:
             loop.remove_signal_handler(sig)
         try:

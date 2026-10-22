@@ -103,11 +103,15 @@ class ToolsManager:
         self._ready: dict[str, tuple[Manifest, str | None]] = {}
         self._lock = asyncio.Lock()
 
-    def current(self) -> Toolset:
-        """What a turn starting now gets (selection applied; unknown names dropped, see `error`)."""
+    def current(self, grant: dict[str, bool] | None = None) -> Toolset:
+        """What a turn starting now gets (selection applied; unknown names dropped, see `error`).
+        `grant` (docs/live.md): tool name -> on / off on top of the selection."""
         tools = ()
-        if self._manifest is not None and self.select is not None:
-            names = self._manifest.names() if self.select == "all" else self.select
+        if self._manifest is not None and (self.select is not None or grant):
+            names = (self._manifest.names() if self.select == "all" else list(self.select or []))
+            if grant:
+                names = [n for n in names if grant.get(n, True)]
+                names += [n for n, on in grant.items() if on and n not in names]
             tools = tuple(t for n in names if (t := self._manifest.get(n)) is not None)
         return Toolset(version=self.version, dir=self.root / self.version if self.version else None,
                        swarm=self.swarm, type=self.type, data_dir=self.data_dir,

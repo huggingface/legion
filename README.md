@@ -58,6 +58,11 @@ them.
   (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
   round; `limits.budget_usd` stops the swarm. `flock loop` stops or restarts
   a loop. See [docs/loop.md](docs/loop.md).
+- **Live changes:** `flock update <folder>` applies an edited experiment folder (spec,
+  prompts, tools) to the running swarm and prints what changed; `flock run --watch` does it
+  on every save; `flock grant <target> tools=+x bash=off limits.budget_usd=1` changes what a
+  type or one agent may do. Agents take each change at their next turn, with a one-line note.
+  See [docs/live.md](docs/live.md).
 - **Comms (optional):** a `comms:` block gives the agents one msgboard channel and
   built-in `post` / `read` / `search` tools; each agent joins under its own name at its
   first prompt, posting rules are enforced before the board is called, one poller per
@@ -204,6 +209,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
 | `GET/POST /swarms/{swarm}/loop`, `GET /swarms/{swarm}/events` | loop state per type and agent, `{type, action: start\|stop, final}`, the swarm-level event stream ([docs/loop.md](docs/loop.md)) |
+| `GET /swarms/{swarm}/grants`, `PUT/DELETE /swarms/{swarm}/grants/{target}` | live grants for a type or an agent: tools, `bash`, `limits.max_turns`, `limits.budget_usd` ([docs/live.md](docs/live.md)) |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests

@@ -37,6 +37,7 @@ from flock.models import (
     CommsSpec,
     DrainCommand,
     EventBatch,
+    Grant,
     LoopStartCommand,
     LoopStopCommand,
     PromptCommand,
@@ -46,6 +47,7 @@ from flock.models import (
     WorkerHeartbeat,
     comms_tools,
     parse_duration,
+    type_spec_rev,
 )
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
@@ -293,14 +295,21 @@ class Worker:
         self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
         self._throttled_logged = 0
         self._terminating = False
+        self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
 
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
 
     def _toolbox(self, agent: str) -> Callable[[], Toolset]:
         """What a turn of `agent` may call: the folder tools of the current version plus the
-        agent's built-in comms tools."""
-        return lambda: self.comms.toolset_for(agent, self.tools.current())
+        agent's built-in comms tools, with the agent's grant applied (docs/live.md)."""
+
+        def toolset() -> Toolset:
+            rt = self.agents.get(agent)
+            grant = rt.grant.tools if rt is not None and rt.grant is not None else None
+            return self.comms.toolset_for(agent, self.tools.current(grant))
+
+        return toolset
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -312,7 +321,7 @@ class Worker:
                 await asyncio.shield(pending)
             self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
             if cmd.agent in self.agents:
-                self.agents[cmd.agent].spec = cmd.spec
+                self.agents[cmd.agent].set_live(spec=cmd.spec)  # at its next turn boundary
                 self._set_lineage(self.agents[cmd.agent], cmd)
                 self.tools.want(cmd.tools_version, cmd.spec.folder_tools)
                 return
@@ -327,6 +336,7 @@ class Worker:
                               comms=self.comms)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
+            self.spec_rev = type_spec_rev(cmd.spec)
             self.drain_window = parse_duration(cmd.spec.drain_window)
             self._spawn(self._setup(rt, cmd))
         elif isinstance(cmd, PromptCommand):
@@ -431,7 +441,7 @@ class Worker:
 
     def heartbeat_payload(self) -> WorkerHeartbeat:
         return WorkerHeartbeat(worker=self.cfg.worker_id, deadline=self.cfg.deadline,
-                               draining=self.draining,
+                               draining=self.draining, spec_rev=self.spec_rev,
                                agents=[a.heartbeat() for a in self.agents.values()])
 
     async def send_heartbeat(self) -> bool:
@@ -443,6 +453,7 @@ class Worker:
                 tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
                 self.tools.want(tools.get("version"), tools.get("select"))
                 self._comms_from(resp.get("comms"))
+                self._live_from(resp)
             return True
         except httpx.HTTPError as e:
             log.warning("heartbeat failed: %s", e)
@@ -465,6 +476,28 @@ class Worker:
             log.warning("heartbeat: unreadable comms block: %s", e)
             return
         self.comms.configure(spec, tools if isinstance(tools, list) else [])
+
+    def _live_from(self, resp: dict) -> None:
+        """A changed type spec and the grants in force (docs/live.md): every agent takes them at
+        its next turn boundary."""
+        raw = resp.get("type_spec")
+        if isinstance(raw, dict):
+            try:
+                spec = TypeSpec.model_validate(raw)
+            except ValueError as e:
+                log.warning("heartbeat: unreadable type spec: %s", e)
+            else:
+                self.spec_rev = resp.get("spec_rev") or type_spec_rev(spec)
+                for rt in self.agents.values():
+                    rt.set_live(spec=spec)
+        grants = resp.get("grants")
+        if not isinstance(grants, dict):
+            grants = {}
+        for name, rt in self.agents.items():
+            try:
+                rt.set_live(grant=Grant.model_validate(grants[name]) if name in grants else None)
+            except ValueError as e:
+                log.warning("heartbeat: unreadable grant for %s: %s", name, e)
 
     async def heartbeat_loop(self) -> None:
         await asyncio.sleep(random.random() * self.cfg.heartbeat_interval)
