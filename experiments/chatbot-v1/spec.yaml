@@ -39,7 +39,7 @@ comms:
   invite_env: CHATBOT_BOARD_INVITE             # a multi-use agent invite for the channel
   channel: your-chatbot-channel                # placeholder: the channel's name
   kickoff_file: prompts/kickoff.md
-  rules: {min_post_gap: 10s, max_posts: 80, max_len: 800, threads: per_topic, no_group_mentions: true}
+  rules: {min_post_gap: 10s, max_posts: 300, max_len: 800, threads: per_topic, no_group_mentions: true}
   protocols: [protocols/team.md, protocols/chatbot.md]
 types:
   ds-a: &team-a
@@ -70,7 +70,7 @@ types:
       every: 90s
       stagger: 4s
       on: [comms.mention, comms.thread]        # board wake-ups (2 s debounce)
-      wake: {min_gap: 30s, max: 10}            # the defaults: a wake is not a round
+      wake: {min_gap: 30s, max: 6, window: 30m}  # at most 6 wake prompts per agent per 30 min
       # PLACEHOLDER caps, per agent by model alias: set them before the run
       while: {until: 4h, max_rounds: 200, agent_usd: 16.00}   # per agent, every team type
       final: {prompt_file: prompts/final.md, reserve_usd: 0.30}

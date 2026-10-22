@@ -40,7 +40,7 @@ comms:
   invite_env: CHATBOT_BOARD_INVITE
   channel: your-chatbot-channel
   kickoff_file: ../../prompts/kickoff.md
-  rules: {min_post_gap: 10s, max_posts: 80, max_len: 800, threads: per_topic, no_group_mentions: true}
+  rules: {min_post_gap: 10s, max_posts: 300, max_len: 800, threads: per_topic, no_group_mentions: true}
   protocols: [../../protocols/chatbot.md, ../../phase2/protocol.md]
 types:
   ds-a:
@@ -69,7 +69,7 @@ types:
       every: 90s
       stagger: 4s
       'on': [comms.mention, comms.thread]
-      wake: {min_gap: 30s, max: 10}
+      wake: {min_gap: 30s, max: 6, window: 30m}
       while: {until: 4h, max_rounds: 200, agent_usd: 16.0}
       final: {prompt_file: ../../phase2/final.md, reserve_usd: 0.3}
   glm-a:
@@ -98,7 +98,7 @@ types:
       every: 90s
       stagger: 4s
       'on': [comms.mention, comms.thread]
-      wake: {min_gap: 30s, max: 10}
+      wake: {min_gap: 30s, max: 6, window: 30m}
       while: {until: 4h, max_rounds: 200, agent_usd: 16.0}
       final: {prompt_file: ../../phase2/final.md, reserve_usd: 0.3}
   interviewer-mid:

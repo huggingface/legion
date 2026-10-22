@@ -218,6 +218,26 @@ Two other ways to trigger the switch:
 - By hand (untested): add `--ssh` at launch, then `hf jobs ssh <job id>` and run
   `bash /opt/chatbot/repo/experiments/chatbot-v1/job/switch.sh` with the env set.
 
+**Live changes in the job** (prompts, protocols, `comms.rules`, loop settings, caps; no
+restart). Edit the folder locally, upload it, then drop the marker:
+
+```sh
+hf buckets sync experiments/chatbot-v1 hf://buckets/<ns>/<bucket>/<run>/experiment \
+  --exclude "*.local.yaml" --exclude ".flock*"
+echo go > update && hf buckets cp update hf://buckets/<ns>/<bucket>/<run>/control/update
+```
+
+Within `CHATBOT_CHECK_S` (30 s), the bootstrap re-syncs `experiment/` over its copy and
+re-renders the `*.local.yaml` specs. It then runs `flock update` on the specs of the current
+phase (`spec.local.yaml` before the switch, `phase2/spec.local.yaml` after) and deletes the
+marker. The printed diff goes to the job log and to `control/update-<n>.log`. The switch runs
+the same re-sync first, so phase-2 prompts edited in `experiment/` count. What takes effect
+when: [docs/live.md](../../docs/live.md).
+
+**A reused channel:** set `-e CHATBOT_RUN=run2`. The swarm becomes `chatbot-v1-run2`, so the
+host posts a fresh kickoff ("Kickoff (chatbot-v1 run2)"; a kickoff is posted once per swarm
+and channel), and agents' reads start there.
+
 **Stop it.** Upload a stop marker; do not rely on `hf jobs cancel`:
 
 ```sh

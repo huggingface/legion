@@ -501,3 +501,49 @@ def test_job_bootstrap_stop_marker_writes_the_bundle(tmp_path, fakes):
     assert json.loads((run / "run.json").read_text())["stop_reason"] == "interrupted"
     assert "stop marker found" in (bucket / "logs" / "bootstrap.log").read_text()
     _no_secrets(bucket, board)
+
+
+def _until(proc, tmp_path: Path, text: str, timeout: float = 120) -> str:
+    deadline = time.monotonic() + timeout
+    while text not in (out := (tmp_path / "job.out").read_text()):
+        if proc.poll() is not None or time.monotonic() > deadline:
+            _kill(proc)
+            raise AssertionError(f"no {text!r} in the job output:\n{out[-3000:]}")
+        time.sleep(0.5)
+    return out
+
+
+def test_job_bootstrap_live_update_switch_and_stop_in_smoke_mode(tmp_path, fakes):
+    """The operator's markers in a smoke-mode run: control/update re-syncs <bucket>/experiment/
+    and runs `flock update` (marker deleted after), the switch re-syncs it too (phase-2 edits
+    count), control/stop ends with a bundle. CHATBOT_RUN names a fresh swarm and kickoff."""
+    model_url, board, board_url = fakes
+    proc, _, bucket = _job(tmp_path, model_url, board, board_url, CHATBOT_SMOKE="1",
+                           CHATBOT_RUN="run2")
+    edited = bucket / "experiment"
+    shutil.copytree(tmp_path / "src" / "experiments" / "chatbot-v1", edited)
+    for f, gap in (("spec.yaml", "5s"), ("phase2/spec.yaml", "5s")):
+        (edited / f).write_text((edited / f).read_text().replace("min_post_gap: 10s",
+                                                                 f"min_post_gap: {gap}"))
+    (bucket / "control").mkdir()
+    (bucket / "control" / "update").write_text("go\n")  # 1. live update
+    _until(proc, tmp_path, "update 1 ok")
+    log1 = (bucket / "control" / "update-1.log").read_text()
+    assert "comms.rules.min_post_gap: 10s -> 5s" in log1, log1
+    assert not (bucket / "control" / "update").exists()  # the marker is consumed
+    p2 = edited / "phase2" / "spec.yaml"  # 2. a phase-2 edit, picked up by the switch
+    p2.write_text(p2.read_text().replace("min_post_gap: 5s", "min_post_gap: 7s"))
+    (bucket / "control" / "switch").write_text("go\n")
+    _until(proc, tmp_path, "phase switch ok")
+    switch = (bucket / "control" / "switch.log").read_text()
+    assert '"phase":"merged"' in switch and "min_post_gap: 5s -> 7s" in switch, switch
+    (bucket / "control" / "stop").write_text("stop\n")  # 3. the graceful stop
+    _wait(proc, 90)
+    out = (tmp_path / "job.out").read_text()
+    assert "smoke settings" in out and "stop marker found" in out and "done" in out, out
+    (run,) = (bucket / "flock" / ".flock").iterdir()
+    doc = json.loads((run / "run.json").read_text())
+    assert doc["swarm"] == "chatbot-v1-run2" and doc["stop_reason"] == "interrupted"
+    assert doc["budget"]["budget_usd"] == 1.0  # smoke caps survive the re-renders
+    assert board.msgs[0]["body"].startswith("Kickoff (chatbot-v1 run2)")
+    _no_secrets(bucket, board)

@@ -9,6 +9,10 @@
 #          CHATBOT_CHECK_S  seconds between looks for the control marker (default 30)
 #          CHATBOT_FLOCK_ARGS  extra `flock run` flags (e.g. --skip-preflight)
 #          CHATBOT_SMOKE=1  a short run: job/smoke.json's loop and budget on every rendered spec
+#          CHATBOT_RUN      e.g. run2: the swarm is chatbot-v1-run2 (a fresh kickoff on a reused
+#                           channel) and the kickoff says "chatbot-v1 run2"
+# control: <bucket>/control/switch (phase 2), control/update (a live `flock update` with the
+#          folder uploaded to <bucket>/experiment/ first; the marker is deleted after), control/stop
 #          CHATBOT_SWITCH_AT  optional: seconds after start for the phase switch (else: the
 #                           control marker <bucket>/control/switch, uploaded by the operator)
 # secrets: HF_TOKEN (router + bucket), CHATBOT_BOARD_INVITE, CHATBOT_WORLD_TOKEN
@@ -48,13 +52,20 @@ if [ -z "${CHATBOT_PREINSTALLED:-}" ]; then
 fi
 mkdir -p "$H/repo" && tar -xzf "$H/payload/repo.tar.gz" -C "$H/repo"
 EXP=$H/repo/experiments/chatbot-v1
-for f in spec.yaml phase2/spec.yaml variant-two-channels/spec-a.yaml variant-two-channels/spec-b.yaml \
-         variant-two-channels/phase2/spec-a.yaml variant-two-channels/phase2/spec-b.yaml; do
-  sed -e "s|https://msgboard.example.invalid|$CHATBOT_BOARD_URL|" \
-      -e "s|your-team-b-channel|${CHATBOT_CHANNEL_B:-your-team-b-channel}|" \
-      -e "s|your-chatbot-channel|$CHATBOT_CHANNEL|" "$EXP/$f" > "$EXP/${f%.yaml}.local.yaml"
-done
-if [ -n "${CHATBOT_SMOKE:-}" ]; then  # job/smoke.json: rounds, cadence, caps
+render() {  # the *.local.yaml specs: board, channels, run name (and job/smoke.json in a smoke)
+  local f
+  for f in spec.yaml phase2/spec.yaml variant-two-channels/spec-a.yaml variant-two-channels/spec-b.yaml \
+           variant-two-channels/phase2/spec-a.yaml variant-two-channels/phase2/spec-b.yaml; do
+    sed -e "s|https://msgboard.example.invalid|$CHATBOT_BOARD_URL|" \
+        -e "s|your-team-b-channel|${CHATBOT_CHANNEL_B:-your-team-b-channel}|" \
+        -e "s|your-chatbot-channel|$CHATBOT_CHANNEL|" \
+        -e "s|^swarm: chatbot-v1|swarm: chatbot-v1${CHATBOT_RUN:+-$CHATBOT_RUN}|" \
+        "$EXP/$f" > "$EXP/${f%.yaml}.local.yaml"
+  done
+  if [ -n "${CHATBOT_RUN:-}" ]; then
+    sed -i "s|^Kickoff (chatbot-v1)|Kickoff (chatbot-v1 $CHATBOT_RUN)|" "$EXP/prompts/kickoff.md"
+  fi
+  [ -n "${CHATBOT_SMOKE:-}" ] || return 0
   for f in "$EXP"/spec.local.yaml "$EXP"/phase2/spec.local.yaml "$EXP"/variant-two-channels/*.local.yaml \
            "$EXP"/variant-two-channels/phase2/*.local.yaml; do
     "$PYTHON" - "$f" "$EXP/job/smoke.json" <<'PY'
@@ -71,8 +82,9 @@ d["limits"] = {**d["limits"], **o["limits"]}
 open(f, "w").write(yaml.safe_dump(d, sort_keys=False))
 PY
   done
-  log "smoke settings: $(cat "$EXP/job/smoke.json" | tr -d '\n ')"
-fi
+}
+render
+[ -n "${CHATBOT_SMOKE:-}" ] && log "smoke settings: $(tr -d '\n ' < "$EXP/job/smoke.json")"
 log "installed $(flock --help >/dev/null && echo flock) $($PYTHON --version); variant $VARIANT"
 
 PIDS=()
@@ -109,6 +121,29 @@ report() {  # flock's start lines and its latest status line, into the job log
     tail -n 30 "$o" | grep -a '^\[' | tail -1 | sed "s|^|$(basename "$o"): |" || true
   done
 }
+del() { if [[ $1 == hf://* ]]; then hf buckets remove "$1" -q >/dev/null; else rm -f "$1"; fi; }
+resync() {  # <bucket>/experiment/ (the operator's edited folder), if any, over the experiment
+  rm -rf "$H/overlay" && mkdir -p "$H/overlay"
+  pull "$B/experiment" "$H/overlay" 2>/dev/null || true
+  [ -n "$(ls -A "$H/overlay")" ] || return 0
+  cp -a "$H/overlay/." "$EXP/" && render && log "re-synced $(find "$H/overlay" -type f | wc -l) files from experiment/"
+}
+UPDATES=0
+live_update() {  # control/update: re-sync, then `flock update` on the specs of the current phase
+  local p="" out t rc=0; [ "$switched" = 1 ] && p="phase2/"
+  UPDATES=$((UPDATES + 1)); out="$H/logs/update-$UPDATES.log"
+  resync || log "re-sync failed"
+  if [ "$VARIANT" = two-channels ]; then
+    for t in a b; do (cd "$EXP/variant-two-channels" && FLOCK_CURRENT=".flock-$t/current" \
+      flock update "${p}spec-$t.local.yaml") || rc=$?; done > "$out" 2>&1
+  else
+    (cd "$EXP" && flock update "${p}spec.local.yaml") > "$out" 2>&1 || rc=$?
+  fi
+  if [ "$rc" = 0 ]; then log "update $UPDATES ok:"; else log "update $UPDATES FAILED ($rc):"; fi
+  head -40 "$out" | sed 's|^|  |' | tee -a "$H/logs/bootstrap.log"
+  put "$out" "$B/control/update-$UPDATES.log" || true
+  del "$B/control/update" || log "could not delete control/update"
+}
 STOP=0
 on_term() { log "stop requested: stopping flock (drain, bundle)"; STOP=1; kill -TERM "${PIDS[@]}" 2>/dev/null || true; }
 trap on_term TERM INT
@@ -130,9 +165,12 @@ while alive; do
     elif [ "$switched" = 0 ] && { { [ -n "${CHATBOT_SWITCH_AT:-}" ] &&
          [ $((now - t0)) -ge "$CHATBOT_SWITCH_AT" ]; } || exists "$B/control/switch"; }; then
       log "phase switch"
+      resync || log "re-sync failed"  # phase-2 prompts edited in <bucket>/experiment/ count
       if bash "$EXP/job/switch.sh" > "$H/logs/switch.log" 2>&1; then log "phase switch ok"; else log "phase switch FAILED (logs/switch.log)"; fi
       switched=1
       put "$H/logs/switch.log" "$B/control/switch.log" || true
+    elif exists "$B/control/update"; then
+      live_update
     fi
   fi
   if [ "$STOP" = 0 ] && [ $((now - last_sync)) -ge "$SYNC_S" ]; then sync_out; last_sync=$now; fi
