@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -246,8 +247,8 @@ types:
 LOOP_AGENTS = ["writer-0000", "writer-0001"]
 
 
-def _run_loop_spec(tmp_path: Path, url: str) -> subprocess.CompletedProcess:
-    (tmp_path / "spec.yaml").write_text(LOOP_SPEC.format(url=url))
+def _run_loop_spec(tmp_path: Path, url: str, extra: str = "") -> subprocess.CompletedProcess:
+    (tmp_path / "spec.yaml").write_text(LOOP_SPEC.format(url=url) + extra)
     return subprocess.run(
         _flock("run", "spec.yaml", "--until", "idle", "--skip-preflight"),
         cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120,
@@ -265,3 +266,26 @@ def test_flock_run_until_idle_waits_for_the_loop(tmp_path, fake_server):
         prompts = [(e["data"]["data"]["kind"], e["data"]["data"]["round"])
                    for e in _bundle_events(run, name) if e["type"] == "loop_prompt"]
         assert prompts == [("loop", 1), ("loop", 2), ("final", 2)], (name, prompts)
+
+
+def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_server):
+    """events.jsonl merges the swarm-level stream (loop_*, final_*, budget_*) with the agents'
+    events by time, without repeating the per-agent `final_round`s; run.json summarises each
+    type's loop and the budget."""
+    p = _run_loop_spec(tmp_path, fake_server.url, "limits: {budget_usd: 1.0}\n")
+    assert p.returncode == 0, p.stdout + p.stderr
+    run = _run_dir(tmp_path)
+    merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    swarm = [e for e in merged if e["agent"] == ""]
+    kinds = [e["type"] for e in swarm if e["type"] != "loop_tick"]
+    assert kinds == ["loop_started", "loop_stopped", "final_done"], kinds
+    assert [e["type"] for e in merged].count("final_round") == 2  # once per agent, not twice
+    stamps = [datetime.fromisoformat(e["ts"]) for e in merged]
+    assert stamps == sorted(stamps)
+    assert len(merged) == len(swarm) + sum(len(_bundle_events(run, a)) for a in LOOP_AGENTS)
+    doc = json.loads((run / "run.json").read_text())
+    lp = doc["loops"]["writer"]
+    assert (lp["state"], lp["reason"], lp["rounds_total"], lp["final_sent"], lp["final_done"]) == (
+        "done", "max_rounds", 4, 2, 2), lp
+    assert doc["budget"] == {"budget_usd": 1.0, "final_reserve_usd": 0.0, "cost_usd": 0.0,
+                             "stop": None}
