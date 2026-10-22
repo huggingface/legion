@@ -74,7 +74,7 @@ types:
       while:
         until: 4h
         max_rounds: 200
-        agent_usd: {deepseek: 25.0, glm: 16.0}
+        agent_usd: {deepseek: 34.0, glm: 16.0}
       final: {prompt_file: ../prompts/final.md, reserve_usd: 0.3}
   glm-a:
     harness: llm
@@ -106,7 +106,7 @@ types:
       while:
         until: 4h
         max_rounds: 200
-        agent_usd: {deepseek: 25.0, glm: 16.0}
+        agent_usd: {deepseek: 34.0, glm: 16.0}
       final: {prompt_file: ../prompts/final.md, reserve_usd: 0.3}
   interviewer-mid:
     harness: llm
