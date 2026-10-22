@@ -293,7 +293,8 @@ the type defines `resume_prompt`, sends it. No default.
 
 ```yaml
 swarm: paper-review
-namespace: cmpatino            # HF namespace for jobs
+compute: hf-jobs               # default; `local`: workers as subprocesses, `flock run` (docs/local.md)
+namespace: cmpatino            # HF namespace for jobs (required for hf-jobs, ignored locally)
 bucket: hf://buckets/cmpatino/flock
 providers:                     # optional: where open models are served (see "Providers")
   hf:   {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
@@ -806,3 +807,20 @@ cost; replicas cannot be removed with `DELETE` (`not_spawned`); an agent cannot 
 itself, nor read its parent's status. `spawn.warm` (pre-created idle children) was dropped
 (Carlos, 2026-10-16). Workers open only for agents that exist, so the first spawn of a type with
 no agents pays the worker's boot time; pre-warming is a possible later feature.
+
+## 14. Loops and the budget stop
+
+Added 2026-10-21 (worlds design note §9 and §13). User guide: [loop.md](loop.md).
+
+A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: `first`
+alone, then the loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
+`final` prompt per live agent. The controller's loop engine (`controller/loop.py`) ticks once a
+second and sends every prompt through the bulk-prompt path with `state: idle, skip_pending:
+true`, so loops never stack prompts and stay under `max_working` admission. `every: turn_end` on
+an uncapped provider runs on the worker (`loop_start` / `loop_stop` commands; the worker
+re-prompts when a turn completes), under `max_working` on the controller. Prompts are templates
+the worker renders (`PromptCommand.loop`, `{round}`, `{spend}`, `{last_summary}`, ...).
+`limits.budget_usd` becomes a stop, not only a spawn check: at `budget_usd` minus the final
+reserves loops stop, pending prompts are dropped and final rounds run; at `budget_usd` every
+agent is stopped and prompts are refused. World-backed settings (`every: rounds`, `score_*`,
+`on: world.*`, `context:`) are in the model and refused at apply until a world exists.

@@ -17,6 +17,7 @@ import logging
 import os
 import random
 import re
+import signal
 import sys
 import threading
 from collections import Counter
@@ -36,6 +37,8 @@ from flock.models import (
     CommsSpec,
     DrainCommand,
     EventBatch,
+    LoopStartCommand,
+    LoopStopCommand,
     PromptCommand,
     StopCommand,
     TypeSpec,
@@ -92,6 +95,8 @@ class WorkerConfig:
     sync_interval: float = 180.0
     drain_window: timedelta = DEFAULT_DRAIN_WINDOW  # from the job env; assigns may update it
     incarnation: str | None = None  # WORKER_INCARNATION: binds our polls to this job
+    # compute local (docs/local.md): the controller's pid; the worker exits once it is gone
+    parent_pid: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -108,6 +113,8 @@ class WorkerConfig:
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
             drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
             incarnation=env.get("WORKER_INCARNATION") or None,
+            parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
+            else None,
         )
 
 
@@ -285,6 +292,7 @@ class Worker:
         self._restoring = 0  # setups (restores) in flight; a "wave" ends when it drops to 0
         self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
         self._throttled_logged = 0
+        self._terminating = False
 
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
@@ -326,7 +334,15 @@ class Worker:
             if rt is None:
                 log.warning("prompt %s for unknown agent %s dropped", cmd.prompt_id, cmd.agent)
                 return
-            await rt.prompt(cmd.text, prompt_id=cmd.prompt_id, timeout=cmd.timeout)
+            await rt.prompt(cmd.text, prompt_id=cmd.prompt_id, timeout=cmd.timeout, loop=cmd.loop)
+        elif isinstance(cmd, LoopStartCommand | LoopStopCommand):
+            rt = self.agents.get(cmd.agent)
+            if rt is None:
+                log.warning("%s for unknown agent %s dropped", cmd.kind, cmd.agent)
+            elif isinstance(cmd, LoopStartCommand):
+                rt.start_loop(cmd)
+            else:
+                rt.stop_loop(cmd.reason)
         elif isinstance(cmd, StopCommand):
             if rt := self.agents.get(cmd.agent):
                 self._spawn(rt.stop())
@@ -506,6 +522,29 @@ class Worker:
             await asyncio.sleep(min(left, 30))
         await self.drain("deadline")
 
+    async def parent_loop(self, every: float = 2.0) -> None:
+        """compute local: a worker whose controller process died (kill -9, a crash) would poll
+        a dead URL until its deadline. Exit like a stale slot instead: stop, no sync."""
+        if self.cfg.parent_pid is None:
+            return
+        while os.getppid() == self.cfg.parent_pid:
+            await asyncio.sleep(every)
+        await self.abandon(f"controller process {self.cfg.parent_pid} is gone")
+
+    async def terminate(self, reason: str) -> None:
+        """compute local: SIGTERM from `flock run` at stop. Interrupt every turn now (the
+        adapters kill their harness and tool processes), then exit through the normal path:
+        flush events, last heartbeat. No sync (a local worker has no bucket)."""
+        if self._terminating or self.stale:
+            return
+        log.info("terminating (%s)", reason)
+        self._terminating = self.draining = True
+        for rt in self.agents.values():
+            rt.allow_starts = False
+        await asyncio.gather(*(rt.stop("terminated") for rt in list(self.agents.values())),
+                             return_exceptions=True)
+        self._drained.set()
+
     async def drain(self, reason: str) -> None:
         if self.draining:
             return
@@ -534,11 +573,18 @@ class Worker:
 
     async def run(self) -> int:
         loops = [self.poll_loop(), self.heartbeat_loop(), self.flush_loop(), self.sync_loop(),
-                 self.deadline_loop()]
+                 self.deadline_loop(), self.parent_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
+        loop = asyncio.get_running_loop()
+        on_term = self.cfg.parent_pid is not None  # compute local only; jobs keep the default
+        if on_term:
+            loop.add_signal_handler(signal.SIGTERM,
+                                    lambda: self._spawn(self.terminate("SIGTERM")))
         try:
             await self._drained.wait()
         finally:
+            if on_term:
+                loop.remove_signal_handler(signal.SIGTERM)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

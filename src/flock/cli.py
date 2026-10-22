@@ -1,7 +1,8 @@
 """`flock` CLI: a thin client over the controller API.
 
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
-FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
+FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
+a live `flock run` in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
 agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
 docs/spawn.md for what an agent may call.
 """
@@ -18,10 +19,9 @@ from typing import Annotated, Any
 
 import httpx
 import typer
-import yaml
 from pydantic import ValidationError
 
-from flock.models import AGENT_NAME_RE, SwarmSpec
+from flock.models import AGENT_NAME_RE, SwarmSpec, load_spec_yaml, loop_refusals
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -55,10 +55,27 @@ def auth_headers(url: str, env=os.environ) -> dict[str, str]:
     return headers
 
 
+CURRENT_FILE = Path(".flock") / "current"  # written by `flock run` (docs/local.md)
+
+
+def local_run(env=os.environ) -> dict | None:
+    """The live `flock run` this CLI talks to when FLOCK_URL is unset: `$FLOCK_CURRENT` or
+    `.flock/current` in the working directory, if its process is still alive."""
+    if env.get("FLOCK_URL"):
+        return None
+    from flock.current import read_current
+
+    return read_current(Path(env.get("FLOCK_CURRENT") or CURRENT_FILE))
+
+
 def client() -> httpx.Client:
     """Overridden in tests to point at an in-process app."""
-    url = os.environ.get("FLOCK_URL", "http://localhost:7860")
-    return httpx.Client(base_url=url, headers=auth_headers(url), timeout=60)
+    env = os.environ
+    if (run := local_run(env)) is not None:
+        env = {**env, "FLOCK_URL": run["url"], "FLOCK_TOKEN": run["token"]}
+        env.pop("FLOCK_AGENT_TOKEN", None)
+    url = env.get("FLOCK_URL", "http://localhost:7860")
+    return httpx.Client(base_url=url, headers=auth_headers(url, env), timeout=60)
 
 
 RETRY_ATTEMPTS = 5  # requests in all, per call
@@ -163,6 +180,13 @@ def _print_status(st: dict) -> None:
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
     for t in st["types"].values():
+        if t.get("loop"):
+            typer.echo(_loop_line(t["loop"]))
+    if st.get("budget_stop"):
+        what = ("final reserve reached: loops stopped, final rounds"
+                if st["budget_stop"] == "final_reserve" else "every agent stopped, prompts refused")
+        typer.echo(f"warning: limits.budget_usd: {what}")
+    for t in st["types"].values():
         if t.get("launch_error"):
             what = ("launch refused, not retrying until the next apply"
                     if t["health"] == "launch_refused" else "last launch error, retrying")
@@ -177,11 +201,37 @@ def _print_status(st: dict) -> None:
                        "turns with zero reported tokens; their cost is unknown (shown as $0)")
 
 
+def _loop_line(lp: dict) -> str:
+    rounds = (f"rounds {lp['rounds_min']}-{lp['rounds_max']}" if lp["rounds_min"] != lp["rounds_max"]
+              else f"round {lp['rounds_max']}")
+    line = (f"loop {lp['type']}: {lp['state']} ({lp['mode']}, every {lp['every']}), {rounds}, "
+            f"{lp['agents_done']}/{lp['agents']} agents done")
+    if lp.get("reason"):
+        line += f", stopped: {lp['reason']}"
+    if lp["final_sent"] or lp["state"] == "final":
+        line += f", final {lp['final_done']}/{lp['final_sent']} done"
+    return line
+
+
+def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
+    """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
+    name = getattr(holder, field)
+    if not name or getattr(holder, target) is not None:
+        return
+    src = Path(name)
+    src = src if src.is_absolute() else base / src
+    if not src.is_file():
+        typer.echo(f"{where}: {field} {src} not found", err=True)
+        raise typer.Exit(1)
+    setattr(holder, target, src.read_text(encoding="utf-8"))
+
+
 def load_spec(spec_file: str) -> SwarmSpec:
-    """Read a spec and inline each type's system_prompt_file (relative to the spec file)."""
+    """Read a spec and inline each type's system_prompt_file and loop prompt files (relative
+    to the spec file)."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+        spec = SwarmSpec.model_validate(load_spec_yaml(path.read_text(encoding="utf-8")))
     except ValidationError as e:
         for err in e.errors():
             where = ".".join(str(x) for x in err["loc"])
@@ -195,6 +245,10 @@ def load_spec(spec_file: str) -> SwarmSpec:
                 typer.echo(f"type {name}: system_prompt_file {src} not found", err=True)
                 raise typer.Exit(1)
             ts.system_prompt = src.read_text(encoding="utf-8")
+        if ts.loop is not None:
+            _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
+            if ts.loop.final is not None:
+                _inline(path.parent, ts.loop.final, "prompt_file", "prompt", f"type {name}: loop.final")
     c = spec.comms
     if c is not None:  # kickoff and protocol files, next to the spec (docs/comms.md)
         def read(rel: str, what: str) -> str:
@@ -209,6 +263,18 @@ def load_spec(spec_file: str) -> SwarmSpec:
             c.kickoff = read(c.kickoff_file, "kickoff_file")
         c.protocols_text = [read(f, "protocols") for f in c.protocols]
     return spec
+
+
+def _check_loops(spec: SwarmSpec) -> None:
+    """Refuse loop settings this version cannot run; say which `on:` sources have no feeder."""
+    if refused := loop_refusals(spec):
+        for r in refused:
+            typer.echo(f"refused: {r}", err=True)
+        raise typer.Exit(1)
+    for name, ts in spec.types.items():
+        for src in ts.loop.on if ts.loop else []:
+            typer.echo(f"warning: type {name}: loop.on {src}: no comms feeder in this version yet; "
+                       "wake-ups arrive once comms lands", err=True)
 
 
 def _provider_backed(spec: SwarmSpec) -> bool:
@@ -279,6 +345,7 @@ def apply(
     A tools folder (docs/tools.md) is checked, uploaded and named in the spec by its hash;
     re-applying with a changed folder switches running agents at their next turn."""
     spec = load_spec(spec_file)
+    _check_loops(spec)
     _warn_extra(spec)
     bundle = _tools_bundle(spec, spec_file)
     if preflight is None:
@@ -302,6 +369,63 @@ def apply(
         typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
     st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     _print_status(st)
+
+
+@app.command()
+def run(
+    spec_file: str,
+    data_dir: str = typer.Option(".flock", "--data-dir",
+                                  help="Where the run dir and `current` go."),
+    until: str = typer.Option(
+        None, "--until",
+        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle with nothing "
+             "pending, after at least one turn (and one per agent with --prompt)."),
+    prompt_text: str = typer.Option(None, "--prompt",
+                                    help="Send this prompt to every agent once at start."),
+    preflight: bool = typer.Option(
+        None, "--preflight/--skip-preflight",
+        help="Probe provider-backed models first (default: on when the spec has any)."),
+    strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
+    grace: float = typer.Option(10.0, "--grace",
+                                help="Seconds in-flight turns get to finish at stop."),
+) -> None:
+    """Run a `compute: local` swarm on this machine: controller on 127.0.0.1, workers as
+    subprocesses, a live view in the terminal, a run bundle at the end (docs/local.md). Other
+    commands (`status`, `agents`, `prompt`, `events`, ...) reach it from this directory."""
+    import asyncio
+
+    from flock.models import parse_duration
+
+    try:
+        from flock.controller.localrun import RunOptions, run_local
+    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
+        typer.echo(f"flock run needs the controller extra (pip install 'flock[controller]'): {e}",
+                   err=True)
+        raise typer.Exit(1) from None
+    spec = load_spec(spec_file)
+    if spec.compute.kind != "local":
+        typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}; `flock run` runs "
+                   "`compute: local` specs. For hf-jobs, deploy a controller and use "
+                   "`flock apply` (docs/deploy-job.md), or set `compute: local`.", err=True)
+        raise typer.Exit(1)
+    _warn_extra(spec)
+    seconds, idle = None, False
+    if until == "idle":
+        idle = True
+    elif until:
+        try:
+            seconds = parse_duration(until).total_seconds()
+        except ValueError as e:
+            typer.echo(f"--until: {e} (or `idle`)", err=True)
+            raise typer.Exit(2) from None
+    if preflight is None:
+        preflight = _provider_backed(spec)
+    elif not preflight and (unprobed := _unprobed(spec)):
+        _warn_unverified(unprobed, "preflight skipped")
+    opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
+                      prompt=prompt_text, preflight=preflight, strict=strict, grace=grace)
+    result = asyncio.run(run_local(opts))
+    raise typer.Exit(result.exit_code)
 
 
 def _tools_bundle(spec: SwarmSpec, spec_file: str):
@@ -493,13 +617,15 @@ def events(
 ) -> None:
     """Print an agent's event stream (JSONL); --follow keeps long-polling; --wait returns once
     something new arrived (the last line on stderr is the cursor for the next --after);
-    --pretty prints time, turn, kind and the text or a summary instead of JSON."""
+    --pretty prints time, turn, kind and the text or a summary instead of JSON. Given a swarm,
+    its swarm-level stream (loop_started, loop_tick, loop_stopped, final_round, budget_stop)."""
     deadline = time.monotonic() + timeout
+    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes
+    route = (f"/agents/{name}/events" if _as_agent() or AGENT_NAME_RE.match(name)
+             else f"/swarms/{name}/events")
     while True:
         poll = follow or wait
-        page = _call(
-            "GET", f"/agents/{name}/events", params={"after": after, "wait": 25 if poll else 0}
-        )
+        page = _call("GET", route, params={"after": after, "wait": 25 if poll else 0})
         for ev in page["events"]:
             typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
         after = page["next"]
@@ -508,6 +634,36 @@ def events(
             break
         if not poll:
             break
+
+
+@app.command()
+def loop(
+    swarm: str,
+    type: str = typer.Option(None, "--type", help="the agent type whose loop to stop or start"),
+    stop: bool = typer.Option(False, "--stop", help="stop the loop (then its final round)"),
+    start: bool = typer.Option(False, "--start", help="start the loop again from round 0"),
+    final: bool = typer.Option(True, "--final/--no-final", help="with --stop: run the final round"),
+) -> None:
+    """A swarm's loops (docs/loop.md): state per type and per agent, or --stop / --start one."""
+    if stop and start:
+        typer.echo("--stop or --start, not both", err=True)
+        raise typer.Exit(1)
+    if stop or start:
+        if not type:
+            typer.echo("--stop/--start need --type", err=True)
+            raise typer.Exit(1)
+        body = {"type": type, "action": "stop" if stop else "start", "final": final}
+        typer.echo(_loop_line(_call("POST", f"/swarms/{swarm}/loop", json=body)))
+        return
+    loops = [lp for lp in _call("GET", f"/swarms/{swarm}/loop") if not type or lp["type"] == type]
+    if not loops:
+        typer.echo("no loops")
+    for lp in loops:
+        typer.echo(_loop_line(lp))
+        rows = [[n, a["phase"], a["rounds"], a["done_reason"], a["final"], a["errors"]]
+                for n, a in (lp.get("per_agent") or {}).items()]
+        if rows:
+            _table(rows, ["agent", "phase", "rounds", "done", "final", "errors"])
 
 
 @app.command()
@@ -558,6 +714,7 @@ def whoami() -> None:
 @app.command()
 def workers(swarm: str) -> None:
     """List a swarm's workers."""
+    found = _call("GET", "/workers", params={"swarm": swarm})
     rows = [
         [
             w["id"],
@@ -570,11 +727,14 @@ def workers(swarm: str) -> None:
             w["last_heartbeat"],
             w.get("last_error") or "",
         ]
-        for w in _call("GET", "/workers", params={"swarm": swarm})
+        for w in found
     ]
     _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
                   "last_error"])
-    typer.echo("full job logs: hf jobs logs <job>", err=True)
+    if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
+        typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
+    else:
+        typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
 if __name__ == "__main__":
