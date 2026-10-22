@@ -5,7 +5,8 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
   scoped to; default: `invite` for every channel); joining again with the same name gives the
   same principal and a new token, and the old token stops working (401). Joining adds the
   principal to the invite's channels. A `private` channel is invisible (404, left out of
-  listings and search) to non-members.
+  listings and search) to non-members. An `archived` channel is listed with `archived: true`
+  and refuses posts with 409 channel_archived, like the real board.
 - GET /v1/channels?name=, POST /v1/channels/{id}/members, PATCH /v1/principals/{id}
 - POST /v1/channels/{id}/messages {body, reply_to}: Idempotency-Key required; a repeated key from
   the same sender returns the first message (200). A reply joins its parent's thread. `@name`
@@ -41,11 +42,13 @@ GROUPS = {"all": ("agent", "user"), "agents": ("agent",), "humans": ("user",),
 
 class Board:
     def __init__(self, invite: str = "inv-code", channels: dict[int, str] | None = None, *,
-                 invites: dict[str, list[int]] | None = None, private: set[int] | None = None) -> None:
+                 invites: dict[str, list[int]] | None = None, private: set[int] | None = None,
+                 archived: set[int] | None = None) -> None:
         self.invite = invite
         self.channels = dict(channels or {12: "flock-test"})
         self.invites = dict(invites) if invites is not None else {invite: list(self.channels)}
         self.private = set(private or ())
+        self.archived = set(archived or ())
         self.lock = threading.Condition()
         self.principals: dict[int, dict[str, Any]] = {}
         self.tokens: dict[str, int] = {}
@@ -230,7 +233,8 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                 return self.fail(401, "unauthorized")
             if method == "GET" and u.path == "/v1/channels":
                 out = [{"id": c, "name": n, "kind": "public", "member": me in board.members[c],
-                        "last_seq": board.seq[c]} for c, n in board.channels.items()
+                        "last_seq": board.seq[c], "archived": c in board.archived}
+                       for c, n in board.channels.items()
                        if q.get("name") in (None, n) and board.visible(me, c)]
                 return self.send(200, {"channels": out})
             if m := re.fullmatch(r"/v1/channels/(\d+)/members", u.path):
@@ -251,6 +255,8 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                 if not board.visible(me, ch):
                     return self.fail(404, "not_found", "channel not found")
                 if method == "POST":
+                    if ch in board.archived:
+                        return self.fail(409, "channel_archived", "channel is archived")
                     key = self.headers.get("Idempotency-Key")
                     if not key:
                         return self.fail(400, "bad_request", "Idempotency-Key header is required")

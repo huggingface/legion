@@ -393,6 +393,19 @@ def test_controller_resolves_channel_and_posts_kickoff_once(board):
         resolve(SwarmSpec.model_validate(swarm_raw(url=board.url)), None, {INVITE_ENV: "wrong"})
 
 
+def test_controller_refuses_an_archived_channel_before_any_post_or_join():
+    """Defect 7: an archived channel is refused at resolve, not at the kickoff post (409)."""
+    b, srv, url = fake_msgboard.serve(fake_msgboard.Board(archived={CH}))
+    try:
+        with pytest.raises(CommsError, match=r"channel flock-test \(id 12\) is archived"):
+            resolve(SwarmSpec.model_validate(swarm_raw(url=url, kickoff="Kickoff.")), None,
+                    {INVITE_ENV: b.invite})
+        assert [(m, p) for m, p, _, _ in b.requests] == [("POST", "/v1/join"), ("GET", "/v1/channels")]
+        assert b.msgs == []
+    finally:
+        srv.shutdown()
+
+
 # --------------------------------------------------------------------------- review of #16
 
 
