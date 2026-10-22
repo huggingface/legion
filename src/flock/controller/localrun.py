@@ -72,6 +72,7 @@ class RunOptions:
     out: TextIO = field(default_factory=lambda: sys.stdout)
     tty: bool | None = None  # None: out.isatty()
     worker_command: list[str] | None = None  # tests
+    tools: bytes | None = None  # the packed tools folder (docs/tools.md), uploaded before the PUT
 
 
 @dataclass
@@ -387,7 +388,18 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
         if not rep["ok"] or (opts.strict and rep.get("unverified")):
             say("preflight failed: not starting (fix the provider or pass --skip-preflight)")
             return False
-    r = await http.put(f"/swarms/{spec.swarm}", json=body)
+    spec.tools_version = None
+    if opts.tools is not None:  # as `flock apply`: upload the folder, name it in the spec by hash
+        r = await http.post(f"/swarms/{spec.swarm}/tools", content=opts.tools,
+                            headers={"content-type": "application/gzip"}, timeout=120)
+        if r.status_code >= 400:
+            say(f"tools upload refused ({r.status_code}): {r.text}")
+            return False
+        up = r.json()
+        spec.tools_version = up["version"]
+        say(f"tools: version {up['version']} ({len(opts.tools)} bytes): "
+            f"{', '.join(up['tools']) or 'none'}")
+    r = await http.put(f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
     if r.status_code >= 400:
         say(f"apply refused ({r.status_code}): {r.text}")
         return False

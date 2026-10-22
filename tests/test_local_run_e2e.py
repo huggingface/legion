@@ -187,3 +187,40 @@ def test_flock_run_ctrl_c_kills_running_tools(tmp_path, fake_server):
     kinds = [e["type"] for e in _bundle_events(run, "writer-0000")]
     assert "turn_interrupted" in kinds, kinds  # the worker stopped the turn, not just died
     assert "terminating (SIGTERM)" in next((run / "logs").glob("hello-writer-w*.log")).read_text()
+
+
+GREET = '''"""A folder tool for the `flock run` tools test."""
+
+from flock.tools import Context
+
+
+def greet(name: str, ctx: Context) -> str:
+    """Greet someone.
+
+    Args:
+        name: who to greet
+    """
+    return f"hello {name} via folder tool"
+'''
+
+
+def test_flock_run_ships_the_tools_folder(tmp_path, fake_server):
+    """`flock run` uploads tools/ like `flock apply` (docs/tools.md): the spec is applied with
+    its tools_version, and an agent's turn calls the folder tool."""
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "greet.py").write_text(GREET)
+    spec = SPEC.format(url=fake_server.url).replace("replicas: 3", "replicas: 1")
+    (tmp_path / "spec.yaml").write_text(spec + "    tools: [greet]\n")
+    p = subprocess.run(
+        _flock("run", "spec.yaml", "--prompt", 'call: greet {"name": "flock"}', "--until",
+               "idle", "--skip-preflight"),
+        cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=90,
+        check=False)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "tools: version " in p.stdout and ": greet" in p.stdout, p.stdout
+    evs = _bundle_events(_run_dir(tmp_path), "writer-0000")
+    started = [e for e in evs if e["type"] == "turn_started"]
+    assert started and started[0]["data"]["data"].get("tools_version"), started
+    tool = [e for e in evs if e["type"] == "message"
+            and e["data"]["message"].get("role") == "toolResult"]
+    assert tool and "hello flock via folder tool" in json.dumps(tool[0]), tool

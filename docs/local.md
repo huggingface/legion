@@ -55,6 +55,8 @@ uv run flock run examples/local.yaml --prompt "Introduce yourself in one sentenc
 - `--skip-preflight` skips the tool-call probe of each model (on by default for
   provider-backed models, as with `flock apply`); `--grace 10` is how long in-flight turns get
   at stop; `--data-dir .flock` is where runs go.
+- A `tools/` folder next to the spec ([tools.md](tools.md)) is checked, uploaded and named in
+  the spec by its hash before the run starts, as `flock apply` does.
 
 ## What you see
 

@@ -410,6 +410,7 @@ def run(
                    "`flock apply` (docs/deploy-job.md), or set `compute: local`.", err=True)
         raise typer.Exit(1)
     _warn_extra(spec)
+    bundle = _tools_bundle(spec, spec_file)
     seconds, idle = None, False
     if until == "idle":
         idle = True
@@ -424,7 +425,8 @@ def run(
     elif not preflight and (unprobed := _unprobed(spec)):
         _warn_unverified(unprobed, "preflight skipped")
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
-                      prompt=prompt_text, preflight=preflight, strict=strict, grace=grace)
+                      prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
+                      tools=bundle.data if bundle is not None else None)
     result = asyncio.run(run_local(opts))
     raise typer.Exit(result.exit_code)
 
