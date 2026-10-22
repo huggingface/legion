@@ -93,7 +93,7 @@ def fakes(tmp_path):
 
 
 def _offline(path: Path, model_url: str, board_url: str | None, phase: int,
-             interviews: bool = True) -> None:
+             interviews: bool = True, every: str = "1s") -> None:
     """The spec at `path` with the fakes and scripted loops (each type its own loop dict).
     board_url None: the comms block stays as written (the job's bootstrap fills it in)."""
     spec = load_spec_yaml(path.read_text())
@@ -113,7 +113,7 @@ def _offline(path: Path, model_url: str, board_url: str | None, phase: int,
         loop.pop("prompt_file", None)
         loop.update(first=phase1(me, other, interviews),
                     prompt=WAIT if phase == 1 else phase2(me, other),
-                    every="1s", stagger="100ms", stop_when={"all_agents_done": True},
+                    every=every, stagger="100ms", stop_when={"all_agents_done": True},
                     final={"prompt": FINAL, "reserve_usd": 0.01},
                     **{"while": {"until": "5m", "max_rounds": 1000}})
     spec["limits"]["budget_usd"] = 50
@@ -366,7 +366,11 @@ def _job(tmp_path, model_url, board, board_url, variant: str = "one") -> tuple[
                      ("variant-two-channels/spec-b.yaml", 1),
                      ("variant-two-channels/phase2/spec-a.yaml", 2),
                      ("variant-two-channels/phase2/spec-b.yaml", 2)):
-        _offline(src / "experiments" / "chatbot-v1" / f, model_url, None, phase, False)
+        # the variant's phase 2 waits a round (8 s) so a moved channel reaches every worker
+        # first (comms changes travel with the heartbeat, every 5 s locally)
+        slow = variant != "one" and phase == 2
+        _offline(src / "experiments" / "chatbot-v1" / f, model_url, None, phase, False,
+                 every="8s" if slow else "1s")
     (bucket / "payload").mkdir(parents=True)
     with tarfile.open(bucket / "payload" / "repo.tar.gz", "w:gz") as tar:
         for d in ("experiments", "worlds"):

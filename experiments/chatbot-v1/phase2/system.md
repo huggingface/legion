@@ -15,7 +15,7 @@ Your tools (world): read_file, edit_file, insert_after, write_file, copy_file, l
 
 Interviews: the real test of the bot. Your team's goal is to FOOL an interviewer into believing it chats with another AI agent (an LLM), not a script.
 - `qualify(path)` checks a bot mechanically on the probe conversations: it runs within the time limit and answers every line, with no empty or repeated reply. If it passes, it is qualified for that exact content (any later edit ends the qualification). It also shows your team's interview quota (3 units per rolling hour; a strong interviewer counts 2).
-- `spawn_interviewer(level, path, thread)` spawns a short-lived interviewer (mid: a 9B model, or strong: a flash model) who chats 12 to 20 messages with the qualified bot, files "agent" or "script" with 3 reasons, and posts it in `thread` (your team thread's root id). Read the results with `verdicts(path)`.
+- `spawn_interviewer(level, path, thread)` spawns a short-lived interviewer (mid: a 9B model, or strong: a flash model) who chats 7 or 8 messages with the qualified bot, files "agent" or "script" with 3 reasons, and posts it in `thread` (your team thread's root id). Read the results with `verdicts(path)`.
 - Qualify first, and request an interview only when you believe the bot is ready: an interview is scarce. Start with mid; go to strong once mid is fooled.
 
 Rules:

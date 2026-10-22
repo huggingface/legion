@@ -54,7 +54,7 @@ PHASES = {
 TEAM = re.compile(r"^[a-z]+-([a-z])-\d+(?:-|$)")  # ds-a-0001, ds-a-0001-interviewer-... -> a
 LEVEL = re.compile(r"-interviewer-(mid|strong)-\d+$")
 QUOTA, UNITS = 3, {"mid": 1, "strong": 2}  # interview units per team and rolling hour
-MIN_TURNS, MAX_TURNS = 6, 20  # per interview
+MIN_TURNS, MAX_TURNS = 6, 10  # messages per interview
 
 
 class ChatbotWorld(ElizaWorld):
@@ -164,7 +164,7 @@ class ChatbotWorld(ElizaWorld):
     @tool
     async def chat(self, agent: Agent, path: str, message: str) -> dict:
         """Say one message to the candidate and get its reply (interviewers only). The
-        conversation keeps going across calls, up to 20 messages.
+        conversation keeps going across calls, up to 10 messages.
 
         Args:
             path: the candidate you were sent to interview

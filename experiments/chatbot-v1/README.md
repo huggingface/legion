@@ -83,7 +83,7 @@ What the phase changes:
      candidate path and the board thread). A prompt sent together with the spawn was dropped
      once in the offline dry run (see Risks in the plan).
 3. **The interviewer works through its task.**
-   - It holds 12-20 messages with `chat(path, message)`. Each message re-runs the bot on the
+   - It holds 7 or 8 messages (at least 6, at most 10) with `chat(path, message)`. Each message re-runs the bot on the
      whole conversation so far, and the interviewer sees only the reply, never stderr.
    - It calls `submit_verdict(path, "agent"|"script", confidence, 3 reasons)`, needing at
      least 6 messages. It posts `INTERVIEW <path>: ...` in the thread and calls `done`.
@@ -106,7 +106,8 @@ Caps:
 | interviewers per team agent per run | 8 | `PER_RUN` in `tools/interview.py` |
 | interviewers per swarm per run | 64 | `limits.spawned_total` |
 | interviews per team per rolling hour | 3 units; `strong` counts 2 | `QUOTA`, `UNITS` in `worlds/chatbot/chatbot.py`, taken at an interview's first `chat` |
-| messages per interview | 6 to 20 | `MIN_TURNS`, `MAX_TURNS` |
+| messages per interview | 6 to 10 | `MIN_TURNS`, `MAX_TURNS` |
+| model calls per interviewer | 12 | `max_turns` on `&interviewer` (a probe of Qwen3.5-9B: median 9.5 calls for 7 messages) |
 | budget per interviewer | $0.15 | `max_budget_usd` on `&interviewer` (one prompt is its whole life) |
 
 In phase 1 the cross-team rule applies to interviewers too: team A's interviewer cannot reach

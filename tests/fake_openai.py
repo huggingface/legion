@@ -31,6 +31,12 @@ Replies, decided from the last message of each request:
 - last user text contains `503!`    -> HTTP 503 every time
 - last user text contains `429!`    -> HTTP 429 (Retry-After: 0) the first time a request with
                                        these exact messages is seen, then the normal reply
+- last user text contains `empty!`  -> an empty assistant message (no content, no tool call),
+                                       also under a forcing `tool_choice`; `empty-always!` in
+                                       any user message: every reply is empty
+- a `script:` step named EMPTY      -> an empty assistant message at that point
+- last user text is the llm harness's NUDGE ("Reply with exactly one tool call.") and `done`
+  is offered                        -> `done {summary: "nudged"}`
 - otherwise                         -> text "echo: <last user text>"
 Streams SSE when the request asks for `stream: true` (Pi does), with a usage chunk at the end:
 prompt_tokens 100 (+1 per message), 40 of them cached, completion_tokens 7.
@@ -46,6 +52,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+NUDGE = "Reply with exactly one tool call."  # flock.worker.adapters.llm.NUDGE (kept import-free)
 
 LOCK = threading.Lock()
 SEEN_429: set[str] = set()
@@ -85,6 +93,8 @@ def _scripted(body: dict[str, Any]) -> dict[str, Any] | None:
     offered = {t.get("function", {}).get("name") for t in body.get("tools") or []}
     if k < len(steps):
         name, args = steps[k]
+        if name == "EMPTY":  # a dropped call: an empty assistant message
+            return {"content": "", "tool_calls": None}
     elif "done" in offered:
         name, args = "done", {"summary": "script done"}
     else:
@@ -99,6 +109,14 @@ def reply_for(body: dict[str, Any]) -> dict[str, Any]:
     msgs = body.get("messages") or []
     last = msgs[-1] if msgs else {}
     tc = body.get("tool_choice")
+    offered = {t.get("function", {}).get("name") for t in body.get("tools") or []}
+    users = [_text(m.get("content")) for m in msgs if m.get("role") == "user"]
+    if any("empty-always!" in u for u in users) or (
+            last.get("role") == "user" and "empty!" in _text(last.get("content"))):
+        return {"content": "", "tool_calls": None}
+    if last.get("role") == "user" and _text(last.get("content")) == NUDGE and "done" in offered:
+        return {"content": None, "tool_calls": [{"id": f"call_nudged_{len(msgs)}", "type": "function",
+                "function": {"name": "done", "arguments": json.dumps({"summary": "nudged"})}}]}
     if scripted := _scripted(body):
         return scripted
     if last.get("role") == "user" and (named := _named_call(body, _text(last.get("content")))):

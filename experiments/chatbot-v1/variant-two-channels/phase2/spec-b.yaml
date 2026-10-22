@@ -118,7 +118,7 @@ types:
     tools: ['world:chat', 'world:submit_verdict', 'comms:post']
     bash: false
     tool_choice: required
-    max_turns: 26
+    max_turns: 12
     max_budget_usd: 0.15
     tool_output_chars: 4000
   interviewer-strong:
@@ -132,7 +132,7 @@ types:
     tools: ['world:chat', 'world:submit_verdict', 'comms:post']
     bash: false
     tool_choice: required
-    max_turns: 26
+    max_turns: 12
     max_budget_usd: 0.15
     tool_output_chars: 4000
 spawn:
