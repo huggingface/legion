@@ -1158,6 +1158,22 @@ def create_app(
             released |= seen[0] != "idle" and ah.state != "working"
         return released
 
+    def reap_ephemeral(hb: WorkerHeartbeat) -> None:
+        """docs/spawn.md "Ephemeral types": remove each spawned agent this heartbeat reports
+        idle (or stuck) after at least one turn, with no prompt pending or just admitted. The
+        heartbeat's tokens include its last turn, so the cost it leaves behind is complete."""
+        now, pending = clock().timestamp(), None
+        for ah in hb.agents:
+            if ah.state == "working" or ah.turns < 1 or (live.get(ah.name) or ("",))[0] == "admitted":
+                continue
+            a = store.get_agent(ah.name)
+            if a is None or a["parent"] is None or a["removing"]:
+                continue
+            pending = store.pending_counts(a["swarm"]) if pending is None else pending
+            if not pending.get(ah.name):
+                remove_subtree(store, ah.name, "ephemeral", now)
+                store.listener("reconcile", "")
+
     def seen(w: Row) -> None:
         """Any request from the slot's current job proves it alive (reconcile.last_seen).
         Written at most every SEEN_EVERY seconds per worker."""
@@ -1215,6 +1231,8 @@ def create_app(
         cap = provider_cap(sw["spec"], w["type"]) if sw else None
         if heartbeat_seen(hb, clock().timestamp()) and cap is not None:
             wake_window(w["swarm"], {cap[0]})
+        if sw is not None and (ets := sw["spec"].types.get(w["type"])) and ets.ephemeral:
+            reap_ephemeral(hb)
         out: dict[str, Any] = {"ok": True}
         spec = sw["spec"] if sw else None
         if spec is not None and spec.tools_version is not None and w is not None:

@@ -311,6 +311,18 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
             "events": len(evs), "events_file": f"events/{a['name']}.jsonl",
         })
 
+    # Removed agents (spawned children, ephemeral ones: docs/spawn.md) keep their events; their
+    # cost is in the swarm's total (removed_cost).
+    removed = []
+    for name in sorted(set(store.event_agents(spec.swarm)) - {a["name"] for a in per_agent}
+                       - {swarm_stream(spec.swarm)}):
+        evs = store.read_events(name, 0, limit=10**9)
+        with (ev_dir / f"{name}.jsonl").open("w", encoding="utf-8") as f:
+            for i, ev in enumerate(evs):
+                f.write(json.dumps(ev) + "\n")
+                merged.append((str(ev.get("ts", "")), i, ev))
+        removed.append({"name": name, "events": len(evs), "events_file": f"events/{name}.jsonl"})
+
     # The swarm-level stream (docs/loop.md "Events"). Its per-agent events (`final_round`) are
     # also on the agent's stream, so only the swarm's own (agent "") are added.
     for i, ev in enumerate(store.read_events(swarm_stream(spec.swarm), 0, limit=10**9)):
@@ -359,6 +371,7 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         "loops": loops,
         "budget": budget,
         "agents": per_agent,
+        "removed_agents": removed,
         "workers": [{"id": w["id"], "type": w["type"], "crashes": w["crashes"],
                      "last_error": w.get("last_error"), "log": f"logs/{w['id']}.log"}
                     for w in workers.values()],

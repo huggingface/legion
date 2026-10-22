@@ -130,6 +130,35 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
   `./data`; the controller image sets `/data`). Turn on the Space's persistent storage so `/data`
   survives redeploys: unlike replicas, spawned agents cannot be rebuilt from the spec.
 
+### Ephemeral types
+
+`ephemeral: true` on a type makes each spawned agent of it live for one session: a judge, an
+interviewer, a one-shot helper.
+
+```yaml
+types:
+  interviewer: {harness: llm, model: glm, replicas: 0, ephemeral: true,
+                workers: {initial: 0, max_extra: 2}, max_turns: 26, max_budget_usd: 0.15}
+spawn:
+  dev: {types: [interviewer], max: 2}
+```
+
+- **When.** The controller removes the agent when a worker heartbeat reports it idle (or
+  stuck) after at least one turn, with no prompt pending or just handed out. How the turn
+  ended does not matter: `done`, `max_turns`, its budget or an error. A heartbeat's tokens
+  include the last turn, so the cost it leaves behind is complete.
+- **What.** The same removal as `DELETE /agents/{name}`: `child_removed {reason: ephemeral}` on
+  the parent's stream, an unassign to its worker (final sync), its token revoked, its cost
+  kept in the swarm's total (`removed_cost`), and its place under the parent's `spawn.max`
+  freed, since caps count live children. The worker then deletes the agent's workdir, session
+  log, state, tools pin and the harness's own session dir (`AgentRuntime.purge`).
+- **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
+  session. A run bundle (`flock run`) keeps removed agents' events (`events/<name>.jsonl`) and
+  lists them in `run.json` under `removed_agents`.
+- **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
+- **A follow-up prompt** from the parent must arrive while the agent is still working; a
+  prompt sent after its session ended gets 404, because the agent is gone.
+
 ## API
 
 | Method | Path | Result |

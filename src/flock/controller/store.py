@@ -809,6 +809,11 @@ class Store:
         self.listener("events", agent)
         return n
 
+    def event_agents(self, swarm: str) -> list[str]:
+        """Every stream of the swarm with events, removed agents' included."""
+        return [r["agent"] for r in self._q(
+            "SELECT agent FROM event_index WHERE swarm = ? ORDER BY agent", [swarm])]
+
     def event_count(self, agent: str) -> int:
         row = self._one("SELECT lines FROM event_index WHERE agent = ?", [agent])
         return row["lines"] if row else 0

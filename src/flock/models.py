@@ -348,6 +348,10 @@ class TypeSpec(BaseModel):
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
     # `spawn:` lets others create; None keeps v1's placement.
     workers: WorkersSpec | None = None
+    # Spawned agents of this type live for one session (docs/spawn.md "Ephemeral types"): the
+    # controller removes one once a heartbeat reports it idle after a turn with nothing pending
+    # (done, max_turns, budget or an error alike), and its worker deletes its files. Spawn-only.
+    ephemeral: bool = False
     flavor: str = "cpu-basic"
     worker_lifetime: str = "24h"
     lifetime_jitter: str = "4h"
@@ -452,6 +456,12 @@ class TypeSpec(BaseModel):
         if v is not None and v < 256:
             raise ValueError("context_tokens must be >= 256")
         return v
+
+    @model_validator(mode="after")
+    def _ephemeral_spawn_only(self) -> TypeSpec:
+        if self.ephemeral and self.replicas:
+            raise ValueError("ephemeral: true is for spawned agents only; set replicas: 0")
+        return self
 
     @field_validator("workers")
     @classmethod

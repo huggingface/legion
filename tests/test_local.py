@@ -349,6 +349,31 @@ def test_write_bundle(tmp_path):
     store.close()
 
 
+
+def test_write_bundle_keeps_removed_agents_events(tmp_path):
+    """docs/spawn.md "Ephemeral types": a removed agent's events stay in the bundle, listed under
+    run.json `removed_agents`, not under `agents`."""
+    store = Store(tmp_path / "data")
+    spec = local_spec()
+    store.put_swarm(spec, time.time())
+    store.insert_agent("w-0000", "loc", "w", 0, time.time())
+    store.insert_agent("w-gone", "loc", "w", 9, time.time())
+    _events(store, "w-0000", "turn_started", "turn_ended")
+    _events(store, "w-gone", "turn_started", "turn_ended")
+    store.delete_agent_rows("w-gone")
+    t0 = datetime.now(UTC)
+    localrun.write_bundle(tmp_path / "run", store, spec, started=t0, ended=t0, reason="idle",
+                          url="u", tracker=localrun.Tracker(store, "loc"))
+    doc = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert [a["name"] for a in doc["agents"]] == ["w-0000"]
+    assert doc["removed_agents"] == [{"name": "w-gone", "events": 2,
+                                      "events_file": "events/w-gone.jsonl"}]
+    lines = (tmp_path / "run" / "events" / "w-gone.jsonl").read_text().splitlines()
+    assert [json.loads(x)["type"] for x in lines] == ["turn_started", "turn_ended"]
+    merged = [json.loads(x) for x in (tmp_path / "run" / "events.jsonl").read_text().splitlines()]
+    assert sum(e["agent"] == "w-gone" for e in merged) == 2
+    store.close()
+
 def test_run_local_refuses_a_jobs_spec(tmp_path):
     opts = localrun.RunOptions(spec=make_spec(), data_dir=tmp_path, out=io.StringIO())
     with pytest.raises(ValueError, match="compute: local"):
