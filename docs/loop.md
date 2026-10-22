@@ -25,7 +25,7 @@ types:
       # or prompt_file: prompts/round.md (read by `flock apply`, relative to the spec)
       every: turn_end            # turn_end (default) | a duration: 30s, 2m | rounds (needs a world)
       stagger: 50ms              # agent i gets its first prompt i * stagger after the loop starts
-      on: [comms.mention]        # wake-ups (fed by the comms PR; see "Wake queue")
+      on: [comms.mention]        # wake-ups from the board (see "Wake queue")
       while:                     # all set conditions must hold
         until: 2h                # wall time since the loop started (type-wide)
         max_rounds: 400          # loop prompts per agent
@@ -167,15 +167,17 @@ so a controller restart resumes the loops; only queued wake-ups are lost.
 
 ### Wake queue (`on:`)
 
-`LoopEngine.wake(agent, reason)` is the controller-side seam the comms PR will feed (board
-mentions, thread replies): it queues the agent's loop prompt (`why: wake: <reasons>`) once 2 s
-have passed without a new wake for that agent, or at most 10 s after the first, through the
-same `state: idle, skip_pending: true` path. A wake is accepted only for an agent in a running
-loop whose `on:` lists the reason (or its prefix before `:`, so `comms.mention:42` matches
-`comms.mention`); wakes for an agent that is working wait until it is idle and then give one
-prompt. Nothing calls it in this version; `flock apply` warns that `on: comms.*` has no feeder
-yet, and `tests/test_loop_controller.py::test_wake_queue_debounces_and_skips_pending` drives it
-directly.
+`LoopEngine.wake(agent, reason)` is fed by the board (docs/comms.md): every `comms_mention` and
+`comms_thread_reply` event a worker posts becomes `wake(agent, "comms.mention")` or
+`wake(agent, "comms.thread")`. A wake queues the agent's loop prompt (`why: wake: <reasons>`)
+once 2 s have passed without a new wake for that agent, or at most 10 s after the first, through
+the same `state: idle, skip_pending: true` path; the prompt is a round and counts toward
+`max_rounds`. A wake is accepted only for an agent in a running loop whose `on:` lists the
+reason (or its prefix before `:`, so `comms.mention:42` matches `comms.mention`), and never in a
+swarm stopped by the hard budget stop; wakes for an agent that is working wait until it is idle
+and then give one prompt. `flock apply` and `flock run` warn when an `on:` source can never
+fire: a `comms.*` source on a type that is not on the board (no `comms: true` or no swarm
+`comms:` block), a kind the swarm's `comms.wake` leaves out, or a source with no feeder.
 
 ### Events
 
@@ -294,8 +296,8 @@ with "needs a world (not in this version)"): `every: rounds` (prompt all, wait f
 `turn_ended` or `rounds.timeout_s`, `POST /rounds/{n}/close`), `while.score_*`, `on: world.*`,
 `context: world.*`.
 
-Deferred to the comms and artifacts PRs: the feeder for `on: comms.*` (the engine's `wake()` is
-ready), and `context: comms.* | artifacts.*` (refused: "is not in this version"). Deferred to the
+Deferred to the comms and artifacts PRs: `context: comms.* | artifacts.*` (refused: "is not in
+this version"). Deferred to the
 tools PR: honouring `final.add_tools` (carried, not enforced). Not done: a `run_stopping` hook to
 a world, per-call booking to tighten the budget overshoot, a `loop.start: manual` switch, and
 `limits.final_reserve_usd`: the note's §4.7 put the reserve under `limits`; here it is

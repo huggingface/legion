@@ -98,7 +98,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no comms feeder in this version" in r.output
+    assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 
@@ -111,6 +111,37 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
     assert r.exit_code == 1 and "missing.md not found" in r.output
+
+
+def test_flock_run_checks_loops_like_apply(tmp_path, monkeypatch):
+    """`flock run` runs the same CLI loop checks as `flock apply` (`_check_loops`): the `on:`
+    warning, and refusals on the CLI before anything starts."""
+    from flock.controller import localrun
+
+    started: list = []
+
+    async def fake_run_local(opts):
+        started.append(opts)
+        return localrun.RunResult(tmp_path, "idle", 0, {})
+
+    monkeypatch.setattr(localrun, "run_local", fake_run_local)
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "round.md").write_text("Round {round}.\n")
+    raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
+    raw["compute"] = {"kind": "local"}
+    raw["types"]["researcher"]["loop"] = {"prompt_file": "prompts/round.md", "every": "30s",
+                                          "on": ["comms.mention"]}
+    f = tmp_path / "spec.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    r = CliRunner().invoke(cli.app, ["run", str(f), "--skip-preflight"])
+    assert r.exit_code == 0, r.output
+    assert "loop.on comms.mention: no comms feeder" in r.output and len(started) == 1
+
+    raw["types"]["researcher"]["loop"]["while"] = {"score_ge": {"coverage_pct": 100}}
+    f.write_text(yaml.safe_dump(raw))
+    r = CliRunner().invoke(cli.app, ["run", str(f), "--skip-preflight"])
+    assert r.exit_code == 1 and len(started) == 1  # refused on the CLI: no run started
+    assert "refused: types.researcher.loop.while.score_ge needs a world (not in this version)" in r.output
 
 
 DOCS = Path(__file__).parent.parent / "docs" / "loop.md"

@@ -50,7 +50,9 @@ uv run flock run examples/local.yaml --prompt "Introduce yourself in one sentenc
 - `--prompt TEXT` sends one prompt to every agent at start (optional; without it the agents
   wait for prompts from a second terminal).
 - `--until idle` stops once every agent is idle with nothing pending, after each prompted agent
-  finished a turn. `--until 10m` stops after a duration. Without `--until` the run goes until
+  finished a turn, and once every type's `loop:` is over (its final round done, or stopped
+  without one); agents idle between loop rounds do not count, and a `replicas: 0` type nobody
+  spawned into is skipped. `--until 10m` stops after a duration. Without `--until` the run goes until
   Ctrl-C (a second Ctrl-C forces) or the spec's `limits.budget_usd`.
 - `--skip-preflight` skips the tool-call probe of each model (on by default for
   provider-backed models, as with `flock apply`); `--grace 10` is how long in-flight turns get
@@ -113,8 +115,11 @@ budget check, the view and the bundle use the spec as currently applied, so a re
 ```
 .flock/hello-20261021-161443/
   run.json             spec (env values with TOKEN/KEY/SECRET/... in the name redacted), stop reason,
-                       duration, totals (agents, turns, events, cost, tokens), per agent and per worker
-  events.jsonl         every agent's events merged by time (pi session format v3, as `flock events`)
+                       duration, totals (agents, turns, events, cost, tokens), per agent and per worker,
+                       `loops` (per type: state, stop reason, rounds, final round) and `budget`
+                       (budget_usd, final reserve, cost, which budget stop fired)
+  events.jsonl         every agent's events and the swarm-level ones (loop_*, final_done,
+                       budget_stop; agent ""), merged by time (pi session format v3, as `flock events`)
   events/<agent>.jsonl one file per agent
   agents/<agent>/      agent workdirs        state/llm/   llm harness sessions
   logs/                controller.log, <worker>.log      controller/  the controller's SQLite state
