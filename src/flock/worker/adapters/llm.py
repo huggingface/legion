@@ -96,6 +96,9 @@ BASH_TIMEOUT_MAX_S = 600.0
 OUTPUT_LIMIT = 8_000  # default `tool_output_chars`: stored/sent tool output, head and tail
 STOP_GRACE = 5.0
 FORCED_DEFAULT_MAX_TURNS = 50  # forced tool choice with `done` and no max_turns
+# A forced turn whose reply has no tool call (a provider dropped it: an empty assistant message)
+# gets this once before the turn ends as before; the retry is a model call like any other.
+NUDGE = "Reply with exactly one tool call."
 
 PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
 You have one tool, `bash`. It runs a shell command in that directory and returns the output \
@@ -678,7 +681,7 @@ class LLMAdapter:
         model = spec.resolved_model.model_id
         self.in_turn = True
         calls, cost = 0, 0.0
-        overflow_retried = False
+        overflow_retried = nudged = False
         # a forced model that never calls `done` would loop until turn_timeout: cap it
         max_turns = spec.max_turns
         if max_turns is None and self.forced and self.done_enabled:
@@ -740,6 +743,11 @@ class LLMAdapter:
                     self._end("completed", num_turns=calls)
                     return
                 queued = self._drain()
+                if not tool_calls and not queued and self.forced and self.done_enabled and not nudged:
+                    nudged = True  # one nudge per miss, then the turn ends as before
+                    self._user([NUDGE])
+                    continue
+                nudged = nudged and not tool_calls
                 self._user(queued)
                 if not queued and (not tool_calls or (self.forced and not self.done_enabled)):
                     # forced tool choice without `done`: one action per prompt (the model could

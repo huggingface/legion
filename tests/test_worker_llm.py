@@ -726,3 +726,39 @@ async def test_calibration_and_settings(tmp_path, fake_server, monkeypatch):
                                   "types": {"a": {"harness": "codex", "model": "m", "chars_per_token": 2}}})
     with pytest.raises(ValueError, match="tool_output_chars must be >= 200"):
         llm_spec(tool_output_chars=10)
+
+
+async def test_forced_empty_reply_gets_one_nudge(tmp_path, fake_server, monkeypatch):
+    """A provider that drops the tool call (an empty assistant message) under a forcing
+    tool_choice with `done`: one user nudge, counted as a model call; it then calls done."""
+    from flock.worker.adapters.llm import NUDGE
+
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=12)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("empty! please")
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 2  # empty + done
+    users = [e.message for e in evs if e.kind == "message" and e.message["role"] == "user"]
+    assert users[-1]["content"] == [{"type": "text", "text": NUDGE}]
+    final = [e.message for e in evs if e.kind == "message"][-1]
+    assert final["content"] == [{"type": "text", "text": "nudged"}]
+    # a script that drops the call right after a tool result
+    await a.send('script: [["bash", {"command": "echo v"}], ["EMPTY", {}]]')
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 3  # bash, empty, done
+    # still empty after the nudge: the turn ends as before (no second nudge)
+    await a.send("empty-always! now")
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 2
+    assert sum(e.kind == "message" and e.message["role"] == "user"
+               and e.message["content"][0]["text"] == NUDGE for e in evs) == 1
+    await a.stop()
+
+
+async def test_forced_empty_reply_nudge_counts_toward_max_turns(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=1)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("empty! please")
+    end = (await turn(a))[-1]
+    assert end.status == "error" and end.data["reason"] == "max_turns" and end.data["num_turns"] == 1
+    await a.stop()

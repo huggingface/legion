@@ -61,7 +61,11 @@ types:
   the summary as the final assistant message (calls after `done` in the same reply are skipped).
   `max_turns` still caps model calls (`reason: max_turns`); with no `max_turns`, a forced turn
   with `done` is capped at 50 calls so a model that never calls `done` cannot loop until
-  `turn_timeout`. `tool_choice: bash` offers only `bash` (one action per prompt) unless
+  `turn_timeout`. If a reply in such a turn has no tool call at all (a provider dropped it: an
+  empty assistant message, seen right after a tool result), the harness adds one user message,
+  "Reply with exactly one tool call.", and asks again. The retry is a model call and counts
+  toward `max_turns`. A second miss in a row ends the turn `completed`, as before.
+  `tool_choice: bash` offers only `bash` (one action per prompt) unless
   `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too.
 - `response_format` goes in `extra` and is sent as is, nested objects included. A JSON schema
   shaped like `{"tool": "bash", "command": ...}` makes every reply a call through the text
