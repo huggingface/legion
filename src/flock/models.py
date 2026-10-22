@@ -11,7 +11,30 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+
+# --------------------------------------------------------------------------- spec YAML
+
+
+class _SpecLoader(yaml.SafeLoader):
+    """SafeLoader with YAML 1.2 booleans: only true/false. YAML 1.1 (PyYAML's default) also
+    reads on/off/yes/no as booleans, so the documented `on: [comms.mention]` key became `True`.
+    Dropping them in the loader protects every key and value of a spec, not just `loop.on`."""
+
+
+_BOOL = "tag:yaml.org,2002:bool"
+_SpecLoader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in rs if tag != _BOOL]
+    for ch, rs in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_SpecLoader.add_implicit_resolver(_BOOL, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+                                  list("tTfF"))
+
+
+def load_spec_yaml(text: str) -> Any:
+    """Parse spec YAML (safe, YAML 1.2 booleans); validate with `SwarmSpec.model_validate`."""
+    return yaml.load(text, Loader=_SpecLoader)  # a SafeLoader subclass
 
 # --------------------------------------------------------------------------- durations
 
@@ -915,6 +938,12 @@ class LoopSpec(BaseModel):
         if self.every in ("turn_end", "rounds"):
             return None
         return parse_duration(self.every).total_seconds()
+
+
+def hit_max_turns(turn_ended: dict) -> bool:
+    """A `turn_ended` that stopped at the type's `max_turns` (llm, Pi, Codex: `reason`; Claude:
+    `subtype`). Not a failed turn for a loop: with `tool_choice: required` it is how turns end."""
+    return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
 
 
 def agent_cap(ts: TypeSpec) -> float | None:

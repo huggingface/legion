@@ -7,6 +7,8 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from flock.models import LoopMeta, LoopStartCommand, TokenUsage
 from flock.worker.adapters.base import AdapterEvent
 from flock.worker.loop import render
@@ -90,6 +92,32 @@ async def test_three_failed_turns_in_a_row_end_the_loop(tmp_path, monkeypatch):
     assert len(ad.sent) == 3 and custom(rt, "loop_stopped")[0]["reason"] == "errors"
     assert [d["why"] for d in custom(rt, "loop_prompt")] == ["start", "retry after error",
                                                               "retry after error"]
+    await rt.stop()
+
+
+class MaxTurnsAdapter(ScriptedAdapter):
+    def __init__(self, *a, data: dict, **kw):
+        super().__init__(*a, **kw)
+        self.data = data
+
+    async def _finish(self):
+        await asyncio.sleep(self.turn_time)
+        self._q.put(AdapterEvent("turn_ended", status="error", error="max_turns exceeded",
+                                 data=self.data))
+        self._turn = None
+
+
+@pytest.mark.parametrize("data", [{"reason": "max_turns"},             # llm, pi, codex
+                                  {"subtype": "error_max_turns"}])     # claude
+async def test_max_turns_is_not_a_failed_loop_turn(tmp_path, data):
+    """Defect 5: with tool_choice required, ending at max_turns is normal; 5 in a row run the
+    loop to max_rounds instead of ending it with `errors`."""
+    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=MaxTurnsAdapter(tmp_path / "h", data=data))
+    await rt.setup(restore=False)
+    rt.start_loop(start(max_rounds=5))
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds" and len(ad.sent) == 5
+    assert [d["why"] for d in custom(rt, "loop_prompt")] == ["start"] + ["turn_end"] * 4
     await rt.stop()
 
 
