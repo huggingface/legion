@@ -321,6 +321,13 @@ def test_tracker_idle_and_render(tmp_path):
     assert "w-0001" in frame and "turn_ended" in frame
     assert "FLOCK_CURRENT=" in frame  # not ./.flock: the hint names the file
     assert "completed 2" in localrun.status_line(snap, 3)
+    # an agent removed with a turn still open (a spawned child whose turn_ended was never
+    # read): its open turn goes with its row and does not block idle
+    store.insert_agent("w-gone", "loc", "w", 9, now)
+    _events(store, "w-gone", "turn_started")
+    assert not tr.idle(tr.snapshot(spec, now)) and "w-gone" in tr.open_turns
+    store.delete_agent_rows("w-gone")
+    assert tr.idle(tr.snapshot(spec, now)) and "w-gone" not in tr.open_turns
     store.close()
 
 

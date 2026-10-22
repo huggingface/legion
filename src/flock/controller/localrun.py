@@ -178,7 +178,12 @@ class Tracker:
     def read_events(self) -> None:
         from flock.cli import pretty_event
 
-        for a in self.store.list_agents(self.swarm):
+        agents = self.store.list_agents(self.swarm)
+        # a removed agent (a spawned child, docs/spawn.md) can leave a turn open here when its
+        # last turn_ended was not read before its row went: it never blocks `idle`
+        live = {a["name"] for a in agents}
+        self.open_turns = {n: t for n, t in self.open_turns.items() if n in live}
+        for a in agents:
             name = a["name"]
             after = self.cursor.get(name, 0)
             evs = self.store.read_events(name, after, limit=5000)
