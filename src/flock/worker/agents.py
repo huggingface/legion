@@ -21,7 +21,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from flock.models import AgentHeartbeat, Event, TokenUsage, TypeSpec, parse_duration
+from flock.models import (
+    AgentHeartbeat,
+    Event,
+    LoopMeta,
+    LoopStartCommand,
+    TokenUsage,
+    TypeSpec,
+    parse_duration,
+)
 from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
 from flock.worker.adapters.base import (
     AdapterEvent,
@@ -31,6 +39,7 @@ from flock.worker.adapters.base import (
     usage_sub,
 )
 from flock.worker.events import Outbox, SessionLog, utcnow
+from flock.worker.loop import render
 
 if TYPE_CHECKING:
     from flock.worker.identity import Identities
@@ -39,6 +48,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 INSTRUCTIONS_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "pi": "AGENTS.md", "llm": "AGENTS.md"}
+LOOP_ERROR_LIMIT = 3  # failed loop turns in a row end the worker-side loop
+LOOP_ERROR_BACKOFF = 2.0  # s before re-sending the loop prompt after a failed turn
+# Interruptions that are a decision (stop, drain, unassign), not a failure: no re-prompt.
+_DECIDED = ("stop", "drain", "unassign", "abandoned", "draining")
 
 
 class AgentState(BaseModel):
@@ -50,6 +63,9 @@ class AgentState(BaseModel):
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # cumulative, by model
     harness_cum: dict[str, TokenUsage] = Field(default_factory=dict)  # last cumulative snapshot
     harness_estimate_usd: float | None = None
+    loop_round: int = 0  # last loop round sent to this agent (docs/loop.md)
+    loop_run: str | None = None  # the loop run (LoopStartCommand.run) loop_round counts in
+    last_summary: str | None = None  # what the agent last passed to `done` (else its last reply)
 
 
 def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path, why: str) -> str:
@@ -120,6 +136,14 @@ class AgentRuntime:
         self._turn_tools: str | None = None  # tools version of the turn in flight
         self._tools_section: str | None = None  # last generated instructions section
         self._pinned: Toolset | None = None  # pinned when a prompt was forwarded between turns
+        # `every: turn_end` (docs/loop.md): set by loop_start, cleared by loop_stop / a limit
+        self.loop: LoopStartCommand | None = None
+        self._loop_errors = 0
+        self._loop_task: asyncio.Task | None = None
+        self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
+        self._turn_summary: str | None = None  # `done`'s summary this turn
+        self._turn_text: str | None = None  # last assistant text this turn
+        self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
 
     # ------------------------------------------------------------------ paths and state
     @property
@@ -196,7 +220,10 @@ class AgentRuntime:
         if resume_prompt:
             await self.prompt(resume_prompt)
 
-    async def prompt(self, text: str, *, prompt_id: str | None = None, timeout: str | None = None) -> None:
+    async def prompt(self, text: str, *, prompt_id: str | None = None, timeout: str | None = None,
+                     loop: LoopMeta | None = None) -> None:
+        if loop is not None:
+            text = self._loop_prompt(text, loop)
         if timeout:
             self._next_timeout = parse_duration(timeout).total_seconds()
         if self.phase == "running" and not self._stop_req:
@@ -204,7 +231,8 @@ class AgentRuntime:
             return
         if self.phase == "none" and (not self.allow_starts or self._stop_req):
             self.emit("prompt_deferred", {"prompt_id": prompt_id, "text": text,
-                                          "reason": "draining" if not self.allow_starts else self._stop_req})
+                                          "reason": "draining" if not self.allow_starts else self._stop_req,
+                                          **self._loop_untaken()})
             return
         self.buffer.append(text)
         if self.phase == "none":
@@ -228,7 +256,7 @@ class AgentRuntime:
 
     def _defer_buffer(self, reason: str) -> None:
         for text in self.buffer:
-            self.emit("prompt_deferred", {"text": text, "reason": reason})
+            self.emit("prompt_deferred", {"text": text, "reason": reason, **self._loop_untaken()})
         self.buffer.clear()
 
     def _prepare_workdir(self, tools: Toolset | None = None) -> None:
@@ -402,6 +430,7 @@ class AgentRuntime:
             if self.turn_id is None:
                 self._begin_turn(ev.data)
         elif k == "message" and ev.message is not None:
+            self._note_message(ev.message)
             self._emit(self.log.message(ev.message, turn_id=self.turn_id))
         elif k == "usage" and ev.usage is not None:
             self._account(ev)
@@ -414,9 +443,13 @@ class AgentRuntime:
                 if self._turn_tools is not None:
                     extra["tools_version"] = self._turn_tools
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
-                                         **extra,
+                                         "tool_calls": self._turn_tool_calls, **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
+                summary = self._turn_summary or self._turn_text
+                if summary:
+                    self.state.last_summary = summary
                 self._end_turn()
+                self._after_turn(ev.status or "completed")
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
         self.dirty = True
@@ -453,6 +486,8 @@ class AgentRuntime:
             if ts is not None and ts.error:
                 data["tools_error"] = ts.error
         self._turn_tools = data.get("tools_version")
+        self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
+        self._loop_inflight = None
         self.emit("turn_started", data)
 
     def _end_turn(self) -> None:
@@ -470,6 +505,7 @@ class AgentRuntime:
             extra = {"tools_version": self._turn_tools} if self._turn_tools is not None else {}
             self.emit("turn_interrupted", {"reason": reason, **extra})
             self._end_turn()
+            self._after_turn("interrupted", reason)
         self.awaiting = False
 
     def _account(self, ev: AdapterEvent) -> None:
@@ -486,6 +522,114 @@ class AgentRuntime:
             usage = usage_sub(usage, prev)
         self.state.tokens[model] = self.state.tokens.get(model, TokenUsage()) + usage
         self._turn_tokens[model] = self._turn_tokens.get(model, TokenUsage()) + usage
+
+    # ------------------------------------------------------------------ loop (docs/loop.md)
+    def _note_message(self, m: dict[str, Any]) -> None:
+        """Per turn: tool calls (not `done`), `done`'s summary and the last assistant text."""
+        if m.get("role") != "assistant":
+            return
+        content = m.get("content")
+        blocks = content if isinstance(content, list) else []
+        texts = [b.get("text") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+        if isinstance(content, str):
+            texts = [content]
+        text = "\n".join(t for t in texts if isinstance(t, str) and t.strip()).strip()
+        self._turn_tool_calls += sum(1 for b in blocks if isinstance(b, dict)
+                                and b.get("type") == "toolCall" and b.get("name") != "done")
+        if m.get("fromDoneTool") and text:
+            self._turn_summary = text
+        elif text:
+            self._turn_text = text
+
+    def spend_usd(self) -> float:
+        from flock.controller.prices import cost_usd, type_price_table
+
+        return cost_usd(self.state.tokens, type_price_table(self.spec))
+
+    def _loop_prompt(self, template: str, meta: LoopMeta) -> str:
+        """Number and render a loop prompt; record it as a `loop_prompt` event."""
+        if meta.kind == "loop":
+            n = meta.round if meta.round is not None else self.state.loop_round + 1
+            self.state.loop_round = max(self.state.loop_round, n)
+            meta = meta.model_copy(update={"round": n})
+        elif meta.kind == "final" and self.loop is not None:
+            self._loop_end("final")
+        self._loop_inflight = meta
+        self.emit("loop_prompt", {"kind": meta.kind, "round": meta.round, "why": meta.why,
+                                  **({"add_tools": meta.add_tools} if meta.add_tools else {})})
+        return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,
+                      now=utcnow())
+
+    def _loop_untaken(self) -> dict[str, Any]:
+        """A deferred prompt that was a loop prompt: it does not count as a round, and the
+        controller learns which one it was (`loop`) so it can send it again."""
+        m, self._loop_inflight = self._loop_inflight, None
+        if m is None:
+            return {}
+        if m.kind == "loop" and m.round is not None:
+            self.state.loop_round = min(self.state.loop_round, max(0, m.round - 1))
+        return {"loop": {"kind": m.kind, "round": m.round}}
+
+    def start_loop(self, cmd: LoopStartCommand) -> None:
+        """`loop_start`: send the loop prompt now if idle, then after every completed turn. A
+        new run (`flock loop --start`) counts rounds from the command's; a repeat of the same
+        run keeps the higher count."""
+        self.loop = cmd
+        if cmd.run is not None and cmd.run != self.state.loop_run:
+            self.state.loop_run, self.state.loop_round = cmd.run, cmd.meta.round or 0
+        else:
+            self.state.loop_round = max(self.state.loop_round, cmd.meta.round or 0)
+        self._loop_errors = 0
+        if self.turn_id is None and not self.awaiting and not self.buffer:
+            self._loop_schedule(0.0, "start")
+
+    def stop_loop(self, reason: str = "stop") -> None:
+        """`loop_stop`: no more worker-side loop prompts; the turn in flight finishes. Always
+        answered with `loop_stopped` (the controller waits for it before the final round)."""
+        if self._loop_task is not None and not self._loop_task.done():
+            self._loop_task.cancel()
+        active, self.loop = self.loop is not None, None
+        self.emit("loop_stopped", {"reason": reason, "round": self.state.loop_round, "active": active})
+
+    def _loop_end(self, reason: str) -> None:
+        self.loop = None
+        self.emit("loop_stopped", {"reason": reason, "round": self.state.loop_round, "active": True})
+
+    def _after_turn(self, status: str, reason: str | None = None) -> None:
+        if self.loop is None:
+            return
+        if status == "completed":
+            self._loop_errors = 0
+            self._loop_schedule(0.0, "turn_end")
+            return
+        if status == "interrupted" and (reason is None or reason in _DECIDED):
+            return  # stopped on purpose: the controller decides what comes next
+        self._loop_errors += 1
+        if self._loop_errors >= LOOP_ERROR_LIMIT:
+            self._loop_end("errors")
+            return
+        self._loop_schedule(LOOP_ERROR_BACKOFF, f"retry after {reason or status}")
+
+    def _loop_schedule(self, delay: float, why: str) -> None:
+        if self._loop_task is not None and not self._loop_task.done():
+            return
+        self._loop_task = asyncio.create_task(self._loop_next(delay, why), name=f"loop-{self.name}")
+
+    async def _loop_next(self, delay: float, why: str) -> None:
+        if delay:
+            await asyncio.sleep(delay)
+        lp = self.loop
+        if lp is None or not self.allow_starts or self._stop_req:
+            return
+        if self.turn_id is not None or self.awaiting or self.buffer:
+            return  # a turn is already on its way; its end schedules the next round
+        if lp.max_rounds is not None and self.state.loop_round >= lp.max_rounds:
+            self._loop_end("max_rounds")
+            return
+        if lp.deadline is not None and utcnow() >= lp.deadline:
+            self._loop_end("deadline")
+            return
+        await self.prompt(lp.text, loop=lp.meta.model_copy(update={"round": None, "why": why}))
 
     # ------------------------------------------------------------------ control
     @property
