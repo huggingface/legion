@@ -93,7 +93,7 @@ fi
 log "flock run started (pids ${PIDS[*]})"
 
 sync_out() {
-  [ -d "$CHATBOT_WS" ] && push "$CHATBOT_WS" "$B/ws" || log "sync ws failed"
+  if [ -d "$CHATBOT_WS" ]; then push "$CHATBOT_WS" "$B/ws" || log "sync ws failed"; fi
   for d in "${RUNS[@]}"; do [ -d "$d" ] && { push "$d" "$B/flock/$(basename "$d")" || log "sync $d failed"; }; done
   push "$H/logs" "$B/logs" || log "sync logs failed"
 }
@@ -119,7 +119,7 @@ while alive; do
   now=$(date +%s)
   if [ "$STOP" = 0 ] && [ "${#PIDS[@]}" -gt 1 ] && failed; then log "a flock run failed"; on_term; fi
   if [ "$STOP" = 1 ] && [ -z "${stop_synced:-}" ]; then  # the workspace first, while flock drains
-    stop_synced=1; push "$CHATBOT_WS" "$B/ws" || log "sync ws failed"
+    stop_synced=1; if [ -d "$CHATBOT_WS" ]; then push "$CHATBOT_WS" "$B/ws" || log "sync ws failed"; fi
   fi
   if [ "$switched" = 0 ] && [ "$STOP" = 0 ] && [ $((now - last_check)) -ge "${CHATBOT_CHECK_S:-30}" ]; then
     last_check=$now
