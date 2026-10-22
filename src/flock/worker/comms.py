@@ -13,8 +13,8 @@ the built-in `comms:*` tools with their rules, and the local gateway `flock-tool
   not count) emits `comms_mention {msg_id, thread, from}` on that agent's event stream, a reply
   in a thread the agent posted in emits `comms_thread_reply {msg_id, thread, from}` (one event
   per message and agent, mention first; only the kinds in `comms.wake`). The controller hands
-  those to its comms hook (`flock.controller.api`, `on_comms`), where the loop's wake queue
-  plugs in.
+  those to the loop's wake queue (`flock.controller.api`: `wake(agent, "comms.<reason>")`,
+  honoured for types whose `loop.on` lists it).
 - Tools: `post`, `read`, `search` (flock.comms.tools). Rules are checked before any board call;
   a refusal is the tool result `{"error": "refused: ..."}`. `max_posts` and the last post time
   are kept in the agent's synced state, so they survive a relaunch.

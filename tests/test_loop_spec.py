@@ -95,7 +95,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no comms feeder in this version" in r.output
+    assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 

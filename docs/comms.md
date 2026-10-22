@@ -143,12 +143,14 @@ Each new channel message is matched against every joined agent on the worker, ex
 One event per message and agent, the mention first. Also on the stream: `comms_joined`,
 `comms_join_failed`, `comms_refused`.
 
-**The wake hook.** The controller passes every `comms_mention` and `comms_thread_reply` it
-receives to `create_app(..., on_comms=fn)` as `fn(agent, reason, data)` with reason `mention` or
-`thread` and `data = {agent, msg_id, thread, from}`. Without a hook it logs them. The loop's wake
-queue (`loop.on: [comms.mention, comms.thread]`, a separate PR) plugs in here as
-`on_comms=lambda agent, reason, data: wake(agent, f"comms.{reason}")`; until then nothing is
-prompted by a message, and the events are in `flock events`.
+**Wake-ups.** The controller passes every `comms_mention` and `comms_thread_reply` it receives to
+the loop's wake queue as `wake(agent, "comms.mention")` or `wake(agent, "comms.thread")`: an agent
+whose type has `loop.on: [comms.mention, comms.thread]` gets its loop prompt early (2 s debounce,
+one prompt per burst, never while it is working; docs/loop.md "Wake queue"). A type without that
+`on:` entry, or without a running loop, is not prompted by a message; the events are in
+`flock events` either way. `create_app(..., on_comms=fn)` also hands each one to
+`fn(agent, reason, data)` with reason `mention` or `thread` and
+`data = {agent, msg_id, thread, from}` (an observer; tests use it).
 
 ## Protocols
 

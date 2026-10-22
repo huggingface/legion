@@ -356,6 +356,42 @@ async def test_wake_queue_debounces_and_skips_pending(sim):
     assert list(prompts(await sim.commands())) == [A0]
 
 
+async def test_comms_events_wake_the_loop(sim):
+    """The worker's comms events reach the wake queue (`on_comms` -> `wake(agent, comms.<reason>)`):
+    two mentions of A0 give it one prompt; a thread reply to A1 (not in `on:`) gives none."""
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"]})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    msg = {"msg_id": 7, "thread": 7, "from": "carlos"}
+    await sim.events(A0, ("comms_mention", msg), ("comms_mention", {**msg, "msg_id": 8}))
+    await sim.events(A1, ("comms_thread_reply", msg))
+    sim.tick(2.1)
+    got = prompts(await sim.commands())
+    assert list(got) == [A0] and got[A0]["loop"]["why"] == "wake: comms.mention"
+    assert got[A0]["loop"]["round"] == 2
+    await sim.turn(A0, got[A0])
+    sim.tick(3)
+    assert await sim.commands() == []
+
+
+async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"]},
+                    limits={"budget_usd": 1.0})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.store.put_swarm_flags("demo", {"budget_stop": "hard", "budget_usd": 1.0, "at": 0})
+    assert not sim.loops.wake(A0, "comms.mention")  # the loop has not seen the stop yet
+    await sim.events(A0, ("comms_mention", {"msg_id": 7, "thread": 7, "from": "carlos"}))
+    sim.tick(2.1)
+    assert not [c for c in await sim.commands() if c["kind"] == "prompt"]
+
+
 async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     from fastapi.testclient import TestClient
     from typer.testing import CliRunner

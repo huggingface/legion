@@ -147,3 +147,73 @@ async def test_comms_end_to_end(tmp_path, monkeypatch):
         srv.shutdown()
         bsrv.shutdown()
         await asyncio.sleep(0)
+
+
+def wake_spec(llm_url: str, board_url: str) -> dict:
+    """Two looping types on the board: `mw` wakes on a mention, `nw` has no `on:`."""
+    loop = {"prompt": "bash: echo round {round} {why}", "every": "1h", "while": {"max_rounds": 5}}
+    base = {"harness": "llm", "model": "gpu:fake-model", "replicas": 1, "agents_per_worker": 1,
+            "idle_grace": "30s", "turn_timeout": "30s", "comms": True}
+    return {
+        "swarm": "wk", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+        "providers": {"gpu": {"type": "openai_compat", "base_url": llm_url, "api_key_env": KEY_ENV,
+                              "self_hosted": True}},
+        "comms": {"kind": "msgboard", "url": board_url, "invite_env": INVITE_ENV,
+                  "channel": "flock-test"},
+        "types": {"mw": {**base, "loop": {**loop, "on": ["comms.mention"]}},
+                  "nw": {**base, "loop": loop}},
+    }
+
+
+async def test_mention_on_the_board_wakes_the_mentioned_agent_once(tmp_path, monkeypatch):
+    """A message on the fake board mentions two looping agents (`every: 1h`, so only a wake can
+    prompt them again): the one whose type has `on: [comms.mention]` gets one loop prompt
+    (`why: wake: comms.mention`), the other none."""
+    monkeypatch.setenv(KEY_ENV, "sk-e2e")
+    board, bsrv, board_url = fake_msgboard.serve()
+    monkeypatch.setenv(INVITE_ENV, board.invite)
+    srv = fake_openai.serve(0, str(tmp_path / "requests.jsonl"))
+    llm_url = f"http://127.0.0.1:{srv.server_port}/v1"
+    sw = Swarm(tmp_path)
+    sw.settings.secret_source = {INVITE_ENV: board.invite}
+    sw.app = create_app(sw.store, TOKEN, secret_source={INVITE_ENV: board.invite}, loop_interval=0)
+    import httpx
+    sw.transport = httpx.ASGITransport(app=sw.app)
+    monkeypatch.setattr(cli, "client",
+                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(wake_spec(llm_url, board_url)))
+    MW, NW = "mw-0000", "nw-0000"
+
+    def evs(agent: str, kind: str) -> list[dict]:
+        return [e for e in sw.store.read_events(agent, 0) if e["type"] == kind]
+
+    def users(agent: str) -> list[str]:
+        return [b["text"] for e in evs(agent, "message") if e["data"]["message"]["role"] == "user"
+                for b in e["data"]["message"]["content"]]
+
+    async def ticker():
+        while True:
+            sw.app.state.loops.tick()
+            await asyncio.sleep(0.1)
+
+    try:
+        out = await apply(spec_file)
+        assert "no comms feeder" not in out  # comms.mention is fed for a type on the board
+        sw.tick()
+        sw.tasks.append(asyncio.create_task(ticker()))
+        # round 1 (`start`) for both; each joins the board at that first prompt
+        await until(lambda: all(len(evs(a, "turn_ended")) == 1 for a in (MW, NW)), timeout=15)
+        await until(lambda: all(w.comms._cursor is not None for w in sw.workers.values()), timeout=10)
+        board.post("carlos", 12, f"@{MW} @{NW} can you two look at the ladder?")
+        await until(lambda: evs(MW, "comms_mention") and evs(NW, "comms_mention"), timeout=10)
+        await until(lambda: len(evs(MW, "turn_ended")) == 2, timeout=10)
+        await asyncio.sleep(3)  # past the 2 s debounce: nothing more comes
+        assert users(MW) == ["bash: echo round 1 start", "bash: echo round 2 wake: comms.mention"]
+        assert users(NW) == ["bash: echo round 1 start"]
+        assert len(evs(MW, "comms_mention")) == 1 and len(evs(NW, "comms_mention")) == 1
+    finally:
+        await sw.close()
+        srv.shutdown()
+        bsrv.shutdown()
+        await asyncio.sleep(0)

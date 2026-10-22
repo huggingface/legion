@@ -22,7 +22,7 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from flock.models import AGENT_NAME_RE, SwarmSpec, loop_refusals
+from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, loop_refusals
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -266,6 +266,23 @@ def load_spec(spec_file: str) -> SwarmSpec:
     return spec
 
 
+# `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
+COMMS_WAKES = {"comms.mention": "mention", "comms.thread": "thread"}
+
+
+def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
+    """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
+    kind = COMMS_WAKES.get(src)
+    if kind is None:
+        return "no feeder in this version (comms.mention and comms.thread are fed)"
+    if spec.comms is None or not comms_tools(ts, spec.comms):
+        return ("no comms feeder: the type is not on the board (set `comms: true` and the "
+                "swarm-level `comms:` block)")
+    if kind not in spec.comms.wake:
+        return f"no comms feeder: comms.wake does not list {kind}"
+    return None
+
+
 def _check_loops(spec: SwarmSpec) -> None:
     """Refuse loop settings this version cannot run; say which `on:` sources have no feeder."""
     if refused := loop_refusals(spec):
@@ -274,8 +291,8 @@ def _check_loops(spec: SwarmSpec) -> None:
         raise typer.Exit(1)
     for name, ts in spec.types.items():
         for src in ts.loop.on if ts.loop else []:
-            typer.echo(f"warning: type {name}: loop.on {src}: no comms feeder in this version yet; "
-                       "wake-ups arrive once comms lands", err=True)
+            if why := _unfed(spec, ts, src):
+                typer.echo(f"warning: type {name}: loop.on {src}: {why}", err=True)
 
 
 def _provider_backed(spec: SwarmSpec) -> bool:

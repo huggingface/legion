@@ -16,7 +16,8 @@ Who sends the loop prompt (`mode`):
   prompts on `turn_ended` events or when `every` has passed since the agent's last loop prompt.
 
 `first` goes alone, and the loop prompt only after the turn that followed it ended. Wake-ups
-(`wake(agent, reason)`, the seam for `on: comms.*`) queue the loop prompt after a 2 s debounce.
+(`wake(agent, reason)`, fed by the workers' comms events for `on: comms.*`) queue the loop
+prompt after a 2 s debounce.
 
 State lives in the store (`loops`, `loop_agents`, `swarm_flags`), so a controller restart
 picks the loops up where they were. Swarm-level events go to the stream `_swarm.<swarm>`
@@ -132,10 +133,13 @@ class LoopEngine:
     def wake(self, agent: str, reason: str) -> bool:
         """Queue the agent's loop prompt (debounced WAKE_DEBOUNCE s, skip_pending), e.g. for a
         comms mention. Only for a running loop whose `on:` lists `reason` (or its prefix
-        before ':'); returns False when the wake was ignored."""
+        before ':') in a swarm the hard budget stop has not stopped; returns False when the
+        wake was ignored."""
         with self._lock:
             a = self.store.get_agent(agent)
-            sw = self.store.get_swarm(a["swarm"]) if a else None
+            if a is None or self.hard_stopped(a["swarm"]):
+                return False
+            sw = self.store.get_swarm(a["swarm"])
             ts = sw["spec"].types.get(a["type"]) if sw else None
             if ts is None or ts.loop is None:
                 return False

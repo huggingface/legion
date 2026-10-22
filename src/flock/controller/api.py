@@ -528,10 +528,10 @@ def create_app(
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
     default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`).
-    `comms_transport` lets tests fake the message board (docs/comms.md). `on_comms(agent,
-    reason, data)` is the comms wake hook: called for every `comms_mention` (reason "mention")
-    and `comms_thread_reply` (reason "thread") event a worker posts; the loop's wake queue
-    (`loop.on: comms.*`) plugs in here. None: logged at debug level only."""
+    `comms_transport` lets tests fake the message board (docs/comms.md). Every `comms_mention`
+    (reason "mention") and `comms_thread_reply` (reason "thread") event a worker posts goes to
+    the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
+    `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer."""
     secret_source = os.environ if secret_source is None else secret_source
     if loop_interval is None:
         loop_interval = float(os.environ.get("FLOCK_LOOP_INTERVAL", "1"))
@@ -569,11 +569,11 @@ def create_app(
     def comms_event(agent: str, ev: Event) -> None:
         data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
         reason = COMMS_WAKE_EVENTS[ev.type]
-        if on_comms is None:
-            log.debug("comms %s for %s: %s", reason, agent, data)
-            return
         try:
-            on_comms(agent, reason, {"agent": agent, **data})
+            woke = loops.wake(agent, f"comms.{reason}")
+            log.debug("comms %s for %s (wake %s): %s", reason, agent, woke, data)
+            if on_comms is not None:
+                on_comms(agent, reason, {"agent": agent, **data})
         except Exception:  # a hook never breaks event ingestion
             log.exception("comms hook failed for %s", agent)
 
