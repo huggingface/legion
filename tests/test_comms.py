@@ -357,7 +357,7 @@ async def test_read_defaults_to_the_run_since_the_kickoff(tmp_path, board):
         out, err = await t.call("dev-0000", "read")
         assert not err and [m["text"] for m in out["messages"]] == ["kickoff", "new 1"]
         assert out["since"] == kickoff and "truncated" not in out and "since:" in out["note"]
-        out, err = await t.call("dev-0000", "read", since=f"#{old[1]}")
+        out, err = await t.call("dev-0000", "read", since=f"#{old[0]}")  # strictly newer
         assert not err and [m["text"] for m in out["messages"]] == ["old 1", "old 2", "kickoff", "new 1"]
         assert "truncated" not in out and "note" not in out
         out, err = await t.call("dev-0000", "read", n=1)
@@ -831,3 +831,25 @@ async def test_normalised_board_urls_are_idempotent_and_build_clients(url, want)
         assert board.url == want and same_board(board.url, url)
     finally:
         await board.aclose()
+
+
+async def test_read_since_is_exclusive_and_says_caught_up(tmp_path, board):
+    """Polling with `since: <last id seen>` returns only newer messages, and an explicit
+    "caught up" note when there are none (it used to return the `since` message itself, so a
+    poll was never empty)."""
+    kickoff = board.post("sw-host", CH, "kickoff")["id"]
+    t = Team(tmp_path, board, ["dev-0000"])
+    t.spec.kickoff_id = kickoff
+    try:
+        await t.start()
+        first = board.post("ds-1", CH, "one", reply_to=kickoff)["id"]
+        out, err = await t.call("dev-0000", "read", since=kickoff)
+        assert not err and [m["text"] for m in out["messages"]] == ["one"]
+        out, err = await t.call("dev-0000", "read", since=first)
+        assert not err and out["messages"] == []
+        assert out["note"] == f"caught up: nothing newer than {first}"
+        board.post("ds-1", CH, "two")
+        out, err = await t.call("dev-0000", "read", since=first)
+        assert not err and [m["text"] for m in out["messages"]] == ["two"] and "note" not in out
+    finally:
+        await t.close()

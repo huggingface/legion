@@ -49,9 +49,11 @@ DEFS: dict[str, dict[str, Any]] = {
                                                     f"most {READ_MAX}); `truncated` says older exist"},
             "thread": {**_ID, "description": "optional: a thread's root message id, to read "
                                              "that thread instead"},
-            "since": {**_ID, "description": "optional: a message id; only messages from it on "
-                                            "(default: the kickoff, so pass an older id to read "
-                                            "history from before the run)"},
+            "since": {**_ID, "description": "optional: a message id; only messages newer than "
+                                            "it (pass the last id you saw to poll; an empty "
+                                            "result notes you are caught up). Default: from the "
+                                            "kickoff on; pass an older id to read history from "
+                                            "before the run"},
         },
         "required": [],
     },

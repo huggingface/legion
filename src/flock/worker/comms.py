@@ -689,7 +689,9 @@ class CommsHub:
             since = c.kickoff_id  # on a reused channel, history from before the run stays out
         reached = older = False  # reached: the page goes back to `since`, nothing after it is cut
         if since is not None:
-            kept = [x for x in msgs if isinstance(x.get("id"), int) and x["id"] >= since]
+            # an explicit `since` is a cursor: strictly newer; the default keeps the kickoff itself
+            kept = [x for x in msgs if isinstance(x.get("id"), int)
+                    and (x["id"] >= since if default else x["id"] > since)]
             reached = len(kept) < len(msgs) or (bool(kept) and kept[0]["id"] == since)
             older = len(kept) < len(msgs) or bool(page.get("has_more"))
             msgs, out["since"] = kept, since
@@ -701,6 +703,8 @@ class CommsHub:
         elif default and reached and older:
             out["note"] = (f"from the kickoff (message {since}) on; for older ones read with "
                            "since: <message id>")
+        elif since is not None and not default and not msgs:
+            out["note"] = f"caught up: nothing newer than {since}"
         return out
 
     async def _search(self, op: _Op, args: dict[str, Any]) -> dict[str, Any]:
