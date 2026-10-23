@@ -50,7 +50,7 @@ if [ -z "${CHATBOT_PREINSTALLED:-}" ]; then
   pip "$W[controller]" "huggingface_hub==2.2.0"
 fi
 mkdir -p "$H/repo" && tar -xzf "$H/payload/repo.tar.gz" -C "$H/repo"
-EXP=$H/repo/experiments/chatbot-v2
+EXP=$H/repo/experiments/chatbot-v2; if [ -n "${CHATBOT_VARIANT:-}" ]; then "$PYTHON" "$EXP/$CHATBOT_VARIANT/render.py" --into "$EXP" > "$H/logs/variant.log" 2>&1 || { cat "$H/logs/variant.log"; exit 1; }; fi  # CHATBOT_VARIANT=selfhosted: selfhosted/README.md
 export CHATBOT_CONFIG=$EXP/world.yaml  # the world's knobs (worlds/chatbot2)
 render() {  # the *.local.yaml specs: board, channels, run name (and job/smoke.json in a smoke)
   local f
