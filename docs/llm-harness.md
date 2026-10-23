@@ -111,7 +111,7 @@ any steered prompts. It stops when a reply has no tool call and nothing was stee
 | `turn_started` | the loop takes a prompt while idle |
 | `message` (pi format) | each user prompt, assistant reply (`toolCall` blocks, `thinking` from `reasoning_content` or `<think>`) and `toolResult` |
 | `usage` | after every model call, per call (not cumulative); `input` excludes cached prompt tokens, keyed by the model id |
-| `turn_ended completed` | a reply without tool calls and no queued prompt; a `done` call (its summary is emitted first as the final assistant message, `fromDoneTool: true`); or, forced `tool_choice` without `done`, after the forced call's tool ran. `data.num_turns` = model calls |
+| `turn_ended completed` | a reply without tool calls and no queued prompt; a `done` call (its summary is emitted first as the final assistant message, `fromDoneTool: true`); or, forced `tool_choice` without `done`, after the forced call's tool ran. `data.num_turns` = model calls; `data.repeated_calls` when any (see Repeated calls) |
 | `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
 | `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
 | `turn_ended error`, `reason: context_overflow` | a context-length 400 that compaction plus one retry could not fix |
@@ -134,6 +134,20 @@ workdir, stdin closed, stdout and stderr combined, output truncated to `tool_out
 killed on timeout or stop. Its environment is the shared allow-list (`PATH`, `HOME`, locale,
 proxies, ...) plus what the worker passes (the type's `secrets`, `env`, msgboard identity,
 `FLOCK_AGENT*`), minus `FLOCK_TOKEN` and minus the provider key.
+
+### Repeated calls
+
+A small model that is stuck often makes the same call again and again inside one turn. The loop
+counts calls by tool name and arguments, per turn (`done` is not counted):
+
+- the 3rd, 4th and 5th identical call still run, but their result starts with
+  `This is the third identical call in this turn. Are you stuck? Try a different action or call done.`;
+- from the 6th on, the call is not run: its result is that nudge plus
+  `[not run: the same call was made N times already this turn]` (`isError`).
+
+`turn_ended` carries `data.repeated_calls` (calls from the 3rd identical one on) when there were
+any. A command whose effect changes between runs (a counter, a poll) is still "identical"; vary
+it (e.g. add a `sleep`) or end the turn.
 
 Small models often write the call as text instead of `tool_calls`. The loop accepts a reply
 that is only (after stripping a code fence or `<tool_call>` / `<|tool_call_start|>` tags):

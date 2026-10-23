@@ -644,6 +644,13 @@ STEP = ('n=$(( $(cat c 2>/dev/null || echo 0) + 1 )); echo $n > c; '
         'for i in range(30)]}))"; [ $n -ge 12 ] && echo DONE-NOW; true')
 
 
+def no_repeat_guard(monkeypatch) -> None:
+    import flock.worker.adapters.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "REPEAT_NUDGE_AT", 1000)
+    monkeypatch.setattr(llm_mod, "REPEAT_SKIP_AFTER", 1000)
+
+
 def test_compaction_drops_old_steps_inside_one_turn(tmp_path):
     def call(i):
         return {"role": "assistant", "content": None, "tool_calls": [
@@ -669,6 +676,7 @@ def tokens_sent(srv) -> list[int]:
 async def test_growing_turn_is_compacted_before_the_bound(tmp_path, fake_server, monkeypatch):
     """Run 3: ~600-char JSON tool results at ~2 chars/token; a chars/4 estimate let a 3000-token
     budget reach 7.9k and overflow 8192. Projection from the server's count keeps it bounded."""
+    no_repeat_guard(monkeypatch)  # STEP is one stateful command repeated on purpose
     a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", context_tokens=2500,
                        max_turns=20)
     await a.start(wd, None, spec, env={KEY_ENV: "k"})
@@ -685,6 +693,7 @@ async def test_growing_turn_is_compacted_before_the_bound(tmp_path, fake_server,
 
 
 async def test_context_error_compacts_and_retries_once(tmp_path, fake_server, monkeypatch):
+    no_repeat_guard(monkeypatch)  # STEP is one stateful command repeated on purpose
     a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=30,
                        context_tokens=100_000)  # no proactive compaction: the server is the bound
     await a.start(wd, None, spec, env={KEY_ENV: "k"})
@@ -726,3 +735,42 @@ async def test_calibration_and_settings(tmp_path, fake_server, monkeypatch):
                                   "types": {"a": {"harness": "codex", "model": "m", "chars_per_token": 2}}})
     with pytest.raises(ValueError, match="tool_output_chars must be >= 200"):
         llm_spec(tool_output_chars=10)
+
+
+async def test_repeated_identical_calls_are_nudged_then_not_run(tmp_path, fake_server, monkeypatch):
+    """A model stuck repeating one call: from the third identical call in a turn its result starts
+    with a nudge; after the fifth the call is not run. `repeated_calls` counts them."""
+    from flock.worker.adapters.llm import REPEAT_NUDGE
+
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required")
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo x >> rep.txt done after 7")  # the same bash call 7 times, then done
+    evs = await turn(a)
+    end = evs[-1]
+    assert end.status == "completed" and end.data["num_turns"] == 8
+    assert end.data["repeated_calls"] == 5  # calls 3 to 7
+    results = [e.message for e in evs if e.kind == "message" and e.message["role"] == "toolResult"]
+    texts = [r["content"][0]["text"] for r in results[:7]]
+    assert [t.startswith(REPEAT_NUDGE) for t in texts] == [False, False, True, True, True, True, True]
+    assert texts[2] == f"{REPEAT_NUDGE}\n[exit code 0]" and not results[2]["isError"]
+    assert "[not run: the same call was made 5 times already" in texts[5] and results[5]["isError"]
+    assert (wd / "rep.txt").read_text().count("x") == 5  # the 6th and 7th were not run
+    sent = requests_seen(fake_server)[3]["body"]["messages"][-1]
+    assert sent["role"] == "tool" and sent["content"].startswith(REPEAT_NUDGE)
+    await a.send("bash: echo y >> rep.txt done after 2")  # a new turn counts afresh
+    end = (await turn(a))[-1]
+    assert end.status == "completed" and "repeated_calls" not in end.data
+    await a.stop()
+
+
+async def test_two_identical_calls_are_not_nudged(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required")
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo x >> r.txt\ndone after 2")
+    end = (await turn(a))[-1]
+    assert "repeated_calls" not in end.data
+    await a.send("bash: echo y >> r.txt\ndone after 3")  # a third identical call: nudged
+    evs = await turn(a)
+    assert evs[-1].data["repeated_calls"] == 1
+    assert (wd / "r.txt").read_text() == "x\nx\ny\ny\ny\n"
+    await a.stop()
