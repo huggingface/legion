@@ -726,3 +726,31 @@ async def test_calibration_and_settings(tmp_path, fake_server, monkeypatch):
                                   "types": {"a": {"harness": "codex", "model": "m", "chars_per_token": 2}}})
     with pytest.raises(ValueError, match="tool_output_chars must be >= 200"):
         llm_spec(tool_output_chars=10)
+
+
+async def test_loop_turn_at_max_turns_sets_an_unfinished_summary(tmp_path, fake_server, monkeypatch):
+    """The worker loop with the llm harness: a round that stops at max_turns (no `done`) makes
+    the next round's `{last_summary}` say so instead of repeating the previous summary."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from flock.models import LoopMeta, LoopStartCommand
+
+    monkeypatch.setenv(KEY_ENV, "k")
+    spec = llm_spec(fake_server.url, tool_choice="required", max_turns=2)
+    a = LLMAdapter(tmp_path / "work" / "llm-0001", agent="llm-0001", home=tmp_path / "llm")
+    rt = AgentRuntime("llm-0001", "llm", spec, swarm="sw", work_root=tmp_path / "work",
+                      adapter=a, outbox=Outbox())
+    await rt.setup(restore=False)
+    rt.state.last_summary = "stale summary from hours ago"
+    rt.start_loop(LoopStartCommand(
+        agent="llm-0001", text="bash: echo r{round}\nlast: {last_summary}", max_rounds=2,
+        run=uuid.uuid4().hex[:12],
+        meta=LoopMeta(kind="loop", type="llm", round=0, why="turn_end", started_at=datetime.now(UTC))))
+    await until(lambda: rt.state.turns == 2, timeout=20)
+    await rt.stop()
+    prompts = [m["content"] for r in requests_seen(fake_server) for m in r["body"]["messages"]
+               if m["role"] == "user" and m["content"].startswith("bash: echo r")]
+    assert prompts[0] == "bash: echo r1\nlast: stale summary from hours ago"
+    assert prompts[-1] == ("bash: echo r2\nlast: previous turn ended (max_turns) after 2 tool call(s) "
+                           "without finishing (last calls: bash, bash)")

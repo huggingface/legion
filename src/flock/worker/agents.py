@@ -150,6 +150,7 @@ class AgentRuntime:
         self._loop_errors = 0
         self._loop_task: asyncio.Task | None = None
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
+        self._turn_call_names: list[str] = []  # their tool names, in order
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
         self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
@@ -480,6 +481,8 @@ class AgentRuntime:
                                          "tool_calls": self._turn_tool_calls, **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 summary = self._turn_summary or self._turn_text
+                if self._turn_summary is None and ev.status not in (None, "completed"):
+                    summary = self._unfinished_summary(ev.data)  # not a stale or half-way text
                 if summary:
                     self.state.last_summary = summary
                 self._end_turn()
@@ -488,6 +491,14 @@ class AgentRuntime:
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
         self.dirty = True
+
+    def _unfinished_summary(self, data: dict[str, Any]) -> str:
+        """`{last_summary}` after a turn that stopped without `done` (max_turns, budget, error):
+        say so, so the next loop prompt does not repeat an older turn's summary."""
+        why = data.get("reason") or data.get("subtype") or "an error"
+        last = ", ".join(self._turn_call_names[-3:]) or "none"
+        return (f"previous turn ended ({why}) after {self._turn_tool_calls} tool call(s) without "
+                f"finishing (last calls: {last})")
 
     def _usage_missing(self, status: str | None) -> bool:
         """A provider-backed turn that completed with zero reported tokens: the server sent no
@@ -522,6 +533,7 @@ class AgentRuntime:
                 data["tools_error"] = ts.error
         self._turn_tools = data.get("tools_version")
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
+        self._turn_call_names = []
         self._loop_inflight = None
         self.emit("turn_started", data)
 
@@ -569,8 +581,10 @@ class AgentRuntime:
         if isinstance(content, str):
             texts = [content]
         text = "\n".join(t for t in texts if isinstance(t, str) and t.strip()).strip()
-        self._turn_tool_calls += sum(1 for b in blocks if isinstance(b, dict)
-                                and b.get("type") == "toolCall" and b.get("name") != "done")
+        names = [str(b.get("name")) for b in blocks if isinstance(b, dict)
+                 and b.get("type") == "toolCall" and b.get("name") != "done"]
+        self._turn_tool_calls += len(names)
+        self._turn_call_names += names
         if m.get("fromDoneTool") and text:
             self._turn_summary = text
         elif text:
