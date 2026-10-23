@@ -31,6 +31,7 @@ SHIM = (f"import resource as r,runpy,sys\nfor k,v in {LIMITS}: r.setrlimit(k,(v,
 class ElizaWorld(World):
     name, version, description = "eliza", "0.1.0", (HERE / "rules.md").read_text()
     dirs, probes_src = ("agents", "best", "probes"), HERE / "probes"
+    write_cap = WRITE_CAP  # bytes per file
 
     def __init__(self, root: str | None = None) -> None:
         self.ws = Path(root or os.environ.get("ELIZA_WS", "ws")).resolve()
@@ -75,12 +76,16 @@ class ElizaWorld(World):
         self._append("log.jsonl", {"ts": round(time.time(), 3), "agent": agent.name, "turn":
                                    agent.turn, "req": agent.request_id, "action": action, **data})
 
+    def _argv(self, path: Path, tmp: str) -> list[str]:
+        """The interpreter's arguments after `-I` that run the bot at `path` in `tmp`."""
+        return ["-c", SHIM, str(path)]
+
     def _run(self, path: Path, lines: list[str]) -> dict:
         """One conversation: each line with its reply line, the exit status, stderr's tail."""
         with tempfile.TemporaryDirectory() as tmp:
             out, err = Path(tmp) / ".out", Path(tmp) / ".err"
             with open(out, "wb") as fo, open(err, "wb") as fe:
-                proc = subprocess.Popen([sys.executable, "-I", "-c", SHIM, str(path)], cwd=tmp,
+                proc = subprocess.Popen([sys.executable, "-I", *self._argv(path, tmp)], cwd=tmp,
                                         env={}, stdin=subprocess.PIPE, stdout=fo, stderr=fe,
                                         start_new_session=True)
                 try:
@@ -147,8 +152,9 @@ class ElizaWorld(World):
         on a syntax error the file keeps its previous content and the agent reads the error."""
         rel, data = self._rel(p), text.encode()
         before = p.stat().st_size if p.is_file() else 0
-        if len(data) > WRITE_CAP:
-            raise ToolError(f"refused: {len(data)} bytes, the limit is {WRITE_CAP}", "too_big")
+        if len(data) > self.write_cap:
+            raise ToolError(f"refused: {len(data)} bytes, the limit is {self.write_cap}",
+                            "too_big")
         p.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / p.name

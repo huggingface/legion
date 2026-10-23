@@ -243,9 +243,10 @@ class ChatbotWorld(ElizaWorld):
     def _promoted(self, rec: dict) -> None:
         self._mirror(["best/bot.py", f"best/v{rec['n']}.py", "best/history.jsonl", "log.jsonl"])
 
-    def _mirror(self, rels: list[str]) -> None:
-        """Copy workspace files to $CHATBOT_BUCKET at the same relative paths. A failure is
-        logged (`mirror_error`), never raised: the run goes on."""
+    def _mirror(self, rels: list[str], delete: tuple[str, ...] = ()) -> None:
+        """Copy workspace files to $CHATBOT_BUCKET at the same relative paths (and remove the
+        `delete` ones there). A failure is logged (`mirror_error`), never raised: the run goes
+        on."""
         dest = os.environ.get("CHATBOT_BUCKET", "").strip().rstrip("/")
         if not dest:
             return
@@ -257,8 +258,12 @@ class ChatbotWorld(ElizaWorld):
                 ns, name, *rest = dest.removeprefix("hf://buckets/").split("/")
                 pre = "".join(x + "/" for x in rest if x)
                 HfApi().batch_bucket_files(f"{ns}/{name}",
-                                           add=[(str(self.ws / r), pre + r) for r in rels])
+                                           add=[(str(self.ws / r), pre + r) for r in rels],
+                                           **({"delete": [pre + r for r in delete]}
+                                              if delete else {}))
             else:
+                for r in delete:
+                    (Path(dest) / r).unlink(missing_ok=True)
                 for r in rels:
                     (Path(dest) / r).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(self.ws / r, Path(dest) / r)
@@ -288,16 +293,16 @@ def make_app(world: ChatbotWorld, token: str):
     return app
 
 
-def serve() -> None:
+def serve(cls: type[ChatbotWorld] = ChatbotWorld) -> None:
     """What the spec runs. Writes ws/world.json ({url}) for `merge` and `status`."""
     import uvicorn
 
     token = os.environ.get("FLOCK_WORLD_TOKEN") or sys.exit("FLOCK_WORLD_TOKEN is not set")
-    world = ChatbotWorld()
+    world = cls()
     host = os.environ.get("FLOCK_WORLD_HOST") or "127.0.0.1"
     port = int(os.environ.get("FLOCK_WORLD_PORT") or 8765)
     (world.ws / "world.json").write_text(json.dumps({"url": f"http://{host}:{port}"}) + "\n")
-    print(f"world chatbot {world.manifest()['version']} on http://{host}:{port}", flush=True)
+    print(f"world {world.name} {world.manifest()['version']} on http://{host}:{port}", flush=True)
     uvicorn.run(make_app(world, token), host=host, port=port, log_level="warning",
                 access_log=False)
 
