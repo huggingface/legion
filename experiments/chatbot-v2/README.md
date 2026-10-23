@@ -88,8 +88,9 @@ Control markers in `<bucket>/<run>/control/` (checked every 30 s):
 - `stop`: flock drains and writes its bundle, then the final sync. Prefer it to
   `hf jobs cancel`, which leaves the container only seconds.
 
-`CHATBOT_SMOKE=1` applies `job/smoke.json` (short loop, $1 budget, 4 interviewers) for a
-short smoke job.
+`CHATBOT_SMOKE=1` applies `job/smoke.json` (20 min loop at 60 s, $2.50 per agent, $15 total) for
+a smoke job; `-e CHATBOT_SWITCH_AT=600` switches at +10 min. For a 3-min compare round, upload
+`job/smoke-world.yaml` as `<bucket>/<run>/experiment/world.yaml` first (applied at the switch).
 
 ## The chat Space contract
 
