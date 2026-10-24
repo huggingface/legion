@@ -24,7 +24,7 @@
 : "${FLOCK_TOKEN:?}" "${HF_TOKEN:?}" "${FLOCK_STATE_URL:?}" "${RUN_DIR:?}"
 mkdir -p "$RUN_DIR/logs" "$FLOCK_SLURM_LAUNCH_DIR"
 HOST=$(hostname)
-echo "$HOST" > "$FLOCK_SLURM_HOST_FILE.tmp" && mv "$FLOCK_SLURM_HOST_FILE.tmp" "$FLOCK_SLURM_HOST_FILE"
+write_host "$FLOCK_SLURM_HOST_FILE" "$HOST"
 export FLOCK_COMPUTE=slurm FLOCK_MODE=space PORT=7860
 export FLOCK_URL="http://$HOST:7860"                # the API, for the CLI and waves
 export FLOCK_WORKER_URL='http://${CTL_HOST}:7860'   # what workers get: expanded from the host file

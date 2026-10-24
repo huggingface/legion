@@ -41,11 +41,11 @@ run directory (host files, worker env files, logs).
    (`container-build` is the cluster's builder; any OCI builder works, then `enroot import`.)
    Then in `run3.env`: `SQSH=<the .sqsh>` (the world), `FLOCK_SLURM_CONTAINER_IMAGE=<the .sqsh>`
    and `FLOCK_SLURM_CONTAINER_ROOT=/work` (the workers' env files).
-   In the container everything is under `/work` (`WORK_ROOT=/work/agents`,
-   `FLOCK_LLM_HOME=/work/llm`, `CHATBOT_WS=/work/ws`, `HOME=/work/home`, `HF_HOME=/work/hf`,
-   `TMPDIR=/work/tmp`): its `/tmp` is RAM counted against the job's memory. Mounts: the
-   controller host file's directory read-only (workers), the repo and the run dir read-only
-   (world). Secrets arrive as env, sourced before `srun`: **verify once** that they pass into
+   In the container everything is under `/work`: a worker's `WORK_ROOT`, `FLOCK_LLM_HOME`,
+   `HOME`, `HF_HOME`, `TMPDIR` are `/work/flock/<WORKER_ID>/{work,llm,home,hf,tmp}`, the world's
+   workspace `/work/world/ws`; the container's `/tmp` is RAM counted against the job's memory.
+   The controller stays on the host (bare venv: it calls `sbatch`). Mounts: `<RUN_DIR>/hosts`
+   read-only (workers), the repo and the run dir read-only (world). Secrets arrive as env, sourced before `srun`: **verify once** that they pass into
    the container (`srun --container-image=$SQSH env | cut -d= -f1 | sort`).
 4. Rehearsal inside one job (no model, no board; ~3 min; non-zero on failure):
    `srun -p <partition> -c 4 --mem=8G --time=00:20:00 /fsx/run3/flock/experiments/run3/dryrun.sh`
@@ -61,12 +61,12 @@ sbatch -o $RUN_DIR/logs/%x-%j.out world.sbatch      $RUN_DIR/run3.env
 sbatch -o $RUN_DIR/logs/%x-%j.out waves.sbatch      $RUN_DIR/run3.env
 ```
 
-Order does not matter: each job writes its host file (`controller.host`, `world.host`) once it
-answers, and `waves.sbatch` polls both (a line a minute, never gives up) before it renders
+Order does not matter: each job writes its host file (`<RUN_DIR>/hosts/controller.host`,
+`hosts/world.host`, rewritten at every start; `<RUN_DIR>/*.host` are symlinks) once it answers, and `waves.sbatch` polls both (a line a minute, never gives up) before it renders
 (`render.py --variant $RUN3_VARIANT --compute slurm`), applies, and starts `waves.py run`.
 The waves clock starts at the controller's first answer and is kept next to the spec, so a
 requeued runner resumes the same schedule. The controller sbatches every worker
-(`worker.sbatch`, 4 CPU / 7G agents, 2 CPU / 3500M interviewers, `--no-requeue`).
+(`worker.sbatch`, 4 CPU / 7G agents, 2 CPU / 3800M interviewers, `--no-requeue`).
 
 The smoke: `RUN3_VARIANT=smoke RUN3_WAVES=waves-smoke.yaml` (30-min loop, `max_rounds` 120,
 cap 40). The 48 h run: `RUN3_VARIANT=selfhosted RUN3_WAVES=waves.yaml` (cap from waves.yaml).

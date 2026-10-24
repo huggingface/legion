@@ -668,7 +668,7 @@ class ComputeSpec(BaseModel):
     venv: str | None = None  # written to the env file as FLOCK_VENV for the script
     secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
     # workers run in a container whose /tmp is RAM: every agent/harness path goes under this
-    # root instead (WORK_ROOT=<root>/agents, FLOCK_LLM_HOME, HOME, HF_HOME, TMPDIR, CHATBOT_WS)
+    # root instead: <root>/flock/<worker id>/{work,llm,home,hf,tmp}
     container_root: str | None = None
     container_image: str | None = None  # an Enroot image (.sqsh): FLOCK_CONTAINER_IMAGE
     types: dict[str, SlurmResources] = Field(default_factory=dict)

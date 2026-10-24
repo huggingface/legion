@@ -8,8 +8,9 @@ FROM python:3.12-slim
 ARG HF_HUB_VERSION=2.2.0
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PATH=/opt/flock/bin:$PATH \
-    WORK_ROOT=/work/agents FLOCK_LLM_HOME=/work/llm CHATBOT_WS=/work/ws \
     HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp FLOCK_HOMELESS_ROOT=/work
+# per process (set by the env file / world.sbatch): workers /work/flock/<worker id>/{work,llm,
+# home,hf,tmp}, the world /work/world/{ws,home,hf,tmp}
 
 COPY dist/ /tmp/dist/
 # /opt/flock: a venv with flock[controller] (the world server and the CLI) and the hf CLI;
@@ -21,7 +22,7 @@ RUN python -m venv /opt/flock \
  && /opt/flock/bin/python -c "import flock.worker.main, flock.world.server, fastapi, uvicorn"
 # /work: everything an agent, a harness or the world writes (the container's /tmp is a RAM
 # tmpfs that counts against the job's memory). World-writable: Enroot maps the job's user.
-RUN mkdir -p /work/agents /work/llm /work/ws /work/home /work/hf /work/tmp \
+RUN mkdir -p /work/flock /work/world /work/home /work/hf /work/tmp \
  && chmod -R 1777 /work
 WORKDIR /work
 CMD ["/opt/flock/bin/flock-worker"]

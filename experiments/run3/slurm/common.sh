@@ -17,6 +17,13 @@ if [ -z "${HOME:-}" ] || [ ! -w "${HOME:-/nonexistent}" ]; then  # a container w
 fi
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/$USER-uv} HF_HOME=${HF_HOME:-/tmp/$USER-hf}
 PY="$VENV/bin/python"
+# host files: <RUN_DIR>/hosts/*.host (rewritten at every controller/world start), with
+# <RUN_DIR>/controller.host and world.host as symlinks
+write_host() {  # $1: the host file, $2: the host name
+  mkdir -p "$(dirname "$1")"
+  echo "$2" > "$1.tmp" && mv "$1.tmp" "$1"
+  ln -sfn "hosts/$(basename "$1")" "$RUN_DIR/$(basename "$1")" 2>/dev/null || true
+}
 log() { echo "$(date -u +%FT%TZ) ${SLURM_JOB_NAME:-run3}[${SLURM_JOB_ID:-?}]: $*"; }
 STOPPING=0
 once() { [ "$STOPPING" = 0 ] || return 0; STOPPING=1; "$@"; }

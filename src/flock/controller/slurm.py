@@ -214,9 +214,9 @@ def worker_env(wid: str, env: Mapping[str, str], secrets: Mapping[str, str],
     run = cfg.get("run") or (Path(cfg["launch_dir"]).parent.name if cfg.get("launch_dir") else "")
     if root := (cfg.get("container_root") or "").rstrip("/"):
         # a container: its /tmp is RAM counted against the job's memory, so nothing goes there
-        paths = {"WORK_ROOT": f"{root}/agents", "FLOCK_LLM_HOME": f"{root}/llm",
-                 "CHATBOT_WS": f"{root}/ws", "HOME": f"{root}/home", "HF_HOME": f"{root}/hf",
-                 "TMPDIR": f"{root}/tmp"}
+        base = f"{root}/flock/{wid}"
+        paths = {"WORK_ROOT": f"{base}/work", "FLOCK_LLM_HOME": f"{base}/llm",
+                 "HOME": f"{base}/home", "HF_HOME": f"{base}/hf", "TMPDIR": f"{base}/tmp"}
     else:  # bare node: node-local and fixed per slot (restores go to the same paths)
         base = f"{WORK_BASE}/{wid}"
         paths = {"WORK_ROOT": f"{base}/work", "FLOCK_LLM_HOME": f"{base}/llm"}

@@ -22,7 +22,7 @@ sbatch --parsable -p <partition> [-A <account>] -c <cpus> --mem=<mem> --time=<ti
 The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET RUN
 FLOCK_URL WORK_ROOT FLOCK_LLM_HOME PYTHONUNBUFFERED`, the type's `env`, and when configured
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
-`container_root`, `CHATBOT_WS HOME HF_HOME TMPDIR`). A comment names the secrets the worker
+`container_root`, `HOME HF_HOME TMPDIR`). A comment names the secrets the worker
 expects from the cluster's secrets file: `FLOCK_TOKEN HF_TOKEN` plus the launch's (provider
 key, board invite, `FLOCK_WORLD_TOKEN`). The worker script (the cluster's, or
 `experiments/run3/slurm/worker.sbatch`) sources the secrets file and the env file and runs
@@ -56,7 +56,7 @@ compute:
   max_cpus: 28               # FLOCK_SLURM_MAX_CPUS
   max_mem: 54G               # FLOCK_SLURM_MAX_MEM
   types:                     # per type: partition, cpus, mem, time, container_root
-    interviewer: {cpus: 2, mem: 3500M}
+    interviewer: {cpus: 2, mem: 3800M}
 ```
 
 Precedence: built-in defaults < spec keys < `FLOCK_SLURM_*` on the controller < `types.<type>`.
@@ -126,8 +126,8 @@ name, optional port) receives it.
 Workers and the world may run in a container (`srun --container-image`), the controller stays
 on the host (it needs `sbatch`). In the container `/tmp` is a RAM tmpfs counted against the
 job's memory, so nothing goes there: with `container_root: /work` the env file sets
-`WORK_ROOT=/work/agents FLOCK_LLM_HOME=/work/llm CHATBOT_WS=/work/ws HOME=/work/home
-HF_HOME=/work/hf TMPDIR=/work/tmp`. A worker with no usable HOME derives HOME, HF_HOME,
+`WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`
+(the world: `/work/world/ws`). A worker with no usable HOME derives HOME, HF_HOME,
 XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
 `FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
 `experiments/run3/slurm/Containerfile` builds the image.

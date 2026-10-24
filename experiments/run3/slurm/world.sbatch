@@ -37,8 +37,8 @@ HERE=${RUN3_SLURM_DIR:-$REPO/experiments/run3/slurm}
 if [ -n "${SQSH:-}" ]; then
   # in the container: /work is its own root filesystem (its /tmp is RAM: never used);
   # the repo and the run dir are mounted read-only; flock is the image's /opt/flock
-  export CHATBOT_WS=/work/ws HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp \
-         FLOCK_HOMELESS_ROOT=/work PY=/opt/flock/bin/python
+  export CHATBOT_WS=/work/world/ws HOME=/work/world/home HF_HOME=/work/world/hf \
+         TMPDIR=/work/world/tmp FLOCK_HOMELESS_ROOT=/work/world PY=/opt/flock/bin/python
   srun --ntasks=1 --container-image="$SQSH" --no-container-mount-home --container-writable \
        --container-mounts="$REPO:$REPO:ro,$RUN_DIR:$RUN_DIR:ro" \
        bash -c 'mkdir -p "$HOME" "$HF_HOME" "$TMPDIR" && exec "$0"' "$HERE/world-run.sh" &
@@ -54,7 +54,7 @@ until "$VENV/bin/python" -c 'import sys,urllib.request as u; u.urlopen(sys.argv[
   kill -0 "$PID" 2>/dev/null || { log "world exited before answering"; exit 1; }
   [ $((n % 12)) = 0 ] && log "waiting for the world to answer"; n=$((n + 1)); sleep 5
 done
-echo "$HOST" > "$FLOCK_WORLD_HOST_FILE.tmp" && mv "$FLOCK_WORLD_HOST_FILE.tmp" "$FLOCK_WORLD_HOST_FILE"
+write_host "$FLOCK_WORLD_HOST_FILE" "$HOST"
 log "world on $HOST:7860 (host file $FLOCK_WORLD_HOST_FILE)"
 fwd() { kill -TERM "$PID" 2>/dev/null || true; }   # srun forwards it into the container
 trap 'once fwd' TERM USR1 INT

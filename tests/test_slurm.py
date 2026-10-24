@@ -556,10 +556,10 @@ def test_container_root_puts_every_path_under_it(tmp_path, slurm, store, clock):
     reconcile(store, SlurmJobsClient(env={}), clock(), settings())
     (path,) = (tmp_path / "launch").glob(f"{W0}-*.env")
     env = read_env_file(path)
-    assert {k: env[k] for k in ("WORK_ROOT", "FLOCK_LLM_HOME", "CHATBOT_WS", "HOME", "HF_HOME",
-                                "TMPDIR")} == {
-        "WORK_ROOT": "/work/agents", "FLOCK_LLM_HOME": "/work/llm", "CHATBOT_WS": "/work/ws",
-        "HOME": "/work/home", "HF_HOME": "/work/hf", "TMPDIR": "/work/tmp"}
+    base = f"/work/flock/{W0}"
+    assert {k: env[k] for k in ("WORK_ROOT", "FLOCK_LLM_HOME", "HOME", "HF_HOME", "TMPDIR")} == {
+        "WORK_ROOT": f"{base}/work", "FLOCK_LLM_HOME": f"{base}/llm", "HOME": f"{base}/home",
+        "HF_HOME": f"{base}/hf", "TMPDIR": f"{base}/tmp"}
     assert not any(v.startswith("/tmp") for v in env.values())
     cfg = resolve(slurm_spec(tmp_path, types={"researcher": {"container_root": "/c"}}).compute,
                   "researcher", {})

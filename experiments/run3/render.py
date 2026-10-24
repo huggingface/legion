@@ -30,7 +30,7 @@ Environment (unset: the placeholder stays, so the spec loads but preflight fails
 30-min smoke on the cluster) and adds what a remote backend needs: the bucket, the world by URL
 (default http://${WORLD_HOST}:7860, the host read from FLOCK_WORLD_HOST_FILE on the
 controller), interviewer worker slots, the provider key by name, and for slurm the per-type
-sizes (agents 4 CPU / 7G, interviewers 2 CPU / 3500M; docs/slurm.md).
+sizes (agents 4 CPU / 7G, interviewers 2 CPU / 3800M; docs/slurm.md).
   slurm: RUN3_BUCKET, RUN3_WORLD_URL, RUN3_SLURM_PARTITION (default hopper-cpu); the paths
   (worker_script, log_dir, launch_dir) come from the controller's FLOCK_SLURM_* env.
 The world's command stays `{python} chatbot3.py serve`: flock fills in its own interpreter's
@@ -92,7 +92,7 @@ def remote(d: dict, e, sched, compute: str) -> None:
     if compute == "slurm":  # sizes per worker type (docs/slurm.md); paths from FLOCK_SLURM_*
         sizes = {name: {"cpus": 4, "mem": "7G"} for name, t in d["types"].items()
                  if t.get("loop")}
-        sizes["interviewer"] = {"cpus": 2, "mem": "3500M"}
+        sizes["interviewer"] = {"cpus": 2, "mem": "3800M"}
         d["compute"] = {"kind": "slurm",
                         "partition": e("RUN3_SLURM_PARTITION", "hopper-cpu"),
                         "cpus": 4, "mem": "7G", "time": "29:00:00", "types": sizes}

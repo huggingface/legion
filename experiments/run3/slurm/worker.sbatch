@@ -7,6 +7,8 @@
 # sbatch runs with a scrubbed environment (PATH, HOME, USER, LANG, TZ, SLURM_*), so everything
 # else comes from the two files.
 #
+# Cancel: flock runs a plain `scancel <job>` (TERM reaches the worker and the drain runs); it
+# never signals srun itself (that would SIGKILL the task).
 # Stop paths, all ending in the worker's own preemption drain (worker/main.py, <= 20 s:
 # interrupt turns, sync every agent to the bucket in parallel, preempted marker, exit 75):
 #   - a Spot notice: the node watcher sends SIGUSR1 to every process of the job (the worker
@@ -15,7 +17,8 @@
 # Bare node (default): flock-worker from FLOCK_VENV, paths under /tmp/flock/<worker id>.
 # Container (FLOCK_CONTAINER_IMAGE in the env file, from compute container_image, with
 # container_root /work): `srun --container-image` runs /opt/flock/bin/flock-worker inside the
-# image (Containerfile); WORK_ROOT, FLOCK_LLM_HOME, HOME, HF_HOME, TMPDIR are under /work in the
+# image (Containerfile); WORK_ROOT, FLOCK_LLM_HOME, HOME, HF_HOME, TMPDIR are under
+# /work/flock/<worker id>/ in the
 # container's root filesystem (never its /tmp: RAM counted against the job), agents never touch
 # /fsx. The secrets are env vars of this script; srun passes the environment into the
 # container (pyxis default; verify once with `srun --container-image=... env | cut -d= -f1`).
@@ -46,8 +49,8 @@ if [ -n "${FLOCK_CONTAINER_IMAGE:-}" ]; then
   fi
   srun --ntasks=1 --container-image="$FLOCK_CONTAINER_IMAGE" --no-container-mount-home \
        --container-writable "${MOUNTS[@]}" \
-       bash -c 'mkdir -p "$WORK_ROOT" "$FLOCK_LLM_HOME" "${HOME:-/work/home}" "${HF_HOME:-/work/hf}" \
-                 "${TMPDIR:-/work/tmp}" && exec /opt/flock/bin/flock-worker' &
+       bash -c 'mkdir -p "$WORK_ROOT" "$FLOCK_LLM_HOME" "$HOME" "$HF_HOME" "$TMPDIR" \
+                 && exec /opt/flock/bin/flock-worker' &
 else
   # node-local and fixed per slot (restores go to the same absolute paths); wiped at start
   BASE=/tmp/flock/$WORKER_ID

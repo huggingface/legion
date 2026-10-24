@@ -167,7 +167,7 @@ def test_render_variants(tmp_path):
         assert sl.compute.kind == "slurm" and sl.bucket == "hf://buckets/ns/run3"
         assert sl.world.url == "http://${WORLD_HOST}:7860" and sl.world.command is None
         assert (sl.compute.types["interviewer"].cpus, sl.compute.types["interviewer"].mem) == (
-            2, "3500M")
+            2, "3800M")
         assert (sl.compute.types["agent"].cpus, sl.compute.types["agent"].mem) == (4, "7G")
         assert sl.types["interviewer"].workers.max_extra >= 1
         for name in ("agent", "agent-think"):
