@@ -84,6 +84,7 @@ ENV_KEYS = {
     "max_cpus": "FLOCK_SLURM_MAX_CPUS",
     "max_mem": "FLOCK_SLURM_MAX_MEM",
     "container_root": "FLOCK_SLURM_CONTAINER_ROOT",
+    "container_image": "FLOCK_SLURM_CONTAINER_IMAGE",
 }
 # The only variables sbatch (and squeue/sacct/scancel) get from the controller: without
 # --export the job inherits sbatch's environment and Slurm may store it in its accounting
@@ -232,6 +233,8 @@ def worker_env(wid: str, env: Mapping[str, str], secrets: Mapping[str, str],
         out["FLOCK_VENV"] = cfg["venv"]
     if cfg.get("secrets_file"):
         out["FLOCK_SECRETS_FILE"] = cfg["secrets_file"]
+    if cfg.get("container_image"):  # the worker script runs flock-worker in it (srun/pyxis)
+        out["FLOCK_CONTAINER_IMAGE"] = cfg["container_image"]
     names = list(dict.fromkeys([*ALWAYS_SECRETS, *secrets]))
     return out, names
 

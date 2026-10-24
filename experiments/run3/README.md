@@ -23,6 +23,8 @@ Nothing here launches anything. Every value for the operator is a placeholder.
 | `protocols/` | `run3.md` (self-organization), `chatbot.md` (GREEN/RED, RED -> probe -> fix) |
 | `tools/interview.py` | `spawn_interviewer(booking, thread)` |
 | `job/` | `bootstrap.sh` (the single job), `launch.sh` (payload + the `hf jobs run` line) |
+| `slurm/` | Runbook C: sbatch templates (controller, world, waves, worker), Containerfile, env examples |
+| `dryrun.sh` | one-command rehearsal (fake model and board, smoke waves, Slurm-side tests) |
 | `world-space/` | the world as a Docker Space (`flock world serve`): `Dockerfile`, `start.sh`, `prepare.sh` |
 
 The world is `worlds/chatbot3` (on `worlds/chatbot2`): `agents/<name>/` per agent (own-dir
@@ -163,6 +165,15 @@ agents each (40 agent workers at the cap, up to 40 interviewer workers), the wor
    (heartbeats pause ~1 min; re-export `FLOCK_URL`).
 9. Stop: `flock loop run3 --type agent --stop` (and `--type agent-think`; final round), then `flock remove run3`, then
    `scripts/deploy-job.sh --down --group run3 "$W"`; stop the Space.
+
+## Runbook C: CPU Slurm cluster
+
+`slurm/README.md`: the controller job (host, bare venv, `FLOCK_COMPUTE=slurm`, it sbatches the
+workers), the world job, the waves job (`render.py --compute slurm`, apply, `waves.py run`),
+an optional Enroot image for workers and world, the Spot budget (~20 s after SIGUSR1) and the
+stop order (`flock remove`, then `scancel`; the `control/*` markers are single-job only).
+`dryrun.sh` rehearses a node with the fake model and board. Mechanism and spec keys:
+`docs/slurm.md`.
 
 ## Tests (offline, fakes only)
 

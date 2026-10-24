@@ -670,6 +670,7 @@ class ComputeSpec(BaseModel):
     # workers run in a container whose /tmp is RAM: every agent/harness path goes under this
     # root instead (WORK_ROOT=<root>/agents, FLOCK_LLM_HOME, HOME, HF_HOME, TMPDIR, CHATBOT_WS)
     container_root: str | None = None
+    container_image: str | None = None  # an Enroot image (.sqsh): FLOCK_CONTAINER_IMAGE
     types: dict[str, SlurmResources] = Field(default_factory=dict)
     # the largest job the partition can ever run: sbatch accepts bigger ones, which then pend
     # forever; a launch over these is refused (also checked at apply)
