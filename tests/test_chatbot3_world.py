@@ -68,7 +68,7 @@ def _log(w) -> list[dict]:
 
 def test_manifest_flat_workspace_and_descriptions(world):
     m = world.manifest()
-    assert (m["name"], m["version"]) == ("chatbot3", "0.3.0")
+    assert (m["name"], m["version"]) == ("chatbot3", "0.3.1")
     assert m["hooks"] == ["agent_done", "turn"]
     tools = {t["name"]: t for t in m["tools"]}
     assert {"read_file", "grep_file", "write_file", "copy_file", "edit_file", "insert_after",
@@ -323,19 +323,103 @@ def test_copy_of_best_survives_a_concurrent_promotion(world):
         assert len(got) == 1, (k, got)
 
 
-def test_gate_size_parallelism_and_busy_refusal(mod, tmp_path, monkeypatch):
-    """probes.gate_size (the newest N verified probes), runs.per_promotion and
-    promote.max_waiting, all re-read from $CHATBOT_CONFIG at each call."""
+def _many_probes(w, n):
+    for i in range(n):
+        assert run(_probe(w, A, [f"my word is w{i}", "what is my word?"],
+                          f"mentions_fact:w{i}"))["verified"]
+
+
+def test_sampled_gate_is_deterministic_and_full_every_kth(mod, tmp_path, monkeypatch):
     cfg = tmp_path / "world.yaml"
-    cfg.write_text("probes: {gate_size: 1}\nruns: {per_promotion: 3}\npromote: {max_waiting: 2}\n")
+    cfg.write_text("probes: {per_agent_per_hour: 100, gate_sample: 4, gate_full_every: 3}\n")
+    monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w = mod.Chatbot3World(str(tmp_path / "ws"))
+    run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))  # promotion 1
+    _many_probes(w, 10)
+    one, label = w._gate("a" * 64)
+    assert len(one) == 4 and label.startswith("sample 4/10")
+    assert [x["id"] for x in w._gate("a" * 64)[0]] == [x["id"] for x in one]  # same bot, same
+    assert any([x["id"] for x in w._gate(f"{k:064x}")[0]] != [x["id"] for x in one]
+               for k in range(5))  # another bot, another sample
+    r = run(w.promote_best(B, _pkg(w, B, HOME_B, REMEMBERS), "remembers"))  # promotion 2
+    assert r["promoted"] and w._history()[-1]["gate"].startswith("sample 4/10")
+    assert w._gate("a" * 64)[1] == "full 10"  # the 3rd promotion: the full set
+    cfg.write_text("probes: {gate_sample: 0}\n")  # live: the full set always
+    assert w._gate("b" * 64)[1] == "full 10"
+
+
+def test_pool_bounds_parallel_runs_and_is_re_read(mod, tmp_path, monkeypatch):
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text("runs: {parallel: 3}\n")
+    monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w = mod.Chatbot3World(str(tmp_path / "ws"))
+    live, peak, lock = [0], [0], threading.Lock()
+    real = mod.ElizaWorld._run
+
+    def counted(self, path, lines):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.05)
+        try:
+            return real(self, path, lines)
+        finally:
+            with lock:
+                live[0] -= 1
+
+    monkeypatch.setattr(mod.ElizaWorld, "_run", counted)
+    path = _pkg(w, A, HOME_A)
+
+    async def many(k):
+        await asyncio.gather(*(w.run_bot(path, ["hi"]) for _ in range(k)))
+
+    run(many(10))
+    assert peak[0] == 3
+    peak[0] = 0
+    time.sleep(0.02)
+    cfg.write_text("runs: {parallel: 6}\n")  # live: a bigger pool, no restart
+    run(many(12))
+    assert peak[0] == 6
+
+
+def test_slow_promotion_answers_queued_with_a_ticket(mod, tmp_path, monkeypatch):
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text("promote: {wait_s: 0.05}\n")
+    monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w = mod.Chatbot3World(str(tmp_path / "ws"))
+    real = mod.ElizaWorld._run
+
+    def slow(self, path, lines):
+        time.sleep(0.05)
+        return real(self, path, lines)
+
+    monkeypatch.setattr(mod.ElizaWorld, "_run", slow)
+    path = _pkg(w, A, HOME_A)
+
+    async def go():
+        r = await w.promote_best(A, path, "base")
+        assert r["queued"] and r["promoted"] is None and r["ticket"] == "agent-0000-p1"
+        assert (await w.best_status(agent=A))["pending"] == 1
+        while getattr(w, "_waiting", 0):
+            await asyncio.sleep(0.05)
+        return await w.best_status(agent=A)
+
+    st = run(go())
+    assert st["pending"] == 0 and st["your_promotions"][0]["result"]["promoted"] is True
+    assert {x["action"] for x in _log(w)} >= {"promote_queued", "promote"}
+
+
+def test_busy_refusal_when_max_waiting(mod, tmp_path, monkeypatch):
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text("promote: {max_waiting: 2, wait_s: 0}\n")
     monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
     monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
     w = mod.Chatbot3World(str(tmp_path / "ws"))
     run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))
     run(_probe(w, A, TEACHER, "mentions_fact:teacher"))
-    run(_probe(w, A, PIZZA, "mentions_fact:pizza"))
-    s = run(w.best_status())["score"]
-    assert s["live_of"] == 1 and s["live_fails"] == ["p2"]  # only the newest probe gates
     ags = _agents(5)
     paths = [_pkg(w, a, f"agents/{a.name}", REMEMBERS) for a in ags]
 
@@ -344,6 +428,4 @@ def test_gate_size_parallelism_and_busy_refusal(mod, tmp_path, monkeypatch):
 
     res = run(burst())
     busy = [r for r in res if not r["promoted"] and r.get("why", "").startswith("busy")]
-    assert sum(r["promoted"] for r in res) == 1 and len(busy) == 3  # 2 in flight, 3 refused
-    cfg.write_text("probes: {gate_size: 0}\n")  # live change: the whole set again
-    assert run(w.best_status())["score"]["live_of"] == 2
+    assert sum(bool(r["promoted"]) for r in res) == 1 and len(busy) == 3  # 2 in flight

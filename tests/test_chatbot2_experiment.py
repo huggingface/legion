@@ -327,7 +327,8 @@ def test_phase2_spec_changes_only_prompts():
     sys.path.insert(0, str(ROOT / "worlds" / "chatbot2"))
     import chatbot2
 
-    assert knobs == chatbot2.DEFAULTS  # world.yaml states the world's defaults
+    # world.yaml states the world's defaults (later knobs default to the old behaviour)
+    assert all(chatbot2.DEFAULTS[sec][k] == v for sec, d in knobs.items() for k, v in d.items())
 
 
 def _render(tmp_path: Path, env: dict) -> tuple[Path, str]:

@@ -27,6 +27,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import shutil
 import sys
@@ -47,11 +48,12 @@ from flock.world import Agent, ToolError, tool
 
 DEFAULTS = {"merge": {"compare_minutes": 15},
             "probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 150,
-                       "gate_size": 0},  # the newest N verified probes form the gate; 0: all
+                       "gate_sample": 0, "gate_full_every": 0},  # 0: the gate is the full set
             "interviews": {"strong_per_hour": 2, "mid_per_hour": 3, "start_minutes": 5,
                            "expire_minutes": 20},
             "runs": {"per_promotion": 4},  # probe runs at once while scoring one bot
-            "promote": {"max_waiting": 0}}  # promotions in flight (running + queued); 0: any
+            "promote": {"max_waiting": 0,  # promotions in flight (running + queued); 0: any
+                        "wait_s": 0}}  # answer `queued` + a ticket after this long; 0: wait
 PKG_SHIM = (f"import resource as r,runpy,sys\nfor k,v in {LIMITS}: r.setrlimit(k,(v,v))\n"
             "sys.path.insert(0,'.'); runpy.run_module('bot', run_name='__main__', alter_sys=True)")
 CHECK = re.compile(r"^(not_repeat|not_empty|answers_question|"
@@ -301,13 +303,11 @@ class Chatbot2World(ChatbotWorld):
 
     async def _full(self, p: Path, known: dict | None = None, live: list | None = None) -> dict:
         """The score on the live set: the seed probes (Eliza points) plus 1 per verified swarm
-        probe (one whose evidence reproduced when the world re-ran it), the newest
-        `probes.gate_size` of them (0: all). Knobs re-read at every call."""
+        probe (one whose evidence reproduced when the world re-ran it); `live` is the gate's set
+        (`_gate`), the full verified set when left out. Probe runs go `_gate_parallel()` at a
+        time (re-read at every call)."""
         live = [x for x in (self._live() if live is None else live) if x.get("verified", True)]
-        if (n := int(self.cfg("probes", "gate_size"))) > 0:
-            live = live[-n:]
-        res, sem = dict(known or {}), asyncio.Semaphore(max(1, int(self.cfg("runs",
-                                                                             "per_promotion"))))
+        res, sem = dict(known or {}), asyncio.Semaphore(self._gate_parallel())
 
         async def one(x: dict) -> None:
             async with sem:
@@ -321,6 +321,24 @@ class Chatbot2World(ChatbotWorld):
                 "crashed": seed["crashed"], "live": sum(got.values()), "live_of": len(got),
                 "live_fails": [k for k, v in got.items() if not v], "results": got,
                 "score": seed["score"] + sum(got.values()), "of": seed["of"] + len(got)}
+
+    def _gate_parallel(self) -> int:
+        return max(1, int(self.cfg("runs", "per_promotion")))
+
+    def _gate(self, cand_sha: str) -> tuple[list[dict], str]:
+        """The probes one promotion is decided on, for the candidate and the best alike: the
+        verified live set, or a sample of `probes.gate_sample` of them seeded by the
+        candidate's hash (a retry of the same bot meets the same sample). The full set when
+        the sample would not be smaller, and for every `probes.gate_full_every`-th promotion.
+        Returns (probes, label for the history)."""
+        live = [x for x in self._live() if x.get("verified", True)]
+        size, every = int(self.cfg("probes", "gate_sample")), int(self.cfg("probes",
+                                                                           "gate_full_every"))
+        n_next = len(self._history()) + 1
+        if size <= 0 or size >= len(live) or (every > 0 and n_next % every == 0):
+            return live, f"full {len(live)}"
+        pick = sorted(random.Random(cand_sha).sample(range(len(live)), size))
+        return [live[i] for i in pick], f"sample {size}/{len(live)} seed {cand_sha[:12]}"
 
     async def _best_score(self, live: list | None = None) -> dict | None:
         p = self._best_path()
@@ -460,14 +478,29 @@ class Chatbot2World(ChatbotWorld):
             return {"promoted": False, "why": f"busy: {waiting} promotions are queued; keep "
                     "improving and try again in a few minutes"}
         self._waiting = waiting + 1
-        try:
-            return await self._promote_locked(agent, p, path, reason)
-        finally:
-            self._waiting -= 1
+        task = asyncio.ensure_future(self._promote_locked(agent, p, path, reason))
+        task.add_done_callback(lambda _: setattr(self, "_waiting", self._waiting - 1))
+        wait = float(self.cfg("promote", "wait_s"))
+        if wait <= 0:
+            return await task
+        done, _ = await asyncio.wait({task}, timeout=wait)
+        if task in done:
+            return task.result()
+        tickets = self.__dict__.setdefault("_tickets", {})  # the result lands here later
+        tid = f"{agent.name}-p{1 + sum(t['agent'] == agent.name for t in tickets.values())}"
+        tickets[tid] = {"ticket": tid, "agent": agent.name, "path": self._rel(p),
+                        "ts": round(time.time()), "result": None}
+        task.add_done_callback(lambda t: tickets[tid].update(
+            result=t.result() if not t.cancelled() and t.exception() is None else
+            {"promoted": False, "why": f"error: {t.exception()!r}"[:300]}))
+        self._log(agent, "promote_queued", path=path, ticket=tid)
+        return {"promoted": None, "queued": True, "ticket": tid, "pending": self._waiting,
+                "why": f"queued behind {self._waiting - 1} other promotion(s); it is decided "
+                       "without you: best_status shows `pending` and your result. Keep working."}
 
     async def _promote_locked(self, agent: Agent, p: Path, path: str, reason: str) -> dict:
         async with self._promotion():  # re-read best inside: a queued promotion meets the new one
-            live = self._live()  # both scored on the same set
+            live, gate = self._gate(self._sha(p))  # both scored on the same probes
             fails, cand, cur = await asyncio.gather(asyncio.to_thread(self._bar, p),
                                                     self._full(p, live=live),
                                                     self._best_score(live))
@@ -481,7 +514,7 @@ class Chatbot2World(ChatbotWorld):
             if why:
                 self._log(agent, "promote_refused", path=path, score=cand["score"], why=why)
                 return {"promoted": False, "why": why, "candidate": self._pub(cand),
-                        "best": self._pub(cur)}
+                        "best": self._pub(cur), "gate": gate}
             n, old = len(self._history()) + 1, self._best_files()
             kind, b = ("package", "bot") if p.is_dir() else ("file", "bot.py"), self.ws / "best"
             _copy(p, b / (f"v{n}" if p.is_dir() else f"v{n}.py"))
@@ -493,7 +526,7 @@ class Chatbot2World(ChatbotWorld):
                    "kind": kind[0], "score": cand["score"], "of": cand["of"],
                    "seed": cand["seed"], "live": f"{cand['live']}/{cand['live_of']}",
                    "ts": round(time.time()), "sha": self._sha(p)[:12], "size": self._size(p),
-                   "best_before": self._best[0][:12] or None if cur else None}
+                   "best_before": self._best[0][:12] or None if cur else None, "gate": gate}
             new = self._best_files()
             (b / "current.json").write_text(json.dumps(
                 {"n": n, "kind": kind[0], "entry": f"best/{kind[1]}", "files": new}) + "\n")
@@ -509,12 +542,17 @@ class Chatbot2World(ChatbotWorld):
                 "live_fails": cand["live_fails"]}
 
     @tool
-    async def best_status(self) -> dict:
+    async def best_status(self, agent: Agent | None = None) -> dict:
         """Show the shared best (best/bot.py or best/bot/): where it came from, its size, its
-        score on the live probe set and the probes it fails, the last 5 promotions, and during
-        the compare round when promotion opens."""
+        score on the live probe set and the probes it fails, the last 5 promotions, how many
+        promotions are pending, the results of your queued ones, and during the compare round
+        when promotion opens."""
         recs, p = self._history(), self._best_path()
-        out = {"best": recs[-1] if recs else None, "earlier": recs[-6:-1][::-1]}
+        out = {"best": recs[-1] if recs else None, "earlier": recs[-6:-1][::-1],
+               "pending": getattr(self, "_waiting", 0)}
+        if agent is not None and (mine := [t for t in self.__dict__.get("_tickets", {}).values()
+                                           if t["agent"] == agent.name][-3:]):
+            out["your_promotions"] = mine
         if p:
             s = await self._best_score()
             out |= {"path": self._rel(p), "size": self._size(p), "score": self._pub(s)}
@@ -534,7 +572,8 @@ class Chatbot2World(ChatbotWorld):
             path: the bot, e.g. teams/a/agents/ds-a-0001/bot or best/bot
         """
         p = self._bot(path, agent, "qualify")
-        fails, s = await asyncio.gather(asyncio.to_thread(self._bar, p), self._full(p))
+        fails, s = await asyncio.gather(asyncio.to_thread(self._bar, p),
+                                        self._full(p, live=self._gate(self._sha(p))[0]))
         self._log(agent, "qualify", path=self._rel(p), qualified=not fails)
         return {"qualified": not fails, "path": self._rel(p), "fails": fails[:6],
                 "score": self._pub(s), "quota": self._quotas(self.team(agent))}

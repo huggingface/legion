@@ -14,7 +14,10 @@ Changed: promote_best is open from the start (it runs the same qualify bar as qu
 book_interview: chatbot2's one `_bar`). Interviews are `strong` only and have no quota:
 bookings are still reserved, charged on a verdict and released when cut off, for the records,
 but never refused for quota. The interviewer is `<parent>-interviewer-NNNN` (type
-`interviewer`). Bot runs share a pool of `runs.parallel` slots (the world's CPU), read at start.
+`interviewer`). Bot runs share a pool of `runs.parallel` slots (the world's CPU), re-read live.
+Promotions are decided on a sampled gate (`probes.gate_sample`, the full set every
+`probes.gate_full_every`-th promotion), and a promotion that takes longer than `promote.wait_s`
+answers `queued` with a ticket (best_status shows `pending` and the result).
 
 Knobs: the YAML file $CHATBOT_CONFIG (probes, interviews, runs), re-read when it changes."""
 
@@ -42,10 +45,10 @@ from eliza import ElizaWorld
 from flock.world import Agent, ToolError, World, tool
 
 DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 400,
-                       "gate_size": 120},  # the gate: the newest 120 verified probes
+                       "gate_sample": 60, "gate_full_every": 10},
             "interviews": {"start_minutes": 5, "expire_minutes": 20},
-            "runs": {"parallel": 0, "per_promotion": 12},
-            "promote": {"max_waiting": 8}}  # 0: the usable CPUs (sched_getaffinity)
+            "runs": {"parallel": 0},  # 0: the usable CPUs (sched_getaffinity)
+            "promote": {"max_waiting": 0, "wait_s": 40}}
 IV = re.compile(r"-interviewer-\d+$")  # agent-0007-interviewer-0012 -> parent agent-0007
 
 
@@ -69,6 +72,24 @@ def _doc(fn, doc: str):
     return tool(w)
 
 
+class _Pool:
+    """Slots for bot runs whose size can change while the world runs (`runs.parallel`)."""
+
+    def __init__(self, limit) -> None:
+        self.limit, self.active, self.cond = limit, 0, threading.Condition()
+
+    def __enter__(self) -> None:
+        with self.cond:
+            while self.active >= self.limit():
+                self.cond.wait(0.5)  # re-checks the limit, which may have grown
+            self.active += 1
+
+    def __exit__(self, *exc) -> None:
+        with self.cond:
+            self.active -= 1
+            self.cond.notify()
+
+
 def _usable_cpus() -> int:
     try:
         return len(os.sched_getaffinity(0)) or 4
@@ -77,15 +98,21 @@ def _usable_cpus() -> int:
 
 
 class Chatbot3World(Chatbot2World):
-    name, version, base_rules = "chatbot3", "0.3.0", (HERE / "rules.md").read_text()
+    name, version, base_rules = "chatbot3", "0.3.1", (HERE / "rules.md").read_text()
     dirs = ("agents", "best", "probes", "interviews")
 
     def __init__(self, root: str | None = None) -> None:
         super().__init__(root or os.environ.get("CHATBOT_WS") or str(HERE / "ws"))
         self.phase = "merged"  # no phases: nothing is ever refused by team
-        # 0: the CPUs this process may use (a Slurm job's cpuset, not the whole node)
-        n = int(self.cfg("runs", "parallel")) or _usable_cpus()
-        self._slots = threading.BoundedSemaphore(n)
+        self._slots = _Pool(self._parallel)
+
+    def _parallel(self) -> int:
+        """`runs.parallel`, re-read live; 0: the CPUs this process may use (a Slurm job's
+        cpuset, not the whole node)."""
+        return max(1, int(self.cfg("runs", "parallel")) or _usable_cpus())
+
+    def _gate_parallel(self) -> int:  # a promotion may use the whole pool
+        return self._parallel()
 
     @property
     def description(self) -> str:
@@ -249,7 +276,10 @@ DOCS = {
         the current best on the live probe set: a higher total score, never lower on the seed
         probes. A tie does not promote: add a probe best fails (add_probe), fix it in your
         copy, then promote. Promotions run one at a time: one that waited behind another is
-        compared with the NEW best (so the same score is then a tie).
+        compared with the NEW best (so the same score is then a tie). Both bots are scored on
+        the same probes: a sample of the live set picked by your bot's hash (the full set every
+        few promotions). If it is still queued after a while you get `queued` and a ticket:
+        keep working, best_status shows the result.
 
         Args:
             path: your candidate, e.g. agents/<your name>/bot
@@ -288,8 +318,8 @@ DOCS = {
             lines: the user's messages in order (1 to 20, one line each)
         """,
     "best_status": """Show the shared best (best/bot.py or best/bot/): where it came from, its
-        size, its score on the live probe set and the probes it fails, and the last 5
-        promotions.""",
+        size, its score on the live probe set and the probes it fails, the last 5 promotions,
+        how many promotions are `pending`, and the results of your queued ones.""",
     "chat": """Say one message to the candidate and get its reply (interviewers only). The
         conversation keeps going across calls, up to 10 messages.
 
