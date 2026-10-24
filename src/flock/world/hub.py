@@ -54,6 +54,7 @@ from flock.world.protocol import (
     TYPE_HEADER,
     WorldManifest,
     credential_id,
+    origin_matches,
 )
 
 log = logging.getLogger(__name__)
@@ -164,7 +165,7 @@ class WorldHub:
             return False, f"this worker has no secret for world {name}; {restart}"
         origin = s.credential_origin or ""
         bound = (origin.startswith("local:") and _loopback(s.endpoint or "")) or \
-            (origin == s.endpoint)
+            origin_matches(origin, s.endpoint or "")
         if not bound or not hmac.compare_digest(credential_id(token, origin), s.credential_id):
             return False, f"world {name} now uses another secret or endpoint; {restart}"
         return True, None

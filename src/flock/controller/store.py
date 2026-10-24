@@ -325,6 +325,10 @@ class Store:
             self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
         self.listener("reconcile", "")
 
+    def update_swarm_spec(self, spec: SwarmSpec) -> None:
+        """Replace a stored spec in place (no re-apply side effects): a world that moved."""
+        self._x("UPDATE swarms SET spec = ? WHERE name = ?", [spec.model_dump_json(), spec.swarm])
+
     def get_swarm(self, name: str) -> Row | None:
         row = self._one("SELECT * FROM swarms WHERE name = ?", [name])
         if row:

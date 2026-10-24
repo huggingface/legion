@@ -132,6 +132,23 @@ def credential_id(token: str, origin: str) -> str:
                     hashlib.sha256).hexdigest()[:32]
 
 
+WORLD_HOST_VAR = "${WORLD_HOST}"  # in world.url: the host is read from FLOCK_WORLD_HOST_FILE
+WORLD_HOST_FILE_ENV = "FLOCK_WORLD_HOST_FILE"
+
+
+def origin_matches(origin: str, endpoint: str) -> bool:
+    """A secret bound to `origin` may go to `endpoint`: the same URL, or, for a world.url with
+    ${WORLD_HOST} (a world whose host moves, docs/slurm.md), that URL with any one host name."""
+    if origin == endpoint:
+        return True
+    if WORLD_HOST_VAR not in origin:
+        return False
+    pre, _, post = origin.partition(WORLD_HOST_VAR)
+    host = endpoint[len(pre):len(endpoint) - len(post)] if endpoint.startswith(pre) and \
+        endpoint.endswith(post) and len(endpoint) > len(pre) + len(post) else ""
+    return bool(re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]+)?", host))
+
+
 def manifest_error(exc: Exception) -> str:
     """One line from a pydantic ValidationError (or anything else)."""
     errors = getattr(exc, "errors", None)

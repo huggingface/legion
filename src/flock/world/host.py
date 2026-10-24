@@ -35,6 +35,8 @@ from flock.world.protocol import (
     SWARM_ENV,
     TOKEN_ENV,
     TOKEN_HEADER,
+    WORLD_HOST_FILE_ENV,
+    WORLD_HOST_VAR,
     WorldManifest,
     credential_id,
     manifest_error,
@@ -66,7 +68,55 @@ def credential_origin(spec: SwarmSpec, endpoint: str) -> str:
     w = spec.world
     if w is not None and w.command is not None and spec.compute.kind == "local":
         return f"local:{spec.swarm}"
+    if w is not None and w.url is not None and WORLD_HOST_VAR in w.url:
+        return w.url  # bound to the template: a world that moves host keeps its credential
     return endpoint
+
+
+def world_endpoint(url: str, env: Mapping[str, str] = os.environ) -> str:
+    """world.url with ${WORLD_HOST} replaced by the first word of FLOCK_WORLD_HOST_FILE."""
+    if WORLD_HOST_VAR not in url:
+        return url
+    path = env.get(WORLD_HOST_FILE_ENV)
+    if not path:
+        raise WorldError(f"world.url {url} needs {WORLD_HOST_FILE_ENV} on the controller")
+    try:
+        words = Path(path).read_text().split()
+    except OSError as e:
+        raise WorldError(f"world host file {path}: {e}") from None
+    if not words:
+        raise WorldError(f"world host file {path} is empty (is the world job up?)")
+    return url.replace(WORLD_HOST_VAR, words[0])
+
+
+def follow_world_host(spec: SwarmSpec, controller_token: str, secrets: Mapping[str, str], *,
+                      env: Mapping[str, str] = os.environ,
+                      transport: httpx.BaseTransport | None = None) -> SwarmSpec | None:
+    """A swarm whose world.url has ${WORLD_HOST}: if the host file now names another host and
+    the world answers there, the spec with the new endpoint (and manifest), to store; workers
+    get it with their next heartbeat. None: nothing to change (or the new host does not
+    answer yet: try again later)."""
+    w = spec.world
+    if w is None or w.url is None or WORLD_HOST_VAR not in w.url:
+        return None
+    try:
+        url = world_endpoint(w.url, env)
+    except WorldError as e:
+        log.warning("world %s: %s", spec.swarm, e)
+        return None
+    if url == w.endpoint:
+        return None
+    token = world_token(spec, controller_token, secrets)
+    try:
+        manifest = fetch_manifest(url, token, transport=transport)
+    except WorldError as e:
+        log.warning("world of %s moved to %s but does not answer yet: %s", spec.swarm, url, e)
+        return None
+    new = spec.model_copy(deep=True)
+    assert new.world is not None
+    log.info("world of %s moved: %s -> %s", spec.swarm, w.endpoint, url)
+    new.world.endpoint, new.world.manifest = url, manifest
+    return new
 
 
 def world_token(spec: SwarmSpec, controller_token: str, secrets: Mapping[str, str]) -> str | None:
@@ -351,7 +401,7 @@ def resolve(spec: SwarmSpec, *, host: WorldHost | None, controller_token: str,
         url, started = host.ensure(spec.swarm, w, token)
     else:
         assert w.url is not None
-        url = w.url
+        url = world_endpoint(w.url)
     try:
         w.manifest = fetch_manifest(url, token, transport=transport)
         w.endpoint = url

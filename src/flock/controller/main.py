@@ -141,6 +141,7 @@ class Built:
     final_push_timeout: float = FINAL_PUSH_TIMEOUT
 
 
+WORLD_FOLLOW_INTERVAL = 15.0  # s between reads of FLOCK_WORLD_HOST_FILE
 COMPUTE_KINDS = (None, "hf-jobs", "local", "slurm", "external")
 
 
@@ -213,6 +214,24 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             await asyncio.sleep(STATS_LOG_INTERVAL)
             log.info("hub calls: %s", stats().get("hub_calls", {}))
 
+    async def follow_worlds() -> None:
+        """FLOCK_WORLD_HOST_FILE (docs/slurm.md): a world job requeued on another node writes
+        its new host there; specs with ${WORLD_HOST} in world.url get the new endpoint, and
+        workers get it with their next heartbeat (same credential: no relaunch)."""
+        from flock.world.host import follow_world_host
+
+        while True:
+            await asyncio.sleep(WORLD_FOLLOW_INTERVAL)
+            for sw in store.list_swarms():
+                try:
+                    new = await asyncio.to_thread(follow_world_host, sw["spec"], token, env,
+                                                    env=env)
+                except Exception:
+                    log.exception("world host check failed")
+                    continue
+                if new is not None:
+                    store.update_swarm_spec(new)
+
     async def sync_state() -> None:
         while True:
             await asyncio.sleep(sync_every)
@@ -226,6 +245,8 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     async def background(notifier: Notifier) -> None:
         loops.append(asyncio.current_task())
         tasks = [asyncio.create_task(log_stats())]
+        if env.get("FLOCK_WORLD_HOST_FILE"):
+            tasks.append(asyncio.create_task(follow_worlds()))
         if state is not None:
             tasks.append(asyncio.create_task(sync_state()))
         loops.extend(tasks)
