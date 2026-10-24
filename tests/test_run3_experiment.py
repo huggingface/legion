@@ -394,6 +394,13 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
     # the bundle in the bucket, with every agent's events
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()
+    doc = json.loads((run / "run.json").read_text())  # removed interviewers carry their cost
+    gone = doc["removed_agents"]
+    assert gone and all(r["type"] == "interviewer" and r["cost_usd"] is not None for r in gone)
+    if variant == "standin":  # priced: live agents + removed ones = the swarm's total
+        assert all(r["cost_usd"] > 0 for r in gone)
+        live = sum(x["cost_usd"] for x in doc["agents"])
+        assert abs(live + sum(r["cost_usd"] for r in gone) - doc["totals"]["cost_usd"]) < 1e-3
     local = yaml.safe_load((home / "repo/experiments/run3/spec.local.yaml").read_text())
     assert local["types"]["agent"]["loop"]["while"] == loop_while
     agents = [f"agent-{i:04d}" for i in range(cap)]

@@ -154,7 +154,8 @@ spawn:
   log, state, tools pin and the harness's own session dir (`AgentRuntime.purge`).
 - **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
   session. A run bundle (`flock run`) keeps removed agents' events (`events/<name>.jsonl`) and
-  lists them in `run.json` under `removed_agents`.
+  lists them in `run.json` under `removed_agents`, each with its type, tokens and `cost_usd`
+  (priced from its turns' tokens, as the swarm's total counts it).
 - **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
 - **A follow-up prompt** from the parent must arrive while the agent is still working; a
   prompt sent after its session ended gets 404, because the agent is gone.

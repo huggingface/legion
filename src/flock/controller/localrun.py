@@ -46,6 +46,7 @@ import httpx
 from flock.controller.api import create_app, swarm_status
 from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
+from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.reconcile import Settings, agent_state, run_reconciler, worker_state
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
@@ -333,7 +334,7 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         })
 
     # Removed agents (spawned children, ephemeral ones: docs/spawn.md) keep their events; their
-    # cost is in the swarm's total (removed_cost).
+    # cost is in the swarm's total (removed_cost) and, per agent, priced from their turns' tokens.
     removed = []
     for name in sorted(set(store.event_agents(spec.swarm)) - {a["name"] for a in per_agent}
                        - {swarm_stream(spec.swarm)}):
@@ -342,7 +343,19 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
             for i, ev in enumerate(evs):
                 f.write(json.dumps(ev) + "\n")
                 merged.append((str(ev.get("ts", "")), i, ev))
-        removed.append({"name": name, "events": len(evs), "events_file": f"events/{name}.jsonl"})
+        # its cost from its turns' tokens (the store keeps only the swarm's removed total)
+        rtoks: dict[str, TokenUsage] = {}
+        for ev in evs:
+            data = (ev.get("data") or {}).get("data") if ev.get("type") == "turn_ended" else None
+            for model, u in ((data or {}).get("tokens") or {}).items():
+                with contextlib.suppress(ValueError, TypeError):
+                    rtoks[model] = rtoks.get(model, TokenUsage()) + TokenUsage(**u)
+        rtype = max((t for t in spec.types if f"-{t}-" in name), key=len, default=None)
+        removed.append({"name": name, "type": rtype, "events": len(evs),
+                        "events_file": f"events/{name}.jsonl",
+                        "cost_usd": cost_usd(rtoks, type_price_table(spec.types.get(rtype)))
+                        if rtype else None,
+                        "tokens": {m: u.model_dump() for m, u in rtoks.items()}})
 
     # The swarm-level stream (docs/loop.md "Events"). Its per-agent events (`final_round`) are
     # also on the agent's stream, so only the swarm's own (agent "") are added.
