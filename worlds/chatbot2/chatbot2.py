@@ -152,6 +152,30 @@ class Chatbot2World(ChatbotWorld):
         return {"files": len(fs), "bytes": sum(f.stat().st_size for f in fs),
                 "lines": sum(f.read_bytes().count(b"\n") for f in fs)}
 
+    def _bar(self, p: Path) -> list[str]:
+        """THE qualify bar, shared by qualify, book_interview and promote_best (one function, so
+        they cannot drift): on every seed probe conversation the bot runs within the time limit
+        and every line gets a non-empty reply that repeats no earlier one. Each failure names
+        the probe file, the line and its text; [] when it qualifies (it stops at a crash)."""
+        fails = []
+        for name, rows in self._probes().items():
+            r = self._run(p, [m for m, _ in rows])
+            turns = r["turns"]
+            replies = [_norm(t["bot"]) for t in turns]
+            if r["status"] != "ok":  # a crash or a timeout: name the first unanswered line
+                i = next((i for i, t in enumerate(turns) if t["bot"] is None), len(turns) - 1)
+                return [*fails, f"{name} line {i + 1} {turns[i]['user']!r}: {r['status']}"]
+            fails += [f"{name} line {i + 1} {t['user']!r}: no reply"
+                      for i, (t, x) in enumerate(zip(turns, replies)) if not x][:1]
+            fails += [f"{name} line {i + 1} {turns[i]['user']!r}: repeated reply {x!r}"
+                      for i, x in enumerate(replies) if x and x in replies[:i]][:1]
+        return fails
+
+    @staticmethod
+    def _unfit(fails: list[str]) -> str:
+        return f"it fails the qualify bar (no empty or repeated reply, every line answered): " \
+               f"{'; '.join(fails[:3])}"
+
     @tool
     def read_file(self, path: str, start: int | None = None, end: int | None = None,
                   agent: Agent | None = None) -> str:
@@ -251,8 +275,10 @@ class Chatbot2World(ChatbotWorld):
             else None
 
     async def _full(self, p: Path, known: dict | None = None, live: list | None = None) -> dict:
-        """The score on the live set: the seed probes (Eliza points) plus 1 per swarm probe."""
-        live, res, sem = live or self._live(), dict(known or {}), asyncio.Semaphore(4)
+        """The score on the live set: the seed probes (Eliza points) plus 1 per verified swarm
+        probe (one whose evidence reproduced when the world re-ran it)."""
+        live = [x for x in (self._live() if live is None else live) if x.get("verified", True)]
+        res, sem = dict(known or {}), asyncio.Semaphore(4)
 
         async def one(x: dict) -> None:
             async with sem:
@@ -296,7 +322,9 @@ class Chatbot2World(ChatbotWorld):
                 not_phrase:<text> (no reply contains it), not_repeat (no reply is repeated),
                 not_empty (every line gets a reply), answers_question (the last line is a
                 question and its reply makes a statement, not only a counter-question)
-            evidence: the failing reply the bot gave you in that run_bot, copied exactly
+            evidence: the failing reply the bot gave you in that run_bot, copied exactly (if
+                the re-run does not reproduce it, the probe is kept but unverified and does
+                not count in the promotion gate)
             path: the bot that fails it; leave empty for the current best (before the first
                 promotion: the bot you ran)
         """
@@ -325,6 +353,8 @@ class Chatbot2World(ChatbotWorld):
                             "no_best")
         sha, r = self._sha(p), await asyncio.to_thread(self._run, p, lines)
         replies, rel = [t["bot"] or "" for t in r["turns"]], self._rel(p)
+        ok = any(_norm(evidence) in _norm(x) or _norm(x) and _norm(x) in _norm(evidence)
+                 for x in replies)
         if passes(check.strip(), r):
             self._log(agent, "probe_refused", path=rel, check=check)
             raise ToolError(f"refused: {rel} already passes this probe (its replies now: "
@@ -332,29 +362,35 @@ class Chatbot2World(ChatbotWorld):
         pid = f"p{len(self._live()) + 1}"
         rec = {"id": pid, "author": agent.name, "ts": round(time.time(), 3), "lines": lines,
                "check": check.strip(), "path": rel, "evidence": evidence[:300],
-               "reply": (replies[-1] or r["status"])[:300], "evidence_matches": any(
-                   _norm(evidence) in _norm(x) or _norm(x) and _norm(x) in _norm(evidence)
-                   for x in replies)}
+               "reply": (replies[-1] or r["status"])[:300], "evidence_matches": ok,
+               "verified": ok}
         self._append("probes/live.jsonl", rec)
-        if self._best[0] == sha:  # best's cached results, unless a promotion came in between
+        if ok and self._best[0] == sha:  # best's cached results, unless a promotion came in
             self._best[1][pid] = False
-        self._log(agent, "add_probe", probe=pid, path=rel, check=rec["check"])
+        self._log(agent, "add_probe", probe=pid, path=rel, check=rec["check"], verified=ok)
         await asyncio.to_thread(self._mirror, ["probes/live.jsonl", "log.jsonl"])
         said = " / ".join(x[:60] for x in lines[-3:])
-        return {"added": pid, "live_probes": int(pid[1:]), "post": f"PROBE {pid} "
-                f"({agent.name}) {rec['check']}: '{said}' -> {rel}: '{rec['reply'][:120]}'"}
+        out = {"added": pid, "live_probes": int(pid[1:]), "verified": ok, "post": f"PROBE {pid}"
+               f"{'' if ok else ' (unverified)'} ({agent.name}) {rec['check']}: '{said}' -> "
+               f"{rel}: '{rec['reply'][:120]}'"}
+        if not ok:
+            out["note"] = ("your evidence is not in the bot's replies on the re-run (they are in "
+                           "'post'), so this probe does NOT count in the promotion gate. Copy "
+                           "the failing reply exactly from run_bot next time.")
+        return out
 
     @tool
     async def probes(self) -> dict:
         """The probe set every promotion is scored on: the seed probe files (the floor) and the
         swarm's probes (id, author, check, lines, newest 40), each with whether the current
-        best passes it."""
+        best passes it. An unverified probe (its evidence did not reproduce) does not count."""
         s, live = await self._best_score(), self._live()
         res = s["results"] if s else {}
         return {"seed": s["seed_probes"] if s else sorted(self._probes()), "total": len(live),
                 "best_fails": [k for k, v in res.items() if not v],
                 "live": [{k: x[k] for k in ("id", "author", "check", "lines")}
-                         | {"best": {True: "pass", False: "FAIL"}.get(res.get(x["id"]), "-")}
+                         | {"verified": x.get("verified", True),
+                            "best": {True: "pass", False: "FAIL"}.get(res.get(x["id"]), "-")}
                          for x in live[-40:]]}
 
     # ------------------------------------------------------------------ promotion
@@ -373,9 +409,10 @@ class Chatbot2World(ChatbotWorld):
     async def promote_best(self, agent: Agent, path: str, reason: str) -> dict:
         """Make your bot (a .py file or a package directory) the shared best (best/bot.py or
         best/bot/) if it BEATS the current best on the live probe set: a higher total score,
-        and no lower on the seed probes (the floor). A tie does not promote: add a probe best
-        fails (add_probe), fix it in your copy, then promote. Closed in phase 1 and during
-        the compare round right after the merge.
+        and no lower on the seed probes (the floor). It must also pass the qualify bar (no
+        empty or repeated reply; the same check as qualify and book_interview). A tie does not
+        promote: add a probe best fails (add_probe), fix it in your copy, then promote. Closed
+        in phase 1 and during the compare round right after the merge.
 
         Args:
             path: your candidate, e.g. teams/a/agents/ds-a-0001/bot
@@ -389,8 +426,11 @@ class Chatbot2World(ChatbotWorld):
                             "what to keep.", "compare_round")
         async with self._promote:
             live = self._live()  # both scored on the same set
-            cand, cur = await self._full(p, live=live), await self._best_score(live)
+            fails, cand, cur = await asyncio.gather(asyncio.to_thread(self._bar, p),
+                                                    self._full(p, live=live),
+                                                    self._best_score(live))
             why = ("it crashed or timed out on a probe" if cand["crashed"] else
+                   self._unfit(fails) if fails else
                    f"it scores {cand['seed']} on the seed probes, best {cur['seed']} (the floor)"
                    if cur and cand["seed"] < cur["seed"] else
                    f"it scores {cand['score']}, the current best {cur['score']}: it must beat "
@@ -444,7 +484,7 @@ class Chatbot2World(ChatbotWorld):
         """Check a bot before an interview: on every seed probe conversation it runs within the
         time limit and answers each line, with no empty or repeated reply. Also shows its score
         on the live probe set and your team's interview quotas. (book_interview runs the same
-        bar on its frozen copy.)
+        bar on its frozen copy, and promote_best on the candidate.)
 
         Args:
             path: the bot, e.g. teams/a/agents/ds-a-0001/bot or best/bot
@@ -519,8 +559,8 @@ class Chatbot2World(ChatbotWorld):
         _copy(p, snap)
         if fails := await asyncio.to_thread(self._bar, snap):
             shutil.rmtree(snap.parent)
-            raise ToolError(f"refused: {self._rel(p)} does not qualify: {fails[:3]}. Nothing was "
-                            "reserved.", "not_qualified")
+            raise ToolError(f"refused: {self._rel(p)} does not qualify: {self._unfit(fails)}. "
+                            "Nothing was reserved.", "not_qualified")
         with self._blk:
             try:
                 quota_left()  # again: another booking may have come in during the bar
