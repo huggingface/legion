@@ -124,6 +124,8 @@ def test_render_variants(tmp_path):
             assert (t.replicas, t.agents_per_worker, t.tool_choice, t.bash) == (0, 25, "required",
                                                                                False)
             assert t.max_turns == 20 and "at most 18 calls" in t.loop.prompt
+            assert "exactly as `run_bot` returned it" in t.loop.prompt
+            assert "exactly as `run_bot` returned it" in t.loop.first
             lp = t.loop
             assert (lp.every, lp.while_.until, lp.wake.min_gap, lp.wake.max) == (
                 "turn_end", "48h", "10s", 20)

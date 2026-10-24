@@ -100,6 +100,8 @@ types:
 
         4. `done` with "joined: <thread> <your plan>".
 
+        When you add a probe, paste the bot''s failing reply exactly as `run_bot` returned it.
+
         Communicate in simple, clear language: short sentences, say what you did and what you need next,
         no jargon or filler.
 

@@ -70,6 +70,7 @@ types:
         2. Pick ONE: an approach that needs hands (join its thread, `post` "taking: <the piece>") or a new angle nobody covers (open a thread: thread "new", "[<tag>] <the idea>: agents/<your name>/...").
         3. If best exists and you have no bot yet: copy_file("best/bot", "agents/<your name>/bot") (or best/bot.py), then run_bot it with 6 lines that test your piece.
         4. `done` with "joined: <thread> <your plan>".
+        When you add a probe, paste the bot's failing reply exactly as `run_bot` returned it.
         Communicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.
       prompt_file: prompts/round.md
       every: turn_end                          # continuous: the next round when a turn ends
