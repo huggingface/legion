@@ -75,6 +75,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from flock.controller.prices import Price, price_for
+from flock.home import home
 from flock.models import TokenUsage, TypeSpec
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env, pi_usage
@@ -163,7 +164,7 @@ When the task is done, reply in plain text without a tool call."""
 
 
 def llm_home() -> Path:
-    return Path(os.environ.get("FLOCK_LLM_HOME") or Path.home() / ".flock-llm")
+    return Path(os.environ.get("FLOCK_LLM_HOME") or home() / ".flock-llm")
 
 
 def harness_env(env: Mapping[str, str] | None, base: Mapping[str, str] | None = None) -> dict[str, str]:

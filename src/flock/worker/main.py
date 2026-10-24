@@ -8,6 +8,14 @@ agent, flush events, last heartbeat, exit 0. Controller errors are retried with 
 except 404/409 on our own worker routes: the controller says this slot has no live job (we
 are a stale process and a replacement may already own our agents), so we kill the harness
 processes and exit 0 without syncing, to avoid overwriting the replacement's bucket state.
+
+Preemption (SIGUSR1, and SIGTERM outside compute local; docs/slurm.md): the machine is being
+taken away. A cluster's Spot watcher cancels the job about 30 s after the signal, so the whole
+handler is bounded by FLOCK_DRAIN_BUDGET_S (default 20 s): stop admitting turns, interrupt every
+running turn at once (`turn_interrupted`), sync every agent to the bucket in parallel, write
+`<swarm>/_workers/<worker>/preempted.json` in the bucket, flush events, send a last heartbeat
+with `preempted: true`, exit PREEMPT_EXIT (75). The controller relaunches the slot at once (a
+planned restart, no crash backoff) and the new job restores every agent from the bucket.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from pathlib import Path
 
 import httpx
 
+from flock.home import cache_defaults
 from flock.models import (
     HEARTBEAT_INTERVAL,
     AssignCommand,
@@ -63,6 +72,8 @@ from flock.world.hub import WorldHub
 log = logging.getLogger("flock.worker")
 
 DEFAULT_DRAIN_WINDOW = timedelta(minutes=10)
+PREEMPT_EXIT = 75  # EX_TEMPFAIL: the job ended because its machine was taken away
+DEFAULT_DRAIN_BUDGET = 20.0  # s, FLOCK_DRAIN_BUDGET_S: the whole preemption handler
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -101,11 +112,23 @@ class WorkerConfig:
     incarnation: str | None = None  # WORKER_INCARNATION: binds our polls to this job
     # compute local (docs/local.md): the controller's pid; the worker exits once it is gone
     parent_pid: int | None = None
+    drain_budget: float = DEFAULT_DRAIN_BUDGET  # s, the preemption handler (SIGUSR1)
+    # Slurm (docs/slurm.md): FLOCK_URL is a template with ${CTL_HOST}, read from this file at
+    # start and again when the controller stops answering (it may have moved host)
+    url_template: str | None = None
+    host_file: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
+        host_file = env.get("FLOCK_CTL_HOST_FILE") or None
+        template = env["FLOCK_URL"] if host_file and "${CTL_HOST}" in env["FLOCK_URL"] else None
+        if template is not None:
+            env = {**env, "CTL_HOST": env.get("CTL_HOST") or read_host_file(host_file)}
         return cls(
             url=expand_env(env["FLOCK_URL"], env).rstrip("/"),
+            url_template=template,
+            host_file=host_file,
+            drain_budget=float(env.get("FLOCK_DRAIN_BUDGET_S") or DEFAULT_DRAIN_BUDGET),
             token=env["FLOCK_TOKEN"],
             worker_id=env["WORKER_ID"],
             swarm=env["SWARM"],
@@ -120,6 +143,17 @@ class WorkerConfig:
             parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
             else None,
         )
+
+
+def read_host_file(path: str) -> str:
+    """The controller's hostname from its host file (first word; the controller job writes it)."""
+    try:
+        words = Path(path).read_text().split()
+    except OSError as e:
+        raise ValueError(f"controller host file {path}: {e}") from None
+    if not words:
+        raise ValueError(f"controller host file {path} is empty")
+    return words[0]
 
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -158,13 +192,29 @@ class ControllerClient:
 
     def __init__(self, url: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None,
                  incarnation: str | None = None, max_concurrency: int = MAX_CONCURRENCY,
-                 sleep: Callable[[float], Awaitable[object]] | None = None) -> None:
+                 sleep: Callable[[float], Awaitable[object]] | None = None,
+                 resolve_url: Callable[[], str] | None = None) -> None:
         self.http = httpx.AsyncClient(base_url=url, headers={"Authorization": f"Bearer {token}"},
                                       timeout=httpx.Timeout(20, read=60), transport=transport)
         self.params = {"incarnation": incarnation} if incarnation else {}
         self._slots = asyncio.Semaphore(max(1, max_concurrency))
         self._sleep = sleep or asyncio.sleep
         self.stats: Counter[str] = Counter()
+        # re-reads where the controller is (a host file on Slurm) after a transport error
+        self.resolve_url = resolve_url
+
+    def _refresh_url(self) -> None:
+        if self.resolve_url is None:
+            return
+        try:
+            url = self.resolve_url().rstrip("/")
+        except (OSError, ValueError) as e:
+            log.warning("controller address: %s", e)
+            return
+        if url and url != str(self.http.base_url).rstrip("/"):
+            log.warning("controller moved: %s -> %s", self.http.base_url, url)
+            self.http.base_url = url
+            self.stats["moved"] += 1
 
     async def _send(self, method: str, path: str, *, budget: float, **kw) -> httpx.Response:
         """`budget`: seconds this call may spend waiting between attempts."""
@@ -179,6 +229,8 @@ class ControllerClient:
                     r = await self.http.request(method, path, **kw)
                 except httpx.TransportError as e:
                     err = e
+            if err is not None:
+                self._refresh_url()
             if r is not None and r.status_code not in RETRY_STATUSES:
                 r.raise_for_status()
                 return r
@@ -302,6 +354,9 @@ class Worker:
         self._wave: tuple[float, int, dict] | None = None  # (start, agents, stats snapshot)
         self._throttled_logged = 0
         self._terminating = False
+        self.preempted = False  # the preemption handler started (no new turns)
+        self.preempt_synced = False  # it finished: the heartbeat may say `preempted` now
+        self._deadline = 0.0  # loop time by which a preempted worker has exited
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
 
     async def _fetch_tools(self, version: str) -> bytes:
@@ -464,6 +519,7 @@ class Worker:
     def heartbeat_payload(self) -> WorkerHeartbeat:
         return WorkerHeartbeat(worker=self.cfg.worker_id, deadline=self.cfg.deadline,
                                draining=self.draining, spec_rev=self.spec_rev,
+                               preempted=self.preempt_synced,
                                agents=[a.heartbeat() for a in self.agents.values()])
 
     async def send_heartbeat(self) -> bool:
@@ -602,6 +658,69 @@ class Worker:
                              return_exceptions=True)
         self._drained.set()
 
+    async def preempt(self, reason: str) -> None:
+        """The machine goes away in seconds (docs/slurm.md): everything below fits in
+        `cfg.drain_budget`. Turns are interrupted, not finished; each agent's session and
+        workdir go to the bucket in parallel; then the preempted marker. Events, the last
+        heartbeat (`preempted: true`) and exit code PREEMPT_EXIT follow in `run`."""
+        if self.preempted or self.stale:
+            return
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        self._deadline = t0 + self.cfg.drain_budget
+        log.warning("preempted (%s): interrupting %d agents, syncing within %.0f s", reason,
+                    len(self.agents), self.cfg.drain_budget)
+        # no early heartbeat: `preempted` tells the controller to relaunch, which must wait
+        # until the bucket has this worker's last state
+        self.preempted = self._terminating = self.draining = True
+        agents = list(self.agents.values())
+        for rt in agents:
+            rt.allow_starts = False
+        # syncs run in threads: one per agent, not the default pool's few
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=max(8, len(agents) + 4),
+                                                     thread_name_prefix="preempt"))
+        # leave time for the events and the last heartbeat (a few seconds)
+        budget = max(1.0, self.cfg.drain_budget * 0.8)
+
+        async def one(rt: AgentRuntime) -> None:
+            await rt.stop("preempted")
+            await rt.sync_now("preempt")
+
+        snap = self.sync.stats.snapshot() if self.sync else {}
+        try:
+            await asyncio.wait_for(asyncio.gather(*(one(rt) for rt in agents),
+                                                  return_exceptions=True), budget)
+        except TimeoutError:
+            log.warning("preempt: sync did not finish in %.0f s; exiting anyway", budget)
+        await self._mark_preempted(reason, max(0.5, self._deadline - loop.time() - 2))
+        log.info("preempt: %d agents interrupted and synced in %.1f s; bucket %s", len(agents),
+                 loop.time() - t0, self.sync.stats.since(snap) if self.sync else {})
+        self.preempt_synced = True
+        self._drained.set()
+
+    async def _mark_preempted(self, reason: str, timeout: float) -> None:
+        """`<swarm>/_workers/<worker>/preempted.json` in the bucket: who, when, why."""
+        if self.sync is None:
+            return
+        import json
+        import tempfile
+
+        body = json.dumps({"worker": self.cfg.worker_id, "reason": reason,
+                           "at": utcnow().isoformat(), "agents": sorted(self.agents)})
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write(body)
+        path = Path(f.name)
+        dest = f"{self.cfg.swarm}/_workers/{self.cfg.worker_id}/preempted.json"
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self.sync.store.upload, [(path, dest)]),
+                                   timeout)
+        except Exception as e:  # noqa: BLE001 - the heartbeat flag still tells the controller
+            log.warning("preempt marker not written: %s", type(e).__name__)
+        finally:
+            path.unlink(missing_ok=True)
+
     async def drain(self, reason: str) -> None:
         if self.draining:
             return
@@ -633,29 +752,45 @@ class Worker:
                  self.deadline_loop(), self.parent_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
         loop = asyncio.get_running_loop()
-        on_term = self.cfg.parent_pid is not None  # compute local only; jobs keep the default
-        if on_term:
-            loop.add_signal_handler(signal.SIGTERM,
-                                    lambda: self._spawn(self.terminate("SIGTERM")))
+        # compute local: SIGTERM is `flock run` stopping (terminate). Elsewhere SIGTERM and
+        # SIGUSR1 mean the machine goes away (a Spot notice, a time limit, a cancel): preempt.
+        local = self.cfg.parent_pid is not None
+        handlers = {
+            signal.SIGUSR1: lambda: self._spawn(self.preempt("SIGUSR1")),
+            signal.SIGTERM: (lambda: self._spawn(self.terminate("SIGTERM"))) if local
+            else (lambda: self._spawn(self.preempt("SIGTERM"))),
+        }
+        for sig, fn in handlers.items():
+            loop.add_signal_handler(sig, fn)
         try:
             await self._drained.wait()
         finally:
-            if on_term:
-                loop.remove_signal_handler(signal.SIGTERM)
+            for sig in handlers:
+                loop.remove_signal_handler(sig)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        for attempt in range(5):
-            if self.stale or await self.flush_events():
-                break
-            await asyncio.sleep(_backoff(attempt))
-        if not self.stale:
-            await self.send_heartbeat()
+        if self.preempted:  # what is left of the budget, for events and the last heartbeat
+            left = max(1.0, self._deadline - loop.time())
+            try:
+                await asyncio.wait_for(self._final_reports(), left)
+            except TimeoutError:
+                log.warning("preempt: events/heartbeat cut at the budget")
+        else:
+            await self._final_reports()
         await self.comms.aclose()
         await self.world.aclose()
         await self.client.aclose()
-        log.info("drained; exiting")
-        return 0
+        log.info("drained; exiting%s", " (preempted)" if self.preempted else "")
+        return PREEMPT_EXIT if self.preempted else 0
+
+    async def _final_reports(self) -> None:
+        for attempt in range(5):
+            if self.stale or await self.flush_events():
+                break
+            await asyncio.sleep(0.2 if self.preempted else _backoff(attempt))
+        if not self.stale:
+            await self.send_heartbeat()
 
 
 def quiet_libraries() -> None:
@@ -695,12 +830,23 @@ def main() -> None:
     quiet_libraries()
     cfg = WorkerConfig.from_env()
     cfg.work_root.mkdir(parents=True, exist_ok=True)
+    # a container with no (writable) HOME: caches next to the work root (docs/slurm.md)
+    if set_ := cache_defaults(cfg.work_root.parent / "cache"):
+        log.info("no usable HOME: %s", set_)
     sync = None
     if cfg.bucket:
         stats = BucketStats()
         count_hub_http(stats)
         sync = BucketSync(HubBucketStore(cfg.bucket, stats=stats), cfg.swarm)
-    client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation)
+    resolve = None
+    if cfg.url_template and cfg.host_file:
+        template, host_file = cfg.url_template, cfg.host_file
+
+        def resolve() -> str:
+            return expand_env(template, {"CTL_HOST": read_host_file(host_file)})
+
+    client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation,
+                              resolve_url=resolve)
     worker = Worker(cfg, client, sync=sync)
     run_and_exit(worker.run())
 

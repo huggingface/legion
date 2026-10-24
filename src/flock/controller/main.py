@@ -147,6 +147,12 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         raise SystemExit("FLOCK_TOKEN must be set")
     dep = deployment(env)
     data_dir = env.get("FLOCK_DATA", "./data")
+    if env is os.environ:  # a container with no usable HOME: hub caches under the data dir
+        from pathlib import Path
+
+        from flock.home import cache_defaults
+
+        cache_defaults(Path(data_dir).resolve() / "cache")
     state = state_sync_from_env(env, data_dir)
     if dep.mode == "job" and state is None:
         log.warning("job mode without FLOCK_STATE_URL: controller state is lost on restart")

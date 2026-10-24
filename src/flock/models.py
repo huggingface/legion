@@ -1362,6 +1362,9 @@ class WorkerHeartbeat(BaseModel):
     # `type_spec_rev` of the type spec the worker has (docs/live.md): the controller sends the
     # current one in the heartbeat response only when it differs
     spec_rev: str | None = None
+    # the worker's last heartbeat after a preemption notice (SIGUSR1): it synced and exits;
+    # the controller relaunches the slot at once, as a planned restart (docs/slurm.md)
+    preempted: bool = False
 
 
 class Event(BaseModel):

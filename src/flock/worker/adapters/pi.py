@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from flock.controller.prices import Price, price_for
+from flock.home import home
 from flock.models import TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
 
@@ -56,7 +57,7 @@ STOP_GRACE = 5.0
 
 
 def pi_home() -> Path:
-    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or home() / ".pi" / "agent")
 
 
 @dataclass(frozen=True)
