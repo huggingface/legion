@@ -120,6 +120,7 @@ async def test_sigusr1_preempts_within_budget_and_restart_restores(tmp_path):
     # `preempted` only on heartbeats sent after the sync: the last one
     flags = [hb.preempted for hb in ctrl.heartbeats[hb_before:]]
     assert flags[-1] is True and flags.count(True) == 1
+    assert ctrl.heartbeats[-1].interrupted == ["researcher-0000"]
     assert ctrl.heartbeats[-1].draining is True
 
     # the relaunched job (same name) restores every agent from the bucket and resumes

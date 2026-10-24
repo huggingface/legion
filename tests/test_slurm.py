@@ -84,6 +84,7 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
         "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": block,
         "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 2,
                                  "agents_per_worker": 2, "secrets": ["ANTHROPIC_API_KEY"],
+                                 "resume_prompt": "Your turn was cut; continue.",
                                  "env": {"MSGBOARD_URL": "https://example.invalid"}}},
     })
 
@@ -364,3 +365,115 @@ async def test_slurm_controller_accepts_only_slurm_specs(store, clock, tmp_path)
         other = spec.model_copy(update={"compute": ComputeSpec(kind="local")})
         r = await c.put("/swarms/demo", json=other.model_dump(mode="json"))
         assert r.status_code == 400 and "compute 'slurm'" in r.text
+
+
+# --------------------------------------------------------------------------- planned restarts
+
+
+async def test_preempt_flag_cancelled_relaunch_same_name_registers_fresh(tmp_path, slurm, store,
+                                                                        clock):
+    """launch -> SIGUSR1 drain (flag) -> CANCELLED -> relaunch same name -> 200; the old
+    incarnation gets 409. No backoff, no crash count, the cut turn resumes."""
+    import httpx
+
+    from flock.controller.api import create_app
+    from flock.models import AssignCommand
+
+    spec = slurm_spec(tmp_path)
+    store.put_swarm(spec, 0)
+    jobs, s = SlurmJobsClient(env={}), settings()
+    reconcile(store, jobs, clock(), s)
+    (old_job,) = slurm.ids()
+    old_inc = store.get_worker(W0)["incarnation"]
+    slurm.set(old_job, "RUNNING")
+    app = create_app(store, TOKEN, clock=clock)
+
+    def hb(**kw):
+        return WorkerHeartbeat(worker=W0, deadline=clock() + timedelta(hours=24), agents=[
+            AgentHeartbeat(name="researcher-0000", state="working", turn_id="t1"),
+            AgentHeartbeat(name="researcher-0001", state="idle")], **kw).model_dump(mode="json")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        url = f"/workers/{W0}/heartbeat"
+        r = await c.post(url, json=hb(), params={"incarnation": old_inc})
+        assert r.status_code == 200
+        clock.advance(10)
+        # the worker's last heartbeat after its drain: synced, exiting
+        last = hb(preempted=True, draining=True)
+        last["agents"][0].update(state="idle", turn_id=None)
+        last["interrupted"] = ["researcher-0000"]
+        r = await c.post(url, json=last, params={"incarnation": old_inc})
+        assert r.status_code == 200
+        actions = reconcile(store, jobs, clock(), s)  # the very next pass, no 90 s wait
+        kinds = [a.kind for a in actions]
+        assert "planned_restart" in kinds and "launch" in kinds and "crash" not in kinds
+        assert f"scancel {old_job}" in slurm.calls()
+        new_job = next(i for i in slurm.ids() if i != old_job)
+        argv = slurm.argv(new_job)
+        assert argv[argv.index("-J") + 1] == W0
+        w = store.get_worker(W0)
+        assert w["job_id"] == new_job and w["incarnation"] != old_inc
+        assert (w["crashes"], w["consecutive_crashes"], w["preempted"]) == (0, 0, 0)
+        # the old job ends CANCELLED (ours, now): it does not disturb the new slot
+        assert jobs.inspect(old_job).stage == "CANCELED"
+        # a late request from the old process: 409, it exits without syncing
+        r = await c.post(url, json=hb(), params={"incarnation": old_inc})
+        assert r.status_code == 409
+        # the relaunched worker registers fresh
+        slurm.set(new_job, "RUNNING")
+        r = await c.post(url, json=hb(), params={"incarnation": w["incarnation"]})
+        assert r.status_code == 200
+    assigns = [AssignCommand.model_validate_json(c["body"]) for c in store.commands_for(W0)
+               if '"assign"' in c["body"]]
+    by = {a.agent: a for a in assigns}
+    assert by["researcher-0000"].restore and by["researcher-0000"].resume_prompt
+    assert by["researcher-0001"].resume_prompt is None
+
+
+async def test_reused_worker_id_while_old_job_runs_stays_409(tmp_path, slurm, store, clock):
+    import httpx
+
+    from flock.controller.api import create_app
+
+    store.put_swarm(slurm_spec(tmp_path), 0)
+    jobs = SlurmJobsClient(env={})
+    reconcile(store, jobs, clock(), settings())
+    (job,) = slurm.ids()
+    slurm.set(job, "RUNNING")
+    w = store.get_worker(W0)
+    app = create_app(store, TOKEN, clock=clock)
+    body = WorkerHeartbeat(worker=W0, deadline=clock() + timedelta(hours=1),
+                           agents=[]).model_dump(mode="json")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        r = await c.post(f"/workers/{W0}/heartbeat", json=body,
+                         params={"incarnation": "f" * 32})
+        assert r.status_code == 409
+    clock.advance(30)
+    reconcile(store, jobs, clock(), settings())
+    assert store.get_worker(W0)["job_id"] == job and store.get_worker(W0)["incarnation"] == \
+        w["incarnation"]
+
+
+def test_spot_churn_never_crashloops_and_timeout_is_planned(tmp_path, slurm, store, clock):
+    store.put_swarm(slurm_spec(tmp_path), 0)
+    jobs, s = SlurmJobsClient(env={}), settings()
+    reconcile(store, jobs, clock(), s)
+    for i in range(7):  # more than CRASHLOOP_THRESHOLD reclaims in a row
+        job = store.get_worker(W0)["job_id"]
+        slurm.set(job, "RUNNING")
+        clock.advance(30)
+        heartbeat(store, clock, W0)
+        slurm.set(job, "TIMEOUT" if i == 3 else "CANCELLED by 0")
+        clock.advance(100)
+        kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
+        assert "planned_restart" in kinds and "launch" in kinds, kinds
+    w = store.get_worker(W0)
+    assert w["crashes"] == 0 and store.type_health("demo", "researcher") == "ok"
+    # a real failure is still a crash, with backoff
+    job = w["job_id"]
+    slurm.set(job, "FAILED", "1:0")
+    clock.advance(100)
+    kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
+    assert "crash" in kinds and "launch" not in kinds

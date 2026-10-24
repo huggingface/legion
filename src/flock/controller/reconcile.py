@@ -184,6 +184,8 @@ def _needs_check(w: Row, now: float) -> bool:
     """Fresh, non-draining workers are trusted from heartbeats; others get a job-status check."""
     if w["job_id"] is None:
         return False
+    if w.get("preempted"):  # the worker synced and is exiting: end the slot now
+        return True
     seen = last_seen(w)
     if seen is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
         return False
@@ -352,6 +354,15 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
             p.store.update_worker(w["id"], state=worker_state(w, p.now).value)
         return
     p.store.update_worker(w["id"], last_inspect=p.now)
+    if w.get("preempted"):
+        # docs/slurm.md: the worker's last heartbeat said it was preempted and has synced.
+        # End the slot without waiting for the scheduler (squeue/sacct lag, a watcher that
+        # cancels 30 s later): the relaunch registers a fresh incarnation and restores.
+        if not getattr(p.jobs, "external", False):
+            p.cancel(w["job_id"], spec.namespace)
+        _job_ended(p, spec, w, ts, JobState("ERROR", "preempted: worker reported it",
+                                            preempted=True))
+        return
     st = p.job_state(w["job_id"], spec.namespace)
     if st is None:
         return
@@ -395,6 +406,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "last_heartbeat": None,
         "last_seen": None,
         "draining": 0,
+        "preempted": 0,
     }
     if planned:
         store.update_worker(wid, **common, consecutive_crashes=0, next_launch_at=p.now)
@@ -528,6 +540,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         last_seen=None,
         last_inspect=None,
         draining=0,
+        preempted=0,
         state=WorkerState.launching.value,
         next_launch_at=None,
     )
@@ -552,6 +565,12 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         "draining": int(hb.draining),
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,
     }
+    if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
+        fields["preempted"] = 1
+        for name in hb.interrupted:  # their turn was cut: resume after the restore
+            a = store.get_agent(name)
+            if a is not None and a["worker"] == worker_id:
+                store.update_agent(name, resume_pending=1)
     if w["consecutive_crashes"] and t - (w["launched_at"] or t) >= STABLE_AFTER:
         fields["consecutive_crashes"] = 0
     store.update_worker(worker_id, **fields)

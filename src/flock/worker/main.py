@@ -356,6 +356,7 @@ class Worker:
         self._terminating = False
         self.preempted = False  # the preemption handler started (no new turns)
         self.preempt_synced = False  # it finished: the heartbeat may say `preempted` now
+        self._interrupted: set[str] = set()  # agents whose turn a preemption cut
         self._deadline = 0.0  # loop time by which a preempted worker has exited
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
 
@@ -520,6 +521,7 @@ class Worker:
         return WorkerHeartbeat(worker=self.cfg.worker_id, deadline=self.cfg.deadline,
                                draining=self.draining, spec_rev=self.spec_rev,
                                preempted=self.preempt_synced,
+                               interrupted=sorted(self._interrupted),
                                agents=[a.heartbeat() for a in self.agents.values()])
 
     async def send_heartbeat(self) -> bool:
@@ -685,6 +687,8 @@ class Worker:
         budget = max(1.0, self.cfg.drain_budget * 0.8)
 
         async def one(rt: AgentRuntime) -> None:
+            if rt.turn_id is not None or rt.awaiting:
+                self._interrupted.add(rt.name)
             await rt.stop("preempted")
             await rt.sync_now("preempt")
 
