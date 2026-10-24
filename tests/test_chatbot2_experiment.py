@@ -354,10 +354,43 @@ def test_render_states_the_real_duration_in_the_kickoff(tmp_path):
     assert json.loads(out)["limits"]["budget_usd"] == 15.0
     spec = yaml.safe_load((exp / "spec.local.yaml").read_text())
     assert spec["types"]["ds-a"]["loop"]["while"]["until"] == "20m"
+    assert "SMOKE" not in (exp / "prompts" / "round-a.md").read_text()
+    assert (exp / "world.yaml").read_text() == (EXP / "world.yaml").read_text()
+
+
+def test_render_the_resmoke_variant(tmp_path):
+    import os
+
+    exp, out = _render(tmp_path, {"CHATBOT_SMOKE": "1", "CHATBOT_RUN": "resmoke",
+                                  "CHATBOT_SWITCH_AT": "240"})
+    o = json.loads(out)
+    assert o["while"] == {"until": "10m", "max_rounds": 10,
+                          "agent_usd": {"deepseek": 0.8, "glm": 0.8}}
+    assert o["limits"]["budget_usd"] == 5.0 and "variants" not in o
+    for f in ("spec.local.yaml", "phase2/spec.local.yaml"):
+        d = yaml.safe_load((exp / f).read_text())
+        assert d["limits"]["budget_usd"] == 5.0
+        assert {t["loop"]["while"]["until"] for t in d["types"].values() if t.get("loop")} == {
+            "10m"}
+    knobs = yaml.safe_load((exp / "world.yaml").read_text())
+    assert knobs["merge"]["compare_minutes"] == 1 and knobs["interviews"]["start_minutes"] == 1
+    assert knobs["interviews"]["strong_per_hour"] == 2  # the rest as in world.yaml
+    kick = (exp / "prompts" / "kickoff.md").read_text()
+    assert "8 agents, 10 min," in kick and "(first 4 min)" in kick and "(last 6 min)" in kick
+    for team in "ab":
+        text = (exp / "prompts" / f"round-{team}.md").read_text()
+        assert text.count("in round 2") == 1 and "book_interview('mid'" in text
+        assert "spawn_interviewer" in text.splitlines()[-1]
+    out2 = subprocess.run([sys.executable, str(exp / "job" / "render.py"), str(exp)],
+                          env={**os.environ, "CHATBOT_SMOKE": "1", "CHATBOT_RUN": "resmoke"},
+                          capture_output=True, text=True, check=True)
+    assert out2.returncode == 0  # a re-render (after a re-sync) appends the note once
+    assert (exp / "prompts" / "round-a.md").read_text().count("in round 2") == 1
 
 
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
-def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes):
+@pytest.mark.parametrize("variant", ["run3", "resmoke"])
+def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes, variant):
     """bootstrap.sh without a job (a directory as the bucket): control/update re-syncs
     <bucket>/experiment/ (world.yaml too: the world re-reads it) and runs `flock update`, then the
     marker is deleted; control/switch runs job/switch.sh (merge + phase-2 prompts); control/stop
@@ -388,7 +421,7 @@ def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes):
            "CHATBOT_BOARD_URL": board_url, "CHATBOT_CHANNEL": "chatbot-test",
            "CHATBOT_BOARD_INVITE": board.invite, "CHATBOT_WORLD_TOKEN": "w0rld-t0ken",
            "CHATBOT_SYNC_S": "3", "CHATBOT_CHECK_S": "1", "CHATBOT_TICK_S": "1",
-           "CHATBOT_FLOCK_ARGS": "--skip-preflight", "CHATBOT_SMOKE": "1", "CHATBOT_RUN": "run3"}
+           "CHATBOT_FLOCK_ARGS": "--skip-preflight", "CHATBOT_SMOKE": "1", "CHATBOT_RUN": variant}
     out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
     proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
                             stdout=out, stderr=subprocess.STDOUT, text=True,
@@ -397,6 +430,11 @@ def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes):
         ws = tmp_path / "job" / "ws"
         _wait_for(proc, tmp_path / "job.out", ws, "round 0", lambda log: {
             x["agent"] for x in log if x["action"] == "edit_file"} == set(AGENTS))
+        job_exp = tmp_path / "job" / "repo" / "experiments" / "chatbot-v2"
+        if variant == "resmoke":  # the variant's world knobs and round note, from the start
+            knobs = yaml.safe_load((job_exp / "world.yaml").read_text())
+            assert knobs["interviews"]["start_minutes"] == 1, knobs
+            assert "in round 2" in (job_exp / "prompts" / "round-b.md").read_text()
         edited = bucket / "experiment"
         shutil.copytree(src / "experiments" / "chatbot-v2", edited)
         for f in ("spec.yaml", "phase2/spec.yaml"):
@@ -424,9 +462,12 @@ def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes):
     assert "smoke settings" in text and "stop marker found" in text and "done" in text, text
     (run,) = (bucket / "flock" / ".flock").iterdir()
     doc = json.loads((run / "run.json").read_text())
-    assert doc["swarm"] == "chatbot-v2-run3" and doc["stop_reason"] == "interrupted"
-    kick = board.msgs[0]["body"]  # smoke.json's 20 min, not the real run's 4 hours
-    assert kick.startswith("Kickoff (chatbot-v2 run3). 8 agents, 20 min, ONE"), kick
-    assert "Phase 1 (first 10 min)" in kick and "Phase 2 (last 10 min)" in kick, kick
+    assert doc["swarm"] == f"chatbot-v2-{variant}" and doc["stop_reason"] == "interrupted"
+    kick = board.msgs[0]["body"]  # smoke.json's duration, not the real run's 4 hours
+    mins = {"run3": (20, 10, 10), "resmoke": (10, 5, 5)}[variant]
+    assert kick.startswith(f"Kickoff (chatbot-v2 {variant}). 8 agents, {mins[0]} min, ONE"), kick
+    assert f"(first {mins[1]} min)" in kick and f"(last {mins[2]} min)" in kick, kick
+    if variant == "resmoke":
+        assert "smoke settings: {" in text and '"budget_usd":5.0' in text, text
     assert (bucket / "ws" / "interviews.json").is_file() and (bucket / "ws" / "probes").is_dir()
     _no_secrets(bucket, board)
