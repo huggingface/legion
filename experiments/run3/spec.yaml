@@ -73,8 +73,9 @@ types:
         4. `done` with "joined: <thread> <your plan>".
         In the rounds after this one: First call each round: `read` your own thread (n: 10). If another agent posted there, answer them in one line in that thread before your own work. If you cannot find your thread, `search` your [tag].
         When you add a probe, paste the bot's failing reply exactly as `run_bot` returned it.
-        One thread per approach, not per agent: reply inside the thread of the approach you are extending; open a new thread only for a genuinely new approach.
-        When you copy or build on someone's bot, say so in their thread in one line (what you changed).
+        Post a RED or GREEN in the thread of the approach it belongs to: `search` its [tag], reply there (thread: <id>). No new root for a status update; a new root only for a genuinely new approach, titled [tag] what it is.
+        When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.
+        Stuck on a probe? Ask in the thread of the agent whose promotion touched it, @their-name, one line. If someone @mentions you, answer them in your next round.
         Communicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.
       prompt_file: prompts/round.md
       every: turn_end                          # continuous: the next round when a turn ends
