@@ -34,6 +34,9 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   message) or a limit; without it a forced turn is one action: the forced call, its tool run,
   done (plus one more step per steered prompt). Constrained output is what makes small thinking
   models fast and reliable (2.5 s and 20/20 valid vs 25 s and 7/20 free-form, LFM2.5-2.6B).
+- Repeated calls: from the third call in a turn identical to an earlier one (same tool, same
+  arguments), its result starts with a nudge (REPEAT_NUDGE); after the fifth such call it is not
+  run and the nudge is the whole result. `turn_ended` counts them in `repeated_calls`.
 - Tool calls: native `tool_calls`, or, for small models that write the call as text, a reply
   that is only `{"tool": "bash", "command": ...}` (optionally fenced) or a pythonic
   `[bash(command="...")]`. Such a reply is stored as a proper tool call (`flock_from_text`), so
@@ -99,6 +102,9 @@ FORCED_DEFAULT_MAX_TURNS = 50  # forced tool choice with `done` and no max_turns
 # A forced turn whose reply has no tool call (a provider dropped it: an empty assistant message)
 # gets this once before the turn ends as before; the retry is a model call like any other.
 NUDGE = "Reply with exactly one tool call."
+REPEAT_NUDGE_AT = 3  # the 3rd identical call (tool + arguments) in a turn gets REPEAT_NUDGE
+REPEAT_SKIP_AFTER = 5  # identical calls after the 5th are not run: the nudge is the result
+REPEAT_NUDGE = "This is the third identical call in this turn. Are you stuck? Try a different action or call done."
 
 PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
 You have one tool, `bash`. It runs a shell command in that directory and returns the output \
@@ -440,6 +446,7 @@ class LLMAdapter:
         self.env: dict[str, str] = {}
         self.tool_env: dict[str, str] = {}
         self.in_turn = False
+        self._repeated = 0  # this turn's repeated identical calls (REPEAT_NUDGE_AT on)
         self._spec: TypeSpec | None = None
         self._key: str | None = None
         self._client: httpx.AsyncClient | None = None
@@ -704,6 +711,8 @@ class LLMAdapter:
         self.in_turn = False
         if self._turn_tools is not None and self._turn_tools.version is not None:
             data.setdefault("tools_version", self._turn_tools.version)
+        if self._repeated:
+            data.setdefault("repeated_calls", self._repeated)
         self._queue.put(AdapterEvent("turn_ended", status=status, error=error, data=data))
 
     @property
@@ -719,6 +728,8 @@ class LLMAdapter:
         self.in_turn = True
         calls, cost = 0, 0.0
         overflow_retried = nudged = False
+        seen: dict[str, int] = {}  # identical calls this turn, by tool + arguments
+        self._repeated = 0
         # a forced model that never calls `done` would loop until turn_timeout: cap it
         max_turns = spec.max_turns
         if max_turns is None and self.forced and self.done_enabled:
@@ -774,7 +785,17 @@ class LLMAdapter:
                         done = call
                         self._tool_result(call, "ok", False)
                     else:
-                        await self._run_tool(call)
+                        key = json.dumps([call["name"], call["arguments"]], sort_keys=True, default=str)
+                        seen[key] = k = seen.get(key, 0) + 1
+                        if k < REPEAT_NUDGE_AT:
+                            await self._run_tool(call)
+                            continue
+                        self._repeated += 1
+                        if k > REPEAT_SKIP_AFTER:
+                            self._tool_result(call, f"{REPEAT_NUDGE}\n[not run: the same call was "
+                                                    f"made {k - 1} times already this turn]", True)
+                        else:
+                            await self._run_tool(call, prefix=REPEAT_NUDGE + "\n")
                 if done is not None:
                     self._finish(done, model)
                     self._end("completed", num_turns=calls)
@@ -868,7 +889,7 @@ class LLMAdapter:
             "role": "toolResult", "toolCallId": call["id"], "toolName": call["name"],
             "content": [{"type": "text", "text": out}], "isError": err, "timestamp": _ms(), **extra}))
 
-    async def _run_tool(self, call: dict[str, Any]) -> None:
+    async def _run_tool(self, call: dict[str, Any], prefix: str = "") -> None:
         args = call["arguments"]
         folder = self.folder_tools
         if isinstance(args, str):
@@ -878,7 +899,7 @@ class LLMAdapter:
                                   env=self.tool_env)
             spec = self._spec
             out = _truncate(r.output, (spec.tool_output_chars if spec else None) or OUTPUT_LIMIT)
-            self._tool_result(call, out, r.error, toolsVersion=folder.version,
+            self._tool_result(call, prefix + out, r.error, toolsVersion=folder.version,
                               durationMs=int(r.duration_s * 1000))
             return
         elif call["name"] != "bash" or not self.bash_enabled:
@@ -891,7 +912,7 @@ class LLMAdapter:
             out, err = "bash needs a non-empty `command` string", True
         else:
             out, err = await self._bash(args["command"], args.get("timeout"))
-        self._tool_result(call, out, err)
+        self._tool_result(call, prefix + out, err)
 
     async def _bash(self, command: str, timeout: Any) -> tuple[str, bool]:
         try:
