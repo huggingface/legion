@@ -366,3 +366,35 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
     assert all(v["snapshot"] == f"interviews/{v['booking']}/bot" for v in vs)
     assert (bucket / "ws" / "best" / "current.json").is_file()  # the mirror and the ws sync
     _no_secrets(bucket, board)
+
+
+def test_world_space_entry_point(tmp_path):
+    """What the Space's start.sh runs: `flock world serve chatbot3:Chatbot3World` from
+    worlds/chatbot3 serves the manifest behind the world token; the scripts parse."""
+    import socket
+
+    for f in ("start.sh", "prepare.sh"):
+        assert subprocess.run(["bash", "-n", str(EXP / "world-space" / f)], check=False).returncode == 0
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    env = {**_env(tmp_path), "FLOCK_WORLD_TOKEN": "w0rld-t0ken", "CHATBOT_WS": str(tmp_path / "ws")}
+    proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "world", "serve",
+                             "chatbot3:Chatbot3World", "--port", str(port)],
+                            cwd=ROOT / "worlds" / "chatbot3", env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        url, deadline = f"http://127.0.0.1:{port}/manifest", time.monotonic() + 30
+        while True:
+            try:
+                r = httpx.get(url, headers={"X-World-Token": "w0rld-t0ken"}, timeout=2)
+                break
+            except httpx.TransportError:
+                assert time.monotonic() < deadline and proc.poll() is None
+                time.sleep(0.3)
+        assert r.status_code == 200 and r.json()["name"] == "chatbot3"
+        assert httpx.get(url, headers={"X-World-Token": "nope"}, timeout=2).status_code == 401
+        assert (tmp_path / "ws" / "agents").is_dir()
+    finally:
+        proc.kill()
+        proc.wait()
