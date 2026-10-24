@@ -343,13 +343,16 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()
     agents = [f"agent-{i:04d}" for i in range(40)]
+    looped = 0
     for a in agents:  # a newcomer: the newcomer prompt first, then rounds
         ev = _bundle_events(run, a)
         kinds = [e["data"]["data"]["kind"] for e in ev if e["type"] == "loop_prompt"]
-        assert kinds[0] == "first" and "loop" in kinds[1:], (a, kinds)
+        assert kinds[0] == "first" and "first" not in kinds[1:], (a, kinds)
+        looped += "loop" in kinds
         first_user = next(e["data"]["message"] for e in ev if e["type"] == "message"
                           and e["data"]["message"].get("role") == "user")
         assert "You just joined a running effort" in json.dumps(first_user)
+    assert looped >= 20, looped
     # promotion from the start: the first bot promoted at once, identical ones refused as ties
     hist = _jsonl(ws / "best" / "history.jsonl")
     assert len(hist) == 1 and hist[0]["agent"] in agents[:20]

@@ -18,7 +18,7 @@ Tools (world): grep_file, read_file, edit_file, insert_after, write_file, copy_f
 - run_bot(path, lines) runs a bot on one conversation. Use it before every claim about a bot.
 
 Probes, the gate for every promotion, written by all of you:
-- When run_bot shows a RED (a wrong, empty, repeated, forgetful or therapist-like reply), FIRST add it: add_probe(lines, check, evidence) with the exact lines, one check (mentions:<word>, mentions_fact:<word>, not_phrase:<text>, not_repeat, not_empty, answers_question) and the failing reply as evidence (before the first promotion also give `path`). The world refuses a probe best already passes. Post the `post` line it returns in your thread. THEN fix it.
+- When run_bot shows a RED (a wrong, empty, repeated, forgetful or therapist-like reply), FIRST add it: add_probe(lines, check, evidence) with the exact lines, one check (mentions:<word>, mentions_fact:<word>, not_phrase:<text>, not_repeat, not_empty, answers_question) and the failing reply as evidence, copied exactly from run_bot (a probe whose evidence does not reproduce is kept but does not count; before the first promotion also give `path`). The world refuses a probe best already passes. Post the `post` line it returns in your thread. THEN fix it.
 - Probes are for real conversation failures, never for keywords alone.
 
 Promotion is open from the start: promote_best(path, reason) makes your bot the shared best (best/) when it passes the qualify bar and BEATS best on the live probe set. A tie does not promote: add a probe best fails, fix it in your copy, promote. When you beat best, promote at once.

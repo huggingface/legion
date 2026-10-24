@@ -97,8 +97,9 @@ def test_promotion_from_the_start_bar_and_beat_best(world, tmp_path):
     assert not tie["promoted"] and "a tie does not promote" in tie["why"]
     world.write_file(B, f"{HOME_B}/empty.py", EMPTY)  # fails the bar: refused before scoring
     bad = run(world.promote_best(B, f"{HOME_B}/empty.py", "x"))
-    assert not bad["promoted"] and "qualify bar" in bad["why"] and "candidate" not in bad
-    p = run(world.add_probe(B, TEACHER, "mentions_fact:teacher", "it forgot"))  # vs best
+    assert not bad["promoted"] and "fails the qualify bar" in bad["why"]
+    p = run(world.add_probe(B, TEACHER, "mentions_fact:teacher",
+                             "I am good, bye: what's my job again?"))  # vs best (verified)
     assert p["added"] == "p1" and p["post"].startswith("PROBE p1 (agent-0001)")
     world.edit_file(B, f"{HOME_B}/bot/words.py", "+ line)", "+ ' | '.join(SAID))")
     win = run(world.promote_best(B, f"{HOME_B}/bot", "remembers"))

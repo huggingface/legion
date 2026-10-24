@@ -167,8 +167,9 @@ def _state(spec: Path, start: float | None) -> float:
 def _say(rec: dict) -> None:
     head = (f"wave ({rec['why']}): {sum(rec['before'].values())} -> {rec['total']} agents "
             f"{rec['after']} (cap {rec['cap']})")
+    lines = [x for x in rec.get("lines", []) if not x.startswith("world.")]  # controller-written
     print(head + ("; FAILED: " + " / ".join(rec["error"]) if "error" in rec else
-                  "; " + " / ".join(rec.get("lines", []))), flush=True)
+                  "; " + " / ".join(lines)), flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

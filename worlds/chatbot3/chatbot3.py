@@ -10,8 +10,8 @@ read window, swarm-written probes (add_probe, verified: best must fail it), the 
 with a frozen copy, the evidence-first verdict, the turn/agent_done hooks, the log and the
 bucket mirror of best/ ($CHATBOT_BUCKET).
 
-Changed: promote_best is open from the start and also needs the qualify bar (the same bar
-book_interview runs on its frozen copy). Interviews are `strong` only and have no quota:
+Changed: promote_best is open from the start (it runs the same qualify bar as qualify and
+book_interview: chatbot2's one `_bar`). Interviews are `strong` only and have no quota:
 bookings are still reserved, charged on a verdict and released when cut off, for the records,
 but never refused for quota. The interviewer is `<parent>-interviewer-NNNN` (type
 `interviewer`). Bot runs share a pool of `runs.parallel` slots (the world's CPU), read at start.
@@ -108,25 +108,6 @@ class Chatbot3World(Chatbot2World):
 
     # ------------------------------------------------------------------ promotion
     @tool
-    async def promote_best(self, agent: Agent, path: str, reason: str) -> dict:
-        """Make your bot (a .py file or a package directory) the shared best (best/bot.py or
-        best/bot/). Open from the start. It must pass the qualify bar (every seed conversation
-        runs, every line gets a reply, no empty or repeated reply) and BEAT the current best on
-        the live probe set: a higher total score, never lower on the seed probes. A tie does
-        not promote: add a probe best fails (add_probe), fix it in your copy, then promote.
-
-        Args:
-            path: your candidate, e.g. agents/<your name>/bot
-            reason: one line: what it does better, and your run_bot evidence
-        """
-        p = self._bot(path, agent, "promote_best")
-        if fails := await asyncio.to_thread(self._bar, p):
-            why = f"it does not pass the qualify bar: {fails[:3]}"
-            self._log(agent, "promote_refused", path=path, why=why)
-            return {"promoted": False, "why": why}
-        return await Chatbot2World.promote_best(self, agent, path, reason)
-
-    @tool
     async def qualify(self, agent: Agent, path: str) -> dict:
         """Check a bot before a promotion or an interview: on every seed probe conversation it
         runs within the time limit and answers each line, with no empty or repeated reply.
@@ -172,8 +153,8 @@ class Chatbot3World(Chatbot2World):
                 b = self._bookings()
                 b[bid].update(state="released", why="not qualified")
                 self._store(b)
-            raise ToolError(f"refused: {self._rel(p)} does not qualify: {fails[:3]}. Nothing was "
-                            "booked.", "not_qualified")
+            raise ToolError(f"refused: {self._rel(p)} does not qualify: {self._unfit(fails)}. "
+                            "Nothing was booked.", "not_qualified")
         with self._blk:
             hist, b, now = self._history(), self._expired(), time.time()
             b[bid] = {"id": bid, "team": "", "level": "strong", "by": agent.name,
@@ -244,6 +225,17 @@ class Chatbot3World(Chatbot2World):
 
 
 DOCS = {
+    "promote_best": """Make your bot (a .py file or a package directory) the shared best
+        (best/bot.py or best/bot/). Open from the start. It must pass the qualify bar (every
+        seed conversation runs, every line gets a reply, no empty or repeated reply) and BEAT
+        the current best on the live probe set: a higher total score, never lower on the seed
+        probes. A tie does not promote: add a probe best fails (add_probe), fix it in your
+        copy, then promote.
+
+        Args:
+            path: your candidate, e.g. agents/<your name>/bot
+            reason: one line: what it does better, and your run_bot evidence
+        """,
     "read_file": """Read a workspace file, or some of its lines. The first line of the result
         says which lines you got and how many the file has. A file over 60 KB needs start and
         end: find the spot with grep_file first.
