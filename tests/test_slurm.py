@@ -477,3 +477,72 @@ def test_spot_churn_never_crashloops_and_timeout_is_planned(tmp_path, slurm, sto
     clock.advance(100)
     kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
     assert "crash" in kinds and "launch" not in kinds
+
+
+# --------------------------------------------------------------------------- hardening
+
+
+def test_sbatch_gets_a_scrubbed_environment(tmp_path, slurm, store, clock, monkeypatch):
+    for name in ("FLOCK_TOKEN", "HF_TOKEN", "OPENAI_API_KEY", "CHATBOT_BOARD_INVITE",
+                 "FLOCK_WORLD_TOKEN", "CHATBOT_WORLD_TOKEN"):
+        monkeypatch.setenv(name, f"secret-{name.lower()}")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    store.put_swarm(slurm_spec(tmp_path), 0)
+    reconcile(store, SlurmJobsClient(), clock(), settings())
+    (job,) = slurm.ids()
+    seen = (slurm.dir / "jobs" / f"{job}.environ").read_text()
+    assert "secret-" not in seen and "FLOCK_TOKEN" not in seen and "HF_TOKEN" not in seen
+    assert "LANG=C.UTF-8" in seen and "PATH=" in seen
+
+
+def test_size_guard_at_apply_and_at_launch(tmp_path, slurm, store, clock):
+    from flock.models import mem_mb
+
+    assert mem_mb("54G") == 54 * 1024 and mem_mb("3500M") == 3500 and mem_mb("1T") == 1024**2
+    assert mem_mb("512") == 512 and mem_mb("2048K") == 2
+    with pytest.raises(ValueError, match="cpus 32 is over max_cpus 28"):
+        slurm_spec(tmp_path, cpus=32)
+    with pytest.raises(ValueError, match="mem 60G is over max_mem 54G"):
+        slurm_spec(tmp_path, types={"researcher": {"mem": "60G"}})
+    with pytest.raises(ValueError, match="expected a number"):
+        slurm_spec(tmp_path, mem="lots")
+    assert slurm_spec(tmp_path, cpus=32, max_cpus=64).compute.cpus == 32
+    # an env override that does not fit: refused at launch, nothing submitted
+    store.put_swarm(slurm_spec(tmp_path), 0)
+    actions = reconcile(store, SlurmJobsClient(env={"FLOCK_SLURM_MEM": "100G"}), clock(),
+                        settings())
+    refused = [a for a in actions if a.kind == "launch_refused"]
+    assert refused and "max_mem" in refused[0].detail and slurm.ids() == []
+
+
+def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, clock):
+    store.put_swarm(slurm_spec(tmp_path), 0)
+    s = settings()
+    reconcile(store, SlurmJobsClient(env={}), clock(), s)
+    (job,) = slurm.ids()
+    w = store.get_worker(W0)
+    assert w["log_path"] == str(tmp_path / "logs" / f"{W0}-{job}.out")
+    (tmp_path / "logs" / f"{W0}-{job}.out").write_text("start\nImportError: no module x\n")
+    slurm.set(job, "FAILED", "1:0")
+    clock.advance(100)
+    fresh = SlurmJobsClient(env={})  # a requeued controller: nothing in memory
+    assert fresh.logs_tail(job) == []
+    kinds = [a.kind for a in reconcile(store, fresh, clock(), s)]
+    assert "crash" in kinds
+    assert "ImportError: no module x" in store.get_worker(W0)["last_error"]
+    # with FLOCK_SLURM_LOG_DIR the client finds it on its own too
+    again = SlurmJobsClient(env={"FLOCK_SLURM_LOG_DIR": str(tmp_path / "logs")})
+    assert again.logs_tail(job)[-1] == "ImportError: no module x"
+
+
+def test_unknown_compute_kind_is_a_hard_error(tmp_path, caplog):
+    from flock.controller.main import build
+
+    env = {"FLOCK_TOKEN": TOKEN, "FLOCK_DATA": str(tmp_path / "d"), "FLOCK_COMPUTE": "slrum"}
+    with pytest.raises(SystemExit, match="FLOCK_COMPUTE='slrum' is not one of"):
+        build(env)
+    assert not (tmp_path / "d").exists()  # refused before anything was opened
+    caplog.set_level("INFO", logger="flock.controller")
+    b = build({**env, "FLOCK_COMPUTE": "slurm"})
+    assert "compute slurm: SlurmJobsClient" in caplog.text
+    b.store.close()

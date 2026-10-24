@@ -146,6 +146,22 @@ def load(target: str, path: str | None = None) -> World:
     return world
 
 
+def stop_on_usr1() -> None:
+    """SIGUSR1 (a Spot notice on Slurm: the watcher signals every process of the job) shuts
+    the server down like SIGTERM, once: later USR1s are ignored (docs/slurm.md)."""
+    import signal
+
+    sent = []
+
+    def handler(signum, frame) -> None:
+        if not sent:
+            sent.append(signum)
+            print("world: SIGUSR1: shutting down", flush=True)
+            os.kill(os.getpid(), signal.SIGTERM)  # uvicorn's own graceful shutdown
+
+    signal.signal(signal.SIGUSR1, handler)
+
+
 def serve(target: str, *, host: str | None = None, port: int | None = None,
           token_env: str = TOKEN_ENV, insecure: bool = False) -> None:
     import uvicorn
@@ -158,5 +174,6 @@ def serve(target: str, *, host: str | None = None, port: int | None = None,
     host = host or os.environ.get(HOST_ENV) or "127.0.0.1"
     port = port or int(os.environ.get(PORT_ENV) or DEFAULT_PORT)
     print(f"world {world.name} {world.version} on http://{host}:{port}", flush=True)
+    stop_on_usr1()
     uvicorn.run(create_app(world, token or None), host=host, port=port, log_level="warning",
                 access_log=False)

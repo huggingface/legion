@@ -247,3 +247,26 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
         assert list(ro_home.iterdir()) == []
     finally:
         ro_home.chmod(0o700)
+
+
+@pytest.mark.parametrize("signals", [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"),
+                                     ("SIGTERM",)])
+async def test_repeated_signals_drain_once(tmp_path, signals, caplog):
+    """The Spot watcher signals every process of the job, and the batch script forwards: the
+    worker may get USR1 twice, or USR1 then TERM. The first starts the drain; the rest change
+    nothing."""
+    caplog.set_level("INFO", logger="flock.worker")
+    store = SlowStore(delay=0.3)
+    ctrl = FakeController()
+    ctrl.batches = [[AssignCommand(agent=n, type="researcher", spec=spec(idle_grace="10s"),
+                                   restore=False) for n in names(4)]]
+    worker, _adapters, _ = make(tmp_path, ctrl, store, budget=5)
+    run = asyncio.create_task(worker.run())
+    await until(lambda: len(worker.agents) == 4, timeout=5)
+    for sig in signals:
+        os.kill(os.getpid(), getattr(signal, sig))
+        await asyncio.sleep(0.1)  # the second arrives while the first drain runs
+    assert await asyncio.wait_for(run, 10) == PREEMPT_EXIT
+    assert caplog.text.count("preempted (") == 1
+    assert len([u for u in store.uploads if any("preempted.json" in r for r in u)]) == 1
+    assert [hb.preempted for hb in ctrl.heartbeats].count(True) == 1

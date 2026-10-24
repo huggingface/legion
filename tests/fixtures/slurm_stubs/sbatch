@@ -6,6 +6,7 @@ mkdir -p "$S/jobs"
 n=$(( $(cat "$S/next" 2>/dev/null || echo 1000) + 1 ))
 echo "$n" > "$S/next"
 printf '%s\n' "$@" > "$S/jobs/$n.argv"
+env > "$S/jobs/$n.environ"
 name=""; comment=""
 prev=""
 for a in "$@"; do

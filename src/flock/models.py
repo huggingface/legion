@@ -604,6 +604,31 @@ class TypeSpec(BaseModel):
         return v
 
 
+_MEM = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)B?\s*$", re.IGNORECASE)
+
+
+def mem_mb(value: str) -> float:
+    """sbatch --mem as MB: a bare number is MB; K/M/G/T suffixes (1024-based)."""
+    m = _MEM.match(str(value))
+    if not m:
+        raise ValueError(f"memory {value!r}: expected a number with K, M, G or T")
+    scale = {"": 1, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}[m.group(2).upper()]
+    return float(m.group(1)) * scale
+
+
+def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str,
+                 max_mem: str) -> str | None:
+    """Why a job of this size can never start on the partition (None: it fits)."""
+    try:
+        if cpus is not None and int(cpus) > int(max_cpus):
+            return f"cpus {cpus} is over max_cpus {max_cpus}: the job would pend forever"
+        if mem is not None and mem_mb(mem) > mem_mb(max_mem):
+            return f"mem {mem} is over max_mem {max_mem}: the job would pend forever"
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 class SlurmResources(BaseModel):
     """Per-type overrides of a `compute: slurm` spec."""
 
@@ -642,6 +667,10 @@ class ComputeSpec(BaseModel):
     venv: str | None = None  # written to the env file as FLOCK_VENV for the script
     secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
     types: dict[str, SlurmResources] = Field(default_factory=dict)
+    # the largest job the partition can ever run: sbatch accepts bigger ones, which then pend
+    # forever; a launch over these is refused (also checked at apply)
+    max_cpus: int = Field(default=28, ge=1)
+    max_mem: str = "54G"
 
 
 class SwarmSpec(BaseModel):
@@ -791,6 +820,13 @@ class SwarmSpec(BaseModel):
             raise ValueError(f"world.url is required for compute {kind}: run the world as a "
                              "Job, Space or cluster job and give its url (starting it from "
                              "`command` is compute: local only, docs/world.md)")
+        if kind == "slurm":
+            sizes = [("compute", self.compute.cpus, self.compute.mem)] + [
+                (f"compute.types.{n}", r.cpus, r.mem) for n, r in self.compute.types.items()]
+            for where, cpus, mem in sizes:
+                if problem := size_problem(cpus, mem, self.compute.max_cpus,
+                                           self.compute.max_mem):
+                    raise ValueError(f"{where}: {problem}")
         unknown = set(self.compute.types) - set(self.types)
         if unknown:
             raise ValueError(f"compute.types names unknown types: {sorted(unknown)}")

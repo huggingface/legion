@@ -209,6 +209,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
         if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
             self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
+        if "log_path" not in cols:  # the current job's log file (compute slurm)
+            self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
         if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
             self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost

@@ -448,6 +448,14 @@ def _interrupt_turns(p: _Pass, w: Row, st: JobState) -> None:
             store.update_agent(a["name"], resume_pending=1, turn_id=None)
 
 
+def _file_tail(path: str, n: int = 5) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return [ln.strip() for ln in f.read().splitlines()[-n:] if ln.strip()]
+    except OSError:
+        return []
+
+
 def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
     """`STAGE: message`, plus the job's last log lines (one Hub call per crash) when the
     jobs client can fetch them: a boot failure (wheel download 401, missing key) is only
@@ -460,6 +468,8 @@ def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
         except Exception as exc:  # noqa: BLE001 - logs are a nicety; never break the pass
             log.warning("logs of %s failed: %s", w["job_id"], type(exc).__name__)
             lines = []
+        if not lines and w.get("log_path"):  # a job an earlier controller launched
+            lines = _file_tail(w["log_path"])
         if lines:
             reason += " | " + " / ".join(lines)
     return reason[:500]
@@ -529,6 +539,12 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         p.act("launch_failed", wid, f"{msg}; backoff {backoff:.0f}s")
         return
     store.set_launch_error(spec.swarm, type_name, None, 0)
+    log_path = None
+    if (path_of := getattr(p.jobs, "log_path", None)) is not None:
+        try:
+            log_path = path_of(job_id)
+        except Exception:  # noqa: BLE001 - a nicety
+            log_path = None
     store.clear_commands(wid)
     store.update_worker(
         wid,
@@ -541,6 +557,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         last_inspect=None,
         draining=0,
         preempted=0,
+        log_path=log_path,
         state=WorkerState.launching.value,
         next_launch_at=None,
     )

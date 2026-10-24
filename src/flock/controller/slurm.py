@@ -59,13 +59,14 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from flock.controller.jobs import JobListing, JobState
-from flock.models import ComputeSpec, TypeSpec
+from flock.models import ComputeSpec, TypeSpec, mem_mb, size_problem  # noqa: F401
 
 log = logging.getLogger("flock.slurm")
 
 # The worker's exit code after a preemption drain (worker/main.py): EX_TEMPFAIL.
 PREEMPT_EXIT = 75
-DEFAULTS = {"partition": "hopper-cpu", "cpus": "4", "mem": "7G", "time": "29:00:00"}
+DEFAULTS = {"partition": "hopper-cpu", "cpus": "4", "mem": "7G", "time": "29:00:00",
+            "max_cpus": "28", "max_mem": "54G"}
 # compute spec key -> controller env override (the first seven are the cluster's contract)
 ENV_KEYS = {
     "partition": "FLOCK_SLURM_PARTITION",
@@ -80,7 +81,15 @@ ENV_KEYS = {
     "run": "FLOCK_SLURM_RUN",
     "venv": "FLOCK_SLURM_VENV",
     "secrets_file": "FLOCK_SLURM_SECRETS_FILE",
+    "max_cpus": "FLOCK_SLURM_MAX_CPUS",
+    "max_mem": "FLOCK_SLURM_MAX_MEM",
 }
+# The only variables sbatch (and squeue/sacct/scancel) get from the controller: without
+# --export the job inherits sbatch's environment and Slurm may store it in its accounting
+# (sacct --env-vars), so no token or key may be in it.
+KEEP_ENV = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+                      "TERM", "SHELL"})
+KEEP_PREFIXES = ("LC_", "SLURM_")
 # Secrets every Slurm worker reads from the secrets file besides those the launch names:
 # HF_TOKEN for the bucket sync (HfApi() reads it from the env).
 ALWAYS_SECRETS = ("FLOCK_TOKEN", "HF_TOKEN")
@@ -105,8 +114,17 @@ class SlurmConfigError(ValueError):
     launch_refused = True
 
 
+def scrubbed_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The controller's environment minus everything but KEEP_ENV and LC_*/SLURM_*."""
+    env = os.environ if env is None else env
+    return {k: v for k, v in env.items() if k in KEEP_ENV or k.startswith(KEEP_PREFIXES)}
+
+
 def _run(argv: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=CMD_TIMEOUT, check=False)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=CMD_TIMEOUT, check=False,
+                          env=scrubbed_env())
+
+
 
 
 def resolve(compute: ComputeSpec | None, type_name: str,
@@ -283,6 +301,8 @@ class SlurmJobsClient:
         if missing:
             raise SlurmConfigError(f"compute slurm needs {', '.join(missing)} (spec `compute:` keys "
                              f"or {', '.join(ENV_KEYS[k] for k in missing)})")
+        if problem := size_problem(cfg["cpus"], cfg["mem"], cfg["max_cpus"], cfg["max_mem"]):
+            raise SlurmConfigError(f"{env.get('TYPE', '')}: {problem}")
         settings, names = worker_env(worker_id, env, secrets, cfg)
         env_path = env_file_path(cfg["launch_dir"], worker_id, env)
         write_private(env_path, env_file_text(settings, names))
@@ -401,12 +421,24 @@ class SlurmJobsClient:
             out.append(JobListing(job_id, have, st.stage, env, st.message))
         return out
 
-    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> list[str]:
+    def log_path(self, job_id: str) -> str | None:
+        """`<log_dir>/<worker id>-<job id>.out` of a job this client launched (reconcile keeps
+        it on the slot row, so a restarted controller still finds a crash's last lines)."""
         launched = self._launched.get(job_id)
         if launched is None:
-            return []
+            return None
         worker_id, _, log_dir = launched
-        path = Path(log_dir) / f"{worker_id}-{job_id}.out"
+        return str(Path(log_dir) / f"{worker_id}-{job_id}.out")
+
+    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> list[str]:
+        path_s = self.log_path(job_id)
+        if path_s is None:  # launched by an earlier controller: look in the env's log dir
+            log_dir = resolve(None, "", self.env).get("log_dir")
+            found = sorted(Path(log_dir).glob(f"*-{job_id}.out")) if log_dir else []
+            if not found:
+                return []
+            path_s = str(found[0])
+        path = Path(path_s)
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:

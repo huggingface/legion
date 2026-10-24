@@ -141,10 +141,18 @@ class Built:
     final_push_timeout: float = FINAL_PUSH_TIMEOUT
 
 
+COMPUTE_KINDS = (None, "hf-jobs", "local", "slurm", "external")
+
+
 def build(env: Mapping[str, str] = os.environ) -> Built:
     token = env.get("FLOCK_TOKEN", "")
     if not token:
         raise SystemExit("FLOCK_TOKEN must be set")
+    kind = env.get("FLOCK_COMPUTE") or None
+    if kind not in COMPUTE_KINDS:
+        # never fall back to HF Jobs: a typo on a cluster would launch paid jobs
+        raise SystemExit(f"FLOCK_COMPUTE={kind!r} is not one of "
+                         f"{', '.join(k for k in COMPUTE_KINDS if k)} (unset: hf-jobs)")
     dep = deployment(env)
     data_dir = env.get("FLOCK_DATA", "./data")
     if env is os.environ:  # a container with no usable HOME: hub caches under the data dir
@@ -163,22 +171,24 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         log.info("state: trimmed %d event streams to the restored index", fixed)
     jobs: JobsClient
     compute: str | None = None  # the spec `compute.kind` this controller accepts
-    if env.get("FLOCK_COMPUTE") == "local":  # docs/local.md: workers as local subprocesses
+    if kind == "local":  # docs/local.md: workers as local subprocesses
         if dep.mode == "job":
             raise SystemExit("FLOCK_COMPUTE=local cannot run with FLOCK_MODE=job")
         from flock.controller.local import LocalJobsClient
 
         jobs, compute = LocalJobsClient(root=data_dir), "local"
-    elif env.get("FLOCK_COMPUTE") in ("slurm", "external"):  # docs/slurm.md
+    elif kind in ("slurm", "external"):  # docs/slurm.md
         from flock.controller.slurm import ExternalJobsClient, SlurmJobsClient
 
-        compute = env["FLOCK_COMPUTE"]
+        compute = kind
         jobs = SlurmJobsClient(env=env) if compute == "slurm" else ExternalJobsClient(env=env)
     elif env.get("FLOCK_FAKE_JOBS") == "1":
         jobs = FakeJobsClient(network_group=dep.network_group)
     else:
         jobs = HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
         compute = "hf-jobs"
+    log.info("compute %s: %s", compute or ("fake" if env.get("FLOCK_FAKE_JOBS") == "1"
+                                           else "hf-jobs"), type(jobs).__name__)
     settings = Settings(
         public_url=dep.worker_url,
         token=token,
@@ -262,6 +272,9 @@ async def final_push(b: Built) -> bool:
     return True
 
 
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1)
+
+
 async def serve(b: Built, host: str = "0.0.0.0") -> None:
     """Run the API (and the status port, if any) until SIGTERM/SIGINT. Shutdown, in order:
     close the listeners and stop the reconcile and sync loops; push the state (bounded by
@@ -291,7 +304,9 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
             log.info("%s: shutting down", sig.name)
         stopping.set()
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    # SIGUSR1: a Spot notice on Slurm (the watcher signals every process of the job); the
+    # same once-only shutdown as SIGTERM (docs/slurm.md)
+    for sig in STOP_SIGNALS:
         loop.add_signal_handler(sig, on_signal, sig)
     log.info("flock controller (%s mode): API %s, workers use %s%s", dep.mode, dep.public_url,
              dep.worker_url, f", status {dep.status_url}" if dep.status_url else "")
@@ -314,7 +329,7 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
         for t in pending:
             t.cancel()
     finally:
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in STOP_SIGNALS:
             loop.remove_signal_handler(sig)
     log.info("flock controller: exit")
 
