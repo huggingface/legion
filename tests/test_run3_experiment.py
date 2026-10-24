@@ -164,7 +164,7 @@ def test_render_variants(tmp_path):
     assert p.pricing == {rd.ROUTER: [0.30, 1.20, 0.30]}
     assert {m.model for m in st.models.values()} == {f"vllm:{rd.ROUTER}"}
     lp = st.types["agent"].loop
-    assert (lp.every, lp.while_.until, lp.while_.agent_usd, lp.wake.max) == ("60s", "20m", 1.5, 20)
+    assert (lp.every, lp.while_.until, lp.while_.agent_usd, lp.wake.max) == ("60s", "20m", 3.0, 20)
     assert (st.limits.budget_usd, st.types["agent"].max_budget_usd,
             st.types["interviewer"].max_budget_usd) == (30, 0.2, 0.15)
     for variant, name in (("smoke", "spec.smoke.yaml"), ("standin", "spec.standin.yaml"),
@@ -320,7 +320,7 @@ def _jsonl(p: Path) -> list[dict]:
 VARIANTS = {  # variant: waves file, cap, wave totals, the loop's `while`
     "smoke": ("waves-smoke.yaml", 40, [(0, 20), (20, 40)], {"until": "30m", "max_rounds": 120}),
     "standin": ("waves-standin.yaml", 20, [(0, 10), (10, 20)],
-                {"until": "20m", "max_rounds": 40, "agent_usd": 1.5})}
+                {"until": "20m", "max_rounds": 40, "agent_usd": 3.0})}
 
 
 @pytest.mark.parametrize("variant", list(VARIANTS))
