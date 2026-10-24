@@ -1,13 +1,19 @@
 # The world's knobs (worlds/chatbot3), read from $CHATBOT_CONFIG (the job's bootstrap points it
 # here) and re-read when this file changes (edit it in <bucket>/experiment/, upload
-# control/update). `runs.parallel` is read once, at the world's start.
+# control/update). Every knob is re-read at the next call, except `runs.parallel` (read once,
+# at the world's start).
 probes:
   per_agent_per_hour: 4      # add_probe calls one agent may make per rolling hour
   max_lines: 12              # user lines per probe
-  max_total: 400             # swarm probes in the live set (each promotion runs all of them)
+  max_total: 400             # swarm probes kept (add_probe refuses beyond)
+  gate_size: 120             # the promotion gate: the newest 120 verified probes (0: all)
 interviews:
   start_minutes: 5           # a booking with no chat by then is released (records only)
   expire_minutes: 20         # an interview idle this long is released (records only)
 runs:
   parallel: 0                # bot runs at once across the world (run_bot, probes, promotions,
                              # interviews); 0: the world's CPU count
+  per_promotion: 12          # probe runs at once while one promotion scores (re-read live)
+promote:
+  max_waiting: 8             # promotions in flight (running + queued); more are refused at
+                             # once ("busy"), so no call waits past the 60 s tool timeout

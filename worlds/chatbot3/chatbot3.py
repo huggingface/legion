@@ -41,9 +41,11 @@ from eliza import ElizaWorld
 
 from flock.world import Agent, ToolError, World, tool
 
-DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 400},
+DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 400,
+                       "gate_size": 120},  # the gate: the newest 120 verified probes
             "interviews": {"start_minutes": 5, "expire_minutes": 20},
-            "runs": {"parallel": 0}}  # 0: the usable CPUs (sched_getaffinity)
+            "runs": {"parallel": 0, "per_promotion": 12},
+            "promote": {"max_waiting": 8}}  # 0: the usable CPUs (sched_getaffinity)
 IV = re.compile(r"-interviewer-\d+$")  # agent-0007-interviewer-0012 -> parent agent-0007
 
 

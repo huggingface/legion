@@ -321,3 +321,29 @@ def test_copy_of_best_survives_a_concurrent_promotion(world):
     for k in range(40):  # one whole version per copy
         got = {p.read_text() for p in (world.ws / HOME_B / f"c{k}").glob("*.py")}
         assert len(got) == 1, (k, got)
+
+
+def test_gate_size_parallelism_and_busy_refusal(mod, tmp_path, monkeypatch):
+    """probes.gate_size (the newest N verified probes), runs.per_promotion and
+    promote.max_waiting, all re-read from $CHATBOT_CONFIG at each call."""
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text("probes: {gate_size: 1}\nruns: {per_promotion: 3}\npromote: {max_waiting: 2}\n")
+    monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w = mod.Chatbot3World(str(tmp_path / "ws"))
+    run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))
+    run(_probe(w, A, TEACHER, "mentions_fact:teacher"))
+    run(_probe(w, A, PIZZA, "mentions_fact:pizza"))
+    s = run(w.best_status())["score"]
+    assert s["live_of"] == 1 and s["live_fails"] == ["p2"]  # only the newest probe gates
+    ags = _agents(5)
+    paths = [_pkg(w, a, f"agents/{a.name}", REMEMBERS) for a in ags]
+
+    async def burst():
+        return await asyncio.gather(*(w.promote_best(a, p, "x") for a, p in zip(ags, paths)))
+
+    res = run(burst())
+    busy = [r for r in res if not r["promoted"] and r.get("why", "").startswith("busy")]
+    assert sum(r["promoted"] for r in res) == 1 and len(busy) == 3  # 2 in flight, 3 refused
+    cfg.write_text("probes: {gate_size: 0}\n")  # live change: the whole set again
+    assert run(w.best_status())["score"]["live_of"] == 2

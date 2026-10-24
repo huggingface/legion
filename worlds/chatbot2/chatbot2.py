@@ -46,9 +46,12 @@ from eliza import LIMITS, READ_CAP
 from flock.world import Agent, ToolError, tool
 
 DEFAULTS = {"merge": {"compare_minutes": 15},
-            "probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 150},
+            "probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 150,
+                       "gate_size": 0},  # the newest N verified probes form the gate; 0: all
             "interviews": {"strong_per_hour": 2, "mid_per_hour": 3, "start_minutes": 5,
-                           "expire_minutes": 20}}
+                           "expire_minutes": 20},
+            "runs": {"per_promotion": 4},  # probe runs at once while scoring one bot
+            "promote": {"max_waiting": 0}}  # promotions in flight (running + queued); 0: any
 PKG_SHIM = (f"import resource as r,runpy,sys\nfor k,v in {LIMITS}: r.setrlimit(k,(v,v))\n"
             "sys.path.insert(0,'.'); runpy.run_module('bot', run_name='__main__', alter_sys=True)")
 CHECK = re.compile(r"^(not_repeat|not_empty|answers_question|"
@@ -298,9 +301,13 @@ class Chatbot2World(ChatbotWorld):
 
     async def _full(self, p: Path, known: dict | None = None, live: list | None = None) -> dict:
         """The score on the live set: the seed probes (Eliza points) plus 1 per verified swarm
-        probe (one whose evidence reproduced when the world re-ran it)."""
+        probe (one whose evidence reproduced when the world re-ran it), the newest
+        `probes.gate_size` of them (0: all). Knobs re-read at every call."""
         live = [x for x in (self._live() if live is None else live) if x.get("verified", True)]
-        res, sem = dict(known or {}), asyncio.Semaphore(4)
+        if (n := int(self.cfg("probes", "gate_size"))) > 0:
+            live = live[-n:]
+        res, sem = dict(known or {}), asyncio.Semaphore(max(1, int(self.cfg("runs",
+                                                                             "per_promotion"))))
 
         async def one(x: dict) -> None:
             async with sem:
@@ -447,6 +454,18 @@ class Chatbot2World(ChatbotWorld):
             raise ToolError(f"refused: compare round, promotion opens in {math.ceil(left / 60)} "
                             "min. Now run_bot the other team's candidate and post in [merged] "
                             "what to keep.", "compare_round")
+        waiting, cap = getattr(self, "_waiting", 0), int(self.cfg("promote", "max_waiting"))
+        if cap and waiting >= cap:  # refuse fast instead of growing a queue past the tool timeout
+            self._log(agent, "promote_refused", path=path, why="busy")
+            return {"promoted": False, "why": f"busy: {waiting} promotions are queued; keep "
+                    "improving and try again in a few minutes"}
+        self._waiting = waiting + 1
+        try:
+            return await self._promote_locked(agent, p, path, reason)
+        finally:
+            self._waiting -= 1
+
+    async def _promote_locked(self, agent: Agent, p: Path, path: str, reason: str) -> dict:
         async with self._promotion():  # re-read best inside: a queued promotion meets the new one
             live = self._live()  # both scored on the same set
             fails, cand, cur = await asyncio.gather(asyncio.to_thread(self._bar, p),
