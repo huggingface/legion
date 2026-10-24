@@ -1,0 +1,101 @@
+# Run 3 of the chatbot experiment: ONE conversational chatbot, no imposed structure. Many agents
+# (waves.yaml: 20 every 5 min to 100, then 20 per hour to 300, cap 1,000) in one flat
+# workspace (worlds/chatbot3), one board channel, self-organized threads, promotion and strong
+# interviews from the start. The loop, the board and the limits are this spec; no loop code.
+#
+# This is the SOURCE spec: the self-hosted single-job variant (compute: local, one vLLM
+# endpoint, price 0, no $ caps, <= 50 agents). render.py fills in the environment and writes
+# the spec that runs (`spec.local.yaml`); `--variant jobs` and `--variant router-smoke` derive
+# the other two from this file (spec.jobs.yaml, spec.smoke.yaml are generated). Placeholders:
+#   https://your-vllm.example.invalid/v1   <- OPENAI_BASE_URL (the vLLM server, ending in /v1)
+#   MODEL_WORKER / MODEL_INTERVIEWER        <- the served model id(s) (interviewer: default worker)
+#   msgboard.example.invalid / your-run3-channel <- CHATBOT_BOARD_URL / CHATBOT_CHANNEL
+swarm: run3
+compute: local
+tools_dir: tools                               # spawn_interviewer (tools/interview.py)
+providers:
+  vllm:
+    type: openai_compat
+    base_url: https://your-vllm.example.invalid/v1
+    api_key_env: OPENAI_API_KEY                # optional on the server; any value when it has no --api-key
+    self_hosted: true
+    timeout_s: 300
+    max_retries: 5
+    pricing: {"*": [0, 0, 0]}                  # self-hosted: no $ cost, no $ cap fires
+models:
+  worker:
+    model: vllm:MODEL_WORKER
+    # DeepSeek-V4.1-Flash's chat template defaults to thinking ON: the plain agent turns it off
+    extra: {max_tokens: 32000, temperature: 0.6, chat_template_kwargs: {thinking: false}}
+  worker-think:                                # the optional thinking share (waves.yaml think_share)
+    model: vllm:MODEL_WORKER
+    extra: {max_tokens: 32000, temperature: 0.6, chat_template_kwargs: {thinking: true}}
+  interviewer:
+    model: vllm:MODEL_INTERVIEWER
+    extra: {max_tokens: 2048, temperature: 0.7, chat_template_kwargs: {thinking: false}}
+world:
+  dir: ../../worlds/chatbot3                   # workspace: $CHATBOT_WS (default worlds/chatbot3/ws)
+  command: ["{python}", chatbot3.py, serve]
+  token_env: CHATBOT_WORLD_TOKEN
+comms:
+  kind: msgboard
+  url: https://msgboard.example.invalid        # placeholder: your board's URL
+  invite_env: CHATBOT_BOARD_INVITE             # a multi-use agent invite for the channel
+  channel: your-run3-channel                   # placeholder: the channel's name
+  kickoff_file: prompts/kickoff.md
+  rules: {min_post_gap: 10s, max_len: 800, threads: per_topic, no_group_mentions: true}
+  protocols: [protocols/run3.md, protocols/chatbot.md]
+types:
+  agent: &agent
+    harness: llm
+    model: worker
+    replicas: 0                                # waves.py raises it (waves.yaml); never edit by hand in a run
+    agents_per_worker: 25
+    system_prompt_file: prompts/system.md
+    comms: true                                # post, read, search
+    tools: [spawn_interviewer, "world:read_file", "world:grep_file", "world:write_file",
+            "world:copy_file", "world:edit_file", "world:insert_after", "world:list_files",
+            "world:run_bot", "world:promote_best", "world:best_status", "world:qualify",
+            "world:add_probe", "world:probes", "world:book_interview", "world:verdicts"]
+    bash: false
+    tool_choice: required                      # every model call is a tool call; `done` ends a turn
+    max_turns: 12                              # model calls per prompt
+    tool_output_chars: 32000
+    context_tokens: 64000                      # compaction threshold (the server needs >= 64k)
+    loop: &loop
+      first: |
+        You just joined a running effort (round 0). Others have been building for a while. ONE tool call per reply:
+        1. `search` the channel for what is going on: the threads ("[" tags), "PROMOTED", "INTERVIEW", "RED". Then `best_status` for the current best.
+        2. Pick ONE: an approach that needs hands (join its thread, `post` "taking: <the piece>") or a new angle nobody covers (open a thread: thread "new", "[<tag>] <the idea>: agents/<your name>/...").
+        3. If best exists and you have no bot yet: copy_file("best/bot", "agents/<your name>/bot") (or best/bot.py), then run_bot it with 6 lines that test your piece.
+        4. `done` with "joined: <thread> <your plan>".
+      prompt_file: prompts/round.md
+      every: turn_end                          # continuous: the next round when a turn ends
+      stagger: 2s
+      on: [comms.mention, comms.thread]
+      wake: {min_gap: 10s, max: 20, window: 30m}
+      while: {until: 48h, max_rounds: 6000}    # ~100 turns/h/agent x 48 h + headroom
+      final: {prompt_file: prompts/final.md}
+  agent-think:                                 # optional: thinking on; same prompts and tools
+    <<: *agent
+    model: worker-think
+    replicas: 0                                # waves.py: think_share of each wave
+  interviewer:                                 # spawned by agents (spawn_interviewer), never replicas
+    harness: llm
+    model: interviewer
+    replicas: 0
+    agents_per_worker: 25
+    workers: {initial: 0, max_extra: 40}       # 1 live per agent x cap 1,000 / 25
+    ephemeral: true                            # removed once its session ends (docs/spawn.md)
+    system_prompt_file: prompts/interviewer.md
+    tools: ["world:chat", "world:submit_verdict", "comms:post"]
+    bash: false
+    tool_choice: required
+    max_turns: 12                              # 7-8 chat messages + verdict + post + done
+    tool_output_chars: 4000
+spawn:                                         # live interviewers per agent (no other quota)
+  agent: &interviews {types: [interviewer], max: 1, depth: 1}
+  agent-think: *interviews
+limits:
+  budget_usd: null                             # self-hosted: no $ stop
+  alive: 2000                                  # agents + their live interviewers (cap 1,000 each)

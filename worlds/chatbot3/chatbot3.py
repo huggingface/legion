@@ -36,10 +36,10 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "chatbot2"))  # chatbot2 adds ../chatbot, which adds ../eliza
 
-from chatbot2 import Chatbot2World, _copy  # noqa: E402
-from eliza import ElizaWorld  # noqa: E402
+from chatbot2 import Chatbot2World, _copy
+from eliza import ElizaWorld
 
-from flock.world import Agent, ToolError, World, tool  # noqa: E402
+from flock.world import Agent, ToolError, World, tool
 
 DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 400},
             "interviews": {"start_minutes": 5, "expire_minutes": 20},
