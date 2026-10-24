@@ -234,7 +234,9 @@ def test_chatbot_experiment_dry_run(tmp_path, fakes):
         seen = next(r for r in res if '\\"quota\\"' in r and '\\"verdicts\\"' in r)
         assert all(v["interviewer"] in seen for v in mine), seen
     hist = [json.loads(x) for x in (ws / "best" / "history.jsonl").read_text().splitlines()]
-    assert sorted(h["agent"] for h in hist) == sorted(AGENTS)
+    # every agent promoted; chatbot-v1's gate accepts ties ("at least as well"), so an agent
+    # whose phase-2 round ran twice (a repeated loop prompt) is recorded twice: count agents
+    assert {h["agent"] for h in hist} == set(AGENTS)
     assert all(h["score"] == h["of"] for h in hist), hist
 
     # the mirror: best/ and the phase in the bucket (a local dir here)
