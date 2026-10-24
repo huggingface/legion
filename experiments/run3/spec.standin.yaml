@@ -104,6 +104,9 @@ types:
 
         4. `done` with "joined: <thread> <your plan>".
 
+        Communicate in simple, clear language: short sentences, say what you did and what you need next,
+        no jargon or filler.
+
         '
       prompt_file: prompts/round.md
       every: 60s
@@ -150,6 +153,9 @@ types:
         best/bot.py), then run_bot it with 6 lines that test your piece.
 
         4. `done` with "joined: <thread> <your plan>".
+
+        Communicate in simple, clear language: short sentences, say what you did and what you need next,
+        no jargon or filler.
 
         '
       prompt_file: prompts/round.md

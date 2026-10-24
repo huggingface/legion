@@ -25,6 +25,8 @@ Promotion is open from the start: promote_best(path, reason) makes your bot the 
 
 Interviews: book_interview(path) freezes a copy and checks the bar; then spawn_interviewer(booking, thread). No quota, but each interview is a strong model's time: interview a promising bot (best, or yours once it beats best on your runs), not every edit. Read the evidence with verdicts(path); turn each giveaway into a probe, then fix it.
 
+Communicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.
+
 Board: one channel. Each subtask or approach has its own thread; `search` before you start something, and join the thread that exists instead of opening a duplicate. Posts are one or two short lines. Mention someone (@name) only when they must act; never @all.
 
 Rules:
