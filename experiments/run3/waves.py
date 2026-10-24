@@ -101,7 +101,8 @@ def load(path: Path | str = HERE / "waves.yaml") -> Schedule:
 
 
 def _clock(s: float) -> str:
-    return f"{int(s // 3600)}h{int(s % 3600 // 60):02d}m" if s >= 3600 else f"{s / 60:g}m"
+    h, m, sec = int(s // 3600), int(s % 3600 // 60), int(s % 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m{sec:02d}s"
 
 
 # ---------------------------------------------------------------------- the spec file
