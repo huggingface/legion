@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
+from flock.controller import naming
 from flock.controller.store import Row, Store
 from flock.models import (
     Event,
@@ -32,7 +33,6 @@ from flock.models import (
     TypeHealth,
     UnassignCommand,
     child_depth,
-    child_name,
     max_workers,
     root_depth,
 )
@@ -196,8 +196,8 @@ def spawn(store: Store, parent_name: str, req: SpawnRequest, now: float) -> tupl
         _admit(store, spec, parent, req.type)
         swarm, depth = parent["swarm"], child_depth(spec, agent_depth(spec, parent), req.type)
         while True:  # a replica of an oddly named type could hold the name: skip it
-            n = store.next_spawn_number(swarm)
-            name = child_name(parent_name, req.type, n)
+            n = store.next_spawn_number(swarm)  # the counter (spawned_total) in any naming
+            name = naming.new_child_name(store, spec, parent_name, req.type, n, now)
             if store.get_agent(name) is None:
                 break
         store.insert_child(name, swarm, req.type, n, parent_name, depth, now)

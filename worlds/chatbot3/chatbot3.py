@@ -47,6 +47,12 @@ DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 40
 IV = re.compile(r"-interviewer-\d+$")  # agent-0007-interviewer-0012 -> parent agent-0007
 
 
+def interviewer(agent: Agent) -> bool:
+    """An interviewer: type `interviewer` (any naming; `naming: words` gives `iv-amber-otter`),
+    or a numeric child name `<parent>-interviewer-NNNN`."""
+    return agent.type == "interviewer" or bool(IV.search(agent.name))
+
+
 def _doc(fn, doc: str):
     """The parent's tool under this world's description (the agents read it)."""
     if asyncio.iscoroutinefunction(fn):
@@ -177,14 +183,16 @@ class Chatbot3World(Chatbot2World):
         return b
 
     def _booking(self, agent: Agent, bid: str) -> tuple[dict, dict]:
-        m = IV.search(agent.name)
-        if not m:
+        if not interviewer(agent):
             raise ToolError("refused: only interviewer agents call this; book_interview, then "
                             "spawn_interviewer", "not_interviewer")
-        b, parent = self._expired(), agent.name[:m.start()]
+        # a numeric name says its parent; a words name does not: the booking binds the first
+        # interviewer that chats on it (its task names the booking)
+        m = IV.search(agent.name)
+        b, parent = self._expired(), agent.name[:m.start()] if m else None
         x = b.get(bid.strip())
-        if not x or x["by"] != parent or x.get("interviewer") not in (None, agent.name) or x[
-                "state"] not in ("reserved", "active"):
+        if not x or (parent is not None and x["by"] != parent) or x.get("interviewer") not in (
+                None, agent.name) or x["state"] not in ("reserved", "active"):
             self._log(agent, "refused", tool="chat", booking=bid, why="booking")
             raise ToolError(f"refused: booking {bid!r} is not open for you"
                             f"{' (' + x['state'] + ')' if x else ''}. Call `done` now.",
@@ -194,7 +202,7 @@ class Chatbot3World(Chatbot2World):
     def on_turn(self, agent: Agent, data: dict) -> None:
         """An interviewer's turn ended (its whole life): an interview without a verdict was cut
         off and is released (for the records; there is no quota)."""
-        if not IV.search(agent.name):
+        if not interviewer(agent):
             return
         with self._blk:
             b = self._bookings()

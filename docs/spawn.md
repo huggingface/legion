@@ -111,7 +111,8 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 
 ## Lifecycle
 
-- **Name:** `<parent>-<type>-<NNNN>`, `NNNN` from a per-swarm counter that is never reused while
+- **Name:** `<parent>-<type>-<NNNN>` (with `naming: words`: a reserved `<adjective>-<noun>`, see
+  "Names"), `NNNN` from a per-swarm counter that is never reused while
   the swarm exists, e.g. `leader-0000-analyst-0007`, then `leader-0000-analyst-0007-helper-0012`.
 - **Placement:** on the child type's own workers with v1's fill rule (fill in order, never move,
   open a new worker on demand). A type that declares `workers` never gets more than
@@ -159,6 +160,40 @@ spawn:
 - **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
 - **A follow-up prompt** from the parent must arrive while the agent is still working; a
   prompt sent after its session ended gets 404, because the agent is gone.
+
+## Names
+
+`naming:` (swarm-level) picks how agents are named; it applies to replicas and spawned
+children alike.
+
+| `naming` | replicas | spawned children |
+|---|---|---|
+| `numeric` (default) | `<type>-NNNN` (the slot) | `<parent>-<type>-NNNN` (the per-swarm counter) |
+| `words` | `<adjective>-<noun>`, e.g. `amber-otter` | the same, e.g. `brisk-lantern` |
+
+```yaml
+naming: words
+naming_seed: 3          # optional: the same spec gives the same names; unset: random
+types:
+  interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
+```
+
+- **Words.** About 190 adjectives (colors, simple qualities) and 340 nouns (animals, fruits,
+  plants, everyday objects), lowercase, letters and hyphens only, so every name is a valid
+  board handle. When two-word names get crowded, a third word is added.
+- **Reserved.** The controller reserves each name in its store with the type and the slot (a
+  replica) or the parent (a child). A name is unique on the controller and never reused while
+  the swarm exists, not even after its agent is removed. A replica slot that is recreated
+  (scale down and up, a cascade removal) keeps its name, also across controller restarts (the
+  reservations are in `state.db`).
+- **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
+  counts it); with `words` it no longer appears in the name.
+- **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
+  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock remove <name>`. A words
+  name says nothing about the parent: a world that needs the parent uses `X-Flock-Type` and
+  its own records (worlds/chatbot3 binds an interview booking to the first interviewer that
+  uses it).
+- The CLI tells an agent from a swarm by looking the name up (a swarm wins a tie).
 
 ## API
 

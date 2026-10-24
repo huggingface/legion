@@ -350,7 +350,8 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
             for model, u in ((data or {}).get("tokens") or {}).items():
                 with contextlib.suppress(ValueError, TypeError):
                     rtoks[model] = rtoks.get(model, TokenUsage()) + TokenUsage(**u)
-        rtype = max((t for t in spec.types if f"-{t}-" in name), key=len, default=None)
+        rtype = (store.reserved_name(name) or {}).get("type") or max(  # words, else numeric
+            (t for t in spec.types if f"-{t}-" in name), key=len, default=None)
         removed.append({"name": name, "type": rtype, "events": len(evs),
                         "events_file": f"events/{name}.jsonl",
                         "cost_usd": cost_usd(rtoks, type_price_table(spec.types.get(rtype)))

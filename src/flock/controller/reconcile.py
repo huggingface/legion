@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from flock.controller import naming
 from flock.controller import spawn as spawning
 from flock.controller.jobs import JobsClient, JobState
 from flock.controller.prices import cost_usd, type_price_table
@@ -41,7 +42,6 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorldSpec,
-    agent_name,
     comms_tools,
     max_workers,
     parse_duration,
@@ -232,8 +232,7 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
         if ts is None or a["removing"] or (a["parent"] is None and a["slot"] >= replicas):
             for r in spawning.remove_subtree(store, a["name"], reason, p.now):
                 p.act("unassign", r["name"], r["worker"] or "")
-    for slot in range(replicas):
-        name = agent_name(type_name, slot)
+    for slot, name in enumerate(naming.replica_names(store, spec, type_name, replicas, p.now)):
         if name not in existing:
             store.insert_agent(name, spec.swarm, type_name, slot, p.now)
 

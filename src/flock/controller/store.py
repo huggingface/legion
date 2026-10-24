@@ -145,6 +145,15 @@ CREATE TABLE IF NOT EXISTS spawn_keys (
   child TEXT NOT NULL,
   PRIMARY KEY (parent, key)
 );
+CREATE TABLE IF NOT EXISTS agent_names (
+  name TEXT PRIMARY KEY,
+  swarm TEXT NOT NULL,
+  type TEXT NOT NULL,
+  slot INTEGER,
+  parent TEXT,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_names_by_type ON agent_names (swarm, type, slot);
 """
 
 Row = dict[str, Any]
@@ -337,6 +346,7 @@ class Store:
             self._x("DELETE FROM loop_agents WHERE swarm = ?", [name])
             self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
             self._x("DELETE FROM grants WHERE swarm = ?", [name])
+            self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
 
     # ----------------------------------------------------------------- grants (docs/live.md)
 
@@ -544,6 +554,33 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [name, swarm, type_name, n, parent, depth, now],
         )
+
+    # ----------------------------------------------------------------- names (naming: words)
+
+    def reserve_name(self, name: str, swarm: str, type_name: str, slot: int | None,
+                     parent: str | None, now: float) -> bool:
+        """Reserve `name` for good (while the swarm exists): False if it is taken by a
+        reservation or an agent anywhere on this controller."""
+        with self._lock:
+            if self.get_agent(name) is not None:
+                return False
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO agent_names (name, swarm, type, slot, parent, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (name, swarm, type_name, slot, parent, now))
+            return cur.rowcount == 1
+
+    def reserved_slot_names(self, swarm: str, type_name: str) -> dict[int, str]:
+        """Replica slot -> its reserved name (a recreated slot keeps it)."""
+        return {r["slot"]: r["name"] for r in self._q(
+            "SELECT slot, name FROM agent_names WHERE swarm = ? AND type = ? AND parent IS NULL "
+            "AND slot IS NOT NULL", [swarm, type_name])}
+
+    def reserved_name(self, name: str) -> Row | None:
+        """A words name's reservation (it outlives the agent): type, slot, parent."""
+        return self._one("SELECT * FROM agent_names WHERE name = ?", [name])
+
+    def reserved_names_count(self, swarm: str) -> int:
+        return self._one("SELECT COUNT(*) AS n FROM agent_names WHERE swarm = ?", [swarm])["n"]
 
     def next_spawn_number(self, swarm: str) -> int:
         """The swarm's spawn counter, incremented; never reused while the swarm exists."""

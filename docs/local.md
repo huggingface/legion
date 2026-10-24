@@ -142,6 +142,10 @@ A long-lived local controller without the terminal view also exists:
 
 ## What differs locally
 
+- Agent names follow the spec's `naming:` as on HF Jobs: `<type>-NNNN` by default,
+  `<adjective>-<noun>` with `naming: words` (docs/spawn.md "Names"); the run bundle's
+  `events/<name>.jsonl` and `agents/<name>/` use the same names.
+
 Same code as on jobs: the spec, the API and CLI, the reconcile loop and placement
 (`agents_per_worker`, `workers:`), heartbeats and agent states, prompt admission
 (`max_working`), bulk and children prompts, spawn and its limits, events, cost from the pinned

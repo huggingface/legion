@@ -452,6 +452,9 @@ class TypeSpec(BaseModel):
     # controller removes one once a heartbeat reports it idle after a turn with nothing pending
     # (done, max_turns, budget or an error alike), and its worker deletes its files. Spawn-only.
     ephemeral: bool = False
+    # With the swarm's `naming: words`: put before every name of this type (e.g. "iv-" for
+    # interviewers), so roles stay recognizable. Lowercase letters and hyphens, ending in "-".
+    name_prefix: str | None = None
     flavor: str = "cpu-basic"
     worker_lifetime: str = "24h"
     lifetime_jitter: str = "4h"
@@ -538,6 +541,14 @@ class TypeSpec(BaseModel):
         parse_duration(v)
         return v
 
+    @field_validator("name_prefix")
+    @classmethod
+    def _name_prefix(cls, v: str | None) -> str | None:
+        if v is not None and not re.fullmatch(r"[a-z]+(-[a-z]+)*-", v):
+            raise ValueError(f"name_prefix {v!r}: lowercase letters and hyphens, ending in '-' "
+                             "(e.g. 'iv-')")
+        return v
+
     @field_validator("replicas", "agents_per_worker", "max_working_per_worker")
     @classmethod
     def _non_negative(cls, v: int) -> int:
@@ -622,6 +633,12 @@ class SwarmSpec(BaseModel):
     comms: CommsSpec | None = None
     # The swarm's world (docs/world.md); None: no world.
     world: WorldSpec | None = None
+    # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
+    # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
+    # reserved and never reused while the swarm exists). `naming_seed` makes the words
+    # deterministic for the swarm; unset, they are random.
+    naming: Literal["numeric", "words"] = "numeric"
+    naming_seed: int | None = None
 
     @field_validator("tools_version")
     @classmethod

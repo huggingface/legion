@@ -145,11 +145,17 @@ def _as_agent() -> bool:
 
 
 def _is_swarm(name: str) -> bool:
-    """Only a name shaped like an agent's (`...-NNNN`) costs a lookup."""
-    if not AGENT_NAME_RE.match(name):
+    """A swarm, unless it names an agent: a numeric agent name (`...-NNNN`) that is not a
+    swarm, or any other name (`naming: words`, e.g. `amber-otter`) that is an agent and not a
+    swarm. A name without a hyphen is no agent's: no lookup."""
+    if "-" not in name:
         return True
     with client() as c:
-        return _request(c, "GET", f"/swarms/{name}").status_code == 200
+        if _request(c, "GET", f"/swarms/{name}").status_code == 200:
+            return True
+        if AGENT_NAME_RE.match(name):
+            return False
+        return _request(c, "GET", f"/agents/{name}").status_code != 200
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -530,7 +536,7 @@ def _grant_swarm(target: str, swarm: str | None) -> str:
     if swarm:
         return swarm
     with client() as c:
-        if AGENT_NAME_RE.match(target):
+        if AGENT_NAME_RE.match(target) or "-" in target:  # numeric or words agent names
             r = _request(c, "GET", f"/agents/{target}")
             if r.status_code == 200:
                 return r.json()["swarm"]
@@ -881,9 +887,10 @@ def events(
     --pretty prints time, turn, kind and the text or a summary instead of JSON. Given a swarm,
     its swarm-level stream (loop_started, loop_tick, loop_stopped, final_round, budget_stop)."""
     deadline = time.monotonic() + timeout
-    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes
+    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes; other
+    # names (`naming: words`) are agents unless a swarm has that name
     route = (f"/agents/{name}/events" if _as_agent() or AGENT_NAME_RE.match(name)
-             else f"/swarms/{name}/events")
+             or not _is_swarm(name) else f"/swarms/{name}/events")
     while True:
         poll = follow or wait
         page = _call("GET", route, params={"after": after, "wait": 25 if poll else 0})
