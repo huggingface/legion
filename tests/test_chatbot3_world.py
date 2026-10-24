@@ -195,3 +195,84 @@ def test_words_named_interviewer(world):
         run(world.chat(Agent("teal-heron", "agent"), bid, "hi"))
     world.on_turn(iv, {"status": "error"})  # cut off: released (hook by type)
     assert world._bookings()[bid]["why"] == "cut off"
+
+
+# ------------------------------------------------------------------ the promotion gate is atomic
+PIZZA = ["I love pizza", "what food do I love?"]
+TEACHER_ONLY = WORDS.format(tail="' | '.join(x for x in SAID if 'teacher' in x)")
+
+
+async def _probe(w, agent, lines, check):
+    """Add a probe best fails, with the evidence copied from its own reply (verified)."""
+    r = await w.run_bot("best/bot", lines)
+    return await w.add_probe(agent, lines, check, r["turns"][-1]["bot"])
+
+
+def _agents(n):
+    return [Agent(f"agent-{i:04d}", "agent") for i in range(n)]
+
+
+def test_concurrent_equal_promotions_one_wins(world):
+    """6 equal candidates against a lower best, at once: exactly 1 promotes, 5 are refused as
+    ties against the new best (the critical section re-reads best)."""
+    async def go():
+        assert (await world.promote_best(A, f"{HOME_A}/bot", "base"))["promoted"]
+        assert (await _probe(world, A, TEACHER, "mentions_fact:teacher"))["verified"]
+        ags = _agents(6)
+        paths = [_pkg(world, a, f"agents/{a.name}", REMEMBERS) for a in ags]
+        return await asyncio.gather(*(world.promote_best(a, p, "x") for a, p in zip(ags, paths)))
+
+    res = run(go())
+    assert sum(r["promoted"] for r in res) == 1
+    assert sum("a tie does not promote" in r.get("why", "") for r in res) == 5
+    hist = world._history()
+    assert len(hist) == 2 and hist[1]["best_before"] == hist[0]["best_after"]
+    assert hist[1]["best_after"] != hist[0]["best_after"]
+
+
+@pytest.mark.parametrize("order", ["better_first", "better_last"])
+def test_concurrent_different_scores_the_higher_ends_best(world, order):
+    """Two strictly better candidates with different scores, at once: promotions are
+    serialized in arrival order and each is compared with the best at its turn, so the higher
+    one ends as best in either order (the higher first: the lower is refused; the lower
+    first: the higher beats it and promotes after it)."""
+    async def go():
+        assert (await world.promote_best(A, f"{HOME_A}/bot", "base"))["promoted"]
+        assert (await _probe(world, A, TEACHER, "mentions_fact:teacher"))["verified"]
+        assert (await _probe(world, A, PIZZA, "mentions_fact:pizza"))["verified"]
+        hi, lo = _agents(2)
+        p_hi = _pkg(world, hi, f"agents/{hi.name}", REMEMBERS)  # passes both probes
+        p_lo = _pkg(world, lo, f"agents/{lo.name}", TEACHER_ONLY)  # passes one
+        pair = [(hi, p_hi), (lo, p_lo)] if order == "better_first" else [(lo, p_lo), (hi, p_hi)]
+        return await asyncio.gather(*(world.promote_best(a, p, "x") for a, p in pair))
+
+    run(go())
+    hist = world._history()
+    assert hist[-1]["agent"] == "agent-0000" and hist[-1]["live"] == "2/2"  # the higher
+    assert [h["agent"] for h in hist[1:]] in (["agent-0000"], ["agent-0001", "agent-0000"])
+
+
+def test_two_world_processes_share_the_gate(mod, tmp_path, monkeypatch):
+    """A replaced world runs next to the old one for a moment: two instances on the same
+    workspace still promote one at a time (the file lock), so equal candidates give one."""
+    import threading as th
+
+    monkeypatch.delenv("CHATBOT_CONFIG", raising=False)
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w1 = mod.Chatbot3World(str(tmp_path / "ws"))  # one instance per thread: each has its own
+    worlds = [mod.Chatbot3World(str(tmp_path / "ws")) for _ in range(4)]  # in-process lock
+    run(w1.promote_best(A, _pkg(w1, A, HOME_A), "base"))
+    run(_probe(w1, A, TEACHER, "mentions_fact:teacher"))
+    ags = _agents(4)
+    paths = [_pkg(w1, a, f"agents/{a.name}", REMEMBERS) for a in ags]
+    out: list[dict] = []
+
+    def one(w, a, p):
+        out.append(run(w.promote_best(a, p, "x")))
+
+    ts = [th.Thread(target=one, args=(w, a, p)) for w, a, p in zip(worlds, ags, paths)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert sum(r["promoted"] for r in out) == 1 and len(w1._history()) == 2

@@ -246,7 +246,8 @@ DOCS = {
         seed conversation runs, every line gets a reply, no empty or repeated reply) and BEAT
         the current best on the live probe set: a higher total score, never lower on the seed
         probes. A tie does not promote: add a probe best fails (add_probe), fix it in your
-        copy, then promote.
+        copy, then promote. Promotions run one at a time: one that waited behind another is
+        compared with the NEW best (so the same score is then a tie).
 
         Args:
             path: your candidate, e.g. agents/<your name>/bot

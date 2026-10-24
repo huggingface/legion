@@ -412,7 +412,8 @@ class Chatbot2World(ChatbotWorld):
         and no lower on the seed probes (the floor). It must also pass the qualify bar (no
         empty or repeated reply; the same check as qualify and book_interview). A tie does not
         promote: add a probe best fails (add_probe), fix it in your copy, then promote. Closed
-        in phase 1 and during the compare round right after the merge.
+        in phase 1 and during the compare round right after the merge. Promotions run one at a
+        time: one that waited behind another is compared with the NEW best.
 
         Args:
             path: your candidate, e.g. teams/a/agents/ds-a-0001/bot
@@ -424,7 +425,7 @@ class Chatbot2World(ChatbotWorld):
             raise ToolError(f"refused: compare round, promotion opens in {math.ceil(left / 60)} "
                             "min. Now run_bot the other team's candidate and post in [merged] "
                             "what to keep.", "compare_round")
-        async with self._promote:
+        async with self._promotion():  # re-read best inside: a queued promotion meets the new one
             live = self._live()  # both scored on the same set
             fails, cand, cur = await asyncio.gather(asyncio.to_thread(self._bar, p),
                                                     self._full(p, live=live),
@@ -450,11 +451,13 @@ class Chatbot2World(ChatbotWorld):
             rec = {"n": n, "path": self._rel(p), "agent": agent.name, "reason": reason[:300],
                    "kind": kind[0], "score": cand["score"], "of": cand["of"],
                    "seed": cand["seed"], "live": f"{cand['live']}/{cand['live_of']}",
-                   "ts": round(time.time()), "sha": self._sha(p)[:12], "size": self._size(p)}
+                   "ts": round(time.time()), "sha": self._sha(p)[:12], "size": self._size(p),
+                   "best_before": self._best[0][:12] or None if cur else None}
             new = self._best_files()
             (b / "current.json").write_text(json.dumps(
                 {"n": n, "kind": kind[0], "entry": f"best/{kind[1]}", "files": new}) + "\n")
             self._best = (self._sha(self._best_path()), dict(cand["results"]))
+            rec["best_after"] = self._best[0][:12]
             self._append("best/history.jsonl", rec)
             self._log(agent, "promote", path=rec["path"], score=cand["score"], n=n)
         snap = [self._rel(f) for f in _files(b / (f"v{n}" if p.is_dir() else f"v{n}.py"))]

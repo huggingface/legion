@@ -7,6 +7,8 @@ edits are atomic, and a .py change that does not compile is refused. Bots run as
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -39,7 +41,23 @@ class ElizaWorld(World):
             (self.ws / d).mkdir(parents=True, exist_ok=True)
         if not any((self.ws / "probes").glob("*.txt")):
             shutil.copytree(self.probes_src, self.ws / "probes", dirs_exist_ok=True)
-        self._promote = asyncio.Lock()
+        self._promote = asyncio.Lock()  # one promotion at a time in this process ...
+
+    @contextlib.asynccontextmanager
+    async def _promotion(self):
+        """THE promotion critical section: one promotion at a time per workspace, across
+        processes too (a world replaced on re-apply runs next to the old one for a moment), by
+        an asyncio lock plus an exclusive file lock on .promote.lock in the workspace. Inside it the caller
+        re-reads the current best, scores, compares and commits, so a promotion queued behind
+        another is compared against the NEW best."""
+        async with self._promote:
+            f = open(self.ws / ".promote.lock", "a")  # noqa: SIM115, ASYNC230 (tiny, closed below)
+            try:
+                await asyncio.to_thread(fcntl.flock, f, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+                f.close()
 
     def _home(self, agent: Agent) -> Path:
         """The one directory `agent` may write under."""
@@ -276,7 +294,8 @@ class ElizaWorld(World):
         """
         seen = (lambda r: True) if agent is None else (
             lambda r: not self._refuse(agent, "list_files", r))
-        files = sorted((p for p in self.ws.rglob("*") if p.is_file() and p.name != "log.jsonl"
+        files = sorted((p for p in self.ws.rglob("*") if p.is_file()
+                        and p.name not in ("log.jsonl", ".promote.lock")
                         and self._rel(p).startswith(prefix) and seen(self._rel(p))),
                        key=lambda p: -p.stat().st_mtime)
         return {"total": len(files), "files": [
@@ -305,7 +324,7 @@ class ElizaWorld(World):
             reason: one line: what it does better, and your run_bot evidence
         """
         p = self._path(path, agent=agent, tool="promote_best")
-        async with self._promote:
+        async with self._promotion():
             cand, hist = await asyncio.to_thread(self._score, p), self._history()
             best = self.ws / "best" / "bot.py"
             cur = await asyncio.to_thread(self._score, best) if hist else None
@@ -316,9 +335,11 @@ class ElizaWorld(World):
                 self._log(agent, "promote_refused", path=path, score=cand["score"], why=why)
                 return {"promoted": False, "why": why, "candidate": cand, "best": cur}
             text, n = p.read_text(errors="replace"), len(hist) + 1
+            sha = hashlib.sha256(text.encode()).hexdigest()[:12]
             rec = {"n": n, "path": self._rel(p), "agent": agent.name, "reason": reason[:300],
                    "score": cand["score"], "of": cand["of"], "ts": round(time.time()),
-                   "sha": hashlib.sha256(text.encode()).hexdigest()[:12]}
+                   "sha": sha, "best_before": hashlib.sha256(best.read_bytes()).hexdigest()[:12]
+                   if hist and best.is_file() else None, "best_after": sha}
             for dst in (best, best.with_name(f"v{n}.py")):
                 dst.write_text(text)
             self._append("best/history.jsonl", rec)
