@@ -157,7 +157,18 @@ def test_render_variants(tmp_path):
             f.unlink()
     # the committed generated specs are what render.py writes
     rd = _mod("render")
-    for variant, name in (("smoke", "spec.smoke.yaml"), ("jobs", "spec.jobs.yaml"),
+    st = load_spec(str(EXP / "spec.standin.yaml"))  # the router as a stand-in endpoint
+    p = st.providers["vllm"]
+    assert (p.base_url, p.api_key_env, p.self_hosted) == ("https://router.huggingface.co/v1",
+                                                         "HF_TOKEN", False)
+    assert p.pricing == {rd.ROUTER: [0.30, 1.20, 0.30]}
+    assert {m.model for m in st.models.values()} == {f"vllm:{rd.ROUTER}"}
+    lp = st.types["agent"].loop
+    assert (lp.every, lp.while_.until, lp.while_.agent_usd, lp.wake.max) == ("60s", "20m", 1.5, 20)
+    assert (st.limits.budget_usd, st.types["agent"].max_budget_usd,
+            st.types["interviewer"].max_budget_usd) == (30, 0.2, 0.15)
+    for variant, name in (("smoke", "spec.smoke.yaml"), ("standin", "spec.standin.yaml"),
+                          ("jobs", "spec.jobs.yaml"),
                           ("router-smoke", "spec.router-smoke.yaml")):
         want = rd.HEAD.format(v=variant) + yaml.safe_dump(rd.render(variant, True),
                                                           sort_keys=False, width=100)
@@ -273,7 +284,7 @@ INTERVIEW = script(*[("chat", {"booking": "{booking}", "message": f"hello {i}"})
 WAIT = script(("read", {}))
 
 
-def _payload(tmp_path: Path) -> Path:
+def _payload(tmp_path: Path, waves: str) -> Path:
     src, bucket = tmp_path / "src", tmp_path / "bucket"
     exp = src / "experiments" / "run3"
     shutil.copytree(EXP, exp, ignore=shutil.ignore_patterns("*.local.yaml*", "__py*", "ws"))
@@ -293,7 +304,7 @@ def _payload(tmp_path: Path) -> Path:
                          "stagger": "100ms", "final": {"prompt": script(("done", {}))}}
             t["max_turns"] = 30
     (exp / "spec.yaml").write_text(yaml.safe_dump(d, sort_keys=False))
-    w = exp / "waves-smoke.yaml"  # the smoke's schedule, minutes -> seconds
+    w = exp / waves  # the variant's schedule, minutes -> seconds
     w.write_text(w.read_text().replace("at: 5m", "at: 8s").replace("at: 10m", "at: 16s"))
     (bucket / "payload").mkdir(parents=True)
     with tarfile.open(bucket / "payload" / "repo.tar.gz", "w:gz") as tar:
@@ -306,11 +317,19 @@ def _jsonl(p: Path) -> list[dict]:
     return [json.loads(x) for x in p.read_text().splitlines()] if p.is_file() else []
 
 
-def test_single_job_three_waves_end_to_end(tmp_path, fakes):
-    """The smoke variant's bootstrap rehearsal (RUN3_VARIANT=smoke, waves-smoke.yaml with its
-    minutes as seconds)."""
+VARIANTS = {  # variant: waves file, cap, wave totals, the loop's `while`
+    "smoke": ("waves-smoke.yaml", 40, [(0, 20), (20, 40)], {"until": "30m", "max_rounds": 120}),
+    "standin": ("waves-standin.yaml", 20, [(0, 10), (10, 20)],
+                {"until": "20m", "max_rounds": 40, "agent_usd": 1.5})}
+
+
+@pytest.mark.parametrize("variant", list(VARIANTS))
+def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
+    """The bootstrap rehearsal of the smoke variants (RUN3_VARIANT, its waves file with the
+    minutes as seconds): smoke 0 -> 20 -> 40 (the third wave capped), standin 0 -> 10 -> 20."""
+    waves, cap, totals, loop_while = VARIANTS[variant]
     model_url, board, board_url = fakes
-    bucket, home = _payload(tmp_path), tmp_path / "job"
+    bucket, home = _payload(tmp_path, waves), tmp_path / "job"
     env = {**_env(tmp_path), "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
            "PYTHON": sys.executable, "CHATBOT_PREINSTALLED": "1", "CHATBOT_HOME": str(home),
            "CHATBOT_BUCKET": str(bucket), "CHATBOT_BOARD_URL": board_url,
@@ -318,7 +337,8 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
            "CHATBOT_WORLD_TOKEN": "w0rld-t0ken", "CHATBOT_SYNC_S": "5", "CHATBOT_CHECK_S": "1",
            "CHATBOT_TICK_S": "1", "CHATBOT_FLOCK_ARGS": "--skip-preflight",
            "OPENAI_BASE_URL": model_url, "OPENAI_API_KEY": "fake-key", "MODEL_WORKER": "fake-model",
-           "RUN3_VARIANT": "smoke", "RUN3_WAVES": "waves-smoke.yaml", "CHATBOT_RUN": "t1"}
+           "HF_TOKEN": "fake-key",
+           "RUN3_VARIANT": variant, "RUN3_WAVES": waves, "CHATBOT_RUN": "t1"}
     out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
     proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
                             stdout=out, stderr=subprocess.STDOUT, text=True,
@@ -327,11 +347,11 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
     try:
         _until(proc, tmp_path, "flock run started")
         deadline = time.monotonic() + 240
-        while True:  # 40 agents joined, each had its first turn; interviews filed verdicts
+        while True:  # every agent joined, each had its first turn; interviews filed verdicts
             log = _jsonl(ws / "log.jsonl")
             joined = {x["agent"] for x in log if x["action"] == "book_interview"}
             verdicts = sum(x["action"] == "verdict" for x in log)
-            if len(joined) == 40 and verdicts >= 10 and time.time() - wlog.stat().st_ctime > 10:
+            if len(joined) == cap and verdicts >= cap // 4 and time.time() - wlog.stat().st_ctime > 10:
                 break
             assert proc.poll() is None and time.monotonic() < deadline, (
                 len(joined), verdicts, _jsonl(wlog), (tmp_path / "job.out").read_text()[-3000:])
@@ -345,17 +365,17 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
         out.close()
     text = (tmp_path / "job.out").read_text()
     assert "stop marker found" in text and "final sync" in text, text[-3000:]
-    # the waves: 0 -> 20 -> 40; the third is capped at 40 (no change, no line)
+    # the waves; a capped wave makes no change and no line
     waves_log = _jsonl(wlog)
-    assert [(sum(x["before"].values()), x["total"]) for x in waves_log] == [(0, 20), (20, 40)]
+    assert [(sum(x["before"].values()), x["total"]) for x in waves_log] == totals
     assert all(x["lines"] and "error" not in x for x in waves_log), waves_log
-    assert "types.agent.replicas: 0 -> 20" in waves_log[0]["lines"]
+    assert f"types.agent.replicas: 0 -> {totals[0][1]}" in waves_log[0]["lines"]
     # the bundle in the bucket, with every agent's events
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()
     local = yaml.safe_load((home / "repo/experiments/run3/spec.local.yaml").read_text())
-    assert local["types"]["agent"]["loop"]["while"] == {"until": "30m", "max_rounds": 120}
-    agents = [f"agent-{i:04d}" for i in range(40)]
+    assert local["types"]["agent"]["loop"]["while"] == loop_while
+    agents = [f"agent-{i:04d}" for i in range(cap)]
     looped = 0
     for a in agents:  # a newcomer: the newcomer prompt first, then rounds
         ev = _bundle_events(run, a)
@@ -365,17 +385,18 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
         first_user = next(e["data"]["message"] for e in ev if e["type"] == "message"
                           and e["data"]["message"].get("role") == "user")
         assert "You just joined a running effort" in json.dumps(first_user)
-    assert looped >= 20, looped
+    if variant == "smoke":  # standin's rounds are 60 s apart: none in this short rehearsal
+        assert looped >= 20, looped
     # promotion from the start: the first bot promoted at once, identical ones refused as ties
     hist = _jsonl(ws / "best" / "history.jsonl")
-    assert len(hist) == 1 and hist[0]["agent"] in agents[:20]
+    assert len(hist) == 1 and hist[0]["agent"] in agents[:totals[0][1]]
     log = _jsonl(ws / "log.jsonl")
-    assert sum(x["action"] == "promote_refused" and "a tie" in x.get("why", "") for x in log) == 39
+    assert sum(x["action"] == "promote_refused" and "a tie" in x.get("why", "") for x in log) == cap - 1
     # interviews: every agent booked one, none refused for quota, verdicts on frozen copies
     books = json.loads((ws / "interviews.json").read_text())
-    assert len(books) == 40 and not [x for x in log if x.get("why") == "quota"]
+    assert len(books) == cap and not [x for x in log if x.get("why") == "quota"]
     vs = _jsonl(ws / "verdicts.jsonl")
-    assert len(vs) >= 10 and all(v["level"] == "strong" and v["counts"] for v in vs)
+    assert len(vs) >= cap // 4 and all(v["level"] == "strong" and v["counts"] for v in vs)
     assert all(v["snapshot"] == f"interviews/{v['booking']}/bot" for v in vs)
     assert (bucket / "ws" / "best" / "current.json").is_file()  # the mirror and the ws sync
     _no_secrets(bucket, board)

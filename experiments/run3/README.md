@@ -13,9 +13,9 @@ Nothing here launches anything. Every value for the operator is a placeholder.
 | file | what |
 |---|---|
 | `spec.yaml` | the source spec: types `agent` (thinking off), `agent-think` (thinking on, 0 by default), ephemeral `interviewer`; loop, board, limits |
-| `render.py` | fills in the environment and writes the spec that runs; `--variant selfhosted` (default, single job), `smoke` (30-min loop on the endpoint), `jobs` (HF Jobs, world on a Space), `router-smoke` (HF router, $ caps) |
-| `spec.smoke.yaml`, `spec.jobs.yaml`, `spec.router-smoke.yaml` | the derived variants, generated (`render.py --variant X --committed`; a test checks they are current) |
-| `waves.yaml`, `waves-smoke.yaml`, `waves-router-smoke.yaml` | the wave schedules (run; 30-min smoke 20/20/20 cap 40; router smoke 2/2/2) |
+| `render.py` | fills in the environment and writes the spec that runs; `--variant selfhosted` (default, single job), `smoke` (30-min loop on the endpoint), `standin` (the smoke on the HF router, $ caps), `jobs` (HF Jobs, world on a Space), `router-smoke` (HF router, $ caps) |
+| `spec.smoke.yaml`, `spec.standin.yaml`, `spec.jobs.yaml`, `spec.router-smoke.yaml` | the derived variants, generated (`render.py --variant X --committed`; a test checks they are current) |
+| `waves.yaml`, `waves-smoke.yaml`, `waves-standin.yaml`, `waves-router-smoke.yaml` | the wave schedules (run; 30-min smoke 20/20/20 cap 40; stand-in 10/10 cap 20; router smoke 2/2/2) |
 | `load/` | `load_smoke.py` (the endpoint's load smoke) and `job.sh` (it as a cpu-basic job) |
 | `waves.py` | the wave runner: `plan`, `status`, `tick`, `run`, `add N`, `set N`, `pin` |
 | `world.yaml` | the world's knobs (`$CHATBOT_CONFIG`; re-read on change) |

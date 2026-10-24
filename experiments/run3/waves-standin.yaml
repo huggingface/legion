@@ -1,0 +1,9 @@
+# The stand-in smoke (RUN3_VARIANT=standin, RUN3_WAVES=waves-standin.yaml): 10 agents at +0 and
+# 10 at +5 min, cap 20.
+type: agent
+think_type: agent-think
+think_share: 0
+cap: 20
+waves:
+  - {at: 0, add: 10}
+  - {at: 5m, add: 10}
