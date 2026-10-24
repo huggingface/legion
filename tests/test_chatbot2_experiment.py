@@ -330,6 +330,32 @@ def test_phase2_spec_changes_only_prompts():
     assert knobs == chatbot2.DEFAULTS  # world.yaml states the world's defaults
 
 
+def _render(tmp_path: Path, env: dict) -> tuple[Path, str]:
+    import os
+
+    exp = tmp_path / "exp"
+    shutil.copytree(EXP, exp, ignore=shutil.ignore_patterns(".flock", "*.local.yaml"))
+    for f in ("spec.yaml", "phase2/spec.yaml"):
+        shutil.copyfile(exp / f, exp / f.replace(".yaml", ".local.yaml"))
+    keep = {k: v for k, v in os.environ.items() if not k.startswith("CHATBOT_")}
+    out = subprocess.run([sys.executable, str(exp / "job" / "render.py"), str(exp), "--first"],
+                         env={**keep, **env}, capture_output=True, text=True, check=True).stdout
+    return exp, out
+
+
+def test_render_states_the_real_duration_in_the_kickoff(tmp_path):
+    real = (EXP / "prompts" / "kickoff.md").read_text()
+    exp, out = _render(tmp_path / "real", {})
+    assert out == "" and (exp / "prompts" / "kickoff.md").read_text() == real  # 4 h: unchanged
+    assert "8 agents, 4 hours," in real and "(first 2 h)" in real and "(last 2 h)" in real
+    exp, out = _render(tmp_path / "smoke", {"CHATBOT_SMOKE": "1", "CHATBOT_SWITCH_AT": "600"})
+    kick = (exp / "prompts" / "kickoff.md").read_text()
+    assert "8 agents, 20 min," in kick and "(first 10 min)" in kick and "(last 10 min)" in kick
+    assert json.loads(out)["limits"]["budget_usd"] == 15.0
+    spec = yaml.safe_load((exp / "spec.local.yaml").read_text())
+    assert spec["types"]["ds-a"]["loop"]["while"]["until"] == "20m"
+
+
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
 def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes):
     """bootstrap.sh without a job (a directory as the bucket): control/update re-syncs
@@ -399,6 +425,8 @@ def test_job_bootstrap_update_switch_and_stop(tmp_path, fakes):
     (run,) = (bucket / "flock" / ".flock").iterdir()
     doc = json.loads((run / "run.json").read_text())
     assert doc["swarm"] == "chatbot-v2-run3" and doc["stop_reason"] == "interrupted"
-    assert board.msgs[0]["body"].startswith("Kickoff (chatbot-v2 run3)")
+    kick = board.msgs[0]["body"]  # smoke.json's 20 min, not the real run's 4 hours
+    assert kick.startswith("Kickoff (chatbot-v2 run3). 8 agents, 20 min, ONE"), kick
+    assert "Phase 1 (first 10 min)" in kick and "Phase 2 (last 10 min)" in kick, kick
     assert (bucket / "ws" / "interviews.json").is_file() and (bucket / "ws" / "probes").is_dir()
     _no_secrets(bucket, board)

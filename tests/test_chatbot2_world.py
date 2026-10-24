@@ -199,9 +199,9 @@ def test_promotion_is_strict_on_the_live_set_and_mirrors_best(world, tmp_path, m
     monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(HfApi=FakeApi))
     monkeypatch.setenv("CHATBOT_BUCKET", "hf://buckets/me/chatbots/run-3/")
     FakeApi.calls = []
-    world.write_file(A, f"{HOME_A}/single.py", "import sys\nfor l in sys.stdin: print("
-                     "'Hi Priya! Japan food guitar Biscuit pasta, I am Bo, nice, good, bye', "
-                     "flush=True)\n")
+    world.write_file(A, f"{HOME_A}/single.py", "import sys\nfor n, l in enumerate(sys.stdin): "
+                     "print('Hi Priya! Japan food guitar Biscuit pasta, I am Bo, nice, good, bye',"
+                     " n, flush=True)\n")
     with pytest.raises(ToolError, match="promotion opens after the merge"):
         run(world.promote_best(A, f"{HOME_A}/single.py", "early"))
     _merged(world, tmp_path, monkeypatch)
@@ -232,8 +232,8 @@ def test_promotion_is_strict_on_the_live_set_and_mirrors_best(world, tmp_path, m
     assert r["promoted"] and r["best"]["live"] == "1/1" and r["live_fails"] == [], r
     assert run(world.probes())["live"][0]["best"] == "pass"
     # the seed probes are the floor: more swarm probes cannot buy a seed regression
-    world.write_file(A, f"{HOME_A}/mute/__main__.py", "import sys\nfor l in sys.stdin: print("
-                     "'teacher', flush=True)\n")
+    world.write_file(A, f"{HOME_A}/mute/__main__.py", "import sys\nfor n, l in enumerate("
+                     "sys.stdin): print('teacher', n, flush=True)\n")
     r = run(world.promote_best(A, f"{HOME_A}/mute", "x"))
     assert not r["promoted"] and "(the floor)" in r["why"]
     why = [x["why"] for x in _log(world) if x["action"] == "promote_refused"]
@@ -316,6 +316,52 @@ def test_booking_refuses_an_unqualified_bot_without_reserving(world):
     assert q["qualified"] and q["quota"]["strong"]["left"] == 2 and q["score"]["live_of"] == 0
 
 
+def test_one_qualify_bar_for_qualify_booking_and_promotion(world, tmp_path, monkeypatch):
+    # passes the probes (it beats having no best) but gives "ok" and "lol" the same reply
+    rep = f"{HOME_A}/rep"
+    _pkg(world, A, HOME_A, WORDS.format(tail="('fine' if line in ('ok', 'lol') else line)"),
+         "rep")
+    _merged(world, tmp_path, monkeypatch)
+    q = run(world.qualify(A, rep))
+    assert not q["qualified"] and q["score"]["seed"] > 0
+    line = "robust.txt line 4 'lol': repeated reply"
+    assert q["fails"][0].startswith(line), q["fails"]
+    r = run(world.promote_best(A, rep, "passes the probes"))
+    assert not r["promoted"] and "fails the qualify bar" in r["why"] and line in r["why"], r
+    assert not (world.ws / "best").exists() or world._best_path() is None
+    with pytest.raises(ToolError, match="does not qualify") as e:
+        run(world.book_interview(A, "strong", rep))
+    assert str(e.value).split("does not qualify: ")[1].removesuffix(" Nothing was reserved.") \
+        .removesuffix(".") == r["why"]  # the same reason, word for word
+    assert world._bookings() == {}
+    assert [x["why"] for x in _log(world) if x["action"] == "promote_refused"] == [r["why"]]
+    assert run(world.promote_best(A, f"{HOME_A}/bot", "qualifies"))["promoted"]
+
+
+def test_an_unverified_probe_is_kept_but_does_not_count(world, tmp_path, monkeypatch):
+    _merged(world, tmp_path, monkeypatch)
+    assert run(world.promote_best(A, f"{HOME_A}/bot", "first"))["promoted"]
+    r = run(world.add_probe(B, TEACHER, "mentions_fact:teacher", "I never said that"))
+    assert r["verified"] is False and "does NOT count" in r["note"]
+    assert r["post"].startswith("PROBE p1 (unverified)")
+    rec = json.loads((world.ws / "probes/live.jsonl").read_text())
+    assert (rec["verified"], rec["evidence_matches"]) == (False, False)
+    p = run(world.probes())
+    assert p["best_fails"] == [] and p["live"][0] | {"lines": 0} == {
+        "id": "p1", "author": "ds-b-0001", "check": "mentions_fact:teacher", "lines": 0,
+        "verified": False, "best": "-"}
+    st = run(world.best_status())["score"]
+    assert (st["live"], st["live_of"]) == (0, 0)
+    # a fix of the unverified failure does not beat best: it scores the same
+    world.copy_file(A, "best/bot", f"{HOME_A}/fix")
+    world.edit_file(A, f"{HOME_A}/fix/words.py", "+ line)", "+ ' | '.join(SAID))")
+    r = run(world.promote_best(A, f"{HOME_A}/fix", "remembers"))
+    assert not r["promoted"] and "a tie does not promote" in r["why"], r
+    v = run(world.add_probe(B, TEACHER, "mentions_fact:teacher", "bye: what's my job again?"))
+    assert v["verified"] and "note" not in v
+    assert run(world.promote_best(A, f"{HOME_A}/fix", "remembers"))["promoted"]
+
+
 def test_spawn_interviewer_tool_spawns_for_a_booking(tmp_path):
     import httpx
     import respx
@@ -347,7 +393,7 @@ def test_spawn_interviewer_tool_spawns_for_a_booking(tmp_path):
 def test_world_restart_keeps_bookings_and_probes(world, mod, tmp_path, monkeypatch):
     _merged(world, tmp_path, monkeypatch)
     run(world.promote_best(A, f"{HOME_A}/bot", "first"))
-    run(world.add_probe(B, TEACHER, "mentions_fact:teacher", "forgot"))
+    run(world.add_probe(B, TEACHER, "mentions_fact:teacher", "bye: what's my job again?"))
     b = run(world.book_interview(A, "strong", "best/bot"))
     assert world._bookings()[b["booking"]]["best_n"] == 1
     again = mod.Chatbot2World(str(Path(world.ws)))

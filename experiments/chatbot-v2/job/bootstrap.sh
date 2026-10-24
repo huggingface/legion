@@ -63,25 +63,11 @@ render() {  # the *.local.yaml specs: board, channels, run name (and job/smoke.j
   if [ -n "${CHATBOT_RUN:-}" ]; then
     sed -i "s|^Kickoff (chatbot-v2)|Kickoff (chatbot-v2 $CHATBOT_RUN)|" "$EXP/prompts/kickoff.md"
   fi
-  [ -n "${CHATBOT_SMOKE:-}" ] || return 0
-  for f in "$EXP"/spec.local.yaml "$EXP"/phase2/spec.local.yaml; do
-    "$PYTHON" - "$f" "$EXP/job/smoke.json" <<'PY'
-import json, sys, yaml
-from flock.models import load_spec_yaml
-f, o = sys.argv[1], json.load(open(sys.argv[2]))
-d = load_spec_yaml(open(f).read())
-for t in d["types"].values():
-    if t.get("loop"):
-        lp = t["loop"] = {**t["loop"], "every": o["every"]}
-        lp["while"] = {**lp["while"], **o["while"]}
-        lp["final"] = {**lp["final"], "reserve_usd": o["reserve_usd"]}
-d["limits"] = {**d["limits"], **o["limits"]}
-open(f, "w").write(yaml.safe_dump(d, sort_keys=False))
-PY
-  done
+  # job/render.py: the smoke settings (CHATBOT_SMOKE=1) and the kickoff's real duration
+  SMOKE_SETTINGS=$("$PYTHON" "$EXP/job/render.py" "$EXP" "$@")
 }
-render
-[ -n "${CHATBOT_SMOKE:-}" ] && log "smoke settings: $(tr -d '\n ' < "$EXP/job/smoke.json")"
+render --first
+[ -n "${CHATBOT_SMOKE:-}" ] && log "smoke settings: $SMOKE_SETTINGS"
 log "installed $(flock --help >/dev/null && echo flock) $($PYTHON --version)"
 
 PIDS=()
@@ -119,10 +105,10 @@ live_update() {  # control/update: re-sync, then `flock update` on the specs of 
   UPDATES=$((UPDATES + 1)); out="$H/logs/update-$UPDATES.log"
   resync || log "re-sync failed"
   (cd "$EXP" && flock update "${p}spec.local.yaml") > "$out" 2>&1 || rc=$?
+  put "$out" "$B/control/update-$UPDATES.log" || true  # both before the result line below
+  del "$B/control/update" || log "could not delete control/update"
   if [ "$rc" = 0 ]; then log "update $UPDATES ok:"; else log "update $UPDATES FAILED ($rc):"; fi
   head -40 "$out" | sed 's|^|  |' | tee -a "$H/logs/bootstrap.log"
-  put "$out" "$B/control/update-$UPDATES.log" || true
-  del "$B/control/update" || log "could not delete control/update"
 }
 STOP=0
 on_term() { log "stop requested: stopping flock (drain, bundle)"; STOP=1; kill -TERM "${PIDS[@]}" 2>/dev/null || true; }
@@ -143,9 +129,10 @@ while alive; do
          [ $((now - t0)) -ge "$CHATBOT_SWITCH_AT" ]; } || exists "$B/control/switch"; }; then
       log "phase switch"
       resync || log "re-sync failed"  # phase-2 prompts edited in <bucket>/experiment/ count
-      if bash "$EXP/job/switch.sh" > "$H/logs/switch.log" 2>&1; then log "phase switch ok"; else log "phase switch FAILED (logs/switch.log)"; fi
+      src=0; bash "$EXP/job/switch.sh" > "$H/logs/switch.log" 2>&1 || src=$?
       switched=1
-      put "$H/logs/switch.log" "$B/control/switch.log" || true
+      put "$H/logs/switch.log" "$B/control/switch.log" || true  # before the log line
+      if [ "$src" = 0 ]; then log "phase switch ok"; else log "phase switch FAILED (logs/switch.log)"; fi
     elif exists "$B/control/update"; then
       live_update
     fi
