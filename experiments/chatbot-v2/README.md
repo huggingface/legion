@@ -30,7 +30,7 @@ loop, board rules and job shape as chatbot-v1; what changed is the world
 - `prompts/` (phase 1: system, round, final per team; kickoff; interviewer), `phase2/`,
   `protocols/`.
 - `tools/interview.py`: `spawn_interviewer(booking, thread)`.
-- `job/`: `bootstrap.sh` (the container entrypoint), `switch.sh`, `launch.sh`, `smoke.json`.
+- `job/`: `bootstrap.sh` (the container entrypoint), `switch.sh`, `launch.sh`, `render.py`, `smoke.json`.
 
 ## Knobs (`world.yaml`)
 
@@ -91,6 +91,11 @@ Control markers in `<bucket>/<run>/control/` (checked every 30 s):
 `CHATBOT_SMOKE=1` applies `job/smoke.json` (20 min loop at 60 s, $2.50 per agent, $15 total) for
 a smoke job; `-e CHATBOT_SWITCH_AT=600` switches at +10 min. For a 3-min compare round, upload
 `job/smoke-world.yaml` as `<bucket>/<run>/experiment/world.yaml` first (applied at the switch).
+With `-e CHATBOT_RUN=<name>`, `variants.<name>` in `smoke.json` overrides those settings
+(`job/render.py`). `resmoke` is a 10-min interview-path check: $0.80 per agent, $5 total, 1-min
+compare round and booking start window (its `world` knobs, merged into `world.yaml` at start),
+and a round-prompt line asking each agent to book a mid interview and spawn its interviewer
+in round 2. Use it with `-e CHATBOT_SWITCH_AT=240`.
 
 ## The chat Space contract
 
