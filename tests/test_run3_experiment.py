@@ -149,8 +149,10 @@ def test_render_variants(tmp_path):
         assert j.models["interviewer"].model == "vllm:m-iv" and j.world.command is None
         assert j.types["agent"].secrets == ["OPENAI_API_KEY"]
         files.append(_render(tmp_path, "smoke", OPENAI_BASE_URL="http://gpu.internal:8000/v1",
-                             MODEL_WORKER="m", CHATBOT_RUN="smoke"))
+                             MODEL_WORKER="m", CHATBOT_RUN="smoke",
+                             OPENAI_BASE_URLS="http://g1:8000/v1, http://g2:8000/v1"))
         sm = load_spec(str(files[-1]))
+        assert sm.providers["vllm"].endpoints == ["http://g1:8000/v1", "http://g2:8000/v1"]
         assert sm.swarm == "run3-smoke" and sm.limits.budget_usd is None
         for name in ("agent", "agent-think"):
             lp = sm.types[name].loop
@@ -331,6 +333,19 @@ def _payload(tmp_path: Path, waves: str) -> Path:
     return bucket
 
 
+def _second_server(tmp_path: Path):
+    """Another fake OpenAI server with its own request log (requests-2.jsonl)."""
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from . import fake_openai
+
+    h = type("Handler2", (fake_openai.Handler,), {"log_path": str(tmp_path / "requests-2.jsonl")})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), h)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def _jsonl(p: Path) -> list[dict]:
     return [json.loads(x) for x in p.read_text().splitlines()] if p.is_file() else []
 
@@ -375,6 +390,16 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
                 len(joined), verdicts, _jsonl(wlog), (tmp_path / "job.out").read_text()[-3000:])
             time.sleep(1)
         (bucket / "control").mkdir(exist_ok=True)
+        if variant == "smoke":  # a live server switch: every agent moves at its next turn
+            srv2 = _second_server(tmp_path)
+            url2 = f"http://127.0.0.1:{srv2.server_port}/v1"
+            (bucket / "control" / "endpoints").write_text(url2 + "\n")
+            _until(proc, tmp_path, "endpoints 1 ok", timeout=60)
+            deadline = time.monotonic() + 60
+            while not (tmp_path / "requests-2.jsonl").is_file() or len(
+                    (tmp_path / "requests-2.jsonl").read_text().splitlines()) < 10:
+                assert time.monotonic() < deadline and proc.poll() is None
+                time.sleep(1)
         (bucket / "control" / "stop").write_text("stop\n")
         assert _wait(proc, 180) == 0, (tmp_path / "job.out").read_text()[-3000:]
     finally:
@@ -394,6 +419,16 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
     # the bundle in the bucket, with every agent's events
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()
+    if variant == "smoke":  # the server switch: turns moved to server 2, named in turn_ended
+        ends = [e["data"]["data"] for a in [f"agent-{i:04d}" for i in range(cap)]
+                for e in _bundle_events(run, a) if e["type"] == "turn_ended"]
+        host1, host2 = model_url.split("/")[2], f"127.0.0.1:{srv2.server_port}"
+        assert {d.get("endpoint") for d in ends} == {host1, host2}
+        moved = [d for d in ends if d.get("endpoint_from")]
+        assert moved and all((d["endpoint_from"], d["endpoint"]) == (host1, host2) for d in moved)
+        assert not (bucket / "control" / "endpoints").exists()
+        assert "endpoints 1 ok" in (bucket / "logs" / "bootstrap.log").read_text()
+        srv2.shutdown()
     doc = json.loads((run / "run.json").read_text())  # removed interviewers carry their cost
     gone = doc["removed_agents"]
     assert gone and all(r["type"] == "interviewer" and r["cost_usd"] is not None for r in gone)

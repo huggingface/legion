@@ -6,6 +6,7 @@
 # env:     CHATBOT_BUCKET   hf://buckets/<ns>/<bucket>/<run> (payload/ in, everything else out)
 #          CHATBOT_BOARD_URL, CHATBOT_CHANNEL, CHATBOT_RUN (swarm run3-<run>, optional)
 #          OPENAI_BASE_URL  the vLLM server (/v1); MODEL_WORKER, MODEL_INTERVIEWER (optional)
+#          OPENAI_BASE_URLS several servers, comma-separated (agents pinned by name hash)
 #          RUN3_VARIANT     selfhosted (default) | smoke (30-min loop) | standin (router as the endpoint, $ caps) | router-smoke
 #          RUN3_WAVES       the wave schedule file in the experiment (default waves.yaml)
 #          CHATBOT_SYNC_S   seconds between bucket syncs (default 300)
@@ -16,6 +17,9 @@
 #          <bucket>/control/add      its content N: N more agents now (after the schedule: the
 #                                    operator's call); deleted after, log in control/add-<k>.log
 #          <bucket>/control/waves-off  the schedule stops (`add` and `update` still work)
+#          <bucket>/control/endpoints  its content: the server list (comma-separated URLs) from
+#                                    now on; re-render + `flock update` (agents of a removed
+#                                    server move at their next turn; new agents spread)
 #          <bucket>/control/stop     flock drains and writes its bundle, then the last sync
 # secrets: HF_TOKEN (bucket; the router in router-smoke), CHATBOT_BOARD_INVITE,
 #          CHATBOT_WORLD_TOKEN, OPENAI_API_KEY (optional: the vLLM server's key)
@@ -103,6 +107,20 @@ live_update() {  # control/update: re-sync, keep the live replicas, then `flock 
   put "$out" "$B/control/update-$UPDATES.log" || true
   del "$B/control/update" || log "could not delete control/update"
 }
+ENDPOINTS=0
+set_endpoints() {  # control/endpoints: a new server list, applied like control/update
+  local out rc=0 urls
+  ENDPOINTS=$((ENDPOINTS + 1)); out="$H/logs/endpoints-$ENDPOINTS.log"
+  fetch "$B/control/endpoints" "$H/endpoints.txt" && urls=$(tr -d ' \n\r' < "$H/endpoints.txt")
+  if [ -n "${urls:-}" ]; then
+    export OPENAI_BASE_URLS=$urls
+    { render && waves pin && (cd "$EXP" && flock update spec.local.yaml); } > "$out" 2>&1 || rc=$?
+  else echo "control/endpoints: empty" > "$out"; rc=1; fi
+  if [ "$rc" = 0 ]; then log "endpoints $ENDPOINTS ok: $urls"; else log "endpoints $ENDPOINTS FAILED ($rc)"; fi
+  head -20 "$out" | sed 's|^|  |' | tee -a "$H/logs/bootstrap.log"
+  put "$out" "$B/control/endpoints-$ENDPOINTS.log" || true
+  del "$B/control/endpoints" || log "could not delete control/endpoints"
+}
 ADDS=0
 add_now() {  # control/add: N more agents now
   local n out rc=0
@@ -130,6 +148,8 @@ while alive; do
       log "stop marker found"; on_term
     elif exists "$B/control/update"; then
       live_update
+    elif exists "$B/control/endpoints"; then
+      set_endpoints
     elif exists "$B/control/add"; then
       add_now
     else

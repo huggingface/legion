@@ -18,6 +18,8 @@ Variants (one source, spec.yaml):
 
 Environment (unset: the placeholder stays, so the spec loads but preflight fails):
   OPENAI_BASE_URL     the vLLM server, ending in /v1
+  OPENAI_BASE_URLS    several servers of the model, comma-separated (wins over OPENAI_BASE_URL):
+                      each agent is pinned to one by a hash of its name (docs/llm-harness.md)
   OPENAI_API_KEY      optional (named in the spec, never written; any value without --api-key)
   MODEL_WORKER        the served model id; MODEL_INTERVIEWER defaults to it
   CHATBOT_BOARD_URL, CHATBOT_CHANNEL, CHATBOT_RUN (swarm run3-<run>)
@@ -67,6 +69,8 @@ def render(variant: str = "selfhosted", placeholders: bool = False) -> dict:
         prov, _, mid = m["model"].partition(":")
         m["model"] = f"{prov}:{ids.get(mid, mid)}"
     d["providers"]["vllm"]["base_url"] = e("OPENAI_BASE_URL", ROUTER_URL if standin else URL)
+    if urls := [u.strip() for u in e("OPENAI_BASE_URLS", "").split(",") if u.strip()]:
+        d["providers"]["vllm"].update(base_url=urls[0], base_urls=urls)
     d["comms"].update(url=e("CHATBOT_BOARD_URL", BOARD), channel=e("CHATBOT_CHANNEL", CHANNEL))
     if run := e("CHATBOT_RUN", ""):
         d["swarm"] = f"run3-{run}"

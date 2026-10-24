@@ -72,6 +72,15 @@ vllm serve <hf model path> --served-model-name <MODEL_WORKER> \
   server.
 - **Prefix caching on**: every turn resends the agent's history.
 - Reachable over HTTPS from the job(s); the key, if any, is a job secret.
+- **More than one server** (when the load smoke says one node is not enough): start server 2
+  with the same flags and the same `--served-model-name`, then set `OPENAI_BASE_URLS` (comma-
+  separated, e.g. `https://gpu-1/v1,https://gpu-2/v1`) instead of `OPENAI_BASE_URL`. Each agent
+  is pinned to one server by a hash of its name and keeps it (its prefix cache stays warm); the
+  hash spreads agents roughly evenly. Live: single job, upload the list to `control/endpoints`;
+  jobs mode, re-render with `OPENAI_BASE_URLS` and `flock update`. Agents already running stay
+  on their server, new agents spread over all of them; a removed server's agents move at their
+  next turn. `turn_ended` events carry `endpoint: <host:port>` for a per-server load view. The
+  key (`OPENAI_API_KEY`) is shared by all servers.
 
 ## Waves
 
@@ -83,7 +92,8 @@ a JSON line in `<spec>.waves.jsonl`. The schedule file is re-read at every tick.
 - **Single job:** the bootstrap ticks every `CHATBOT_CHECK_S` (30 s) from the job's start.
   `control/add` (content: a number) adds that many now; `control/waves-off` stops the schedule;
   `control/update` re-syncs `<bucket>/experiment/`, re-renders, pins the live count
-  (`waves.py pin`) and runs `flock update`.
+  (`waves.py pin`) and runs `flock update`; `control/endpoints` (a comma-separated URL list)
+  switches the servers the same way.
 - **Jobs mode:** the operator session runs `python waves.py run --spec spec.jobs.local.yaml`
   with `FLOCK_URL`/`FLOCK_TOKEN` set; it stops when the schedule is over (300).
   `waves.py status` shows the count and the next wave; `waves.py add 100` or `set 250`
