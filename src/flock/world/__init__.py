@@ -99,6 +99,11 @@ class World:
     version: typing.ClassVar[str] = "0.0.0"
     description: typing.ClassVar[str] = ""
     capabilities: typing.ClassVar[list[str]] = []
+    # False (default): the server runs one tool call or hook at a time (a global lock), so a
+    # world needs no locking of its own. True: calls and hooks run concurrently in the
+    # server's thread pool; the world guards its own state (a slow tool then never holds up
+    # the hooks or the other agents' calls).
+    concurrent: typing.ClassVar[bool] = False
 
     # ------------------------------------------------------------------ tools
     def tools(self) -> dict[str, Callable]:

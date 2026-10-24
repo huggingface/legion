@@ -58,6 +58,13 @@ def world(mod, tmp_path, monkeypatch):
     return w
 
 
+def _until(ok, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not ok():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -68,7 +75,7 @@ def _log(w) -> list[dict]:
 
 def test_manifest_flat_workspace_and_descriptions(world):
     m = world.manifest()
-    assert (m["name"], m["version"]) == ("chatbot3", "0.3.1")
+    assert (m["name"], m["version"]) == ("chatbot3", "0.3.2")
     assert m["hooks"] == ["agent_done", "turn"]
     tools = {t["name"]: t for t in m["tools"]}
     assert {"read_file", "grep_file", "write_file", "copy_file", "edit_file", "insert_after",
@@ -139,8 +146,8 @@ def test_interviews_without_quota(world, mod, monkeypatch):
     assert world._bookings()["agent-0000-iv1-strong"]["state"] == "charged"
     iv2 = Agent("agent-0000-interviewer-0005")  # cut off: released (for the records)
     run(world.chat(iv2, "agent-0000-iv2-strong", "hi"))
-    world.on_turn(iv2, {"status": "error"})
-    assert world._bookings()["agent-0000-iv2-strong"]["why"] == "cut off"
+    world.on_turn(iv2, {"status": "error"})  # released off the request path
+    _until(lambda: world._bookings()["agent-0000-iv2-strong"].get("why") == "cut off")
     vs = world.verdicts(B)
     assert [x["booking"] for x in vs["verdicts"]] == ["agent-0000-iv1-strong"]
     assert sorted(x["id"] for x in vs["open_bookings"]) == [
@@ -195,7 +202,7 @@ def test_words_named_interviewer(world):
     with pytest.raises(ToolError, match="only interviewer agents"):
         run(world.chat(Agent("teal-heron", "agent"), bid, "hi"))
     world.on_turn(iv, {"status": "error"})  # cut off: released (hook by type)
-    assert world._bookings()[bid]["why"] == "cut off"
+    _until(lambda: world._bookings()[bid].get("why") == "cut off")
 
 
 # ------------------------------------------------------------------ the promotion gate is atomic
@@ -429,3 +436,79 @@ def test_busy_refusal_when_max_waiting(mod, tmp_path, monkeypatch):
     res = run(burst())
     busy = [r for r in res if not r["promoted"] and r.get("why", "").startswith("busy")]
     assert sum(bool(r["promoted"]) for r in res) == 1 and len(busy) == 3  # 2 in flight
+
+
+def test_hooks_and_reads_stay_fast_during_a_promotion_and_slow_tools(mod, tmp_path, monkeypatch):
+    """Served over HTTP (flock.world.server): while a long promotion is scored and slow sync
+    tools (edit_file with a slow compile check) run, 50 hooks answer with p95 < 100 ms and a
+    read_file within 200 ms (the world is `concurrent`: no global lock; hooks do their
+    bookkeeping off the request path)."""
+    import socket
+    import statistics
+
+    import httpx
+    import uvicorn
+
+    from flock.world.server import create_app
+
+    monkeypatch.delenv("CHATBOT_CONFIG", raising=False)
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w = mod.Chatbot3World(str(tmp_path / "ws"))
+    path = _pkg(w, A, HOME_A)
+    real_run, real_save = mod.ElizaWorld._run, mod.ElizaWorld._save
+
+    def slow_run(self, p, lines):
+        time.sleep(0.1)
+        return real_run(self, p, lines)
+
+    def slow_save(self, *a, **k):
+        time.sleep(2.0)  # a slow compile check
+        return real_save(self, *a, **k)
+
+    monkeypatch.setattr(mod.ElizaWorld, "_run", slow_run)
+    monkeypatch.setattr(mod.ElizaWorld, "_save", slow_save)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(create_app(w, "tok"), host="127.0.0.1", port=port,
+                                           log_level="warning"))
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    base, head = f"http://127.0.0.1:{port}", {"X-World-Token": "tok"}
+    while not server.started:
+        time.sleep(0.05)
+
+    def tool(name, agent, args, timeout=60):
+        return httpx.post(f"{base}/tools/{name}", json={"args": args}, timeout=timeout,
+                          headers={**head, "X-Flock-Agent": agent.name,
+                                   "X-Flock-Type": agent.type})
+
+    try:
+        busy = [threading.Thread(target=tool, args=("promote_best", A, {
+            "path": path, "reason": "x"}))] + [threading.Thread(target=tool, args=(
+                "edit_file", A, {"path": f"{HOME_A}/bot/words.py", "old": "SAID = []",
+                                 "new": "SAID = []"})) for _ in range(10)]
+        for b in busy:
+            b.start()
+        time.sleep(0.3)  # the promotion is scoring, the edits hold their compile checks
+        lat = []
+        for i in range(50):
+            t0 = time.monotonic()
+            r = httpx.post(f"{base}/hooks", headers=head, timeout=10, json={
+                "event": "turn", "agent": f"iv-a{i}" if i % 2 else "agent-0001",
+                "type": "interviewer" if i % 2 else "agent", "swarm": "s", "turn": "t-1",
+                "data": {"status": "completed"}})
+            lat.append(time.monotonic() - t0)
+            assert r.json()["ok"]
+        t0 = time.monotonic()
+        r = tool("read_file", A, {"path": f"{HOME_A}/bot/words.py"}, timeout=10)
+        read_s = time.monotonic() - t0
+        assert r.json()["ok"] and any(b.is_alive() for b in busy)  # still busy meanwhile
+        p95 = statistics.quantiles(lat, n=20)[-1]
+        assert p95 < 0.1, (p95, max(lat))
+        assert read_s < 0.2, read_s
+        for b in busy:
+            b.join()
+    finally:
+        server.should_exit = True
+        t.join(5)

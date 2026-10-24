@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -192,7 +193,7 @@ class ElizaWorld(World):
                               bytes_after=len(data))
                     raise ToolError(f"{rel} NOT changed (it keeps its previous content): "
                                     f"syntax error\n{err[-1200:]}", "syntax_error")
-            tmp_dst = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+            tmp_dst = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
             shutil.copyfile(src, tmp_dst)
             os.replace(tmp_dst, p)
         self._log(agent, tool, path=rel, bytes_before=before, bytes_after=len(data))

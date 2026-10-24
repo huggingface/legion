@@ -67,6 +67,8 @@ def create_app(world: World, token: str | None) -> FastAPI:
                 for t in world.manifest().get("tools") or []}
 
     def locked(fn, *args: Any) -> Any:
+        if getattr(world, "concurrent", False):  # the world guards its own state
+            return fn(*args)
         with lock:
             return fn(*args)
 

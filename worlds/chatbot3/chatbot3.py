@@ -98,8 +98,11 @@ def _usable_cpus() -> int:
 
 
 class Chatbot3World(Chatbot2World):
-    name, version, base_rules = "chatbot3", "0.3.1", (HERE / "rules.md").read_text()
+    name, version, base_rules = "chatbot3", "0.3.2", (HERE / "rules.md").read_text()
     dirs = ("agents", "best", "probes", "interviews")
+    # tool calls and hooks run concurrently (flock.world.server): the bookings have their
+    # lock, promotions their critical section, file writes are atomic, logs are appends
+    concurrent = True
 
     def __init__(self, root: str | None = None) -> None:
         super().__init__(root or os.environ.get("CHATBOT_WS") or str(HERE / "ws"))
@@ -239,8 +242,12 @@ class Chatbot3World(Chatbot2World):
     def on_turn(self, agent: Agent, data: dict) -> None:
         """An interviewer's turn ended (its whole life): an interview without a verdict was cut
         off and is released (for the records; there is no quota)."""
-        if not interviewer(agent):
+        if not interviewer(agent):  # most turns: nothing to do, answer at once
             return
+        # the release is bookkeeping: off the request path, so the hook answers in ms
+        threading.Thread(target=self._release_cut, args=(agent,), daemon=True).start()
+
+    def _release_cut(self, agent: Agent) -> None:
         with self._blk:
             b = self._bookings()
             cut = [x for x in b.values() if x.get("interviewer") == agent.name

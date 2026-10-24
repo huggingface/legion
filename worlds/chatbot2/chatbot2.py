@@ -721,8 +721,10 @@ class Chatbot2World(ChatbotWorld):
             confidence: 0.0 to 1.0
         """
         with self._blk:
-            return self._verdict(agent, booking, evidence_script, evidence_agent, verdict,
-                                 confidence)
+            out = self._verdict(agent, booking, evidence_script, evidence_agent, verdict,
+                                confidence)
+        self._mirror(["verdicts.jsonl", "interviews.json", "log.jsonl"])  # outside the lock
+        return out
 
     def _verdict(self, agent: Agent, booking: str, evidence_script: list[str],
                  evidence_agent: list[str], verdict: str, confidence: float) -> dict:
@@ -741,7 +743,6 @@ class Chatbot2World(ChatbotWorld):
         x["state"] = "charged"
         self._store(b)
         self._log(agent, "verdict", booking=x["id"], path=x["path"], verdict=verdict)
-        self._mirror(["verdicts.jsonl", "interviews.json", "log.jsonl"])
         return {"recorded": True, **{k: v for k, v in rec.items() if k != "transcript"}}
 
     def on_turn(self, agent: Agent, data: dict) -> None:
