@@ -11,7 +11,7 @@ Variants (one source, spec.yaml):
   with `max_rounds` 120 per agent; prices 0, no $ caps (waves-smoke.yaml: 20/20/20, cap 40).
 - standin: the smoke against the HF router as a stand-in endpoint (OPENAI_BASE_URL defaults to
   the router, the key is HF_TOKEN, MODEL_WORKER defaults to the router's DeepSeek id, which the
-  interviewers use too), router prices, `every: 60s`, a 20-min loop, $3.00 per agent, $0.20
+  interviewers use too), router prices, `every: 60s`, a 20-min loop, $3.00 per agent, $0.33
   per prompt, $0.15 per interviewer, $30 hard stop (waves-standin.yaml: 10 + 10, cap 20).
 - router-smoke: the HF router with DeepSeek at router prices and $ caps, for a short smoke
   without the endpoint (until 20m, $2.50 per agent, $15 in total).
@@ -90,7 +90,7 @@ def render(variant: str = "selfhosted", placeholders: bool = False) -> dict:
         for m in d["models"].values():
             m["model"] = f"hf:{ROUTER}"
         for t in loops:
-            t["max_budget_usd"] = 0.20  # per prompt
+            t["max_budget_usd"] = 0.33  # per prompt: chatbot-v2's $0.20 for 12 calls, at 20
             t["loop"] = {**t["loop"], "while": {"until": "20m", "max_rounds": 200,
                                                 "agent_usd": 2.50},
                          "final": {**t["loop"]["final"], "reserve_usd": 0.30}}
@@ -102,7 +102,7 @@ def render(variant: str = "selfhosted", placeholders: bool = False) -> dict:
                     pricing={ids["MODEL_WORKER"]: ROUTER_PRICE,
                              ids["MODEL_INTERVIEWER"]: ROUTER_PRICE})
         for t in loops:
-            t["max_budget_usd"] = 0.20  # per prompt, as chatbot-v2
+            t["max_budget_usd"] = 0.33  # per prompt: chatbot-v2's $0.20 for 12 calls, at 20
             t["loop"] = {**t["loop"], "every": "60s",
                          "while": {"until": "20m", "max_rounds": 40, "agent_usd": 3.00},
                          "final": {**t["loop"]["final"], "reserve_usd": 0.30}}

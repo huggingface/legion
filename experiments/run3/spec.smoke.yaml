@@ -86,7 +86,7 @@ types:
     - world:verdicts
     bash: false
     tool_choice: required
-    max_turns: 12
+    max_turns: 20
     tool_output_chars: 32000
     context_tokens: 64000
     loop:
@@ -133,7 +133,7 @@ types:
     tools: *id001
     bash: false
     tool_choice: required
-    max_turns: 12
+    max_turns: 20
     tool_output_chars: 32000
     context_tokens: 64000
     loop:

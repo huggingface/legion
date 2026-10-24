@@ -123,6 +123,7 @@ def test_render_variants(tmp_path):
             t = s.types[name]
             assert (t.replicas, t.agents_per_worker, t.tool_choice, t.bash) == (0, 25, "required",
                                                                                False)
+            assert t.max_turns == 20 and "at most 18 calls" in t.loop.prompt
             lp = t.loop
             assert (lp.every, lp.while_.until, lp.wake.min_gap, lp.wake.max) == (
                 "turn_end", "48h", "10s", 20)
@@ -166,7 +167,7 @@ def test_render_variants(tmp_path):
     lp = st.types["agent"].loop
     assert (lp.every, lp.while_.until, lp.while_.agent_usd, lp.wake.max) == ("60s", "20m", 3.0, 20)
     assert (st.limits.budget_usd, st.types["agent"].max_budget_usd,
-            st.types["interviewer"].max_budget_usd) == (30, 0.2, 0.15)
+            st.types["interviewer"].max_budget_usd) == (30, 0.33, 0.15)
     for variant, name in (("smoke", "spec.smoke.yaml"), ("standin", "spec.standin.yaml"),
                           ("jobs", "spec.jobs.yaml"),
                           ("router-smoke", "spec.router-smoke.yaml")):

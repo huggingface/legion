@@ -85,7 +85,7 @@ types:
     - world:verdicts
     bash: false
     tool_choice: required
-    max_turns: 12
+    max_turns: 20
     tool_output_chars: 32000
     context_tokens: 64000
     loop:
@@ -124,7 +124,7 @@ types:
       final:
         prompt_file: prompts/final.md
         reserve_usd: 0.3
-    max_budget_usd: 0.2
+    max_budget_usd: 0.33
   agent-think:
     harness: llm
     model: worker-think
@@ -135,7 +135,7 @@ types:
     tools: *id001
     bash: false
     tool_choice: required
-    max_turns: 12
+    max_turns: 20
     tool_output_chars: 32000
     context_tokens: 64000
     loop:
@@ -169,7 +169,7 @@ types:
       final:
         prompt_file: prompts/final.md
         reserve_usd: 0.3
-    max_budget_usd: 0.2
+    max_budget_usd: 0.33
   interviewer:
     harness: llm
     model: interviewer

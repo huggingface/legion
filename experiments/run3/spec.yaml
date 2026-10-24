@@ -60,7 +60,7 @@ types:
             "world:add_probe", "world:probes", "world:book_interview", "world:verdicts"]
     bash: false
     tool_choice: required                      # every model call is a tool call; `done` ends a turn
-    max_turns: 12                              # model calls per prompt
+    max_turns: 20                              # model calls per prompt (the round prompt says `done` by 18)
     tool_output_chars: 32000
     context_tokens: 64000                      # compaction threshold (the server needs >= 64k)
     loop: &loop
