@@ -1035,7 +1035,7 @@ def world_serve(
         from flock.home import cache_defaults
         from flock.world.server import serve
 
-        cache_defaults()  # no usable HOME (a container): caches under the temp dir
+        cache_defaults()  # no usable HOME (a container): $FLOCK_HOMELESS_ROOT, else the temp dir
     except ImportError as e:  # fastapi / uvicorn: the `controller` extra
         typer.echo(f"flock world serve needs the controller extra: {e}", err=True)
         raise typer.Exit(1) from None

@@ -546,3 +546,21 @@ def test_unknown_compute_kind_is_a_hard_error(tmp_path, caplog):
     b = build({**env, "FLOCK_COMPUTE": "slurm"})
     assert "compute slurm: SlurmJobsClient" in caplog.text
     b.store.close()
+
+
+def test_container_root_puts_every_path_under_it(tmp_path, slurm, store, clock):
+    """Workers in a container (RAM /tmp): the env file moves every agent/harness path under
+    container_root; per type too."""
+    spec = slurm_spec(tmp_path, container_root="/work")
+    store.put_swarm(spec, 0)
+    reconcile(store, SlurmJobsClient(env={}), clock(), settings())
+    (path,) = (tmp_path / "launch").glob(f"{W0}-*.env")
+    env = read_env_file(path)
+    assert {k: env[k] for k in ("WORK_ROOT", "FLOCK_LLM_HOME", "CHATBOT_WS", "HOME", "HF_HOME",
+                                "TMPDIR")} == {
+        "WORK_ROOT": "/work/agents", "FLOCK_LLM_HOME": "/work/llm", "CHATBOT_WS": "/work/ws",
+        "HOME": "/work/home", "HF_HOME": "/work/hf", "TMPDIR": "/work/tmp"}
+    assert not any(v.startswith("/tmp") for v in env.values())
+    cfg = resolve(slurm_spec(tmp_path, types={"researcher": {"container_root": "/c"}}).compute,
+                  "researcher", {})
+    assert cfg["container_root"] == "/c"

@@ -638,6 +638,7 @@ class SlurmResources(BaseModel):
     cpus: int | None = Field(default=None, ge=1)
     mem: str | None = None
     time: str | None = None
+    container_root: str | None = None
 
 
 class ComputeSpec(BaseModel):
@@ -666,6 +667,9 @@ class ComputeSpec(BaseModel):
     run: str | None = None  # RUN= in the env file; default: the launch_dir's parent dir name
     venv: str | None = None  # written to the env file as FLOCK_VENV for the script
     secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
+    # workers run in a container whose /tmp is RAM: every agent/harness path goes under this
+    # root instead (WORK_ROOT=<root>/agents, FLOCK_LLM_HOME, HOME, HF_HOME, TMPDIR, CHATBOT_WS)
+    container_root: str | None = None
     types: dict[str, SlurmResources] = Field(default_factory=dict)
     # the largest job the partition can ever run: sbatch accepts bigger ones, which then pend
     # forever; a launch over these is refused (also checked at apply)

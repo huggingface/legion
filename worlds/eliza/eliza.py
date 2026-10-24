@@ -85,8 +85,10 @@ class ElizaWorld(World):
         with tempfile.TemporaryDirectory() as tmp:
             out, err = Path(tmp) / ".out", Path(tmp) / ".err"
             with open(out, "wb") as fo, open(err, "wb") as fe:
+                # TMPDIR: a bot's own temp files stay in its run dir (in a container /tmp is
+                # RAM that counts against the job's memory)
                 proc = subprocess.Popen([sys.executable, "-I", *self._argv(path, tmp)], cwd=tmp,
-                                        env={}, stdin=subprocess.PIPE, stdout=fo, stderr=fe,
+                                        env={"TMPDIR": tmp}, stdin=subprocess.PIPE, stdout=fo, stderr=fe,
                                         start_new_session=True)
                 try:
                     proc.communicate("".join(x + "\n" for x in lines).encode(), TIMEOUT_S)

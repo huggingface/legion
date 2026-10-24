@@ -11,6 +11,7 @@ import signal
 import threading
 import time
 from datetime import timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -197,8 +198,11 @@ async def test_client_follows_a_moved_controller(tmp_path):
 
 
 def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
-    """A container with no HOME (or a read-only one): caches go next to the work root, adapters
-    never write under HOME, and a folder tool (python -I subprocess) still runs."""
+    """A container with no usable HOME and a RAM /tmp: HOME, caches and TMPDIR go next to the
+    work root (/work/agents -> /work/home, /work/hf, /work/tmp), adapters never write under
+    HOME, nothing defaults to /tmp, and a folder tool (python -I subprocess) still runs."""
+    import tempfile
+
     from flock.home import home
     from flock.tools.loader import load_dir
     from flock.tools.runner import run_tool
@@ -207,9 +211,11 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
     ro_home.mkdir()
     ro_home.chmod(0o500)
     monkeypatch.setenv("HOME", str(ro_home))
-    for var in ("HF_HOME", "XDG_CACHE_HOME", "UV_CACHE_DIR", "FLOCK_LLM_HOME"):
+    for var in ("HF_HOME", "XDG_CACHE_HOME", "UV_CACHE_DIR", "FLOCK_LLM_HOME", "TMPDIR"):
         monkeypatch.delenv(var, raising=False)
-    work = tmp_path / "flock" / WID / "work"
+    monkeypatch.setattr(tempfile, "tempdir", None)  # restored after the test
+    root = tmp_path / "work"  # what /work is in the container
+    work = root / "agents"
     monkeypatch.setenv("FLOCK_URL", "http://ctl:7860")
     monkeypatch.setenv("FLOCK_TOKEN", "t")
     monkeypatch.setenv("WORKER_ID", WID)
@@ -217,6 +223,8 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
     monkeypatch.setenv("TYPE", "researcher")
     monkeypatch.setenv("DEADLINE", "2026-10-25T00:00:00+00:00")
     monkeypatch.setenv("WORK_ROOT", str(work))
+    real_tmp = Path("/tmp")
+    before = {p.name for p in real_tmp.iterdir() if p.name.startswith("flock")}
     started = {}
 
     def fake_run(coro, **kw):  # startup only: do not enter the loops
@@ -227,26 +235,33 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
     try:
         wmain.main()
         assert started["worker"] is not None and work.is_dir()
-        for var, sub in (("HF_HOME", "hf"), ("XDG_CACHE_HOME", "cache"), ("UV_CACHE_DIR", "uv")):
-            assert os.environ[var] == str(work.parent / "cache" / sub)
-        assert home() != ro_home and os.access(home(), os.W_OK)
+        for var, sub in (("HOME", "home"), ("HF_HOME", "hf"), ("XDG_CACHE_HOME", "cache"),
+                         ("UV_CACHE_DIR", "uv"), ("TMPDIR", "tmp")):
+            assert os.environ[var] == str(root / sub), var
+        assert tempfile.gettempdir() == str(root / "tmp")
+        assert home() == root / "home"
         from flock.worker.adapters.llm import llm_home
 
-        assert not str(llm_home()).startswith(str(ro_home))
-        monkeypatch.delenv("HOME")
-        assert os.access(home(), os.W_OK)
+        assert str(llm_home()).startswith(str(root))
+        monkeypatch.delenv("HOME")  # no HOME at all: still under the work root
+        assert home() == root / "home"
 
         folder = tmp_path / "tools"
         folder.mkdir()
-        (folder / "t.py").write_text('def add(a: int, b: int) -> int:\n    """Adds."""\n'
-                                     "    return a + b\n")
+        (folder / "t.py").write_text('import tempfile\n\n\ndef where() -> str:\n'
+                                     '    """Where temp files go."""\n'
+                                     "    return tempfile.gettempdir()\n")
         m = load_dir(folder)
-        r = asyncio.run(run_tool(m.get("add"), {"a": 2, "b": 3}, tools_dir=folder,
-                                 workdir=tmp_path / "wd"))
-        assert (r.output, r.error) == ("5", False)
+        env = {"PATH": os.environ["PATH"], "TMPDIR": os.environ["TMPDIR"]}  # the allow-list
+        r = asyncio.run(run_tool(m.get("where"), {}, tools_dir=folder, workdir=root / "wd",
+                                 env=env))
+        assert (r.output, r.error) == (str(root / "tmp"), False)
         assert list(ro_home.iterdir()) == []
+        after = {p.name for p in real_tmp.iterdir() if p.name.startswith("flock")}
+        assert after <= before  # nothing of ours appeared directly under /tmp
     finally:
         ro_home.chmod(0o700)
+
 
 
 @pytest.mark.parametrize("signals", [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"),

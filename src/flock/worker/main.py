@@ -37,7 +37,7 @@ from pathlib import Path
 
 import httpx
 
-from flock.home import cache_defaults
+from flock.home import homeless_defaults
 from flock.models import (
     HEARTBEAT_INTERVAL,
     AssignCommand,
@@ -834,8 +834,9 @@ def main() -> None:
     quiet_libraries()
     cfg = WorkerConfig.from_env()
     cfg.work_root.mkdir(parents=True, exist_ok=True)
-    # a container with no (writable) HOME: caches next to the work root (docs/slurm.md)
-    if set_ := cache_defaults(cfg.work_root.parent / "cache"):
+    # a container with no (writable) HOME: HOME, caches and TMPDIR next to the work root
+    # (/work/agents -> /work/home, /work/hf, /work/tmp, ...), never /tmp (docs/slurm.md)
+    if set_ := homeless_defaults(cfg.work_root.parent):
         log.info("no usable HOME: %s", set_)
     sync = None
     if cfg.bucket:
