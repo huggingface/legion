@@ -137,7 +137,7 @@ def test_render_variants(tmp_path):
             assert (lp.every, lp.while_.until, lp.wake.min_gap, lp.wake.max) == (
                 "turn_end", "48h", "10s", 20)
             assert lp.first.startswith("You just joined a running effort")
-            assert "search" in lp.prompt and len(lp.prompt) < 1200  # short, action-oriented
+            assert "search" in lp.prompt and len(lp.prompt) < 1400  # short, action-oriented
         iv = s.types["interviewer"]
         assert iv.ephemeral and iv.model == "interviewer" and iv.workers.max_extra == 40
         assert s.spawn["agent"].types == ["interviewer"] and s.spawn["agent"].max == 1

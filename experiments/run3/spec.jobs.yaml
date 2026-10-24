@@ -101,6 +101,10 @@ types:
 
         4. `done` with "joined: <thread> <your plan>".
 
+        In the rounds after this one: First call each round: `read` your own thread (n: 10). If another
+        agent posted there, answer them in one line in that thread before your own work. If you cannot
+        find your thread, `search` your [tag].
+
         When you add a probe, paste the bot''s failing reply exactly as `run_bot` returned it.
 
         One thread per approach, not per agent: reply inside the thread of the approach you are extending;
