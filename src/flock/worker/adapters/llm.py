@@ -58,6 +58,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -69,6 +70,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -428,6 +430,23 @@ def redact(text: str, *secrets: str | None) -> str:
 # --------------------------------------------------------------------------- adapter
 
 
+def pick_endpoint(agent: str, urls: list[str], current: str | None = None) -> str | None:
+    """The server an agent talks to: `current` while it is still listed (its prefix cache stays
+    warm), else the URL with the highest hash of (agent, url). Rendezvous hashing: stable for a
+    given list, spreads agents roughly evenly, and a URL added or removed moves only the agents
+    that must move (removed: its agents re-hash; added: only new agents land on it)."""
+    if not urls:
+        return None
+    if current in urls:
+        return current
+    return max(urls, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
+
+
+def endpoint_host(url: str | None) -> str | None:
+    """`host:port` of a server URL, for events and status."""
+    return (urlsplit(url).netloc or url) if url else None
+
+
 class LLMAdapter:
     harness = "llm"
 
@@ -461,6 +480,9 @@ class LLMAdapter:
         # new version applies from the next turn and never mid-turn. Set by AgentRuntime.
         self.toolbox = toolbox
         self._turn_tools: Toolset | None = None
+        # The server this agent talks to (provider `base_urls`), chosen at each turn start
+        self._endpoint: str | None = None
+        self._endpoint_from: str | None = None  # the previous one, when this turn moved
 
     @property
     def session_dir(self) -> Path:
@@ -496,7 +518,9 @@ class LLMAdapter:
         old = self._spec
         if old is None or spec.resolved_model is None or old.resolved_model is None:
             return
-        if spec.resolved_model.provider != old.resolved_model.provider:
+        same = ("base_url", "base_urls")  # a new server list applies at the next turn start
+        if (spec.resolved_model.provider.model_copy(update=dict.fromkeys(same))
+                != old.resolved_model.provider.model_copy(update=dict.fromkeys(same))):
             return
         self._spec = spec
 
@@ -713,6 +737,10 @@ class LLMAdapter:
             data.setdefault("tools_version", self._turn_tools.version)
         if self._repeated:
             data.setdefault("repeated_calls", self._repeated)
+        if self._endpoint is not None:  # the server this turn used (per-endpoint load)
+            data.setdefault("endpoint", endpoint_host(self._endpoint))
+            if self._endpoint_from is not None:
+                data.setdefault("endpoint_from", endpoint_host(self._endpoint_from))
         self._queue.put(AdapterEvent("turn_ended", status=status, error=error, data=data))
 
     @property
@@ -726,6 +754,9 @@ class LLMAdapter:
         assert spec is not None and spec.resolved_model is not None
         model = spec.resolved_model.model_id
         self.in_turn = True
+        prev = self._endpoint
+        self._endpoint = pick_endpoint(self.agent, spec.resolved_model.provider.endpoints, prev)
+        self._endpoint_from = prev if prev is not None and prev != self._endpoint else None
         calls, cost = 0, 0.0
         overflow_retried = nudged = False
         seen: dict[str, int] = {}  # identical calls this turn, by tool + arguments
@@ -965,7 +996,7 @@ class LLMAdapter:
         if not tools:  # bash off and nothing else to call: a plain chat request
             body.pop("tools", None)
             body.pop("tool_choice", None)
-        url = f"{r.provider.base_url}/chat/completions"
+        url = f"{self._endpoint or r.provider.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
         retries = r.provider.max_retries if r.provider.max_retries is not None else DEFAULT_MAX_RETRIES
         for attempt in range(retries + 1):

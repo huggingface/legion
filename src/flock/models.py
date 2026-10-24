@@ -123,6 +123,11 @@ class ProviderSpec(BaseModel):
 
     type: Literal["openai_compat", "anthropic"]
     base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
+    # Several servers of one model (openai_compat, the `llm` harness): each agent is pinned to one
+    # by a stable hash of its name (rendezvous hashing) and keeps it while it stays listed, so
+    # its prefix cache stays warm. `base_url` is the one-element form; with `base_urls` it
+    # defaults to the first. Other harnesses and preflight's first probe use `base_url`.
+    base_urls: list[str] | None = None
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
     # Max agents of this swarm on this provider that may be in a turn at once. Enforced at
@@ -157,6 +162,17 @@ class ProviderSpec(BaseModel):
 
     @model_validator(mode="after")
     def _url(self) -> ProviderSpec:
+        if self.base_urls is not None:
+            urls = [u.strip().rstrip("/") for u in self.base_urls if u and u.strip()]
+            if not urls:
+                raise ValueError("base_urls must list at least one URL")
+            if len(set(urls)) != len(urls):
+                raise ValueError("base_urls must not repeat a URL")
+            if self.type != "openai_compat":
+                raise ValueError("base_urls is for openai_compat providers (the llm harness)")
+            self.base_urls = urls
+            if self.base_url is None:
+                self.base_url = urls[0]
         if self.type == "openai_compat" and not self.base_url:
             raise ValueError("base_url is required for type openai_compat (e.g. https://router.huggingface.co/v1)")
         if self.type == "openai_compat" and self.auth == "x-api-key":
@@ -164,6 +180,11 @@ class ProviderSpec(BaseModel):
         if self.base_url is not None:
             self.base_url = self.base_url.rstrip("/")
         return self
+
+    @property
+    def endpoints(self) -> list[str]:
+        """The servers to spread agents over: `base_urls`, else `[base_url]`."""
+        return list(self.base_urls) if self.base_urls else ([self.base_url] if self.base_url else [])
 
 
 class ModelSpec(BaseModel):

@@ -213,8 +213,22 @@ def _text_get_time_call(content: Any) -> bool:
 async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResult,
                       timeout: float, tool_choice: str | None = None) -> int:
     """Two Chat Completions turns; returns tokens reported. Raises ProbeError. The follow-up
-    goes out with `tool_choice: auto` (a forced choice would demand another call)."""
-    url, headers = f"{r.provider.base_url}/chat/completions", {"Authorization": f"Bearer {key}"}
+    goes out with `tool_choice: auto` (a forced choice would demand another call). With
+    `base_urls`, every server is probed (an error names the one that failed)."""
+    urls, total = r.provider.endpoints or [r.provider.base_url], 0
+    for base in urls:
+        try:
+            total += await _probe_chat_at(client, base, r, key, result, timeout, tool_choice)
+        except ProbeError as e:
+            if len(urls) == 1:
+                raise
+            raise ProbeError(f"{base}: {e}") from e
+    return total
+
+
+async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str, result: PreflightResult,
+                         timeout: float, tool_choice: str | None) -> int:
+    url, headers = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
     body = chat_request(r, tool_choice)
     msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]

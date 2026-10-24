@@ -213,6 +213,29 @@ shrink a single long turn: it only dropped whole earlier prompts. Now:
    **`context_overflow`**. Other 4xx still end with `api_error`.
 5. **Capped tool output.** Tool output is capped at `tool_output_chars` before it is stored.
 
+## Several servers of one model (`base_urls`)
+
+```yaml
+providers:
+  vllm: {type: openai_compat, base_urls: ["https://gpu-1.example.org/v1", "https://gpu-2.example.org/v1"],
+         api_key_env: VLLM_API_KEY, self_hosted: true}
+```
+
+- **Pinning.** Each agent talks to one server, chosen by rendezvous hashing of its name and the
+  URL (the highest `sha256(agent, url)`). It keeps that server while it stays in the list, so its
+  prefix cache stays warm. A hash spreads agents roughly evenly (the share per server varies by a
+  few percent at hundreds of agents); there is no load-based placement.
+- **Live changes** (`flock update`), at each agent's next turn start:
+  - a server added: agents keep the one they have; new agents (a wave) spread over the whole list;
+  - a server removed: its agents re-hash onto the remaining ones; the others stay.
+- **Events.** `turn_ended` carries `endpoint: <host:port>` (and `endpoint_from` on the turn that
+  moved), so a viewer can show the load per server.
+- `base_url` is the one-element form (with `base_urls` it defaults to the first). Preflight
+  probes every server. Only the `llm` harness spreads; other harnesses use `base_url`.
+- The choice lives in the running adapter: an agent restarted on another worker re-hashes,
+  which lands on its hashed server (only agents that had stayed on a server across an add can
+  move then).
+
 ## Preflight
 
 Types on `llm` are probed on `POST {base_url}/chat/completions`, non-streamed, with the alias's
