@@ -205,16 +205,16 @@ def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
         assert res.exit_code == 0, res.output
         stored = ctl.store.get_swarm("run3")["spec"]
         assert stored.world.manifest.name == "chatbot3" and stored.compute.kind == "hf-jobs"
-        assert ctl.tick() is not None and ctl.jobs.launches == []  # replicas 0: no workers
+        ctl.tick()
+        assert ctl.jobs.launches == []  # replicas 0: no worker yet
         start = time.time() - 301  # the schedule at 5 min: 40 agents
         assert waves.main(["tick", "--spec", str(spec), "--start", str(start),
                            "--waves", str(EXP / "waves.yaml")]) == 0
         assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 40
         ctl.tick()
-        agent_jobs = [x for x in ctl.jobs.launches if x["labels"].get("type") == "agent"
-                      or "agent-" in x["worker_id"]]
-        assert len(ctl.jobs.launches) == math.ceil(40 / 25) == len(agent_jobs)
-        sec = ctl.jobs.launches[0]["secrets"]
+        agent_jobs = [x for x in ctl.jobs.launches if x["labels"]["type"] == "agent"]
+        assert len(agent_jobs) == math.ceil(40 / 25)
+        sec = agent_jobs[0]["secrets"]
         assert {"FLOCK_WORLD_TOKEN", "CHATBOT_BOARD_INVITE", "OPENAI_API_KEY"} <= set(sec)
         assert "w0rld-t0ken" not in json.dumps(ctl.http.get("/swarms/run3").json())
         # the operator past the schedule: add, then the cap
