@@ -94,13 +94,13 @@ def test_wave_schedule(waves):
             waves.parse(bad)
 
 
-def _render(tmp: Path, variant: str, **envs: str) -> Path:
+def _render(tmp: Path, variant: str, *extra: str, **envs: str) -> Path:
     keep = {k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "MODEL_",
                                                                      "CHATBOT_", "RUN3_"))}
-    out = tmp / f"{variant}.local.yaml"
-    r = subprocess.run([sys.executable, str(EXP / "render.py"), "--variant", variant, "--out",
-                        str(out)], env={**keep, **envs}, capture_output=True, text=True,
-                       timeout=60, check=False)
+    out = tmp / f"{variant}{''.join(extra).replace('--compute', '.')}.local.yaml"
+    r = subprocess.run([sys.executable, str(EXP / "render.py"), "--variant", variant, *extra,
+                        "--out", str(out)], env={**keep, **envs}, capture_output=True,
+                       text=True, timeout=60, check=False)
     assert r.returncode == 0, r.stderr
     dst = EXP / out.name  # next to spec.yaml: the prompt files resolve
     shutil.copyfile(out, dst)
@@ -160,6 +160,22 @@ def test_render_variants(tmp_path):
             assert (lp.every, lp.while_.until, lp.while_.max_rounds, lp.while_.agent_usd) == (
                 "turn_end", "30m", 120, None)
         assert sm.providers["vllm"].pricing == {"*": [0, 0, 0]}
+        # the cluster smoke: the smoke's 30-min loop and round cap, on compute slurm
+        files.append(_render(tmp_path, "smoke", "--compute", "slurm", MODEL_WORKER="m",
+                             RUN3_BUCKET="hf://buckets/ns/run3"))
+        sl = load_spec(str(files[-1]))
+        assert sl.compute.kind == "slurm" and sl.bucket == "hf://buckets/ns/run3"
+        assert sl.world.url == "http://${WORLD_HOST}:7860" and sl.world.command is None
+        assert (sl.compute.types["interviewer"].cpus, sl.compute.types["interviewer"].mem) == (
+            2, "3500M")
+        assert (sl.compute.types["agent"].cpus, sl.compute.types["agent"].mem) == (4, "7G")
+        assert sl.types["interviewer"].workers.max_extra >= 1
+        for name in ("agent", "agent-think"):
+            lp = sl.types[name].loop
+            assert (lp.while_.until, lp.while_.max_rounds) == ("30m", 120)
+            assert sl.types[name].secrets == ["OPENAI_API_KEY"]
+        # the local world runs through flock's own interpreter, never `flock` from PATH
+        assert s.world.command[0] == "{python}"
         files.append(_render(tmp_path, "router-smoke"))
         r = load_spec(str(files[-1]))
         assert list(r.providers) == ["hf"] and r.limits.budget_usd == 15
@@ -372,7 +388,10 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
            "CHATBOT_TICK_S": "1", "CHATBOT_FLOCK_ARGS": "--skip-preflight",
            "OPENAI_BASE_URL": model_url, "OPENAI_API_KEY": "fake-key", "MODEL_WORKER": "fake-model",
            "HF_TOKEN": "fake-key",
-           "RUN3_VARIANT": variant, "RUN3_WAVES": waves, "CHATBOT_RUN": "t1"}
+           "RUN3_VARIANT": variant, "RUN3_WAVES": waves, "CHATBOT_RUN": "t1",
+           # a cold start: the controller is up well after the second wave would be due if
+           # the clock started with the script (it starts when the controller is healthy)
+           "CHATBOT_TEST_START_DELAY_S": "10"}
     out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
     proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
                             stdout=out, stderr=subprocess.STDOUT, text=True,
@@ -411,6 +430,8 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
     assert "stop marker found" in text and "final sync" in text, text[-3000:]
     # the waves; a capped wave makes no change and no line
     waves_log = _jsonl(wlog)
+    assert waves_log[0]["total"] == totals[0][1]  # the first tick never merges two waves
+    assert "waves clock started at" in text
     assert [(sum(x["before"].values()), x["total"]) for x in waves_log] == totals
     assert all(x["lines"] and "error" not in x for x in waves_log), waves_log
     n1 = totals[0][1]  # wave 1 staggered: one agent per step, the last step n1 - 1 -> n1
@@ -506,3 +527,41 @@ def test_world_space_entry_point(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_waves_run_starts_its_clock_at_the_first_controller_answer(tmp_path, monkeypatch, waves,
+                                                                 capsys):
+    """Jobs/Slurm mode: `waves.py run` may start before the controller answers (a cold node).
+    The clock starts at the first answer, so the first tick never merges two waves."""
+    import contextlib
+
+    spec = _render(tmp_path, "jobs", MODEL_WORKER="m")
+    sched = tmp_path / "w.yaml"
+    sched.write_text("cap: 100\nwaves:\n  - {at: 0, add: 5}\n")
+    answers = iter([RuntimeError("down"), RuntimeError("down"), None, None, None])
+    sleeps: list[float] = []
+    fake_now = [1000.0]
+
+    def current(c, swarm, types):
+        a = next(answers)
+        if a is not None:
+            raise a
+        return {"agent": 5}
+
+    def sleep(s):
+        sleeps.append(s)
+        fake_now[0] += s
+
+    monkeypatch.setattr(waves, "current", current)
+    monkeypatch.setattr(waves.time, "sleep", sleep)
+    monkeypatch.setattr(waves.time, "time", lambda: fake_now[0])
+    monkeypatch.setattr(cli, "client", lambda: contextlib.nullcontext(object()))
+    try:
+        assert waves.main(["run", "--spec", str(spec), "--waves", str(sched)]) == 0
+        state = json.loads(Path(str(spec) + ".waves.json").read_text())
+        assert sleeps == [5, 5] and state["start"] == 1010.0  # after two failed contacts
+        out = capsys.readouterr().out
+        assert "waiting for the controller" in out and "waves clock started at" in out
+    finally:
+        for f in (spec, Path(str(spec) + ".waves.json")):
+            f.unlink(missing_ok=True)

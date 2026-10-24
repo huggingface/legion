@@ -179,6 +179,14 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     return rec
 
 
+def _has_state(spec: Path) -> bool:
+    f = spec.with_name(spec.name + ".waves.json")
+    try:
+        return "start" in json.loads(f.read_text())
+    except (OSError, ValueError):
+        return False
+
+
 def _state(spec: Path, start: float | None) -> float:
     f = spec.with_name(spec.name + ".waves.json")
     d = json.loads(f.read_text()) if f.is_file() else {}
@@ -234,7 +242,26 @@ def main(argv: list[str] | None = None) -> int:
                         f"{a.cmd} {a.n}", log, lower=a.cmd == "set", stagger=a.stagger)
             _say(rec)
             return 1 if "error" in rec else 0
+        if a.cmd == "run" and a.start is None and not _has_state(spec):
+            # the clock starts at the first answer from the controller, not at our own start:
+            # on a cold node the controller can come up after the second wave is due, and the
+            # first tick would apply both waves as one
+            waited = 0.0
+            while True:
+                try:
+                    current(c, swarm, list(sched.split(0)))
+                    break
+                except Exception as e:  # noqa: BLE001 - not up yet (or not applied yet)
+                    if waited % 60 == 0:
+                        print(f"waiting for the controller ({type(e).__name__}); the waves "
+                              "clock starts when it answers", flush=True)
+                    time.sleep(5)
+                    waited += 5
+        fresh = a.start is None and not _has_state(spec)
         start = _state(spec, a.start)
+        if fresh:
+            print(f"waves clock started at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))}",
+                  flush=True)
         while True:
             elapsed = time.time() - start
             have, nxt = current(c, swarm, list(sched.split(0))), sched.next(elapsed)

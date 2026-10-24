@@ -68,11 +68,13 @@ render() {  # spec.local.yaml from spec.yaml and the env (endpoint, models, boar
 }
 waves() { (cd "$EXP" && "$PYTHON" waves.py "$@" --spec spec.local.yaml --waves "$WAVES" --log "$H/logs/waves.jsonl"); }
 render
-log "rendered ${RUN3_VARIANT:-selfhosted}; waves $(basename "$WAVES"); installed $(flock --help >/dev/null && echo flock) $($PYTHON --version)"
+log "rendered ${RUN3_VARIANT:-selfhosted}; waves $(basename "$WAVES"); installed $("$PYTHON" -m flock.cli --help >/dev/null && echo flock) $($PYTHON --version)"
 
 PIDS=()
 cd "$EXP"
-flock run spec.local.yaml --until idle ${CHATBOT_FLOCK_ARGS:-} > "$H/logs/run.out" 2>&1 &
+# test hook: a slow start-up (a cold venv) before the controller is up
+[ -n "${CHATBOT_TEST_START_DELAY_S:-}" ] && sleep "$CHATBOT_TEST_START_DELAY_S"
+"$PYTHON" -m flock.cli run spec.local.yaml --until idle ${CHATBOT_FLOCK_ARGS:-} > "$H/logs/run.out" 2>&1 &
 PIDS+=($!)
 log "flock run started (pids ${PIDS[*]})"
 
@@ -101,7 +103,7 @@ live_update() {  # control/update: re-sync, keep the live replicas, then `flock 
   local out rc=0
   UPDATES=$((UPDATES + 1)); out="$H/logs/update-$UPDATES.log"
   resync || log "re-sync failed"
-  { waves pin && (cd "$EXP" && flock update spec.local.yaml); } > "$out" 2>&1 || rc=$?
+  { waves pin && (cd "$EXP" && "$PYTHON" -m flock.cli update spec.local.yaml); } > "$out" 2>&1 || rc=$?
   if [ "$rc" = 0 ]; then log "update $UPDATES ok:"; else log "update $UPDATES FAILED ($rc):"; fi
   head -40 "$out" | sed 's|^|  |' | tee -a "$H/logs/bootstrap.log"
   put "$out" "$B/control/update-$UPDATES.log" || true
@@ -114,7 +116,7 @@ set_endpoints() {  # control/endpoints: a new server list, applied like control/
   fetch "$B/control/endpoints" "$H/endpoints.txt" && urls=$(tr -d ' \n\r' < "$H/endpoints.txt")
   if [ -n "${urls:-}" ]; then
     export OPENAI_BASE_URLS=$urls
-    { render && waves pin && (cd "$EXP" && flock update spec.local.yaml); } > "$out" 2>&1 || rc=$?
+    { render && waves pin && (cd "$EXP" && "$PYTHON" -m flock.cli update spec.local.yaml); } > "$out" 2>&1 || rc=$?
   else echo "control/endpoints: empty" > "$out"; rc=1; fi
   if [ "$rc" = 0 ]; then log "endpoints $ENDPOINTS ok: $urls"; else log "endpoints $ENDPOINTS FAILED ($rc)"; fi
   head -20 "$out" | sed 's|^|  |' | tee -a "$H/logs/bootstrap.log"
@@ -135,6 +137,14 @@ STOP=0
 on_term() { log "stop requested: stopping flock (drain, bundle)"; STOP=1; kill -TERM "${PIDS[@]}" 2>/dev/null || true; }
 trap on_term TERM INT
 alive() { for p in "${PIDS[@]}"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
+healthy() {  # the local controller answers /healthz (its URL is in .flock/current once it is up)
+  local url
+  url=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' \
+        "$EXP/.flock/current" 2>/dev/null) || return 1
+  "$PYTHON" -c 'import sys, urllib.request as u; u.urlopen(sys.argv[1] + "/healthz", timeout=5)' \
+    "$url" 2>/dev/null
+}
+wt0=""  # the waves clock: starts when the controller is healthy, not at script start
 last_sync=$(date +%s); last_check=0; waves_on=1
 while alive; do
   sleep "${CHATBOT_TICK_S:-5}" & wait $! || true
@@ -154,9 +164,12 @@ while alive; do
       add_now
     else
       if [ "$waves_on" = 1 ] && exists "$B/control/waves-off"; then waves_on=0; log "waves off (control/waves-off)"; fi
-      if [ "$waves_on" = 1 ]; then  # a due wave raises replicas (nothing when none is due); a
+      if [ "$waves_on" = 1 ] && [ -z "$wt0" ] && healthy; then
+        wt0=$(date +%s); log "waves clock started at $(date -u -d "@$wt0" +%H:%M:%S 2>/dev/null || echo "$wt0")"
+      fi
+      if [ "$waves_on" = 1 ] && [ -n "$wt0" ]; then  # a due wave raises replicas (nothing when none is due); a
         # staggered wave (waves.yaml stagger_s) blocks this loop while its agents join one by one
-        if out=$(waves tick --start "$t0" 2>&1); then [ -n "$out" ] && log "$out"
+        if out=$(waves tick --start "$wt0" 2>&1); then [ -n "$out" ] && log "$out"
         else log "wave tick failed: $(echo "$out" | tail -1)"; fi
       fi
     fi

@@ -43,7 +43,7 @@ from flock.world import Agent, ToolError, World, tool
 
 DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 400},
             "interviews": {"start_minutes": 5, "expire_minutes": 20},
-            "runs": {"parallel": 0}}  # 0: os.cpu_count()
+            "runs": {"parallel": 0}}  # 0: the usable CPUs (sched_getaffinity)
 IV = re.compile(r"-interviewer-\d+$")  # agent-0007-interviewer-0012 -> parent agent-0007
 
 
@@ -67,6 +67,13 @@ def _doc(fn, doc: str):
     return tool(w)
 
 
+def _usable_cpus() -> int:
+    try:
+        return len(os.sched_getaffinity(0)) or 4
+    except (AttributeError, OSError):  # not on Linux
+        return os.cpu_count() or 4
+
+
 class Chatbot3World(Chatbot2World):
     name, version, base_rules = "chatbot3", "0.3.0", (HERE / "rules.md").read_text()
     dirs = ("agents", "best", "probes", "interviews")
@@ -74,7 +81,8 @@ class Chatbot3World(Chatbot2World):
     def __init__(self, root: str | None = None) -> None:
         super().__init__(root or os.environ.get("CHATBOT_WS") or str(HERE / "ws"))
         self.phase = "merged"  # no phases: nothing is ever refused by team
-        n = int(self.cfg("runs", "parallel")) or os.cpu_count() or 4
+        # 0: the CPUs this process may use (a Slurm job's cpuset, not the whole node)
+        n = int(self.cfg("runs", "parallel")) or _usable_cpus()
         self._slots = threading.BoundedSemaphore(n)
 
     @property

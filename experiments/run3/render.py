@@ -1,6 +1,7 @@
 """Render run 3's spec from spec.yaml and the environment.
 
-    python experiments/run3/render.py [--variant selfhosted|smoke|standin|jobs|router-smoke] [--out FILE]
+    python experiments/run3/render.py [--variant selfhosted|smoke|standin|jobs|router-smoke]
+                                      [--compute local|hf-jobs|slurm|external] [--out FILE]
 
 Variants (one source, spec.yaml):
 - selfhosted (default): compute local, the operator's vLLM endpoint, price 0, no $ caps. The
@@ -24,6 +25,16 @@ Environment (unset: the placeholder stays, so the spec loads but preflight fails
   MODEL_WORKER        the served model id; MODEL_INTERVIEWER defaults to it
   CHATBOT_BOARD_URL, CHATBOT_CHANNEL, CHATBOT_RUN (swarm run3-<run>)
   jobs: RUN3_NAMESPACE, RUN3_BUCKET (hf://buckets/<ns>/<bucket>), RUN3_WORLD_URL (the Space)
+--compute (default: the variant's own; jobs is hf-jobs, the others local): `slurm` (or
+`external`) keeps the variant's loop and caps (`--variant smoke --compute slurm` is the
+30-min smoke on the cluster) and adds what a remote backend needs: the bucket, the world by URL
+(default http://${WORLD_HOST}:7860, the host read from FLOCK_WORLD_HOST_FILE on the
+controller), interviewer worker slots, the provider key by name, and for slurm the per-type
+sizes (agents 4 CPU / 7G, interviewers 2 CPU / 3500M; docs/slurm.md).
+  slurm: RUN3_BUCKET, RUN3_WORLD_URL, RUN3_SLURM_PARTITION (default hopper-cpu); the paths
+  (worker_script, log_dir, launch_dir) come from the controller's FLOCK_SLURM_* env.
+The world's command stays `{python} chatbot3.py serve`: flock fills in its own interpreter's
+absolute path, so util-linux /usr/bin/flock on PATH never matters.
 --out default: <variant spec>.local.yaml next to spec.yaml (spec.local.yaml, ...). Without
 --out and with --committed, writes spec.<variant>.yaml (placeholders only)."""
 
@@ -59,7 +70,36 @@ def env(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
-def render(variant: str = "selfhosted", placeholders: bool = False) -> dict:
+def remote(d: dict, e, sched, compute: str) -> None:
+    """What every remote backend needs (hf-jobs, slurm, external): the bucket, the world by
+    URL, interviewer worker slots, the provider key forwarded by name."""
+    loops = [t for t in d["types"].values() if t.get("loop")]
+    apw = d["types"]["agent"]["agents_per_worker"]
+    d["compute"] = compute
+    if compute == "hf-jobs":
+        d["namespace"] = e("RUN3_NAMESPACE", "your-namespace")
+    d["bucket"] = e("RUN3_BUCKET", "hf://buckets/your-namespace/your-bucket")
+    if compute == "hf-jobs":
+        world_url = e("RUN3_WORLD_URL", "https://your-world-space.hf.space")
+    else:
+        world_url = e("RUN3_WORLD_URL", "http://${WORLD_HOST}:7860")
+    d["world"] = {"url": world_url, "token_env": "CHATBOT_WORLD_TOKEN"}
+    live = sched.cap * d["spawn"]["agent"]["max"]  # one live interviewer per agent at most
+    d["types"]["interviewer"]["workers"] = {"initial": 0, "max_extra": math.ceil(live / apw)}
+    d["types"]["interviewer"]["secrets"] = ["OPENAI_API_KEY"]
+    for t in loops:
+        t["secrets"] = ["OPENAI_API_KEY"]
+    if compute == "slurm":  # sizes per worker type (docs/slurm.md); paths from FLOCK_SLURM_*
+        sizes = {name: {"cpus": 4, "mem": "7G"} for name, t in d["types"].items()
+                 if t.get("loop")}
+        sizes["interviewer"] = {"cpus": 2, "mem": "3500M"}
+        d["compute"] = {"kind": "slurm",
+                        "partition": e("RUN3_SLURM_PARTITION", "hopper-cpu"),
+                        "cpus": 4, "mem": "7G", "time": "29:00:00", "types": sizes}
+
+
+def render(variant: str = "selfhosted", placeholders: bool = False,
+           compute: str | None = None) -> dict:
     e = (lambda n, d: d) if placeholders else env
     d = load_spec_yaml((HERE / "spec.yaml").read_text())
     standin = variant == "standin"
@@ -76,17 +116,9 @@ def render(variant: str = "selfhosted", placeholders: bool = False) -> dict:
         d["swarm"] = f"run3-{run}"
     sched = load(HERE / "waves.yaml")
     loops = [t for t in d["types"].values() if t.get("loop")]
+    compute = compute or ("hf-jobs" if variant == "jobs" else "local")
     if variant == "jobs":
-        apw = d["types"]["agent"]["agents_per_worker"]
-        d.update(compute="hf-jobs", namespace=e("RUN3_NAMESPACE", "your-namespace"),
-                 bucket=e("RUN3_BUCKET", "hf://buckets/your-namespace/your-bucket"))
-        d["world"] = {"url": e("RUN3_WORLD_URL", "https://your-world-space.hf.space"),
-                      "token_env": "CHATBOT_WORLD_TOKEN"}
-        live = sched.cap * d["spawn"]["agent"]["max"]  # one live interviewer per agent at most
-        d["types"]["interviewer"]["workers"] = {"initial": 0, "max_extra": math.ceil(live / apw)}
-        d["types"]["interviewer"]["secrets"] = ["OPENAI_API_KEY"]
-        for t in loops:
-            t["secrets"] = ["OPENAI_API_KEY"]
+        pass  # the selfhosted loop at scale; the remote settings follow below
     elif variant == "router-smoke":
         d["providers"] = {"hf": {"type": "openai_compat", "base_url": "https://router.huggingface.co/v1",
                                  "api_key_env": "HF_TOKEN", "timeout_s": 180, "max_retries": 5,
@@ -117,18 +149,24 @@ def render(variant: str = "selfhosted", placeholders: bool = False) -> dict:
             t["loop"] = {**t["loop"], "while": {"until": "30m", "max_rounds": 120}}
     elif variant != "selfhosted":
         raise SystemExit(f"unknown variant {variant!r}")
+    if compute != "local":
+        remote(d, e, sched, compute)
     return d
 
 
-def write(variant: str, out: Path, placeholders: bool = False) -> Path:
-    out.write_text(HEAD.format(v=variant) + yaml.safe_dump(render(variant, placeholders),
-                                                           sort_keys=False, width=100))
+def write(variant: str, out: Path, placeholders: bool = False,
+          compute: str | None = None) -> Path:
+    v = variant if compute is None else f"{variant} --compute {compute}"
+    out.write_text(HEAD.format(v=v) + yaml.safe_dump(render(variant, placeholders, compute),
+                                                     sort_keys=False, width=100))
     return out
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--variant", default="selfhosted", choices=list(FILES))
+    ap.add_argument("--compute", choices=["local", "hf-jobs", "slurm", "external"],
+                    help="default: hf-jobs for the jobs variant, local for the others")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--committed", action="store_true",
                     help="write the committed generated spec (placeholders only)")
@@ -136,9 +174,11 @@ def main() -> None:
     if a.committed:
         print(write(a.variant, HERE / FILES[a.variant], placeholders=True))
         return
-    out = a.out or HERE / FILES[a.variant].replace(".yaml", ".local.yaml").replace(
-        ".local.local", ".local")
-    print(write(a.variant, out))
+    name = FILES[a.variant]
+    if a.compute not in (None, "local" if a.variant != "jobs" else "hf-jobs"):
+        name = name.replace(".yaml", f".{a.compute}.yaml")
+    out = a.out or HERE / name.replace(".yaml", ".local.yaml").replace(".local.local", ".local")
+    print(write(a.variant, out, compute=a.compute))
 
 
 if __name__ == "__main__":
