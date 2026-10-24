@@ -162,3 +162,15 @@ the world behind `world.url`, waves 0 -> 40 -> 1,000 with 40 worker slots, `set`
 the single-job bootstrap end to end (3 waves 0 -> 20 -> 40 with the third capped, the newcomer
 prompt first for all 40 agents, a promotion at once and 39 ties, 40 bookings without quota,
 verdicts on frozen copies, the stop marker, the bundle in the bucket, no secret in it).
+
+## Pre-launch checks
+
+- **Load smoke** (`load/load_smoke.py`): the run-3 request shape (46k-token prompts, one fresh
+  tool result per call, 135-token outputs, `tool_choice: required`) at C = 8 to 128 for 3 min
+  each; req/s, p50/p95, errors, and vLLM's `/metrics` if reachable; the knee, the agent cap
+  and the first wave for one node. From a shell with `OPENAI_BASE_URL`/`MODEL_WORKER` set:
+  `python experiments/run3/load/load_smoke.py --out <dir>`, or as a cpu-basic job with
+  `load/job.sh`.
+- **30-min smoke**: `RUN3_VARIANT=smoke RUN3_WAVES=waves-smoke.yaml` on runbook A.
+
+The exact commands, markers and the 12-point checklist are in the operator's pre-launch note.
