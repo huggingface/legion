@@ -139,6 +139,15 @@ def test_render_variants(tmp_path):
             "hf-jobs", "https://w.example.invalid", "CHATBOT_WORLD_TOKEN")
         assert j.models["interviewer"].model == "vllm:m-iv" and j.world.command is None
         assert j.types["agent"].secrets == ["OPENAI_API_KEY"]
+        files.append(_render(tmp_path, "smoke", OPENAI_BASE_URL="http://gpu.internal:8000/v1",
+                             MODEL_WORKER="m", CHATBOT_RUN="smoke"))
+        sm = load_spec(str(files[-1]))
+        assert sm.swarm == "run3-smoke" and sm.limits.budget_usd is None
+        for name in ("agent", "agent-think"):
+            lp = sm.types[name].loop
+            assert (lp.every, lp.while_.until, lp.while_.max_rounds, lp.while_.agent_usd) == (
+                "turn_end", "30m", 120, None)
+        assert sm.providers["vllm"].pricing == {"*": [0, 0, 0]}
         files.append(_render(tmp_path, "router-smoke"))
         r = load_spec(str(files[-1]))
         assert list(r.providers) == ["hf"] and r.limits.budget_usd == 15
@@ -148,7 +157,8 @@ def test_render_variants(tmp_path):
             f.unlink()
     # the committed generated specs are what render.py writes
     rd = _mod("render")
-    for variant, name in (("jobs", "spec.jobs.yaml"), ("router-smoke", "spec.smoke.yaml")):
+    for variant, name in (("smoke", "spec.smoke.yaml"), ("jobs", "spec.jobs.yaml"),
+                          ("router-smoke", "spec.router-smoke.yaml")):
         want = rd.HEAD.format(v=variant) + yaml.safe_dump(rd.render(variant, True),
                                                           sort_keys=False, width=100)
         assert (EXP / name).read_text() == want, f"{name}: run render.py --committed"
@@ -261,8 +271,6 @@ INTERVIEW = script(*[("chat", {"booking": "{booking}", "message": f"hello {i}"})
                    ("post", {"text": "INTERVIEW {booking}: script (0.8)", "thread": "{thread}"}),
                    ("done", {"summary": "interviewed"}))
 WAIT = script(("read", {}))
-TEST_WAVES = ("type: agent\nthink_type: agent-think\nthink_share: 0\ncap: 40\nwaves:\n"
-              "  - {at: 0, add: 20}\n  - {at: 8s, add: 20}\n  - {at: 16s, add: 20}\n")
 
 
 def _payload(tmp_path: Path) -> Path:
@@ -285,7 +293,8 @@ def _payload(tmp_path: Path) -> Path:
                          "stagger": "100ms", "final": {"prompt": script(("done", {}))}}
             t["max_turns"] = 30
     (exp / "spec.yaml").write_text(yaml.safe_dump(d, sort_keys=False))
-    (exp / "waves-test.yaml").write_text(TEST_WAVES)
+    w = exp / "waves-smoke.yaml"  # the smoke's schedule, minutes -> seconds
+    w.write_text(w.read_text().replace("at: 5m", "at: 8s").replace("at: 10m", "at: 16s"))
     (bucket / "payload").mkdir(parents=True)
     with tarfile.open(bucket / "payload" / "repo.tar.gz", "w:gz") as tar:
         for x in ("experiments", "worlds"):
@@ -298,6 +307,8 @@ def _jsonl(p: Path) -> list[dict]:
 
 
 def test_single_job_three_waves_end_to_end(tmp_path, fakes):
+    """The smoke variant's bootstrap rehearsal (RUN3_VARIANT=smoke, waves-smoke.yaml with its
+    minutes as seconds)."""
     model_url, board, board_url = fakes
     bucket, home = _payload(tmp_path), tmp_path / "job"
     env = {**_env(tmp_path), "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
@@ -307,7 +318,7 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
            "CHATBOT_WORLD_TOKEN": "w0rld-t0ken", "CHATBOT_SYNC_S": "5", "CHATBOT_CHECK_S": "1",
            "CHATBOT_TICK_S": "1", "CHATBOT_FLOCK_ARGS": "--skip-preflight",
            "OPENAI_BASE_URL": model_url, "OPENAI_API_KEY": "fake-key", "MODEL_WORKER": "fake-model",
-           "RUN3_WAVES": "waves-test.yaml", "CHATBOT_RUN": "t1"}
+           "RUN3_VARIANT": "smoke", "RUN3_WAVES": "waves-smoke.yaml", "CHATBOT_RUN": "t1"}
     out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
     proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
                             stdout=out, stderr=subprocess.STDOUT, text=True,
@@ -342,6 +353,8 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes):
     # the bundle in the bucket, with every agent's events
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()
+    local = yaml.safe_load((home / "repo/experiments/run3/spec.local.yaml").read_text())
+    assert local["types"]["agent"]["loop"]["while"] == {"until": "30m", "max_rounds": 120}
     agents = [f"agent-{i:04d}" for i in range(40)]
     looped = 0
     for a in agents:  # a newcomer: the newcomer prompt first, then rounds

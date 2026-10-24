@@ -5,8 +5,9 @@
 #
 # This is the SOURCE spec: the self-hosted single-job variant (compute: local, one vLLM
 # endpoint, price 0, no $ caps, <= 50 agents). render.py fills in the environment and writes
-# the spec that runs (`spec.local.yaml`); `--variant jobs` and `--variant router-smoke` derive
-# the other two from this file (spec.jobs.yaml, spec.smoke.yaml are generated). Placeholders:
+# the spec that runs (`spec.local.yaml`); `--variant smoke|jobs|router-smoke` derive the
+# others from this file (spec.smoke.yaml, spec.jobs.yaml, spec.router-smoke.yaml are generated).
+# Placeholders:
 #   https://your-vllm.example.invalid/v1   <- OPENAI_BASE_URL (the vLLM server, ending in /v1)
 #   MODEL_WORKER / MODEL_INTERVIEWER        <- the served model id(s) (interviewer: default worker)
 #   msgboard.example.invalid / your-run3-channel <- CHATBOT_BOARD_URL / CHATBOT_CHANNEL

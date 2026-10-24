@@ -6,7 +6,7 @@
 # env:     CHATBOT_BUCKET   hf://buckets/<ns>/<bucket>/<run> (payload/ in, everything else out)
 #          CHATBOT_BOARD_URL, CHATBOT_CHANNEL, CHATBOT_RUN (swarm run3-<run>, optional)
 #          OPENAI_BASE_URL  the vLLM server (/v1); MODEL_WORKER, MODEL_INTERVIEWER (optional)
-#          RUN3_VARIANT     selfhosted (default) | router-smoke (the HF router, $ caps)
+#          RUN3_VARIANT     selfhosted (default) | smoke (30-min loop) | router-smoke (HF router, $ caps)
 #          RUN3_WAVES       the wave schedule file in the experiment (default waves.yaml)
 #          CHATBOT_SYNC_S   seconds between bucket syncs (default 300)
 #          CHATBOT_CHECK_S  seconds between looks for control markers and due waves (default 30)
