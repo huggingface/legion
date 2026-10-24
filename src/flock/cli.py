@@ -983,11 +983,16 @@ def whoami() -> None:
 def workers(swarm: str) -> None:
     """List a swarm's workers."""
     found = _call("GET", "/workers", params={"swarm": swarm})
+
+    def state(w: dict) -> str:  # compute external: a slot with no worker yet is waiting for one
+        waiting = str(w["job_id"] or "").startswith("external-") and w["state"] == "launching"
+        return "external" if waiting else w["state"]
+
     rows = [
         [
             w["id"],
             w["type"],
-            w["state"],
+            state(w),
             w["job_id"],
             len(w["agents"]),
             w["crashes"],
@@ -1001,6 +1006,11 @@ def workers(swarm: str) -> None:
                   "last_error"])
     if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
         typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
+    elif any(str(w["job_id"] or "").startswith("external-") for w in found):
+        typer.echo("compute external: job `external-...` = a slot waiting for (or served by) a "
+                   "worker started outside flock; env files in the compute launch_dir", err=True)
+    elif any(str(w["job_id"] or "").isdigit() for w in found):  # compute slurm
+        typer.echo("full job logs: <compute log_dir>/<worker id>-<job>.out", err=True)
     else:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
 

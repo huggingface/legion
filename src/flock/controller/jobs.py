@@ -83,6 +83,9 @@ def bootstrap_command() -> list[str]:
 class JobState:
     stage: str  # SCHEDULING, RUNNING, COMPLETED, CANCELED, ERROR, DELETED
     message: str | None = None
+    # the job ended because its machine was taken away (a Spot reclaim, a Slurm preemption):
+    # a planned restart, not a crash (reconcile._job_ended)
+    preempted: bool = False
 
     @property
     def terminal(self) -> bool:

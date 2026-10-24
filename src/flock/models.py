@@ -604,14 +604,44 @@ class TypeSpec(BaseModel):
         return v
 
 
-class ComputeSpec(BaseModel):
-    """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
-    `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
-    (`flock run`). The spec also accepts the short form `compute: local`."""
+class SlurmResources(BaseModel):
+    """Per-type overrides of a `compute: slurm` spec."""
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["hf-jobs", "local"] = "hf-jobs"
+    partition: str | None = None
+    cpus: int | None = Field(default=None, ge=1)
+    mem: str | None = None
+    time: str | None = None
+
+
+class ComputeSpec(BaseModel):
+    """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
+    `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
+    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md). `external`: flock
+    launches nothing; workers started by someone else register with FLOCK_URL/FLOCK_TOKEN.
+    The spec also accepts the short form `compute: local`.
+
+    The other keys are for `slurm` (and `launch_dir`/`host_file` for `external`); unset keys
+    fall back to the controller's FLOCK_SLURM_* env, then to built-in defaults. `types` sets
+    per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["hf-jobs", "local", "slurm", "external"] = "hf-jobs"
+    partition: str | None = None
+    account: str | None = None
+    cpus: int | None = Field(default=None, ge=1)
+    mem: str | None = None  # sbatch --mem, e.g. 7G
+    time: str | None = None  # sbatch --time, e.g. 29:00:00
+    worker_script: str | None = None  # the cluster's worker sbatch script; $1 = the env file
+    log_dir: str | None = None  # shared dir: <log_dir>/<worker id>-<job id>.out
+    launch_dir: str | None = None  # shared dir: <worker id>-<incarnation>.env, no secrets
+    host_file: str | None = None  # shared file holding the controller's hostname
+    run: str | None = None  # RUN= in the env file; default: the launch_dir's parent dir name
+    venv: str | None = None  # written to the env file as FLOCK_VENV for the script
+    secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
+    types: dict[str, SlurmResources] = Field(default_factory=dict)
 
 
 class SwarmSpec(BaseModel):
@@ -748,15 +778,22 @@ class SwarmSpec(BaseModel):
 
     @model_validator(mode="after")
     def _job_fields(self) -> SwarmSpec:
-        if self.compute.kind == "hf-jobs":
+        kind = self.compute.kind
+        if kind == "hf-jobs":
             missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
             if missing:
                 raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
                                  "(or set `compute: local`, docs/local.md)")
-            if self.world is not None and self.world.url is None:
-                raise ValueError("world.url is required for compute hf-jobs: run the world as a "
-                                 "Job or Space and give its url (starting it from `command` is "
-                                 "compute: local only, docs/world.md)")
+        elif kind in ("slurm", "external") and not self.bucket:
+            # agent state goes to an HF bucket on every remote backend, never to a shared disk
+            raise ValueError(f"bucket is required for compute {kind}")
+        if kind != "local" and self.world is not None and self.world.url is None:
+            raise ValueError(f"world.url is required for compute {kind}: run the world as a "
+                             "Job, Space or cluster job and give its url (starting it from "
+                             "`command` is compute: local only, docs/world.md)")
+        unknown = set(self.compute.types) - set(self.types)
+        if unknown:
+            raise ValueError(f"compute.types names unknown types: {sorted(unknown)}")
         return self
 
     @field_validator("spawn")

@@ -69,7 +69,11 @@ def deployment(env: Mapping[str, str] = os.environ) -> Deployment:
             raise SystemExit(f"FLOCK_MODE must be 'space' or 'job', not {mode!r}")
         status = int(env["FLOCK_STATUS_PORT"]) if env.get("FLOCK_STATUS_PORT") else None
         url = _space_url(env, port)
-        return Deployment("space", port, url, url, status_port=status)
+        # FLOCK_WORKER_URL: what workers are told, when it differs from the public URL, e.g.
+        # `http://${CTL_HOST}:7860` on Slurm (each worker expands it from its controller host
+        # file, so a controller that moves host does not relaunch the fleet; docs/slurm.md)
+        worker = env.get("FLOCK_WORKER_URL") or url
+        return Deployment("space", port, worker, url, status_port=status)
     group = env.get("FLOCK_NETWORK_GROUP", "")
     if not group:
         raise SystemExit("FLOCK_MODE=job needs FLOCK_NETWORK_GROUP (the workers' network group)")
@@ -159,6 +163,11 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         from flock.controller.local import LocalJobsClient
 
         jobs, compute = LocalJobsClient(root=data_dir), "local"
+    elif env.get("FLOCK_COMPUTE") in ("slurm", "external"):  # docs/slurm.md
+        from flock.controller.slurm import ExternalJobsClient, SlurmJobsClient
+
+        compute = env["FLOCK_COMPUTE"]
+        jobs = SlurmJobsClient(env=env) if compute == "slurm" else ExternalJobsClient(env=env)
     elif env.get("FLOCK_FAKE_JOBS") == "1":
         jobs = FakeJobsClient(network_group=dep.network_group)
     else:
