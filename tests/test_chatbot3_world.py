@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import threading
 import time
 
@@ -276,3 +277,47 @@ def test_two_world_processes_share_the_gate(mod, tmp_path, monkeypatch):
     for t in ts:
         t.join()
     assert sum(r["promoted"] for r in out) == 1 and len(w1._history()) == 2
+
+
+def test_copy_of_best_survives_a_concurrent_promotion(world):
+    """copy_file of best/bot while promotions replace it: the copy comes from the immutable
+    snapshot best/v<n>/ named by current.json, so it never sees a half-replaced directory and
+    always gets one whole version."""
+    import json as js
+    import shutil
+    import threading as th
+
+    run(world.promote_best(A, f"{HOME_A}/bot", "base"))
+    b = world.ws / "best"
+    stop, errors, n = th.Event(), [], [1]
+
+    def promoter():  # what promote_best does to best/, as fast as possible
+        while not stop.is_set():
+            n[0] += 1
+            src = b / f".src{n[0]}"
+            src.mkdir()
+            for i in range(30):
+                (src / f"m{i}.py").write_text(f"V = {n[0]}\n")
+            (src / "__main__.py").write_text(f"V = {n[0]}\n")
+            shutil.copytree(src, b / f"v{n[0]}")
+            shutil.rmtree(b / "bot")
+            os.replace(src, b / "bot")
+            (b / "current.json").write_text(js.dumps({"n": n[0], "kind": "package"}))
+
+    t = th.Thread(target=promoter)
+    t.start()
+    while n[0] < 3:  # past the base bot: every version from here is 31 identical files
+        time.sleep(0.01)
+    try:
+        for k in range(40):
+            try:
+                world.copy_file(B, "best/bot", f"{HOME_B}/c{k}")
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+    finally:
+        stop.set()
+        t.join()
+    assert not errors, errors[:3]
+    for k in range(40):  # one whole version per copy
+        got = {p.read_text() for p in (world.ws / HOME_B / f"c{k}").glob("*.py")}
+        assert len(got) == 1, (k, got)

@@ -236,9 +236,31 @@ class Chatbot2World(ChatbotWorld):
             src: what to copy, e.g. best/bot.py, best/bot or teams/b/agents/ds-b-0000/bot
             path: the new file or directory, e.g. teams/a/agents/<your name>/bot
         """
-        s = self._path(src.rstrip("/"), agent=agent, tool="copy_file")
+        s = self._stable(self._path(src.rstrip("/"), agent=agent, tool="copy_file"))
+        try:
+            return self._copy_from(agent, s, path)
+        except FileNotFoundError as e:  # the source changed under the copy (not best/: frozen)
+            raise ToolError(f"refused: {src} changed while it was copied ({e.filename}); "
+                            "copy it again", "changed") from None
+
+    def _stable(self, p: Path) -> Path:
+        """best/bot (or a file in it) and best/bot.py are replaced by every promotion; their
+        immutable snapshot best/v<n>/ (best/v<n>.py) of the same version is copied instead."""
+        b = self.ws / "best"
+        cur = b / "current.json"
+        if not cur.is_file() or not (p == b / "bot.py" or p == b / "bot" or b / "bot" in p.parents):
+            return p
+        try:
+            n = json.loads(cur.read_text())["n"]
+        except (ValueError, KeyError, OSError):
+            return p
+        snap = b / f"v{n}.py" if p == b / "bot.py" else b / f"v{n}" / p.relative_to(b / "bot")
+        return snap if snap.exists() else p
+
+    def _copy_from(self, agent: Agent, s: Path, path: str) -> dict:
         if s.is_file():
-            return super().copy_file(agent, src, path)
+            return self._save(agent, "copy_file", self._own(agent, "copy_file", path, False),
+                              s.read_text(errors="replace"))
         dst, files = self._own(agent, "copy_file", path.rstrip("/"), False), _files(s)
         if dst.is_file() or len(files) > MAX_FILES:
             raise ToolError(f"refused: copy a directory to a new subdirectory of your dir (at "
