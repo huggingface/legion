@@ -13,6 +13,7 @@
 #   msgboard.example.invalid / your-run3-channel <- CHATBOT_BOARD_URL / CHATBOT_CHANNEL
 swarm: run3
 compute: local
+naming: words                                  # agents are amber-otter, brisk-lantern, ... (docs/spawn.md "Names")
 tools_dir: tools                               # spawn_interviewer (tools/interview.py)
 providers:
   vllm:
@@ -86,6 +87,7 @@ types:
   interviewer:                                 # spawned by agents (spawn_interviewer), never replicas
     harness: llm
     model: interviewer
+    name_prefix: iv-                           # iv-teal-heron: interviewers stay recognizable
     replicas: 0
     agents_per_worker: 25
     workers: {initial: 0, max_extra: 40}       # 1 live per agent x cap 1,000 / 25

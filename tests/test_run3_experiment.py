@@ -125,6 +125,7 @@ def test_render_variants(tmp_path):
         assert s.models["worker-think"].extra["chat_template_kwargs"] == {"thinking": True}
         assert s.models["worker-think"].extra["max_tokens"] >= 4096
         assert sorted(s.types) == ["agent", "agent-think", "interviewer"]
+        assert s.naming == "words" and s.types["interviewer"].name_prefix == "iv-"
         for name in ("agent", "agent-think"):
             t = s.types[name]
             assert (t.replicas, t.agents_per_worker, t.tool_choice, t.bash) == (0, 25, "required",
@@ -419,8 +420,20 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
     # the bundle in the bucket, with every agent's events
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()
+    doc = json.loads((run / "run.json").read_text())
+    # naming: words: readable names for the agents, `iv-` for the interviewers
+    from flock.controller.naming import HANDLE_RE
+
+    agents = sorted(x["name"] for x in doc["agents"] if x["type"] == "agent")
+    assert len(agents) == cap and all(HANDLE_RE.match(a) and not a.startswith("iv-")
+                                      for a in agents), agents
+    ivs = [r["name"] for r in doc["removed_agents"]]
+    assert ivs and all(n.startswith("iv-") and HANDLE_RE.match(n) for n in ivs), ivs
+    posts = [m for m in board.msgs if m["body"].startswith("INTERVIEW ")]  # on the board
+    assert posts and all(m["sender"]["external_id"] in ivs for m in posts)
+    assert any(a in m["body"] for m in posts for a in agents)  # booking ids carry the name
     if variant == "smoke":  # the server switch: turns moved to server 2, named in turn_ended
-        ends = [e["data"]["data"] for a in [f"agent-{i:04d}" for i in range(cap)]
+        ends = [e["data"]["data"] for a in agents
                 for e in _bundle_events(run, a) if e["type"] == "turn_ended"]
         host1, host2 = model_url.split("/")[2], f"127.0.0.1:{srv2.server_port}"
         assert {d.get("endpoint") for d in ends} == {host1, host2}
@@ -429,8 +442,7 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
         assert not (bucket / "control" / "endpoints").exists()
         assert "endpoints 1 ok" in (bucket / "logs" / "bootstrap.log").read_text()
         srv2.shutdown()
-    doc = json.loads((run / "run.json").read_text())  # removed interviewers carry their cost
-    gone = doc["removed_agents"]
+    gone = doc["removed_agents"]  # removed interviewers carry their cost
     assert gone and all(r["type"] == "interviewer" and r["cost_usd"] is not None for r in gone)
     if variant == "standin":  # priced: live agents + removed ones = the swarm's total
         assert all(r["cost_usd"] > 0 for r in gone)
@@ -438,7 +450,6 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
         assert abs(live + sum(r["cost_usd"] for r in gone) - doc["totals"]["cost_usd"]) < 1e-3
     local = yaml.safe_load((home / "repo/experiments/run3/spec.local.yaml").read_text())
     assert local["types"]["agent"]["loop"]["while"] == loop_while
-    agents = [f"agent-{i:04d}" for i in range(cap)]
     looped = 0
     for a in agents:  # a newcomer: the newcomer prompt first, then rounds
         ev = _bundle_events(run, a)
@@ -452,7 +463,7 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
         assert looped >= 5, looped  # rounds follow the first turn (few under a loaded machine)
     # promotion from the start: the first bot promoted at once, identical ones refused as ties
     hist = _jsonl(ws / "best" / "history.jsonl")
-    assert len(hist) == 1 and hist[0]["agent"] in agents[:totals[0][1]]
+    assert len(hist) == 1 and hist[0]["agent"] in agents
     log = _jsonl(ws / "log.jsonl")
     assert sum(x["action"] == "promote_refused" and "a tie" in x.get("why", "") for x in log) == cap - 1
     # interviews: every agent booked one, none refused for quota, verdicts on frozen copies

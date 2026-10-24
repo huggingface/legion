@@ -180,3 +180,18 @@ def test_bot_runs_share_the_pool(mod, tmp_path, monkeypatch):
 
     run(many())
     assert peak[0] == 2
+
+
+def test_words_named_interviewer(world):
+    """`naming: words`: the interviewer is known by its type (iv-teal-heron says nothing about
+    its parent); the booking binds the first interviewer that chats on it."""
+    pa = f"{HOME_A}/bot"
+    bid = run(world.book_interview(A, pa))["booking"]
+    iv, other = Agent("iv-teal-heron", "interviewer"), Agent("iv-amber-otter", "interviewer")
+    assert run(world.chat(iv, bid, "hi"))["turn"] == 1
+    with pytest.raises(ToolError, match="not open for you"):  # bound to the first interviewer
+        run(world.chat(other, bid, "hi"))
+    with pytest.raises(ToolError, match="only interviewer agents"):
+        run(world.chat(Agent("teal-heron", "agent"), bid, "hi"))
+    world.on_turn(iv, {"status": "error"})  # cut off: released (hook by type)
+    assert world._bookings()[bid]["why"] == "cut off"

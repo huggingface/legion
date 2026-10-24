@@ -2,6 +2,7 @@
 # slots). Do not edit: change spec.yaml or the environment and render again.
 swarm: run3
 compute: local
+naming: words
 tools_dir: tools
 providers:
   hf:
@@ -177,6 +178,7 @@ types:
   interviewer:
     harness: llm
     model: interviewer
+    name_prefix: iv-
     replicas: 0
     agents_per_worker: 25
     workers:
