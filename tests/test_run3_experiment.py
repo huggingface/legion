@@ -71,11 +71,16 @@ def test_wave_schedule(waves):
         20, 20, 40, 80, 100, 100, 120, 300]
     assert s.next(1200) == (4800, 120) and s.next(10 ** 6) is None
     assert s.split(300) == {"agent": 300, "agent-think": 0}
+    assert s.staggers == [10] + [0] * 14 and (s.stagger(0), s.stagger(301)) == (10, 0)
     assert [waves.seconds(x) for x in (0, "90", "30s", "5m", "1h20m", "2d")] == [
         0, 90, 30, 300, 4800, 172800]
     t = waves.parse({"cap": 50, "think_type": "agent-think", "think_share": 0.25,
                      "waves": [{"at": "0", "add": 20}, {"every": "1m", "add": 20, "until": 300}]})
     assert t.events == [(0, 20), (60, 40), (120, 50)]  # capped at 50, then over
+    assert t.staggers == [10, 0, 0]  # wave 1 defaults to 10 s, the others to 0
+    assert waves.parse({"stagger_s": 0, "waves": [{"at": 0, "add": 1},
+                                                  {"at": 5, "add": 1, "stagger_s": 3}]}
+                       ).staggers == [0, 3]
     assert t.split(50) == {"agent": 38, "agent-think": 12}  # round half to even
     assert waves.parse({"waves": [{"at": "2m", "add": 5},
                                   {"every": "1h", "add": 5, "until": 12, "from": "1h"}]}
@@ -83,7 +88,8 @@ def test_wave_schedule(waves):
     for bad, why in (({"waves": [{"at": "5m", "add": 1}, {"at": "1m", "add": 1}]}, "time order"),
                      ({"waves": [{"at": "5x", "add": 1}]}, "bad duration"),
                      ({"waves": [{"at": 0, "add": 0}]}, "add must be"),
-                     ({"think_share": 2, "waves": []}, "think_share")):
+                     ({"think_share": 2, "waves": []}, "think_share"),
+                     ({"waves": [{"at": 0, "add": 1, "stagger_s": -1}]}, "stagger_s")):
         with pytest.raises(ValueError, match=why):
             waves.parse(bad)
 
@@ -231,6 +237,13 @@ def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
         assert stored.world.manifest.name == "chatbot3" and stored.compute.kind == "hf-jobs"
         ctl.tick()
         assert ctl.jobs.launches == []  # replicas 0: no worker yet
+        staggered = tmp_path / "waves-staggered.yaml"  # wave 1: 5 agents 0.2 s apart
+        staggered.write_text("cap: 1000\nstagger_s: 0.2\nwaves:\n  - {at: 0, add: 5}\n")
+        t0 = time.monotonic()
+        assert waves.main(["tick", "--spec", str(spec), "--start", str(time.time()),
+                           "--waves", str(staggered)]) == 0
+        assert time.monotonic() - t0 >= 0.8  # 5 steps, 4 gaps
+        assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 5
         start = time.time() - 301  # the schedule at 5 min: 40 agents
         assert waves.main(["tick", "--spec", str(spec), "--start", str(start),
                            "--waves", str(EXP / "waves.yaml")]) == 0
@@ -253,8 +266,9 @@ def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
         assert waves.main(["set", "300", "--spec", str(spec)]) == 0  # the override may lower
         assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 300
         log = [json.loads(x) for x in Path(str(spec) + ".waves.jsonl").read_text().splitlines()]
-        assert [x["total"] for x in log] == [40, 1000, 300]
-        assert [x["why"][:10] for x in log] == ["schedule 5", "add 960", "set 300"]
+        assert [x["total"] for x in log] == [5, 40, 1000, 300]
+        assert [x["why"][:10] for x in log] == ["schedule 0", "schedule 5", "add 960", "set 300"]
+        assert [(x["steps"], x["stagger_s"]) for x in log] == [(5, 0.2), (1, 0), (1, 0), (1, 0)]
     finally:
         for f in (spec, Path(str(spec) + ".waves.jsonl"), Path(str(spec) + ".waves.json")):
             f.unlink(missing_ok=True)
@@ -308,7 +322,8 @@ def _payload(tmp_path: Path, waves: str) -> Path:
             t["max_turns"] = 30
     (exp / "spec.yaml").write_text(yaml.safe_dump(d, sort_keys=False))
     w = exp / waves  # the variant's schedule, minutes -> seconds
-    w.write_text(w.read_text().replace("at: 5m", "at: 8s").replace("at: 10m", "at: 16s"))
+    w.write_text(w.read_text().replace("at: 5m", "at: 8s").replace("at: 10m", "at: 16s")
+                 + "stagger_s: 0.2\n")  # wave 1's agents join 0.2 s apart
     (bucket / "payload").mkdir(parents=True)
     with tarfile.open(bucket / "payload" / "repo.tar.gz", "w:gz") as tar:
         for x in ("experiments", "worlds"):
@@ -372,7 +387,10 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
     waves_log = _jsonl(wlog)
     assert [(sum(x["before"].values()), x["total"]) for x in waves_log] == totals
     assert all(x["lines"] and "error" not in x for x in waves_log), waves_log
-    assert f"types.agent.replicas: 0 -> {totals[0][1]}" in waves_log[0]["lines"]
+    n1 = totals[0][1]  # wave 1 staggered: one agent per step, the last step n1 - 1 -> n1
+    assert (waves_log[0]["steps"], waves_log[0]["stagger_s"]) == (n1, 0.2)
+    assert f"types.agent.replicas: {n1 - 1} -> {n1}" in waves_log[0]["lines"]
+    assert waves_log[1]["steps"] == 1  # later waves: all at once
     # the bundle in the bucket, with every agent's events
     (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
     assert "run3-t1" in (run / "run.json").read_text()

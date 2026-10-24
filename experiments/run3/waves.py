@@ -5,7 +5,7 @@ and applying the folder with `flock update` (the same path as a live update), up
     waves.py status --spec S                   # the current count on the controller, next wave
     waves.py tick   --spec S [--start T]       # apply the wave that is due, if any (bootstrap)
     waves.py run    --spec S [--interval 30]   # tick until the schedule is over (jobs mode)
-    waves.py add N  --spec S                   # N more agents now (operator, after the schedule)
+    waves.py add N  --spec S [--stagger 10]    # N more agents now (operator, after the schedule)
     waves.py set N  --spec S                   # exactly N (the operator's override, may lower)
     waves.py pin    --spec S                   # write the controller's replicas into S (no apply)
 
@@ -14,7 +14,9 @@ session), else the local run's .flock/current (the single-job bootstrap runs it 
 experiment folder). S is the rendered spec (`spec.local.yaml`, render.py): its
 `types.<type>.replicas` are set, then S is applied as `flock update S` does, so prompts,
 tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's `flock scale` up stays.
-Every change is one JSON line in --log (default: <S>.waves.jsonl). The start time is kept in
+A wave with `stagger_s` (waves.yaml: 10 s for wave 1 by default, 0 after) raises the count
+one agent at a time, that many seconds apart; `tick` and `run` block meanwhile. Every change is
+one JSON line in --log (default: <S>.waves.jsonl). The start time is kept in
 <S>.waves.json (`--start` epoch seconds overrides it)."""
 
 from __future__ import annotations
@@ -54,6 +56,12 @@ class Schedule:
     think_type: str | None = None
     think_share: float = 0.0
     raw: dict = field(default_factory=dict)
+    staggers: list[float] = field(default_factory=list)  # per event: seconds between its agents
+
+    def stagger(self, elapsed: float) -> float:
+        """The stagger of the latest event due at `elapsed` (0 before the first)."""
+        due = [s for (t, _), s in zip(self.events, self.staggers) if t <= elapsed]
+        return due[-1] if due else 0.0
 
     def target(self, elapsed: float) -> int:
         """Agents the schedule wants `elapsed` seconds after the start."""
@@ -74,8 +82,12 @@ def parse(doc: dict | str) -> Schedule:
     share = float(d.get("think_share") or 0)
     if not 0 <= share <= 1:
         raise ValueError("think_share must be 0 to 1")
-    events, t, total = [], 0.0, 0
-    for w in d.get("waves") or []:
+    events, staggers, t, total = [], [], 0.0, 0
+    first = float(d.get("stagger_s", 10))  # wave 1's default; later waves default to 0
+    for i, w in enumerate(d.get("waves") or []):
+        gap = float(w.get("stagger_s", first if i == 0 else 0))
+        if gap < 0:
+            raise ValueError(f"wave {w}: stagger_s must be >= 0")
         add = int(w["add"])
         if add <= 0:
             raise ValueError(f"wave {w}: add must be > 0")
@@ -87,13 +99,16 @@ def parse(doc: dict | str) -> Schedule:
             while total < min(until, cap):
                 t, total = t + step, min(total + add, until, cap)
                 events.append((t, total))
+                staggers.append(gap)
         else:
             at = seconds(w["at"])
             if events and at < events[-1][0]:
                 raise ValueError(f"wave {w}: waves must be in time order")
             t, total = at, min(total + add, cap)
             events.append((t, total))
-    return Schedule(events, cap, d.get("type") or "agent", d.get("think_type"), share, d)
+            staggers.append(gap)
+    return Schedule(events, cap, d.get("type") or "agent", d.get("think_type"), share, d,
+                    staggers)
 
 
 def load(path: Path | str = HERE / "waves.yaml") -> Schedule:
@@ -130,8 +145,10 @@ def current(c, swarm: str, types: list[str]) -> dict[str, int]:
 
 
 def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
-          lower: bool = False) -> dict:
-    """Make the total `total` (capped; never lower unless `lower`), apply the spec, log it."""
+          lower: bool = False, stagger: float = 0.0) -> dict:
+    """Make the total `total` (capped; never lower unless `lower`), apply the spec, log it.
+    `stagger` > 0 raises the count one agent at a time, that many seconds apart (each agent is
+    created, and gets its first prompt, on its own), so a wave does not hit the board at once."""
     from flock.cli import SpecError, load_spec, update_swarm
 
     swarm = load_spec(str(spec)).swarm
@@ -142,14 +159,21 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     counts = sched.split(total)
     rec = {"ts": round(time.time(), 3), "why": why, "before": before, "after": counts,
            "total": total, "cap": sched.cap}
-    write_replicas(spec, counts)
     if counts == before:
+        write_replicas(spec, counts)
         rec["lines"] = ["no changes"]
         return rec
-    try:
-        rec["lines"] = update_swarm(c, str(spec))
-    except SpecError as e:
-        rec["error"] = e.lines
+    steps = range(have + 1, total + 1) if stagger > 0 and total > have else [total]
+    rec["stagger_s"], rec["steps"] = (stagger if len(steps) > 1 else 0), len(steps)
+    for i, k in enumerate(steps):
+        if i:
+            time.sleep(stagger)
+        write_replicas(spec, sched.split(k))
+        try:
+            rec["lines"] = update_swarm(c, str(spec))
+        except SpecError as e:
+            rec["error"] = e.lines
+            break
     with open(log, "a") as f:
         f.write(json.dumps(rec) + "\n")
     return rec
@@ -166,7 +190,9 @@ def _state(spec: Path, start: float | None) -> float:
 
 def _say(rec: dict) -> None:
     head = (f"wave ({rec['why']}): {sum(rec['before'].values())} -> {rec['total']} agents "
-            f"{rec['after']} (cap {rec['cap']})")
+            f"{rec['after']} (cap {rec['cap']}"
+            + (f"; {rec['steps']} steps {rec['stagger_s']:g} s apart" if rec.get("stagger_s")
+               else "") + ")")
     lines = [x for x in rec.get("lines", []) if not x.startswith("world.")]  # controller-written
     print(head + ("; FAILED: " + " / ".join(rec["error"]) if "error" in rec else
                   "; " + " / ".join(lines)), flush=True)
@@ -181,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start", type=float, help="epoch seconds of the run's start")
     ap.add_argument("--interval", type=float, default=30.0, help="run: seconds between ticks")
     ap.add_argument("--log", type=Path, help="default: <spec>.waves.jsonl")
+    ap.add_argument("--stagger", type=float, default=0.0,
+                    help="add / set: seconds between the new agents (schedule: stagger_s)")
     a = ap.parse_args(argv)
     sched = load(a.waves)
     if a.cmd == "plan":
@@ -203,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd in ("add", "set"):
             have = sum(current(c, swarm, list(sched.split(0))).values())
             rec = apply(c, spec, sched, have + a.n if a.cmd == "add" else a.n,
-                        f"{a.cmd} {a.n}", log, lower=a.cmd == "set")
+                        f"{a.cmd} {a.n}", log, lower=a.cmd == "set", stagger=a.stagger)
             _say(rec)
             return 1 if "error" in rec else 0
         start = _state(spec, a.start)
@@ -219,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             due = sched.target(elapsed)
             if due > sum(have.values()):
-                rec = apply(c, spec, sched, due, f"schedule {_clock(elapsed)}", log)
+                rec = apply(c, spec, sched, due, f"schedule {_clock(elapsed)}", log,
+                            stagger=sched.stagger(elapsed))
                 _say(rec)
                 if a.cmd == "tick":
                     return 1 if "error" in rec else 0

@@ -6,6 +6,7 @@ type: agent              # the type that grows (spec.yaml types.agent)
 think_type: agent-think  # the optional thinking type (thinking on)
 think_share: 0           # share of the total that runs agent-think (0.25: 1 in 4); 0: none
 cap: 1000                # hard cap on live agents of both types together (waves and `add`)
+stagger_s: 10            # wave 1: its agents join 10 s apart (later waves: 0, unless a wave sets stagger_s)
 waves:
   - {at: 0, add: 20}
   - {at: 5m, add: 20}

@@ -134,7 +134,8 @@ while alive; do
       add_now
     else
       if [ "$waves_on" = 1 ] && exists "$B/control/waves-off"; then waves_on=0; log "waves off (control/waves-off)"; fi
-      if [ "$waves_on" = 1 ]; then  # a due wave raises replicas (nothing when none is due)
+      if [ "$waves_on" = 1 ]; then  # a due wave raises replicas (nothing when none is due); a
+        # staggered wave (waves.yaml stagger_s) blocks this loop while its agents join one by one
         if out=$(waves tick --start "$t0" 2>&1); then [ -n "$out" ] && log "$out"
         else log "wave tick failed: $(echo "$out" | tail -1)"; fi
       fi
