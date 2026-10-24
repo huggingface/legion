@@ -671,6 +671,16 @@ class ComputeSpec(BaseModel):
     # root instead: <root>/flock/<worker id>/{work,llm,home,hf,tmp}
     container_root: str | None = None
     container_image: str | None = None  # an Enroot image (.sqsh): FLOCK_CONTAINER_IMAGE
+
+    @model_serializer(mode="wrap")
+    def _compact(self, handler: Any) -> Any:
+        """Only the keys that are set: `{kind: local}` stays `{kind: local}` in dumps."""
+        out = handler(self)
+        if not isinstance(out, dict):
+            return out
+        defaults = {"types": {}, "max_cpus": 28, "max_mem": "54G"}
+        return {k: v for k, v in out.items()
+                if k == "kind" or (v is not None and defaults.get(k, object()) != v)}
     types: dict[str, SlurmResources] = Field(default_factory=dict)
     # the largest job the partition can ever run: sbatch accepts bigger ones, which then pend
     # forever; a launch over these is refused (also checked at apply)
