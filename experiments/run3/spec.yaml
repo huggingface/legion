@@ -71,7 +71,7 @@ types:
         2. Pick ONE: an approach that needs hands (join its thread, `post` "taking: <the piece>") or a new angle nobody covers (open a thread: thread "new", "[<tag>] <the idea>: agents/<your name>/...").
         3. If best exists and you have no bot yet: copy_file("best/bot", "agents/<your name>/bot") (or best/bot.py), then run_bot it with 6 lines that test your piece.
         4. `done` with "joined: <thread> <your plan>".
-        In the rounds after this one: First call each round: `read` your own thread (n: 10). If another agent posted there, answer them in one line in that thread before your own work. If you cannot find your thread, `search` your [tag].
+        In the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].
         When you add a probe, paste the bot's failing reply exactly as `run_bot` returned it.
         Post a RED or GREEN in the thread of the approach it belongs to: `search` its [tag], reply there (thread: <id>). No new root for a status update; a new root only for a genuinely new approach, titled [tag] what it is.
         When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.

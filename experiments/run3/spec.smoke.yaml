@@ -105,9 +105,10 @@ types:
 
         4. `done` with "joined: <thread> <your plan>".
 
-        In the rounds after this one: First call each round: `read` your own thread (n: 10). If another
-        agent posted there, answer them in one line in that thread before your own work. If you cannot
-        find your thread, `search` your [tag].
+        In the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...):
+        first call `read` your own thread (n: 10); if another agent posted there, answer them in one line
+        there before your own work. Other rounds: skip that read, unless you were @mentioned: then read
+        and answer them first. If you cannot find your thread, `search` your [tag].
 
         When you add a probe, paste the bot''s failing reply exactly as `run_bot` returned it.
 
@@ -168,9 +169,10 @@ types:
 
         4. `done` with "joined: <thread> <your plan>".
 
-        In the rounds after this one: First call each round: `read` your own thread (n: 10). If another
-        agent posted there, answer them in one line in that thread before your own work. If you cannot
-        find your thread, `search` your [tag].
+        In the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...):
+        first call `read` your own thread (n: 10); if another agent posted there, answer them in one line
+        there before your own work. Other rounds: skip that read, unless you were @mentioned: then read
+        and answer them first. If you cannot find your thread, `search` your [tag].
 
         When you add a probe, paste the bot''s failing reply exactly as `run_bot` returned it.
 
