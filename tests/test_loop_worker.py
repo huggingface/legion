@@ -310,3 +310,36 @@ async def test_readonly_follows_the_turns_pinned_tools(tmp_path, v1_readonly, v2
         await adapter.stop()
         if pump is not None:
             await asyncio.wait_for(pump, 3)
+
+
+class StoppedAdapter(ScriptedAdapter):
+    """Turn 1 calls `done` with a summary; later turns call tools and stop at max_turns."""
+
+    async def _finish(self):
+        await asyncio.sleep(self.turn_time)
+        if len(self.sent) == 1:
+            self._q.put(AdapterEvent("message", message={"role": "assistant", "fromDoneTool": True,
+                                                         "content": [{"type": "text", "text": "built v1"}]}))
+            self._q.put(AdapterEvent("turn_ended", status="completed"))
+        else:
+            for name in ("edit_file", "run_bot", "read"):
+                self._q.put(AdapterEvent("message", message={"role": "assistant", "content": [
+                    {"type": "text", "text": "let me check"},
+                    {"type": "toolCall", "id": name, "name": name, "arguments": {}}]}))
+            self._q.put(AdapterEvent("turn_ended", status="error", error="max_turns exceeded",
+                                     data={"reason": "max_turns"}))
+        self._turn = None
+
+
+async def test_a_turn_stopped_without_done_replaces_the_stale_summary(tmp_path):
+    """A loop turn that ends at max_turns used to leave `last_summary` at an older turn's
+    `done` summary, so every later prompt repeated it."""
+    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=StoppedAdapter(tmp_path / "h"))
+    await rt.setup(restore=False)
+    rt.start_loop(start("round {round}: {last_summary}", max_rounds=3))
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    line = ("previous turn ended (max_turns) after 3 tool call(s) without finishing "
+            "(last calls: edit_file, run_bot, read)")
+    assert ad.sent == ["round 1: (none yet)", "round 2: built v1", f"round 3: {line}"]
+    assert rt.state.last_summary == line
+    await rt.stop()

@@ -81,7 +81,7 @@ The worker fills these in `prompt`, `first` and `final.prompt`, at send time:
 | `{spend}` | the agent's cost so far in USD, 3 decimals (worker-side, same price table as the controller) |
 | `{cap}` | the agent's `while.agent_usd`, 2 decimals, or `none` |
 | `{why}` | what sent it: `first`, `start`, `turn_end`, `every 120s`, `wake: comms.mention`, `retry after error`, `final: max_rounds` |
-| `{last_summary}` | the text the agent last passed to `done` (`llm` harness), else its last reply; `(none yet)` before any |
+| `{last_summary}` | the text the agent last passed to `done` (`llm` harness), else its last reply; `(none yet)` before any. A turn that stopped without `done` (`max_turns`, `max_budget_usd`, an error) sets it to `previous turn ended (<reason>) after N tool call(s) without finishing (last calls: a, b, c)` instead, so the next prompt never repeats an older turn's summary |
 
 Anything else in braces, and format specs such as `{cap:.2f}`, is left exactly as written, so
 JSON and code in a prompt survive.

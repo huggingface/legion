@@ -167,6 +167,7 @@ class AgentRuntime:
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
         self._turn_state_calls = 0  # of those, the ones that are not read-only (idle_rounds)
         self._turn_finished = False  # `done(finished: true)` this turn (stop_when.all_agents_done)
+        self._turn_call_names: list[str] = []  # their tool names, in order
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
         self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
@@ -607,6 +608,8 @@ class AgentRuntime:
                                        {"status": ev.status or "completed",
                                         "tool_calls": self._turn_tool_calls})
                 summary = self._turn_summary or self._turn_text
+                if self._turn_summary is None and ev.status not in (None, "completed"):
+                    summary = self._unfinished_summary(ev.data)  # not a stale or half-way text
                 if summary:
                     self.state.last_summary = summary
                 finished = self._turn_finished
@@ -619,6 +622,14 @@ class AgentRuntime:
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
         self.dirty = True
+
+    def _unfinished_summary(self, data: dict[str, Any]) -> str:
+        """`{last_summary}` after a turn that stopped without `done` (max_turns, budget, error):
+        say so, so the next loop prompt does not repeat an older turn's summary."""
+        why = data.get("reason") or data.get("subtype") or "an error"
+        last = ", ".join(self._turn_call_names[-3:]) or "none"
+        return (f"previous turn ended ({why}) after {self._turn_tool_calls} tool call(s) without "
+                f"finishing (last calls: {last})")
 
     def _usage_missing(self, status: str | None) -> bool:
         """A provider-backed turn that completed with zero reported tokens: the server sent no
@@ -654,6 +665,7 @@ class AgentRuntime:
         self._turn_tools = data.get("tools_version")
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
         self._turn_state_calls, self._turn_finished = 0, False
+        self._turn_call_names = []
         self._loop_inflight = None
         self.emit("turn_started", data)
 
@@ -709,6 +721,7 @@ class AgentRuntime:
         self._turn_state_calls += sum(1 for b in calls if b.get("readonly") is not True)
         if m.get("fromDoneTool") and m.get("finished") is True:
             self._turn_finished = True
+        self._turn_call_names += [str(b.get("name")) for b in calls]
         if m.get("fromDoneTool") and text:
             self._turn_summary = text
         elif text:
