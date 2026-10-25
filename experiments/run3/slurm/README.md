@@ -14,6 +14,7 @@ run directory (host files, worker env files, logs).
 | `waves.sbatch` | render + apply (once the controller and the world answer) + `waves.py run` |
 | `worker.sbatch` | one worker slot, sbatch'ed by the controller (contract in `docs/slurm.md`) |
 | `Containerfile` | the worker/world image (`/opt/flock`, `/work`) |
+| `Containerfile.pi` | that image + Node 22.23.3 + Pi 1.2.0, for the `agent-pi` workers |
 | `run3.env.example`, `secrets.env.example` | the run's settings and the secret names |
 | `../dryrun.sh` | one-command rehearsal with the fake model and board |
 
@@ -47,6 +48,12 @@ run directory (host files, worker env files, logs).
    The controller stays on the host (bare venv: it calls `sbatch`). Mounts: `<RUN_DIR>/hosts`
    read-only (workers), the repo and the run dir read-only (world). Secrets arrive as env, sourced before `srun`: **verify once** that they pass into
    the container (`srun --container-image=$SQSH env | cut -d= -f1 | sort`).
+   The `agent-pi` type (harness pi) needs Node + Pi: build `Containerfile.pi` FROM that image
+   (`--build-arg BASE=run3-flock:<sha>`, tag `run3-flock-pi:<sha>`, `enroot import` it the same
+   way) and set `CONTAINER_IMAGE_agent_pi=<the pi .sqsh>` in the secrets file: worker.sbatch
+   uses `CONTAINER_IMAGE_<TYPE, - as _>` when set, else `FLOCK_CONTAINER_IMAGE`. A worker's type
+   is `TYPE` in its env file (`TYPE=agent-pi`; worker id and job name `<swarm>-agent-pi-wNNNN`).
+   Pi refuses to prompt without its key variable: `OPENAI_API_KEY` must be non-empty.
 4. Rehearsal inside one job (no model, no board; ~3 min; non-zero on failure):
    `srun -p <partition> -c 4 --mem=8G --time=00:20:00 /fsx/run3/flock/experiments/run3/dryrun.sh`
 

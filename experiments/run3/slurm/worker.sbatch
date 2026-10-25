@@ -35,6 +35,10 @@ set +a
 : "${WORKER_ID:?}" "${FLOCK_URL:?}" "${FLOCK_TOKEN:?FLOCK_TOKEN missing from the secrets file}"
 : "${HF_TOKEN:?HF_TOKEN missing from the secrets file (bucket sync)}"
 export FLOCK_WORLD_TOKEN=${FLOCK_WORLD_TOKEN:-${CHATBOT_WORLD_TOKEN:-}}
+# a per-type image: CONTAINER_IMAGE_<TYPE with - as _> (e.g. CONTAINER_IMAGE_agent_pi, the
+# Node + Pi image of Containerfile.pi, set in the secrets file) wins over FLOCK_CONTAINER_IMAGE
+img_var=CONTAINER_IMAGE_${TYPE:-}; img_var=${img_var//-/_}
+if [ -n "${TYPE:-}" ] && [ -n "${!img_var:-}" ]; then export FLOCK_CONTAINER_IMAGE=${!img_var}; fi
 export PYTHONUNBUFFERED=1
 [ -n "${FLOCK_CONTAINER_IMAGE:-}" ] || export PATH="${FLOCK_VENV:?}/bin:$PATH"
 # the controller's host: read at start (and re-read by the worker when it stops answering)
