@@ -124,7 +124,25 @@ def test_render_variants(tmp_path):
         assert s.models["worker"].extra["chat_template_kwargs"] == {"thinking": False}
         assert s.models["worker-think"].extra["chat_template_kwargs"] == {"thinking": True}
         assert s.models["worker-think"].extra["max_tokens"] >= 4096
-        assert sorted(s.types) == ["agent", "agent-think", "interviewer"]
+        assert sorted(s.types) == ["agent", "agent-pi", "agent-think", "interviewer"]
+        # agent-pi: the Pi harness on the same served model, thinking left on (Pi sends no
+        # `extra`), the same tools, comms, loop and round prompt; its first prompt is a Pi note
+        # followed by exactly agent's first prompt (kept in sync by hand)
+        pi, ag = s.types["agent-pi"], s.types["agent"]
+        assert (pi.harness.value, pi.replicas, pi.agents_per_worker, pi.max_turns) == (
+            "pi", 0, 25, 20)
+        assert pi.resolved_model.model_id == ag.resolved_model.model_id
+        assert pi.effective_reasoning == "high" and not pi.resolved_model.extra
+        assert (pi.tools, pi.comms, pi.system_prompt) == (ag.tools, ag.comms, ag.system_prompt)
+        assert pi.loop.prompt == ag.loop.prompt and pi.loop.final == ag.loop.final
+        assert (pi.loop.every, pi.loop.on, pi.loop.wake, pi.loop.while_) == (
+            ag.loop.every, ag.loop.on, ag.loop.wake, ag.loop.while_)
+        assert pi.loop.first.endswith(ag.loop.first), (
+            "spec.yaml: agent-pi's first must be its Pi note + exactly agent's first")
+        note = pi.loop.first[: -len(ag.loop.first)]
+        assert "flock-tool <name> --json" in note and "plain text" in note
+        assert s.spawn["agent-pi"] == s.spawn["agent"]
+        assert cli.extra_warnings(s) == []  # agent-pi's alias has no `extra` Pi would drop
         assert s.naming == "words" and s.types["interviewer"].name_prefix == "iv-"
         for name in ("agent", "agent-think"):
             t = s.types[name]
@@ -169,6 +187,8 @@ def test_render_variants(tmp_path):
         assert (sl.compute.types["interviewer"].cpus, sl.compute.types["interviewer"].mem) == (
             2, "3800M")
         assert (sl.compute.types["agent"].cpus, sl.compute.types["agent"].mem) == (4, "7G")
+        assert (sl.compute.types["agent-pi"].cpus, sl.compute.types["agent-pi"].mem) == (4, "7G")
+        assert sl.types["agent-pi"].secrets == ["OPENAI_API_KEY"]  # Pi needs the key var set
         assert sl.types["interviewer"].workers.max_extra >= 1
         for name in ("agent", "agent-think"):
             lp = sl.types[name].loop
