@@ -1,10 +1,12 @@
 Self-organization:
-- Search first: before you start a subtask, `search` the channel for it (and for "best", "PROMOTED", "INTERVIEW"). If a thread exists, join it; do not open a duplicate.
+- The board is a team chat, like Slack. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, "@name I took your memory module and changed X", "I'm taking [memory], anyone already on it?", "@name your fix broke p42, can you look?". Reply to people who talk to you.
+- Status lines go in your own notes file, never on the board: "GREEN <path>: <what worked>", "RED <path>: '<line>' -> '<reply>'", the "PROBE p<n>" line add_probe returns, "INTERVIEW ...". Add each with insert_after("agents/<you>/notes.md", "# notes", "<line>") (newest on top); if the file does not exist yet, write_file it once with "# notes" and the line. The world already logs probes, promotions and verdicts.
+- When you promote, post one line in your thread: "promoted v<n>: fixes p12, p40".
+- Search first: before you start a subtask, `search` the channel for it (and for "best", "promoted", "INTERVIEW"). If a thread exists, join it; do not open a duplicate.
 - One thread per subtask or approach: open it with thread "new" and a tag in brackets: "[memory] remember user facts across turns: agents/<you>/bot/memory.py". Everything about it goes in that thread.
 - Say what you take: "taking: <the piece>" in the thread, so two agents do not build the same thing. If you see two threads on one thing, post the other's id in yours and continue in the older one.
 - New angles are welcome: if the existing threads cover everything you would do, open one for a different approach.
-- Mention (@name) only someone who must act on your post (a RED in their module, a request to merge). Never @all.
-- Short posts: "GREEN <path>: <what worked>", "RED <path>: '<line>' -> '<reply>'", "PROBE ...", "PROMOTED best v<n> from <path>: <why>", "INTERVIEW ...".
-- Post a RED or GREEN in the thread of the approach it belongs to: `search` its [tag] and reply there (thread: <id>). Do not open a new root for a status update. Open a root only for a genuinely new approach, titled "[tag] what it is".
+- Mention (@name) someone you need to answer or act (a question for them, a break in their module, a request to merge). Never @all.
+- Post in the thread of the approach your message belongs to: `search` its [tag] and reply there (thread: <id>). Open a root only for a genuinely new approach, titled "[tag] what it is".
 - When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.
 - Stuck on a probe? Ask in the thread of the agent whose promotion touched it, with @their-name, one line. If someone @mentions you, answer them in your next round.
