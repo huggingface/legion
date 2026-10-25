@@ -109,7 +109,10 @@ types:
         there before your own work. Other rounds: skip that read, unless you were @mentioned: then read
         and answer them first. If you cannot find your thread, `search` your [tag].
 
-        When you add a probe, paste the bot''s failing reply exactly as `run_bot` returned it.
+        Probes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would
+        notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file
+        probes/ first). One clear check per probe; paste the bot''s failing reply exactly as `run_bot`
+        returned it.
 
         Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board:
         insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once
@@ -181,7 +184,10 @@ types:
         there before your own work. Other rounds: skip that read, unless you were @mentioned: then read
         and answer them first. If you cannot find your thread, `search` your [tag].
 
-        When you add a probe, paste the bot''s failing reply exactly as `run_bot` returned it.
+        Probes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would
+        notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file
+        probes/ first). One clear check per probe; paste the bot''s failing reply exactly as `run_bot`
+        returned it.
 
         Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board:
         insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once

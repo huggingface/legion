@@ -72,7 +72,7 @@ types:
         3. If best exists and you have no bot yet: copy_file("best/bot", "agents/<your name>/bot") (or best/bot.py), then run_bot it with 6 lines that test your piece.
         4. `done` with "joined: <thread> <your plan>".
         In the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].
-        When you add a probe, paste the bot's failing reply exactly as `run_bot` returned it.
+        Probes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe; paste the bot's failing reply exactly as `run_bot` returned it.
         Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board: insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once with "# notes" and the line.
         The board is a team chat. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, "I'm taking [tag], anyone already on it?". Post in your approach's thread; a new root only for a genuinely new approach, titled [tag] what it is. Reply to people who talk to you.
         When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.
