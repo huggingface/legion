@@ -114,6 +114,10 @@ types:
         probes/ first). One clear check per probe; paste the bot''s failing reply exactly as `run_bot`
         returned it.
 
+        The probe set is a growing collection of tests written during the project: a guide to evaluate
+        your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot
+        on the few probes that matter for it; never try to run all the probes.
+
         Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board:
         insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once
         with "# notes" and the line.
@@ -232,6 +236,10 @@ types:
         notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file
         probes/ first). One clear check per probe; paste the bot''s failing reply exactly as `run_bot`
         returned it.
+
+        The probe set is a growing collection of tests written during the project: a guide to evaluate
+        your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot
+        on the few probes that matter for it; never try to run all the probes.
 
         Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board:
         insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once

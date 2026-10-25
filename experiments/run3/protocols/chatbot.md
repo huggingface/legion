@@ -5,3 +5,4 @@ Chatbot rules:
 - One module per feature in bot/, each under 20 KB. Find with grep_file, read only the range you need.
 - Never rewrite someone else's file; copy what you need into your own dir (copy_file, or read_file + edit_file) and tell them in their thread what you took.
 - The probes are a floor, not the goal: never write replies that only stuff keywords.
+- The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.
