@@ -151,6 +151,7 @@ types:
         min_gap: 10s
         max: 20
         window: 30m
+      notices: true
       while:
         until: 20m
         max_rounds: 40
@@ -225,6 +226,7 @@ types:
       stagger: 2s
       'on': *id002
       wake: *id003
+      notices: true
       while:
         until: 20m
         max_rounds: 40
@@ -328,6 +330,7 @@ types:
       stagger: 2s
       'on': *id002
       wake: *id003
+      notices: true
       while:
         until: 20m
         max_rounds: 40

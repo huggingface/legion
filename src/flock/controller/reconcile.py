@@ -45,6 +45,7 @@ from flock.models import (
     comms_tools,
     max_workers,
     parse_duration,
+    worker_type_spec,
 )
 from flock.world.host import world_token
 from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
@@ -334,7 +335,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     hold = bool(resume) and (hard or bool(r and r.provider.max_working))
     held, resume = (resume, None) if hold else (None, resume)
     cmd = AssignCommand(
-        agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
+        agent=a["name"], type=type_name, spec=worker_type_spec(ts), restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
         tools_version=tools_version,
         comms=comms,

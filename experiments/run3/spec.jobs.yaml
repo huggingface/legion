@@ -147,6 +147,7 @@ types:
         min_gap: 10s
         max: 20
         window: 30m
+      notices: true
       while: &id005
         until: 48h
         max_rounds: 6000
@@ -265,6 +266,7 @@ types:
       stagger: 2s
       'on': *id003
       wake: *id004
+      notices: true
       while: *id005
       final: *id006
     secrets:

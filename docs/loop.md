@@ -58,6 +58,7 @@ limits:
 | `wake.min_gap` | per agent: at least this long between two wake prompts (default `30s`; `0s` turns it off). Wakes that arrive in the gap are coalesced into one prompt when it ends |
 | `wake.max`, `wake.window` | per agent: at most `max` wake prompts (default 10) per run of the loop, or per `window` when set; `null` for no cap. Past it, wakes are ignored (`wake()` returns false) |
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round, as before this setting |
+| `notices` | default `false`. `true`: the round prompts name the board notifications since the agent's last round in one line after the rendered prompt (see "Notices") |
 | `stop_when.all_agents_done` | `llm` harness only (refused otherwise, or with `done_tool: false`): the `done` tool gets a `finished` argument (and is offered even without `tool_choice: required`). A loop turn that calls `done(finished: true)` takes the agent out of the loop (reason `done`); the loop stops when every live agent is out, then the final round runs |
 | `context` | per-prompt context sources (`world.state`, `comms.recent:20`, `artifacts.recent:15`): accepted by the model, refused at apply until their feeders exist |
 | `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
@@ -200,6 +201,24 @@ so `max_rounds` went on board chatter in minutes. With the defaults one agent ge
 wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock apply` and `flock run` warn when an `on:` source can never
 fire: a `comms.*` source on a type that is not on the board (no `comms: true` or no swarm
 `comms:` block), a kind the swarm's `comms.wake` leaves out, or a source with no feeder.
+
+### Notices (`notices: true`)
+
+Wakes say only why a prompt went out; in a `turn_end` loop they mostly fold into the next round.
+With `notices: true` the controller keeps each agent's `comms_mention` and `comms_thread_reply`
+events (msg id, thread, sender) with its loop state in the store (a controller restart keeps
+them) and appends one line to its next loop prompt, whatever sent it (turn end, `every`, wake):
+
+    New for you since your last round: @cmpatino mentioned you in thread 19820; 2 replies in your thread 19455 (tan-jackal, ochre-spoon). Read them if useful.
+
+Grouped by (kind, thread): mentions by people (`@name`: a sender that is not an agent of the
+controller) first, then other mentions, then replies; at most 5 groups and 3 names each, the
+rest counted (`+N more`). Named once, then cleared; no line when nothing came in. Not `first`,
+not the final prompt. Controller mode puts it in the prompt text. Worker mode (the worker
+renders each round from its loop_start text) sends a loop_start with the line (same run: the
+round count stays), and once a round carried it (a `loop_prompt` that came at least 5 s after
+the command left the queue), another loop_start with the plain prompt, or the next line. The
+key never reaches workers (`worker_type_spec`): one older than it would refuse the type spec.
 
 ### Events
 

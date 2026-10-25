@@ -73,6 +73,7 @@ from flock.models import (
     loop_refusals,
     merge_grants,
     type_spec_rev,
+    worker_type_spec,
     world_tools,
 )
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
@@ -584,6 +585,10 @@ def create_app(
     def comms_event(agent: str, ev: Event) -> None:
         data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
         reason = COMMS_WAKE_EVENTS[ev.type]
+        try:  # `loop.notices`: named in the agent's next round prompt
+            loops.notice(agent, reason, data)
+        except Exception:
+            log.exception("comms notice failed for %s", agent)
         try:
             woke = loops.wake(agent, f"comms.{reason}")
             log.debug("comms %s for %s (wake %s): %s", reason, agent, woke, data)
@@ -1403,9 +1408,10 @@ def create_app(
         if ts is not None:
             # docs/live.md: a changed type spec (prompts, limits, ...) and the grants in force
             # reach the worker here; it applies them at each agent's next turn boundary
-            rev = type_spec_rev(ts)
+            wts = worker_type_spec(ts)  # never `loop.notices` (controller only)
+            rev = type_spec_rev(wts)
             if hb.spec_rev != rev:
-                out["type_spec"], out["spec_rev"] = ts.model_dump(mode="json"), rev
+                out["type_spec"], out["spec_rev"] = wts.model_dump(mode="json"), rev
             type_grants, agent_grants = store.agent_grants(w["swarm"])
             grants = {a.name: g.compact() for a in hb.agents
                       if (g := merge_grants(type_grants.get(w["type"]), agent_grants.get(a.name)))}

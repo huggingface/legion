@@ -66,6 +66,14 @@ ACK_TIMEOUT = 60.0  # s to wait for a worker's loop_stopped before the final pro
 ERROR_LIMIT = 3  # failed loop turns in a row (not max_turns) end an agent's loop (both sides)
 RESTOP_EVERY = 30.0  # s, hard budget stop: min gap between repeated stops to one working agent
 LOOP_KINDS = ("first", "loop")
+NOTICE_KEEP = 100  # pending notices kept per agent (the oldest go first)
+NOTICE_GROUPS = 5  # (kind, thread) groups named in the notice line; the rest are counted
+NOTICE_NAMES = 3  # names shown per group
+NOTICE_HEAD = "New for you since your last round: "
+# s after the controller saw the armed loop_start leave the queue before a `loop_prompt` counts
+# as the round that carried it: one emitted just before the fetch can arrive up to a worker
+# event flush (3 s) later. Erring late shows the line twice, never drops it.
+NOTICE_FETCH_MARGIN = 5.0
 
 
 def swarm_stream(swarm: str) -> str:
@@ -119,6 +127,51 @@ def _unwake(st: dict) -> None:
     if st.get("wake_times"):
         st["wake_times"] = st["wake_times"][:-1]
     st["wake_last"] = st["wake_times"][-1] if st.get("wake_times") else None
+
+
+def _who(n: dict) -> str:
+    # no braces (the worker's renderer would take `{round}` in a name for a placeholder)
+    name = "".join(c for c in str(n.get("from") or "?") if c not in "{}\n\r")[:64]
+    return f"@{name}" if n.get("human") else name
+
+
+def notice_line(notices: list[dict]) -> str:
+    """The one line appended to a round prompt (`loop.notices`): the board notifications since
+    the agent's last round, grouped by (kind, thread): mentions by humans first, then other
+    mentions, then replies in the agent's threads, each in the order they came; at most
+    NOTICE_GROUPS groups and NOTICE_NAMES names per group (humans first), the rest counted."""
+    groups: dict[tuple[str, int], list[dict]] = {}
+    for n in notices:
+        groups.setdefault((n["kind"], n["thread"]), []).append(n)
+
+    def rank(item: tuple[tuple[str, int], list[dict]]) -> int:
+        (kind, _), ns = item
+        return (0 if kind == "mention" else 2) + (0 if any(n.get("human") for n in ns) else 1)
+
+    ordered = sorted(groups.items(), key=rank)  # stable: first come first within a rank
+    parts = []
+    for (kind, thread), ns in ordered[:NOTICE_GROUPS]:
+        names = list(dict.fromkeys(_who(n) for n in sorted(ns, key=lambda n: not n.get("human"))))
+        shown = ", ".join(names[:NOTICE_NAMES])
+        if len(names) > NOTICE_NAMES:
+            shown += f", +{len(names) - NOTICE_NAMES} more"
+        k = len(ns)
+        if kind == "mention":
+            parts.append(f"{shown} mentioned you in thread {thread}" if k == 1
+                         else f"{k} mentions of you in thread {thread} ({shown})")
+        else:
+            parts.append(f"{k} {'reply' if k == 1 else 'replies'} in your thread {thread} ({shown})")
+    rest = ordered[NOTICE_GROUPS:]
+    if rest:
+        more = sum(len(ns) for _, ns in rest)
+        threads = list(dict.fromkeys(str(t) for (_, t), _ in rest))
+        parts.append(f"+{more} more in thread{'s' if len(threads) > 1 else ''} "
+                     + ", ".join(threads[:NOTICE_GROUPS]) + (", ..." if len(threads) > NOTICE_GROUPS else ""))
+    return NOTICE_HEAD + "; ".join(parts) + ". Read them if useful."
+
+
+def with_notices(text: str, line: str | None) -> str:
+    return f"{text.rstrip()}\n\n{line}" if line else text
 
 
 def _new_agent() -> dict[str, Any]:
@@ -190,6 +243,36 @@ class LoopEngine:
             self._wakes[agent] = (first, now, [*why, reason][-10:], n + 1)
             return True
 
+    def notice(self, agent: str, reason: str, data: dict[str, Any]) -> bool:
+        """A board notification for the agent (`comms_mention` / `comms_thread_reply` from its
+        worker): kept, with the loop agent's state in the store, until its next round prompt
+        names it (`loop.notices`). Ignored for a type without `loop.notices`, an agent out of
+        its loop and a message already kept. `reason`: mention or thread."""
+        with self._lock:
+            a = self.store.get_agent(agent)
+            if a is None:
+                return False
+            sw = self.store.get_swarm(a["swarm"])
+            ts = sw["spec"].types.get(a["type"]) if sw else None
+            if ts is None or ts.loop is None or not ts.loop.notices:
+                return False
+            st = self.store.get_loop_agent(agent)
+            thread, mid = data.get("thread"), data.get("msg_id")
+            if st is None or st["phase"] == "done" or not isinstance(thread, int):
+                return False
+            kind = "mention" if reason == "mention" else "reply"
+            pending = st.get("notices") or []
+            if mid is not None and any(n["msg_id"] == mid and n["kind"] == kind for n in pending):
+                return False
+            sender = str(data.get("from") or "?")
+            human = data.get("identity_type") == "user" if "identity_type" in data else (
+                sender != "?" and self.store.get_agent(sender) is None)  # not one of ours
+            pending.append({"msg_id": mid, "thread": thread, "from": sender, "kind": kind,
+                            "human": human})
+            st["notices"] = pending[-NOTICE_KEEP:]
+            self.store.put_loop_agent(agent, a["swarm"], a["type"], st)
+            return True
+
     def control(self, swarm: str, type_name: str, action: str, final: bool = True) -> LoopStatus:
         """`flock loop --start|--stop`: stop (optionally without the final round) or start
         the loop again from round 0 (agents that had `first` do not get it again)."""
@@ -246,6 +329,11 @@ class LoopEngine:
                 d = _custom(ev)
                 if ev.type == "loop_prompt":
                     st["last_activity"] = now
+                    arm = st.get("notice_armed")
+                    if (arm and not arm.get("used") and d.get("kind") == "loop" and not d.get("wake")
+                            and self._fetched(a, arm, now)
+                            and now - arm["fetched"] >= NOTICE_FETCH_MARGIN):
+                        arm["used"] = True  # this round carried the line: plain again next tick
                     st["inflight"] = {"kind": d.get("kind"), "round": d.get("round"),
                                       "counted": d.get("counted", True), "wake": d.get("wake", False)}
                     if d.get("kind") == "first":
@@ -304,6 +392,20 @@ class LoopEngine:
             if stop_reason and st["phase"] == "looping":
                 self._agent_done(a, st, L, stop_reason, now)
             self.store.put_loop_agent(a["name"], a["swarm"], a["type"], st)
+
+    def _fetched(self, a: Row, arm: dict, now: float) -> bool:
+        """The armed loop_start left its worker's command queue (`arm["fetched"]`: when the
+        controller first saw it gone)."""
+        if arm.get("fetched") is None:
+            for c in self.store.commands_for(a["worker"]) if a["worker"] else []:
+                try:
+                    body = json.loads(c["body"])
+                except ValueError:
+                    continue
+                if body.get("kind") == "loop_start" and body.get("agent") == a["name"]:
+                    return False
+            arm["fetched"] = now
+        return True
 
     def _undeliver(self, st: dict, took: dict | None, now: float) -> None:
         """The worker refused a loop prompt it had taken (draining, stopping): undo what its
@@ -599,8 +701,12 @@ class LoopEngine:
         lp = ts.loop
         assert lp is not None and lp.prompt is not None
         until = lp.while_.until
+        arm = st.get("notice_armed")
+        line = arm["line"] if arm and not arm.get("used") and lp.notices else None
+        if line:
+            arm["fetched"] = None  # a new command to wait for
         cmd = LoopStartCommand(
-            agent=a["name"], text=lp.prompt,
+            agent=a["name"], text=with_notices(lp.prompt, line),
             meta=self._meta(ts, type_name, L, "loop", round=st["rounds"], why="turn_end"),
             max_rounds=lp.while_.max_rounds, run=L.get("run"),
             deadline=_ts(L["started_at"] + parse_duration(until).total_seconds()) if until else None)
@@ -689,6 +795,15 @@ class LoopEngine:
                         ts, type_name, L, "loop", round=None, why=woken[0],
                         counted=lp.wake.counts_as_round, wake=True))
                     wakes[name] = woken[1]
+                else:
+                    arm = st.get("notice_armed")
+                    if (arm and not arm.get("used") and arm.get("fetched") is None
+                            and self._fetched(a, arm, now)):
+                        changed.add(name)  # seen leaving the queue: when, for `used`
+                    if self._arm_notices(lp, st, waiting=bool(st["stop_sent"] and not st["acked"]),
+                                         now=now):
+                        self._loop_start(spec, type_name, ts, L, a, st, now)
+                        changed.add(name)
                 continue
             if st["stop_sent"] and not st["acked"] and now - st["stop_sent"] < ACK_TIMEOUT:
                 continue  # its worker-side loop (before a mode change) has not confirmed the stop
@@ -713,11 +828,22 @@ class LoopEngine:
                 due[name] = self._prompt(a, lp.prompt or "", self._meta(
                     ts, type_name, L, "loop", round=st["rounds"] + int(counted), why=why,
                     counted=counted, wake=name in wakes))
+        noticed: dict[str, int] = {}  # agent -> pending notices its due loop prompt names
+        for name, cmd in due.items():
+            pending = states[name].get("notices") if lp.notices else None
+            if pending and cmd.loop is not None and cmd.loop.kind == "loop":
+                due[name] = cmd.model_copy(update={"text": with_notices(cmd.text, notice_line(pending))})
+                noticed[name] = len(pending)
+            elif states[name].get("notices") and not lp.notices:
+                states[name]["notices"] = []  # switched off: nothing kept for later
+                changed.add(name)
         sent = set(self.send(spec.swarm, type_name, [a for a in agents if a["name"] in due],
                              lambda a: due[a["name"]])) if due else set()
         for name in sent:
             st, meta = states[name], due[name].loop
             assert meta is not None
+            if name in noticed:  # named once; what came in meanwhile waits for the next round
+                st["notices"] = st["notices"][noticed[name]:]
             if meta.kind == "first":
                 st["phase"], st["first_delivered"] = "first", False
             else:
@@ -746,6 +872,35 @@ class LoopEngine:
             reasons = {st["done_reason"] for st in live}
             self._stop(spec.swarm, type_name, ts, L, reasons.pop() if len(reasons) == 1
                        else "agents_done", final=True, now=now)
+
+    def _arm_notices(self, lp: LoopSpec, st: dict, *, waiting: bool, now: float) -> bool:
+        """Worker-side loop (`loop.notices`): the worker renders each round from the text of its
+        last loop_start, so the line rides in a fresh loop_start (same run: the round count
+        stays) and, once a round carried it (its `loop_prompt` after the command was fetched),
+        another loop_start puts the plain prompt back, or the line of what came in meanwhile.
+        True when a loop_start is due now (`notice_armed` updated)."""
+        arm = st.get("notice_armed")
+        if not st["wstarted"] or st["acked"] or waiting:
+            return False
+        if not lp.notices:  # switched off: nothing kept for later
+            if st.get("notices"):
+                st["notices"] = []
+            if arm:
+                st["notice_armed"] = None
+                return not arm.get("used")  # take the line out of the worker's loop text
+            return False
+        if arm and not arm.get("used"):
+            return False  # its round has not come yet
+        pending = st.get("notices") or []
+        if pending:
+            st["notice_armed"] = {"line": notice_line(pending), "at": now, "n": len(pending),
+                                  "fetched": None}
+            st["notices"] = []
+            return True
+        if arm:  # used, nothing new: the plain prompt again
+            st["notice_armed"] = None
+            return True
+        return False
 
     def _woken(self, name: str, st: dict, lp: LoopSpec, now: float) -> tuple[str, int] | None:
         """The queued wake that is due now, as (why, events): after WAKE_DEBOUNCE s of quiet

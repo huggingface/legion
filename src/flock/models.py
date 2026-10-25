@@ -1180,12 +1180,17 @@ class LoopSpec(BaseModel):
     final: LoopFinal | None = None
     wake: LoopWake = Field(default_factory=LoopWake)
     stop_when: LoopStopWhen = Field(default_factory=LoopStopWhen)
+    # Controller only: one line after the rendered loop prompt naming the board notifications
+    # (mentions, replies in the agent's threads) since its last round. Never sent to workers.
+    notices: bool = False
 
     @model_serializer(mode="wrap")
     def _dump(self, handler):  # `while` on the wire, as written in specs
         out = handler(self)
         if isinstance(out, dict) and "while_" in out:
             out["while"] = out.pop("while_")
+        if isinstance(out, dict) and not self.notices:
+            out.pop("notices", None)  # off: dumps (and hashes) exactly as before the key existed
         return out
 
     @field_validator("every")
@@ -1228,6 +1233,14 @@ def hit_max_turns(turn_ended: dict) -> bool:
     """A `turn_ended` that stopped at the type's `max_turns` (llm, Pi, Codex: `reason`; Claude:
     `subtype`). Not a failed turn for a loop: with `tool_choice: required` it is how turns end."""
     return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
+
+
+def worker_type_spec(ts: TypeSpec) -> TypeSpec:
+    """The type spec as workers get it: without the controller-only `loop.notices` (workers
+    validate it with extra=forbid; one older than the key would refuse the whole spec)."""
+    if ts.loop is None or not ts.loop.notices:
+        return ts
+    return ts.model_copy(update={"loop": ts.loop.model_copy(update={"notices": False})})
 
 
 def agent_cap(ts: TypeSpec) -> float | None:

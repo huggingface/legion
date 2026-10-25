@@ -87,6 +87,7 @@ types:
       stagger: 2s
       on: [comms.mention, comms.thread]
       wake: {min_gap: 10s, max: 20, window: 30m}
+      notices: true                            # one line after each round prompt: mentions and thread replies since the last round (controller only)
       while: {until: 48h, max_rounds: 6000}    # ~100 turns/h/agent x 48 h + headroom
       final: {prompt_file: prompts/final.md}
   agent-think:                                 # optional: thinking on; same prompts and tools
