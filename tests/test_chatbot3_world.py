@@ -75,7 +75,7 @@ def _log(w) -> list[dict]:
 
 def test_manifest_flat_workspace_and_descriptions(world):
     m = world.manifest()
-    assert (m["name"], m["version"]) == ("chatbot3", "0.3.2")
+    assert (m["name"], m["version"]) == ("chatbot3", "0.3.3")
     assert m["hooks"] == ["agent_done", "turn"]
     tools = {t["name"]: t for t in m["tools"]}
     assert {"read_file", "grep_file", "write_file", "copy_file", "edit_file", "insert_after",
@@ -512,3 +512,84 @@ def test_hooks_and_reads_stay_fast_during_a_promotion_and_slow_tools(mod, tmp_pa
     finally:
         server.should_exit = True
         t.join(5)
+
+
+def _retire_world(mod, tmp_path, monkeypatch, knobs: str):
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text(f"probes: {{per_agent_per_hour: 100, {knobs}}}\n")
+    monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    w = mod.Chatbot3World(str(tmp_path / "ws"))
+    run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))
+    return w, cfg
+
+
+def test_retire_off_by_default_but_streaks_are_kept(world):
+    """retire_after 0 (the default): the gate and the probe limit are chatbot2's; the gate's
+    results for best are still counted (one per version), ready if the knob is turned on."""
+    run(world.promote_best(A, f"{HOME_A}/bot", "base"))
+    run(_probe(world, A, TEACHER, "mentions_fact:teacher"))
+    _pkg(world, B, HOME_B, REMEMBERS)
+    assert run(world.promote_best(B, f"{HOME_B}/bot", "remembers"))["promoted"]
+    sha = world._sha(world._best_path())[:12]
+    assert world._streaks() == {"p1": {"streak": 1, "sha": sha}}
+    assert not run(world.promote_best(A, f"{HOME_B}/bot", "tie"))["promoted"]  # re-scores best
+    assert world._streaks()["p1"]["streak"] == 1  # the same version counts once
+    for k in range(5):
+        world._gate_scored(f"{k:012x}", {"p1": True})
+    assert world._retired() == set() and world._gate("a" * 64)[1] == "full 1"
+    st = run(world.best_status())
+    assert st["probes"] == {"live": 1, "retired": 0, "max_total": 400, "retire_after": 0}
+
+
+def test_retire_after_n_passes_reset_on_fail(mod, tmp_path, monkeypatch):
+    w, _ = _retire_world(mod, tmp_path, monkeypatch, "retire_after: 3")
+    _many_probes(w, 2)
+    w._gate_scored("v1", {"p1": True, "p2": True})
+    w._gate_scored("v1", {"p1": True, "p2": True})  # re-scored: no new version
+    w._gate_scored("v2", {"p1": True, "p2": False})  # a fail resets
+    w._gate_scored("v3", {"p1": True, "p2": True})
+    assert w._retired() == {"p1"} and w._streaks()["p2"]["streak"] == 1
+    assert [x["probe"] for x in _log(w) if x["action"] == "probe_retired"] == ["p1"]
+    w._gate_scored("v4", {"p1": False})  # failed in a full gate: it counts again
+    assert w._retired() == set()
+
+
+def test_retired_left_out_of_sample_and_limit_kept_in_full_gate(mod, tmp_path, monkeypatch):
+    w, cfg = _retire_world(mod, tmp_path, monkeypatch,
+                           "retire_after: 2, gate_sample: 4, gate_full_every: 0, max_total: 10")
+    _many_probes(w, 10)
+    with pytest.raises(ToolError, match=r"the live set is full: 10 live probes, the limit is "
+                                        r"10 \(0 retired probes do not count"):
+        run(_probe(w, A, ["my word is x", "what is my word?"], "mentions_fact:x"))
+    for v in ("v1", "v2"):
+        w._gate_scored(v, {"p1": True, "p2": True, "p3": True})
+    assert w._retired() == {"p1", "p2", "p3"}
+    for k in range(30):  # every sample: 4 of the 7 not retired
+        got, label = w._gate(f"{k:064x}")
+        assert len(got) == 4 and not {x["id"] for x in got} & {"p1", "p2", "p3"}
+        assert label.startswith("sample 4/7 ") and label.endswith("(3 retired)")
+    st = run(w.best_status())
+    assert st["probes"] == {"live": 7, "retired": 3, "max_total": 10, "retire_after": 2}
+    pr = run(w.probes())
+    assert pr["counts"]["retired"] == 3 and [x["id"] for x in pr["live"] if x.get("retired")] \
+        == ["p1", "p2", "p3"]
+    assert run(_probe(w, A, ["my word is x", "what is my word?"], "mentions_fact:x"))[
+        "added"] == "p11"  # 8 live of 10: room again
+    cfg.write_text("probes: {retire_after: 2, gate_sample: 0, max_total: 10}\n")
+    full, label = w._gate("a" * 64)  # the final round: everything, the retired included
+    assert label == "full 11" and {"p1", "p2", "p3"} <= {x["id"] for x in full}
+    cfg.write_text("probes: {retire_after: 2, gate_sample: 60, max_total: 10}\n")
+    os.utime(cfg, (time.time() + 5, time.time() + 5))  # a new mtime: re-read
+    assert w._gate("a" * 64)[1] == "active 8 (3 retired)"  # the sample would cover the rest
+
+
+def test_retired_survive_a_restart(mod, tmp_path, monkeypatch):
+    w, _ = _retire_world(mod, tmp_path, monkeypatch, "retire_after: 2, gate_sample: 2")
+    _many_probes(w, 4)
+    for v in ("v1", "v2"):
+        w._gate_scored(v, {"p1": True, "p2": True})
+    w2 = mod.Chatbot3World(str(tmp_path / "ws"))  # the requeued world on the restored ws/
+    assert w2._retired() == {"p1", "p2"} and w2._streaks() == w._streaks()
+    assert {x["id"] for x in w2._gate("a" * 64)[0]} == {"p3", "p4"}
+    assert not list((w.ws / "probes").glob(".streaks*"))  # written atomically, no leftovers

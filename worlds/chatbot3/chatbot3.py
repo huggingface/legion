@@ -19,13 +19,26 @@ Promotions are decided on a sampled gate (`probes.gate_sample`, the full set eve
 `probes.gate_full_every`-th promotion), and a promotion that takes longer than `promote.wait_s`
 answers `queued` with a ticket (best_status shows `pending` and the result).
 
+Retired probes (`probes.retire_after`, 0: off): the gate already scores best on its probes at
+every promotion (the new best on the candidate's gate, the old best when the gate re-scores
+it). probes/streaks.json keeps, per probe id, the consecutive versions of best that passed it
+when evaluated (one count per version, by its sha; a fail resets it to 0). A probe whose
+streak reaches retire_after is retired: it does not count toward `probes.max_total` and is
+left out of the sampled gate, but a full-set gate (gate_sample 0, every gate_full_every-th)
+still scores it, so a regression on it is still caught (and a fail there un-retires it).
+With a sample of 60 out of 400-800 probes a probe lands in a given gate 8-15% of the time,
+so 3 counted passes span 3 versions at the very least and usually many more: 3 is the run's
+setting. No extra bot runs.
+
 Knobs: the YAML file $CHATBOT_CONFIG (probes, interviews, runs), re-read when it changes."""
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -45,7 +58,8 @@ from eliza import ElizaWorld
 from flock.world import Agent, ToolError, World, tool
 
 DEFAULTS = {"probes": {"per_agent_per_hour": 4, "max_lines": 12, "max_total": 400,
-                       "gate_sample": 60, "gate_full_every": 10},
+                       "gate_sample": 60, "gate_full_every": 10,
+                       "retire_after": 0},  # 0: no probe is ever retired
             "interviews": {"start_minutes": 5, "expire_minutes": 20},
             "runs": {"parallel": 0},  # 0: the usable CPUs (sched_getaffinity)
             "promote": {"max_waiting": 0, "wait_s": 40}}
@@ -98,7 +112,7 @@ def _usable_cpus() -> int:
 
 
 class Chatbot3World(Chatbot2World):
-    name, version, base_rules = "chatbot3", "0.3.2", (HERE / "rules.md").read_text()
+    name, version, base_rules = "chatbot3", "0.3.3", (HERE / "rules.md").read_text()
     dirs = ("agents", "best", "probes", "interviews")
     # tool calls and hooks run concurrently (flock.world.server): the bookings have their
     # lock, promotions their critical section, file writes are atomic, logs are appends
@@ -164,6 +178,96 @@ class Chatbot3World(Chatbot2World):
             path: the bot, e.g. agents/<your name>/bot or best/bot
         """
         return await Chatbot2World.qualify(self, agent, path)
+
+    # ------------------------------------------------------------------ retired probes
+    def _streaks(self) -> dict:
+        """probes/streaks.json: {probe id: {"streak": consecutive versions of best that passed
+        it when evaluated, "sha": the last version counted}}; {} before the first gate."""
+        f = self.ws / "probes" / "streaks.json"
+        try:
+            return json.loads(f.read_text()) if f.is_file() else {}
+        except (ValueError, OSError):
+            return {}
+
+    def _gate_scored(self, sha: str, results: dict) -> None:
+        """Count the gate's results for best (called inside the promotion critical section, so
+        one writer at a time, across processes too). One count per version: a version seen
+        again (the gate re-scoring it) adds no pass, but a fail always resets."""
+        if not results:
+            return
+        s, sha, n = self._streaks(), sha[:12], int(self.cfg("probes", "retire_after"))
+        for pid, ok in results.items():
+            r = s.setdefault(pid, {"streak": 0, "sha": ""})
+            if not ok:
+                r.update(streak=0, sha=sha)
+            elif r["sha"] != sha:
+                r.update(streak=r["streak"] + 1, sha=sha)
+                if n > 0 and r["streak"] == n:
+                    self._append("log.jsonl", {"ts": round(time.time(), 3), "agent": "world",
+                                               "action": "probe_retired", "probe": pid})
+        f = self.ws / "probes" / "streaks.json"
+        tmp = f.with_name(f".streaks.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(s, sort_keys=True) + "\n")
+        os.replace(tmp, f)
+
+    def _retired(self) -> set[str]:
+        n = int(self.cfg("probes", "retire_after"))
+        return {k for k, r in self._streaks().items() if r["streak"] >= n} if n > 0 else set()
+
+    def _counts(self) -> dict:
+        live, ret = self._live(), self._retired()
+        k = sum(x["id"] in ret for x in live)
+        return {"live": len(live) - k, "retired": k,
+                "max_total": int(self.cfg("probes", "max_total")),
+                "retire_after": int(self.cfg("probes", "retire_after"))}
+
+    def _full_why(self) -> str:
+        c = self._counts()
+        if c["live"] < c["max_total"]:
+            return ""
+        return (f"the live set is full: {c['live']} live probes, the limit is {c['max_total']}"
+                + (f" ({c['retired']} retired probes do not count: a probe retires once best "
+                   f"has passed it {c['retire_after']} times in a row)" if c["retire_after"] > 0
+                   else ""))
+
+    def _gate(self, cand_sha: str) -> tuple[list[dict], str]:
+        """chatbot2's gate, but the sample is drawn from the probes that are not retired; the
+        full set (gate_sample 0, every gate_full_every-th promotion) includes the retired."""
+        live = [x for x in self._live() if x.get("verified", True)]
+        size, every = int(self.cfg("probes", "gate_sample")), int(self.cfg("probes",
+                                                                           "gate_full_every"))
+        if size <= 0 or (every > 0 and (len(self._history()) + 1) % every == 0):
+            return live, f"full {len(live)}"
+        ret = self._retired()
+        pool = [x for x in live if x["id"] not in ret]
+        tail = f" ({len(live) - len(pool)} retired)" if len(pool) < len(live) else ""
+        if size >= len(pool):
+            return pool, f"full {len(live)}" if not tail else f"active {len(pool)}{tail}"
+        pick = sorted(random.Random(cand_sha).sample(range(len(pool)), size))
+        return [pool[i] for i in pick], (f"sample {size}/{len(pool)} seed {cand_sha[:12]}"
+                                         + tail)
+
+    @tool
+    async def best_status(self, agent: Agent | None = None) -> dict:
+        """Show the shared best (best/bot.py or best/bot/): where it came from, its size, its
+        score on the live probe set and the probes it fails, the last 5 promotions, how many
+        promotions are `pending`, the results of your queued ones, and the probe counts: live
+        (count toward the limit) and retired (best passed them several times in a row)."""
+        out = await Chatbot2World.best_status(self, agent=agent)
+        return out | {"probes": self._counts()}
+
+    @tool
+    async def probes(self) -> dict:
+        """The probe set every promotion is scored on: the seed probe files (the floor) and the
+        swarm's probes (id, author, check, lines, newest 40), each with whether the current
+        best passes it. An unverified probe (its evidence did not reproduce) does not count. A
+        retired probe (best passed it several times in a row) is only checked in full-set gates
+        and does not count toward the probe limit."""
+        out, ret = await Chatbot2World.probes(self), self._retired()
+        for x in out["live"]:
+            if x["id"] in ret:
+                x["retired"] = True
+        return out | {"counts": self._counts()}
 
     # ------------------------------------------------------------------ interviews
     def _quotas(self, team: str) -> dict:
@@ -324,9 +428,6 @@ DOCS = {
             path: a bot file or package, e.g. best/bot, best/bot.py or agents/agent-0001/bot
             lines: the user's messages in order (1 to 20, one line each)
         """,
-    "best_status": """Show the shared best (best/bot.py or best/bot/): where it came from, its
-        size, its score on the live probe set and the probes it fails, the last 5 promotions,
-        how many promotions are `pending`, and the results of your queued ones.""",
     "chat": """Say one message to the candidate and get its reply (interviewers only). The
         conversation keeps going across calls, up to 10 messages.
 

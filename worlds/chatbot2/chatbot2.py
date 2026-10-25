@@ -382,8 +382,7 @@ class Chatbot2World(ChatbotWorld):
         lines, kind, arg = ([" ".join(x.split())[:300] for x in lines if x.strip()],
                             *check.strip().partition(":")[::2])
         why = (f"you added {len(mine)} probes in the last hour (the limit is {per})"
-               if len(mine) >= per else f"the live set is full ({len(self._live())})"
-               if len(self._live()) >= self.cfg("probes", "max_total") else
+               if len(mine) >= per else room if (room := self._full_why()) else
                "evidence is required: the failing reply you saw" if not evidence.strip() else
                f"give 1 to {maxl} lines" if not 0 < len(lines) <= maxl else
                f"check must be one of {CHECKS}" if not CHECK.match(check.strip()) else
@@ -425,6 +424,16 @@ class Chatbot2World(ChatbotWorld):
                            "'post'), so this probe does NOT count in the promotion gate. Copy "
                            "the failing reply exactly from run_bot next time.")
         return out
+
+    def _full_why(self) -> str:
+        """Why add_probe has no room ('' when it has): every live probe counts toward
+        `probes.max_total`."""
+        n = len(self._live())
+        return f"the live set is full ({n})" if n >= self.cfg("probes", "max_total") else ""
+
+    def _gate_scored(self, sha: str, results: dict) -> None:
+        """A promotion scored the bot with this sha, the best (before or after it), on its gate
+        probes: {probe id: passed}. Nothing here; a subclass may keep a record."""
 
     @tool
     async def probes(self) -> dict:
@@ -504,6 +513,8 @@ class Chatbot2World(ChatbotWorld):
             fails, cand, cur = await asyncio.gather(asyncio.to_thread(self._bar, p),
                                                     self._full(p, live=live),
                                                     self._best_score(live))
+            if cur:  # the gate re-scored the current best
+                self._gate_scored(self._best[0], cur["results"])
             why = ("it crashed or timed out on a probe" if cand["crashed"] else
                    self._unfit(fails) if fails else
                    f"it scores {cand['seed']} on the seed probes, best {cur['seed']} (the floor)"
@@ -531,6 +542,7 @@ class Chatbot2World(ChatbotWorld):
             (b / "current.json").write_text(json.dumps(
                 {"n": n, "kind": kind[0], "entry": f"best/{kind[1]}", "files": new}) + "\n")
             self._best = (self._sha(self._best_path()), dict(cand["results"]))
+            self._gate_scored(self._best[0], cand["results"])  # the new best on the gate
             rec["best_after"] = self._best[0][:12]
             self._append("best/history.jsonl", rec)
             self._log(agent, "promote", path=rec["path"], score=cand["score"], n=n)
