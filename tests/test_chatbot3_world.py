@@ -75,7 +75,7 @@ def _log(w) -> list[dict]:
 
 def test_manifest_flat_workspace_and_descriptions(world):
     m = world.manifest()
-    assert (m["name"], m["version"]) == ("chatbot3", "0.3.3")
+    assert (m["name"], m["version"]) == ("chatbot3", "0.3.4")
     assert m["hooks"] == ["agent_done", "turn"]
     tools = {t["name"]: t for t in m["tools"]}
     assert {"read_file", "grep_file", "write_file", "copy_file", "edit_file", "insert_after",
@@ -593,3 +593,225 @@ def test_retired_survive_a_restart(mod, tmp_path, monkeypatch):
     assert w2._retired() == {"p1", "p2"} and w2._streaks() == w._streaks()
     assert {x["id"] for x in w2._gate("a" * 64)[0]} == {"p3", "p4"}
     assert not list((w.ws / "probes").glob(".streaks*"))  # written atomically, no leftovers
+
+
+# ------------------------------------------------------------------ best's score without bot runs
+def _counting(mod, monkeypatch, delay=0.0):
+    """Patch the bot run: count every run (by bot path and lines) and the peak at once."""
+    real, lock = mod.ElizaWorld._run, threading.Lock()
+    st = {"runs": [], "live": 0, "peak": 0, "best_peak": 0, "best_live": 0}
+
+    def counted(self, path, lines):
+        best = "best" in path.parts
+        with lock:
+            st["runs"].append((str(path), tuple(lines)))
+            st["live"] += 1
+            st["best_live"] += best
+            st["peak"] = max(st["peak"], st["live"])
+            st["best_peak"] = max(st["best_peak"], st["best_live"])
+        try:
+            time.sleep(delay)
+            return real(self, path, lines)
+        finally:
+            with lock:
+                st["live"] -= 1
+                st["best_live"] -= best
+
+    monkeypatch.setattr(mod.ElizaWorld, "_run", counted)
+    return st
+
+
+def _cfg_world(mod, tmp_path, monkeypatch, text):
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text(text)
+    monkeypatch.setenv("CHATBOT_CONFIG", str(cfg))
+    monkeypatch.delenv("CHATBOT_BUCKET", raising=False)
+    return mod.Chatbot3World(str(tmp_path / "ws"))
+
+
+async def _until_async(ok, timeout=20.0):
+    deadline = time.monotonic() + timeout
+    while not ok():
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.02)
+
+
+def test_best_status_runs_no_bot_gate_then_background_full(mod, tmp_path, monkeypatch):
+    w = _cfg_world(mod, tmp_path, monkeypatch,
+                   "probes: {per_agent_per_hour: 100, gate_sample: 3, gate_full_every: 0}\n")
+    run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))
+    _many_probes(w, 8)
+    assert run(w.promote_best(B, _pkg(w, B, HOME_B, REMEMBERS), "remembers"))["promoted"]
+    sha = w._sha(w._best_path())[:12]
+    st = _counting(mod, monkeypatch)
+
+    async def go():
+        first = await w.best_status(agent=A)
+        ran = len(st["runs"])  # the call itself: no bot run (the background starts after it)
+        await _until_async(lambda: (w._fullrec or {}).get("sha") == sha)
+        return first, ran, await w.best_status(agent=A)
+
+    first, ran, second = run(go())
+    assert ran == 0
+    g = first["score"]["gate"]
+    assert g["n"] == 2 and g["gate"].startswith("sample 3/8") and g["live"] == "3/3"
+    assert len(g["probes"]) == 3 and g["fails"] == []  # the gate's probes, from memory
+    assert first["score"]["full"] is None and "full_pending" in first["score"]
+    full = second["score"]["full"]
+    assert (full["n"], full["sha"], full["current"]) == (2, sha, True) and full["age_s"] >= 0
+    assert (full["live"], full["live_of"]) == (8, 8) and "full_pending" not in second["score"]
+    # the background ran the 5 probes the gate had not scored, and the 4 seed files, once
+    assert len(st["runs"]) == 5 + 4 and len(set(st["runs"])) == 9
+    assert all("/best/v2" in p for p, _ in st["runs"])
+    n = len(st["runs"])
+    run(w.best_status())  # nothing new to score: no run
+    pr = run(w.probes())  # probes: best's results from the cache, no run either
+    assert len(st["runs"]) == n and {x["best"] for x in pr["live"]} == {"pass"}
+    assert pr["marks"]["best_n"] == 2 and pr["marks"]["best_sha"] == sha
+    assert pr["marks"]["scored"] == 8
+    assert any(x["action"] == "best_full" and x["n"] == 2 for x in _log(w))
+
+
+def test_best_score_is_single_flight_across_callers(mod, tmp_path, monkeypatch):
+    """After a best change, 6 best_status calls and 4 gate re-scores of best at once: each of
+    best's probes (and the seed score) runs once in all."""
+    w = _cfg_world(mod, tmp_path, monkeypatch,
+                   "probes: {per_agent_per_hour: 100, gate_sample: 0}\nruns: {parallel: 4}\n")
+    run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))
+    _many_probes(w, 6)
+    w._best, w._seed = ("", {}), ("", None)  # a restarted world: nothing cached for best
+    st = _counting(mod, monkeypatch, delay=0.05)
+
+    async def go():
+        live = w._gate("a" * 64)[0]
+        out = await asyncio.gather(*(w.best_status() for _ in range(6)),
+                                   *(w._best_score(live) for _ in range(4)))
+        await _until_async(lambda: w._fullrec is not None)
+        return out
+
+    out = run(go())
+    assert all(s["score"] == out[-1]["score"] and s["live_of"] == 6 for s in out[6:])
+    assert len(st["runs"]) == 6 + 4 and len(set(st["runs"])) == 10, " ".join(l[0][-2:] for p, l in st["runs"])  # once each
+    assert w._fullrec["s"]["score"] == out[-1]["score"]
+
+
+def test_background_full_score_is_capped_and_low_priority(mod, tmp_path, monkeypatch):
+    w = _cfg_world(mod, tmp_path, monkeypatch,
+                   "probes: {per_agent_per_hour: 100}\nruns: {parallel: 8, background: 2}\n")
+    run(w.promote_best(A, _pkg(w, A, HOME_A), "base"))
+    _many_probes(w, 12)
+    w._best, w._seed = ("", {}), ("", None)
+    st = _counting(mod, monkeypatch, delay=0.05)
+
+    async def go():
+        await w.best_status()
+        await _until_async(lambda: w._fullrec is not None)
+
+    run(go())
+    assert st["best_peak"] == 2 and len(st["runs"]) == 12 + 4
+
+
+def test_pool_low_priority_waits_for_normal_runs(mod):
+    pool, order = mod._Pool(lambda: 1), []
+    pool.acquire()  # the one slot is busy
+
+    def take(name, prio):
+        pool.acquire(prio=prio)
+        order.append(name)
+        time.sleep(0.05)
+        pool.release()
+
+    low = threading.Thread(target=take, args=("low", mod._Prio(True)))
+    low.start()
+    time.sleep(0.1)
+    normal = threading.Thread(target=take, args=("normal", None))
+    normal.start()
+    time.sleep(0.1)
+    pool.release()
+    low.join(5)
+    normal.join(5)
+    assert order == ["normal", "low"]
+    raised = mod._Prio(True)  # a low run a normal caller joined: no longer waits behind
+    pool.acquire()
+    t = threading.Thread(target=take, args=("raised", raised))
+    t.start()
+    time.sleep(0.1)
+    raised.low = False
+    pool.release()
+    t.join(5)
+    assert order[-1] == "raised" and pool.active == 0
+
+
+def test_deadline_drops_the_calls_runs_and_frees_the_slots(mod, tmp_path, monkeypatch):
+    w = _cfg_world(mod, tmp_path, monkeypatch,
+                   "probes: {per_agent_per_hour: 100}\nruns: {parallel: 1, call_deadline_s: 0.3}\n")
+    path = _pkg(w, A, HOME_A)
+    run(w.promote_best(A, path, "base"))
+    _many_probes(w, 6)
+    st = _counting(mod, monkeypatch, delay=0.2)
+
+    async def go():
+        with pytest.raises(ToolError, match="gave up after 0.3 s") as e:
+            await w.call("qualify", {"path": path}, A)  # 4 bar + 4 seed + 6 probe runs
+        assert e.value.code == "busy"
+        started = len(st["runs"])
+        await asyncio.sleep(0.6)  # the run in progress ends; nothing queued starts
+        return started
+
+    started = run(go())
+    assert started <= 3 and len(st["runs"]) == started
+    assert w._slots.active == 0 and w._slots.waiting == []
+    t0 = time.monotonic()  # the pool is free: the next call runs at once
+    assert run(w.call("run_bot", {"path": path, "lines": ["hi"]}, A))["status"] == "ok"
+    assert time.monotonic() - t0 < 0.5
+    assert [x["why"] for x in _log(w) if x["action"] == "call_dropped"] == ["deadline"]
+    # promote_best is not bounded: its gate (14 runs of 0.2 s, one slot) outlives the deadline
+    cfg = tmp_path / "world.yaml"
+    cfg.write_text("probes: {per_agent_per_hour: 100}\nruns: {parallel: 1, call_deadline_s: "
+                   "0.3}\npromote: {wait_s: 0}\n")
+    os.utime(cfg, (time.time() + 5, time.time() + 5))
+    _pkg(w, B, HOME_B, REMEMBERS)
+    r = run(w.call("promote_best", {"path": f"{HOME_B}/bot", "reason": "x"}, B))
+    assert r["promoted"] is True
+
+
+def test_disconnected_caller_cancels_its_runs(mod, tmp_path, monkeypatch):
+    """Over HTTP: the client gives up (its own timeout) on qualify; the world notices the
+    disconnect, cancels the call and drops its runs still waiting for a slot."""
+    import socket
+
+    import httpx
+    import uvicorn
+
+    from flock.world import server as srv
+
+    monkeypatch.setattr(srv, "DISCONNECT_POLL_S", 0.1)
+    w = _cfg_world(mod, tmp_path, monkeypatch,
+                   "probes: {per_agent_per_hour: 100}\nruns: {parallel: 1, call_deadline_s: 0}\n")
+    path = _pkg(w, A, HOME_A)
+    run(w.promote_best(A, path, "base"))
+    _many_probes(w, 6)
+    st = _counting(mod, monkeypatch, delay=0.2)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(srv.create_app(w, "tok"), host="127.0.0.1", port=port,
+                                           log_level="warning"))
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    while not server.started:
+        time.sleep(0.05)
+    try:
+        with pytest.raises(httpx.TimeoutException):
+            httpx.post(f"http://127.0.0.1:{port}/tools/qualify", json={"args": {"path": path}},
+                       timeout=0.5, headers={"X-World-Token": "tok", "X-Flock-Agent": A.name})
+        _until(lambda: any(x["action"] == "call_dropped" for x in _log(w)))
+        time.sleep(0.5)
+        started = len(st["runs"])
+        time.sleep(0.6)
+        assert len(st["runs"]) == started and started < 8  # 14 runs without the cancel
+        assert w._slots.active == 0
+        assert [x["why"] for x in _log(w) if x["action"] == "call_dropped"] == ["cancelled"]
+    finally:
+        server.should_exit = True
+        t.join(5)

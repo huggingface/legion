@@ -4,12 +4,15 @@
 `Class` (or takes a World instance named so) and serves it with uvicorn on
 `$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default 127.0.0.1:8765), requiring `X-World-Token` to
 equal `$FLOCK_WORLD_TOKEN`. Synchronous tools and hooks run one at a time (a lock), so a world
-needs no locking of its own; `async def` tools run on the event loop.
+needs no locking of its own; `async def` tools run on the event loop. An `async` tool the world marks `cancellable(name)` is
+cancelled when its caller disconnects (checked every second), so a call nobody waits for any
+more stops instead of running to the end.
 Needs the `controller` extra (FastAPI, uvicorn).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import importlib
 import inspect
@@ -23,6 +26,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from starlette.datastructures import Headers
 
 from flock.tools.runner import check_args
 from flock.world import Agent, ToolError, World
@@ -49,6 +53,45 @@ def _error(code: str, message: str, status: int = 200) -> JSONResponse:
                         status_code=status)
 
 
+class _Auth:
+    """Every route needs `X-World-Token: <token>`."""
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app, self.token = app, token
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and not hmac.compare_digest(
+                Headers(scope=scope).get(TOKEN_HEADER, ""), self.token):
+            await _error("unauthorized", f"missing or wrong {TOKEN_HEADER}", 401)(
+                scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+DISCONNECT_POLL_S = 1.0
+
+
+class _Gone(Exception):
+    """The caller disconnected before the tool finished."""
+
+
+async def _unless_gone(aw: Any, request: Request) -> Any:
+    """Await `aw`, cancelling it if the client disconnects first (raises _Gone)."""
+    task = asyncio.ensure_future(aw)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_POLL_S)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                task.cancel()
+                await asyncio.wait({task})
+                raise _Gone
+    except asyncio.CancelledError:
+        task.cancel()  # this handler cancelled: the tool's work goes too
+        raise
+
+
 def _agent(headers: Any) -> Agent:
     return Agent(name=headers.get(AGENT_HEADER, ""), type=headers.get(TYPE_HEADER, ""),
                  swarm=headers.get(SWARM_HEADER, ""), turn=headers.get(TURN_HEADER, ""),
@@ -72,11 +115,8 @@ def create_app(world: World, token: str | None) -> FastAPI:
         with lock:
             return fn(*args)
 
-    @app.middleware("http")
-    async def auth(request: Request, call_next):
-        if token and not hmac.compare_digest(request.headers.get(TOKEN_HEADER, ""), token):
-            return _error("unauthorized", f"missing or wrong {TOKEN_HEADER}", 401)
-        return await call_next(request)
+    if token:  # plain ASGI (not @app.middleware): a client's disconnect still reaches the route
+        app.add_middleware(_Auth, token=token)
 
     @app.get("/manifest")
     async def manifest() -> dict:
@@ -102,7 +142,14 @@ def create_app(world: World, token: str | None) -> FastAPI:
         try:
             result = await run_in_threadpool(locked, world.call, name, args, agent)
             if inspect.isawaitable(result):
-                result = await result
+                if getattr(world, "cancellable", lambda _: False)(name):
+                    try:
+                        result = await _unless_gone(result, request)
+                    except _Gone:
+                        log.info("tool %s for %s: caller gone, cancelled", name, agent.name)
+                        return _error("cancelled", "the caller disconnected", 499)
+                else:
+                    result = await result
             result = json.loads(json.dumps(result, default=str))
         except ToolError as e:
             return _error(e.code, e.message)

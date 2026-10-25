@@ -150,6 +150,12 @@ class World:
                  if _is_agent(p, hints)}
         return fn(**args, **extra)
 
+    def cancellable(self, tool: str) -> bool:
+        """May the server cancel this tool's `async` work when its caller disconnects (the
+        HTTP client gave up, e.g. on its own timeout)? Default False: the work always runs to
+        the end. A world returns True for tools whose work is wasted once nobody reads it."""
+        return False
+
     # ------------------------------------------------------------------ hooks
     def on_agent_start(self, agent: Agent) -> None:
         """An agent got its first prompt on its worker (again after a relaunch)."""
