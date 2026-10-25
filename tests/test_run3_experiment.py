@@ -304,10 +304,25 @@ def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
         assert len(workers) == math.ceil(1000 / 25) == 40
         assert waves.main(["set", "300", "--spec", str(spec)]) == 0  # the override may lower
         assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 300
+        # Pi agents on top: only agent-pi changes; later waves and adds keep it
+        def reps():
+            ts = ctl.store.get_swarm("run3")["spec"].types
+            return {t: ts[t].replicas for t in ("agent", "agent-think", "agent-pi")}
+
+        assert waves.main(["add", "25", "--spec", str(spec), "--type", "agent-pi"]) == 0
+        assert reps() == {"agent": 300, "agent-think": 0, "agent-pi": 25}
+        assert waves.main(["add", "5", "--spec", str(spec)]) == 0
+        assert reps() == {"agent": 305, "agent-think": 0, "agent-pi": 25}
+        assert waves.main(["set", "20", "--spec", str(spec), "--type", "agent-pi"]) == 0
+        assert reps() == {"agent": 305, "agent-think": 0, "agent-pi": 20}
+        assert waves.main(["pin", "--spec", str(spec)]) == 0
+        assert load_spec(str(spec)).types["agent-pi"].replicas == 20
         log = [json.loads(x) for x in Path(str(spec) + ".waves.jsonl").read_text().splitlines()]
-        assert [x["total"] for x in log] == [5, 40, 1000, 300]
-        assert [x["why"][:10] for x in log] == ["schedule 0", "schedule 5", "add 960", "set 300"]
-        assert [(x["steps"], x["stagger_s"]) for x in log] == [(5, 0.2), (1, 0), (1, 0), (1, 0)]
+        assert [x["total"] for x in log] == [5, 40, 1000, 300, 25, 305, 20]
+        assert [x["why"][:10] for x in log] == ["schedule 0", "schedule 5", "add 960", "set 300",
+                                               "add 25 --t", "add 5", "set 20 --t"]
+        assert log[4]["after"] == {"agent-pi": 25}
+        assert [(x["steps"], x["stagger_s"]) for x in log] == [(5, 0.2)] + [(1, 0)] * 6
     finally:
         for f in (spec, Path(str(spec) + ".waves.jsonl"), Path(str(spec) + ".waves.json")):
             f.unlink(missing_ok=True)

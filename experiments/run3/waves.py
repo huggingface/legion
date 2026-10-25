@@ -6,14 +6,16 @@ and applying the folder with `flock update` (the same path as a live update), up
     waves.py tick   --spec S [--start T]       # apply the wave that is due, if any (bootstrap)
     waves.py run    --spec S [--interval 30]   # tick until the schedule is over (jobs mode)
     waves.py add N  --spec S [--stagger 10]    # N more agents now (operator, after the schedule)
-    waves.py set N  --spec S                   # exactly N (the operator's override, may lower)
+    waves.py add N  --spec S --type agent-pi   # N more of one type only (the others unchanged)
+    waves.py set N  --spec S [--type T]        # exactly N (the operator's override, may lower)
     waves.py pin    --spec S                   # write the controller's replicas into S (no apply)
 
 The controller is the one `flock` reaches: FLOCK_URL / FLOCK_TOKEN (jobs mode, from the operator
 session), else the local run's .flock/current (the single-job bootstrap runs it in the
 experiment folder). S is the rendered spec (`spec.local.yaml`, render.py): its
 `types.<type>.replicas` are set, then S is applied as `flock update S` does, so prompts,
-tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's `flock scale` up stays.
+tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's `flock scale` up stays. Replica types outside the
+schedule (agent-pi) are written into S as the controller runs them, so a wave never resets them.
 A wave with `stagger_s` (waves.yaml: 10 s for wave 1 by default, 0 after) raises the count
 one agent at a time, that many seconds apart; `tick` and `run` block meanwhile. Every change is
 one JSON line in --log (default: <S>.waves.jsonl). The start time is kept in
@@ -128,7 +130,7 @@ def write_replicas(spec: Path, counts: dict[str, int]) -> None:
     d = load_spec_yaml(spec.read_text())
     for t, n in counts.items():
         if t not in d["types"]:
-            raise SystemExit(f"{spec}: no type {t!r} (waves.yaml type / think_type)")
+            raise SystemExit(f"{spec}: no type {t!r} (waves.yaml type / think_type, --type)")
         d["types"][t]["replicas"] = n
     spec.write_text(yaml.safe_dump(d, sort_keys=False, width=100))
 
@@ -144,23 +146,38 @@ def current(c, swarm: str, types: list[str]) -> dict[str, int]:
     return {t: int((ts.get(t) or {}).get("replicas") or 0) for t in types}
 
 
+def spec_types(spec: Path) -> list[str]:
+    """The spec's replica types (not ephemeral: those are spawned, never replicas)."""
+    from flock.models import load_spec_yaml
+
+    return [t for t, d in load_spec_yaml(spec.read_text())["types"].items()
+            if not d.get("ephemeral")]
+
+
 def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
-          lower: bool = False, stagger: float = 0.0) -> dict:
+          lower: bool = False, stagger: float = 0.0, only: str | None = None) -> dict:
     """Make the total `total` (capped; never lower unless `lower`), apply the spec, log it.
     `stagger` > 0 raises the count one agent at a time, that many seconds apart (each agent is
-    created, and gets its first prompt, on its own), so a wave does not hit the board at once."""
+    created, and gets its first prompt, on its own), so a wave does not hit the board at once.
+    `only`: `total` is that one type's count (the schedule's types keep theirs; the cap counts
+    them too). Every other replica type is written as the controller runs it, so applying the
+    spec never changes it (e.g. agent-pi agents an operator added stay)."""
     from flock.cli import SpecError, load_spec, update_swarm
 
     swarm = load_spec(str(spec)).swarm
-    types = list(sched.split(0))
+    types = [only] if only else list(sched.split(0))
+    keep = [t for t in spec_types(spec) if t not in types]
+    others = current(c, swarm, keep)
     before = current(c, swarm, types)
     have = sum(before.values())
-    total = min(sched.cap, total if lower else max(total, have))
-    counts = sched.split(total)
+    room = sched.cap - (sum(others[t] for t in sched.split(0) if t in others) if only else 0)
+    total = max(0, min(room, total if lower else max(total, have)))
+    split = (lambda k: {only: k}) if only else sched.split
+    counts = split(total)
     rec = {"ts": round(time.time(), 3), "why": why, "before": before, "after": counts,
            "total": total, "cap": sched.cap}
     if counts == before:
-        write_replicas(spec, counts)
+        write_replicas(spec, {**others, **counts})
         rec["lines"] = ["no changes"]
         return rec
     steps = range(have + 1, total + 1) if stagger > 0 and total > have else [total]
@@ -168,7 +185,7 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     for i, k in enumerate(steps):
         if i:
             time.sleep(stagger)
-        write_replicas(spec, sched.split(k))
+        write_replicas(spec, {**others, **split(k)})
         try:
             rec["lines"] = update_swarm(c, str(spec))
         except SpecError as e:
@@ -215,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start", type=float, help="epoch seconds of the run's start")
     ap.add_argument("--interval", type=float, default=30.0, help="run: seconds between ticks")
     ap.add_argument("--log", type=Path, help="default: <spec>.waves.jsonl")
+    ap.add_argument("--type", dest="only", metavar="TYPE",
+                    help="add / set: change only this type's replicas (e.g. agent-pi); the "
+                         "schedule's types keep theirs")
     ap.add_argument("--stagger", type=float, default=0.0,
                     help="add / set: seconds between the new agents (schedule: stagger_s)")
     a = ap.parse_args(argv)
@@ -234,12 +254,15 @@ def main(argv: list[str] | None = None) -> int:
     swarm = load_spec(str(spec)).swarm
     with client() as c:
         if a.cmd == "pin":
-            write_replicas(spec, current(c, swarm, list(sched.split(0))))
+            write_replicas(spec, current(c, swarm, spec_types(spec)))
             return 0
         if a.cmd in ("add", "set"):
-            have = sum(current(c, swarm, list(sched.split(0))).values())
-            rec = apply(c, spec, sched, have + a.n if a.cmd == "add" else a.n,
-                        f"{a.cmd} {a.n}", log, lower=a.cmd == "set", stagger=a.stagger)
+            if a.only and a.only not in spec_types(spec):
+                ap.error(f"--type {a.only}: not a replica type of {spec.name}")
+            have = sum(current(c, swarm, [a.only] if a.only else list(sched.split(0))).values())
+            why = f"{a.cmd} {a.n}" + (f" --type {a.only}" if a.only else "")
+            rec = apply(c, spec, sched, have + a.n if a.cmd == "add" else a.n, why, log,
+                        lower=a.cmd == "set", stagger=a.stagger, only=a.only)
             _say(rec)
             return 1 if "error" in rec else 0
         if a.cmd == "run" and a.start is None and not _has_state(spec):

@@ -12,7 +12,7 @@ Nothing here launches anything. Every value for the operator is a placeholder.
 
 | file | what |
 |---|---|
-| `spec.yaml` | the source spec: types `agent` (thinking off), `agent-think` (thinking on, 0 by default), ephemeral `interviewer`; loop, board, limits |
+| `spec.yaml` | the source spec: types `agent` (thinking off), `agent-think` (thinking on, 0 by default), `agent-pi` (the Pi harness, 0 by default), ephemeral `interviewer`; loop, board, limits |
 | `render.py` | fills in the environment and writes the spec that runs; `--variant selfhosted` (default, single job), `smoke` (30-min loop on the endpoint), `standin` (the smoke on the HF router, $ caps), `jobs` (HF Jobs, world on a Space), `router-smoke` (HF router, $ caps) |
 | `spec.smoke.yaml`, `spec.standin.yaml`, `spec.jobs.yaml`, `spec.router-smoke.yaml` | the derived variants, generated (`render.py --variant X --committed`; a test checks they are current) |
 | `waves.yaml`, `waves-smoke.yaml`, `waves-standin.yaml`, `waves-router-smoke.yaml` | the wave schedules (run; 30-min smoke 20/20/20 cap 40; stand-in 10/10 cap 20; router smoke 2/2/2) |
@@ -69,7 +69,11 @@ vllm serve <hf model path> --served-model-name <MODEL_WORKER> \
 - **Thinking.** DeepSeek-V4.1-Flash's chat template defaults to thinking ON. The `agent` type
   sends `chat_template_kwargs: {thinking: false}`; `agent-think` sends `{thinking: true}`. The
   server needs the reasoning parser on, so thinking arrives as `reasoning_content`; the
-  harness shows it in the transcript and never sends it back (tested).
+  harness shows it in the transcript and never sends it back (tested). `agent-pi` runs Pi
+  (docs/pi.md), which sends no `extra`, so thinking stays the template's default (on); its
+  alias has `reasoning: high` (Pi: `--thinking high`, sent as `reasoning_effort`). Its tools are
+  `flock-tool` commands from Pi's bash (its first prompt opens with a note saying so); image:
+  `slurm/Containerfile.pi`; local proof: `pi_smoke.py`.
 - **`--max-num-seqs` at or above the live agents** (plus interviewers), or turns queue on the
   server.
 - **Prefix caching on**: every turn resends the agent's history.
@@ -100,7 +104,8 @@ a JSON line in `<spec>.waves.jsonl`. The schedule file is re-read at every tick.
   with `FLOCK_URL`/`FLOCK_TOKEN` set; it stops when the schedule is over (300).
   `waves.py status` shows the count and the next wave; `waves.py add 100` or `set 250`
   overrides (`set` may lower). `flock scale run3 agent N` also works; the next wave never
-  lowers it.
+  lowers it. `waves.py add 25 --type agent-pi` adds Pi agents without touching `agent` /
+  `agent-think`; waves, `add` and `pin` keep every other type at the controller's count.
 
 ## Runbook A: single job (smokes, up to ~50 agents)
 
