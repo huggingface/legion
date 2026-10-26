@@ -42,6 +42,10 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   same type). The adapter writes `/state/pi/models.json` atomically on every start: one provider
   (the flock provider name), `api: openai-completions`, `apiKey: "$<VAR>"`. The key is read from the
   environment at request time; it never lands on disk (`auth.json` stays `{}`).
+  With multiple provider `base_urls`, each agent selects an endpoint by a stable
+  name hash and uses `/state/pi/agents/<name>` as its own config home. This prevents
+  different agents from overwriting each other's endpoint in models.json; session
+  files are still synced relative to the adapter's home for restore.
 - **System prompt**: `AGENTS.md` in the workdir. Pi also reads AGENTS.md/CLAUDE.md from parent
   directories and its agent dir, so `/work`, `/work/agents` and `/state/pi` must not have one.
 - **Prompts**: `prompt` with `streamingBehavior: "steer"`. Idle: starts a run

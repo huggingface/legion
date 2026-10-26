@@ -202,3 +202,8 @@ escape hatch: report only, no queueing.
 - Codex with model ids it has no built-in metadata for (context window, auto-compaction).
 - Cost of Codex on the HF router: the working router providers stream zero usage, so it shows
   as $0 with the zero-usage warning.
+
+
+Pi also supports `base_urls` for multiple servers of one model. Agents are spread
+by a stable name hash, and their model config directories are separate when more
+than one endpoint is configured. See [pi.md](pi.md).

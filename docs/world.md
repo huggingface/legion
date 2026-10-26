@@ -246,3 +246,29 @@ Space is public, so the secret is its only protection.
 - Per-service rate budgets: a world call is not rate-limited by flock beyond the 429 / 503
   retries.
 - Batching and delivery guarantees for hooks.
+
+## Local clone uploads (workspace-upload-v1)
+
+A world can advertise `workspace-upload-v1` and implement
+`call_workspace(name, args, agent, snapshot)`. For `open_pr(path=...)` and
+`run_bot(ref_or_path=<local path>)`, the worker captures a git clone rooted inside
+the caller's workdir. It forwards `{args: {...}, workspace: {base_sha, files}}` to
+the existing authenticated tool route; the file map contains base64 bytes. The
+upload is outside the model's tool arguments, so the model supplies neither a
+server path nor a base SHA. `main` and `pr:<number>` use no upload.
+
+Only tracked and nonignored files are captured; missing tracked files represent
+deletions. Symlinks, paths outside the agent workspace, git metadata, more than
+10,000 files or more than 128 MiB are refused. The base is the merge base of local
+HEAD and origin/main; the world validates it against its own history. Commit
+local edits and fetch/rebase before refreshing a stale PR. Upload-capable calls
+have a 330-second HTTP read timeout so a 300-second conversation can finish.
+Other worlds keep their existing timeout and dispatch behavior.
+
+The chatbot4 world preserves the seed input/output and module loader, runs the
+bot under stdlib/import and side-effect restrictions with resource limits, and
+requires a different agent's review of the exact PR head. It refuses stale bases
+instead of rebasing automatically; refreshing a PR always requires fresh review.
+`prs.jsonl` records PR events with both the main parent and PR head for merges.
+`eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
+this implementation does not start an evaluator.

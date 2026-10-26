@@ -554,3 +554,25 @@ def test_down_dry_run_and_stuck_controller_leave_the_state(tmp_path, monkeypatch
 def test_down_needs_a_wheel_or_state_url():
     with pytest.raises(SystemExit):
         jobdeploy.main(["--down", "--group", "g", "--namespace", "me"], {})
+
+
+def test_subsequent_state_push_uploads_only_changed_event_files(tmp_path):
+    bucket = FakeBucket(tmp_path / "bucket")
+    store = Store(tmp_path / "data")
+    sync = StateSync(bucket, tmp_path / "data")
+    store.put_swarm(make_spec(), 1.0)
+    for i in range(3):
+        name = f"researcher-{i:04d}"
+        store.insert_agent(name, "demo", "researcher", i, 1.0)
+        store.append_events("demo", name, [_event(name, 0)])
+    assert sync.push(store) == 4
+    store.append_events("demo", "researcher-0001", [_event("researcher-0001", 1)])
+    assert sync.push(store) == 2  # DB and one changed agent, not the whole event tree
+    assert bucket.ops == ["upload", "sync_up", "upload", "upload"]
+    restored_dir = tmp_path / "restored"
+    assert StateSync(bucket, restored_dir).restore()
+    restored = Store(restored_dir)
+    assert restored.event_count("researcher-0001") == 2
+    assert restored.event_count("researcher-0000") == 1
+    restored.close()
+    store.close()

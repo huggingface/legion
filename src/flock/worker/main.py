@@ -287,9 +287,13 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
             return ClaudeAdapter(workdir)
         if spec.harness.value == "pi":
             from flock.controller.prices import type_price_table
-            from flock.worker.adapters.pi import PiAdapter, pi_model_config
+            from flock.worker.adapters.pi import PiAdapter, pi_home, pi_model_config
 
-            return PiAdapter(workdir, agent=name, model_config=pi_model_config(spec),
+            # Each endpoint needs its own models.json; agents on one worker can
+            # target different servers, so keep their Pi config directories separate.
+            multi = spec.resolved_model and len(spec.resolved_model.provider.endpoints) > 1
+            home = pi_home() / "agents" / name if multi else None
+            return PiAdapter(workdir, agent=name, home=home, model_config=pi_model_config(spec, name),
                              prices=type_price_table(spec))
         if spec.harness.value == "llm":
             from flock.controller.prices import type_price_table

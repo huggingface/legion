@@ -41,6 +41,7 @@ class StateSync:
         self._pushed_at_change: int | None = None  # store.changes() at the last push
         self._lock = threading.Lock()  # the periodic push and the final push never overlap
         self.pushes = 0
+        self._event_versions: dict[str, tuple[int, int]] | None = None
 
     def restore(self) -> bool:
         """Before the Store opens: replace the local DB (and event files) with the bucket's copy.
@@ -91,8 +92,24 @@ class StateSync:
             files = 1
             events_dir = self.data_dir / EVENTS
             if self.events and events_dir.is_dir():
-                self.bucket.sync_up(events_dir, EVENTS)
-                files += sum(1 for p in events_dir.rglob("*") if p.is_file())
+                versions = {}
+                paths = {}
+                for path in events_dir.rglob("*"):
+                    if path.is_file():
+                        stat = path.stat()
+                        rel = f"{EVENTS}/{path.relative_to(events_dir).as_posix()}"
+                        versions[rel] = (stat.st_size, stat.st_mtime_ns)
+                        paths[rel] = path
+                if self._event_versions is None:
+                    self.bucket.sync_up(events_dir, EVENTS)
+                    files += len(paths)
+                else:
+                    changed = [(paths[rel], rel) for rel, version in versions.items()
+                               if self._event_versions.get(rel) != version]
+                    if changed:
+                        self.bucket.upload(changed)
+                        files += len(changed)
+                self._event_versions = versions
             self._pushed_at_change = changes
             self.pushes += 1
             return files

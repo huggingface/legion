@@ -140,6 +140,8 @@ def notice_line(notices: list[dict]) -> str:
     the agent's last round, grouped by (kind, thread): mentions by humans first, then other
     mentions, then replies in the agent's threads, each in the order they came; at most
     NOTICE_GROUPS groups and NOTICE_NAMES names per group (humans first), the rest counted."""
+    if any(n.get("channel") or n["kind"] in ("dm", "channel") for n in notices):
+        return extended_notice_line(notices)
     groups: dict[tuple[str, int], list[dict]] = {}
     for n in notices:
         groups.setdefault((n["kind"], n["thread"]), []).append(n)
@@ -181,6 +183,32 @@ def _new_agent() -> dict[str, Any]:
             "final": None, "final_sent": None,
             "wakes": 0, "wake_last": None, "wake_times": [],  # wake prompts sent (`on:`)
             "inflight": None}  # {kind, round} of a loop prompt the worker took, until its turn starts
+
+
+def extended_notice_line(notices: list[dict]) -> str:
+    groups = {}
+    for n in notices:
+        groups.setdefault((n["kind"], n.get("channel", ""), n["thread"]), []).append(n)
+    parts = []
+    ordered = sorted(groups.items(), key=lambda x: {"dm": 0, "mention": 1, "reply": 2}.get(x[0][0], 3))
+    for (kind, channel, thread), ns in ordered[:NOTICE_GROUPS]:
+        names = list(dict.fromkeys(_who(n) for n in ns))
+        shown = ", ".join(names[:NOTICE_NAMES])
+        if len(names) > NOTICE_NAMES:
+            shown += f", +{len(names) - NOTICE_NAMES} more"
+        where = "".join(c for c in str(channel) if c not in "{}\n\r")[:64]
+        suffix = f" in #{where}" if where else ""
+        if kind == "dm":
+            parts.append(f"DM from {shown} (channel {where})")
+        elif kind == "mention":
+            parts.append(f"{shown} mentioned you{suffix}, thread {thread}")
+        elif kind == "channel":
+            parts.append(f"new topic{suffix}, thread {thread} ({shown})")
+        else:
+            parts.append(f"{len(ns)} replies{suffix}, thread {thread} ({shown})")
+    if len(ordered) > NOTICE_GROUPS:
+        parts.append(f"+{len(ordered) - NOTICE_GROUPS} more groups")
+    return NOTICE_HEAD + "; ".join(parts) + ". Read them if useful."
 
 
 # A prompt sender: (swarm, type, agents, build) -> names of the agents that got a prompt.
@@ -260,7 +288,7 @@ class LoopEngine:
             thread, mid = data.get("thread"), data.get("msg_id")
             if st is None or st["phase"] == "done" or not isinstance(thread, int):
                 return False
-            kind = "mention" if reason == "mention" else "reply"
+            kind = reason if reason in ("mention", "dm", "channel") else "reply"
             pending = st.get("notices") or []
             if mid is not None and any(n["msg_id"] == mid and n["kind"] == kind for n in pending):
                 return False
@@ -269,6 +297,8 @@ class LoopEngine:
                 sender != "?" and self.store.get_agent(sender) is None)  # not one of ours
             pending.append({"msg_id": mid, "thread": thread, "from": sender, "kind": kind,
                             "human": human})
+            if data.get("channel"):
+                pending[-1]["channel"] = str(data["channel"])
             st["notices"] = pending[-NOTICE_KEEP:]
             self.store.put_loop_agent(agent, a["swarm"], a["type"], st)
             return True
@@ -385,7 +415,9 @@ class LoopEngine:
                     if finished:
                         stop_reason = "done"
                     if L.get("mode") == "controller":
-                        st["errors"] = 0 if status == "completed" or max_turns else st["errors"] + 1
+                        st["errors"] = (0 if status == "completed" or max_turns else
+                                        st["errors"] if d.get("reason") in ("timeout", "model_transport")
+                                        else st["errors"] + 1)
                         if st["errors"] >= ERROR_LIMIT:
                             stop_reason = "errors"
                         st["turn_done"] = True

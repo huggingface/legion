@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flock.models import COMMS_TOOLS, Grant, GrantLimits, SwarmSpec
+from flock.models import ALL_COMMS_TOOLS as COMMS_TOOLS
+from flock.models import Grant, GrantLimits, SwarmSpec
 
 # Keys whose values are prompt text: reported as "prompts changed", never printed.
 PROMPT_KEYS = ("system_prompt", "prompt", "first", "kickoff", "protocols_text")

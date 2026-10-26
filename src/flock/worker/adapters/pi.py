@@ -86,13 +86,16 @@ class PiModelConfig:
                                               "apiKey": f"${self.api_key_env}", "models": [model]}}}
 
 
-def pi_model_config(spec: TypeSpec) -> PiModelConfig | None:
+def pi_model_config(spec: TypeSpec, agent: str = "") -> PiModelConfig | None:
     """Pi's endpoint for a provider-backed type (`spec.resolved_model`). None: a harness-native
     model, passed to Pi as given (one of Pi's built-in providers, e.g. `anthropic/claude-...`)."""
     r = spec.resolved_model
     if r is None:
         return None
-    return PiModelConfig(base_url=r.provider.base_url or "", api_key_env=r.provider.api_key_env,
+    from flock.worker.adapters.llm import pick_endpoint
+
+    endpoint = pick_endpoint(agent, r.provider.endpoints) if agent else r.provider.base_url
+    return PiModelConfig(base_url=endpoint or "", api_key_env=r.provider.api_key_env,
                          model_id=r.model_id, provider=r.provider_name,
                          reasoning=spec.effective_reasoning)
 
@@ -239,7 +242,12 @@ class PiMapper:
             if rec.get("aborted"):
                 return [AdapterEvent("turn_ended", status="interrupted", raw=rec)]
             if last.get("stopReason") == "error":
-                return [AdapterEvent("turn_ended", status="error", error=last.get("errorMessage"), raw=rec)]
+                message = str(last.get("errorMessage") or "")
+                transient = any(x in message.lower() for x in (
+                    "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
+                    "connection refused", "socket", "429", "503", "502", "abort"))
+                return [AdapterEvent("turn_ended", status="error", error=message, raw=rec,
+                                     data={"reason": "model_transport"} if transient else {})]
             return [AdapterEvent("turn_ended", status="completed", raw=rec)]
         if t == "auto_retry_end" and not rec.get("success", True):
             return [AdapterEvent("error", error=str(rec.get("finalError") or rec.get("error") or

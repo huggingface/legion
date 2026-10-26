@@ -114,7 +114,7 @@ class _Routes:
                                                                        "limit": n}}
 
     @staticmethod
-    def activity(channel: int, after: int | None, wait: float) -> tuple[str, str, dict]:
+    def activity(channel: int | str, after: int | None, wait: float) -> tuple[str, str, dict]:
         params = _query({"after": after, "wait": wait if after is not None and wait else None,
                          "channels": channel, "limit": 200})
         return "GET", "/v1/activity", {"params": params}
@@ -196,7 +196,7 @@ class AsyncBoard:
         """{messages (the thread's newest n, oldest first), has_more, next_cursor}."""
         return await self.request(_Routes.thread(channel, root, n), cred)
 
-    async def activity(self, cred: Credential, channel: int, after: int | None, wait: float = 0) -> dict:
+    async def activity(self, cred: Credential, channel: int | str, after: int | None, wait: float = 0) -> dict:
         return await self.request(_Routes.activity(channel, after, wait), cred)
 
     async def search(self, cred: Credential, q: str, *, sort: str = "relevance", limit: int = 20) -> dict:

@@ -532,3 +532,23 @@ async def test_pi_runtime_reports_limit_in_turn_ended(tmp_path, fake_server, mon
     [ended] = [r["data"] for r in map(json.loads, rt.log.path.read_text().splitlines())
                if r.get("customType") == "turn_ended"]
     assert ended["status"] == "error" and ended["reason"] == "max_turns" and ended["num_turns"] == 1
+
+
+def test_pi_spreads_agents_over_multiple_endpoints_without_shared_config():
+    raw = {"swarm": "multi", "compute": "local", "models": {"m": {"model": "vllm:test"}},
+           "providers": {"vllm": {"type": "openai_compat", "api_key_env": "OPENAI_API_KEY",
+               "base_urls": ["http://first/v1", "http://second/v1"], "self_hosted": True}},
+           "types": {"agent": {"harness": "pi", "model": "m"}}}
+    spec = SwarmSpec.model_validate(raw).types["agent"]
+    configs = [pi_model_config(spec, f"agent-{i:04d}") for i in range(50)]
+    assert {c.base_url for c in configs} == {"http://first/v1", "http://second/v1"}
+    assert pi_model_config(spec, "agent-0000") == pi_model_config(spec, "agent-0000")
+
+
+def test_pi_transport_error_has_retryable_reason():
+    mapper = PiMapper()
+    mapper.on_record({"type": "agent_start"})
+    mapper.on_record({"type": "message_end", "message": {"role": "assistant",
+        "stopReason": "error", "errorMessage": "fetch failed: connection reset"}})
+    [ended] = mapper.on_record({"type": "agent_settled"})
+    assert ended.status == "error" and ended.data["reason"] == "model_transport"

@@ -57,9 +57,11 @@ from flock.comms.tools import (
     thread_of,
     tool_def,
 )
-from flock.models import COMMS_TOOLS, CommsSpec, comms_name, normalize_board_url
+from flock.models import ALL_COMMS_TOOLS as COMMS_TOOLS
+from flock.models import CommsSpec, comms_name, normalize_board_url
 from flock.tools.runner import Result, check_args
 from flock.tools.toolset import GATEWAY_LINE_MAX, Toolset
+from flock.worker.comms_extended import ExtendedComms
 from flock.worker.identity import Identities, MsgboardIdentity
 
 if TYPE_CHECKING:
@@ -96,6 +98,9 @@ class Member:
     # fallbacks when the agent has no runtime (tests); otherwise its synced AgentState
     posts: int = 0
     last_post: float | None = None
+    channels: set[int] = field(default_factory=set)
+    created_channels: list[int] = field(default_factory=list)
+    cursor: int | None = None
 
 
 class _Stale(Exception):
@@ -146,7 +151,7 @@ def _err(msg: str, t0: float) -> Result:
     return Result(json.dumps({"error": msg}, ensure_ascii=False), True, time.monotonic() - t0)
 
 
-class CommsHub:
+class CommsHub(ExtendedComms):
     def __init__(self, *, swarm: str, identities: Identities | None = None,
                  runtime: Callable[[str], AgentRuntime | None] | None = None,
                  env: Mapping[str, str] | None = None,
@@ -154,6 +159,7 @@ class CommsHub:
                  clock: Callable[[], float] = time.time, poll_wait: float = POLL_WAIT_S,
                  backoff_s: float = 1.0) -> None:
         self.swarm = swarm
+        self._init_extended()
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
                                                                              timeout=20))
         self._runtime = runtime or (lambda name: None)
@@ -383,6 +389,8 @@ class CommsHub:
             rt = self._runtime(agent)
             if rt is not None:
                 m.threads.update(rt.state.comms_threads)
+            if c.extended:
+                await self._extended_join(m, c)
             self.stats["joins"] += 1
             self._emit(agent, "comms_joined", {"principal": ident.principal, "principal_id": ident.id,
                                                "channel": c.channel, "channel_id": c.channel_id})
@@ -488,7 +496,7 @@ class CommsHub:
         if "mentions" in msg:
             for x in msg.get("mentions") or []:
                 who = (m.ident is not None and x.get("id") == m.ident.id) or x.get("external_id") == m.name
-                if who and str(x.get("as") or "").lstrip("@").lower() not in GROUP_NAMES:
+                if who and (self.spec.extended or str(x.get("as") or "").lstrip("@").lower() not in GROUP_NAMES):
                     return True
             return False
         return re.search(rf"(?<![\w@])@{re.escape(m.name)}(?![\w-])", msg.get("body") or "") is not None
@@ -506,6 +514,9 @@ class CommsHub:
         messages of the current subscription count: data returned by a request of an older
         generation, another board or another channel is dropped (no cache entry, no event)."""
         c = self.spec
+        if c is not None and c.extended:
+            self._extended_fanout(msgs, source)
+            return
         if c is None or source != self.current():
             return
         for x in sorted(msgs, key=lambda x: x.get("id") or 0):
@@ -534,13 +545,23 @@ class CommsHub:
         c = self.spec
         assert c is not None
         sender = author(x)
+        channel = x.get("channel") or {}
         data = {"msg_id": x["id"], "thread": thread_of(x), "from": sender}
+        if channel and c.extended:
+            data.update(channel=channel.get("name") or str(channel.get("id")),
+                        channel_id=channel.get("id"), identity_type=(x.get("sender") or {}).get("identity_type"))
+        if channel.get("kind") == "dm":
+            if "dm" in c.wake:
+                self._emit(m.name, "comms_dm", data)
+            return
         if "mention" in c.wake and self._mentions(x, m):
             self.stats["mentions"] += 1
             self._emit(m.name, "comms_mention", data)
         elif "thread" in c.wake and x.get("thread_id") and x["thread_id"] in m.threads:
             self.stats["thread_replies"] += 1
             self._emit(m.name, "comms_thread_reply", data)
+        elif "channel" in c.wake and not x.get("thread_id"):
+            self._emit(m.name, "comms_channel_message", data)
 
     def _replay(self, m: Member) -> None:
         """An agent is back after a re-join: the messages the poller saw meanwhile."""
@@ -565,6 +586,9 @@ class CommsHub:
         return m
 
     async def _poll_loop(self) -> None:
+        if self.spec is not None and self.spec.extended:
+            await self._poll_extended()
+            return
         attempt = 0
         while self.active:
             m = self._poll_member()
@@ -613,6 +637,10 @@ class CommsHub:
                 op = _Op(m, m.ident, self.spec, self._gen)  # one identity, its own board
                 if op.ident is None or op.c is None or not same_board(op.ident.url, op.c.url):
                     raise BoardError("comms settings changed during the call; try again")
+                if entry not in ("comms:post", "comms:read", "comms:search"):
+                    return _ok(await self._extended_call(op, entry, args), t0)
+                if args.get("channel") is not None:
+                    op = await self._channel_op(op, args["channel"])
                 fn = {"comms:post": self._post, "comms:read": self._read,
                       "comms:search": self._search}[entry]
                 return _ok(await fn(op, args), t0)
@@ -677,6 +705,8 @@ class CommsHub:
         self.stats["posts"] += 1
         if isinstance(msg, dict) and isinstance(msg.get("id"), int):
             msg.setdefault("channel_id", c.channel_id)
+            if c.extended:
+                msg.setdefault("channel", {"id": c.channel_id, "name": c.channel, "kind": "public"})
             self.fanout([msg], op.source)  # dropped if the settings changed during the post
         out: dict[str, Any] = {"posted": msg.get("id"), "thread": thread_of(msg) if msg.get("id") else None}
         if rules.max_posts:

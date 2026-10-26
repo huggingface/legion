@@ -77,6 +77,9 @@ class AgentState(BaseModel):
     last_summary: str | None = None  # what the agent last passed to `done` (else its last reply)
     # comms (docs/comms.md): posts made (max_posts), the last one's wall time (min_post_gap),
     # and the threads the agent posted in (thread-reply wakes), so a relaunch keeps them
+    comms_cursor: int | None = None
+    comms_board: str | None = None
+    comms_created_channels: list[int] = Field(default_factory=list)
     comms_posts: int = 0
     comms_last_post: float | None = None
     comms_threads: list[int] = Field(default_factory=list)
@@ -618,7 +621,7 @@ class AgentRuntime:
                 if finished and self.loop is not None and lp is not None and lp.stop_when.all_agents_done:
                     self._loop_end("done")  # no next round; the controller takes it out too
                 self._after_turn(ev.status or "completed",
-                                 "max_turns" if hit_max_turns(ev.data) else None)
+                                 "max_turns" if hit_max_turns(ev.data) else ev.data.get("reason"))
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
         self.dirty = True
@@ -797,6 +800,9 @@ class AgentRuntime:
             return
         if status == "interrupted" and (reason is None or reason in _DECIDED):
             return  # stopped on purpose: the controller decides what comes next
+        if reason in ("timeout", "model_transport"):
+            self._loop_schedule(LOOP_ERROR_BACKOFF, f"retry after {reason}")
+            return
         self._loop_errors += 1
         if self._loop_errors >= LOOP_ERROR_LIMIT:
             self._loop_end("errors")

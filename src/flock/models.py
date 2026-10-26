@@ -126,7 +126,7 @@ class ProviderSpec(BaseModel):
     # Several servers of one model (openai_compat, the `llm` harness): each agent is pinned to one
     # by a stable hash of its name (rendezvous hashing) and keeps it while it stays listed, so
     # its prefix cache stays warm. `base_url` is the one-element form; with `base_urls` it
-    # defaults to the first. Other harnesses and preflight's first probe use `base_url`.
+    # defaults to the first. Pi also hashes by agent; other harnesses use `base_url`.
     base_urls: list[str] | None = None
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
@@ -222,6 +222,9 @@ class ResolvedModel(BaseModel):
 
 # Built-in comms tools a type may list in `tools:`; the model sees the bare name (`post`).
 COMMS_TOOLS = ("comms:post", "comms:read", "comms:search")
+EXTENDED_COMMS_TOOLS = ("comms:channels", "comms:create_channel", "comms:join_channel",
+                        "comms:dm", "comms:read_dms", "comms:react")
+ALL_COMMS_TOOLS = COMMS_TOOLS + EXTENDED_COMMS_TOOLS
 COMMS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
@@ -258,6 +261,8 @@ class CommsRules(BaseModel):
     max_posts: int | None = None  # per agent, for the run (kept in the agent's synced state)
     max_len: int | None = None  # characters per post
     threads: Literal["per_topic"] | None = None  # posts must say thread: new or a root id
+    max_channels_per_agent: int = Field(default=3, ge=1, le=100)
+    max_channels: int = Field(default=60, ge=1, le=100)
     no_group_mentions: bool = False  # refuse @all / @agents / @humans (and @everyone, @people)
 
     @field_validator("min_post_gap")
@@ -288,6 +293,7 @@ class CommsSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     kind: Literal["msgboard"] = "msgboard"
+    extended: bool = False  # multi-channel tools and serialized per-identity activity polling
     url: str
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
     channel: str  # name, with or without `#`
@@ -296,7 +302,7 @@ class CommsSpec(BaseModel):
     rules: CommsRules = Field(default_factory=CommsRules)
     protocols: list[str] = Field(default_factory=list)  # files appended to the instructions
     protocols_text: list[str] = Field(default_factory=list)  # inlined by `flock apply`
-    wake: list[Literal["mention", "thread"]] = Field(default_factory=lambda: ["mention", "thread"])
+    wake: list[Literal["mention", "thread", "dm", "channel"]] = Field(default_factory=lambda: ["mention", "thread"])
     search: Literal["board", "index"] | None = "board"
     # Written by the controller at apply; anything given by hand is replaced.
     channel_id: int | None = None
@@ -343,12 +349,13 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
     them with `comms: true` (search only when the swarm's `comms.search` is set)."""
     if comms is None or ts.comms is False:
         return []
-    listed = [t for t in ts.tools if t in COMMS_TOOLS] if isinstance(ts.tools, list) else []
+    listed = [t for t in ts.tools if t in ALL_COMMS_TOOLS] if isinstance(ts.tools, list) else []
     if listed:
         return list(dict.fromkeys(listed))
     if not ts.comms:
         return []
-    return [t for t in COMMS_TOOLS if t != "comms:search" or comms.search]
+    return [t for t in (ALL_COMMS_TOOLS if comms.extended else COMMS_TOOLS)
+            if t != "comms:search" or comms.search]
 
 
 # --------------------------------------------------------------------------- world (docs/world.md)
@@ -509,7 +516,7 @@ class TypeSpec(BaseModel):
     @classmethod
     def _known_comms(cls, v: list[str] | str | None) -> list[str] | str | None:
         if isinstance(v, list):
-            bad = [t for t in v if t.startswith("comms:") and t not in COMMS_TOOLS]
+            bad = [t for t in v if t.startswith("comms:") and t not in ALL_COMMS_TOOLS]
             if bad:
                 raise ValueError(f"unknown comms tool(s) {', '.join(bad)}; comms tools: "
                                  f"{', '.join(COMMS_TOOLS)}")
@@ -781,7 +788,7 @@ class SwarmSpec(BaseModel):
         `comms:search` needs `comms.search`; `comms: false` with listed comms tools is a
         contradiction."""
         for name, ts in self.types.items():
-            listed = [t for t in ts.tools if t in COMMS_TOOLS] if isinstance(ts.tools, list) else []
+            listed = [t for t in ts.tools if t in ALL_COMMS_TOOLS] if isinstance(ts.tools, list) else []
             if (ts.comms or listed) and self.comms is None:
                 raise ValueError(f"types.{name}: comms tools need the swarm-level `comms:` block "
                                  "(kind, url, invite_env, channel)")

@@ -905,3 +905,17 @@ async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
     sim.tick(2.1)
     w = prompts(await sim.commands())[A0]["loop"]
     assert (w["round"], w["why"], w["wake"]) == (2, "wake: comms.mention", True)
+
+
+async def test_transport_stalls_do_not_exhaust_controller_loop(sim):
+    await sim.apply({"prompt": "p", "every": "5s"})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for reason in ("model_transport", "timeout") * 3:
+        await sim.turn(A0, got[A0], status="error", reason=reason)
+        sim.tick(5)
+        got = prompts(await sim.commands())
+        assert A0 in got
+    state = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
+    assert (state["phase"], state["errors"]) == ("looping", 0)

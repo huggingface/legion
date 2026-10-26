@@ -42,6 +42,7 @@ from flock.world.protocol import (
     TURN_HEADER,
     TYPE_HEADER,
 )
+from flock.world.workspace import MAX_BYTES
 
 log = logging.getLogger("flock.world")
 
@@ -125,7 +126,13 @@ def create_app(world: World, token: str | None) -> FastAPI:
     @app.post("/tools/{name}")
     async def call(name: str, request: Request):
         try:
-            body = await request.json()
+            limit = MAX_BYTES * 4 // 3 + (4 << 20) if "workspace-upload-v1" in world.capabilities else 1 << 20
+            data = bytearray()
+            async for chunk in request.stream():
+                data.extend(chunk)
+                if len(data) > limit:
+                    return _error("bad_request", "tool request is too large", 413)
+            body = json.loads(data)
         except ValueError:
             return _error("bad_request", "the body must be JSON: {\"args\": {...}}", 400)
         args = body.get("args") if isinstance(body, dict) else None
@@ -140,7 +147,14 @@ def create_app(world: World, token: str | None) -> FastAPI:
         if err := check_args(tools[name], args):
             return _error("bad_args", f"{name}: {err}")
         try:
-            result = await run_in_threadpool(locked, world.call, name, args, agent)
+            if isinstance(body, dict) and "workspace" in body:
+                handler = getattr(world, "call_workspace", None)
+                if "workspace-upload-v1" not in world.capabilities or handler is None:
+                    return _error("bad_request", "this world does not accept workspace uploads", 400)
+                result = await run_in_threadpool(locked, handler, name, args, agent,
+                                                body["workspace"])
+            else:
+                result = await run_in_threadpool(locked, world.call, name, args, agent)
             if inspect.isawaitable(result):
                 if getattr(world, "cancellable", lambda _: False)(name):
                     try:

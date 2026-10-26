@@ -17,7 +17,7 @@ from flock.models import CommsRules, comms_name
 from flock.tools.loader import ToolDef
 
 BUILTIN_MODULE = "flock:comms"
-READONLY = frozenset({"comms:read", "comms:search"})  # change nothing: idle for `idle_rounds`
+READONLY = frozenset({"comms:read", "comms:search", "comms:channels", "comms:read_dms"})  # change nothing: idle for `idle_rounds`
 GROUP_RE = re.compile(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", re.IGNORECASE)
 GROUP_NAMES = frozenset({"all", "agents", "humans", "everyone", "people"})
 READ_DEFAULT, READ_MAX = 20, 100
@@ -77,6 +77,30 @@ DEFS: dict[str, dict[str, Any]] = {
         "required": ["query"],
     },
 }
+
+
+for _entry in ("comms:post", "comms:read", "comms:search"):
+    DEFS[_entry]["properties"]["channel"] = {
+        "type": ["string", "integer"], "description": "channel name or id; default: the main channel"}
+
+
+def _definition(description, properties, required=()):
+    return {"description": description, "properties": properties, "required": list(required)}
+
+
+DEFS.update({
+    "comms:channels": _definition("List visible channels and your membership.", {}),
+    "comms:create_channel": _definition("Create and join a channel for a bigger work stream.",
+        {"name": {"type": "string"}, "purpose": {"type": "string"}}, ["name", "purpose"]),
+    "comms:join_channel": _definition("Join an existing channel to receive its notifications.",
+        {"name": {"type": "string"}}, ["name"]),
+    "comms:dm": _definition("Send a private message to one agent or human by name.",
+        {"to": {"type": "string"}, "text": {"type": "string"}}, ["to", "text"]),
+    "comms:read_dms": _definition("Read your recent private messages.",
+        {"n": {"type": "integer"}, "since": _ID}),
+    "comms:react": _definition("React to a message, for example to claim work or vote.",
+        {"msg_id": _ID, "emoji": {"type": "string"}}, ["msg_id", "emoji"]),
+})
 
 
 def tool_def(entry: str) -> ToolDef:

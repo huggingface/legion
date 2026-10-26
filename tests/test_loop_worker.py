@@ -343,3 +343,23 @@ async def test_a_turn_stopped_without_done_replaces_the_stale_summary(tmp_path):
     assert ad.sent == ["round 1: (none yet)", "round 2: built v1", f"round 3: {line}"]
     assert rt.state.last_summary == line
     await rt.stop()
+
+
+class TransportFailureAdapter(ScriptedAdapter):
+    async def _finish(self):
+        await asyncio.sleep(self.turn_time)
+        self._q.put(AdapterEvent("turn_ended", status="error", error="fetch failed",
+                                data={"reason": "model_transport"}))
+        self._turn = None
+
+
+async def test_transport_stalls_do_not_exhaust_worker_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=TransportFailureAdapter(tmp_path / "h"))
+    await rt.setup(restore=False)
+    rt.start_loop(start(max_rounds=5))
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    assert len(ad.sent) == 5
+    assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds"
+    assert rt._loop_errors == 0
+    await rt.stop()

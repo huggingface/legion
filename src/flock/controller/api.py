@@ -84,7 +84,8 @@ from flock.world.host import resolve as world_resolve
 
 log = logging.getLogger(__name__)
 # Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
-COMMS_WAKE_EVENTS = {"comms_mention": "mention", "comms_thread_reply": "thread"}
+COMMS_WAKE_EVENTS = {"comms_mention": "mention", "comms_thread_reply": "thread",
+                    "comms_dm": "dm", "comms_channel_message": "channel"}
 
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt

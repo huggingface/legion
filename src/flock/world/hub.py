@@ -56,6 +56,7 @@ from flock.world.protocol import (
     credential_id,
     origin_matches,
 )
+from flock.world.workspace import capture
 
 log = logging.getLogger(__name__)
 
@@ -346,13 +347,28 @@ class WorldHub:
         rt = self._runtime(agent)
         if rt is not None and getattr(rt, "turn_id", None):
             headers[TURN_HEADER] = rt.turn_id
+        payload = {"args": args}
+        if "workspace-upload-v1" in snap.manifest.capabilities:
+            local = args.get("path", "chatbot-swarm") if name == "open_pr" else None
+            if name == "run_bot":
+                ref = args.get("ref_or_path", "main")
+                if ref != "main" and not str(ref).startswith("pr:"):
+                    local = ref
+            if local is not None:
+                if rt is None:
+                    return _err("no local workspace is available", t0)
+                try:
+                    payload["workspace"] = await asyncio.to_thread(capture, rt.workdir, local)
+                except (ValueError, OSError) as exc:
+                    return _err(str(exc), t0)
         wname = snap.manifest.name
+        timeout = max(self.timeout, 330) if "workspace-upload-v1" in snap.manifest.capabilities else self.timeout
         for attempt in range(RETRIES + 1):
             try:
-                r = await self._http().post(f"{snap.endpoint}/tools/{name}", json={"args": args},
-                                            headers=headers, timeout=self.timeout)
+                r = await self._http().post(f"{snap.endpoint}/tools/{name}", json=payload,
+                                            headers=headers, timeout=timeout)
             except httpx.TimeoutException:
-                return _err(f"{name}: world {wname} did not answer within {self.timeout:g} s", t0)
+                return _err(f"{name}: world {wname} did not answer within {timeout:g} s", t0)
             except httpx.HTTPError as e:
                 return _err(f"{name}: world {wname} is unreachable ({type(e).__name__})", t0)
             if r.status_code in (429, 503) and attempt < RETRIES:
