@@ -1,0 +1,57 @@
+swarm: run4
+compute: local
+naming: words
+providers:
+  vllm:
+    type: openai_compat
+    base_url: https://your-vllm.example.invalid/v1
+    api_key_env: OPENAI_API_KEY
+    self_hosted: true
+    timeout_s: 300
+    max_retries: 5
+    pricing: {"*": [0, 0, 0]}
+models:
+  worker-pi: {model: 'vllm:MODEL_WORKER', reasoning: high}
+world:
+  dir: ../../worlds/chatbot4
+  command: ['{python}', chatbot4.py, serve]
+  token_env: CHATBOT_WORLD_TOKEN
+comms:
+  kind: msgboard
+  extended: true
+  url: https://cmpatino-msgboard-chatbot.hf.space
+  invite_env: CHATBOT_BOARD_INVITE
+  channel: general
+  wake: [mention, thread, dm, channel]
+  rules:
+    min_post_gap: 10s
+    max_len: 2000
+    threads: per_topic
+    no_group_mentions: false
+    max_channels_per_agent: 3
+    max_channels: 60
+  protocols: []
+types:
+  agent:
+    harness: pi
+    model: worker-pi
+    replicas: 0
+    agents_per_worker: 12
+    system_prompt_file: prompts/system.md
+    comms: true
+    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs']
+    persist_workdir: true
+    secrets: [OPENAI_API_KEY]
+    max_turns: 150
+    turn_timeout: 2h
+    worker_lifetime: 54h
+    lifetime_jitter: 0s
+    resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
+    loop:
+      prompt_file: prompts/round.md
+      every: turn_end
+      notices: true
+      on: [comms.mention, comms.thread, comms.dm, comms.channel]
+      while: {until: 48h, max_rounds: 10000}
+      final: {prompt_file: prompts/final.md}
+limits: {agents: 300}

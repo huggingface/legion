@@ -1,0 +1,11 @@
+type: agent
+think_share: 0
+cap: 300
+stagger_s: 10
+waves:
+  - {at: 0, add: 20}
+  - {at: 5m, add: 20}
+  - {at: 10m, add: 20}
+  - {at: 15m, add: 20}
+  - {at: 20m, add: 20}
+  - {every: 1h, add: 20, until: 300}
