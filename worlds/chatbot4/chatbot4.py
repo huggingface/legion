@@ -1,15 +1,15 @@
 """Run-4 world: local snapshots, native Hub PRs and independent reviews."""
 from __future__ import annotations
 
+import base64
 import contextvars
 import json
 import os
 import re
-import shutil
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 
 from repository import Hub, Repository
@@ -22,6 +22,9 @@ from flock.world.workspace import unpack
 HERE = Path(__file__).resolve().parent
 UPLOAD = contextvars.ContextVar("workspace", default=None)
 FIXED = ("bot/__init__.py", "bot/__main__.py", "bot/runtime.py", "bot/modules/__init__.py")
+MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
+EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+           "*.egg-info/", ".DS_Store")
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
@@ -76,31 +79,67 @@ class Chatbot4World(World):
             UPLOAD.reset(token)
 
     def _files(self, snapshot, tree):
-        for child in tree.iterdir():
-            if child.name == ".git":
+        """Apply an upload over tree (a checkout of its base, or an empty directory).
+
+        Byte-identical files are not rewritten; tracked files missing from the upload are
+        deleted. Returns the paths that differ from the tree, for the compile check.
+        """
+        files = snapshot.get("files")
+        if not isinstance(files, dict):
+            raise ToolError("invalid workspace upload", "bad_workspace")
+        changed = {}
+        for name, encoded in files.items():
+            rel = PurePosixPath(name) if isinstance(name, str) else None
+            if (rel is None or rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts
+                    or "\\" in name or not isinstance(encoded, str)):
+                raise ToolError("invalid workspace upload", "bad_workspace")
+            if len(encoded) > (MAX_FILE_BYTES + 2) // 3 * 4:
+                raise ToolError(f"file too large: {name[:200]} is over {MAX_FILE_BYTES} bytes; "
+                                "remove it from the clone or add it to .gitignore", "file_too_large")
+            target = tree / rel
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise ToolError("invalid workspace upload", "bad_workspace") from exc
+            if len(data) > MAX_FILE_BYTES:
+                raise ToolError(f"file too large: {name[:200]} is over {MAX_FILE_BYTES} bytes; "
+                                "remove it from the clone or add it to .gitignore", "file_too_large")
+            if target.is_file() and not target.is_symlink() and target.read_bytes() == data:
                 continue
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
+            changed[name] = encoded
+        if (tree / ".git").is_dir():
+            # Default excludes even if an agent drops .gitignore: caches are never committed.
+            (tree / ".git/info").mkdir(exist_ok=True)
+            (tree / ".git/info/exclude").write_text("\n".join(EXCLUDE) + "\n")
+            tracked = self.repo.git("ls-files", "-z", at=tree).split("\0")
+            for name in tracked:
+                if name and name not in files:
+                    (tree / name).unlink(missing_ok=True)
+                    changed.setdefault(name, None)
         try:
-            unpack(snapshot, tree)
+            unpack({"files": {k: v for k, v in changed.items() if v is not None}}, tree)
         except (ValueError, TypeError, OSError) as exc:
             raise ToolError("invalid workspace upload", "bad_workspace") from exc
-        self._contract(tree)
+        return sorted(changed)
 
-    def _contract(self, tree):
+    def _contract(self, tree, names=None):
+        """Check the fixed interface, and that names (default: every .py file) compile."""
         for name, expected in self.fixed.items():
             f = tree / name
             if not f.is_file() or f.read_bytes() != expected:
                 raise ToolError(f"keep the seed interface fixed: {name}; edit bot/modules/ instead",
                                 "fixed_interface")
-        for f in tree.rglob("*.py"):
-            if ".git" not in f.relative_to(tree).parts:
-                try:
-                    compile(f.read_bytes(), str(f.relative_to(tree)), "exec")
-                except (SyntaxError, ValueError):
-                    raise ToolError(f"Python does not compile: {f.relative_to(tree)}", "compile") from None
+        if names is None:
+            names = [f.relative_to(tree).as_posix() for f in tree.rglob("*.py")
+                     if ".git" not in f.relative_to(tree).parts]
+        for name in names:
+            f = tree / name
+            if not name.endswith(".py") or not f.is_file():
+                continue
+            try:
+                compile(f.read_bytes(), name, "exec")
+            except (SyntaxError, ValueError):
+                raise ToolError(f"Python does not compile: {name}", "compile") from None
 
     @tool
     def open_pr(self, agent: Agent, branch: str, title: str, description: str,
@@ -137,6 +176,7 @@ class Chatbot4World(World):
                 tree = Path(tmp) / "tree"
                 self.repo.checkout(base, tree)
                 self._files(snapshot, tree)
+                self._contract(tree, self.repo.staged(tree))
                 sha = self.repo.commit(tree, base, agent.name, title)
             branch_ref = f"agents/{agent.name}/{branch}"
             if not old and any(r["branch"] == branch_ref for r in self.state["prs"].values()):
@@ -261,9 +301,14 @@ class Chatbot4World(World):
                     sha = self.repo.sha(ref_or_path)
                     self.repo.checkout(sha, tree)
             elif isinstance(snapshot, dict):
-                tree.mkdir()
-                self._files(snapshot, tree)
                 sha = snapshot.get("base_sha")
+                if isinstance(sha, str) and self.repo.ancestor(sha, "main"):
+                    self.repo.checkout(sha, tree)  # then only changed files are written/compiled
+                    self._contract(tree, self._files(snapshot, tree))
+                else:
+                    tree.mkdir()
+                    self._files(snapshot, tree)
+                    self._contract(tree)
             else:
                 raise ToolError("use main, pr:<number>, or a clone path inside your workspace")
             return {"ref": ref_or_path, "sha": sha, **self._run(tree, lines)}

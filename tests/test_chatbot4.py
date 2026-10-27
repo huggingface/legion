@@ -273,3 +273,31 @@ def test_bot_cannot_send_signals_to_other_processes(setup):
     result = run(clone, ["hi"])
     assert result["ok"], result
     assert "sent" not in result["replies"][0], result["replies"]
+
+
+def test_upload_respects_ignores_size_limit_and_compiles_only_changes(setup, monkeypatch):
+    world, clone, remote = setup
+    (clone / "bot/modules/topic.py").write_text('def respond(text, memory):\n    return None\n')
+    snapshot = capture(clone.parent, clone.name)
+    junk = {".venv/lib/broken.py": b"def (:\n", "bot/__pycache__/x.cpython-312.pyc": b"\0junk",
+            ".pytest_cache/v/cache/lastfailed": b"{}"}
+    snapshot["files"].update({k: base64.b64encode(v).decode() for k, v in junk.items()})
+    snapshot["files"].pop(".gitignore")  # the world's default excludes still apply
+    checked = []
+    real = world._contract
+    monkeypatch.setattr(world, "_contract", lambda tree, names=None: (checked.append(names),
+                                                                       real(tree, names)))
+    rec = world.call_workspace("open_pr", {"branch": "topic", "title": "Topic module",
+                                           "description": "tested"}, Agent("cedar"), snapshot)
+    committed = git(remote, "ls-tree", "-r", "--name-only", rec["head_sha"]).splitlines()
+    assert "bot/modules/topic.py" in committed and ".gitignore" not in committed
+    assert not [name for name in committed if name in junk]
+    assert checked == [["bot/modules/topic.py"]]
+    big = clone / "bot/modules/data.py"
+    big.write_text("X = 1\n" + "#" * (2 << 20))
+    with pytest.raises(ToolError, match="file too large: bot/modules/data.py"):
+        submit(world, clone, branch="big")
+    with pytest.raises(ToolError, match="file too large"):
+        world.call_workspace("run_bot", {"ref_or_path": "chatbot-swarm", "lines": ["hi"]},
+                             Agent("cedar"), capture(clone.parent, clone.name))
+    assert world.repo.hub.n == 1  # the refused upload created no Hub PR

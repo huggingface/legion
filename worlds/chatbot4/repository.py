@@ -64,6 +64,13 @@ class Repository:
         self.git("clone", "--no-hardlinks", str(self.root), str(dest), at=dest.parent)
         self.git("checkout", "--detach", ref, at=dest)
 
+    def staged(self, tree):
+        """Stage the tree (honouring .gitignore) and list added/changed paths."""
+        self.git("add", "-A", at=tree)
+        names = self.git("diff", "--cached", "--name-only", "-z", "--no-renames",
+                         "--diff-filter=AM", "HEAD", at=tree)
+        return [name for name in names.split("\0") if name]
+
     def commit(self, tree, parent, author, title):
         self.git("add", "-A", at=tree)
         self.git("-c", f"user.name={author}", "-c", f"user.email={author}@flock.invalid",
