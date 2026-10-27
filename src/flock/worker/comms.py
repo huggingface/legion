@@ -30,7 +30,6 @@ import functools
 import hmac
 import json
 import logging
-import os
 import re
 import secrets
 import time
@@ -59,6 +58,7 @@ from flock.comms.tools import (
 )
 from flock.models import ALL_COMMS_TOOLS as COMMS_TOOLS
 from flock.models import CommsSpec, comms_name, normalize_board_url
+from flock.secrets_file import secret_env
 from flock.tools.runner import Result, check_args
 from flock.tools.toolset import GATEWAY_LINE_MAX, Toolset
 from flock.worker.comms_extended import ExtendedComms
@@ -164,7 +164,7 @@ class CommsHub(ExtendedComms):
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
                                                                              timeout=20))
         self._runtime = runtime or (lambda name: None)
-        self._env = env if env is not None else os.environ
+        self._env = env if env is not None else secret_env()
         self._transport = transport
         self._clock = clock
         self.poll_wait = poll_wait

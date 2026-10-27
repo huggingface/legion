@@ -28,6 +28,38 @@ key, board invite, `FLOCK_WORLD_TOKEN`). The worker script (the cluster's, or
 `experiments/run3/slurm/worker.sbatch`) sources the secrets file and the env file and runs
 `flock-worker`.
 
+### Worker secrets file
+
+Sourcing the secrets file puts them in the worker's exec environment, which any same-user
+process can read from `/proc/<pid>/environ` for the worker's whole life (unsetting them later
+does not change it). To keep them out, the worker script writes the worker's secrets to a
+private file and execs `flock-worker` with only its path:
+
+- `FLOCK_WORKER_SECRETS_FILE=<path>`: read once at start. A regular file (not a symlink)
+  owned by the worker's user, mode `0600` (any group/other bit is refused and the worker
+  stops). `FLOCK_SECRETS_FILE` above is the cluster's shell-sourced file; flock never reads it.
+- Format: one `NAME=value` per line; blank lines and `#` comment lines are ignored; an
+  optional `export ` prefix; a value in matching `'...'` or `"..."` is unquoted. No `$VAR`
+  expansion, escapes or multi-line values.
+- Names: the worker's credentials, `FLOCK_TOKEN` and `HF_TOKEN`, plus the launch's provider
+  key (e.g. `OPENAI_API_KEY`, the type's `api_key_env`), board invite (e.g.
+  `CHATBOT_BOARD_INVITE`), `FLOCK_WORLD_TOKEN`, and any name in a type's `secrets`.
+- Precedence: a name in the file wins over the same name in the environment, and every name
+  in the file is removed from the worker's `os.environ`, so processes it starts never inherit
+  it. Names not in the file are still read from the environment (the old way keeps working).
+- `FLOCK_WORKER_SECRETS_FILE_UNLINK=1` deletes the file once it is read (a requeued step then
+  needs a new one). The worker logs the names it read, never the values.
+
+```
+# worker-inner.sh
+umask 077
+secrets=$(mktemp "${TMPDIR:-/tmp}/flock-worker-secrets.XXXXXX")
+printf 'FLOCK_TOKEN=%s\nHF_TOKEN=%s\nOPENAI_API_KEY=%s\nFLOCK_WORLD_TOKEN=%s\nCHATBOT_BOARD_INVITE=%s\n' \
+  "$FLOCK_TOKEN" "$HF_TOKEN" "$OPENAI_API_KEY" "$FLOCK_WORLD_TOKEN" "$CHATBOT_BOARD_INVITE" > "$secrets"
+exec env -u FLOCK_TOKEN -u HF_TOKEN -u OPENAI_API_KEY -u FLOCK_WORLD_TOKEN -u CHATBOT_BOARD_INVITE \
+  FLOCK_WORKER_SECRETS_FILE="$secrets" FLOCK_WORKER_SECRETS_FILE_UNLINK=1 flock-worker
+```
+
 `FLOCK_URL` is `http://${CTL_HOST}:<port>` when a host file is configured: the worker reads
 the controller's hostname from `FLOCK_CTL_HOST_FILE` at start and again after a connection
 error, so a controller requeued on another node is followed without relaunching the fleet.

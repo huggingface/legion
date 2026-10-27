@@ -35,6 +35,7 @@ from flock.models import (
     hit_max_turns,
     parse_duration,
 )
+from flock.secrets_file import secret_env
 from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
 from flock.worker import comms as comms_mod
 from flock.worker.adapters.base import (
@@ -144,7 +145,7 @@ class AgentRuntime:
         self.sync = sync
         self.identities = identities
         self._working_count = working_count
-        self._secret_source = secret_source  # default: os.environ (job secrets arrive as env)
+        self._secret_source = secret_source  # default: secret_env(), the secrets file over env
         self.log = SessionLog(self.sessions_dir / f"{name}.jsonl", swarm=swarm, agent=name,
                               harness=spec.harness.value, cwd=str(self.workdir))
         self.state = AgentState()
@@ -470,7 +471,7 @@ class AgentRuntime:
         declared secrets, `spec.env`, the msgboard identity, and a provider-backed model's key
         under its `api_key_env` name (read from the worker's environment, where the job puts
         it). Nothing else from the worker: FLOCK_TOKEN and the rest stay here."""
-        source = self._secret_source if self._secret_source is not None else os.environ
+        source = self._secret_source if self._secret_source is not None else secret_env()
         env = {k: source[k] for k in self.spec.secrets if k in source}
         env.update(self.spec.env)
         if self.identities is not None:

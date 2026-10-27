@@ -16,12 +16,12 @@ Swapping to an admin "create-or-get agent by name" endpoint later means replacin
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 
 import httpx
 
 from flock.models import TypeSpec, normalize_board_url
+from flock.secrets_file import secret_env
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class Identities:
     """Per-worker cache of msgboard identities, keyed by (board url, agent)."""
 
     def __init__(self, env: dict[str, str] | None = None, client: httpx.AsyncClient | None = None) -> None:
-        self._env = env if env is not None else os.environ
+        self._env = env if env is not None else secret_env()
         self._client = client
         self._ids: dict[tuple[str, str], MsgboardIdentity] = {}
 

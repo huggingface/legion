@@ -29,7 +29,6 @@ import hmac
 import ipaddress
 import json
 import logging
-import os
 import time
 import uuid
 from collections import OrderedDict
@@ -41,6 +40,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from flock.models import WorldSpec
+from flock.secrets_file import secret_env
 from flock.tools.loader import ToolDef
 from flock.tools.runner import DEFAULT_TIMEOUT_S, RESULT_MAX_BYTES, Result, check_args
 from flock.tools.toolset import Toolset
@@ -111,7 +111,7 @@ class WorldHub:
                  runtime: Callable[[str], Any] | None = None,
                  timeout: float = DEFAULT_TIMEOUT_S) -> None:
         self.swarm, self.type = swarm, type_name
-        self._env = env if env is not None else os.environ
+        self._env = env if env is not None else secret_env()
         self._transport = transport
         self._runtime = runtime or (lambda name: None)
         self.timeout = timeout

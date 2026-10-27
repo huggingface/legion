@@ -59,6 +59,8 @@ from flock.models import (
     type_spec_rev,
     world_tools,
 )
+from flock.secrets_file import load as load_secrets
+from flock.secrets_file import secret_env
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
@@ -841,7 +843,11 @@ def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     quiet_libraries()
-    cfg = WorkerConfig.from_env()
+    # FLOCK_WORKER_SECRETS_FILE: credentials from a 0600 file, not the exec env (docs/slurm.md)
+    if names := load_secrets():
+        log.info("secrets: %d read from FLOCK_WORKER_SECRETS_FILE (%s)", len(names),
+                 ", ".join(names))
+    cfg = WorkerConfig.from_env(secret_env())
     cfg.work_root.mkdir(parents=True, exist_ok=True)
     # a container with no (writable) HOME: HOME, caches and TMPDIR next to the work root
     # (/work/agents -> /work/home, /work/hf, /work/tmp, ...), never /tmp (docs/slurm.md)
@@ -851,7 +857,8 @@ def main() -> None:
     if cfg.bucket:
         stats = BucketStats()
         count_hub_http(stats)
-        sync = BucketSync(HubBucketStore(cfg.bucket, stats=stats), cfg.swarm)
+        sync = BucketSync(HubBucketStore(cfg.bucket, token=secret_env().get("HF_TOKEN") or None,
+                                          stats=stats), cfg.swarm)
     resolve = None
     if cfg.url_template and cfg.host_file:
         template, host_file = cfg.url_template, cfg.host_file
