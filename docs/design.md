@@ -346,7 +346,9 @@ types:
 in the workdir, not a flag, so it survives resume. `flock apply` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
-caller's files (added in the e2e run).
+caller's files (added in the e2e run). `system_prompt_append_file` (optional) is appended
+after a blank line, so several types can share one prompt plus a section of their own
+(experiments/run4's spawner and child types).
 
 Tools folder (docs/tools.md): `tools_dir` (top level, default `tools/` next to the spec file)
 holds Python functions; `types.<t>.tools` selects them. `flock apply` packs the folder,

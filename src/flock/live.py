@@ -105,6 +105,7 @@ def watched_files(spec_file: Path, spec: SwarmSpec | None) -> list[Path]:
     if spec is not None:
         for ts in spec.types.values():
             names.append(ts.system_prompt_file)
+            names.append(ts.system_prompt_append_file)
             if ts.loop is not None:
                 names.append(ts.loop.prompt_file)
                 names.append(ts.loop.final.prompt_file if ts.loop.final else None)

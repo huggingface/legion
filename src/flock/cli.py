@@ -252,8 +252,9 @@ def load_spec(spec_file: str) -> SwarmSpec:
 
 
 def read_spec(spec_file: str) -> SwarmSpec:
-    """Read a spec and inline each type's system_prompt_file and loop prompt files, and the
-    comms kickoff and protocol files (relative to the spec file). Raises SpecError."""
+    """Read a spec and inline each type's system_prompt_file (plus system_prompt_append_file)
+    and loop prompt files, and the comms kickoff and protocol files (relative to the spec
+    file). Raises SpecError."""
     path = Path(spec_file)
     try:
         spec = SwarmSpec.model_validate(load_spec_yaml(path.read_text(encoding="utf-8")))
@@ -272,6 +273,13 @@ def read_spec(spec_file: str) -> SwarmSpec:
             if not src.is_file():
                 raise SpecError([f"type {name}: system_prompt_file {src} not found"])
             ts.system_prompt = src.read_text(encoding="utf-8")
+        if ts.system_prompt_append_file:
+            src = Path(ts.system_prompt_append_file)
+            src = src if src.is_absolute() else path.parent / src
+            if not src.is_file():
+                raise SpecError([f"type {name}: system_prompt_append_file {src} not found"])
+            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n"
+                                + src.read_text(encoding="utf-8")).lstrip("\n")
         if ts.loop is not None:
             _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
             if ts.loop.final is not None:

@@ -32,7 +32,7 @@ comms:
     max_channels: 60
   protocols: []
 types:
-  agent:
+  agent: &agent
     harness: pi
     model: worker-pi
     replicas: 0
@@ -54,4 +54,18 @@ types:
       on: [comms.mention, comms.thread, comms.dm, comms.channel]
       while: {until: 48h, max_rounds: 10000}
       final: {prompt_file: prompts/final.md}
-limits: {agents: 300}
+  # The spawner wave (README "Spawner wave"): the same agent, plus a group section. Waves add
+  # agent-spawner replicas; each may spawn up to 4 agent-child peers (spawn: below).
+  agent-spawner:
+    <<: *agent
+    replicas: 0
+    system_prompt_append_file: prompts/group-spawner.md
+    workers: {initial: 2, max_extra: 0}     # 20 spawners at 12 per worker
+  agent-child:
+    <<: *agent
+    replicas: 0
+    system_prompt_append_file: prompts/group-child.md
+    workers: {initial: 0, max_extra: 7}     # 80 children at 12 per worker, opened on demand
+spawn:
+  agent-spawner: {types: {agent-child: 4}, depth: 1}
+limits: {alive: 400, spawned_total: 100}

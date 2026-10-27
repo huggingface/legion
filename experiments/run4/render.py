@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -15,7 +16,9 @@ HERE = Path(__file__).resolve().parent
 def render(variant="jobs", placeholders=False, compute=None):
     def env(name, default):
         return default if placeholders else os.environ.get(name, default)
-    data = load_spec_yaml((HERE / "spec.yaml").read_text())
+    # The JSON round trip expands spec.yaml's `<<: *agent` clones into plain, unshared maps,
+    # so the output has no YAML aliases and an edit to one type never reaches another.
+    data = json.loads(json.dumps(load_spec_yaml((HERE / "spec.yaml").read_text())))
     provider = data["providers"]["vllm"]
     urls = [u.strip() for u in env("OPENAI_BASE_URLS", "").split(",") if u.strip()]
     provider["base_url"] = urls[0] if urls else env("OPENAI_BASE_URL", provider["base_url"])
@@ -36,7 +39,8 @@ def render(variant="jobs", placeholders=False, compute=None):
         data["compute"] = {"kind": "slurm", "partition": env("RUN3_SLURM_PARTITION", "hopper-cpu"),
                            "cpus": 4, "mem": "7G", "time": "54:00:00"} if kind == "slurm" else kind
     if variant == "smoke":
-        data["types"]["agent"]["loop"]["while"] = {"until": "30m", "max_rounds": 100}
+        for t in data["types"].values():  # agent, agent-spawner, agent-child
+            t["loop"]["while"] = {"until": "30m", "max_rounds": 100}
     SwarmSpec.model_validate(data)
     return data
 

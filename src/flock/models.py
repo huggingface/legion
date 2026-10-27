@@ -449,6 +449,10 @@ class TypeSpec(BaseModel):
     # The file's contents, inlined by `flock apply` (the controller and workers cannot
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None
+    # A second file appended to the system prompt by `flock apply` (after a blank line): a
+    # per-type section on top of a prompt several types share (experiments/run4's spawner and
+    # child types). The worker only sees the combined `system_prompt`.
+    system_prompt_append_file: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)

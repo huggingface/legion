@@ -25,7 +25,7 @@ def module(name):
 
 def test_spec_fixed_prompt_and_waves():
     spec = load_spec(str(EXP / "spec.yaml"))
-    assert set(spec.types) == {"agent"}
+    assert set(spec.types) == {"agent", "agent-spawner", "agent-child"}  # test_run4_spawner
     agent = spec.types["agent"]
     assert agent.harness.value == "pi" and agent.agents_per_worker == 12
     assert agent.max_turns == 150 and agent.turn_timeout == "2h"

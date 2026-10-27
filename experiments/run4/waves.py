@@ -7,6 +7,7 @@ and applying the folder with `flock update` (the same path as a live update), up
     waves.py run    --spec S [--interval 30]   # tick until the schedule is over (jobs mode)
     waves.py add N  --spec S [--stagger 10]    # N more agents now (operator, after the schedule)
     waves.py add N  --spec S --type agent-pi   # N more of one type only (the others unchanged)
+    waves.py add 20 --spec S --type agent-spawner --stagger 10   # the spawner wave (README)
     waves.py set N  --spec S [--type T]        # exactly N (the operator's override, may lower)
     waves.py pin    --spec S                   # write the controller's replicas into S (no apply)
 
@@ -19,7 +20,8 @@ schedule (agent-pi) are written into S as the controller runs them, so a wave ne
 A wave with `stagger_s` (waves.yaml: 10 s for wave 1 by default, 0 after) raises the count
 one agent at a time, that many seconds apart; `tick` and `run` block meanwhile. Every change is
 one JSON line in --log (default: <S>.waves.jsonl). The start time is kept in
-<S>.waves.json (`--start` epoch seconds overrides it)."""
+<S>.waves.json (`--start` epoch seconds overrides it). A type under `type_caps` (waves.yaml,
+e.g. agent-spawner: 20) has its own cap for `--type`, outside the schedule's `cap`."""
 
 from __future__ import annotations
 
@@ -60,6 +62,7 @@ class Schedule:
     think_share: float = 0.0
     raw: dict = field(default_factory=dict)
     staggers: list[float] = field(default_factory=list)  # per event: seconds between its agents
+    type_caps: dict[str, int] = field(default_factory=dict)  # --type caps outside `cap`
 
     def stagger(self, elapsed: float) -> float:
         """The stagger of the latest event due at `elapsed` (0 before the first)."""
@@ -110,8 +113,13 @@ def parse(doc: dict | str) -> Schedule:
             t, total = at, min(total + add, cap)
             events.append((t, total))
             staggers.append(gap)
+    type_caps = {str(t): int(n) for t, n in (d.get("type_caps") or {}).items()}
+    if any(n < 0 for n in type_caps.values()):
+        raise ValueError("type_caps must be >= 0")
+    if (d.get("type") or "agent") in type_caps or d.get("think_type") in type_caps:
+        raise ValueError("type_caps: the schedule's own types use `cap`")
     return Schedule(events, cap, d.get("type") or "agent", d.get("think_type"), share, d,
-                    staggers)
+                    staggers, type_caps)
 
 
 def load(path: Path | str = HERE / "waves.yaml") -> Schedule:
@@ -171,18 +179,23 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     others = current(c, swarm, keep)
     before = current(c, swarm, types)
     have = sum(before.values())
-    room = sched.cap - (sum(others[t] for t in sched.split(0) if t in others) if only else 0)
+    if only in sched.type_caps:  # its own cap (agent-spawner), not the schedule's
+        room = sched.type_caps[only]
+    else:
+        room = sched.cap - (sum(others[t] for t in sched.split(0) if t in others) if only else 0)
     total = max(0, min(room, total if lower else max(total, have)))
     split = (lambda k: {only: k}) if only else sched.split
     counts = split(total)
     rec = {"ts": round(time.time(), 3), "why": why, "before": before, "after": counts,
-           "total": total, "cap": sched.cap}
+           "total": total, "cap": sched.type_caps.get(only, sched.cap)}
     if counts == before:
         write_replicas(spec, {**others, **counts})
         rec["lines"] = ["no changes"]
         _holds(spec, False)
         return rec
-    if total > max(have, 100):
+    # The capacity guard: growth past 100 agents. With --type the other types count too, so
+    # 20 spawners on top of 300 agents are checked.
+    if total > have and (total + sum(others.values()) if only else total) > 100:
         from load_guard import capacity_ok
 
         ok, message = capacity_ok()

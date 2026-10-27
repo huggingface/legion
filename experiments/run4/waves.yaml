@@ -9,3 +9,5 @@ waves:
   - {at: 15m, add: 20}
   - {at: 20m, add: 20}
   - {every: 10m, add: 20, until: 300}
+# `waves.py add 20 --type agent-spawner` (README "Spawner wave"): its own cap, outside `cap`.
+type_caps: {agent-spawner: 20}

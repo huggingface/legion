@@ -288,7 +288,8 @@ keeps them until removed; it does nothing until prompted.
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
 - The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
-  type's `system_prompt_file`.
+  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock apply` appends to
+  a shared prompt.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
 - Spawned rows are not mirrored to the bucket. If the controller loses its SQLite (no persistent
   storage), workers report agents the controller does not know and the controller unassigns them.

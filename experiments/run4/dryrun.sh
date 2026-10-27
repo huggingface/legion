@@ -9,6 +9,6 @@ command -v pi >/dev/null || [ -x "${FLOCK_PI_CLI:-}" ] || {
 }
 ruff check .
 pytest -q -o "cache_dir=${TMPDIR:-/tmp}/run4-pytest-cache" \
-  tests/test_run4_experiment.py tests/test_run4_cluster_review.py tests/test_run4_isolation.py tests/test_run4_pi_smoke.py \
+  tests/test_run4_experiment.py tests/test_run4_cluster_review.py tests/test_run4_isolation.py tests/test_run4_pi_smoke.py tests/test_run4_spawner.py \
   tests/test_chatbot4.py tests/test_comms_extended.py tests/test_worker_pi.py \
   tests/test_loop_worker.py tests/test_loop_controller.py tests/test_loop_notices.py

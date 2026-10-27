@@ -145,6 +145,45 @@ During the smoke and first waves, watch stale-base orphan PRs, PRs left open
 after an uncertain Hub merge, PR-lock latency, full-tree upload memory, poller
 health and final-push duration. These remain observation items from the review.
 
+## Spawner wave
+
+The next 100 agents after the 300-agent schedule: 20 spawners, each of which may start up
+to 4 peer helpers (20 + 80 = 100).
+
+- Types (`spec.yaml`): `agent` is unchanged (the schedule's 300). `agent-spawner` and
+  `agent-child` are YAML clones of it (same Pi harness, model, limits, tools, loop, board),
+  plus a short group section appended to `prompts/system.md` by `system_prompt_append_file`:
+  `prompts/group-spawner.md` and `prompts/group-child.md`. Spawning is optional; there is
+  no leader in a group, and a child starts from the spawner's `--prompt` as its first prompt.
+- Policy: `spawn: {agent-spawner: {types: {agent-child: 4}, depth: 1}}`. A child cannot
+  spawn. A fifth spawn is refused with `max_children`; removing a child frees its place.
+- Workers: spawners `{initial: 2, max_extra: 0}`, children `{initial: 0, max_extra: 7}`
+  (12 per worker), on top of the 25 `agent` workers: up to 34 worker jobs in total.
+- Limits: `limits.alive: 400`, `limits.spawned_total: 100` (the spawn counter is never
+  reused, so 100 spawns in total, removed children included). `waves.yaml` caps the spawner
+  type at 20 (`type_caps`), apart from the schedule's 300.
+- Inside the agent, `flock` is the worker venv's CLI (first on PATH, a read-only mount of the
+  namespace). It uses `FLOCK_URL` and the agent's own `FLOCK_AGENT_TOKEN`; `FLOCK_TOKEN` is
+  never in the agent's environment. `tests/test_run4_spawner.py` covers this; its namespace
+  case runs in the cluster dry run.
+- `flock apply`/`flock update` must come from a checkout with `system_prompt_append_file`
+  (this commit or later): an older CLI drops the group sections without an error. The
+  controller and workers only get the combined `system_prompt`.
+
+Launch, after rendering the spec again (`render.py`):
+
+```sh
+python experiments/run4/waves.py add 20 --spec experiments/run4/spec.slurm.local.yaml \
+  --type agent-spawner --stagger 10
+```
+
+Watch:
+
+```sh
+flock agents run4 --parent <spawner>     # a spawner's children
+flock events <spawner> --pretty          # spawned / child_removed events
+```
+
 ## Launch and stop boundaries
 
 The operator submits the world and controller jobs only after the owner's go.
