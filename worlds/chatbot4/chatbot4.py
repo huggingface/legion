@@ -199,6 +199,25 @@ class Chatbot4World(World):
             except (SyntaxError, ValueError):
                 raise ToolError(f"Python does not compile: {name}", "compile") from None
 
+    @staticmethod
+    def _slug(agent: Agent, branch) -> str:
+        """Normalize a branch argument to the bare slug, accepting only this agent's prefix."""
+        text = branch.strip() if isinstance(branch, str) else ""
+        own = f"agents/{agent.name}/"
+        for prefix in ("refs/heads/" + own, own):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
+        else:
+            bare = text.removeprefix("refs/heads/")
+            if bare.startswith("agents/"):
+                raise ToolError(f"branch prefix must be your own (agents/{agent.name}/) or omitted; "
+                                f"got \"{text[:80]}\"")
+        if not NAME.fullmatch(text):
+            raise ToolError("branch must be a short slug matching [a-z][a-z0-9-]{0,63} "
+                            f"(you may omit the agents/{agent.name}/ prefix); got \"{str(branch)[:80]}\"")
+        return text
+
     @tool
     @logs_refusals
     def open_pr(self, agent: Agent, branch: str, title: str, description: str,
@@ -207,10 +226,14 @@ class Chatbot4World(World):
 
         The worker uploads path from your private workspace. Include tests and run_bot
         evidence in description. At most two open PRs per agent. Read CONTRIBUTING.md.
+        branch is a short slug like my-topic; the world stores it as agents/<you>/<slug>.
         """
         self._identity(agent)
-        if not NAME.fullmatch(branch) or not 3 <= len(title) <= 200 or not description.strip():
-            raise ToolError("use a short branch slug, a title (3–200 chars), and a description")
+        branch = self._slug(agent, branch)
+        if not isinstance(title, str) or not 3 <= len(title) <= 200:
+            raise ToolError(f"title must be 3–200 characters (got {len(title) if isinstance(title, str) else 0})")
+        if not isinstance(description, str) or not description.strip():
+            raise ToolError("description must not be empty")
         snapshot = UPLOAD.get()
         if not isinstance(snapshot, dict):
             raise ToolError("submit a local clone through flock-tool; the worker uploads it")

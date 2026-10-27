@@ -533,3 +533,30 @@ def test_hub_failure_logs_status_and_headers_but_no_secrets(monkeypatch, caplog)
     assert "create_pull_request" in text and "o/r" in text
     assert "/api/datasets/o/r/discussions" in text and "?" not in text.split("request=")[1]
     assert secret not in text and "SECRETTOKEN" not in text
+
+
+def test_open_pr_branch_prefix_and_specific_errors(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone, branch=" agents/cedar/greeting ")
+    assert rec["branch"] == "agents/cedar/greeting"
+    (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hi!"\n')
+    for form in ("greeting", "agents/cedar/greeting", "refs/heads/agents/cedar/greeting"):
+        assert submit(world, clone, branch=form, pr=rec["pr"])["branch"] == rec["branch"]
+    with pytest.raises(ToolError, match="prefix must be your own"):
+        submit(world, clone, branch="agents/birch/greeting", pr=rec["pr"])
+    with pytest.raises(ToolError, match="prefix must be your own"):
+        submit(world, clone, branch="refs/heads/agents/birch/other")
+    with pytest.raises(ToolError, match="branch slug already used"):
+        submit(world, clone, branch="agents/cedar/greeting")
+    with pytest.raises(ToolError, match=r"branch must be a short slug matching .*got \"Bad_Slug\""):
+        submit(world, clone, branch="Bad_Slug")
+    with pytest.raises(ToolError, match="got \"" + "x" * 80 + "\"$"):
+        submit(world, clone, branch="x" * 200 + "!")
+    for bad, msg in (("hi", r"title must be 3–200 characters \(got 2\)"),
+                     ("t" * 201, r"\(got 201\)")):
+        with pytest.raises(ToolError, match=msg):
+            world.call_workspace("open_pr", {"branch": "other", "title": bad, "description": "d"},
+                                 Agent("cedar"), capture(clone.parent, clone.name))
+    with pytest.raises(ToolError, match="description must not be empty"):
+        world.call_workspace("open_pr", {"branch": "other", "title": "Fine title", "description": "  "},
+                             Agent("cedar"), capture(clone.parent, clone.name))
