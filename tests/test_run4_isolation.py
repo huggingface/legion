@@ -263,6 +263,15 @@ async def test_pi_start_uses_namespace_wrapper_and_explicit_environment(tmp_path
         assert kwargs["env"]["MODEL_KEY"] == "provider-key"
         assert kwargs["env"]["FLOCK_TOOLS_PIN"] == str(pin)
         assert not ({"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN", "UNRELATED_SECRET"} & kwargs["env"].keys())
+        # HOME, TMPDIR and caches live on the agent's own disk-backed dir, not the tmpfs root.
+        env = kwargs["env"]
+        assert env["HOME"] == str(home / "home") and env["TMPDIR"] == str(home / "tmp")
+        for var in ("XDG_CACHE_HOME", "UV_CACHE_DIR", "npm_config_cache", "PIP_CACHE_DIR"):
+            assert env[var].startswith(str(home / "home") + "/")
+        for d in (home / "home", home / "tmp"):
+            assert d.is_dir() and (d.stat().st_mode & 0o777) == 0o700
+        config = json.loads(args[args.index(str(Path(isolation.__file__).resolve())) + 1])
+        assert str(home.resolve()) in config["writable"] and config["private_dirs"] == []
     finally:
         await adapter.stop()
 

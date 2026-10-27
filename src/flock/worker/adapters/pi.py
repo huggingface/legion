@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import tempfile
 import uuid
@@ -352,6 +353,21 @@ class PiAdapter:
         self._isolation_dir: tempfile.TemporaryDirectory | None = None
         self._seen: list[tuple[int, str]] = []
 
+    def scratch_env(self) -> dict[str, str]:
+        """Isolated Pi's HOME, TMPDIR and tool caches: under its own agent dir (disk-backed,
+        private to this agent, not synced), not in the in-memory root where npm, uv or test
+        caches would fill the tmpfs. TMPDIR starts empty on every start; HOME and its caches
+        are kept for the agent's next start on this worker."""
+        home, tmp = self.home / "home", self.home / "tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        for d in (home, tmp):
+            d.mkdir(parents=True, exist_ok=True)
+            d.chmod(0o700)
+        cache = home / ".cache"
+        return {"HOME": str(home), "TMPDIR": str(tmp), "XDG_CACHE_HOME": str(cache),
+                "UV_CACHE_DIR": str(cache / "uv"), "npm_config_cache": str(cache / "npm"),
+                "PIP_CACHE_DIR": str(cache / "pip")}
+
     @property
     def session_dir(self) -> Path:
         return self.home / "sessions" / self.agent
@@ -482,11 +498,10 @@ class PiAdapter:
                     raise RuntimeError("isolated Pi requires an agent-private tools pin directory")
                 pin_path.parent.mkdir(parents=True, exist_ok=True)
                 readonly.append(pin_path.parent)
+            self.env.update(self.scratch_env())
             self._isolation_dir = tempfile.TemporaryDirectory(prefix="flock-pi-root-")
             launch = isolate_command(self.argv, Path(self._isolation_dir.name), cwd=self.workdir,
-                                     readonly=readonly, writable=[self.workdir, self.home], network=True,
-                                     private_dirs=[Path(self.env.get("HOME", "/tmp/home")),
-                                                   Path(self.env.get("TMPDIR", "/tmp"))])
+                                     readonly=readonly, writable=[self.workdir, self.home], network=True)
         self._queue = EventQueue()
         self._mapper = PiMapper(cfg.model_ref if cfg else spec.model, max_turns=spec.max_turns,
                                 max_budget_usd=spec.max_budget_usd, prices=self.prices)
