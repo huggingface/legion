@@ -89,7 +89,7 @@ def check(env, *, online=False, get=httpx.get, api=None):
         detail = str(exc) if isinstance(exc, ValueError) and "CHATBOT_BUCKET" in str(exc) else \
             "metadata request failed; inspect token scopes without logging its value"
         record("hub_metadata", False, detail)
-    except Exception:  # never crash preflight; never echo an exception that may carry secrets
+    except Exception:  # noqa: BLE001 - never crash preflight or echo a possibly secret message
         record("hub_metadata", False, "metadata check failed unexpectedly; details omitted")
     return results
 
