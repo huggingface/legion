@@ -139,6 +139,7 @@ class Chatbot4World(World):
             for rec in self.state["prs"].values():
                 if rec["state"] == "closing":  # interrupted close_pr: the author may retry
                     rec["state"] = "open"
+            self._fetch_missing_heads()
             self._reconcile()
         self.drainer = threading.Thread(target=self._drain, name="chatbot4-hub-outbox", daemon=True)
         self.drainer.start()
@@ -333,6 +334,23 @@ class Chatbot4World(World):
                 self._busy(agent, "create_pull_request", reason="pr_create_gap")
             self.last_create = at
         time.sleep(at - now)
+
+    def _fetch_missing_heads(self):
+        """Startup only: the bundle restore carries the PR refs the world knew at archive time;
+        fetch, explicitly and in small batches, the open PRs whose recorded head isn't in the
+        repository (pushes after the archive). Never fails the start: what stays missing is
+        logged and will error on that PR only (its author's next update re-pushes it)."""
+        try:
+            missing = [rec["pr"] for rec in self.state["prs"].values()
+                       if rec["state"] == "open" and rec.get("head_sha")
+                       and not self.repo.has_commit(rec["head_sha"])]
+            if not missing:
+                return
+            left = self.repo.fetch_pr_refs(missing)
+            log.warning("startup: fetched %d PR heads missing after the restore; still missing: %s",
+                        len(missing) - len(left), left or "none")
+        except Exception as e:  # noqa: BLE001 - a fake or failing repository must not stop the start
+            log.warning("startup: PR head check skipped: %s", e)
 
     def _reconcile(self, author=None):
         """Mark open PRs whose head is already in main as merged (call with the lock held).

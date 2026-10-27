@@ -80,11 +80,42 @@ class Repository:
         return p.stdout.decode().strip()
 
     def fetch(self):
+        """Fetch main only. The world writes refs/pr/N itself after every push (update_ref), so
+        PR refs never come from the Hub here; a wildcard over refs/pr/* is also refused by the
+        Hub's git backend once there are many PRs (hang-up / 'expected acknowledgments')."""
         with self.refs_lock:
             started = time.monotonic()
-            self.git("fetch", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/heads/main",
-                     "+refs/pr/*:refs/pr/*")
+            self.git("fetch", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/heads/main")
             self.fetched = started
+
+    def has_commit(self, sha):
+        if not sha or len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+            return False
+        p = subprocess.run(["git", "-C", str(self.root), "cat-file", "-e", f"{sha}^{{commit}}"],
+                           env=self.env, capture_output=True, timeout=10, check=False)
+        return p.returncode == 0
+
+    def fetch_pr_refs(self, numbers, batch=8, delays=(1, 3, 9)):
+        """Fetch refs/pr/N for the given PR numbers from the Hub, explicitly, in small batches
+        (the Hub hangs up on large or wildcard PR-ref fetches). Never raises: a batch that still
+        fails after the retries is logged, and the list of PR numbers left unfetched is returned."""
+        missing = []
+        numbers = [int(n) for n in numbers]
+        for start in range(0, len(numbers), batch):
+            chunk = numbers[start:start + batch]
+            specs = [f"+refs/pr/{n}:refs/pr/{n}" for n in chunk]
+            for attempt, delay in enumerate(delays + (None,)):
+                try:
+                    with self.refs_lock:
+                        self.git("fetch", "--no-write-fetch-head", "origin", *specs)
+                    break
+                except ToolError:
+                    if delay is None:
+                        log.warning("PR refs %s not fetched after %d attempts", chunk, attempt + 1)
+                        missing.extend(chunk)
+                    else:
+                        time.sleep(delay)
+        return missing
 
     def refresh(self, max_age):
         """Fetch unless a fetch started within max_age seconds. The world updates its own
