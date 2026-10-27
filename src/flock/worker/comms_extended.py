@@ -22,6 +22,8 @@ from flock.comms.tools import Refused, as_id, author, brief, check_content, chec
 log = logging.getLogger(__name__)
 
 POLL_BACKOFF_MAX_S = 120.0
+CACHE_TTL_S = 60.0  # per agent: its channel list and the principals directory
+READ_DMS_CHANNELS = 10  # read_dms reads at most this many DM channels (the newest)
 
 
 def poll_backoff(failures: int, base: float, retry_after: float | None = None,
@@ -32,12 +34,35 @@ def poll_backoff(failures: int, base: float, retry_after: float | None = None,
 
 
 class ExtendedComms:
+    async def _cached(self, m, key, fetch, *, fresh=False):
+        """`fetch()` at most once per CACHE_TTL_S per agent and key. Returns (value, hit)."""
+        now = monotonic()
+        hit = self._tool_cache.get((m.name, key))
+        if not fresh and hit is not None and now - hit[0] < CACHE_TTL_S:
+            return hit[1], True
+        value = await fetch()
+        self._tool_cache[(m.name, key)] = (now, value)
+        return value, False
+
+    def _forget(self, m, key):
+        self._tool_cache.pop((m.name, key), None)
+
+    async def _channels(self, op, *, fresh=False):
+        return await self._cached(op.m, "channels", lambda: op.board(self).channels(op.ident),
+                                  fresh=fresh)
+
     async def _channel_op(self, op, channel):
         if channel is None:
             return op
         name = str(channel).lstrip("#")
-        channels = await op.board(self).channels(op.ident)
-        match = next((c for c in channels if str(c["id"]) == name or c["name"] == name), None)
+        channels, hit = await self._channels(op)
+
+        def find(chs):
+            return next((c for c in chs if str(c["id"]) == name or c["name"] == name), None)
+        match = find(channels)
+        if match is None and hit:  # created or opened since the cached list
+            channels, _ = await self._channels(op, fresh=True)
+            match = find(channels)
         if match is None or match.get("kind") == "dm":
             raise ValueError("channel is not visible; use channels to find it")
         op.m.channels.update(c["id"] for c in channels if c.get("member"))
@@ -47,12 +72,13 @@ class ExtendedComms:
     async def _extended_call(self, op, entry, args):
         board, ident, m = op.board(self), op.ident, op.m
         if entry == "comms:channels":
-            channels = await board.channels(ident)
+            channels, _ = await self._channels(op)
             m.channels.update(c["id"] for c in channels if c.get("member"))
             return {"channels": channels}
         if entry == "comms:join_channel":
             selected = await self._channel_op(op, args["name"])
             await board.add_member(ident, selected.c.channel_id, ident.id)
+            self._forget(m, "channels")  # membership changed
             m.channels.add(selected.c.channel_id)
             return {"joined": selected.c.channel, "id": selected.c.channel_id}
         if entry == "comms:create_channel":
@@ -73,6 +99,7 @@ class ExtendedComms:
                     "name": args["name"], "description": args["purpose"], "private": False}}), ident)
                 if channel["id"] not in created:  # a retried create returns the same channel
                     created.append(channel["id"])
+                self._forget(m, "channels")
                 m.channels.add(channel["id"])
                 if rt:
                     rt.save_state()
@@ -82,13 +109,15 @@ class ExtendedComms:
                 check_content(op.c.rules.model_copy(update={"threads": None}), args["text"], None)
                 posts, last = self._state(m)
                 check_rate(op.c.rules, posts, last, self._clock())
-                data = await board.request(("GET", "/v1/principals", {}), ident)
+                data, _ = await self._cached(m, "principals", lambda: board.request(
+                    ("GET", "/v1/principals", {}), ident))
                 name = args["to"].lstrip("@")
                 people = data.get("principals") or []
                 person = next((p for p in people if name in (p.get("external_id"), p.get("display_name"))), None)
                 if person is None:
                     raise ValueError("no agent or human with that name")
                 channel = await board.request(("POST", "/v1/dms", {"json": {"with": person["id"]}}), ident)
+                self._forget(m, "channels")  # possibly a new DM channel
                 msg = await board.post(ident, channel["id"], args["text"])
                 self._record_post(m, self._clock())
                 msg["channel"] = channel
@@ -96,12 +125,23 @@ class ExtendedComms:
                 self._extended_fanout([msg], op.source)
                 return {"posted": msg["id"], "channel": channel["id"]}
         if entry == "comms:read_dms":
-            channels = [c for c in await board.channels(ident) if c.get("kind") == "dm"]
+            # The newest DM channels only, and a channel's page again only when its last_seq
+            # moved: 1 + (changed channels) requests instead of 1 + every DM channel.
+            listed, _ = await self._channels(op, fresh=True)
+            channels = sorted((c for c in listed if c.get("kind") == "dm"),
+                              key=lambda c: c["id"], reverse=True)[:READ_DMS_CHANNELS]
             n = max(1, min(args.get("n", 20), 100))
             since = as_id(args.get("since"), "since") or 0
             messages = []
             for channel in channels:
-                page = await board.latest(ident, channel["id"], n)
+                key = ("dm", channel["id"], n)
+                seen = self._tool_cache.get((m.name, key))
+                if seen is not None and channel.get("last_seq") is not None \
+                        and seen[0] == channel["last_seq"]:
+                    page = seen[1]
+                else:
+                    page = await board.latest(ident, channel["id"], n)
+                    self._tool_cache[(m.name, key)] = (channel.get("last_seq"), page)
                 messages.extend({**brief(x), "channel": channel["id"]}
                                 for x in page.get("messages", []) if x["id"] > since)
             return {"messages": sorted(messages, key=lambda x: x["id"])[-n:]}
@@ -206,4 +246,5 @@ class ExtendedComms:
 
     def _init_extended(self):
         self._channel_lock = asyncio.Lock()
+        self._tool_cache: dict[tuple, tuple] = {}  # (agent, key) -> (stamp, value)
         self._delivered: OrderedDict[tuple[str, str, int], bool] = OrderedDict()

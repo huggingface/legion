@@ -171,7 +171,8 @@ class CommsHub(ExtendedComms):
                  clock: Callable[[], float] = time.time, poll_wait: float = POLL_WAIT_S,
                  backoff_s: float = 1.0, poll_min_interval: float = 2.0,
                  poll_cycle_s: float | None = None, rate: float | None = None,
-                 burst: float = 5.0) -> None:
+                 burst: float = 5.0, agent_rate: float | None = None,
+                 agent_burst: float = 10.0) -> None:
         self.swarm = swarm
         self._init_extended()
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
@@ -185,6 +186,9 @@ class CommsHub(ExtendedComms):
         self.poll_cycle_s = poll_cycle_s  # overrides the spec's comms.poll_cycle_s (tests)
         # the worker's board request budget (requests/s), shared by the poller and all tools
         self.limiter = RateLimiter(rate, burst) if rate else None
+        # per agent: comms tool calls beyond this rate are refused locally, before any request
+        self.agent_rate, self.agent_burst = agent_rate, agent_burst
+        self._agent_limits: dict[str, RateLimiter] = {}
         self.backoff_s = backoff_s
         self.spec: CommsSpec | None = None
         self.entries: list[str] = []
@@ -660,6 +664,14 @@ class CommsHub(ExtendedComms):
             return _err(f"{entry} is not enabled for this agent", t0)
         if err := check_args(tool_def(entry).parameters, args):
             return _err(f"{comms_name(entry)}: {err}", t0)
+        if self.agent_rate:
+            limit = self._agent_limits.setdefault(agent, RateLimiter(self.agent_rate, self.agent_burst))
+            if wait := limit.try_take():
+                self.stats["refused"] += 1
+                error = (f"too many board calls from you; retry in {max(1, int(wait) + 1)} s "
+                         "(nothing was sent)")
+                self._emit(agent, "comms_refused", {"rule": "agent_rate", "error": error})
+                return _err(error, t0)
         for attempt in (0, 1):
             try:
                 m = await self._member(agent)

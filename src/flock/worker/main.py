@@ -126,6 +126,10 @@ class WorkerConfig:
     # shared by the poller and every comms tool call); 0 turns it off
     comms_rate: float = 0.5
     comms_burst: float = 5.0
+    # FLOCK_COMMS_AGENT_RATE / _BURST: one agent's comms tool calls per second beyond which
+    # calls are refused locally (default 6/min, burst 10); 0 turns it off
+    comms_agent_rate: float = 0.1
+    comms_agent_burst: float = 10.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -155,6 +159,8 @@ class WorkerConfig:
             if env.get("FLOCK_COMMS_POLL_CYCLE_S") else None,
             comms_rate=float(env.get("FLOCK_COMMS_RATE") or 0.5),
             comms_burst=float(env.get("FLOCK_COMMS_BURST") or 5.0),
+            comms_agent_rate=float(env.get("FLOCK_COMMS_AGENT_RATE") or 0.1),
+            comms_agent_burst=float(env.get("FLOCK_COMMS_AGENT_BURST") or 10.0),
         )
 
 
@@ -358,7 +364,9 @@ class Worker:
         self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
                                        runtime=self.agents.get,
                                        poll_cycle_s=cfg.comms_poll_cycle_s,
-                                       rate=cfg.comms_rate, burst=cfg.comms_burst)
+                                       rate=cfg.comms_rate, burst=cfg.comms_burst,
+                                       agent_rate=cfg.comms_agent_rate,
+                                       agent_burst=cfg.comms_agent_burst)
         # the swarm's world (docs/world.md): its tools, reached through the same gateway
         self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
                                        runtime=self.agents.get)

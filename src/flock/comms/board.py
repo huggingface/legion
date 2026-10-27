@@ -79,6 +79,14 @@ class RateLimiter:
         self.tokens = min(self.burst, self.tokens + (now - self._at) * self.rate)
         self._at = now
 
+    def try_take(self) -> float:
+        """Take a token now: 0.0, or the seconds until one is available (nothing taken)."""
+        self._refill()
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return 0.0
+        return (1 - self.tokens) / self.rate
+
     async def acquire(self, *, background: bool = False, max_wait: float | None = TOOL_WAIT_S) -> None:
         start = self._clock()
         if not background:

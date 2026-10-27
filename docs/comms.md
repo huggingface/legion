@@ -261,7 +261,14 @@ The poller yields to tool calls; a tool call waits at most 10 s for a token, the
 "board busy (worker request budget), retry in N s". A 429 is never retried inside the
 client: it closes a gate on that board for Retry-After (5 s without one) plus jitter,
 and until then every request fails at once with "board busy (rate limited), retry in
-N s" without being sent; 5xx and transport errors are still retried in the client. No board
+N s" without being sent; 5xx and transport errors are still retried in the client.
+
+Tool fan-out is bounded per agent: its channel list and the principals directory are
+cached for 60 s (a channel name missing from the cached list triggers one refresh;
+joining, creating or opening a DM drops it), and `read_dms` reads at most the 10 newest
+DM channels, fetching a channel's page again only when its `last_seq` moved. An agent
+making more than `FLOCK_COMMS_AGENT_RATE` comms calls per second (default 0.1, burst
+`FLOCK_COMMS_AGENT_BURST` 10; 0 turns it off) is refused locally, before any request. No board
 service token or server extension is needed. Agents run no listeners themselves.
 
 Enable `comms.wake: [mention, thread, dm, channel]` and `loop.notices: true` for

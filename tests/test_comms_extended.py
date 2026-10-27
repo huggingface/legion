@@ -284,3 +284,58 @@ async def test_poll_backoff_only_slows_the_rotation(monkeypatch):
     assert gaps[0] == 75.0 and gaps[1] == 75.0  # 300 s / 4; the 1 s Retry-After changes nothing
     assert gaps[2] == 400.0  # the long Retry-After wins over the spacing
     assert gaps[3] == 75.0  # and the next success is back to normal
+
+
+async def test_tool_fan_out_is_cached_and_limited_per_agent(tmp_path, board, monkeypatch):
+    from flock.comms.board import AsyncBoard
+
+    real, sent = AsyncBoard.request, []
+
+    async def counting(self, route, cred=None, **kw):
+        sent.append((route[0], route[1]))
+        return await real(self, route, cred, **kw)
+
+    monkeypatch.setattr(AsyncBoard, "request", counting)
+    team = Team(tmp_path, board, ["cedar", "birch"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.03
+    team.spec.extended = True
+    team.spec.rules = CommsRules(min_post_gap=None)
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    try:
+        await team.start()
+        _, error = await team.call("birch", "create_channel", name="memory", purpose="work")
+        assert not error
+        sent.clear()
+        for _ in range(3):
+            out, error = await team.call("cedar", "channels")
+            assert not error
+        # a channel created after cedar's cached list is still found (one refresh)
+        _, error = await team.call("birch", "create_channel", name="later", purpose="work")
+        assert not error
+        out, error = await team.call("cedar", "read", channel="later")
+        assert not error, out
+        cedar_lists = [p for p in sent if p == ("GET", "/v1/channels")]
+        assert len(cedar_lists) == 2 + 1  # one cached list, birch's create check, one refresh
+
+        sent.clear()
+        for text in ("one", "two"):
+            out, error = await team.call("cedar", "dm", to="birch", text=text)
+            assert not error, out
+        assert sent.count(("GET", "/v1/principals")) == 1
+        read, error = await team.call("birch", "read_dms")
+        assert not error and [m["text"] for m in read["messages"]] == ["one", "two"]
+        sent.clear()
+        read, error = await team.call("birch", "read_dms")  # nothing new: the list only
+        assert not error and len(read["messages"]) == 2
+        assert [p for p in sent if p[1] != "/v1/activity"] == [("GET", "/v1/channels")]
+
+        team.hub.agent_rate, team.hub.agent_burst = 0.001, 2
+        sent.clear()
+        assert not (await team.call("cedar", "channels"))[1]  # (the dm dropped the cached list)
+        assert not (await team.call("cedar", "channels"))[1]
+        out, error = await team.call("cedar", "channels")
+        assert error and "too many board calls from you; retry in" in out["error"]
+        assert [p for p in sent if p[1] != "/v1/activity"] == [("GET", "/v1/channels")]  # 1st only
+    finally:
+        await team.close()
