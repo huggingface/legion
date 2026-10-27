@@ -424,3 +424,30 @@ def test_bind_never_touches_an_existing_target_on_a_readonly_bind(tmp_path, monk
     monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: refuse()
                         if self.exists() and not k.get("exist_ok") else None)
     isolation._bind(root, str(source), readonly=True)  # no touch, no mkdir of existing paths
+
+
+def test_setup_errors_name_the_step_and_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(isolation, "_mount", lambda *a, **k: None)
+    source = tmp_path / "data"
+    source.mkdir()
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        with pytest.raises(isolation.IsolationSetupError) as e:
+            isolation._bind(locked / "root", str(source), readonly=False)
+        assert "mount point creation failed" in str(e.value) and str(locked / "root") in str(e.value)
+        with pytest.raises(isolation.IsolationSetupError, match="required path is missing: path="):
+            isolation._bind(tmp_path / "root", str(tmp_path / "missing"), readonly=False)
+
+        # the entry point prints the step and path, never argv
+        config = {"root": str(locked / "root"), "cwd": "/", "readonly": [], "writable": [],
+                  "readonly_root": True, "private_dirs": [], "symlinks": []}
+        result = subprocess.run([sys.executable, "-I", isolation.__file__, json.dumps(config),
+                                 "/bin/true", "argv-secret"], capture_output=True, text=True,
+                                timeout=10, check=False)
+        assert result.returncode == 125
+        assert "root creation failed" in result.stderr and str(locked / "root") in result.stderr
+        assert "argv-secret" not in result.stderr
+    finally:
+        locked.chmod(0o755)

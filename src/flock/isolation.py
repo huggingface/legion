@@ -6,12 +6,14 @@ chroots and drops capabilities before executing any agent-supplied code.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import os
 import re
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC = 1, 2, 4, 8
@@ -28,8 +30,24 @@ DEV_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 MOUNT_ATTR_RDONLY, AT_FDCWD, AT_RECURSIVE, SYS_MOUNT_SETATTR = 0x1, -100, 0x8000, 442
 
 
-class IsolationMountError(OSError):
+class IsolationSetupError(OSError):
+    """A sandbox setup step failed: names the step and path (never argv or the env)."""
+
+
+class IsolationMountError(IsolationSetupError):
     """A mount(2) call of the sandbox setup failed: names the target and flags, no argv."""
+
+
+@contextlib.contextmanager
+def _step(step: str, path) -> Iterator[None]:
+    """Turn a plain OSError of one setup step into an IsolationSetupError naming it."""
+    try:
+        yield
+    except IsolationSetupError:
+        raise
+    except OSError as e:
+        raise IsolationSetupError(e.errno, f"isolation {step} failed: "
+                                           f"{e.strerror or type(e).__name__}: path={path}") from None
 
 
 def enabled() -> bool:
@@ -226,17 +244,18 @@ def check_mounts(mounts: list[tuple[str, set[str]]], root: str, readonly: list[s
 def _bind(root: Path, source: str, *, readonly: bool):
     path = Path(source)
     if not path.exists():
-        raise RuntimeError("required isolation path is missing")
+        raise IsolationSetupError(2, f"isolation bind failed: required path is missing: path={source}")
     target = root / path.relative_to("/")
-    target.parent.mkdir(parents=True, exist_ok=True)
     # Create the mount point only when missing: it may already exist on a read-only bind
     # (/etc/localtime -> /usr/share/zoneinfo/... under the /usr bind), where touch()'s utime
     # fails with EROFS.
-    if path.is_dir():
-        if not target.is_dir():
-            target.mkdir()
-    elif not target.exists():
-        target.touch()
+    with _step("mount point creation", target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_dir():
+            if not target.is_dir():
+                target.mkdir()
+        elif not target.exists():
+            target.touch()
     # Recursive: a user namespace refuses (EINVAL) a non-recursive bind of a tree that has
     # locked submounts, since it would uncover what they hide. Only explicitly listed paths
     # are bound, so a submount comes in only under a path that was asked for.
@@ -271,7 +290,8 @@ def _enter(config, argv):
     if os.getpgrp() != os.getpid():
         os.setsid()
     root = Path(config["root"])
-    root.mkdir(parents=True, exist_ok=True)
+    with _step("root creation", root):
+        root.mkdir(parents=True, exist_ok=True)
     _mount("tmpfs", root, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755,size=256m")
     for path in config["readonly"]:
         _bind(root, path, readonly=True)
@@ -281,15 +301,19 @@ def _enter(config, argv):
         inside = root / Path(link).relative_to("/")
         if os.path.lexists(inside):
             continue  # already visible through a bind mount
-        inside.parent.mkdir(parents=True, exist_ok=True)
-        inside.symlink_to(target)
+        with _step("symlink creation", inside):
+            inside.parent.mkdir(parents=True, exist_ok=True)
+            inside.symlink_to(target)
     for path in config["private_dirs"]:
-        (root / Path(path).relative_to("/")).mkdir(parents=True, exist_ok=True)
+        with _step("private directory creation", path):
+            (root / Path(path).relative_to("/")).mkdir(parents=True, exist_ok=True)
     for path in ("tmp", "proc", "dev"):
-        (root / path).mkdir(exist_ok=True)
+        with _step("directory creation", root / path):
+            (root / path).mkdir(exist_ok=True)
     for path in DEV_NODES:
         _bind(root, path, readonly=False)
-    (root / "dev/fd").symlink_to("/proc/self/fd")
+    with _step("symlink creation", root / "dev/fd"):
+        (root / "dev/fd").symlink_to("/proc/self/fd")
     _mount("proc", root / "proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
     inside = lambda p: os.path.realpath(root / Path(p).relative_to("/"))
     check_mounts(parse_mountinfo(Path("/proc/self/mountinfo").read_text()), os.path.realpath(root),
@@ -297,8 +321,10 @@ def _enter(config, argv):
                  [inside(p) for p in ("/proc", *DEV_NODES)])
     if config["readonly_root"]:
         _mount(None, root, flags=MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV)
-    os.chroot(root)
-    os.chdir(config["cwd"])
+    with _step("chroot", root):
+        os.chroot(root)
+    with _step("chdir", config["cwd"]):
+        os.chdir(config["cwd"])
     _drop_privileges()
     os.execvpe(argv[0], argv, dict(os.environ))
 
@@ -306,7 +332,7 @@ def _enter(config, argv):
 if __name__ == "__main__":
     try:
         _enter(json.loads(sys.argv[1]), sys.argv[2:])
-    except IsolationMountError as e:  # mount paths and flags only, never argv or the env
+    except IsolationSetupError as e:  # step, path and flags only, never argv or the env
         print(f"run4 process isolation failed during setup: {e.strerror}", file=sys.stderr)
         raise SystemExit(125) from None
     except Exception:  # noqa: BLE001 - fail closed, without leaking arguments or paths
