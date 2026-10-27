@@ -47,7 +47,8 @@ class Repository:
         # not under the world's state lock; reads, clones and object writes run concurrently.
         self.refs_lock = threading.Lock()
         self.fetched = 0.0
-        self.patch_ids = {}  # (base, head) -> stable patch-id or None
+        # (base, head) -> stable patch-id of the default diff, (base, head, 0) -> of the -U0 diff
+        self.patch_ids = {}
         self.env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_LFS_SKIP_SMUDGE": "1"}
         # The dataset is public: PR refs are fetched anonymously first (the Hub throttles git
@@ -217,9 +218,18 @@ class Repository:
 
     def patch_id(self, base, head):
         """Stable patch-id of the diff base..head (None for an empty diff), cached per pair."""
-        key = (base, head)
+        return self._patch_id((base, head), ["diff", base, head])
+
+    def patch_id0(self, base, head):
+        """Stable patch-id of the context-free diff base..head (None for an empty diff).
+
+        Without context lines, a change of main next to the PR's hunks leaves it unchanged,
+        so it identifies the PR's own change across a clean rebase. Cached per pair."""
+        return self._patch_id((base, head, 0), ["diff", "-U0", "--no-color", base, head])
+
+    def _patch_id(self, key, args):
         if key not in self.patch_ids:
-            diff = subprocess.run(["git", "-C", str(self.root), "diff", base, head],
+            diff = subprocess.run(["git", "-C", str(self.root), *args],
                                   capture_output=True, env=self.env, timeout=120, check=False)
             if diff.returncode:
                 log.warning("git diff failed: exit code %s", diff.returncode)

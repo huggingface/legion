@@ -812,6 +812,7 @@ class Chatbot4World(World):
         with self.lock:
             base = check()["base_sha"]
         review = {"head_sha": head_sha, "patch_id": self._patch_id(base, head_sha),
+                  "patch_id0": self._patch_id(base, head_sha, context=False),
                   "verdict": verdict, "comment": comment}
         with self.lock:
             rec = check()
@@ -835,26 +836,35 @@ class Chatbot4World(World):
             self._event("reviewed", agent, pr=pr, **review)
             return {"pr": pr, "reviewer": agent.name, **review}
 
-    def _patch_id(self, base, head):
+    def _patch_id(self, base, head, context=True):
         try:
-            return self.repo.patch_id(base, head)
+            return (self.repo.patch_id if context else self.repo.patch_id0)(base, head)
         except ToolError:
             return None  # unknown change identity: only exact-head reviews count
 
     def _current_reviews(self, rec):
-        """Reviews of the current head, or of an identical diff (a clean rebase).
+        """Reviews of the current head, or of the same change (a clean rebase).
 
-        Reviews stored without a patch_id only count for their exact head.
+        A review carries to a new head when its context-free patch-id (patch_id0) equals the
+        current one, so main changing lines next to the PR's hunks does not void it; or when
+        its patch_id (the diff with context, the older formula) equals the current one.
+        Reviews stored before patch_id0 existed keep only the patch_id match: reviews do not
+        record the base they were made on, so patch_id0 cannot be backfilled for them.
+        Reviews stored without either only count for their exact head.
         """
-        current, patch = {}, ...
+        current, ids = {}, {}
+
+        def ident(field):
+            if field not in ids:
+                ids[field] = self._patch_id(rec["base_sha"], rec["head_sha"],
+                                            context=field == "patch_id")
+            return ids[field]
+
         for name, r in rec["reviews"].items():
-            if r["head_sha"] != rec["head_sha"]:
-                if r.get("patch_id") is None:
-                    continue
-                if patch is ...:
-                    patch = self._patch_id(rec["base_sha"], rec["head_sha"])
-                if r["patch_id"] != patch:
-                    continue
+            if r["head_sha"] != rec["head_sha"] and not any(
+                    r.get(field) is not None and r[field] == ident(field)
+                    for field in ("patch_id0", "patch_id")):
+                continue
             current[name] = r
         return current
 

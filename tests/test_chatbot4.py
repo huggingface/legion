@@ -815,9 +815,106 @@ def test_reviews_without_patch_id_only_count_for_their_exact_head(setup):
     # State archived before patch ids existed, restored into a restarted world.
     state = json.loads(world.db.read_text())
     del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id"]
+    del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id0"]
     world.db.write_text(json.dumps(state))
     world = Chatbot4World(world.ws, world.repo)
     assert world.list_prs(needs_review=True) == []  # still approved at its exact head
+    _rebase(clone)
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    assert [r["pr"] for r in world.list_prs(needs_review=True)] == [second["pr"]]
+    with pytest.raises(ToolError, match="must approve"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    approve(world, updated)
+    assert world.merge_pr(Agent("cedar"), second["pr"])["merged_sha"]
+
+
+HOTSPOT = [f"LINE_{i} = {i}\n" for i in range(1, 10)]
+
+
+def _hotspot(setup):
+    """Put a nine-line module on main, as a file many PRs edit."""
+    world, clone, _ = setup
+    (clone / "bot/modules/hotspot.py").write_text("".join(HOTSPOT))
+    _commit(clone, "hotspot")
+    git(clone, "push", "-q", "origin", "HEAD:main")
+    world.repo.fetch()
+
+
+def _edit_line(clone, number, value):
+    lines = (clone / "bot/modules/hotspot.py").read_text().splitlines(keepends=True)
+    lines[number - 1] = f"LINE_{number} = {value!r}\n"
+    (clone / "bot/modules/hotspot.py").write_text("".join(lines))
+
+
+def _adjacent_prs(setup):
+    """main changes line 3 while cedar's approved PR changes line 5 (inside the diff context)."""
+    _hotspot(setup)
+    return _two_prs(setup, lambda c: _edit_line(c, 3, "main"),
+                    lambda c: _edit_line(c, 5, "pr"))
+
+
+def test_approval_carries_over_a_rebase_next_to_a_change_of_main(setup):
+    world, clone, second = _adjacent_prs(setup)
+    _rebase(clone)
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    rec = world.state["prs"][str(second["pr"])]
+    review = rec["reviews"]["birch"]
+    assert review["head_sha"] == second["head_sha"] and review["patch_id0"]
+    # The diff with context changed (main's line 3 shows in it); the change itself did not.
+    assert review["patch_id"] != world.repo.patch_id(rec["base_sha"], rec["head_sha"])
+    assert review["patch_id0"] == world.repo.patch_id0(rec["base_sha"], rec["head_sha"])
+    assert world.list_prs(needs_review=True) == []
+    result = world.merge_pr(Agent("cedar"), second["pr"])
+    assert result["reviewers"] == ["birch"] and result["head_sha"] == updated["head_sha"]
+
+
+def test_change_request_carries_over_a_rebase_next_to_a_change_of_main(setup):
+    world, clone, second = _adjacent_prs(setup)
+    world.review_pr(Agent("oak"), second["pr"], second["head_sha"], "request_changes", "Add a test")
+    _rebase(clone)
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    with pytest.raises(ToolError, match="requests changes"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    approve(world, updated, "oak")
+    assert world.merge_pr(Agent("cedar"), second["pr"])["reviewers"] == ["birch", "oak"]
+
+
+def test_a_content_change_after_an_adjacent_rebase_needs_a_fresh_approval(setup):
+    world, clone, second = _adjacent_prs(setup)
+    _rebase(clone)
+    _edit_line(clone, 5, "changed")
+    _commit(clone, "different change")
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    assert [r["pr"] for r in world.list_prs(needs_review=True)] == [second["pr"]]
+    with pytest.raises(ToolError, match="must approve"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    approve(world, updated)
+    assert world.merge_pr(Agent("cedar"), second["pr"])["head_sha"] == updated["head_sha"]
+
+
+def _drop_patch_id0(world, pr):
+    """A review stored before patch_id0 existed, restored into a restarted world."""
+    state = json.loads(world.db.read_text())
+    del state["prs"][str(pr)]["reviews"]["birch"]["patch_id0"]
+    world.db.write_text(json.dumps(state))
+    return Chatbot4World(world.ws, world.repo)
+
+
+def test_old_reviews_carry_by_their_patch_id_only(setup):
+    # Away from main's change, the old formula still matches and the approval carries.
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    world = _drop_patch_id0(world, second["pr"])
+    _rebase(clone)
+    submit(world, clone, branch="two", pr=second["pr"])
+    assert world.list_prs(needs_review=True) == []
+    assert world.merge_pr(Agent("cedar"), second["pr"])["reviewers"] == ["birch"]
+
+
+def test_old_reviews_do_not_carry_a_rebase_next_to_a_change_of_main(setup):
+    # The base a review was made on is not stored, so patch_id0 is not backfilled.
+    world, clone, second = _adjacent_prs(setup)
+    world = _drop_patch_id0(world, second["pr"])
     _rebase(clone)
     updated = submit(world, clone, branch="two", pr=second["pr"])
     assert [r["pr"] for r in world.list_prs(needs_review=True)] == [second["pr"]]
@@ -835,6 +932,9 @@ def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
     rec = submit(world, clone)
     first = world.repo.patch_id(rec["base_sha"], rec["head_sha"])
     assert first and world.repo.patch_ids[(rec["base_sha"], rec["head_sha"])] == first
+    assert world.repo.patch_id0(main, main) is None
+    zero = world.repo.patch_id0(rec["base_sha"], rec["head_sha"])
+    assert zero and world.repo.patch_ids[(rec["base_sha"], rec["head_sha"], 0)] == zero
 
 
 def _review(world, rec, who, verdict, comment="Looked at the diff"):
