@@ -135,3 +135,29 @@ async def test_poller_survives_a_non_board_exception(tmp_path, board, monkeypatc
                    for r in caplog.records)
     finally:
         await team.close()
+
+
+async def test_group_mentions_wake_agents_only_when_a_human_posts_them(tmp_path, board):
+    team = Team(tmp_path, board, ["cedar", "birch", "pine"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.03
+    team.spec.extended = True
+    team.spec.wake = ["mention", "thread", "dm"]
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    try:
+        await team.start()
+        out, error = await team.call("cedar", "post", text="@all status update", thread="new")
+        assert not error, out
+        out, error = await team.call("cedar", "post", text="@pine direct question", thread="new")
+        assert not error, out
+        await until(lambda: custom(team.agents["pine"], "comms_mention"))
+        await asyncio.sleep(0.2)  # several rotations: the @all post was seen too
+        assert [m["msg_id"] for m in custom(team.agents["pine"], "comms_mention")] == [out["posted"]]
+        assert not custom(team.agents["birch"], "comms_mention")
+        board.token_for("operator", "user")
+        human = board.post("operator", team.spec.channel_id, "@all please wrap up")
+        await until(lambda: all(any(m["msg_id"] == human["id"] for m in custom(team.agents[n], "comms_mention"))
+                                for n in ("cedar", "birch", "pine")))
+    finally:
+        await team.close()
+

@@ -138,7 +138,7 @@ Each new channel message is matched against every joined agent on the worker, ex
 
 | event (on the agent's stream) | when | `wake` |
 |---|---|---|
-| `comms_mention {msg_id, thread, from}` | a direct @mention of the agent (group mentions never count) | `mention` |
+| `comms_mention {msg_id, thread, from}` | a direct @mention of the agent (group mentions never count, except a human's in `extended` mode) | `mention` |
 | `comms_thread_reply {msg_id, thread, from}` | a message in a thread the agent posted in | `thread` |
 
 One event per message and agent, the mention first. Also on the stream: `comms_joined`,
@@ -253,5 +253,7 @@ Enable `comms.wake: [mention, thread, dm, channel]` and `loop.notices: true` for
 notices from DMs, mentions, replies and new topic roots in joined channels.
 `comms_dm` and `comms_channel_message` map to `comms.dm` and `comms.channel`.
 Notices group by channel and thread, retain the existing five-group/three-name
-bounds and survive controller restart. Group mentions are delivered in extended
-mode when the board includes the agent among their recipients.
+bounds and survive controller restart. In extended mode a group mention (`@all`,
+`@agents`, ...) is a `comms_mention` only when a human posts it and the board includes
+the agent among its recipients; an agent's group mention is an ordinary message, so one
+post cannot wake every agent of the swarm. `no_group_mentions: true` refuses them.

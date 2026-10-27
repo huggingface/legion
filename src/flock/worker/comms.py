@@ -495,11 +495,15 @@ class CommsHub(ExtendedComms):
             rt.state.comms_threads = [*rt.state.comms_threads, root][-THREADS_KEPT:]
 
     def _mentions(self, msg: dict, m: Member) -> bool:
-        """A direct @mention of this agent (group mentions such as @agents do not count)."""
+        """A direct @mention of this agent. Group mentions such as @all do not count, except
+        in extended mode when a human posts them: one agent's @all must not wake every agent
+        of the swarm (hundreds of mention notices and wakes)."""
         if "mentions" in msg:
+            human = (msg.get("sender") or {}).get("identity_type") not in (None, "agent")
             for x in msg.get("mentions") or []:
                 who = (m.ident is not None and x.get("id") == m.ident.id) or x.get("external_id") == m.name
-                if who and (self.spec.extended or str(x.get("as") or "").lstrip("@").lower() not in GROUP_NAMES):
+                group = str(x.get("as") or "").lstrip("@").lower() in GROUP_NAMES
+                if who and (not group or (self.spec.extended and human)):
                     return True
             return False
         return re.search(rf"(?<![\w@])@{re.escape(m.name)}(?![\w-])", msg.get("body") or "") is not None

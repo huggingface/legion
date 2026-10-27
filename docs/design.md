@@ -837,7 +837,8 @@ agent is stopped and prompts are refused. World-backed settings (`every: rounds`
 `comms.extended` adds optional channel-aware tools and per-identity private-message
 polling. Legacy specs retain their default tools and event payloads. The rule
 fields `max_channels_per_agent` and `max_channels` bound channel creation (the
-board count check is advisory across workers). See [comms.md](comms.md).
+board count check is advisory across workers). In extended mode a group mention
+(`@all`, `@agents`, ...) counts as a mention only when a human posts it. See [comms.md](comms.md).
 
 Worlds advertising `workspace-upload-v1` receive worker-captured clone snapshots
 outside the model's arguments. Other World API v1 worlds keep their dispatch and
@@ -846,6 +847,7 @@ stable hash used by the llm harness; multi-endpoint Pi workers use separate agen
 config directories so models.json cannot race between different endpoints.
 
 Transport failures (`model_transport`) and turn timeouts retry without incrementing
-the loop's consecutive error count. Ordinary errors still stop after three failed
+the loop's consecutive error count, after 2 s doubling to 120 s with jitter; after 20 in a
+row each further one counts as an ordinary error. Ordinary errors still stop after three failed
 turns; intentional interruptions retain their existing behavior. Controller state
 sync uploads changed event files incrementally after its first complete sync.
