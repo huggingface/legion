@@ -2,7 +2,8 @@
 
 Writes carry an `Idempotency-Key` that stays the same across retries, so a retried post never
 posts twice. 429, 5xx and transport errors are retried with jittered backoff, honouring
-`Retry-After` (its value plus jitter, up to RETRY_AFTER_MAX_S); other errors raise `BoardError` with the board's own message. Tokens and invite
+`Retry-After` (its value plus jitter, up to RETRY_AFTER_MAX_S), except that the worker's
+AsyncBoard raises a 429 at once (BoardError.retry_after) instead of retrying; other errors raise `BoardError` with the board's own message. Tokens and invite
 codes are never part of an error message.
 """
 
@@ -186,6 +187,10 @@ class AsyncBoard:
             except httpx.TransportError as e:
                 if attempt == ATTEMPTS - 1:
                     raise BoardError(f"board: {method} {path}: {type(e).__name__}") from None
+            if r is not None and r.status_code == 429:
+                # Rate limited: never retried here (a retry is another request against the
+                # same limit); the caller sees retry_after and decides.
+                raise _error(r, method, path)
             if r is not None and r.status_code not in RETRY_STATUSES:
                 if r.status_code >= 400:
                     raise _error(r, method, path)

@@ -31,20 +31,32 @@ def test_delay_waits_retry_after_plus_jitter_up_to_the_cap(monkeypatch):
     assert _delay(0, httpx.Response(429, headers={"retry-after": "0"}), 1.0) > 0.0
 
 
-async def test_exhausted_429_raises_with_retry_after(monkeypatch):
-    sleeps = []
+async def test_async_board_raises_429_at_once_but_retries_5xx(monkeypatch):
+    sleeps, seen = [], []
 
     async def no_sleep(s):
         sleeps.append(s)
 
+    status = [429]
+
+    def handler(r):
+        seen.append(r)
+        if status[0] == 503 and len(seen) > 2:
+            return httpx.Response(200, json={"channels": []})
+        return httpx.Response(status[0], headers={"retry-after": "30"},
+                              json={"error": {"code": "rate_limited", "message": "slow down"}})
+
     monkeypatch.setattr(board_mod.asyncio, "sleep", no_sleep)
-    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(
-        lambda r: httpx.Response(429, headers={"retry-after": "30"},
-                                 json={"error": {"code": "rate_limited", "message": "slow down"}})))
+    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(handler))
+    cred = type("C", (), {"url": "http://b.invalid", "token": "t"})()
     try:
         with pytest.raises(BoardError) as e:
-            await board.channels(type("C", (), {"url": "http://b.invalid", "token": "t"})())
+            await board.channels(cred)
         assert e.value.status == 429 and e.value.retry_after == 30.0
-        assert len(sleeps) == board_mod.ATTEMPTS - 1 and all(30.0 <= s <= 36.0 for s in sleeps)
+        assert len(seen) == 1 and sleeps == []  # one request, no in-client retry
+        status[0] = 503
+        seen.clear()
+        assert await board.channels(cred) == []
+        assert len(seen) == 3 and len(sleeps) == 2  # 5xx still retried in the client
     finally:
         await board.aclose()
