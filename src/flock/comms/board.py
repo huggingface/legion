@@ -10,6 +10,7 @@ codes are never part of an error message.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import random
 import time
@@ -22,6 +23,8 @@ from urllib.parse import quote
 import httpx
 
 from flock.models import normalize_board_url
+
+log = logging.getLogger(__name__)
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 ATTEMPTS = 4
@@ -58,6 +61,26 @@ def parse_retry_after(value: str | None, now: datetime | None = None) -> float |
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
     return max(0.0, (when - (now or datetime.now(UTC))).total_seconds())
+
+
+HEADERS_LOGGED_429 = 5  # the first 429s of a process also log allow-listed response headers
+_LOG_HEADERS = ("retry-after", "server", "date", "via", "x-request-id")
+_LOG_HEADER_PREFIXES = ("x-ratelimit-", "ratelimit-", "cf-", "x-proxied-")
+_seen_429 = 0
+
+
+def _log_429(method: str, path: str, r: httpx.Response, retry_after: float | None) -> None:
+    """One short WARNING per 429 (`grep -c "board 429"`); for the first few, the response's
+    allow-listed headers too. Never request headers, cookies or the query string."""
+    global _seen_429
+    _seen_429 += 1
+    ra = "none" if retry_after is None else f"{retry_after:g}"
+    log.warning("board 429 %s %s retry_after=%s", method, path.split("?")[0], ra)
+    if _seen_429 <= HEADERS_LOGGED_429:
+        shown = {k: v for k, v in r.headers.items()
+                 if k.lower() in _LOG_HEADERS or k.lower().startswith(_LOG_HEADER_PREFIXES)}
+        log.warning("board 429 response headers (%d/%d): %s", _seen_429, HEADERS_LOGGED_429,
+                    shown)
 
 
 def _busy(what: str, wait: float) -> BoardError:
@@ -264,6 +287,7 @@ class AsyncBoard:
                 # same limit); the gate closes for every caller and the error carries
                 # retry_after.
                 error = _error(r, method, path)
+                _log_429(method, path, r, error.retry_after)
                 self._close_gate(error)
                 raise error
             if r is not None and r.status_code not in RETRY_STATUSES:

@@ -136,3 +136,32 @@ async def test_tool_call_reports_board_busy_to_the_model(monkeypatch):
         assert hub.limiter.rate == 0.5
     finally:
         await hub.aclose()
+
+
+async def test_429_log_lines_never_carry_tokens_cookies_or_queries(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(board_mod, "_seen_429", 0)
+    headers = {"retry-after": "7", "x-ratelimit-remaining": "0", "cf-ray": "abc", "server": "nginx",
+               "set-cookie": "session=cookie-secret", "x-other": "other-secret"}
+    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(
+        lambda r: httpx.Response(429, headers=headers)))
+    cred = type("C", (), {"url": "http://b.invalid", "token": "bearer-secret"})()
+    caplog.set_level(logging.WARNING, logger="flock.comms.board")
+    try:
+        for i in range(6):
+            board.blocked_until = 0.0
+            caplog.clear()
+            with pytest.raises(BoardError):
+                await board.activity(cred, "joined", 5, wait=0)
+            lines = [r.getMessage() for r in caplog.records]
+            assert lines[0] == "board 429 GET /v1/activity retry_after=7"
+            text = "\n".join(lines)
+            for secret in ("bearer-secret", "cookie-secret", "other-secret", "after=5", "joined"):
+                assert secret not in text
+            if i < 5:
+                assert len(lines) == 2 and "x-ratelimit-remaining" in lines[1] and "cf-ray" in lines[1]
+            else:
+                assert len(lines) == 1  # the 6th: the short line only
+    finally:
+        await board.aclose()
