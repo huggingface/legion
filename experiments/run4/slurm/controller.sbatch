@@ -1,5 +1,5 @@
 #!/bin/bash
-# controller.sbatch: the flock controller (+ the run-3 waves runner) as one CPU Slurm job.
+# controller.sbatch: the flock controller (+ the run-4 waves runner) as one CPU Slurm job.
 #
 #   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
 #   sbatch -J flock-ctl-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
@@ -30,7 +30,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=3800M           # hopper-cpu MaxMemPerCPU=2000: more than 2000 MB per CPU silently raises the CPU count (4G / 2 = 2048)
-#SBATCH --time=54:00:00
+#SBATCH --time=60:00:00
 #SBATCH --requeue
 #SBATCH --dependency=singleton  # one controller per run (the job name flock-ctl-<RUN> is per run)
 #SBATCH --open-mode=append      # a requeue keeps the job id: append to the .out instead of truncating it
@@ -93,10 +93,10 @@ SPEC=$EXP/spec.slurm.local.yaml
 WAVES_FILE=$EXP/${RUN3_WAVES:-waves.yaml}
 WORLD_LOG_S=${WORLD_LOG_S:-300}                 # while waiting for the world: one log line every 5 min
 HEALTH_WAIT_S=${HEALTH_WAIT_S:-300}
+WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # bounded cold-start/recovery wait
 
 # ---------------------------------------------------------------- the world must be up first (runbook order)
-# No deadline: a requeued controller may have to wait for a world that is itself restarting on a
-# cold node. world.host is re-read on each try (a requeued world rewrites it). A signal runs the
+# Wait for recovery on a cold node, bounded by WORLD_WAIT_S. world.host is re-read on each try (a requeued world rewrites it). A signal runs the
 # trap once the foreground `sleep`/`http_status` returns; the loop then exits: requeued (USR1)
 # or cancelled (TERM). The URL stays local: an exported RUN3_WORLD_URL would make render.py write
 # a literal world.url and the controller's ${WORLD_HOST} follow (FLOCK_WORLD_HOST_FILE) would never trigger.
@@ -106,6 +106,8 @@ while :; do
   world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null)
   world_url="http://$world_host:7860"
   [ -n "$world_host" ] && [ "$(http_status "$world_url/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ] && break
+  [ $(( $(date +%s) - t0 )) -lt "$WORLD_WAIT_S" ] \
+    || die "world unavailable after ${WORLD_WAIT_S}s; inspect the world recovery log before restarting the controller"
   if [ "$(date +%s)" -ge "$next_log" ]; then
     log "waiting for the world ($(( $(date +%s) - t0 ))s): world.host='${world_host}', no 200 on GET /manifest yet (start world.sbatch if it is not queued)"
     next_log=$(( $(date +%s) + WORLD_LOG_S ))

@@ -157,7 +157,8 @@ class CommsHub(ExtendedComms):
                  env: Mapping[str, str] | None = None,
                  transport: httpx.AsyncBaseTransport | None = None,
                  clock: Callable[[], float] = time.time, poll_wait: float = POLL_WAIT_S,
-                 backoff_s: float = 1.0) -> None:
+                 backoff_s: float = 1.0, poll_min_interval: float = 2.0,
+                 poll_cycle_s: float = 60.0) -> None:
         self.swarm = swarm
         self._init_extended()
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
@@ -167,6 +168,8 @@ class CommsHub(ExtendedComms):
         self._transport = transport
         self._clock = clock
         self.poll_wait = poll_wait
+        self.poll_min_interval = poll_min_interval
+        self.poll_cycle_s = poll_cycle_s
         self.backoff_s = backoff_s
         self.spec: CommsSpec | None = None
         self.entries: list[str] = []

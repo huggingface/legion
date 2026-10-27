@@ -70,7 +70,9 @@ Image: `CONTAINER_IMAGE`, default `/fsx/carlos_patino/prj-eliza/images/python-3.
 called by worker.sbatch): `CONTAINER_IMAGE_<TYPE>` in `run.env` (`-`/`.` in the type become `_`), else
 `FLOCK_CONTAINER_IMAGE` from the env file (flock's client: one image for all types), else `CONTAINER_IMAGE`.
 run3: `CONTAINER_IMAGE_agent_pi=$PRJ/images/pi-worker-node22.sqsh` (Node 22 + Pi 1.2.0 + git/rg, built by
-`tests/pi-image.slurm`; no Python, it comes from the mounts). In an image with `/usr/local/bin/pi`,
+the historical `tests/pi-image.slurm`, which is not included here; no Python,
+it comes from the mounts). Run 4 uses the existing image and validates it with
+`tests/dryrun.slurm`. In an image with `/usr/local/bin/pi`,
 worker-inner.sh exports `FLOCK_PI_CLI` and `PI_CODING_AGENT_DIR=/work/pi/<worker id>`. Extra mounts: `<run>/world` for the world
 (`world.yaml`, `final-sync-bound`), `<run>/hosts` for the worker (`FLOCK_CTL_HOST_FILE`).
 

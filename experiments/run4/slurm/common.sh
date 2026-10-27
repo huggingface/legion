@@ -98,7 +98,7 @@ publish_host() {
 }
 
 # ---------------------------------------------------------------- secrets and run config
-# secrets.env defines HF_TOKEN (via $(cat ~/.cache/huggingface/token)), OPENAI_API_KEY,
+# secrets.env defines shared HF_TOKEN (only the experiment bucket + dataset), OPENAI_API_KEY,
 # CHATBOT_BOARD_INVITE, CHATBOT_WORLD_TOKEN, FLOCK_TOKEN. run.env (optional, not secret) holds
 # the run's endpoint, board, bucket and model settings: see run.env.example.
 source_env_600 "$SECRETS_FILE"
@@ -110,8 +110,8 @@ fi
 # checkout and venv: WORLD_REPO / WORLD_VENV in run.env (defaults: the shared $REPO / $VENV). Done
 # HERE, at run time, so a requeue of an already-submitted world job (Slurm replays the batch script
 # stored at submit time) still picks them up: everything after this point and in world.sbatch /
-# world-inner.sh (PATH, http_status, WORLD_SRC, the world.yaml source, the container mounts, the
-# flock/hf binaries) reads $VENV / $REPO. The controller and the workers keep the shared ones.
+# world-inner.sh (PATH, http_status, WORLD_SRC, container mounts, flock/hf binaries) reads
+# $VENV / $REPO. The controller and workers select their own paths below.
 if [ "${LOG_TAG:-}" = world ]; then
   VENV=${WORLD_VENV:-$VENV}
   REPO=${WORLD_REPO:-$REPO}
@@ -119,8 +119,8 @@ if [ "${LOG_TAG:-}" = world ]; then
   export VENV REPO
 fi
 # The same for the controller job only (LOG_TAG=controller): CTL_VENV / CTL_REPO in run.env.
-# Workers are unaffected: worker.sbatch sources this file, which resets VENV/REPO to the shared
-# ones above, and worker-inner.sh uses that $VENV; the FLOCK_VENV that controller.sbatch writes
+# worker.sbatch also sources this file and selects WORKER_VENV / WORKER_REPO below;
+# worker-inner.sh uses that $VENV. The FLOCK_VENV that controller.sbatch writes
 # into the env files (FLOCK_SLURM_VENV=$VENV) is informational only.
 if [ "${LOG_TAG:-}" = controller ]; then
   VENV=${CTL_VENV:-$VENV}
@@ -133,14 +133,15 @@ fi
 if [ "${LOG_TAG:-}" = worker ]; then
   VENV=${WORKER_VENV:-$VENV}
   REPO=${WORKER_REPO:-$REPO}
+  VENV=${VENV%/} REPO=${REPO%/}
   export VENV REPO
 fi
-# A dedicated dataset-write token is used only by the world process.
-# Workers/controller retain the bucket-scoped HF_TOKEN for sync.
-if [ "${LOG_TAG:-}" != world ]; then
-  unset CHATBOT_REPO_TOKEN
-fi
+# HF_TOKEN is shared by sync and the PR backend. Keep its grant limited to the
+# experiment bucket and dataset. The worker/world disable dumpability; Pi and bots
+# get private process/filesystem views because the outer container exposes host /proc.
+unset CHATBOT_REPO_TOKEN  # obsolete: run 4 uses HF_TOKEN for both resources
 export CHATBOT_REPO=${CHATBOT_REPO:-cmpatino/chatbot-swarm}
+export FLOCK_PROCESS_ISOLATION=1  # mandatory for run4; namespace setup failures must stop startup
 
 # The venv first on PATH: subprocesses started by flock (`flock` CLI inside tools, `hf` from the
 # world's sync loop, `python -I -m flock.tools.runner`) must find the same install. Scripts still

@@ -287,11 +287,12 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
             return ClaudeAdapter(workdir)
         if spec.harness.value == "pi":
             from flock.controller.prices import type_price_table
+            from flock.isolation import enabled
             from flock.worker.adapters.pi import PiAdapter, pi_home, pi_model_config
 
             # Each endpoint needs its own models.json; agents on one worker can
             # target different servers, so keep their Pi config directories separate.
-            multi = spec.resolved_model and len(spec.resolved_model.provider.endpoints) > 1
+            multi = enabled() or (spec.resolved_model and len(spec.resolved_model.provider.endpoints) > 1)
             home = pi_home() / "agents" / name if multi else None
             return PiAdapter(workdir, agent=name, home=home, model_config=pi_model_config(spec, name),
                              prices=type_price_table(spec))
@@ -833,6 +834,10 @@ def run_and_exit(coro, *, exit: Callable[[int], object] = os._exit) -> None:
 
 
 def main() -> None:
+    from flock.isolation import enabled, protect_supervisor
+
+    if enabled():
+        protect_supervisor()
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     quiet_libraries()

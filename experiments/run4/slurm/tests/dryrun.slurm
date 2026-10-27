@@ -17,6 +17,7 @@ srun "${CTR_SRUN[@]}" bash -c '
   export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
   export HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp RUFF_CACHE_DIR=/work/ruff-cache
   export FLOCK_PI_CLI=/usr/local/bin/pi
+  export FLOCK_REQUIRE_ISOLATION=1
   mkdir -p "$HOME" "$HF_HOME" "$TMPDIR"
   bash "$REPO/experiments/run4/dryrun.sh"
 ' &

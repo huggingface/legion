@@ -1,5 +1,5 @@
 #!/bin/bash
-# world.sbatch: the run-3 world (worlds/chatbot4, `flock world serve`) as one CPU Slurm job.
+# world.sbatch: the run-4 PR world (worlds/chatbot4, `flock world serve`) as one CPU Slurm job.
 #
 #   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
 #   sbatch -J flock-world-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
@@ -10,15 +10,10 @@
 # does restore -> serve -> periodic sync -> final sync INSIDE the container: the workspace lives on
 # the container root (/work/world/ws, node disk, deleted with the container), home is not mounted
 # and /fsx is visible only read-only (venv, uv Python, repo, slurm dir, <run>/world).
-# Mirrors experiments/run4/world-space/start.sh (fact sheet §3 world, §5 restart):
-# - CHATBOT_WS is a fresh EMPTY dir in the container, so `ws/` is restored from <CHATBOT_BUCKET>/ws
-#   at every start; the whole workspace is pushed every WS_SYNC_S (300 s); best/ is mirrored by
-#   the world itself at each promotion.
-# - `runs.parallel` is read ONCE at start and 0 means os.cpu_count() = the NODE's CPUs, not the
-#   job's: a run-specific <run>/world/world.yaml (repo default + runs.parallel: 14) is written here
-#   and handed over with CHATBOT_CONFIG (the only mechanism: `flock world serve` has no config
-#   flag). <run>/world is mounted ro, so an edit there still reaches the world (re-read on mtime).
-#   16 CPUs = 14 bot slots + 2 for the server and the sync.
+# - A consistent git bundle and PR/review state restore from <CHATBOT_BUCKET>/world.tar.gz
+#   into a fresh container workspace. Archive uploads run every WS_SYNC_S (300 s).
+# - CHATBOT_RUN_SLOTS controls concurrent contract runs (default 26, plus 2 service CPUs). There is no world.yaml,
+#   probe set or promotion service. <run>/world holds only the bounded-stop control file.
 # - <run>/hosts/world.host (and the <run>/world.host symlink) is rewritten at EVERY start, a
 #   requeue onto a new node included.
 # - Spot reclaim: the watcher sends SIGUSR1 to this shell, to srun and to every process in the
@@ -40,9 +35,9 @@
 #SBATCH --partition=hopper-cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=30G             # hopper-cpu MaxMemPerCPU=2000: 30G / 16 = 1920 MB per CPU (more would silently raise the CPU count)
-#SBATCH --time=54:00:00
+#SBATCH --cpus-per-task=28
+#SBATCH --mem=54G             # full CPU node; 54G / 28 = 1975 MB per CPU, below the 2000 MB limit
+#SBATCH --time=60:00:00
 #SBATCH --requeue
 #SBATCH --dependency=singleton
 #SBATCH --open-mode=append
@@ -62,13 +57,13 @@ FINAL_SYNC_S=${FINAL_SYNC_S:-12}              # Spot path bound for the last syn
 FINAL_SYNC_LONG_S=${FINAL_SYNC_LONG_S:-600}   # clean stop (signal-only TERM) or crash: not under a kill
 CANCEL_SYNC_S=25                              # plain scancel: SIGKILL comes KillWait=30 s after the TERM
 USR1_WAIT_S=22                                # how long on_usr1 waits for the step before the requeue
-WORLD_CTL=$RUN_DIR/world                      # world.yaml + final-sync-bound; mounted ro in the container
+WORLD_CTL=$RUN_DIR/world                      # final-sync-bound; mounted ro in the container
 mkdir -p "$WORLD_CTL" || die "cannot create $WORLD_CTL"
 rm -f "$WORLD_CTL/final-sync-bound"
 on_usr1() {  # Spot reclaim: the watcher cancels the job 30 s after this signal
   # Worst case: the step (stop 5 s + sync 12 s + 2 s kill grace + container teardown) is waited
   # for at most USR1_WAIT_S = 22 s, then `scontrol requeue` (~1 s). With no step yet (signal
-  # during the world.yaml step) it requeues at once.
+  # during startup) it requeues at once.
   [ "$REQUEUE" = 1 ] && return 0
   REQUEUE=1; STOPPING=1
   log "SIGUSR1 (Spot reclaim): USR1 to the world step (srun pid ${SRUN_PID:-<none>}): stop, final sync; then requeue"
@@ -121,7 +116,7 @@ trap on_usr1 USR1
 trap on_term TERM INT
 
 # ---------------------------------------------------------------- inputs (exported: world-inner.sh reads them in the container)
-require_var HF_TOKEN CHATBOT_REPO_TOKEN CHATBOT_WORLD_TOKEN RUN3_BUCKET
+require_var HF_TOKEN CHATBOT_WORLD_TOKEN RUN3_BUCKET
 RUN3_BUCKET=${RUN3_BUCKET%/}
 export CHATBOT_BUCKET="${CHATBOT_BUCKET:-$RUN3_BUCKET/$RUN}"   # hf://buckets/<ns>/<bucket>/<run> (README runbook B step 2)
 export B=${CHATBOT_BUCKET%/}
@@ -134,12 +129,12 @@ export FLOCK_WORLD_TOKEN=$CHATBOT_WORLD_TOKEN     # start.sh: the token the cont
 export FINAL_SYNC_S FINAL_SYNC_LONG_S CANCEL_SYNC_S WORLD_CTL
 
 # Run 4's world has no probe/promote configuration.
-export CHATBOT_RUN_SLOTS=${CHATBOT_RUN_SLOTS:-4}
+export CHATBOT_RUN_SLOTS=${CHATBOT_RUN_SLOTS:-26}
 
 # ---------------------------------------------------------------- serve (in the container)
 [ "$STOPPING" = 0 ] || exit 0  # a signal during the start-up (already requeued on USR1; nothing to sync)
 publish_host world             # every start: a requeue may land on another node
-container_srun_args "$WORLD_CTL"   # -> CTR_SRUN; <run>/world ro (world.yaml, final-sync-bound)
+container_srun_args "$WORLD_CTL"   # -> CTR_SRUN; <run>/world ro (final-sync-bound)
 log "world.host=$WORLD_HOST; url http://$WORLD_HOST:$WORLD_PORT; ws=$CHATBOT_WS (container); bucket=$B; restarts=${SLURM_RESTART_COUNT:-0}"
 log "container=$CONTAINER_IMAGE; world log $RUN_DIR/logs/world-$RUN.log"
 # srun is started while USR1 is ignored, like every child here; inside, world-inner.sh installs its
@@ -166,5 +161,13 @@ while kill -0 "$SRUN_PID" 2>/dev/null; do
 done
 wait "$SRUN_PID"; rc=$?   # the real status even when the last wait was cut by a trap
 log "world step exited with $rc (requeue=$REQUEUE, term=${TERM_MODE:-none}); the final sync ran inside it"
-[ "$REQUEUE" = 1 ] && exit 0  # already requeued
+[ "$REQUEUE" = 1 ] && exit 0  # already requeued by the Spot handler
+if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ] && [ "${SLURM_RESTART_COUNT:-0}" -lt 5 ]; then
+  log "world failed (rc=$rc): automatic recovery requeue $(( ${SLURM_RESTART_COUNT:-0} + 1 ))/5"
+  scontrol requeue "$SLURM_JOB_ID" || exit "$rc"
+  exit 0
+fi
+if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ]; then
+  log "FATAL: world recovery exhausted after ${SLURM_RESTART_COUNT:-0} restarts; operator action required"
+fi
 exit "$rc"

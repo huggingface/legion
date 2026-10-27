@@ -196,6 +196,10 @@ class AgentRuntime:
     @property
     def pin_path(self) -> Path:
         """The Toolset `flock-tool` uses (FLOCK_TOOLS_PIN), rewritten at each turn start."""
+        from flock.isolation import enabled
+
+        if enabled():
+            return self.work_root / "_tools_pins" / self.name / "pin.json"
         return self.work_root / "_tools_pins" / f"{self.name}.json"
 
     def _pin_tools(self) -> Toolset | None:

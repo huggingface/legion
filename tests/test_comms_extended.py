@@ -20,6 +20,8 @@ def board():
 
 async def test_channels_dm_reaction_and_private_notices(tmp_path, board):
     team = Team(tmp_path, board, ["cedar", "birch", "pine"])
+    team.hub.poll_min_interval = 0.01  # functional delivery; production spacing has a virtual-time test
+    team.hub.poll_cycle_s = 0.03
     team.spec.extended = True
     team.spec.wake = ["mention", "thread", "dm", "channel"]
     team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
@@ -58,6 +60,8 @@ async def test_channels_dm_reaction_and_private_notices(tmp_path, board):
 
 async def test_channel_creation_cap_survives_worker_state(tmp_path, board):
     team = Team(tmp_path, board, ["cedar"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.03
     team.spec.extended = True
     team.spec.rules = CommsRules(max_channels_per_agent=1)
     team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
@@ -75,6 +79,8 @@ async def test_channel_creation_cap_survives_worker_state(tmp_path, board):
 
 async def test_external_dm_delivered_to_its_recipient_by_rotating_poll(tmp_path, board):
     team = Team(tmp_path, board, ["cedar", "birch"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.03
     team.spec.extended = True
     team.spec.wake = ["mention", "thread", "dm", "channel"]
     team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))

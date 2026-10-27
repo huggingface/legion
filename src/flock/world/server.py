@@ -229,6 +229,11 @@ def serve(target: str, *, host: str | None = None, port: int | None = None,
           token_env: str = TOKEN_ENV, insecure: bool = False) -> None:
     import uvicorn
 
+    from flock.isolation import enabled, protect_supervisor
+
+    if enabled():
+        protect_supervisor()
+
     token = os.environ.get(token_env, "")
     if not token and not insecure:
         raise SystemExit(f"{token_env} is not set: a world needs its shared secret "

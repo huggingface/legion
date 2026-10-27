@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -179,16 +180,24 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     if counts == before:
         write_replicas(spec, {**others, **counts})
         rec["lines"] = ["no changes"]
+        _holds(spec, False)
         return rec
     if total > max(have, 100):
         from load_guard import capacity_ok
 
         ok, message = capacity_ok()
         if not ok:
-            rec.update(held=True, lines=[message], after=before, total=have)
+            holds = _holds(spec, True)
+            rec.update(held=True, lines=[message], after=before, total=have, consecutive_holds=holds)
+            warn_after = max(1, int(os.environ.get("RUN4_HOLD_WARN_AFTER", "3")))
+            if holds >= warn_after:
+                rec["warning"] = (f"ACTION REQUIRED: {holds} consecutive capacity holds; replicas remain "
+                                  f"{have}. Inspect node metrics and calibrate RUN4_MAX_REQUEST_SECONDS "
+                                  "on the live smoke; growth remains blocked.")
             with open(log, "a") as f:
                 f.write(json.dumps(rec) + "\n")
             return rec
+    _holds(spec, False)
     steps = range(have + 1, total + 1) if stagger > 0 and total > have else [total]
     rec["stagger_s"], rec["steps"] = (stagger if len(steps) > 1 else 0), len(steps)
     for i, k in enumerate(steps):
@@ -203,6 +212,18 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     with open(log, "a") as f:
         f.write(json.dumps(rec) + "\n")
     return rec
+
+
+def _holds(spec: Path, held: bool) -> int:
+    """Persist hold streaks with the wave clock, including across runner restarts."""
+    path = spec.with_name(spec.name + ".waves.json")
+    state = json.loads(path.read_text()) if path.exists() else {}
+    count = int(state.get("consecutive_holds", 0)) + 1 if held else 0
+    state["consecutive_holds"] = count
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(state) + "\n")
+    tmp.replace(path)
+    return count
 
 
 def _has_state(spec: Path) -> bool:
@@ -227,6 +248,8 @@ def _say(rec: dict) -> None:
             f"{rec['after']} (cap {rec['cap']}"
             + (f"; {rec['steps']} steps {rec['stagger_s']:g} s apart" if rec.get("stagger_s")
                else "") + ")")
+    if rec.get("warning"):
+        print(rec["warning"], file=sys.stderr, flush=True)
     lines = [x for x in rec.get("lines", []) if not x.startswith("world.")]  # controller-written
     print(head + ("; FAILED: " + " / ".join(rec["error"]) if "error" in rec else
                   "; " + " / ".join(lines)), flush=True)

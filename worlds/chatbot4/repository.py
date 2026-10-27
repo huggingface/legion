@@ -1,4 +1,4 @@
-"""Git transport and native Hub PRs. Only the world process holds write credentials."""
+"""Git transport and native Hub PRs. The world uses the shared experiment HF_TOKEN for writes."""
 from __future__ import annotations
 
 import os
@@ -21,7 +21,7 @@ class Repository:
             # The URL, argv and repository config contain no token.
             askpass = root.parent / "git-askpass.py"
             askpass.write_text("#!/usr/bin/env python3\nimport os,sys\n"
-                               "print('hf_user' if 'Username' in sys.argv[1] else (os.environ.get('CHATBOT_REPO_TOKEN') or os.environ['HF_TOKEN']))\n")
+                               "print('hf_user' if 'Username' in sys.argv[1] else os.environ['HF_TOKEN'])\n")
             askpass.chmod(0o700)
             self.env["GIT_ASKPASS"] = str(askpass)
         if not (root / "HEAD").exists():
@@ -80,7 +80,10 @@ class Repository:
 class Hub:
     def __init__(self, repo_id):
         self.repo_id = repo_id
-        self.api = HfApi(token=os.environ.get("CHATBOT_REPO_TOKEN") or os.environ.get("HF_TOKEN"))
+        token = os.environ.get("HF_TOKEN")
+        if not token:
+            raise ToolError("HF_TOKEN is required for the bucket and dataset", "configuration")
+        self.api = HfApi(token=token)
 
     def request(self, method, **kwargs):
         # Calls are serialized by the world's mutation lock. Retry 429 only; other

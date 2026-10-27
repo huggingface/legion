@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from flock.isolation import command as isolate_command
+
 SHIM = r'''
 import sys, os, resource, runpy
 root = os.path.realpath(sys.argv[1])
@@ -15,10 +17,11 @@ resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))
 resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
 resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))
 resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
 sys.dont_write_bytecode = True
 sys.path.insert(0, root)
 allowed = set(sys.stdlib_module_names) | {'bot'}
-blocked = {'ctypes', '_ctypes', 'subprocess', 'socket', '_socket', 'multiprocessing'}
+blocked = {'ctypes', '_ctypes', '_posixsubprocess', 'subprocess', 'socket', '_socket', 'multiprocessing'}
 def audit(event, args):
     if event == 'import':
         name = args[0].split('.')[0]
@@ -51,7 +54,10 @@ def run(root: Path, lines: list[str], timeout: float = 300) -> dict:
     with (tempfile.TemporaryDirectory() as tmp,
           open(Path(tmp) / "out", "w+b") as out,
           open(Path(tmp) / "err", "w+b") as err):
-        proc = subprocess.Popen([sys.executable, "-I", "-c", SHIM, str(root)], cwd=tmp,
+        argv = isolate_command([sys.executable, "-I", "-c", SHIM, str(root.resolve())],
+                               Path(tmp) / "root", cwd=root.resolve(), readonly=[root.resolve()],
+                               python_only=True)
+        proc = subprocess.Popen(argv, cwd=tmp,
                                 env={}, stdin=subprocess.PIPE, stdout=out, stderr=err,
                                 start_new_session=True)
         try:

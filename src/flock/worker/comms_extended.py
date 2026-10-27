@@ -1,7 +1,7 @@
 """Multi-channel tools and one rotating activity task per worker.
 
 Each identity keeps its own cursor: another agent's token cannot see its DMs.
-The single polling task rotates identities with <=25 seconds per full idle cycle.
+The single polling task rotates identities on a 60-second cycle, even on busy feeds.
 No service credential, per-agent poll tasks, or per-channel pollers are needed.
 """
 from __future__ import annotations
@@ -11,6 +11,7 @@ import contextlib
 import re
 from collections import OrderedDict
 from dataclasses import replace
+from time import monotonic
 
 from flock.comms.board import BoardError
 from flock.comms.tools import Refused, as_id, author, brief, check_content, check_rate, thread_of
@@ -138,14 +139,17 @@ class ExtendedComms:
             members = [m for m in self.members.values() if m.ident is not None]
             if not members:
                 return
+            started = monotonic()
             m = members[index % len(members)]
             index += 1
             ident, c, gen = m.ident, self.spec, self._gen
+            spacing = max(self.poll_min_interval, self.poll_cycle_s / len(members))
             try:
                 self.stats["polls"] += 1
                 page = await self._board(ident.url).activity(ident, "joined", m.cursor,
-                                                            wait=min(self.poll_wait, 25 / len(members)))
+                                                            wait=min(self.poll_wait, spacing))
                 if gen != self._gen or self.spec is not c:
+                    await asyncio.sleep(max(0, spacing - (monotonic() - started)))
                     continue
                 for msg in page.get("messages") or []:
                     if isinstance(msg, dict):
@@ -164,7 +168,7 @@ class ExtendedComms:
                         await self._member(m.name)
                 else:
                     await asyncio.sleep(self.backoff_s)
-            await asyncio.sleep(0.25)  # bounded traffic even when joined channels stay busy
+            await asyncio.sleep(max(0, spacing - (monotonic() - started)))
 
     def _init_extended(self):
         self._channel_lock = asyncio.Lock()

@@ -1,6 +1,7 @@
 """Read vLLM metrics before increasing a wave; this module launches nothing."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -37,7 +38,15 @@ def metrics_urls():
             for u in urls.split(",") if u.strip()]
 
 
-def capacity_ok(urls=None, *, interval=60, get=None, sleep=time.sleep, clock=time.monotonic):
+def capacity_ok(urls=None, *, interval=60, get=None, sleep=time.sleep, clock=time.monotonic,
+                max_request_seconds=None):
+    try:
+        threshold = float(os.environ.get("RUN4_MAX_REQUEST_SECONDS", "15")
+                          if max_request_seconds is None else max_request_seconds)
+        if not math.isfinite(threshold) or threshold <= 0:
+            raise ValueError("invalid threshold")
+    except (TypeError, ValueError):
+        return False, "HOLD: RUN4_MAX_REQUEST_SECONDS must be finite and positive"
     urls = metrics_urls() if urls is None else urls
     if not urls:
         return False, "HOLD: configure vLLM metrics URLs before growing past 100 agents"
@@ -63,7 +72,7 @@ def capacity_ok(urls=None, *, interval=60, get=None, sleep=time.sleep, clock=tim
         rate = delta / max(end - start, 0.001)
         tpr = last["running"] / rate if rate > 0 else (float("inf") if last["running"] else 0)
         details.append(f"node {index + 1}: waiting={last['waiting']:g}, ~{tpr:.1f}s/request")
-        if all(p[1]["waiting"] > 0 for p in points) or tpr > 15:
+        if all(p[1]["waiting"] > 0 for p in points) or tpr > threshold:
             return False, "HOLD: " + "; ".join(details)
     return True, "; ".join(details)
 

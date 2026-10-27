@@ -50,7 +50,10 @@ class LocalHub:
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, monkeypatch):
+    # Workflow/contract unit tests. Real kernel isolation is checked separately in
+    # test_run4_isolation.py and required by the prepared cluster dry run.
+    monkeypatch.setattr("sandbox.isolate_command", lambda argv, *args, **kwargs: argv)
     seed = tmp_path / "seed"
     shutil.copytree(ROOT / "worlds/chatbot4/seed", seed, ignore=shutil.ignore_patterns("__pycache__"))
     git(seed, "init", "-b", "main")

@@ -35,6 +35,12 @@ from .worker_fakes import ScriptedAdapter, until
 
 FIX = Path(__file__).parent / "fixtures"
 PI_BIN = os.environ.get("FLOCK_PI_CLI") or shutil.which("pi")
+
+
+@pytest.fixture(autouse=True)
+def generic_pi_mode(monkeypatch):
+    # Generic adapter compatibility; run4 namespace integration has its own tests.
+    monkeypatch.delenv("FLOCK_PROCESS_ISOLATION", raising=False)
 pi_bin = pytest.mark.skipif(not (PI_BIN and os.access(PI_BIN, os.X_OK)),
                             reason="pi binary not found (set FLOCK_PI_CLI)")
 SID = "00000000-0000-4000-8000-000000000001"

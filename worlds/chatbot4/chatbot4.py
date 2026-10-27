@@ -15,6 +15,7 @@ from typing import ClassVar, Literal
 from repository import Hub, Repository
 from sandbox import run
 
+from flock.isolation import protect_supervisor
 from flock.world import Agent, ToolError, World, tool
 from flock.world.workspace import unpack
 
@@ -33,6 +34,7 @@ class Chatbot4World(World):
                    "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation.")
 
     def __init__(self, ws=None, repository=None):
+        protect_supervisor()
         self.ws = Path(ws or os.environ.get("CHATBOT_WS", HERE / "ws"))
         self.ws.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -42,7 +44,7 @@ class Chatbot4World(World):
         self.repo = repository or Repository(self.ws / "repo.git",
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
         self.fixed = {name: (HERE / "seed" / name).read_bytes() for name in FIXED}
-        self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "4")))
+        self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
 
     def _save(self):
         tmp = self.db.with_suffix(".tmp")

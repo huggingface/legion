@@ -1,5 +1,5 @@
 #!/bin/bash
-# worker.sbatch <envfile>: one flock worker slot (25 agents) as a CPU Slurm job.
+# worker.sbatch <envfile>: one flock worker slot (12 agents) as a CPU Slurm job.
 #
 # Launched BY THE CONTROLLER's Slurm jobs client (FLOCK_COMPUTE=slurm), roughly as
 #   sbatch --parsable -p $FLOCK_SLURM_PARTITION -c $FLOCK_SLURM_CPUS --mem=$FLOCK_SLURM_MEM \

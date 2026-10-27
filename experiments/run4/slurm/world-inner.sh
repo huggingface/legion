@@ -2,13 +2,13 @@
 # world-inner.sh: the world's driver INSIDE its container (started by world.sbatch through
 # `srun --container-image ... bash world-inner.sh`). Never run it on the host.
 #
-# restore world.tar.gz from the bucket into an EMPTY $CHATBOT_WS -> `flock world serve` -> push ws/ every
+# restore world.tar.gz from the bucket into an EMPTY $CHATBOT_WS -> `flock world serve` -> upload an archive every
 # WS_SYNC_S -> final sync when the server ends. The workspace lives on the container root (/work,
 # node disk, deleted with the container), so every archive upload runs here, not on the host.
 #
 # Input: the batch script's environment (secrets included: srun passes it into the container):
 # VENV B CHATBOT_WS WORLD_SRC WORLD_PORT WORLD_CTL WS_SYNC_S FINAL_SYNC_S FINAL_SYNC_LONG_S
-# CANCEL_SYNC_S FLOCK_WORLD_TOKEN HF_TOKEN CHATBOT_REPO_TOKEN.
+# CANCEL_SYNC_S FLOCK_WORLD_TOKEN HF_TOKEN.
 # Output: the server's stdout/stderr on this script's stdout (world.sbatch appends it to
 # <run>/logs/world-<RUN>.log); this script's own lines on stderr (the job's .out).
 #
@@ -57,7 +57,7 @@ stop_world() {  # stop_world [kill]: TERM the restore, the sync loop and the ser
     { [ -n "$WORLD_PID" ] && kill -0 "$WORLD_PID" 2>/dev/null; } || break
     sleep 1
   done
-  # uvicorn's graceful shutdown can wait indefinitely on an in-flight promotion
+  # uvicorn's graceful shutdown can wait indefinitely on an in-flight contract run
   if [ "${1:-}" = kill ] && [ -n "$WORLD_PID" ] && kill -0 "$WORLD_PID" 2>/dev/null; then
     log "flock world serve still alive after 5 s: SIGKILL"
     kill -KILL "$WORLD_PID" 2>/dev/null
@@ -90,12 +90,31 @@ wait_pid() {  # wait_pid PID: wait until PID exits (wait returns early on a trap
 
 # ---------------------------------------------------------------- restore into an EMPTY ws (start.sh)
 rm -rf /work/world && mkdir -p "$CHATBOT_WS" "$HOME" "$HF_HOME" "$TMPDIR" || { log "FATAL: cannot create /work dirs"; exit 2; }
-trap '' USR1
-"$VENV/bin/python" "$WORLD_SRC/snapshot.py" restore "$CHATBOT_WS" "$B" >/dev/null 2>&1 &
-RESTORE_PID=$!
-trap on_usr1 USR1
-wait_pid "$RESTORE_PID"; rrc=$WRC; RESTORE_PID=
-[ -z "$MODE" ] || { log "signal during the restore: exit, nothing to sync"; exit 0; }
+RESTORE_ATTEMPTS=${WORLD_RESTORE_ATTEMPTS:-5}
+RESTORE_BACKOFF_S=${WORLD_RESTORE_BACKOFF_S:-30}
+case $RESTORE_ATTEMPTS in ''|*[!0-9]*|0) log "FATAL: WORLD_RESTORE_ATTEMPTS must be a positive integer"; exit 2;; esac
+for ((attempt=1; attempt<=RESTORE_ATTEMPTS; attempt++)); do
+  trap '' USR1
+  "$VENV/bin/python" "$WORLD_SRC/snapshot.py" restore "$CHATBOT_WS" "$B" >/dev/null 2>&1 &
+  RESTORE_PID=$!
+  trap on_usr1 USR1
+  wait_pid "$RESTORE_PID"; rrc=$WRC; RESTORE_PID=
+  [ -z "$MODE" ] || { log "signal during restore: exit, nothing to sync"; exit 0; }
+  [ "$rrc" = 0 ] || [ "$rrc" = 3 ] || {
+    log "restore attempt $attempt/$RESTORE_ATTEMPTS failed (rc=$rrc)"
+    if [ "$attempt" -lt "$RESTORE_ATTEMPTS" ]; then
+      # Keep the backoff interruptible: USR1/TERM must retain their Spot/stop paths.
+      trap '' USR1
+      sleep "$RESTORE_BACKOFF_S" &
+      RESTORE_PID=$!
+      trap on_usr1 USR1
+      wait_pid "$RESTORE_PID"; RESTORE_PID=
+      [ -z "$MODE" ] || { log "signal during restore backoff: exit, nothing to sync"; exit 0; }
+    fi
+    continue
+  }
+  break
+done
 if [ "$rrc" = 0 ]; then
   log "restored $CHATBOT_WS from $B/world.tar.gz ($(find "$CHATBOT_WS" -type f | wc -l) files)"
 elif [ "$rrc" = 3 ]; then

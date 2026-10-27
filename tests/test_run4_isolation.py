@@ -1,0 +1,249 @@
+"""Namespace boundary checks. Cluster dry run requires the kernel checks; never launches jobs."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from flock import isolation
+from flock.worker.adapters.pi import PiMapper
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def kernel_namespaces():
+    executable = shutil.which("unshare")
+    result = subprocess.run([executable, "--user", "--map-root-user", "--pid", "--fork", "--mount-proc", "/bin/true"],
+                            capture_output=True, timeout=5, check=False) if executable else None
+    if result is None or result.returncode:
+        if os.environ.get("FLOCK_REQUIRE_ISOLATION") == "1":
+            pytest.fail("run4 requires working user/PID/mount namespaces in this image")
+        pytest.skip("this host denies unprivileged namespaces; required by the cluster dry run")
+
+
+def test_bot_and_pi_invocations_have_separate_roots_and_no_unsafe_fallback(tmp_path):
+    tree, pin, home = tmp_path / "tree", tmp_path / "pins/cedar", tmp_path / "pi/cedar"
+    bot = isolation.command([sys.executable, "-c", "pass"], tmp_path / "bot-root", cwd=tree,
+                            readonly=[tree], python_only=True)
+    assert all(flag in bot for flag in ["--user", "--pid", "--mount-proc", "--net", "--kill-child=SIGKILL"])
+    config = json.loads(bot[bot.index(str(Path(isolation.__file__).resolve())) + 1])
+    assert config["writable"] == [] and config["readonly_root"]
+    pi = isolation.command([sys.executable, "-c", "pass"], tmp_path / "pi-root", cwd=tree,
+                           readonly=[pin], writable=[tree, home], network=True)
+    assert "--net" not in pi and "--mount-proc" in pi
+    config = json.loads(pi[pi.index(str(Path(isolation.__file__).resolve())) + 1])
+    assert config["writable"] == [str(tree), str(home)]
+    assert str(pin.parent) not in config["readonly"]
+
+
+def test_failed_isolation_never_executes_bot_without_it(tmp_path, monkeypatch):
+    from . import test_chatbot4  # world import path
+
+    sandbox = sys.modules["sandbox"]
+    assert test_chatbot4.Chatbot4World
+    fake = tmp_path / "unshare"
+    fake.write_text("#!/bin/sh\nexit 125\n")
+    fake.chmod(0o700)
+    monkeypatch.setattr(isolation.shutil, "which", lambda _: str(fake))
+    result = sandbox.run(ROOT / "worlds/chatbot4/seed", ["Hello"])
+    assert not result["ok"] and result["status"] == "exit 125" and not result["replies"]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux prctl")
+def test_dumpability_blocks_a_same_uid_child_from_supervisor_credentials():
+    script = r'''
+import subprocess, sys
+from flock.isolation import protect_supervisor
+protect_supervisor()
+child = r"""
+import os
+for name in ('environ', 'mem', 'root'):
+    path = '/proc/%d/%s' % (os.getppid(), name)
+    try:
+        if name == 'root': os.readlink(path)
+        else:
+            with open(path, 'rb'): pass
+    except PermissionError: continue
+    raise SystemExit('supervisor proc access was allowed')
+"""
+result = subprocess.run([sys.executable, '-c', child], env={}, capture_output=True)
+assert result.returncode == 0, result.stdout + result.stderr
+'''
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, timeout=5)
+
+
+@pytest.mark.parametrize("message", ["maximum context length is 131072 tokens; you requested 134290",
+                                      "context length 150300 exceeds 131072", "invalid request 50201",
+                                      "you requested 429 tokens, only 200 available"])
+def test_context_length_numbers_do_not_trigger_transport_retries(message):
+    mapper = PiMapper()
+    mapper.on_record({"type": "agent_start"})
+    mapper.on_record({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": message}})
+    [event] = mapper.on_record({"type": "agent_settled"})
+    assert event.status == "error" and event.data.get("reason") != "model_transport"
+
+
+@pytest.mark.parametrize("message", ["429 Too Many Requests", "HTTP 503: unavailable", "HTTP 502: bad gateway"])
+def test_http_errors_remain_retryable(message):
+    mapper = PiMapper()
+    mapper.on_record({"type": "agent_start"})
+    mapper.on_record({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": message}})
+    [event] = mapper.on_record({"type": "agent_settled"})
+    assert event.data["reason"] == "model_transport"
+
+
+def test_namespace_hides_supervisor_and_sibling_files_and_keeps_live_pin_updates(tmp_path, kernel_namespaces):
+    workspace, home, pin = tmp_path / "agents/cedar", tmp_path / "pi/cedar", tmp_path / "pins/cedar"
+    for path in (workspace, home, pin, tmp_path / "pins/birch"):
+        path.mkdir(parents=True)
+    (pin / "pin.json").write_text("old")
+    sibling = tmp_path / "pins/birch/pin.json"
+    sibling.write_text("other-agent-key")
+    secret = tmp_path / "world-secret"
+    secret.write_text("world-token")
+    script = f'''
+import os, pathlib, sys
+assert os.getpgrp() == os.getpid(), 'sandbox inherited an outside process group'
+for hidden in [{str(sibling)!r}, {str(secret)!r}, '/proc/{os.getpid()}/environ']:
+    assert not pathlib.Path(hidden).exists(), hidden
+try: os.kill({os.getpid()}, 0)
+except ProcessLookupError: pass
+else: raise AssertionError('supervisor PID is visible')
+status = pathlib.Path('/proc/self/status').read_text()
+for key in ['CapEff', 'CapPrm', 'CapBnd', 'CapAmb']:
+    assert int(status.split(key+':')[1].split()[0], 16) == 0
+assert status.split('NoNewPrivs:')[1].split()[0] == '1'
+try: pathlib.Path({str(pin / 'pin.json')!r}).write_text('forged')
+except OSError: pass
+else: raise AssertionError('pin is writable')
+pathlib.Path('own-file').write_text('allowed')
+print('ready', flush=True)
+sys.stdin.readline()
+print(pathlib.Path({str(pin / 'pin.json')!r}).read_text(), flush=True)
+'''
+    argv = isolation.command([sys.executable, "-I", "-c", script], tmp_path / "root", cwd=workspace,
+                             readonly=[pin], writable=[workspace, home], network=True, python_only=True)
+    proc = subprocess.Popen(argv, env={}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        # Bounded readiness wait, including when mount/capability setup fails.
+        import selectors
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            assert selector.select(5), "namespace probe did not answer"
+        line = proc.stdout.readline()
+        assert line == "ready\n", proc.communicate(timeout=5)
+        replacement = pin / "new.json"
+        replacement.write_text("updated")
+        replacement.replace(pin / "pin.json")
+        out, err = proc.communicate("go\n", timeout=5)
+        assert proc.returncode == 0 and out == "updated\n", err
+        assert (workspace / "own-file").read_text() == "allowed"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_bot_network_and_files_are_read_only(tmp_path, kernel_namespaces):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "code.py").write_text("pass")
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        script = f'''
+import pathlib, socket
+for path in ['new-file', '/tmp/new-file', {str(tree / 'code.py')!r}]:
+    try: pathlib.Path(path).write_text('bad')
+    except OSError: pass
+    else: raise AssertionError('bot filesystem is writable')
+with socket.socket() as sock:
+    assert sock.connect_ex(('127.0.0.1', {port})) != 0
+print('isolated')
+'''
+        argv = isolation.command([sys.executable, "-I", "-c", script], tmp_path / "root", cwd=tree,
+                                 readonly=[tree], python_only=True)
+        result = subprocess.run(argv, env={}, capture_output=True, timeout=5, text=True, check=False)
+        assert result.returncode == 0 and result.stdout == "isolated\n", result.stderr
+
+
+def test_real_bot_runs_inside_namespaces(tmp_path, kernel_namespaces):
+    from . import test_chatbot4
+
+    assert test_chatbot4.Chatbot4World
+    result = sys.modules["sandbox"].run(ROOT / "worlds/chatbot4/seed", ["Hello", "Bye"])
+    assert result["ok"] and result["replies"] == ["Hello!", "Hello!"], result
+
+
+async def test_pi_start_uses_namespace_wrapper_and_explicit_environment(tmp_path, monkeypatch):
+    from flock.models import TypeSpec
+    from flock.worker.adapters import pi
+
+    monkeypatch.setenv("FLOCK_PROCESS_ISOLATION", "1")
+    monkeypatch.setenv("HF_TOKEN", "worker-secret")
+    workspace, home, pin = tmp_path / "cedar", tmp_path / "home", tmp_path / "pins/cedar/pin.json"
+    workspace.mkdir()
+    adapter = pi.PiAdapter(workspace, agent="cedar", home=home, pi_bin="/usr/bin/false",
+                           model_config=pi.PiModelConfig("http://fake/v1", "MODEL_KEY", "m", "fake"))
+    calls = []
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise RuntimeError("stop before exec")
+    monkeypatch.setattr(pi.asyncio, "create_subprocess_exec", spawn)
+    try:
+        with pytest.raises(RuntimeError, match="stop before exec"):
+            await adapter.start(workspace, None, TypeSpec(harness="pi", model="m"), env={
+                "MODEL_KEY": "provider-key", "HF_TOKEN": "explicit-secret", "FLOCK_TOOLS_PIN": str(pin),
+                "FLOCK_WORLD_TOKEN": "world-secret", "UNRELATED_SECRET": "secret"})
+        args, kwargs = calls[0]
+        assert "--mount-proc" in args and "--pid" in args
+        assert "--net" not in args
+        assert kwargs["start_new_session"]
+        assert kwargs["env"]["MODEL_KEY"] == "provider-key"
+        assert kwargs["env"]["FLOCK_TOOLS_PIN"] == str(pin)
+        assert not ({"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN", "UNRELATED_SECRET"} & kwargs["env"].keys())
+    finally:
+        await adapter.stop()
+
+
+async def test_real_pi_starts_and_resumes_inside_namespaces(tmp_path, monkeypatch, kernel_namespaces):
+    from . import fake_openai
+    from .test_worker_pi import PI_BIN, make_adapter, pi_spec, until_turn_ended
+
+    if not PI_BIN:
+        pytest.skip("Pi CLI is required for isolated integration")
+    monkeypatch.setenv("FLOCK_PROCESS_ISOLATION", "1")
+    server = fake_openai.serve(0, str(tmp_path / "model.jsonl"))
+    adapter, workspace = make_adapter(tmp_path, server, monkeypatch)
+    try:
+        sid = await adapter.start(workspace, None, pi_spec(), env={"FLOCK_TEST_PI_KEY": "fake-key"})
+        await adapter.send("bash: echo namespace-check")
+        events = await until_turn_ended(adapter)
+        assert events[-1].status == "completed"
+        await adapter.stop()
+        assert await adapter.start(workspace, sid, pi_spec(), env={"FLOCK_TEST_PI_KEY": "fake-key"}) == sid
+        await adapter.send("bash: echo namespace-resume")
+        events = await until_turn_ended(adapter)
+        assert events[-1].status == "completed"
+    finally:
+        await adapter.stop()
+        server.shutdown()
+
+
+def test_namespace_wrapper_ignores_direct_spot_usr1(tmp_path, monkeypatch):
+    fake = tmp_path / "unshare"
+    fake.write_text('#!/bin/sh\nkill -USR1 "$$"\nprintf "survived\\n"\n')
+    fake.chmod(0o700)
+    monkeypatch.setattr(isolation.shutil, "which", lambda _: str(fake))
+    argv = isolation.command([sys.executable, "-c", "pass"], tmp_path / "root", cwd=tmp_path,
+                             python_only=True)
+    result = subprocess.run(argv, env={}, capture_output=True, text=True, timeout=5, check=False)
+    assert result.returncode == 0 and result.stdout == "survived\n", result.stderr

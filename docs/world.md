@@ -272,3 +272,17 @@ instead of rebasing automatically; refreshing a PR always requires fresh review.
 `prs.jsonl` records PR events with both the main parent and PR head for merges.
 `eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
 this implementation does not start an evaluator.
+
+Run 4 uses one explicit `HF_TOKEN` for the experiment bucket and dataset. It is
+required by the PR backend and should grant access only to those resources. The
+controller and workers share its dataset-write access. Run4 requires separate
+user/PID/mount namespaces and private `/proc` for Pi and bot subprocesses, plus
+`PR_SET_DUMPABLE=0` on the worker and world. Pi sees only its own writable work
+and session directories and its live, read-only tool-pin directory. Bots also
+get a new network namespace and read-only filesystems. Runtimes are mounted
+read-only; host homes, sibling pins and world state are absent from the child
+root. Namespace capabilities are dropped and `no_new_privs` is set before exec.
+Setup errors abort instead of falling back to a plain process. The cluster dry
+run requires the real kernel isolation tests; these skip on hosts that prohibit
+unprivileged namespaces. The audit hook is an additional language restriction,
+not the process boundary. See [unshare](https://man7.org/linux/man-pages/man1/unshare.1.html).
