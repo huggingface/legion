@@ -309,3 +309,59 @@ def test_namespace_wrapper_ignores_direct_spot_usr1(tmp_path, monkeypatch):
                              python_only=True)
     result = subprocess.run(argv, env={}, capture_output=True, text=True, timeout=5, check=False)
     assert result.returncode == 0 and result.stdout == "survived\n", result.stderr
+
+
+def test_readonly_bind_is_a_recursive_bind_then_a_remount_with_the_locked_flags(tmp_path, monkeypatch):
+    """A user namespace rejects a non-recursive bind of a tree with locked submounts
+    (EINVAL) and a read-only remount that drops a locked flag (EPERM)."""
+    calls = []
+
+    class Libc:
+        class mount:
+            argtypes = None
+
+            def __new__(cls, source, target, kind, flags, data):
+                calls.append((source, target, kind, flags, data))
+                return 0
+
+    source = tmp_path / "runtime"
+    source.mkdir()
+    root = tmp_path / "root"
+    monkeypatch.setattr(isolation, "_libc", lambda: Libc)
+    locked = os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC | os.ST_RELATIME | os.ST_NODIRATIME
+    monkeypatch.setattr(isolation.os, "statvfs", lambda p: type("V", (), {"f_flag": locked})())
+    isolation._bind(root, str(source), readonly=True)
+    target = os.fsencode(root / source.relative_to("/"))
+    assert calls[0] == (os.fsencode(source), target, None, isolation.MS_BIND | isolation.MS_REC, None)
+    expected = (isolation.MS_BIND | isolation.MS_REMOUNT | isolation.MS_RDONLY | isolation.MS_NOSUID
+                | isolation.MS_NODEV | isolation.MS_NOEXEC | isolation.MS_RELATIME | isolation.MS_NODIRATIME)
+    assert calls[1] == (None, target, None, expected, None) and len(calls) == 2
+
+    # strictatime source (no atime flag): the remount must say so, or the kernel resets it
+    calls.clear()
+    monkeypatch.setattr(isolation.os, "statvfs", lambda p: type("V", (), {"f_flag": os.ST_NOSUID})())
+    isolation._bind(root, str(source), readonly=True)
+    assert calls[1][3] & isolation.MS_STRICTATIME and not calls[1][3] & isolation.MS_RELATIME
+
+    # writable binds are recursive too, with no remount
+    calls.clear()
+    isolation._bind(root, str(source), readonly=False)
+    assert [c[3] for c in calls] == [isolation.MS_BIND | isolation.MS_REC]
+
+
+def test_mount_errors_name_the_target_and_flags(tmp_path, monkeypatch):
+    import ctypes
+
+    class Libc:
+        class mount:
+            argtypes = None
+
+            def __new__(cls, *args):
+                return -1
+
+    monkeypatch.setattr(isolation, "_libc", lambda: Libc)
+    monkeypatch.setattr(ctypes, "get_errno", lambda: 22)
+    with pytest.raises(isolation.IsolationMountError) as e:
+        isolation._mount("/usr", tmp_path / "root/usr", flags=isolation.MS_BIND | isolation.MS_REC)
+    assert e.value.errno == 22
+    assert "target=" + str(tmp_path / "root/usr") in str(e.value) and "flags=0x5000" in str(e.value)

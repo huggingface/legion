@@ -15,6 +15,16 @@ from pathlib import Path
 
 MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC = 1, 2, 4, 8
 MS_REMOUNT, MS_BIND = 32, 4096
+MS_NOATIME, MS_NODIRATIME, MS_REC, MS_RELATIME, MS_STRICTATIME = 1024, 2048, 16384, 1 << 21, 1 << 24
+# statvfs flags of a mount that an unprivileged namespace cannot clear (they are locked) ->
+# the mount(2) flags a read-only remount must repeat.
+_LOCKED = ((os.ST_RDONLY, MS_RDONLY), (os.ST_NOSUID, MS_NOSUID), (os.ST_NODEV, MS_NODEV),
+           (os.ST_NOEXEC, MS_NOEXEC), (os.ST_NOATIME, MS_NOATIME),
+           (os.ST_NODIRATIME, MS_NODIRATIME), (os.ST_RELATIME, MS_RELATIME))
+
+
+class IsolationMountError(OSError):
+    """A mount(2) call of the sandbox setup failed: names the target and flags, no argv."""
 
 
 def enabled() -> bool:
@@ -139,7 +149,24 @@ def _mount(source, target, kind=None, flags=0, data=None):
     libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
                            ctypes.c_ulong, ctypes.c_char_p]
     if libc.mount(encoded(source), encoded(target), encoded(kind), flags, encoded(data)) != 0:
-        raise OSError(ctypes.get_errno(), "isolation mount failed")
+        errno = ctypes.get_errno()
+        raise IsolationMountError(errno, f"isolation mount failed: {os.strerror(errno)}: "
+                                         f"source={source} target={target} type={kind} "
+                                         f"flags={flags:#x}")
+
+
+def readonly_remount_flags(target) -> int:
+    """MS_REMOUNT|MS_BIND|MS_RDONLY plus nosuid/nodev, and every locked flag the bound mount
+    already has (statvfs of the bind target): a user namespace cannot clear them, and
+    leaving them out fails with EPERM. No atime flag on the source means strictatime."""
+    inherited = os.statvfs(target).f_flag
+    flags = MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV
+    for flag, mount_flag in _LOCKED:
+        if inherited & flag:
+            flags |= mount_flag
+    if not inherited & (os.ST_NOATIME | os.ST_RELATIME):
+        flags |= MS_STRICTATIME
+    return flags
 
 
 def _bind(root: Path, source: str, *, readonly: bool):
@@ -152,18 +179,13 @@ def _bind(root: Path, source: str, *, readonly: bool):
         target.mkdir(exist_ok=True)
     else:
         target.touch(exist_ok=True)
-    # No recursive binds: a nested host mount must not smuggle extra files/procfs in.
-    _mount(source, target, flags=MS_BIND)
+    # Recursive: a user namespace refuses (EINVAL) a non-recursive bind of a tree that has
+    # locked submounts, since it would uncover what they hide. Only explicitly listed paths
+    # are bound, so a submount comes in only under a path that was asked for.
+    _mount(source, target, flags=MS_BIND | MS_REC)
     if readonly:
-        flags = MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV
-        # An unprivileged namespace cannot clear locked flags inherited from its
-        # parent mounts (notably noexec on /etc files and atime settings).
-        inherited = os.statvfs(source).f_flag
-        for flag, mount_flag in ((os.ST_NOEXEC, MS_NOEXEC), (os.ST_NOATIME, 1024),
-                                 (os.ST_NODIRATIME, 2048), (os.ST_RELATIME, 1 << 21)):
-            if inherited & flag:
-                flags |= mount_flag
-        _mount(None, target, flags=flags)
+        # Step two: read-only only works as a remount of the bind, with the locked flags.
+        _mount(None, target, flags=readonly_remount_flags(target))
 
 
 def _drop_privileges():
@@ -220,6 +242,9 @@ def _enter(config, argv):
 if __name__ == "__main__":
     try:
         _enter(json.loads(sys.argv[1]), sys.argv[2:])
+    except IsolationMountError as e:  # mount paths and flags only, never argv or the env
+        print(f"run4 process isolation failed during setup: {e.strerror}", file=sys.stderr)
+        raise SystemExit(125) from None
     except Exception:  # noqa: BLE001 - fail closed, without leaking arguments or paths
         # Paths, argv and errors could contain credentials. Fail closed without their values.
         print("run4 process isolation failed during setup", file=sys.stderr)
