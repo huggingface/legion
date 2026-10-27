@@ -507,3 +507,29 @@ def test_refusals_are_logged_and_request_keys_are_bounded(setup, monkeypatch):
                                          "description": "x", "pr": rec["pr"]},
                              Agent("cedar", request_id=f"req-{i}"), capture(clone.parent, clone.name))
     assert list(world.state["requests"]) == ["req-1", "req-2"]
+
+
+def test_hub_failure_logs_status_and_headers_but_no_secrets(monkeypatch, caplog):
+    from huggingface_hub.errors import HfHubHTTPError
+    from repository import Hub
+
+    secret = "hf_SECRETTOKEN1234567890"
+    monkeypatch.setenv("HF_TOKEN", secret)
+    request = httpx.Request("POST", "https://huggingface.co/api/datasets/o/r/discussions?token=" + secret,
+                            headers={"Authorization": f"Bearer {secret}"})
+    response = httpx.Response(403, request=request, text=f"body with {secret}",
+                              headers={"x-error-message": "Forbidden: no write access",
+                                       "x-request-id": "req-1"})
+    hub = Hub("o/r")
+
+    def fail(*args, **kwargs):
+        raise HfHubHTTPError(f"403 {secret}", response=response)
+
+    monkeypatch.setattr(hub.api, "create_pull_request", fail)
+    with caplog.at_level("WARNING"), pytest.raises(ToolError, match="Hub request failed"):
+        hub.open("t", "d")
+    text = caplog.text
+    assert "403" in text and "Forbidden: no write access" in text and "req-1" in text
+    assert "create_pull_request" in text and "o/r" in text
+    assert "/api/datasets/o/r/discussions" in text and "?" not in text.split("request=")[1]
+    assert secret not in text and "SECRETTOKEN" not in text

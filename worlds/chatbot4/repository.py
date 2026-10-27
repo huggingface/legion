@@ -1,16 +1,43 @@
 """Git transport and native Hub PRs. The world uses the shared experiment HF_TOKEN for writes."""
 from __future__ import annotations
 
+import logging
 import os
+import re
 import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from huggingface_hub import HfApi
 from huggingface_hub.errors import HfHubHTTPError
 
 from flock.world import ToolError
+from flock.world.server import redact
+
+log = logging.getLogger(__name__)
+
+_URL_CREDENTIALS = re.compile(r"(?<=://)[^/@\s]+@")
+_HUB_HEADERS = ("x-error-code", "x-error-message", "x-request-id", "retry-after")
+
+
+def _safe_text(text, limit):
+    return _URL_CREDENTIALS.sub("[redacted]@", redact(text))[:limit]
+
+
+def _log_hub_failure(method, repo_id, exc):
+    """One WARNING with the status and diagnostic headers; never the exception text, body or
+    request headers, which can hold secrets."""
+    response = getattr(exc, "response", None)
+    request = getattr(response, "request", None)
+    where = ""
+    if request is not None:
+        where = f"{request.method} {urlsplit(str(request.url)).path}"
+    headers = {name: _safe_text(str(response.headers[name]), 300 if name == "x-error-message" else 100)
+               for name in _HUB_HEADERS if response is not None and name in response.headers}
+    log.warning("Hub call %s failed for %s: status=%s request=%s headers=%s", method, repo_id,
+                getattr(response, "status_code", None), where or "unknown", headers)
 
 
 class Repository:
@@ -43,7 +70,11 @@ class Repository:
         p = subprocess.run(["git", "-C", str(at or self.root), *args], input=data,
                            capture_output=True, env=self.env, timeout=120, check=False)
         if p.returncode:
-            # Git's stderr can contain remote data or credentials: never expose it.
+            # Git's stderr can contain remote data or credentials: never expose it to agents;
+            # the world's log gets it redacted.
+            command = next((a for a in args if not a.startswith("-") and "=" not in a), "?")
+            log.warning("git %s failed: exit code %s, stderr=%s", command, p.returncode,
+                        _safe_text(p.stderr.decode(errors="replace").strip(), 500))
             raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
         return p.stdout.decode().strip()
 
@@ -143,6 +174,7 @@ class Hub:
                 return getattr(self.api, method)(self.repo_id, repo_type="dataset", **kwargs)
             except HfHubHTTPError as exc:
                 if exc.response.status_code != 429 or attempt == 4:
+                    _log_hub_failure(method, self.repo_id, exc)
                     raise ToolError("Hub request failed; retry later", "hub_error") from None
                 delay = exc.response.headers.get("Retry-After", "1")
                 try:
@@ -150,6 +182,10 @@ class Hub:
                 except ValueError:
                     delay = 2 ** attempt
                 time.sleep(max(0, min(delay, 30)))
+            except Exception as exc:
+                # The world reports this as an internal error with an id; name the class here.
+                log.warning("Hub call %s failed for %s: %s", method, self.repo_id, type(exc).__name__)
+                raise
 
     def open(self, title, description):
         pr = self.request("create_pull_request", title=title, description=description)
