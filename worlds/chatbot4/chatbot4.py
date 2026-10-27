@@ -25,6 +25,7 @@ FIXED = ("bot/__init__.py", "bot/__main__.py", "bot/runtime.py", "bot/modules/__
 MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
 EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
            "*.egg-info/", ".DS_Store")
+FETCH_TTL = float(os.environ.get("CHATBOT_FETCH_TTL_S", "60"))
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
@@ -48,8 +49,14 @@ class Chatbot4World(World):
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
         self.fixed = {name: (HERE / "seed" / name).read_bytes() for name in FIXED}
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
+        # Merge contract checks get their own runners, so run_bot load never blocks merges.
+        self.merge_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_MERGE_SLOTS", "4")))
+        self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
         with self.lock:  # the archive may predate merges that already landed on the Hub
+            for rec in self.state["prs"].values():
+                if rec["state"] == "closing":  # interrupted close_pr: the author may retry
+                    rec["state"] = "open"
             self._reconcile()
 
     def _save(self):
@@ -185,30 +192,72 @@ class Chatbot4World(World):
         snapshot = UPLOAD.get()
         if not isinstance(snapshot, dict):
             raise ToolError("submit a local clone through flock-tool; the worker uploads it")
+        key = agent.request_id
         with self.lock:
-            key = agent.request_id
             if key and key in self.state["requests"]:
                 return self.state["requests"][key]
-            self.repo.fetch()
-            base = snapshot.get("base_sha", "")
-            main = self.repo.sha()
-            if not self.repo.ancestor(base, main):
+        # The lock is held only for state and the main check; fetches, copies, compiles,
+        # Hub calls and pushes run outside it. A reservation keeps the cap and slugs exact.
+        self.repo.refresh(FETCH_TTL)
+        base = snapshot.get("base_sha", "")
+        branch_ref = f"agents/{agent.name}/{branch}"
+        token = object()
+        with self.lock:
+            if key and key in self.state["requests"]:
+                return self.state["requests"][key]
+            if not self.repo.ancestor(base, "main"):
                 raise ToolError("base is not a main commit; fetch main and rebase your branch")
             old = self._pr(pr) if pr is not None else None
             if old and old["author"] != agent.name:
                 raise ToolError("only the author can update this PR")
-            if old and old["branch"] != f"agents/{agent.name}/{branch}":
+            if old and old["branch"] != branch_ref:
                 raise ToolError("use the original branch slug when updating a PR")
+            pending = self.pending.values()
+            if key and any(p[3] == key for p in pending):
+                raise ToolError("this request is already in progress", "busy")
+            if old and any(p[2] == pr for p in pending):
+                raise ToolError("an update of this PR is already in progress; retry when it finishes")
             if not old:
                 self._reconcile(agent.name)
                 mine = [r["pr"] for r in self.state["prs"].values()
                         if r["state"] == "open" and r["author"] == agent.name]
-                if len(mine) >= 2:
+                if len(mine) + sum(p[0] == agent.name and p[2] is None for p in pending) >= 2:
                     raise ToolError(f"at most two open PRs per agent: update one with pr=<n> or "
                                     f"close one with close_pr (yours: {', '.join(map(str, mine))})")
-            branch_ref = f"agents/{agent.name}/{branch}"
-            if not old and any(r["branch"] == branch_ref for r in self.state["prs"].values()):
-                raise ToolError("branch slug already used; choose a new topic slug")
+                if (any(r["branch"] == branch_ref for r in self.state["prs"].values())
+                        or any(p[1] == branch_ref for p in pending)):
+                    raise ToolError("branch slug already used; choose a new topic slug")
+            old_head = old["head_sha"] if old else None
+            self.pending[token] = (agent.name, branch_ref, pr if old else None, key)
+        try:
+            number, sha, main = self._publish(agent, snapshot, base, title, description,
+                                              branch_ref, pr if old else None, old_head)
+            with self.lock:
+                if old and (old["state"] != "open" or old["head_sha"] != old_head):
+                    raise ToolError("the PR was merged or closed during the update")
+                record = {"pr": number, "state": "open", "author": agent.name,
+                          "branch": branch_ref, "base_sha": main, "head_sha": sha,
+                          "url": f"https://huggingface.co/datasets/{self.repo_id}/discussions/{number}",
+                          "title": title, "description": description, "reviews": {}}
+                self.state["prs"][str(number)] = record
+                result = {k: v for k, v in record.items() if k != "reviews"}
+                if base != main:
+                    result["rebased_from"] = base
+                    result["note"] = (f"rebased onto main {main[:12]}; run git fetch origin "
+                                      f"refs/pr/{number} and continue from FETCH_HEAD")
+                if key:
+                    self.state["requests"][key] = result
+                self._save()
+                self._event("updated" if old else "opened", agent, **result)
+                return result
+        finally:
+            with self.lock:
+                self.pending.pop(token, None)
+
+    def _publish(self, agent, snapshot, base, title, description, branch_ref, pr, old_head):
+        """Commit the upload on main (outside the lock) and publish it; redo if main moves."""
+        for _attempt in range(3):
+            main = self.repo.sha()
             with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
                 tree = Path(tmp) / "tree"
                 self.repo.checkout(base, tree)
@@ -216,37 +265,34 @@ class Chatbot4World(World):
                 self._contract(tree, self.repo.staged(tree))
                 # An older base is rebased onto main here, before anything exists on the Hub.
                 sha = self.repo.commit(tree, base, agent.name, title, onto=main)
-            rebased_from, base = (base, main) if base != main else (None, base)
-            number = pr if old else self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {base}\n\n{description}")
-            # Only agent/PR refs may be replaced, with an exact expected old head.
+            if pr is None:
+                with self.lock:  # merges move main under this lock: compare before creating
+                    if self.repo.sha() != main:
+                        continue
+                number = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
+            else:
+                number = pr
             try:
-                self.repo.push(sha, f"refs/pr/{number}", expected=old["head_sha"] if old else None)
+                # refs/pr/N starts at main on the Hub; updates replace only the expected head.
+                self.repo.push(sha, f"refs/pr/{number}", expected=old_head)
             except ToolError:
-                if not old:  # never leave an orphan Hub PR behind
-                    try:
-                        self.repo.hub.close(number, "Closed by the world: the head could not be pushed.")
-                    except ToolError:
-                        pass
+                if pr is not None:
+                    raise
+                try:  # never leave an orphan Hub PR behind
+                    self.repo.hub.close(number, "Closed by the world: the head could not be pushed.")
+                except ToolError:
+                    pass
+                self.repo.fetch()
+                if self.repo.sha() != main:
+                    continue  # a merge landed between the check and the Hub PR: redo on main
                 raise
-            self.repo.push(sha, f"refs/heads/{branch_ref}", expected=old["head_sha"] if old else None)
-            if not old:
+            self.repo.push(sha, f"refs/heads/{branch_ref}", expected=old_head)
+            if pr is None:
                 self.repo.hub.ready(number)
-            self.repo.git("update-ref", f"refs/flock/pr/{number}/{sha}", sha)
-            record = {"pr": number, "state": "open", "author": agent.name,
-                      "branch": branch_ref, "base_sha": base, "head_sha": sha,
-                      "url": f"https://huggingface.co/datasets/{self.repo_id}/discussions/{number}",
-                      "title": title, "description": description, "reviews": {}}
-            self.state["prs"][str(number)] = record
-            result = {k: v for k, v in record.items() if k != "reviews"}
-            if rebased_from:
-                result["rebased_from"] = rebased_from
-                result["note"] = (f"rebased onto main {main[:12]}; run git fetch origin "
-                                  f"refs/pr/{number} and continue from FETCH_HEAD")
-            if key:
-                self.state["requests"][key] = result
-            self._save()
-            self._event("updated" if old else "opened", agent, **result)
-            return result
+            self.repo.update_ref(f"refs/pr/{number}", sha)
+            self.repo.update_ref(f"refs/flock/pr/{number}/{sha}", sha)
+            return number, sha, main
+        raise ToolError("main kept moving while opening the PR; open it again", "busy")
 
     @tool
     def review_pr(self, agent: Agent, pr: int, head_sha: str,
@@ -255,17 +301,22 @@ class Chatbot4World(World):
         self._identity(agent)
         if verdict not in ("approve", "request_changes") or not comment.strip():
             raise ToolError("give a verdict and a review comment")
-        with self.lock:
+
+        def check():
             rec = self._pr(pr)
             if rec["author"] == agent.name:
                 raise ToolError("another agent must review your PR; self-review is refused")
-            self.repo.fetch()
-            current = self.repo.sha(f"pr:{pr}")
-            if head_sha != current or current != rec["head_sha"]:
+            # Only the world writes PR refs, so its record is the PR head.
+            if head_sha != rec["head_sha"]:
                 raise ToolError("the PR head changed; inspect it again before reviewing")
-            review = {"head_sha": head_sha, "verdict": verdict, "comment": comment}
-            self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
-            rec["reviews"][agent.name] = review
+            return rec
+
+        with self.lock:
+            check()
+        review = {"head_sha": head_sha, "verdict": verdict, "comment": comment}
+        self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
+        with self.lock:
+            check()["reviews"][agent.name] = review
             self._save()
             self._event("reviewed", agent, pr=pr, **review)
             return {"pr": pr, "reviewer": agent.name, **review}
@@ -284,28 +335,29 @@ class Chatbot4World(World):
     def merge_pr(self, agent: Agent, pr: int) -> dict:
         """Merge an independently approved PR after checking its base and bot contract."""
         self._identity(agent)
+        self.repo.refresh(FETCH_TTL)
         with self.lock:
             rec = self._pr(pr)
             self._approved(rec)
-            self.repo.fetch()
             if self._reconcile(rec["author"]) and rec["state"] == "merged":
                 return self._merged_event(rec)
-            main, head = self.repo.sha(), self.repo.sha(f"pr:{pr}")
-            if head != rec["head_sha"] or main != rec["base_sha"]:
+            main, head = self.repo.sha(), rec["head_sha"]
+            if main != rec["base_sha"]:
                 raise ToolError("stale PR: fetch main, rebase, update the PR and get a fresh review")
         with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
             tree = Path(tmp) / "tree"
-            with self.lock:
-                self.repo.checkout(head, tree)
-            self._contract(tree)
-            verdict = self._run(tree, ["Hello", "My name is Sam", "", "What is my name?", "Bye"])
+            self.repo.checkout(head, tree)
+            self._contract(tree, self.repo.changed(main, head))
+            verdict = self._run(tree, ["Hello", "My name is Sam", "", "What is my name?", "Bye"],
+                                self.merge_slots)
             if not verdict["ok"]:
                 raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
+        self.repo.refresh(0)  # outside the lock; the compare-and-swap below uses local refs
         with self.lock:
             rec = self._pr(pr)
             reviewers = self._approved(rec)
-            self.repo.fetch()
-            if self.repo.sha() != main or self.repo.sha(f"pr:{pr}") != head or rec["head_sha"] != head:
+            if (self.repo.sha() != main or rec["head_sha"] != head
+                    or any(p[2] == pr for p in self.pending.values())):
                 raise ToolError("main or the PR changed during checks; update and review again")
             try:
                 self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
@@ -318,6 +370,7 @@ class Chatbot4World(World):
                 if self._reconcile(rec["author"]) and rec["state"] == "merged":
                     return self._merged_event(rec)
                 raise
+            # Local main must move before the lock is released: opens compare against it.
             self.repo.fetch()
             merged = self.repo.sha()
             rec.update(state="merged", merged_sha=merged)
@@ -347,12 +400,21 @@ class Chatbot4World(World):
             rec = self._pr(pr)
             if rec["author"] != agent.name and agent.name not in self.operators:
                 raise ToolError("only the author or the run operator can close this PR")
+            if any(p[2] == pr for p in self.pending.values()):
+                raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
+            rec["state"] = "closing"  # no update, review or merge while the Hub call runs
+        try:
             try:
                 self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
             except ToolError:
                 status = getattr(self.repo.hub, "status", None)
                 if status is None or status(pr) != "closed":
                     raise
+        except BaseException:
+            with self.lock:
+                rec["state"] = "open"
+            raise
+        with self.lock:
             rec.update(state="closed", closed_by=agent.name, close_reason=reason)
             self._save()
             event = {"pr": pr, "author": rec["author"], "head_sha": rec["head_sha"], "reason": reason}
@@ -385,10 +447,9 @@ class Chatbot4World(World):
             tree = Path(tmp) / "tree"
             snapshot = UPLOAD.get()
             if ref_or_path == "main" or ref_or_path.startswith("pr:"):
-                with self.lock:
-                    self.repo.fetch()
-                    sha = self.repo.sha(ref_or_path)
-                    self.repo.checkout(sha, tree)
+                self.repo.refresh(FETCH_TTL)
+                sha = self.repo.sha(ref_or_path)
+                self.repo.checkout(sha, tree)
             elif isinstance(snapshot, dict):
                 sha = snapshot.get("base_sha")
                 if isinstance(sha, str) and self.repo.ancestor(sha, "main"):
@@ -402,13 +463,14 @@ class Chatbot4World(World):
                 raise ToolError("use main, pr:<number>, or a clone path inside your workspace")
             return {"ref": ref_or_path, "sha": sha, **self._run(tree, lines)}
 
-    def _run(self, tree, lines):
-        if not self.slots.acquire(timeout=10):
+    def _run(self, tree, lines, slots=None):
+        slots = slots or self.slots
+        if not slots.acquire(timeout=10):
             raise ToolError("bot runners are busy; retry later", "busy")
         try:
             return run(tree, lines)
         finally:
-            self.slots.release()
+            slots.release()
 
 
 if __name__ == "__main__":

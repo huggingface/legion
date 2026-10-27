@@ -396,3 +396,88 @@ def test_close_pr_frees_the_cap_and_is_limited_to_author_or_operator(setup):
         world.review_pr(Agent("birch"), one["pr"], one["head_sha"], "approve", "late review")
     events = [json.loads(line) for line in (world.ws / "prs.jsonl").read_text().splitlines()]
     assert [e["agent"] for e in events if e["event"] == "pr_closed"] == ["cedar", "operator"]
+
+
+def test_open_pr_work_runs_outside_the_world_lock(setup, monkeypatch):
+    import threading
+
+    world, clone, _ = setup
+    entered, release, results = threading.Event(), threading.Event(), {}
+    real = world._files
+
+    def slow_files(snapshot, tree):
+        if threading.current_thread().name == "slow":
+            entered.set()
+            assert release.wait(10)
+        return real(snapshot, tree)
+
+    monkeypatch.setattr(world, "_files", slow_files)
+    snapshot = capture(clone.parent, clone.name)
+    slow = threading.Thread(name="slow", target=lambda: results.update(slow=world.call_workspace(
+        "open_pr", {"branch": "slow", "title": "Slow upload", "description": "tested"},
+        Agent("cedar"), snapshot)))
+    slow.start()
+    try:
+        assert entered.wait(10)
+        assert world.lock.acquire(timeout=2), "the lock is held during the upload/compile"
+        world.lock.release()
+        fast = submit(world, clone, author="birch", branch="fast")  # proceeds meanwhile
+        approve(world, fast, "pine")
+        assert world.merge_pr(Agent("pine"), fast["pr"])["merged_sha"]
+    finally:
+        release.set()
+        slow.join(10)
+    # main moved while the slow open was in flight: it was rebased onto the new main
+    assert results["slow"]["base_sha"] == world.repo.sha()
+
+
+def test_racing_merges_never_both_land(setup, monkeypatch):
+    import threading
+
+    world, clone, remote = setup
+    one = submit(world, clone, branch="one")
+    (clone / "bot/modules/two.py").write_text('def respond(text, memory):\n    return None\n')
+    two = submit(world, clone, "birch", "two")
+    approve(world, one, "pine")
+    approve(world, two, "pine")
+    barrier, real, outcomes = threading.Barrier(2, timeout=20), world._run, []
+    monkeypatch.setattr(world, "_run", lambda *a, **k: (barrier.wait(), real(*a, **k))[1])
+
+    def merge(rec):
+        try:
+            outcomes.append(world.merge_pr(Agent("oak"), rec["pr"])["merged_sha"])
+        except ToolError as exc:
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=merge, args=(rec,)) for rec in (one, two)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    merged = [o for o in outcomes if isinstance(o, str)]
+    refused = [o for o in outcomes if isinstance(o, ToolError)]
+    assert len(merged) == 1 and len(refused) == 1 and "changed" in str(refused[0])
+    assert git(remote, "rev-parse", "main") == merged[0]
+    assert len(world.list_prs("merged")) == 1
+
+
+def test_main_moving_before_the_hub_pr_is_created_is_redone_without_orphans(setup, monkeypatch):
+    world, clone, remote = setup
+    other = clone.parent / "other"
+    git(clone.parent, "clone", str(remote), str(other))
+    (other / "bot/modules/first.py").write_text('def respond(text, memory):\n    return None\n')
+    first = submit(world, other, author="pine", branch="first")
+    approve(world, first)
+    real, calls = world.repo.hub.open, []
+
+    def open_after_a_merge(title, description):
+        if not calls:  # a merge lands after the world's main check, before the Hub PR exists
+            calls.append(world.merge_pr(Agent("pine"), first["pr"])["merged_sha"])
+        return real(title, description)
+
+    monkeypatch.setattr(world.repo.hub, "open", open_after_a_merge)
+    (clone / "bot/modules/second.py").write_text('def respond(text, memory):\n    return None\n')
+    rec = submit(world, clone, author="birch", branch="second")
+    assert rec["base_sha"] == calls[0] == git(remote, "rev-parse", "main")
+    assert world.repo.hub.closed == [rec["pr"] - 1]  # the first attempt's Hub PR, closed
+    assert [r["pr"] for r in world.list_prs()] == [rec["pr"]]

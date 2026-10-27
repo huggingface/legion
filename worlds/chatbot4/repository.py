@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -15,6 +16,10 @@ from flock.world import ToolError
 class Repository:
     def __init__(self, root: Path, remote: str, hub=None):
         self.root, self.remote, self.hub = root, remote, hub
+        # Ref writes in the shared bare repository (fetch, update-ref) are serialized here,
+        # not under the world's state lock; reads, clones and object writes run concurrently.
+        self.refs_lock = threading.Lock()
+        self.fetched = 0.0
         self.env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_LFS_SKIP_SMUDGE": "1"}
         if hub is not None:
@@ -43,8 +48,21 @@ class Repository:
         return p.stdout.decode().strip()
 
     def fetch(self):
-        self.git("fetch", "origin", "+refs/heads/main:refs/heads/main",
-                 "+refs/pr/*:refs/pr/*")
+        with self.refs_lock:
+            started = time.monotonic()
+            self.git("fetch", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/heads/main",
+                     "+refs/pr/*:refs/pr/*")
+            self.fetched = started
+
+    def refresh(self, max_age):
+        """Fetch unless a fetch started within max_age seconds. The world updates its own
+        refs after every push and merge, so this only catches up with outside changes."""
+        if time.monotonic() - self.fetched >= max_age:
+            self.fetch()
+
+    def update_ref(self, ref, sha):
+        with self.refs_lock:
+            self.git("update-ref", ref, sha)
 
     def sha(self, ref="main"):
         if ref.startswith("pr:") and ref[3:].isdigit():
@@ -67,8 +85,10 @@ class Repository:
         return out.split("\n", 1)[0] or self.git("rev-parse", head)  # fast-forward: head is main
 
     def checkout(self, ref, dest):
-        self.git("clone", "--no-hardlinks", str(self.root), str(dest), at=dest.parent)
-        self.git("checkout", "--detach", ref, at=dest)
+        # --shared borrows the object store instead of copying it; objects are never pruned
+        # while reachable, and new commits are fetched back into the bare repository.
+        self.git("clone", "-q", "--shared", "--no-checkout", str(self.root), str(dest), at=dest.parent)
+        self.git("checkout", "-q", "--detach", ref, at=dest)
 
     def staged(self, tree):
         """Stage the tree (honouring .gitignore) and list added/changed paths."""
@@ -76,6 +96,11 @@ class Repository:
         names = self.git("diff", "--cached", "--name-only", "-z", "--no-renames",
                          "--diff-filter=AM", "HEAD", at=tree)
         return [name for name in names.split("\0") if name]
+
+    def changed(self, base, head):
+        """Paths added or modified between two commits."""
+        out = self.git("diff", "--name-only", "-z", "--no-renames", "--diff-filter=AM", base, head)
+        return [name for name in out.split("\0") if name]
 
     def commit(self, tree, parent, author, title, onto=None):
         """Commit tree on parent; with onto != parent, replay that commit onto it."""
@@ -94,7 +119,7 @@ class Repository:
                                 "changes conflict with main: pull, rebase onto origin/main, "
                                 "then open again", "stale_base") from None
             sha = self.git("rev-parse", "HEAD", at=tree)
-        self.git("fetch", str(tree), sha)
+        self.git("fetch", "--no-write-fetch-head", str(tree), sha)
         return sha
 
     def push(self, sha, ref, expected=None):
@@ -111,7 +136,7 @@ class Hub:
         self.api = HfApi(token=token)
 
     def request(self, method, **kwargs):
-        # Calls are serialized by the world's mutation lock. Retry 429 only; other
+        # Retry 429 only (only merges call this under the world's state lock); other
         # failures are surfaced without exception bodies, which may include secrets.
         for attempt in range(5):
             try:
