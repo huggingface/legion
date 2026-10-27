@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -21,6 +22,10 @@ MS_NOATIME, MS_NODIRATIME, MS_REC, MS_RELATIME, MS_STRICTATIME = 1024, 2048, 163
 _LOCKED = ((os.ST_RDONLY, MS_RDONLY), (os.ST_NOSUID, MS_NOSUID), (os.ST_NODEV, MS_NODEV),
            (os.ST_NOEXEC, MS_NOEXEC), (os.ST_NOATIME, MS_NOATIME),
            (os.ST_NODIRATIME, MS_NODIRATIME), (os.ST_RELATIME, MS_RELATIME))
+
+
+DEV_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
+MOUNT_ATTR_RDONLY, AT_FDCWD, AT_RECURSIVE, SYS_MOUNT_SETATTR = 0x1, -100, 0x8000, 442
 
 
 class IsolationMountError(OSError):
@@ -169,23 +174,78 @@ def readonly_remount_flags(target) -> int:
     return flags
 
 
+def _readonly_recursive(target) -> bool:
+    """mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY): make every submount of a recursive
+    bind read-only too (a remount only changes the top one). False if the kernel lacks it
+    (before 5.12); the mountinfo check still refuses a writable submount."""
+    libc = _libc()
+    attr = (ctypes.c_uint64 * 4)(MOUNT_ATTR_RDONLY, 0, 0, 0)
+    libc.syscall.restype = ctypes.c_long
+    rc = libc.syscall(ctypes.c_long(SYS_MOUNT_SETATTR), ctypes.c_int(AT_FDCWD),
+                      ctypes.c_char_p(os.fsencode(target)), ctypes.c_uint(AT_RECURSIVE),
+                      ctypes.byref(attr), ctypes.c_size_t(ctypes.sizeof(attr)))
+    # Any failure (ENOSYS before 5.12, EPERM on a locked mount): the mountinfo check that
+    # follows the binds still refuses a writable submount.
+    return rc == 0
+
+
+def _unescape(field: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def parse_mountinfo(text: str) -> list[tuple[str, set[str]]]:
+    """(mount point, per-mount options) of each /proc/self/mountinfo line."""
+    out = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 6:
+            out.append((_unescape(fields[4]), set(fields[5].split(","))))
+    return out
+
+
+def check_mounts(mounts: list[tuple[str, set[str]]], root: str, readonly: list[str],
+                 writable: list[str] = (), extra: list[str] = ()) -> None:
+    """Fail closed after the binds. Every mount under `root` must be a planned target (or
+    `extra`: proc, the /dev nodes), or a submount a recursive bind of one brought along
+    (e.g. a container's zoneinfo file bound over /usr's); and every mount at or under a
+    read-only target, outside a writable one, must be `ro`."""
+    def under(path: str, roots) -> bool:
+        return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+    planned = [*readonly, *writable, *extra]
+    for point, opts in mounts:
+        if point == root or not under(point, [root]):
+            continue
+        if not under(point, planned):
+            raise IsolationMountError(1, f"isolation: unexpected mount {point} in the sandbox root")
+        if under(point, readonly) and not under(point, writable) and "ro" not in opts:
+            raise IsolationMountError(30, f"isolation: {point} is mounted writable under a "
+                                          "read-only path")
+
+
 def _bind(root: Path, source: str, *, readonly: bool):
     path = Path(source)
     if not path.exists():
         raise RuntimeError("required isolation path is missing")
     target = root / path.relative_to("/")
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Create the mount point only when missing: it may already exist on a read-only bind
+    # (/etc/localtime -> /usr/share/zoneinfo/... under the /usr bind), where touch()'s utime
+    # fails with EROFS.
     if path.is_dir():
-        target.mkdir(exist_ok=True)
-    else:
-        target.touch(exist_ok=True)
+        if not target.is_dir():
+            target.mkdir()
+    elif not target.exists():
+        target.touch()
     # Recursive: a user namespace refuses (EINVAL) a non-recursive bind of a tree that has
     # locked submounts, since it would uncover what they hide. Only explicitly listed paths
     # are bound, so a submount comes in only under a path that was asked for.
     _mount(source, target, flags=MS_BIND | MS_REC)
     if readonly:
-        # Step two: read-only only works as a remount of the bind, with the locked flags.
+        # Step two: read-only only works as a remount of the bind, with the locked flags;
+        # then the submounts the recursive bind brought along, where the kernel can.
         _mount(None, target, flags=readonly_remount_flags(target))
+        _readonly_recursive(target)
 
 
 def _drop_privileges():
@@ -227,10 +287,14 @@ def _enter(config, argv):
         (root / Path(path).relative_to("/")).mkdir(parents=True, exist_ok=True)
     for path in ("tmp", "proc", "dev"):
         (root / path).mkdir(exist_ok=True)
-    for path in ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"):
+    for path in DEV_NODES:
         _bind(root, path, readonly=False)
     (root / "dev/fd").symlink_to("/proc/self/fd")
     _mount("proc", root / "proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
+    inside = lambda p: os.path.realpath(root / Path(p).relative_to("/"))
+    check_mounts(parse_mountinfo(Path("/proc/self/mountinfo").read_text()), os.path.realpath(root),
+                 [inside(p) for p in config["readonly"]], [inside(p) for p in config["writable"]],
+                 [inside(p) for p in ("/proc", *DEV_NODES)])
     if config["readonly_root"]:
         _mount(None, root, flags=MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV)
     os.chroot(root)

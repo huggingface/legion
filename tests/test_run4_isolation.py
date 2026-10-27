@@ -220,6 +220,11 @@ for path in ['new-file', '/tmp/new-file', {str(tree / 'code.py')!r}]:
     else: raise AssertionError('bot filesystem is writable')
 with socket.socket() as sock:
     assert sock.connect_ex(('127.0.0.1', {port})) != 0
+for line in open('/proc/self/mountinfo'):
+    point, opts = line.split()[4], line.split()[5].split(',')
+    if point == '/proc' or point.startswith('/dev/'):
+        continue
+    assert 'ro' in opts, 'writable mount in the bot sandbox: ' + point
 print('isolated')
 '''
         argv = isolation.command([sys.executable, "-I", "-c", script], tmp_path / "root", cwd=tree,
@@ -328,6 +333,8 @@ def test_readonly_bind_is_a_recursive_bind_then_a_remount_with_the_locked_flags(
     source.mkdir()
     root = tmp_path / "root"
     monkeypatch.setattr(isolation, "_libc", lambda: Libc)
+    recursive = []
+    monkeypatch.setattr(isolation, "_readonly_recursive", lambda target: recursive.append(target) or True)
     locked = os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC | os.ST_RELATIME | os.ST_NODIRATIME
     monkeypatch.setattr(isolation.os, "statvfs", lambda p: type("V", (), {"f_flag": locked})())
     isolation._bind(root, str(source), readonly=True)
@@ -336,6 +343,7 @@ def test_readonly_bind_is_a_recursive_bind_then_a_remount_with_the_locked_flags(
     expected = (isolation.MS_BIND | isolation.MS_REMOUNT | isolation.MS_RDONLY | isolation.MS_NOSUID
                 | isolation.MS_NODEV | isolation.MS_NOEXEC | isolation.MS_RELATIME | isolation.MS_NODIRATIME)
     assert calls[1] == (None, target, None, expected, None) and len(calls) == 2
+    assert recursive == [root / source.relative_to("/")]  # then mount_setattr on submounts
 
     # strictatime source (no atime flag): the remount must say so, or the kernel resets it
     calls.clear()
@@ -365,3 +373,54 @@ def test_mount_errors_name_the_target_and_flags(tmp_path, monkeypatch):
         isolation._mount("/usr", tmp_path / "root/usr", flags=isolation.MS_BIND | isolation.MS_REC)
     assert e.value.errno == 22
     assert "target=" + str(tmp_path / "root/usr") in str(e.value) and "flags=0x5000" in str(e.value)
+
+
+ZONEINFO_MOUNTINFO = r"""22 1 0:21 / / rw,relatime - overlay overlay rw
+40 22 0:5 / /tmp/r/root rw,nosuid,nodev - tmpfs tmpfs rw,size=262144k
+41 40 0:21 /usr /tmp/r/root/usr ro,nosuid,nodev,relatime - overlay overlay rw
+42 41 259:1 /usr/share/zoneinfo/Etc/UTC /tmp/r/root/usr/share/zoneinfo/Etc/UTC ro,relatime - ext4 /dev/nvme0n1p1 rw
+43 40 0:30 /work/cedar /tmp/r/root/work/cedar rw,relatime - ext4 /dev/x rw
+44 40 0:5 /null /tmp/r/root/dev/null rw,nosuid - devtmpfs udev rw
+45 40 0:40 / /tmp/r/root/proc rw,nosuid,nodev,noexec - proc proc rw
+46 40 0:41 /my\040dir /tmp/r/root/opt/my\040dir ro - ext4 /dev/x rw
+"""
+
+
+def test_mountinfo_check_allows_planned_mounts_and_their_ro_children():
+    mounts = isolation.parse_mountinfo(ZONEINFO_MOUNTINFO)
+    assert ("/tmp/r/root/opt/my dir", {"ro"}) in mounts
+    root = "/tmp/r/root"
+    ro, rw = [f"{root}/usr", f"{root}/opt/my dir"], [f"{root}/work/cedar"]
+    extra = [f"{root}/proc", f"{root}/dev/null"]
+    isolation.check_mounts(mounts, root, ro, rw, extra)  # the zoneinfo child is ro: fine
+
+    writable_child = ZONEINFO_MOUNTINFO.replace(
+        "/tmp/r/root/usr/share/zoneinfo/Etc/UTC ro,relatime", "/tmp/r/root/usr/share/zoneinfo/Etc/UTC rw,relatime")
+    with pytest.raises(isolation.IsolationMountError, match="zoneinfo/Etc/UTC is mounted writable"):
+        isolation.check_mounts(isolation.parse_mountinfo(writable_child), root, ro, rw, extra)
+    stray = ZONEINFO_MOUNTINFO + "47 40 0:42 / /tmp/r/root/home/secrets rw - ext4 /dev/x rw\n"
+    with pytest.raises(isolation.IsolationMountError, match="unexpected mount /tmp/r/root/home/secrets"):
+        isolation.check_mounts(isolation.parse_mountinfo(stray), root, ro, rw, extra)
+
+
+def test_bind_never_touches_an_existing_target_on_a_readonly_bind(tmp_path, monkeypatch):
+    """/etc/localtime resolves into /usr, already bound read-only: its mount point exists
+    and touch() (utime) would fail with EROFS."""
+    monkeypatch.setattr(isolation, "_mount", lambda *a, **k: None)
+    monkeypatch.setattr(isolation, "_readonly_recursive", lambda target: True)
+    monkeypatch.setattr(isolation, "readonly_remount_flags", lambda target: 0)
+    source = tmp_path / "zoneinfo/UTC"
+    source.parent.mkdir()
+    source.write_text("tz")
+    root = tmp_path / "root"
+    target = root / source.relative_to("/")
+    target.parent.mkdir(parents=True)
+    target.write_text("tz")
+
+    def refuse(*a, **k):
+        raise PermissionError(30, "Read-only file system")
+
+    monkeypatch.setattr(Path, "touch", refuse)
+    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: refuse()
+                        if self.exists() and not k.get("exist_ok") else None)
+    isolation._bind(root, str(source), readonly=True)  # no touch, no mkdir of existing paths
