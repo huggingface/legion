@@ -281,7 +281,7 @@ async def final_push(b: Built) -> bool:
         return True
     try:
         n = await asyncio.wait_for(
-            asyncio.to_thread(b.state.push, b.store, force=True), b.final_push_timeout
+            asyncio.to_thread(b.state.push, b.store, force=True, final=True), b.final_push_timeout
         )
     except TimeoutError:
         log.error("final push: failed (timeout after %g s)", b.final_push_timeout)
