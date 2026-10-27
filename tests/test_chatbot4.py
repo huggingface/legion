@@ -1092,3 +1092,85 @@ def test_outbox_is_bounded_and_close_flushes_within_the_timeout(setup, monkeypat
     assert len(world.repo.hub.comments) == 3 and world.state["hub_outbox"] == []
     assert not world.drainer.is_alive()
     assert json.loads((world.ws / "prs.json").read_text())["hub_outbox"] == []
+
+
+def _hub_moved_past_the_record(world, clone, remote):
+    """Open a PR, then push a newer head to the Hub's refs/pr/N and branch behind the world's
+    back (a push in the gap before a restart from an older archive)."""
+    rec = submit(world, clone)
+    _module(clone, "gap", "from the gap")
+    _commit(clone, "pushed in the gap")
+    gap = git(clone, "rev-parse", "HEAD")
+    git(clone, "push", "-q", str(remote), f"+{gap}:refs/pr/{rec['pr']}", f"+{gap}:refs/heads/{rec['branch']}")
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == rec["head_sha"] != gap
+    return rec, gap
+
+
+def test_stale_lease_adopts_the_hub_head_and_retries_once(setup, caplog):
+    world, clone, remote = setup
+    rec, gap = _hub_moved_past_the_record(world, clone, remote)
+    caplog.set_level("WARNING")
+    _module(clone, "later", "a later change")
+    new = submit(world, clone, pr=rec["pr"])
+    assert new["head_sha"] not in (rec["head_sha"], gap)
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
+    assert git(remote, "rev-parse", f"refs/heads/{rec['branch']}") == new["head_sha"]
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
+    assert f"adopted Hub head for PR #{rec['pr']} after a stale lease" in caplog.text
+
+
+def test_stale_lease_with_a_failed_fetch_refuses_cleanly(setup, monkeypatch):
+    world, clone, remote = setup
+    rec, gap = _hub_moved_past_the_record(world, clone, remote)
+    calls = []
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda numbers, **kw: calls.append(numbers) or list(numbers))
+    _module(clone, "later", "a later change")
+    with pytest.raises(ToolError, match=r"newer than the world's record.*retry open_pr with pr=") as err:
+        submit(world, clone, pr=rec["pr"])
+    assert err.value.code == "stale_lease" and calls == [[rec["pr"]]]
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == rec["head_sha"]
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == gap
+    monkeypatch.delattr(world.repo, "fetch_pr_refs")  # the Hub answers again: adopt and land
+    new = submit(world, clone, pr=rec["pr"])
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
+
+
+def test_stale_lease_rejected_again_after_adopting_refuses_without_a_loop(setup, monkeypatch):
+    world, clone, remote = setup
+    rec, gap = _hub_moved_past_the_record(world, clone, remote)
+    real, pushes = world.repo.push, []
+
+    def push(sha, ref, expected=None, force=False):
+        pushes.append(ref)
+        if ref.startswith("refs/pr/"):
+            raise ToolError("repository operation failed; refresh your clone and retry", "stale_lease")
+        return real(sha, ref, expected, force)
+
+    monkeypatch.setattr(world.repo, "push", push)
+    _module(clone, "later", "a later change")
+    with pytest.raises(ToolError, match="newer than the world's record") as err:
+        submit(world, clone, pr=rec["pr"])
+    assert err.value.code == "stale_lease" and pushes == [f"refs/pr/{rec['pr']}"] * 2
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == gap  # adopted for the next call
+
+
+def test_a_normal_update_never_fetches_pr_refs(setup, monkeypatch):
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda *a, **k: pytest.fail("fetched"))
+    monkeypatch.setattr(world.repo, "fetch_ref", lambda *a, **k: pytest.fail("fetched"))
+    _module(clone, "later", "a later change")
+    new = submit(world, clone, pr=rec["pr"])
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
+
+
+def test_a_lease_rejection_has_its_own_code(setup):
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    with pytest.raises(ToolError) as err:
+        world.repo.push(git(remote, "rev-parse", "main"), f"refs/pr/{rec['pr']}", expected="0" * 40)
+    assert err.value.code == "stale_lease"
+    with pytest.raises(ToolError) as err:
+        world.repo.push("1" * 40, "refs/pr/999")
+    assert err.value.code == "git_error"

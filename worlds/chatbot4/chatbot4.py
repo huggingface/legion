@@ -599,8 +599,8 @@ class Chatbot4World(World):
             old_head = old["head_sha"] if old else None
             self.pending[token] = (agent.name, branch_ref, number, key)
         try:
-            number, sha, main = self._publish(agent, snapshot, base, title, description,
-                                              branch_ref, number, old_head, started, token)
+            number, sha, main, old_head = self._publish(agent, snapshot, base, title, description,
+                                                        branch_ref, number, old_head, started, token)
             with self.lock:
                 if old and (old["state"] != "open" or old["head_sha"] != old_head):
                     raise ToolError("the PR was merged or closed during the update")
@@ -660,8 +660,8 @@ class Chatbot4World(World):
                                started + CALL_BUDGET - 2 * PUSH_ESTIMATE_S)
             if old_head is not None:  # an open PR: replace only the expected head
                 with self._hub_write(agent, "push", pr, deadline):
-                    self.repo.push(sha, f"refs/pr/{pr}", expected=old_head)
-                    self.repo.push(sha, f"refs/heads/{branch_ref}", expected=old_head)
+                    old_head = self._lease_push(agent, pr, sha, f"refs/pr/{pr}", old_head, started)
+                    self._lease_push(agent, pr, sha, f"refs/heads/{branch_ref}", old_head, started)
             else:
                 with self._hub_write(agent, "open_pr", pr, deadline):
                     if pr is None:
@@ -681,8 +681,62 @@ class Chatbot4World(World):
                                            started)
             self.repo.update_ref(f"refs/pr/{pr}", sha)
             self.repo.update_ref(f"refs/flock/pr/{pr}/{sha}", sha)
-            return pr, sha, main
+            return pr, sha, main, old_head
         raise ToolError("main kept moving while opening the PR; open it again", "busy")
+
+    def _lease_push(self, agent, pr, sha, ref, expected, started):
+        """Push sha to ref (refs/pr/N or the PR's branch) with a lease on expected; the caller
+        holds a Hub slot, never the world lock. On a stale lease (the Hub's ref moved past the
+        world's record, e.g. after a restart from an older archive), fetch the Hub's value,
+        adopt it (for refs/pr/N: into the record's head_sha) and retry the push once.
+        Returns the expected value the push landed with."""
+        try:
+            self.repo.push(sha, ref, expected=expected)
+            return expected
+        except ToolError as exc:
+            if exc.code != "stale_lease":
+                raise
+        refusal = ToolError(f"your PR #{pr}'s head on the Hub is newer than the world's record; "
+                            f"the world is catching up, retry open_pr with pr={pr} in a minute",
+                            "stale_lease")
+        room = started + CALL_BUDGET - time.monotonic()
+        if ref == f"refs/pr/{pr}":
+            local = ref
+            fetched = not self.repo.fetch_pr_refs([pr], delays=(1,) if room > 1 + 2 * PUSH_ESTIMATE_S else ())
+        else:
+            local = f"refs/flock/hub/{ref.removeprefix('refs/')}"
+            fetched = self.repo.fetch_ref(ref, local)
+        hub = None
+        if fetched:
+            try:
+                hub = self.repo.git("rev-parse", "--verify", f"{local}^{{commit}}")
+            except ToolError:
+                hub = None
+        if not hub or hub == expected:
+            log.warning("stale lease on %s for PR #%s (agent=%s): Hub head not fetched; refused",
+                        ref, pr, agent.name)
+            raise refusal
+        if ref == f"refs/pr/{pr}":
+            with self.lock:
+                rec = self.state["prs"].get(str(pr))
+                if rec is None or rec["state"] != "open" or rec["head_sha"] != expected:
+                    raise ToolError("the PR was merged or closed during the update")
+                rec["head_sha"] = hub
+                self._save()
+            log.warning("adopted Hub head for PR #%s after a stale lease: %s -> %s",
+                        pr, expected[:12], hub[:12])
+        else:
+            log.warning("adopted Hub value of %s for PR #%s after a stale lease", ref, pr)
+        if time.monotonic() + PUSH_ESTIMATE_S > started + CALL_BUDGET:
+            raise refusal
+        try:
+            self.repo.push(sha, ref, expected=hub)
+        except ToolError as exc:
+            if exc.code != "stale_lease":
+                raise
+            log.warning("stale lease again on %s for PR #%s (agent=%s); refused", ref, pr, agent.name)
+            raise refusal from None
+        return hub if ref == f"refs/pr/{pr}" else expected
 
     def _land(self, agent, snapshot, base, title, branch_ref, number, sha, main, started):
         """Push the head of the world's own (draft) Hub PR and mark it ready; the caller holds

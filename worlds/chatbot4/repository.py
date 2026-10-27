@@ -74,9 +74,12 @@ class Repository:
             # Git's stderr can contain remote data or credentials: never expose it to agents;
             # the world's log gets it redacted.
             command = next((a for a in args if not a.startswith("-") and "=" not in a), "?")
+            stderr = p.stderr.decode(errors="replace")
             log.warning("git %s failed: exit code %s, stderr=%s", command, p.returncode,
-                        _safe_text(p.stderr.decode(errors="replace").strip(), 500))
-            raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+                        _safe_text(stderr.strip(), 500))
+            # A --force-with-lease push whose expected value no longer matches the remote ref.
+            code = "stale_lease" if command == "push" and "stale info" in stderr else "git_error"
+            raise ToolError("repository operation failed; refresh your clone and retry", code)
         return p.stdout.decode().strip()
 
     def fetch(self):
@@ -116,6 +119,15 @@ class Repository:
                     else:
                         time.sleep(delay)
         return missing
+
+    def fetch_ref(self, remote_ref, local_ref):
+        """Fetch one ref from the Hub into local_ref. Never raises: returns False on failure."""
+        try:
+            with self.refs_lock:
+                self.git("fetch", "--no-write-fetch-head", "origin", f"+{remote_ref}:{local_ref}")
+            return True
+        except Exception:  # noqa: BLE001 - logged by git(); the caller refuses cleanly
+            return False
 
     def refresh(self, max_age):
         """Fetch unless a fetch started within max_age seconds. The world updates its own
