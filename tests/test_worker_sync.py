@@ -411,3 +411,65 @@ def test_failed_big_batch_falls_back_per_file(tmp_path, monkeypatch):
     assert failed == ["r/f2"] and len(done) == 5
     assert [len(c) for c in store.calls[:2]] == [4, 2]  # batches of 4 from the env
     assert ["r/f2"] in store.calls  # the failed batch retried file by file
+
+
+def test_default_workdir_excludes_match_at_any_depth(monkeypatch):
+    from flock.worker.sync import is_excluded, workdir_excludes
+    monkeypatch.delenv("FLOCK_SYNC_EXCLUDE", raising=False)
+    monkeypatch.delenv("FLOCK_SYNC_EXCLUDE_DEFAULTS", raising=False)
+    pats = workdir_excludes()
+    for rel in ["__pycache__/a.cpython-311.pyc", "a/b/__pycache__/x.txt", "m.pyc", "a/b/m.pyc",
+                ".pytest_cache/v/x", "p/.pytest_cache/v/x", ".mypy_cache/x", "p/q/.mypy_cache/x",
+                ".ruff_cache/x", "p/.ruff_cache/x", ".hypothesis/x", "p/.hypothesis/d/x",
+                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.flock-part"]:
+        assert is_excluded(rel, pats), rel
+    for rel in ["src/main.py", "my__pycache__/x", ".git/config", "wt/.git", "wt/.git/HEAD",
+                "wt/src/a.py", "pycache/x", "notes.pyc.md", "egg-info/x"]:
+        assert not is_excluded(rel, pats), rel
+
+
+def test_workdir_excludes_env_extends_and_disables(monkeypatch):
+    from flock.worker.sync import is_excluded, workdir_excludes
+    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "*.tmp, node_modules/")
+    pats = workdir_excludes()
+    assert is_excluded("a/b.tmp", pats) and is_excluded("web/node_modules/x/y.js", pats)
+    assert is_excluded("a/__pycache__/x", pats)
+    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE_DEFAULTS", "0")
+    pats = workdir_excludes()
+    assert not is_excluded("a/__pycache__/x", pats) and not is_excluded("m.pyc", pats)
+    assert is_excluded("a/b.tmp", pats) and is_excluded("f.flock-part", pats)
+
+
+async def test_mirror_skips_caches_and_never_deletes_remote_ones(tmp_path):
+    store = MemoryStore()
+    pre = "sw/researcher/researcher-0001/workdir/"
+    store.files[pre + "pkg/__pycache__/old.pyc"] = b"remote"
+    store.files[pre + "gone.txt"] = b"stale"
+    rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"))
+    await rt.setup(restore=False)
+    store.files[pre + "pkg/__pycache__/old.pyc"] = b"remote"
+    store.files[pre + "gone.txt"] = b"stale"
+    rt.workdir.mkdir(parents=True, exist_ok=True)
+    (rt.workdir / "pkg" / "__pycache__").mkdir(parents=True)
+    (rt.workdir / "pkg" / "__pycache__" / "new.pyc").write_text("c")
+    (rt.workdir / "pkg" / "a.py").write_text("a")
+    (rt.workdir / "wt").mkdir()
+    (rt.workdir / "wt" / ".git").write_text("gitdir: x")
+    await rt.sync.push(rt)
+    assert pre + "pkg/a.py" in store.files and pre + "wt/.git" in store.files
+    assert pre + "pkg/__pycache__/new.pyc" not in store.files  # not uploaded
+    assert store.files[pre + "pkg/__pycache__/old.pyc"] == b"remote"  # not deleted
+    assert pre + "gone.txt" not in store.files  # the mirror still deletes ordinary files
+    await rt.stop()
+
+
+async def test_restore_skips_excluded_remote_files(tmp_path):
+    store = MemoryStore()
+    pre = "sw/researcher/researcher-0001/workdir/"
+    for k in ["keep.txt", "a/b/__pycache__/x.pyc", "m.pyc", ".mypy_cache/x", "wt/.git"]:
+        store.files[pre + k] = b"x"
+    rt, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    res = await rt.sync.restore(rt)
+    assert res.workdir == 2 and not res.failed
+    assert sorted(p.relative_to(rt.workdir).as_posix() for p in rt.workdir.rglob("*")
+                  if p.is_file()) == ["keep.txt", "wt/.git"]

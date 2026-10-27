@@ -41,6 +41,10 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   not fetch stays in the bucket for the next restore.
 - `*.flock-part` (restore temporaries) is never uploaded nor deleted by a push; restore removes
   stray ones left by a crash.
+- Regenerable caches (`workdir_excludes`: `__pycache__/`, `*.pyc`, `.pytest_cache/`, ...; env
+  FLOCK_SYNC_EXCLUDE adds globs, FLOCK_SYNC_EXCLUDE_DEFAULTS=0 drops the defaults) are neither
+  uploaded nor deleted by the mirror, and restore skips them, also those already in the bucket.
+  `.git/` and worktrees are never excluded by default.
 - Restore sets each workdir file's mtime to the bucket's (the listing carries it), so the first
   push after a restore uploads only real changes; session and harness files are marked as
   pushed (`_mark`).
@@ -49,6 +53,7 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -84,6 +89,38 @@ def restore_batch() -> int:
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
 PART_SUFFIX = ".flock-part"
 PUSH_EXCLUDE = ["*" + PART_SUFFIX]  # sync_bucket patterns, matched on relative paths
+# Regenerable caches left out of the workdir mirror and of restore (module docstring). A trailing
+# "/" names a directory at any depth (`workdir_excludes`); other entries are plain globs.
+DEFAULT_WORKDIR_EXCLUDE = ["__pycache__/", "*.pyc", ".pytest_cache/", ".mypy_cache/",
+                           ".ruff_cache/", ".hypothesis/", "*.egg-info/"]
+
+
+def _expand(pattern: str) -> list[str]:
+    """`name/` -> `name/*` and `*/name/*` (the directory at the root and below any directory);
+    anything else is returned as is. `sync_bucket` globs are fnmatch on the whole relative path,
+    where `*` also crosses `/`."""
+    if pattern.endswith("/"):
+        d = pattern.rstrip("/")
+        return [f"{d}/*", f"*/{d}/*"]
+    return [pattern]
+
+
+def workdir_excludes() -> list[str]:
+    """Globs for the workdir mirror, relative to the workdir, always including `*.flock-part`:
+    the defaults (unless env FLOCK_SYNC_EXCLUDE_DEFAULTS=0) plus the comma-separated
+    FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults."""
+    pats = list(PUSH_EXCLUDE)
+    if os.environ.get("FLOCK_SYNC_EXCLUDE_DEFAULTS", "1").strip() != "0":
+        pats += [x for d in DEFAULT_WORKDIR_EXCLUDE for x in _expand(d)]
+    for item in os.environ.get("FLOCK_SYNC_EXCLUDE", "").split(","):
+        if item.strip():
+            pats += _expand(item.strip())
+    return pats
+
+
+def is_excluded(rel: str, patterns: list[str]) -> bool:
+    """Does the workdir-relative posix path match one of the patterns (as `sync_bucket` does)?"""
+    return any(fnmatch.fnmatchcase(rel, pat.replace("\\", "/")) for pat in patterns)
 
 
 def collect_modes(workdir: Path) -> dict[str, str]:
@@ -476,7 +513,7 @@ class BucketSync:
                 log.info("%s: workdir push without remote deletes (last restore incomplete)",
                          rt.name)
             await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
-                                    delete=delete, exclude=PUSH_EXCLUDE)
+                                    delete=delete, exclude=workdir_excludes())
         files = self._changed(self.collect(rt))
         if files:
             await asyncio.to_thread(self.store.upload, files)
@@ -515,13 +552,14 @@ class BucketSync:
         n = sum([await asyncio.to_thread(_clean_parts, d) for d in (rt.workdir, rt.sessions_dir)])
         if n:
             log.info("%s: removed %d stray %s file(s)", rt.name, n, PART_SUFFIX)
+        skip = workdir_excludes()
         for r, _ in listed:
             rel = r[len(pre):]
             area, _, sub = rel.partition("/")
             if not sub or ".." in Path(sub).parts:
                 continue
             if area == "workdir":
-                if rt.spec.persist_workdir:
+                if rt.spec.persist_workdir and not is_excluded(sub, skip):
                     work.append((r, rt.workdir / sub))
             elif area == "sessions":
                 plan.append((r, rt.sessions_dir / sub))
