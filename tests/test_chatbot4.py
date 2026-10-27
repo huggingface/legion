@@ -560,3 +560,104 @@ def test_open_pr_branch_prefix_and_specific_errors(setup):
     with pytest.raises(ToolError, match="description must not be empty"):
         world.call_workspace("open_pr", {"branch": "other", "title": "Fine title", "description": "  "},
                              Agent("cedar"), capture(clone.parent, clone.name))
+
+
+def _module(clone, name, reply):
+    (clone / f"bot/modules/{name}.py").write_text(f'def respond(text, memory):\n    return {reply!r}\n')
+
+
+def _commit(clone, message="change"):
+    git(clone, "add", "-A")
+    git(clone, "-c", "user.name=a", "-c", "user.email=a@flock.invalid", "commit", "-qm", message)
+
+
+def _rebase(clone):
+    git(clone, "fetch", "-q", "origin")
+    git(clone, "-c", "user.name=a", "-c", "user.email=a@flock.invalid", "rebase", "-q", "origin/main")
+
+
+def _two_prs(setup, edit_one, edit_two):
+    """pine's PR merges first; cedar's PR (from the fixture clone) is approved and goes stale."""
+    world, clone, remote = setup
+    other = clone.parent / "other"
+    git(clone.parent, "clone", "-q", str(remote), str(other))
+    edit_one(other)
+    first = submit(world, other, author="pine", branch="one")
+    edit_two(clone)
+    _commit(clone)
+    second = submit(world, clone, branch="two")
+    approve(world, first)
+    world.review_pr(Agent("birch"), second["pr"], second["head_sha"], "approve", "Looks right")
+    world.merge_pr(Agent("pine"), first["pr"])
+    with pytest.raises(ToolError, match="stale PR: .*approvals carry over"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    return world, clone, second
+
+
+def test_approval_carries_over_a_clean_rebase(setup):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    assert [r["pr"] for r in world.list_prs(needs_review=True)] == []
+    _rebase(clone)
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    assert updated["head_sha"] != second["head_sha"]
+    review = world.state["prs"][str(second["pr"])]["reviews"]["birch"]
+    assert review["head_sha"] == second["head_sha"] and review["patch_id"]
+    assert world.list_prs(needs_review=True) == []  # the approval carried over
+    result = world.merge_pr(Agent("cedar"), second["pr"])
+    assert result["reviewers"] == ["birch"] and result["head_sha"] == updated["head_sha"]
+
+
+def test_rebase_that_changes_the_diff_needs_a_fresh_approval(setup):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "greeting", "Hey!"),
+                                    lambda c: _module(c, "greeting", "Hi!"))
+    git(clone, "fetch", "-q", "origin")
+    git(clone, "reset", "-q", "--hard", "origin/main")  # resolve the conflict by redoing the edit
+    _module(clone, "greeting", "Hi!")
+    _commit(clone, "resolved")
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    assert [r["pr"] for r in world.list_prs(needs_review=True)] == [second["pr"]]
+    with pytest.raises(ToolError, match="must approve"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    approve(world, updated)
+    assert world.merge_pr(Agent("cedar"), second["pr"])["head_sha"] == updated["head_sha"]
+
+
+def test_change_request_still_blocks_after_a_clean_rebase(setup):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    world.review_pr(Agent("oak"), second["pr"], second["head_sha"], "request_changes", "Add a test")
+    _rebase(clone)
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    with pytest.raises(ToolError, match="requests changes"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    approve(world, updated, "oak")
+    assert world.merge_pr(Agent("cedar"), second["pr"])["reviewers"] == ["birch", "oak"]
+
+
+def test_reviews_without_patch_id_only_count_for_their_exact_head(setup):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    # State archived before patch ids existed, restored into a restarted world.
+    state = json.loads(world.db.read_text())
+    del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id"]
+    world.db.write_text(json.dumps(state))
+    world = Chatbot4World(world.ws, world.repo)
+    assert world.list_prs(needs_review=True) == []  # still approved at its exact head
+    _rebase(clone)
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    assert [r["pr"] for r in world.list_prs(needs_review=True)] == [second["pr"]]
+    with pytest.raises(ToolError, match="must approve"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    approve(world, updated)
+    assert world.merge_pr(Agent("cedar"), second["pr"])["merged_sha"]
+
+
+def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
+    world, clone, _ = setup
+    main = world.repo.sha()
+    assert world.repo.patch_id(main, main) is None
+    _module(clone, "time", None)
+    rec = submit(world, clone)
+    first = world.repo.patch_id(rec["base_sha"], rec["head_sha"])
+    assert first and world.repo.patch_ids[(rec["base_sha"], rec["head_sha"])] == first

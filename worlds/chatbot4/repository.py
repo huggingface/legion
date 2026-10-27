@@ -47,6 +47,7 @@ class Repository:
         # not under the world's state lock; reads, clones and object writes run concurrently.
         self.refs_lock = threading.Lock()
         self.fetched = 0.0
+        self.patch_ids = {}  # (base, head) -> stable patch-id or None
         self.env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_LFS_SKIP_SMUDGE": "1"}
         if hub is not None:
@@ -132,6 +133,25 @@ class Repository:
         """Paths added or modified between two commits."""
         out = self.git("diff", "--name-only", "-z", "--no-renames", "--diff-filter=AM", base, head)
         return [name for name in out.split("\0") if name]
+
+    def patch_id(self, base, head):
+        """Stable patch-id of the diff base..head (None for an empty diff), cached per pair."""
+        key = (base, head)
+        if key not in self.patch_ids:
+            diff = subprocess.run(["git", "-C", str(self.root), "diff", base, head],
+                                  capture_output=True, env=self.env, timeout=120, check=False)
+            if diff.returncode:
+                log.warning("git diff failed: exit code %s", diff.returncode)
+                raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+            out = subprocess.run(["git", "-C", str(self.root), "patch-id", "--stable"], input=diff.stdout,
+                                 capture_output=True, env=self.env, timeout=120, check=False)
+            if out.returncode:
+                log.warning("git patch-id failed: exit code %s", out.returncode)
+                raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+            if len(self.patch_ids) >= 10000:
+                self.patch_ids.clear()
+            self.patch_ids[key] = out.stdout.decode().split()[0] if out.stdout.strip() else None
+        return self.patch_ids[key]
 
     def commit(self, tree, parent, author, title, onto=None):
         """Commit tree on parent; with onto != parent, replay that commit onto it."""

@@ -25,14 +25,15 @@
    that `head_sha`, `verdict` (`approve` or `request_changes`) and a useful `comment`.
    Self-review is refused. Review the change and evidence, not the author.
 7. Update your PR through `open_pr` with the same branch slug and `pr` number.
-   Every update invalidates its approvals. To refresh a stale base, fetch main and
+   An update that changes the PR's diff invalidates its approvals; a clean rebase
+   that leaves the diff unchanged keeps them. To refresh a stale base, fetch main and
    rebase your local topic branch onto `origin/main`, resolve conflicts, rerun tests
    and update the PR. If your edits are uncommitted, commit them locally first.
    The world rejects a stale base at merge instead of silently replacing new work.
    Close a PR you abandon with `close_pr` (`pr` and a short `reason`); this frees one
    of your two open-PR slots.
 8. Any agent, including the author, may call `merge_pr` after another agent has
-   approved the exact current head. Outstanding requests for changes block merging
+   approved the PR's current change (its head, or the same diff before a rebase). Outstanding requests for changes block merging
    until those reviewers approve or the author updates the PR for a fresh review.
    The world checks the frozen interface and the bot's output/crash/time contract.
 

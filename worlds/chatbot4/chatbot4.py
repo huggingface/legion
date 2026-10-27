@@ -55,7 +55,7 @@ class Chatbot4World(World):
     concurrent = True
     capabilities: ClassVar[list[str]] = ["workspace-upload-v1"]
     description = ("Edit your local git clone, then submit with open_pr. Another agent must "
-                   "approve the exact head before merge. Bot input/output and module loading "
+                   "approve the PR's current change (a clean rebase keeps the approval) before merge. Bot input/output and module loading "
                    "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation.")
 
     def __init__(self, ws=None, repository=None):
@@ -109,8 +109,8 @@ class Chatbot4World(World):
             if not self.repo.ancestor(rec["head_sha"], "main"):
                 continue
             merged = self.repo.merged_by(rec["head_sha"])
-            reviewers = sorted(name for name, r in rec["reviews"].items()
-                               if r["verdict"] == "approve" and r["head_sha"] == rec["head_sha"])
+            reviewers = sorted(name for name, r in self._current_reviews(rec).items()
+                               if r["verdict"] == "approve")
             rec.update(state="merged", merged_sha=merged)
             event = {"pr": rec["pr"], "author": rec["author"], "reviewers": reviewers,
                      "parent_sha": self.repo.git("rev-parse", f"{merged}^1") if merged else None,
@@ -283,7 +283,9 @@ class Chatbot4World(World):
                 record = {"pr": number, "state": "open", "author": agent.name,
                           "branch": branch_ref, "base_sha": main, "head_sha": sha,
                           "url": f"https://huggingface.co/datasets/{self.repo_id}/discussions/{number}",
-                          "title": title, "description": description, "reviews": {}}
+                          "title": title, "description": description,
+                          # Kept so reviews of an identical diff carry over a clean rebase.
+                          "reviews": dict(old["reviews"]) if old else {}}
                 self.state["prs"][str(number)] = record
                 result = {k: v for k, v in record.items() if k != "reviews"}
                 if base != main:
@@ -362,8 +364,9 @@ class Chatbot4World(World):
             return rec
 
         with self.lock:
-            check()
-        review = {"head_sha": head_sha, "verdict": verdict, "comment": comment}
+            base = check()["base_sha"]
+        review = {"head_sha": head_sha, "patch_id": self._patch_id(base, head_sha),
+                  "verdict": verdict, "comment": comment}
         self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
         with self.lock:
             check()["reviews"][agent.name] = review
@@ -371,9 +374,32 @@ class Chatbot4World(World):
             self._event("reviewed", agent, pr=pr, **review)
             return {"pr": pr, "reviewer": agent.name, **review}
 
+    def _patch_id(self, base, head):
+        try:
+            return self.repo.patch_id(base, head)
+        except ToolError:
+            return None  # unknown change identity: only exact-head reviews count
+
+    def _current_reviews(self, rec):
+        """Reviews of the current head, or of an identical diff (a clean rebase).
+
+        Reviews stored without a patch_id only count for their exact head.
+        """
+        current, patch = {}, ...
+        for name, r in rec["reviews"].items():
+            if r["head_sha"] != rec["head_sha"]:
+                if r.get("patch_id") is None:
+                    continue
+                if patch is ...:
+                    patch = self._patch_id(rec["base_sha"], rec["head_sha"])
+                if r["patch_id"] != patch:
+                    continue
+            current[name] = r
+        return current
+
     def _approved(self, rec):
-        reviews = {name: r for name, r in rec["reviews"].items()
-                   if name != rec["author"] and r["head_sha"] == rec["head_sha"]}
+        reviews = {name: r for name, r in self._current_reviews(rec).items()
+                   if name != rec["author"]}
         if any(r["verdict"] == "request_changes" for r in reviews.values()):
             raise ToolError("a reviewer still requests changes on this head")
         names = [name for name, r in reviews.items() if r["verdict"] == "approve"]
@@ -394,7 +420,8 @@ class Chatbot4World(World):
                 return self._merged_event(rec)
             main, head = self.repo.sha(), rec["head_sha"]
             if main != rec["base_sha"]:
-                raise ToolError("stale PR: fetch main, rebase, update the PR and get a fresh review")
+                raise ToolError("stale PR: fetch main, rebase and update the PR; approvals carry "
+                                "over if your diff is unchanged, otherwise ask for a fresh review")
         with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
             tree = Path(tmp) / "tree"
             self.repo.checkout(head, tree)
@@ -486,8 +513,8 @@ class Chatbot4World(World):
             for rec in self.state["prs"].values():
                 if (state != "all" and rec["state"] != state) or (author and rec["author"] != author):
                     continue
-                if needs_review and any(r["verdict"] == "approve" and r["head_sha"] == rec["head_sha"]
-                                        for r in rec["reviews"].values()):
+                if needs_review and any(r["verdict"] == "approve"
+                                        for r in self._current_reviews(rec).values()):
                     continue
                 records.append(json.loads(json.dumps(rec)))
             return records[offset:offset + 100]
