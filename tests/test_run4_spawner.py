@@ -18,7 +18,7 @@ from .test_run4_isolation import kernel_namespaces  # noqa: F401 - the fixture, 
 
 EXP = Path(__file__).resolve().parents[1] / "experiments/run4"
 CMD = TypeAdapter(Command)
-SPAWNER_TEXT = "You may start up to 4 helper agents of your own kind"
+SPAWNER_TEXT = "You can start up to 4 peers of your own kind"
 CHILD_TEXT = "You were started by another agent (your parent, `$FLOCK_PARENT`)"
 
 
