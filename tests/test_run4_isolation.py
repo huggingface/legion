@@ -43,6 +43,59 @@ def test_bot_and_pi_invocations_have_separate_roots_and_no_unsafe_fallback(tmp_p
     assert str(pin.parent) not in config["readonly"]
 
 
+def test_two_level_symlinked_interpreter_keeps_every_hop_inside_the_root(tmp_path, monkeypatch):
+    """A uv venv: bin/python -> .../cpython-3.12-linux (a link) -> cpython-3.12.14-linux. The
+    chroot binds the real install and recreates each hop, so the venv's path resolves."""
+    pythons = tmp_path / "uv/python"
+    real = pythons / "cpython-3.12.14-linux-x86_64-gnu"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin/python3.12").write_text("")
+    (pythons / "cpython-3.12-linux-x86_64-gnu").symlink_to(real.name)  # relative hop
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to(pythons / "cpython-3.12-linux-x86_64-gnu/bin/python3.12")
+    (venv / "bin/python3").symlink_to("python")
+    monkeypatch.setattr(isolation.sys, "executable", str(venv / "bin/python3"))
+    monkeypatch.setattr(isolation.sys, "prefix", str(venv))
+    monkeypatch.setattr(isolation.sys, "base_prefix", str(real))
+    monkeypatch.setattr(isolation.shutil, "which", lambda name: "/usr/bin/unshare")
+    argv = [str(venv / "bin/python3"), "-I", "-S", "-c", "pass"]
+    config = isolation.plan(argv, cwd=tmp_path, python_only=True)
+    hops = dict(config["symlinks"])
+    assert hops[str(venv / "bin/python3")] == "python"
+    assert hops[str(venv / "bin/python")] == str(pythons / "cpython-3.12-linux-x86_64-gnu/bin/python3.12")
+    assert hops[str(pythons / "cpython-3.12-linux-x86_64-gnu")] == real.name
+    assert str(real) in config["readonly"] and str(venv) in config["readonly"]
+
+    # Replaying the plan in a scratch root (no namespace) resolves the original spelling.
+    scratch = tmp_path / "scratch"
+    for path in config["readonly"]:
+        if path.startswith(str(tmp_path)):
+            (scratch / Path(path).relative_to("/")).mkdir(parents=True, exist_ok=True)
+    (scratch / Path(real, "bin").relative_to("/")).mkdir(parents=True, exist_ok=True)
+    (scratch / Path(real, "bin/python3.12").relative_to("/")).write_text("")
+    for link, target in config["symlinks"]:
+        inside = scratch / Path(link).relative_to("/")
+        inside.parent.mkdir(parents=True, exist_ok=True)
+        inside.symlink_to(scratch / Path(target).relative_to("/") if os.path.isabs(target) else target)
+    assert (scratch / Path(venv, "bin/python3").relative_to("/")).resolve() == \
+        (scratch / Path(real, "bin/python3.12").relative_to("/")).resolve()
+
+
+def test_unmounted_symlink_target_fails_with_the_path_named(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere/python3.12"
+    elsewhere.parent.mkdir()
+    elsewhere.write_text("")
+    link = tmp_path / "bin/python"
+    link.parent.mkdir()
+    link.symlink_to(elsewhere)
+    monkeypatch.setattr(isolation.sys, "executable", str(link))
+    monkeypatch.setattr(isolation.sys, "prefix", str(link.parent))
+    monkeypatch.setattr(isolation.sys, "base_prefix", str(link.parent))
+    with pytest.raises(RuntimeError, match=str(elsewhere)):
+        isolation.plan([str(link), "-c", "pass"], cwd=tmp_path, python_only=True)
+
+
 def test_failed_isolation_never_executes_bot_without_it(tmp_path, monkeypatch):
     from . import test_chatbot4  # world import path
 

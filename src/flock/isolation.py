@@ -48,6 +48,72 @@ def runtime_paths(command: list[str], *, python_only=False) -> list[str]:
     return sorted({str(Path(p).absolute()) for p in paths if Path(p).exists()}, key=lambda p: (len(p), p))
 
 
+def symlink_chain(path: str | Path) -> tuple[list[tuple[str, str]], str]:
+    """Resolve `path` one hop at a time: every symlink met on the way (as `(link, target)`,
+    the target exactly as stored) and the final real path. Components that do not exist are
+    kept as they are. A loop or more than 40 hops raises."""
+    links: list[tuple[str, str]] = []
+    pending = list(Path(os.path.abspath(path)).parts[1:])
+    current = Path("/")
+    while pending:
+        name = pending.pop(0)
+        if name in ("", "."):
+            continue
+        if name == "..":
+            current = current.parent
+            continue
+        candidate = current / name
+        if not candidate.is_symlink():
+            current = candidate
+            continue
+        target = os.readlink(candidate)
+        links.append((str(candidate), target))
+        if len(links) > 40:
+            raise RuntimeError(f"isolation: too many symlinks resolving {path}")
+        if os.path.isabs(target):
+            current = Path("/")
+            pending = list(Path(target).parts[1:]) + pending
+        else:
+            pending = list(Path(target).parts) + pending
+    return links, str(current)
+
+
+def _within(path: str, roots: list[str]) -> bool:
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def plan(argv: list[str], *, cwd: Path, readonly=(), writable=(), python_only=False,
+         private_dirs=()) -> dict:
+    """Mounts and symlinks for the chroot. Every path is bound at its real location, and each
+    symlink hop on the way to it (and to the interpreter, the command and node) is recreated
+    inside, so the original spelling resolves there too (a uv venv's python links through
+    `cpython-3.12-...` to `cpython-3.12.14-...`)."""
+    links: dict[str, str] = {}
+
+    def real(p) -> str:
+        hops, final = symlink_chain(p)
+        links.update(hops)
+        return final
+
+    ro = [real(p) for p in runtime_paths(argv, python_only=python_only) + [str(p) for p in readonly]]
+    rw = [real(p) for p in writable]
+    probes = [sys.executable, argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])]
+    if not python_only:
+        probes.append(shutil.which("node"))
+    for probe in filter(None, probes):
+        final = real(probe)
+        if not _within(final, ro + rw):
+            raise RuntimeError(f"isolation cannot represent {probe}: it resolves to {final}, "
+                               "outside every mounted path")
+    real(cwd)
+    def ordered(paths: list[str]) -> list[str]:  # parents before nested mounts
+        return sorted(dict.fromkeys(paths), key=lambda p: (len(p), p))
+
+    return {"readonly": ordered(ro), "writable": list(dict.fromkeys(rw)),
+            "symlinks": sorted(links.items(), key=lambda kv: (len(kv[0]), kv[0])),
+            "private_dirs": [str(Path(p).absolute()) for p in private_dirs]}
+
+
 def command(argv: list[str], root: Path, *, cwd: Path, readonly=(), writable=(), network=False,
             python_only=False, private_dirs=()) -> list[str]:
     """Build a trusted invocation. Only explicitly mounted paths survive the chroot."""
@@ -55,10 +121,9 @@ def command(argv: list[str], root: Path, *, cwd: Path, readonly=(), writable=(),
     if not unshare:
         raise RuntimeError("unshare is required for run4 process isolation")
     config = {"root": str(root.absolute()), "cwd": str(cwd.absolute()),
-              "readonly": runtime_paths(argv, python_only=python_only) + [str(Path(p).absolute()) for p in readonly],
-              "writable": [str(Path(p).absolute()) for p in writable],
               "readonly_root": not network,
-              "private_dirs": [str(Path(p).absolute()) for p in private_dirs]}
+              **plan(argv, cwd=cwd, readonly=readonly, writable=writable, python_only=python_only,
+                     private_dirs=private_dirs)}
     # Slurm sends USR1 to every process on reclaim. Only worker/world supervisors
     # handle it; an unshare wrapper must survive long enough for their bounded drain.
     return ["/bin/sh", "-c", 'trap "" USR1; exec "$@"', "flock-isolate",
@@ -130,6 +195,12 @@ def _enter(config, argv):
         _bind(root, path, readonly=True)
     for path in config["writable"]:
         _bind(root, path, readonly=False)
+    for link, target in config.get("symlinks", ()):
+        inside = root / Path(link).relative_to("/")
+        if os.path.lexists(inside):
+            continue  # already visible through a bind mount
+        inside.parent.mkdir(parents=True, exist_ok=True)
+        inside.symlink_to(target)
     for path in config["private_dirs"]:
         (root / Path(path).relative_to("/")).mkdir(parents=True, exist_ok=True)
     for path in ("tmp", "proc", "dev"):
