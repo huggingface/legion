@@ -99,3 +99,38 @@ async def test_external_dm_delivered_to_its_recipient_by_rotating_poll(tmp_path,
         assert team.agents["birch"].state.comms_cursor
     finally:
         await team.close()
+
+
+async def test_poller_survives_a_non_board_exception(tmp_path, board, monkeypatch, caplog):
+    """A bad page (ValueError, KeyError, a non-JSON proxy reply) is logged with the agent's
+    name and backed off; the single worker poller keeps delivering notices."""
+    from flock.comms.board import AsyncBoard
+
+    real, failures = AsyncBoard.activity, []
+
+    async def flaky(self, cred, channel, after, wait=0):
+        if after is not None and len(failures) < 2:
+            failures.append(cred)
+            raise ValueError("invalid literal for int() with base 10: 'oops'")
+        return await real(self, cred, channel, after, wait)
+
+    monkeypatch.setattr(AsyncBoard, "activity", flaky)
+    team = Team(tmp_path, board, ["cedar", "birch"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.03
+    team.hub.backoff_s = 0.01
+    team.spec.extended = True
+    team.spec.wake = ["mention", "thread", "dm", "channel"]
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    try:
+        await team.start()
+        await until(lambda: len(failures) == 2)
+        poller = team.hub._poller
+        out, error = await team.call("cedar", "post", text="@birch after the bad page", thread="new")
+        assert not error, out
+        await until(lambda: custom(team.agents["birch"], "comms_mention"))
+        assert team.hub._poller is poller and not poller.done()
+        assert any("ValueError" in r.getMessage() and ("cedar" in r.getMessage() or "birch" in r.getMessage())
+                   for r in caplog.records)
+    finally:
+        await team.close()

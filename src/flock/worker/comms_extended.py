@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections import OrderedDict
 from dataclasses import replace
@@ -15,6 +16,8 @@ from time import monotonic
 
 from flock.comms.board import BoardError
 from flock.comms.tools import Refused, as_id, author, brief, check_content, check_rate, thread_of
+
+log = logging.getLogger(__name__)
 
 
 class ExtendedComms:
@@ -134,7 +137,7 @@ class ExtendedComms:
             m.cursor = int(page.get("next_cursor") or 0)
 
     async def _poll_extended(self):
-        index = 0
+        index = failures = 0
         while self.active and self.spec.extended:
             members = [m for m in self.members.values() if m.ident is not None]
             if not members:
@@ -161,13 +164,22 @@ class ExtendedComms:
                     rt.state.comms_cursor, rt.state.comms_board = m.cursor, c.url
                     with contextlib.suppress(OSError):
                         rt.save_state()
+                failures = 0
+            except asyncio.CancelledError:
+                raise
             except BoardError as exc:
                 if exc.status == 401:
                     self._refused_token(m)
-                    with contextlib.suppress(BoardError):
+                    with contextlib.suppress(Exception):
                         await self._member(m.name)
                 else:
-                    await asyncio.sleep(self.backoff_s)
+                    failures += 1
+                    log.warning("comms poll for %s failed: %s", m.name, exc)
+                    await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(failures, 5)))
+            except Exception as exc:  # noqa: BLE001 - one bad page must not stop every agent's notices
+                failures += 1
+                log.warning("comms poll for %s failed: %s: %s", m.name, type(exc).__name__, exc)
+                await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(failures, 5)))
             await asyncio.sleep(max(0, spacing - (monotonic() - started)))
 
     def _init_extended(self):
