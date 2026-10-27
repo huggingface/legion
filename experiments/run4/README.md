@@ -10,7 +10,7 @@ module interface. This folder prepares the run; nothing here has been launched.
   150 model calls / 2 h per round, 12 Pi agents per worker and a 48 h run.
 - `render.py`: generates `spec.slurm.local.yaml` from environment variables without
   contacting a service. `--committed` writes the placeholder `spec.slurm.yaml`.
-- `waves.py`, `waves.yaml`: 20 every 5 min to 100, then +20 hourly to 300.
+- `waves.py`, `waves.yaml`: 20 every 5 min to 100, then +20 every 10 minutes to 300.
   `load_guard.py` checks every configured node before any increase beyond 100:
   three samples across two minutes; hold on persistent queues, >15 s/request,
   unavailable metrics or reset counters. A held final wave is retried, not dropped.

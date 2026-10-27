@@ -8,4 +8,4 @@ waves:
   - {at: 10m, add: 20}
   - {at: 15m, add: 20}
   - {at: 20m, add: 20}
-  - {every: 1h, add: 20, until: 300}
+  - {every: 10m, add: 20, until: 300}

@@ -40,7 +40,7 @@ def test_spec_fixed_prompt_and_waves():
     waves = module("waves").load(EXP / "waves.yaml")
     assert waves.cap == 300 and waves.split(300) == {"agent": 300}
     assert waves.events[:5] == [(0, 20), (300, 40), (600, 60), (900, 80), (1200, 100)]
-    assert waves.events[-1] == (37200, 300)
+    assert waves.events[-1] == (7200, 300)
 
 
 def test_render_multiple_endpoints_and_cluster_lifetime(monkeypatch):
