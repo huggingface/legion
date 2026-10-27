@@ -48,8 +48,9 @@ def shell_environment(tmp_path):
 def run_script(tmp_path, name, env):
     source = (SLURM / name).read_text()
     # Only replace deployment paths; all process/exit/retry logic is the real script.
-    source = source.replace('/fsx/carlos_patino/prj-eliza/slurm/common.sh', str(tmp_path / "common.sh"))
+    # /work first: pytest's tmp dir may itself be under /work (a later pass would rewrite it).
     source = source.replace('/work', str(tmp_path / "work"))
+    source = source.replace('/fsx/carlos_patino/prj-eliza/slurm/common.sh', str(tmp_path / "common.sh"))
     target = tmp_path / name
     target.write_text(source)
     return subprocess.run(["bash", str(target), "run4"], env=env, text=True,

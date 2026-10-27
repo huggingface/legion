@@ -91,6 +91,14 @@ async def test_sync_counts_push_and_restore_failures(tmp_path):
 async def test_file_modes_survive_a_bucket_round_trip(tmp_path):
     """The bucket keeps bytes only (MemoryStore, like the Hub, writes 0644 on download); the
     manifest pushed with the workdir brings executable bits back on restore."""
+    old_umask = os.umask(0o022)  # restored files get 0644/0755 whatever the runner's umask
+    try:
+        await _file_modes_round_trip(tmp_path)
+    finally:
+        os.umask(old_umask)
+
+
+async def _file_modes_round_trip(tmp_path):
     store = MemoryStore()
     rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"))
     await rt.setup(restore=False)
