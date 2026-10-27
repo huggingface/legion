@@ -82,7 +82,11 @@ no external model calls. The separate held-out evaluator consumes
    There is no separate dataset token. Check its fine-grained grants in the Hub;
    metadata checks cannot prove write permission or exclude grants on other repos.
    The controller and workers also hold this token and its dataset-write access.
-   Pi's allow-listed environment omits it. Private process/filesystem views and
+   Pi's allow-listed environment omits it. Inside its container the worker reads
+   its secrets from a private 0600 file on `/work` (`slurm/worker-inner.sh`,
+   `FLOCK_WORKER_SECRETS_FILE`, deleted once read), so its `/proc/<pid>/environ`
+   carries none; the world and controller still take theirs from the sourced
+   environment. Private process/filesystem views and
    disabled dumpability protect the trusted worker/world processes; validate that
    boundary inside the actual image with `slurm/tests/dryrun.slurm`. Narrow token
    grants still limit damage if a credential is exposed.
