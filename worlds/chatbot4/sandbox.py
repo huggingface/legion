@@ -37,11 +37,18 @@ def audit(event, args):
         roots = (root + os.sep, os.path.realpath(sys.base_prefix) + os.sep)
         if not path.startswith(roots) or not path.endswith(('.py', '.pyc', '.so')):
             raise PermissionError('file access is disabled except module loading')
-    if event.startswith(('socket.', 'subprocess.', 'ctypes.')) or event in {
-        'os.system', 'os.exec', 'os.fork', 'os.forkpty', 'os.posix_spawn', 'os.kill',
+    if event.startswith(('socket.', 'subprocess.', 'ctypes.', 'os.kill', 'signal.')) or event in {
+        'os.system', 'os.exec', 'os.fork', 'os.forkpty', 'os.posix_spawn', 'os.kill', 'os.killpg',
         'os.remove', 'os.rename', 'os.mkdir', 'os.rmdir', 'os.chmod', 'os.link',
         'os.symlink', 'os.truncate', 'os.putenv', 'os.unsetenv'}:
         raise PermissionError('bot side effects are disabled')
+import signal, _signal
+# Signals to other processes: os.kill/killpg and signal.pthread_kill raise audit events
+# (blocked above); pidfd_send_signal does not, so remove every sender from the modules.
+for module in (os, sys.modules.get('posix'), signal, _signal):
+    for name in ('kill', 'killpg', 'pthread_kill', 'pidfd_send_signal'):
+        if module is not None and hasattr(module, name):
+            delattr(module, name)
 sys.addaudithook(audit)
 runpy.run_module('bot', run_name='__main__')
 '''

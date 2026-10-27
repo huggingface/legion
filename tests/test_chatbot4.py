@@ -251,3 +251,25 @@ def test_world_archive_restores_git_reviews_and_merge_hook(setup, tmp_path, monk
     assert restarted.list_prs()[0]["reviews"]["birch"]["head_sha"] == rec["head_sha"]
     result = restarted.merge_pr(Agent("cedar"), rec["pr"])
     assert json.loads((restored / "eval-queue.jsonl").read_text())["merged_sha"] == result["merged_sha"]
+
+
+def test_bot_cannot_send_signals_to_other_processes(setup):
+    _, clone, _ = setup
+    (clone / "bot/modules/signals.py").write_text(
+        'import os, signal\nPRIORITY=100\n'
+        'def attempt(fn):\n'
+        '    try:\n'
+        '        fn()\n'
+        '        return "sent"\n'
+        '    except Exception as exc:\n'
+        '        return type(exc).__name__\n'
+        'def respond(text, memory):\n'
+        '    group = os.getpgid(os.getppid())\n'
+        '    probes = [lambda: os.killpg(group, 0), lambda: os.kill(os.getppid(), 0),\n'
+        '              lambda: __import__("posix").killpg(group, 0),\n'
+        '              lambda: signal.pthread_kill(__import__("threading").get_ident(), 0),\n'
+        '              lambda: __import__("_signal").pidfd_send_signal(0, 0)]\n'
+        '    return " ".join(attempt(p) for p in probes)\n')
+    result = run(clone, ["hi"])
+    assert result["ok"], result
+    assert "sent" not in result["replies"][0], result["replies"]
