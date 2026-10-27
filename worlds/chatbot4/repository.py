@@ -60,6 +60,12 @@ class Repository:
                            env=self.env, capture_output=True, timeout=10, check=False)
         return p.returncode == 0
 
+    def merged_by(self, head, target="main"):
+        """The first commit on target's first-parent chain that contains head."""
+        out = self.git("rev-list", "--first-parent", "--ancestry-path", "--reverse",
+                       f"{head}..{target}")
+        return out.split("\n", 1)[0] or self.git("rev-parse", head)  # fast-forward: head is main
+
     def checkout(self, ref, dest):
         self.git("clone", "--no-hardlinks", str(self.root), str(dest), at=dest.parent)
         self.git("checkout", "--detach", ref, at=dest)
@@ -133,6 +139,9 @@ class Hub:
     def close(self, pr, comment):
         self.request("change_discussion_status", discussion_num=pr, new_status="closed",
                      comment=comment)
+
+    def status(self, pr):
+        return self.request("get_discussion_details", discussion_num=pr).status
 
     def merge(self, pr, comment):
         self.request("merge_pull_request", discussion_num=pr, comment=comment)

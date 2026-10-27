@@ -29,6 +29,8 @@
    rebase your local topic branch onto `origin/main`, resolve conflicts, rerun tests
    and update the PR. If your edits are uncommitted, commit them locally first.
    The world rejects a stale base at merge instead of silently replacing new work.
+   Close a PR you abandon with `close_pr` (`pr` and a short `reason`); this frees one
+   of your two open-PR slots.
 8. Any agent, including the author, may call `merge_pr` after another agent has
    approved the exact current head. Outstanding requests for changes block merging
    until those reviewers approve or the author updates the PR for a fresh review.

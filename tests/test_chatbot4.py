@@ -342,3 +342,57 @@ def test_a_failed_push_after_creating_the_hub_pr_closes_it(setup, monkeypatch):
     with pytest.raises(ToolError, match="repository operation failed"):
         submit(world, clone)
     assert world.repo.hub.closed == [world.repo.hub.n] and world.list_prs() == []
+
+
+def test_hub_merge_that_fails_after_merging_is_reconciled(setup, monkeypatch):
+    world, clone, remote = setup
+    rec = submit(world, clone, branch="first")
+    (clone / "bot/modules/other.py").write_text('def respond(text, memory):\n    return None\n')
+    submit(world, clone, branch="second")  # a different head, which stays open
+    approve(world, rec)
+    real = world.repo.hub.merge
+
+    def merge_then_fail(pr, comment):
+        real(pr, comment)
+        raise ToolError("Hub request failed; retry later", "hub_error")
+
+    monkeypatch.setattr(world.repo.hub, "merge", merge_then_fail)
+    result = world.merge_pr(Agent("cedar"), rec["pr"])
+    assert result["merged_sha"] == git(remote, "rev-parse", "main")
+    assert [r["pr"] for r in world.list_prs("merged")] == [rec["pr"]]
+    assert submit(world, clone, branch="third")["state"] == "open"  # the cap counts it no more
+    queue = [json.loads(line) for line in (world.ws / "eval-queue.jsonl").read_text().splitlines()]
+    assert queue[-1]["reconciled"] and queue[-1]["merged_sha"] == result["merged_sha"]
+
+
+def test_restore_from_an_archive_older_than_a_merge_reconciles(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    before = (world.ws / "prs.json").read_text()
+    merged = world.merge_pr(Agent("birch"), rec["pr"])["merged_sha"]
+    (world.ws / "prs.json").write_text(before)  # restored from an archive taken before the merge
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert restarted.list_prs() == []
+    assert restarted.list_prs("merged")[0]["merged_sha"] == merged
+    with pytest.raises(ToolError, match="no open PR"):
+        restarted.merge_pr(Agent("birch"), rec["pr"])
+
+
+def test_close_pr_frees_the_cap_and_is_limited_to_author_or_operator(setup):
+    world, clone, _ = setup
+    one, two = submit(world, clone, branch="first"), submit(world, clone, branch="second")
+    with pytest.raises(ToolError, match=f"update one with pr=<n> or close one with close_pr .*{one['pr']}"):
+        submit(world, clone, branch="third")
+    with pytest.raises(ToolError, match="only the author or the run operator"):
+        world.close_pr(Agent("birch"), one["pr"], "duplicate")
+    closed = world.close_pr(Agent("cedar"), one["pr"], "superseded by a smaller PR")
+    assert closed["state"] == "closed" and world.repo.hub.closed == [one["pr"]]
+    assert submit(world, clone, branch="third")["state"] == "open"
+    world.operators = {"operator"}
+    world.close_pr(Agent("operator"), two["pr"], "abandoned")
+    assert {r["pr"] for r in world.list_prs("closed")} == {one["pr"], two["pr"]}
+    with pytest.raises(ToolError, match="no open PR"):
+        world.review_pr(Agent("birch"), one["pr"], one["head_sha"], "approve", "late review")
+    events = [json.loads(line) for line in (world.ws / "prs.jsonl").read_text().splitlines()]
+    assert [e["agent"] for e in events if e["event"] == "pr_closed"] == ["cedar", "operator"]

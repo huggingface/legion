@@ -48,6 +48,9 @@ class Chatbot4World(World):
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
         self.fixed = {name: (HERE / "seed" / name).read_bytes() for name in FIXED}
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
+        self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
+        with self.lock:  # the archive may predate merges that already landed on the Hub
+            self._reconcile()
 
     def _save(self):
         tmp = self.db.with_suffix(".tmp")
@@ -64,6 +67,33 @@ class Chatbot4World(World):
         if rec is None or rec["state"] != "open":
             raise ToolError("no open PR with that number")
         return rec
+
+    def _reconcile(self, author=None):
+        """Mark open PRs whose head is already in main as merged (call with the lock held).
+
+        This recovers a Hub merge whose local bookkeeping failed, and state restored
+        from an archive that predates merges. Uses the local main ref.
+        """
+        changed = False
+        for rec in self.state["prs"].values():
+            if rec["state"] != "open" or (author and rec["author"] != author):
+                continue
+            if not self.repo.ancestor(rec["head_sha"], "main"):
+                continue
+            merged = self.repo.merged_by(rec["head_sha"])
+            reviewers = sorted(name for name, r in rec["reviews"].items()
+                               if r["verdict"] == "approve" and r["head_sha"] == rec["head_sha"])
+            rec.update(state="merged", merged_sha=merged)
+            event = {"pr": rec["pr"], "author": rec["author"], "reviewers": reviewers,
+                     "parent_sha": self.repo.git("rev-parse", f"{merged}^1") if merged else None,
+                     "head_sha": rec["head_sha"], "merged_sha": merged, "reconciled": True}
+            self._event("merged", Agent("world"), **event)
+            with open(self.ws / "eval-queue.jsonl", "a") as out:
+                out.write(json.dumps({"ts": time.time(), **event}) + "\n")
+            changed = True
+        if changed:
+            self._save()
+        return changed
 
     def _identity(self, agent):
         if not NAME.fullmatch(agent.name):
@@ -169,9 +199,13 @@ class Chatbot4World(World):
                 raise ToolError("only the author can update this PR")
             if old and old["branch"] != f"agents/{agent.name}/{branch}":
                 raise ToolError("use the original branch slug when updating a PR")
-            if not old and sum(r["state"] == "open" and r["author"] == agent.name
-                               for r in self.state["prs"].values()) >= 2:
-                raise ToolError("at most two open PRs per agent")
+            if not old:
+                self._reconcile(agent.name)
+                mine = [r["pr"] for r in self.state["prs"].values()
+                        if r["state"] == "open" and r["author"] == agent.name]
+                if len(mine) >= 2:
+                    raise ToolError(f"at most two open PRs per agent: update one with pr=<n> or "
+                                    f"close one with close_pr (yours: {', '.join(map(str, mine))})")
             branch_ref = f"agents/{agent.name}/{branch}"
             if not old and any(r["branch"] == branch_ref for r in self.state["prs"].values()):
                 raise ToolError("branch slug already used; choose a new topic slug")
@@ -254,6 +288,8 @@ class Chatbot4World(World):
             rec = self._pr(pr)
             self._approved(rec)
             self.repo.fetch()
+            if self._reconcile(rec["author"]) and rec["state"] == "merged":
+                return self._merged_event(rec)
             main, head = self.repo.sha(), self.repo.sha(f"pr:{pr}")
             if head != rec["head_sha"] or main != rec["base_sha"]:
                 raise ToolError("stale PR: fetch main, rebase, update the PR and get a fresh review")
@@ -271,7 +307,17 @@ class Chatbot4World(World):
             self.repo.fetch()
             if self.repo.sha() != main or self.repo.sha(f"pr:{pr}") != head or rec["head_sha"] != head:
                 raise ToolError("main or the PR changed during checks; update and review again")
-            self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
+            try:
+                self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
+            except ToolError:
+                # The Hub may have merged before failing (a 5xx or timeout after commit).
+                try:
+                    self.repo.fetch()
+                except ToolError:
+                    pass
+                if self._reconcile(rec["author"]) and rec["state"] == "merged":
+                    return self._merged_event(rec)
+                raise
             self.repo.fetch()
             merged = self.repo.sha()
             rec.update(state="merged", merged_sha=merged)
@@ -284,14 +330,43 @@ class Chatbot4World(World):
                 out.write(json.dumps({"ts": time.time(), **event}) + "\n")
             return event
 
+    def _merged_event(self, rec):
+        return {"pr": rec["pr"], "author": rec["author"], "head_sha": rec["head_sha"],
+                "merged_sha": rec.get("merged_sha"), "already_merged": True}
+
+    @tool
+    def close_pr(self, agent: Agent, pr: int, reason: str) -> dict:
+        """Close your open PR (frees one of your two open-PR slots). Give a short reason."""
+        self._identity(agent)
+        if not reason.strip() or len(reason) > 2000:
+            raise ToolError("give a short reason (at most 2000 chars)")
+        with self.lock:
+            rec = self.state["prs"].get(str(pr))
+            if rec is not None and rec["state"] == "open":
+                self._reconcile(rec["author"])
+            rec = self._pr(pr)
+            if rec["author"] != agent.name and agent.name not in self.operators:
+                raise ToolError("only the author or the run operator can close this PR")
+            try:
+                self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
+            except ToolError:
+                status = getattr(self.repo.hub, "status", None)
+                if status is None or status(pr) != "closed":
+                    raise
+            rec.update(state="closed", closed_by=agent.name, close_reason=reason)
+            self._save()
+            event = {"pr": pr, "author": rec["author"], "head_sha": rec["head_sha"], "reason": reason}
+            self._event("pr_closed", agent, **event)
+            return {**event, "state": "closed", "closed_by": agent.name}
+
     @tool
     def list_prs(self, state: str = "open", author: str = "", needs_review: bool = False,
                  offset: int = 0) -> list[dict]:
-        """Find PRs, their head SHA and reviews. state is open, merged or all."""
+        """Find PRs, their head SHA and reviews. state is open, merged, closed or all."""
         if offset < 0:
             raise ToolError("offset must be nonnegative")
-        if state not in ("open", "merged", "all"):
-            raise ToolError("state must be open, merged or all")
+        if state not in ("open", "merged", "closed", "all"):
+            raise ToolError("state must be open, merged, closed or all")
         with self.lock:
             records = []
             for rec in self.state["prs"].values():
