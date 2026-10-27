@@ -13,6 +13,7 @@ from flock.models import LoopMeta, LoopStartCommand, TokenUsage
 from flock.tools.loader import ToolDef
 from flock.tools.runner import Result
 from flock.tools.toolset import Toolset
+from flock.worker import agents as agents_mod
 from flock.worker.adapters.base import AdapterEvent
 from flock.worker.adapters.llm import LLMAdapter
 from flock.worker.agents import AgentRuntime
@@ -355,6 +356,7 @@ class TransportFailureAdapter(ScriptedAdapter):
 
 async def test_transport_stalls_do_not_exhaust_worker_loop(tmp_path, monkeypatch):
     monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=TransportFailureAdapter(tmp_path / "h"))
     await rt.setup(restore=False)
     rt.start_loop(start(max_rounds=5))
@@ -362,4 +364,34 @@ async def test_transport_stalls_do_not_exhaust_worker_loop(tmp_path, monkeypatch
     assert len(ad.sent) == 5
     assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds"
     assert rt._loop_errors == 0
+    await rt.stop()
+
+
+def test_transient_backoff_doubles_with_jitter_up_to_the_cap():
+    from flock.worker.agents import transient_backoff
+    top = [transient_backoff(n, rng=lambda: 1.0) for n in range(1, 10)]
+    assert top == [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 120.0, 120.0, 120.0]
+    assert [transient_backoff(n, rng=lambda: 0.0) for n in (1, 3, 50)] == [1.0, 4.0, 60.0]
+
+
+async def test_consecutive_transport_failures_back_off_then_count_as_errors(tmp_path, monkeypatch):
+    """A dead endpoint: retries back off (growing delays), and after LOOP_TRANSIENT_LIMIT in
+    a row each further failure counts toward LOOP_ERROR_LIMIT, so the loop ends."""
+    delays: list[float] = []
+    real = agents_mod.transient_backoff
+
+    def spy(n, rng=None):
+        delays.append(real(n, rng=lambda: 1.0))
+        return 0.001 * n
+
+    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_LIMIT", 4)
+    monkeypatch.setattr("flock.worker.agents.transient_backoff", spy)
+    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=TransportFailureAdapter(tmp_path / "h"))
+    await rt.setup(restore=False)
+    rt.start_loop(start())
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    assert custom(rt, "loop_stopped")[0]["reason"] == "errors"
+    assert delays == [2.0, 4.0, 8.0, 16.0]  # 4 backed-off retries, then 3 counted errors
+    assert len(ad.sent) == 4 + 3
     await rt.stop()

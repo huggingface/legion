@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import shutil
 from collections.abc import Callable, Mapping
 from datetime import datetime
@@ -58,6 +59,20 @@ log = logging.getLogger(__name__)
 INSTRUCTIONS_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "pi": "AGENTS.md", "llm": "AGENTS.md"}
 LOOP_ERROR_LIMIT = 3  # failed loop turns in a row end the worker-side loop
 LOOP_ERROR_BACKOFF = 2.0  # s before re-sending the loop prompt after a failed turn
+# Transient failures (turn timeout, model transport) do not count toward LOOP_ERROR_LIMIT at
+# first; they are retried with exponential backoff and jitter. After LOOP_TRANSIENT_LIMIT of
+# them in a row, each further one counts as an ordinary failed turn, so a dead endpoint ends
+# the loop instead of restarting the harness forever.
+LOOP_TRANSIENT_BACKOFF = 2.0  # s, first retry; doubles per consecutive transient failure
+LOOP_TRANSIENT_BACKOFF_CAP = 120.0  # s
+LOOP_TRANSIENT_LIMIT = 20  # consecutive transient retries before they count as errors
+
+
+def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float:
+    """Delay before the n-th (1-based) consecutive transient retry: 2 s, 4 s, ... capped,
+    with jitter in [50%, 100%] so many agents behind one endpoint do not retry in step."""
+    base = min(LOOP_TRANSIENT_BACKOFF_CAP, LOOP_TRANSIENT_BACKOFF * 2 ** max(0, n - 1))
+    return base * (0.5 + 0.5 * rng())
 # Interruptions that are a decision (stop, drain, unassign), not a failure: no re-prompt.
 _DECIDED = ("stop", "drain", "unassign", "abandoned", "draining")
 _UNSET: Any = object()  # set_live: "no news" for the grant (None means revoked)
@@ -166,6 +181,7 @@ class AgentRuntime:
         # `every: turn_end` (docs/loop.md): set by loop_start, cleared by loop_stop / a limit
         self.loop: LoopStartCommand | None = None
         self._loop_errors = 0
+        self._loop_transient = 0  # consecutive timeout / model_transport turns
         self._loop_task: asyncio.Task | None = None
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
         self._turn_state_calls = 0  # of those, the ones that are not read-only (idle_rounds)
@@ -780,6 +796,7 @@ class AgentRuntime:
         else:
             self.state.loop_round = max(self.state.loop_round, cmd.meta.round or 0)
         self._loop_errors = 0
+        self._loop_transient = 0
         if self.turn_id is None and not self.awaiting and not self.buffer:
             self._loop_schedule(0.0, "start")
 
@@ -799,14 +816,20 @@ class AgentRuntime:
         if self.loop is None:
             return
         if status == "completed" or reason == "max_turns":  # max_turns: a full turn, not a failure
-            self._loop_errors = 0
+            self._loop_errors = self._loop_transient = 0
             self._loop_schedule(0.0, "turn_end")
             return
         if status == "interrupted" and (reason is None or reason in _DECIDED):
             return  # stopped on purpose: the controller decides what comes next
         if reason in ("timeout", "model_transport"):
-            self._loop_schedule(LOOP_ERROR_BACKOFF, f"retry after {reason}")
-            return
+            self._loop_transient += 1
+            if self._loop_transient <= LOOP_TRANSIENT_LIMIT:
+                self._loop_schedule(transient_backoff(self._loop_transient), f"retry after {reason}")
+                return
+            log.warning("%s: %d %s failures in a row; counting them as errors", self.name,
+                        self._loop_transient, reason)
+        else:
+            self._loop_transient = 0
         self._loop_errors += 1
         if self._loop_errors >= LOOP_ERROR_LIMIT:
             self._loop_end("errors")
