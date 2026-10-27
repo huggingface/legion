@@ -11,10 +11,16 @@ changed since the last push by this worker. `restore` brings all three areas bac
 same absolute paths (workdir and work root are fixed, harness homes are fixed by the image)
 before the first resume.
 
+Restore lists the agent's prefix once, then downloads every file it found in batches
+(`RESTORE_BATCH`), each to a `.flock-part` sibling renamed into place on success. A batch that
+fails is retried file by file, with backoff (`RESTORE_BACKOFF`) between rounds: one unreadable
+file (e.g. xet `404` on its reconstruction) is skipped and reported in `RestoreResult.failed`
+instead of aborting the whole restore. Only a failed listing makes `restore` raise.
+
 Buckets store bytes, not file modes: a restored file comes back 0644, so an executable script
 would stop running after a move (pixel run 1, 2026-10-19: `./canvas: Permission denied`). Each
 push therefore writes `<workdir>/.flock-modes.json` ({relative path: octal mode} for every file
-with an executable bit) when it changed, and restore re-applies it after `sync_down`.
+with an executable bit) when it changed, and restore re-applies it after the workdir download.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import os
 import re
 import stat
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +45,9 @@ log = logging.getLogger(__name__)
 
 UPLOAD_CHUNK = 200
 MODES_FILE = ".flock-modes.json"
+RESTORE_BATCH = 100
+RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
+PART_SUFFIX = ".flock-part"
 
 
 def collect_modes(workdir: Path) -> dict[str, str]:
@@ -244,6 +254,76 @@ class RestoreResult:
     workdir: int = 0
     sessions: int = 0
     harness: int = 0
+    # bucket paths (relative to the flock root) that could not be downloaded, after retries
+    failed: list[str] = field(default_factory=list)
+
+
+def _part(p: Path) -> Path:
+    return p.with_name(p.name + PART_SUFFIX)
+
+
+def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
+                       backoff: tuple[float, ...] | None = None,
+                       sleep=None) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Download (remote, local) pairs; returns (downloaded, failed remote paths). Never raises
+    for a file: batches first, then the files of a failed batch one by one, retried after each
+    delay in `backoff`. Each file lands in a `.flock-part` sibling, renamed into place only
+    when it arrived, so a failed file never leaves a truncated copy at its real path."""
+
+    def attempt(batch: list[tuple[str, Path]]) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]]]:
+        ok, bad = [], []
+        try:
+            store.download([(r, _part(p)) for r, p in batch])
+        except Exception as e:  # noqa: BLE001 - sorted out per file below
+            err = e
+        else:
+            err = None
+        for r, p in batch:
+            part = _part(p)
+            if err is None and part.is_file():
+                try:
+                    os.replace(part, p)
+                    ok.append((r, p))
+                    continue
+                except OSError:
+                    pass
+            part.unlink(missing_ok=True)
+            bad.append((r, p))
+        if err is not None and len(batch) == 1:
+            log.info("download of %s failed: %s", batch[0][0], _short(err))
+        return ok, bad
+
+    backoff = RESTORE_BACKOFF if backoff is None else backoff
+    sleep = sleep or time.sleep
+    done: list[tuple[str, Path]] = []
+    pending: list[tuple[str, Path]] = []
+    for i in range(0, len(files), RESTORE_BATCH):
+        ok, bad = attempt(files[i : i + RESTORE_BATCH])
+        done += ok
+        pending += bad
+    if pending:  # each file alone, so one bad file costs only itself
+        retry, pending = pending, []
+        for f in retry:
+            ok, bad = attempt([f])
+            done += ok
+            pending += bad
+    for delay in backoff:
+        if not pending:
+            break
+        sleep(delay)
+        retry, pending = pending, []
+        for f in retry:
+            ok, bad = attempt([f])
+            done += ok
+            pending += bad
+    for r, _ in pending:
+        log.warning("bucket file %s could not be downloaded after %d retries; skipped",
+                    r, len(backoff))
+    return done, [r for r, _ in pending]
+
+
+def _short(e: BaseException) -> str:
+    return f"{type(e).__name__}: {str(e)[:300]}"
 
 
 class BucketSync:
@@ -319,8 +399,9 @@ class BucketSync:
 
     async def _restore(self, rt: AgentRuntime) -> RestoreResult:
         pre = self.prefix(rt)
-        remote = await asyncio.to_thread(self.store.list, pre)
+        remote = await asyncio.to_thread(self.store.list, pre)  # raises: the caller starts fresh
         res = RestoreResult()
+        work: list[tuple[str, Path]] = []
         plan: list[tuple[str, Path]] = []
         home = Path(rt.adapter.home)
         for r in remote:
@@ -329,19 +410,35 @@ class BucketSync:
             if not sub or ".." in Path(sub).parts:
                 continue
             if area == "workdir":
-                res.workdir += 1
+                if rt.spec.persist_workdir:
+                    work.append((r, rt.workdir / sub))
             elif area == "sessions":
                 plan.append((r, rt.sessions_dir / sub))
-                res.sessions += 1
             elif area == "harness":
                 plan.append((r, home / sub))
-                res.harness += 1
-        if res.workdir and rt.spec.persist_workdir:
-            await asyncio.to_thread(self.store.sync_down, pre + "workdir", rt.workdir)
+        if work:
+            rt.workdir.mkdir(parents=True, exist_ok=True)
+            got, failed = await asyncio.to_thread(download_resilient, self.store, work)
+            res.workdir, res.failed = len(got), res.failed + failed
             if n := await asyncio.to_thread(apply_modes, rt.workdir):
                 log.info("%s: restored the mode of %d file(s)", rt.name, n)
         if plan:
-            await asyncio.to_thread(self.store.download, plan)
-            self._mark([(p, r) for r, p in plan])
-        log.info("%s: restored %s", rt.name, res)
+            got, failed = await asyncio.to_thread(download_resilient, self.store, plan)
+            res.failed += failed
+            for r, _ in got:
+                if r.startswith(pre + "sessions/"):
+                    res.sessions += 1
+                else:
+                    res.harness += 1
+            self._mark([(p, r) for r, p in got])
+        if res.failed:
+            self.stats.add("errors", "restore_file_failed", len(res.failed))
+            state = f"{pre}sessions/{rt.state_path.name}"
+            if state in res.failed:
+                log.warning("%s: state file %s not restored; the agent starts a fresh session",
+                            rt.name, state)
+            log.warning("%s: restored workdir=%d sessions=%d harness=%d; %d file(s) skipped",
+                        rt.name, res.workdir, res.sessions, res.harness, len(res.failed))
+        else:
+            log.info("%s: restored %s", rt.name, res)
         return res

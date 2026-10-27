@@ -338,13 +338,18 @@ class AgentRuntime:
     async def setup(self, restore: bool = True, resume_prompt: str | None = None) -> None:
         """Run once on assign: restore from the bucket, load state, then allow starts."""
         try:
+            res = None
             if restore and self.sync is not None:
                 try:
-                    await self.sync.restore(self)
-                except Exception as e:  # noqa: BLE001 - a failed restore means a fresh start
-                    log.warning("%s: restore failed: %s", self.name, e)
+                    res = await self.sync.restore(self)
+                except Exception as e:  # noqa: BLE001 - a failed listing means a fresh start
+                    log.warning("%s: restore failed (fresh start): %s", self.name, e)
                     self.emit("error", {"error": f"restore failed: {e}"})
             self.load_state()
+            if res is not None and res.failed:
+                # files skipped after retries; a missing harness session file makes the next
+                # start take the ResumeError path (session_restarted with a restart prompt)
+                self.emit("restore_partial", {"failed": len(res.failed), "paths": res.failed[:10]})
         finally:
             self._ready.set()
         if resume_prompt:
