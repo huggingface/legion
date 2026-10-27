@@ -481,3 +481,29 @@ def test_main_moving_before_the_hub_pr_is_created_is_redone_without_orphans(setu
     assert rec["base_sha"] == calls[0] == git(remote, "rev-parse", "main")
     assert world.repo.hub.closed == [rec["pr"] - 1]  # the first attempt's Hub PR, closed
     assert [r["pr"] for r in world.list_prs()] == [rec["pr"]]
+
+
+def test_refusals_are_logged_and_request_keys_are_bounded(setup, monkeypatch):
+    import chatbot4
+
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    with pytest.raises(ToolError, match="self-review"):
+        world.call("review_pr", {"pr": rec["pr"], "head_sha": rec["head_sha"], "verdict": "approve",
+                                 "comment": "mine"}, Agent("cedar"))
+    with pytest.raises(ToolError, match="approve"):
+        world.merge_pr(Agent("birch"), rec["pr"])
+    events = [json.loads(line) for line in (world.ws / "prs.jsonl").read_text().splitlines()]
+    refused = [(e["event"], e["agent"], e["pr"], e["code"]) for e in events if e["event"].endswith("_refused")]
+    assert refused == [("review_pr_refused", "cedar", rec["pr"], "tool_error"),
+                       ("merge_pr_refused", "birch", rec["pr"], "tool_error")]
+    from flock.world import tool_schema
+
+    schema = tool_schema(world.tools()["merge_pr"])
+    assert list(schema["parameters"]["properties"]) == ["pr"]  # the wrapper keeps the schema
+    monkeypatch.setattr(chatbot4, "MAX_REQUESTS", 2)
+    for i in range(3):
+        world.call_workspace("open_pr", {"branch": "greeting", "title": "Bounded keys",
+                                         "description": "x", "pr": rec["pr"]},
+                             Agent("cedar", request_id=f"req-{i}"), capture(clone.parent, clone.name))
+    assert list(world.state["requests"]) == ["req-1", "req-2"]

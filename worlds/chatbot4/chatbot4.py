@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import contextvars
+import functools
+import inspect
 import json
 import os
 import re
@@ -25,8 +27,27 @@ FIXED = ("bot/__init__.py", "bot/__main__.py", "bot/runtime.py", "bot/modules/__
 MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
 EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
            "*.egg-info/", ".DS_Store")
+MAX_REQUESTS = 5000  # open_pr idempotency keys kept for worker retries (oldest dropped)
 FETCH_TTL = float(os.environ.get("CHATBOT_FETCH_TTL_S", "60"))
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+
+
+def logs_refusals(fn):
+    """Log a refused PR operation to prs.jsonl (code and message only), then re-raise."""
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except ToolError as exc:
+            bound = signature.bind_partial(self, *args, **kwargs).arguments
+            agent = bound.get("agent")
+            if isinstance(agent, Agent):
+                self._event(f"{fn.__name__}_refused", agent, pr=bound.get("pr"),
+                            code=exc.code, reason=exc.message[:500])
+            raise
+    return wrapper
 
 
 class Chatbot4World(World):
@@ -179,6 +200,7 @@ class Chatbot4World(World):
                 raise ToolError(f"Python does not compile: {name}", "compile") from None
 
     @tool
+    @logs_refusals
     def open_pr(self, agent: Agent, branch: str, title: str, description: str,
                 path: str = "chatbot-swarm", pr: int | None = None) -> dict:
         """Submit your local clone, or update your existing PR with pr:<number>.
@@ -246,7 +268,10 @@ class Chatbot4World(World):
                     result["note"] = (f"rebased onto main {main[:12]}; run git fetch origin "
                                       f"refs/pr/{number} and continue from FETCH_HEAD")
                 if key:
-                    self.state["requests"][key] = result
+                    requests = self.state["requests"]
+                    requests[key] = result
+                    for stale in list(requests)[:max(0, len(requests) - MAX_REQUESTS)]:
+                        del requests[stale]
                 self._save()
                 self._event("updated" if old else "opened", agent, **result)
                 return result
@@ -295,6 +320,7 @@ class Chatbot4World(World):
         raise ToolError("main kept moving while opening the PR; open it again", "busy")
 
     @tool
+    @logs_refusals
     def review_pr(self, agent: Agent, pr: int, head_sha: str,
                   verdict: Literal["approve", "request_changes"], comment: str) -> dict:
         """Review the exact head SHA you inspected or tested, independently of the author."""
@@ -332,6 +358,7 @@ class Chatbot4World(World):
         return names
 
     @tool
+    @logs_refusals
     def merge_pr(self, agent: Agent, pr: int) -> dict:
         """Merge an independently approved PR after checking its base and bot contract."""
         self._identity(agent)
@@ -388,6 +415,7 @@ class Chatbot4World(World):
                 "merged_sha": rec.get("merged_sha"), "already_merged": True}
 
     @tool
+    @logs_refusals
     def close_pr(self, agent: Agent, pr: int, reason: str) -> dict:
         """Close your open PR (frees one of your two open-PR slots). Give a short reason."""
         self._identity(agent)
