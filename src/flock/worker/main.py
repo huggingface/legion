@@ -648,7 +648,10 @@ class Worker:
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(self.cfg.sync_interval)
-            due = [rt for rt in list(self.agents.values()) if rt.live or rt.dirty]
+            # an agent still in setup() (restoring) is never pushed: it would mirror a
+            # half-restored workdir over its bucket copy (flock.worker.sync, "Push safety")
+            due = [rt for rt in list(self.agents.values())
+                   if rt.setup_done and (rt.live or rt.dirty)]
             if not due:
                 continue
             t0, snap = loop.time(), self.sync.stats.snapshot()

@@ -275,3 +275,34 @@ def test_run_and_exit_does_not_wait_for_a_stuck_executor_thread():
     t.join(5)
     release.set()
     assert exits == [0]
+
+
+async def test_periodic_sync_skips_an_agent_until_its_restore_finished(tmp_path):
+    """A restore wave outlasts several sync intervals: the half-restored workdir must never
+    be mirrored over the bucket copy (it would delete what is not downloaded yet)."""
+    from .worker_fakes import GatedStore
+
+    ctrl = FakeController()
+    store = GatedStore()
+    pre = "sw/researcher/researcher-0001/"
+    store.files = {pre + "workdir/a.txt": b"A", pre + "workdir/b.txt": b"B"}
+    before = dict(store.files)
+    sync = RecordingSync(store)
+    ctrl.batches = [[AssignCommand(agent="researcher-0001", type="researcher", spec=spec(),
+                                   restore=True),
+                     PromptCommand(agent="researcher-0001", prompt_id="p", text="go")]]
+    worker, adapters = make_worker(tmp_path, ctrl, sync=sync)
+    run = asyncio.create_task(worker.run())
+    try:
+        await until(lambda: store.waiting > 0)
+        rt = worker.agents["researcher-0001"]
+        rt.dirty = True
+        await asyncio.sleep(0.7)  # > 3 sync intervals while the restore hangs
+        assert sync.pushed == [] and store.files == before and store.synced == []
+    finally:
+        store.gate.set()
+    await until(lambda: adapters["researcher-0001"].sent == ["go"])
+    await until(lambda: "researcher-0001" in sync.pushed)  # periodic pushes resume after setup
+    assert store.files[pre + "workdir/a.txt"] == b"A" and store.files[pre + "workdir/b.txt"] == b"B"
+    await worker.drain("test")
+    assert await asyncio.wait_for(run, 5) == 0

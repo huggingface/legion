@@ -14,13 +14,35 @@ before the first resume.
 Restore lists the agent's prefix once, then downloads every file it found in batches
 (`RESTORE_BATCH`), each to a `.flock-part` sibling renamed into place on success. A batch that
 fails is retried file by file, with backoff (`RESTORE_BACKOFF`) between rounds: one unreadable
-file (e.g. xet `404` on its reconstruction) is skipped and reported in `RestoreResult.failed`
-instead of aborting the whole restore. Only a failed listing makes `restore` raise.
+file is skipped and reported in `RestoreResult.failed` instead of aborting the whole restore. A
+permanent "not found" (HTTP 404, e.g. xet "CAS Client Error: ... 404 Not Found" on the
+reconstruction: the entry's data is gone) is skipped at once, without the backoff rounds (an
+already-corrupt copy with ~42k such entries took 636 s to restore with them). Skipped files are
+logged as one summary line per agent. Only a failed listing makes `restore` raise.
 
 Buckets store bytes, not file modes: a restored file comes back 0644, so an executable script
 would stop running after a move (pixel run 1, 2026-10-19: `./canvas: Permission denied`). Each
 push therefore writes `<workdir>/.flock-modes.json` ({relative path: octal mode} for every file
 with an executable bit) when it changed, and restore re-applies it after the workdir download.
+
+Push safety (run 4, 2026-10-27: periodic syncs mirrored half-restored workdirs over 31 agents'
+bucket copies, deleting entries the in-flight restore had not fetched yet):
+
+- No push before setup: `AgentRuntime.sync_now` does nothing until the agent's `setup()` has
+  finished its restore (every caller: the periodic sync, drain, preempt, unassign), and
+  `BucketSync.push` refuses an agent whose restore is in flight. The bucket copy is the truth
+  until the restore is done.
+- Delete-mirror only from a full baseline: the workdir push deletes remote files missing
+  locally only when this worker's restore of the agent was complete (the listing succeeded and
+  no file failed; an empty prefix counts as complete) or when no restore was attempted (a new
+  agent). After a failed listing, a skipped file or an interrupted restore, pushes upload
+  changed files but never delete, for as long as this worker holds the agent: a file it could
+  not fetch stays in the bucket for the next restore.
+- `*.flock-part` (restore temporaries) is never uploaded nor deleted by a push; restore removes
+  stray ones left by a crash.
+- Restore sets each workdir file's mtime to the bucket's (the listing carries it), so the first
+  push after a restore uploads only real changes; session and harness files are marked as
+  pushed (`_mark`).
 """
 
 from __future__ import annotations
@@ -35,6 +57,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -48,6 +71,7 @@ MODES_FILE = ".flock-modes.json"
 RESTORE_BATCH = 100
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
 PART_SUFFIX = ".flock-part"
+PUSH_EXCLUDE = ["*" + PART_SUFFIX]  # sync_bucket patterns, matched on relative paths
 
 
 def collect_modes(workdir: Path) -> dict[str, str]:
@@ -176,9 +200,14 @@ class BucketStore(Protocol):
 
     def upload(self, files: list[tuple[Path, str]]) -> None: ...
     def list(self, prefix: str) -> list[str]: ...
+    # optional: `list_info(prefix) -> list[tuple[str, float | None]]`, paths with their mtime
+    # (POSIX seconds) when the store keeps one; restore uses it to set local mtimes
     def download(self, files: list[tuple[str, Path]]) -> None: ...
-    def sync_up(self, local: Path, prefix: str) -> None:
-        """Mirror a local directory to `prefix` (delete remote files missing locally)."""
+    def sync_up(self, local: Path, prefix: str, *, delete: bool = True,
+                exclude: list[str] | None = None) -> None:
+        """Upload new/changed files of a local directory to `prefix`; with `delete`, also
+        delete remote files missing locally. `exclude`: fnmatch patterns on relative paths,
+        neither uploaded nor deleted."""
         ...
 
     def sync_down(self, prefix: str, local: Path) -> None: ...
@@ -214,14 +243,18 @@ class HubBucketStore:
             self.api.batch_bucket_files(self.bucket_id, add=[(str(p), self.base + r) for p, r in chunk])
 
     def list(self, prefix: str) -> list[str]:
+        return [r for r, _ in self.list_info(prefix)]
+
+    def list_info(self, prefix: str) -> list[tuple[str, float | None]]:
         from huggingface_hub import BucketFile
 
         self.stats.add("ops", "list_bucket_tree")
         full = self.base + prefix
-        out = []
+        out: list[tuple[str, float | None]] = []
         for f in self.api.list_bucket_tree(self.bucket_id, prefix=full, recursive=True):
             if isinstance(f, BucketFile) and f.path.startswith(full):
-                out.append(f.path[len(self.base):])
+                mt = f.mtime.timestamp() if isinstance(f.mtime, datetime) else None
+                out.append((f.path[len(self.base):], mt))
         return out
 
     def download(self, files: list[tuple[str, Path]]) -> None:
@@ -239,9 +272,11 @@ class HubBucketStore:
     def _url(self, prefix: str) -> str:
         return f"hf://buckets/{self.bucket_id}/{self.base}{prefix}".rstrip("/")
 
-    def sync_up(self, local: Path, prefix: str) -> None:
+    def sync_up(self, local: Path, prefix: str, *, delete: bool = True,
+                exclude: list[str] | None = None) -> None:
         self.stats.add("ops", "sync_bucket_up")
-        self.api.sync_bucket(str(local), self._url(prefix), delete=True, quiet=True)
+        self.api.sync_bucket(str(local), self._url(prefix), delete=delete, exclude=exclude or None,
+                             quiet=True)
 
     def sync_down(self, prefix: str, local: Path) -> None:
         self.stats.add("ops", "sync_bucket_down")
@@ -258,6 +293,17 @@ class RestoreResult:
     failed: list[str] = field(default_factory=list)
 
 
+_NOT_FOUND = re.compile(r"\b404\b|not found", re.IGNORECASE)
+
+
+def _permanent(e: BaseException) -> bool:
+    """A download error that retrying cannot fix: the entry's data is gone (HTTP 404)."""
+    resp = getattr(e, "response", None)
+    if getattr(resp, "status_code", None) == 404:
+        return True
+    return bool(_NOT_FOUND.search(str(e)))
+
+
 def _part(p: Path) -> Path:
     return p.with_name(p.name + PART_SUFFIX)
 
@@ -267,8 +313,10 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
                        sleep=None) -> tuple[list[tuple[str, Path]], list[str]]:
     """Download (remote, local) pairs; returns (downloaded, failed remote paths). Never raises
     for a file: batches first, then the files of a failed batch one by one, retried after each
-    delay in `backoff`. Each file lands in a `.flock-part` sibling, renamed into place only
+    delay in `backoff` unless the error is a permanent "not found" (`_permanent`). Each file lands in a `.flock-part` sibling, renamed into place only
     when it arrived, so a failed file never leaves a truncated copy at its real path."""
+
+    gone: list[str] = []  # permanent "not found": skipped, never retried
 
     def attempt(batch: list[tuple[str, Path]]) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]]]:
         ok, bad = [], []
@@ -290,7 +338,10 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
             part.unlink(missing_ok=True)
             bad.append((r, p))
         if err is not None and len(batch) == 1:
-            log.info("download of %s failed: %s", batch[0][0], _short(err))
+            log.debug("download of %s failed: %s", batch[0][0], _short(err))
+            if bad and _permanent(err):
+                gone.append(bad[0][0])
+                return ok, []
         return ok, bad
 
     backoff = RESTORE_BACKOFF if backoff is None else backoff
@@ -316,10 +367,22 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
             ok, bad = attempt([f])
             done += ok
             pending += bad
-    for r, _ in pending:
-        log.warning("bucket file %s could not be downloaded after %d retries; skipped",
-                    r, len(backoff))
-    return done, [r for r, _ in pending]
+    # the caller logs the skipped files (one summary line per agent, `BucketSync._restore_files`)
+    return done, gone + [r for r, _ in pending]
+
+
+def _clean_parts(root: Path) -> int:
+    """Remove stray `.flock-part` files under `root` (a crash mid-download leaves them)."""
+    n = 0
+    if root.is_dir():
+        for p in root.rglob("*" + PART_SUFFIX):
+            try:
+                if p.is_file() and not p.is_symlink():
+                    p.unlink()
+                    n += 1
+            except OSError:
+                pass
+    return n
 
 
 def _short(e: BaseException) -> str:
@@ -332,6 +395,14 @@ class BucketSync:
         self.swarm = swarm
         self.stats: BucketStats = getattr(store, "stats", None) or BucketStats()
         self._seen: dict[Path, tuple[int, int]] = {}
+        # per agent prefix: may the workdir push delete remote files? Absent: no restore was
+        # attempted (a new agent), deletes allowed. False from the start of a restore until it
+        # completes with every file; stays False after an incomplete one (module docstring).
+        self._mirror: dict[str, bool] = {}
+        self._restoring: set[str] = set()  # agent prefixes with a restore in flight
+
+    def mirror_deletes(self, rt: AgentRuntime) -> bool:
+        return self._mirror.get(self.prefix(rt), True)
 
     def prefix(self, rt: AgentRuntime) -> str:
         return f"{self.swarm}/{rt.type_name}/{rt.name}/"
@@ -381,9 +452,18 @@ class BucketSync:
             raise
 
     async def _push(self, rt: AgentRuntime) -> int:
+        pre = self.prefix(rt)
+        if pre in self._restoring:  # never mirror a half-restored agent (module docstring)
+            log.warning("%s: push skipped, its restore is still running", rt.name)
+            return 0
         if rt.spec.persist_workdir and rt.workdir.is_dir():
             await asyncio.to_thread(write_modes, rt.workdir)
-            await asyncio.to_thread(self.store.sync_up, rt.workdir, self.prefix(rt) + "workdir")
+            delete = self.mirror_deletes(rt)
+            if not delete:
+                log.info("%s: workdir push without remote deletes (last restore incomplete)",
+                         rt.name)
+            await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
+                                    delete=delete, exclude=PUSH_EXCLUDE)
         files = self._changed(self.collect(rt))
         if files:
             await asyncio.to_thread(self.store.upload, files)
@@ -399,12 +479,30 @@ class BucketSync:
 
     async def _restore(self, rt: AgentRuntime) -> RestoreResult:
         pre = self.prefix(rt)
-        remote = await asyncio.to_thread(self.store.list, pre)  # raises: the caller starts fresh
+        self._mirror[pre] = False  # until this restore completes with every file
+        self._restoring.add(pre)
+        try:
+            res = await self._restore_files(rt, pre)
+        finally:
+            self._restoring.discard(pre)
+        self._mirror[pre] = not res.failed
+        return res
+
+    async def _restore_files(self, rt: AgentRuntime, pre: str) -> RestoreResult:
+        lister = getattr(self.store, "list_info", None)
+        if lister is not None:  # raises: the caller starts fresh
+            listed = await asyncio.to_thread(lister, pre)
+        else:
+            listed = [(r, None) for r in await asyncio.to_thread(self.store.list, pre)]
+        mtimes = {r: mt for r, mt in listed}
         res = RestoreResult()
         work: list[tuple[str, Path]] = []
         plan: list[tuple[str, Path]] = []
         home = Path(rt.adapter.home)
-        for r in remote:
+        n = sum([await asyncio.to_thread(_clean_parts, d) for d in (rt.workdir, rt.sessions_dir)])
+        if n:
+            log.info("%s: removed %d stray %s file(s)", rt.name, n, PART_SUFFIX)
+        for r, _ in listed:
             rel = r[len(pre):]
             area, _, sub = rel.partition("/")
             if not sub or ".." in Path(sub).parts:
@@ -420,11 +518,15 @@ class BucketSync:
             rt.workdir.mkdir(parents=True, exist_ok=True)
             got, failed = await asyncio.to_thread(download_resilient, self.store, work)
             res.workdir, res.failed = len(got), res.failed + failed
+            await asyncio.to_thread(_set_mtimes, got, mtimes)
             if n := await asyncio.to_thread(apply_modes, rt.workdir):
                 log.info("%s: restored the mode of %d file(s)", rt.name, n)
         if plan:
+            for _, p in plan:
+                _part(p).unlink(missing_ok=True)
             got, failed = await asyncio.to_thread(download_resilient, self.store, plan)
             res.failed += failed
+            await asyncio.to_thread(_set_mtimes, got, mtimes)
             for r, _ in got:
                 if r.startswith(pre + "sessions/"):
                     res.sessions += 1
@@ -437,8 +539,22 @@ class BucketSync:
             if state in res.failed:
                 log.warning("%s: state file %s not restored; the agent starts a fresh session",
                             rt.name, state)
-            log.warning("%s: restored workdir=%d sessions=%d harness=%d; %d file(s) skipped",
-                        rt.name, res.workdir, res.sessions, res.harness, len(res.failed))
+            log.warning("%s: restored workdir=%d sessions=%d harness=%d; %d file(s) skipped "
+                        "(not found or still failing after retries), e.g. %s", rt.name,
+                        res.workdir, res.sessions, res.harness, len(res.failed),
+                        ", ".join(res.failed[:10]))
         else:
             log.info("%s: restored %s", rt.name, res)
         return res
+
+
+def _set_mtimes(files: list[tuple[str, Path]], mtimes: dict[str, float | None]) -> None:
+    """Give restored files the bucket's mtime, so the next `sync_up` sees them unchanged."""
+    for r, p in files:
+        mt = mtimes.get(r)
+        if mt is None:
+            continue
+        try:
+            os.utime(p, (mt, mt), follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            pass

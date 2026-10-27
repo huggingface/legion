@@ -164,6 +164,9 @@ class AgentRuntime:
         self._stop_req: str | None = None
         self._burst: asyncio.Task | None = None
         self._ready = asyncio.Event()
+        # setup() got past its restore (complete, partial or failed-to-list), not cancelled:
+        # only then may anything push this agent (flock.worker.sync, "Push safety")
+        self.setup_done = False
         self._turn_started_at = 0.0
         self._last_activity = 0.0
         self._turn_timeout = parse_duration(spec.turn_timeout).total_seconds()
@@ -345,6 +348,7 @@ class AgentRuntime:
                 except Exception as e:  # noqa: BLE001 - a failed listing means a fresh start
                     log.warning("%s: restore failed (fresh start): %s", self.name, e)
                     self.emit("error", {"error": f"restore failed: {e}"})
+            self.setup_done = True
             self.load_state()
             if res is not None and res.failed:
                 # files skipped after retries; a missing harness session file makes the next
@@ -898,7 +902,14 @@ class AgentRuntime:
         await self.sync_now("unassign")
 
     async def sync_now(self, reason: str) -> None:
+        """Push the agent to the bucket; every push path (periodic, drain, preempt, unassign)
+        goes through here. Before setup() finished its restore nothing is pushed: the bucket
+        copy is the truth and the half-restored workdir must not overwrite it."""
         if self.sync is None:
+            return
+        if not self.setup_done:
+            log.warning("%s: %s sync skipped, the agent's restore has not finished; "
+                        "the bucket copy stays as it is", self.name, reason)
             return
         self.emit("sync", {"reason": reason})
         self.save_state()

@@ -49,9 +49,9 @@ class SlowStore(MemoryStore):
         self._slow()
         super().upload(files)
 
-    def sync_up(self, local, prefix):
+    def sync_up(self, local, prefix, **kw):
         self._slow()
-        super().sync_up(local, prefix)
+        super().sync_up(local, prefix, **kw)
 
 
 @pytest.fixture(autouse=True)

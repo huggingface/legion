@@ -150,8 +150,9 @@ def test_apply_modes_ignores_paths_outside_the_workdir(tmp_path):
 
 
 class FlakyStore(MemoryStore):
-    """Download fails for any batch holding a path in `bad`; `transient` paths fail their
-    first `fails` attempts only (xet 404 on reconstruction, as in production)."""
+    """Download fails for any batch holding a path in `bad` (xet 404 on reconstruction, as in
+    production: permanent); `transient` paths fail their first `fails` attempts only, with a
+    retryable error."""
 
     def __init__(self, bad=(), transient=(), fails=1):
         super().__init__()
@@ -167,9 +168,10 @@ class FlakyStore(MemoryStore):
     def download(self, files):
         self.calls.append([r for r, _ in files])
         for r, _ in files:
-            if r in self.bad or (r in self.transient and
-                                 sum(r in c for c in self.calls) <= self.fails):
+            if r in self.bad:
                 raise RuntimeError("File reconstruction error: CAS Client Error: 404 Not Found")
+            if r in self.transient and sum(r in c for c in self.calls) <= self.fails:
+                raise RuntimeError("CAS Client Error: 503 Service Unavailable")
         super().download(files)
 
 
@@ -200,8 +202,8 @@ async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, 
     assert (rt2.workdir / "f2.txt").read_text() == "data2"
     assert not (rt2.workdir / "f1.txt").exists()
     assert not list(rt2.workdir.rglob("*.flock-part"))  # no half-written leftovers
-    # the batch, then the file alone, then 3 retries
-    assert sum(pre + "workdir/f1.txt" in c for c in store.calls) == 5
+    # the batch, then the file alone; a 404 is permanent: no retry rounds
+    assert sum(pre + "workdir/f1.txt" in c for c in store.calls) == 2
     assert rt2.sync.stats.snapshot()["errors"] == {"restore_file_failed": 1}
 
 
@@ -259,3 +261,131 @@ async def test_restore_listing_failure_still_raises(tmp_path):
     with pytest.raises(RuntimeError, match="500 listing"):
         await rt2.sync.restore(rt2)
     assert rt2.sync.stats.snapshot()["errors"] == {"restore_failed": 1}
+
+
+async def test_push_after_partial_restore_never_deletes_remote_files(tmp_path, monkeypatch):
+    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
+    store = FlakyStore()
+    pre = await _seeded(tmp_path, store)
+    store.bad = {pre + "workdir/f1.txt"}
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    await rt2.setup()
+    assert not (rt2.workdir / "f1.txt").exists() and not rt2.sync.mirror_deletes(rt2)
+    (rt2.workdir / "f0.txt").unlink()  # even a real local delete is not mirrored now
+    (rt2.workdir / "new.txt").write_text("n")
+    await rt2.sync_now("periodic")
+    assert store.files[pre + "workdir/f1.txt"] == b"data1"  # not restored, still in the bucket
+    assert store.files[pre + "workdir/f0.txt"] == b"data0"
+    assert store.files[pre + "workdir/new.txt"] == b"n"  # changes still go up
+
+
+async def test_push_after_failed_listing_never_deletes_remote_files(tmp_path):
+    store = FlakyStore()
+    pre = await _seeded(tmp_path, store)
+    store.list_error = RuntimeError("500 listing")
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    await rt2.setup()  # fresh start
+    store.list_error = None
+    rt2.workdir.mkdir(parents=True, exist_ok=True)
+    (rt2.workdir / "x.txt").write_text("x")
+    await rt2.sync_now("periodic")
+    assert {pre + f"workdir/f{i}.txt" for i in range(3)} <= set(store.files)
+    assert pre + "workdir/x.txt" in store.files
+
+
+async def test_flock_part_files_are_never_pushed_and_restore_cleans_them(tmp_path):
+    store = MemoryStore()
+    rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"))
+    await rt.setup(restore=False)
+    rt.workdir.mkdir(parents=True, exist_ok=True)
+    (rt.workdir / "f.txt").write_text("f")
+    (rt.workdir / "sub").mkdir()
+    (rt.workdir / "f.txt.flock-part").write_text("")
+    (rt.workdir / "sub" / "g.bin.flock-part").write_text("half")
+    await rt.sync_now("test")
+    assert not any(k.endswith(".flock-part") for k in store.files)
+    assert "sw/researcher/researcher-0001/workdir/f.txt" in store.files
+    # a remote .flock-part (pushed by an older worker) is not deleted by the mirror either
+    store.files["sw/researcher/researcher-0001/workdir/old.flock-part"] = b""
+    await rt.sync.push(rt)
+    assert "sw/researcher/researcher-0001/workdir/old.flock-part" in store.files
+    await rt.stop()
+    del store.files["sw/researcher/researcher-0001/workdir/old.flock-part"]
+
+    # a crash left temporaries on the next machine's disk: restore removes them
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    (rt2.workdir / "sub").mkdir(parents=True)
+    (rt2.workdir / "sub" / "stray.flock-part").write_text("x")
+    await rt2.sync.restore(rt2)
+    assert not list(rt2.workdir.rglob("*.flock-part"))
+    assert (rt2.workdir / "f.txt").read_text() == "f"
+
+
+async def test_first_push_after_full_restore_uploads_nothing_unchanged(tmp_path):
+    store = MemoryStore()
+    pre = await _seeded(tmp_path, store, n_files=5)
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    res = await rt2.sync.restore(rt2)
+    assert res.failed == [] and res.workdir == 5 and rt2.sync.mirror_deletes(rt2)
+    for i in range(5):  # the bucket's mtime, not the download time
+        r = pre + f"workdir/f{i}.txt"
+        assert (rt2.workdir / f"f{i}.txt").stat().st_mtime == pytest.approx(store.mtimes[r], abs=1e-3)
+    uploads = len(store.uploads)
+    assert await rt2.sync.push(rt2) == 0  # sessions/harness: marked as pushed by the restore
+    assert store.synced[-1] == [] and len(store.uploads) == uploads
+    # after a complete restore the mirror deletes again, and real changes go up
+    (rt2.workdir / "f0.txt").unlink()
+    (rt2.workdir / "f1.txt").write_text("changed!")
+    await rt2.sync.push(rt2)
+    assert store.synced[-1] == [pre + "workdir/f1.txt"]
+    assert pre + "workdir/f0.txt" not in store.files
+
+
+def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog):
+    from flock.worker.sync import download_resilient
+
+    class Store(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.calls: list[list[str]] = []
+
+        def download(self, files):
+            self.calls.append([r for r, _ in files])
+            for r, _ in files:
+                if r.startswith("gone"):
+                    raise RuntimeError("File reconstruction error: CAS Client Error: "
+                                       "Request failed: 404 Not Found")
+                if r == "missing":
+                    raise FileNotFoundError("missing not found in bucket")
+                if r == "flaky":
+                    raise RuntimeError("CAS Client Error: 503 Service Unavailable")
+            super().download(files)
+
+    store = Store()
+    names = [f"gone{i}" for i in range(30)] + ["missing", "flaky", "ok"]
+    store.files = {n: b"x" for n in names}
+    slept: list[float] = []
+    files = [(n, tmp_path / n) for n in names]
+    with caplog.at_level("INFO", logger="flock.worker.sync"):
+        done, failed = download_resilient(store, files, backoff=(1.0, 4.0, 10.0), sleep=slept.append)
+    assert [r for r, _ in done] == ["ok"]
+    assert sorted(failed) == sorted(n for n in names if n != "ok")
+    count = lambda n: sum(n in c for c in store.calls)
+    assert count("gone0") == 2 and count("missing") == 2  # batch + solo, no retry rounds
+    assert count("flaky") == 5 and slept == [1.0, 4.0, 10.0]  # retried with backoff
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]  # no line per file
+
+
+async def test_restore_logs_skipped_files_as_one_summary_line(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
+    store = FlakyStore()
+    pre = await _seeded(tmp_path, store, n_files=15)
+    store.bad = {pre + f"workdir/f{i}.txt" for i in range(12)}
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    caplog.clear()
+    with caplog.at_level("INFO", logger="flock.worker.sync"):
+        res = await rt2.sync.restore(rt2)
+    assert len(res.failed) == 12
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "12 file(s) skipped" in warnings[0]
+    assert warnings[0].count(pre + "workdir/") == 10
