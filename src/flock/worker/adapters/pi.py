@@ -353,6 +353,20 @@ class PiAdapter:
         self._isolation_dir: tempfile.TemporaryDirectory | None = None
         self._seen: list[tuple[int, str]] = []
 
+    def update_spec(self, spec: TypeSpec) -> None:
+        """A live `flock update` (docs/live.md): a new endpoint list (vLLM base_urls), model id
+        or reasoning level takes effect at Pi's next start (a transport error or timeout
+        restarts it), where models.json is rewritten. A change of the provider's key variable
+        waits for a worker restart, since the key is set up with the process environment."""
+        if self.model_config is None:
+            return
+        new = pi_model_config(spec, self.agent)
+        if new is None or new.api_key_env != self.model_config.api_key_env or new == self.model_config:
+            return
+        log.info("%s: pi model config updated (endpoint %s); applies at the next pi start",
+                 self.agent, new.base_url)
+        self.model_config = new
+
     def scratch_env(self) -> dict[str, str]:
         """Isolated Pi's HOME, TMPDIR and tool caches: under its own agent dir (disk-backed,
         private to this agent, not synced), not in the in-memory root where npm, uv or test

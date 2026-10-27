@@ -558,3 +558,24 @@ def test_pi_transport_error_has_retryable_reason():
         "stopReason": "error", "errorMessage": "fetch failed: connection reset"}})
     [ended] = mapper.on_record({"type": "agent_settled"})
     assert ended.status == "error" and ended.data["reason"] == "model_transport"
+
+
+def test_update_spec_carries_new_endpoints_to_the_next_pi_start(tmp_path):
+    def spec(urls, key="OPENAI_API_KEY"):
+        raw = {"swarm": "multi", "compute": "local", "models": {"m": {"model": "vllm:test"}},
+               "providers": {"vllm": {"type": "openai_compat", "api_key_env": key,
+                                      "base_urls": urls, "self_hosted": True}},
+               "types": {"agent": {"harness": "pi", "model": "m"}}}
+        return SwarmSpec.model_validate(raw).types["agent"]
+
+    old = spec(["http://old/v1"])
+    a = PiAdapter(tmp_path / "w", agent="agent-0001", home=tmp_path / "pi",
+                  model_config=pi_model_config(old, "agent-0001"))
+    a.update_spec(spec(["http://new-a/v1", "http://new-b/v1"]))
+    assert a.model_config.base_url in ("http://new-a/v1", "http://new-b/v1")
+    before = a.model_config
+    a.update_spec(spec(["http://other/v1"], key="OTHER_KEY"))  # a key change waits for a restart
+    assert a.model_config == before
+    native = PiAdapter(tmp_path / "w", agent="agent-0002", home=tmp_path / "pi2")
+    native.update_spec(spec(["http://new-a/v1"]))  # no provider config: nothing to update
+    assert native.model_config is None

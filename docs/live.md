@@ -73,6 +73,10 @@ CLI harnesses (`claude`, `codex`, `pi`) read their instructions file only at sta
 the note says which file to re-read (`your instructions in CLAUDE.md changed; re-read them`,
 `your tools changed; re-read the Tools section of AGENTS.md`).
 
+A running `pi` agent takes a provider's new endpoint list (`base_urls`), model id or
+reasoning level at its next Pi start: models.json is rewritten then, and a transport error
+or turn timeout restarts Pi. A change of the provider's `api_key_env` needs a worker restart.
+
 ## `flock grant`, `flock revoke`, `flock grants`
 
 ```sh
