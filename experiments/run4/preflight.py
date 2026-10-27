@@ -8,8 +8,28 @@ from pathlib import Path
 
 import httpx
 from huggingface_hub import HfApi
+from huggingface_hub.errors import HfHubHTTPError
+
+try:  # huggingface_hub >= 2 raises errors based on its own httpx fork
+    from httpx2 import HTTPError as HTTPX2Error
+except ImportError:  # pragma: no cover - older huggingface_hub
+    HTTPX2Error = httpx.HTTPError
+
+HUB_ERRORS = (HfHubHTTPError, HTTPX2Error, httpx.HTTPError, OSError, ValueError, KeyError)
 
 from flock.worker.sync import parse_bucket
+
+
+def world_archive(env):
+    """The bucket path world.sbatch restores from: $CHATBOT_BUCKET or $RUN3_BUCKET/$RUN."""
+    bucket = (env.get("CHATBOT_BUCKET") or "").rstrip("/")
+    if not bucket:
+        base, run = (env.get("RUN3_BUCKET") or "").rstrip("/"), env.get("RUN", "")
+        if not base or not run:
+            raise ValueError("set CHATBOT_BUCKET, or RUN3_BUCKET and RUN, as the world does")
+        bucket = f"{base}/{run}"
+    bucket_id, prefix = parse_bucket(bucket)
+    return bucket_id, prefix + "world.tar.gz"
 
 
 def check(env, *, online=False, get=httpx.get, api=None):
@@ -61,12 +81,16 @@ def check(env, *, online=False, get=httpx.get, api=None):
     try:
         api = api or HfApi(token=env.get("HF_TOKEN") or False)
         api.repo_info(env.get("CHATBOT_REPO", "cmpatino/chatbot-swarm"), repo_type="dataset")
-        bucket = env.get("RUN4_BUCKET") or env.get("RUN3_BUCKET", "")
-        bucket_id, prefix = parse_bucket(bucket)
-        list(api.get_bucket_paths_info(bucket_id, [prefix + "run4/world.tar.gz"]))
-        record("hub_metadata", True, "dataset/bucket metadata reachable; this does not prove write scope")
-    except (ValueError, httpx.HTTPError):
-        record("hub_metadata", False, "metadata request failed; inspect token scopes without logging its value")
+        bucket_id, archive = world_archive(env)
+        list(api.get_bucket_paths_info(bucket_id, [archive]))
+        record("hub_metadata", True, f"dataset/bucket metadata reachable ({archive}); "
+               "this does not prove write scope")
+    except HUB_ERRORS as exc:
+        detail = str(exc) if isinstance(exc, ValueError) and "CHATBOT_BUCKET" in str(exc) else \
+            "metadata request failed; inspect token scopes without logging its value"
+        record("hub_metadata", False, detail)
+    except Exception:  # never crash preflight; never echo an exception that may carry secrets
+        record("hub_metadata", False, "metadata check failed unexpectedly; details omitted")
     return results
 
 

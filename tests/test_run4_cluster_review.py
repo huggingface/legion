@@ -349,7 +349,7 @@ def test_online_preflight_only_reads_metadata_and_sanitizes_failures(tmp_path):
 
     preflight = module("preflight")
     env = {"OPENAI_BASE_URLS": "http://model/v1", "MODEL_WORKER": "model-id",
-           "CHATBOT_BOARD_URL": "http://board", "RUN3_BUCKET": "hf://buckets/fake/b",
+           "CHATBOT_BOARD_URL": "http://board", "RUN3_BUCKET": "hf://buckets/fake/b", "RUN": "run4",
            "HF_TOKEN": "private-marker"}
     calls = []
     def get(url, **kwargs):
