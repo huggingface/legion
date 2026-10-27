@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import contextvars
 import functools
 import inspect
 import json
+import logging
 import os
 import re
 import tempfile
@@ -30,6 +32,14 @@ EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", 
 MAX_REQUESTS = 5000  # open_pr idempotency keys kept for worker retries (oldest dropped)
 FETCH_TTL = float(os.environ.get("CHATBOT_FETCH_TTL_S", "60"))
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+# A world tool call must answer within about 55 s (the worker's deadline); Hub waits and push
+# retries stay inside this budget, counted from the start of the call.
+CALL_BUDGET = float(os.environ.get("CHATBOT_CALL_BUDGET_S", "50"))
+PUSH_RETRY_DELAYS = (2, 5)
+PUSH_ESTIMATE_S = 8.0  # time kept free for one more push attempt
+BUSY = "the Hub is busy; retry in about a minute"
+PAUSED = "PRs are paused by the operators; keep working locally, run_bot and reviews still work"
+log = logging.getLogger(__name__)
 
 
 def logs_refusals(fn):
@@ -74,6 +84,18 @@ class Chatbot4World(World):
         self.merge_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_MERGE_SLOTS", "4")))
         self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
+        # Every Hub write (create PR, push, ready, merge, close, comment) holds a slot: one IP
+        # and one token cannot push for 140 agents at once. Lock order: Hub slot, then self.lock.
+        self.hub_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_HUB_WRITE_SLOTS", "1")))
+        self.hub_wait = float(os.environ.get("CHATBOT_HUB_WAIT_S", "20"))
+        self.pr_gap = float(os.environ.get("CHATBOT_PR_CREATE_GAP_S", "10"))
+        self.gap_lock = threading.Lock()
+        self.last_create = float("-inf")  # monotonic time of the last (reserved) PR creation
+        # Pause open_pr/merge_pr: CHATBOT_PRS_PAUSED=1 at start, or the flag file, checked per call.
+        self.paused_env = os.environ.get("CHATBOT_PRS_PAUSED", "").strip() not in ("", "0")
+        self.pause_file = Path(os.environ.get("CHATBOT_PRS_PAUSED_FILE") or self.ws / "prs-paused")
+        # Hub PRs whose head could not be pushed: branch ref -> draft, reused by the next open_pr.
+        self.state.setdefault("drafts", {})
         with self.lock:  # the archive may predate merges that already landed on the Hub
             for rec in self.state["prs"].values():
                 if rec["state"] == "closing":  # interrupted close_pr: the author may retry
@@ -93,8 +115,47 @@ class Chatbot4World(World):
     def _pr(self, pr):
         rec = self.state["prs"].get(str(pr))
         if rec is None or rec["state"] != "open":
+            if self._draft(pr):
+                raise ToolError(f"PR #{pr} is a draft whose head is not on the Hub yet; its author "
+                                f"must retry open_pr with pr={pr}")
             raise ToolError("no open PR with that number")
         return rec
+
+    def _draft(self, pr):
+        return next((d for d in self.state["drafts"].values() if d["pr"] == pr), None)
+
+    def _check_paused(self):
+        if self.paused_env or os.path.exists(self.pause_file):
+            raise ToolError(PAUSED, "paused")
+
+    def _busy(self, agent, what, pr=None, reason="slot_wait"):
+        log.warning("hub_busy: refused %s for agent=%s pr=%s reason=%s", what, agent.name, pr, reason)
+        raise ToolError(BUSY, "hub_busy")
+
+    @contextlib.contextmanager
+    def _hub_write(self, agent, what, pr=None, deadline=None):
+        """Hold a Hub write slot, waiting at most until deadline (default: CHATBOT_HUB_WAIT_S).
+
+        Never acquire this with self.lock held."""
+        if deadline is None:
+            deadline = time.monotonic() + self.hub_wait
+        if not self.hub_slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            self._busy(agent, what, pr)
+        try:
+            yield
+        finally:
+            self.hub_slots.release()
+
+    def _create_gap(self, agent, deadline):
+        """Reserve the next create_pull_request time, CHATBOT_PR_CREATE_GAP_S after the last
+        one world-wide, and wait for it; refuse if that is after deadline."""
+        with self.gap_lock:
+            now = time.monotonic()
+            at = max(now, self.last_create + self.pr_gap)
+            if at > deadline:
+                self._busy(agent, "create_pull_request", reason="pr_create_gap")
+            self.last_create = at
+        time.sleep(at - now)
 
     def _reconcile(self, author=None):
         """Mark open PRs whose head is already in main as merged (call with the lock held).
@@ -228,7 +289,9 @@ class Chatbot4World(World):
         evidence in description. At most two open PRs per agent. Read CONTRIBUTING.md.
         branch is a short slug like my-topic; the world stores it as agents/<you>/<slug>.
         """
+        started = time.monotonic()
         self._identity(agent)
+        self._check_paused()
         branch = self._slug(agent, branch)
         if not isinstance(title, str) or not 3 <= len(title) <= 200:
             raise ToolError(f"title must be 3–200 characters (got {len(title) if isinstance(title, str) else 0})")
@@ -252,31 +315,37 @@ class Chatbot4World(World):
                 return self.state["requests"][key]
             if not self.repo.ancestor(base, "main"):
                 raise ToolError("base is not a main commit; fetch main and rebase your branch")
-            old = self._pr(pr) if pr is not None else None
-            if old and old["author"] != agent.name:
-                raise ToolError("only the author can update this PR")
-            if old and old["branch"] != branch_ref:
-                raise ToolError("use the original branch slug when updating a PR")
+            # A parked draft (its Hub PR exists, its head never landed) is reused, never recreated.
+            draft = self._draft(pr) if pr is not None else self.state["drafts"].get(branch_ref)
+            old = self._pr(pr) if pr is not None and not draft else None
+            for existing in (old, draft):
+                if existing and existing["author"] != agent.name:
+                    raise ToolError("only the author can update this PR")
+                if existing and existing["branch"] != branch_ref:
+                    raise ToolError("use the original branch slug when updating a PR")
+            number = draft["pr"] if draft else (pr if old else None)
             pending = self.pending.values()
             if key and any(p[3] == key for p in pending):
                 raise ToolError("this request is already in progress", "busy")
-            if old and any(p[2] == pr for p in pending):
+            if number is not None and any(p[2] == number for p in pending):
                 raise ToolError("an update of this PR is already in progress; retry when it finishes")
-            if not old:
+            if not old and not draft:
                 self._reconcile(agent.name)
                 mine = [r["pr"] for r in self.state["prs"].values()
                         if r["state"] == "open" and r["author"] == agent.name]
+                mine += [d["pr"] for d in self.state["drafts"].values() if d["author"] == agent.name]
                 if len(mine) + sum(p[0] == agent.name and p[2] is None for p in pending) >= 2:
                     raise ToolError(f"at most two open PRs per agent: update one with pr=<n> or "
                                     f"close one with close_pr (yours: {', '.join(map(str, mine))})")
                 if (any(r["branch"] == branch_ref for r in self.state["prs"].values())
+                        or branch_ref in self.state["drafts"]
                         or any(p[1] == branch_ref for p in pending)):
                     raise ToolError("branch slug already used; choose a new topic slug")
             old_head = old["head_sha"] if old else None
-            self.pending[token] = (agent.name, branch_ref, pr if old else None, key)
+            self.pending[token] = (agent.name, branch_ref, number, key)
         try:
             number, sha, main = self._publish(agent, snapshot, base, title, description,
-                                              branch_ref, pr if old else None, old_head)
+                                              branch_ref, number, old_head, started)
             with self.lock:
                 if old and (old["state"] != "open" or old["head_sha"] != old_head):
                     raise ToolError("the PR was merged or closed during the update")
@@ -287,6 +356,7 @@ class Chatbot4World(World):
                           # Kept so reviews of an identical diff carry over a clean rebase.
                           "reviews": dict(old["reviews"]) if old else {}}
                 self.state["prs"][str(number)] = record
+                self.state["drafts"].pop(branch_ref, None)
                 result = {k: v for k, v in record.items() if k != "reviews"}
                 if base != main:
                     result["rebased_from"] = base
@@ -305,45 +375,87 @@ class Chatbot4World(World):
             with self.lock:
                 self.pending.pop(token, None)
 
-    def _publish(self, agent, snapshot, base, title, description, branch_ref, pr, old_head):
-        """Commit the upload on main (outside the lock) and publish it; redo if main moves."""
+    def _build(self, agent, snapshot, base, title, main):
+        """Commit the upload on base, replayed onto main (outside the world lock)."""
+        with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+            tree = Path(tmp) / "tree"
+            self.repo.checkout(base, tree)
+            self._files(snapshot, tree)
+            self._contract(tree, self.repo.staged(tree))
+            # An older base is rebased onto main here, before anything exists on the Hub.
+            return self.repo.commit(tree, base, agent.name, title, onto=main)
+
+    def _publish(self, agent, snapshot, base, title, description, branch_ref, pr, old_head, started):
+        """Publish the upload: update open PR pr (old_head set), finish parked draft pr, or
+        create one Hub PR. At most one create_pull_request per call, and a created PR is
+        never closed by the world: if its head cannot be pushed it is parked as a draft."""
+        deadline = None
         for _attempt in range(3):
             main = self.repo.sha()
-            with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
-                tree = Path(tmp) / "tree"
-                self.repo.checkout(base, tree)
-                self._files(snapshot, tree)
-                self._contract(tree, self.repo.staged(tree))
-                # An older base is rebased onto main here, before anything exists on the Hub.
-                sha = self.repo.commit(tree, base, agent.name, title, onto=main)
-            if pr is None:
-                with self.lock:  # merges move main under this lock: compare before creating
-                    if self.repo.sha() != main:
-                        continue
-                number = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
+            sha = self._build(agent, snapshot, base, title, main)
+            if deadline is None:
+                deadline = min(time.monotonic() + self.hub_wait,
+                               started + CALL_BUDGET - 2 * PUSH_ESTIMATE_S)
+            if old_head is not None:  # an open PR: replace only the expected head
+                with self._hub_write(agent, "push", pr, deadline):
+                    self.repo.push(sha, f"refs/pr/{pr}", expected=old_head)
+                    self.repo.push(sha, f"refs/heads/{branch_ref}", expected=old_head)
             else:
-                number = pr
-            try:
-                # refs/pr/N starts at main on the Hub; updates replace only the expected head.
-                self.repo.push(sha, f"refs/pr/{number}", expected=old_head)
-            except ToolError:
-                if pr is not None:
-                    raise
-                try:  # never leave an orphan Hub PR behind
-                    self.repo.hub.close(number, "Closed by the world: the head could not be pushed.")
-                except ToolError:
-                    pass
-                self.repo.fetch()
-                if self.repo.sha() != main:
-                    continue  # a merge landed between the check and the Hub PR: redo on main
-                raise
-            self.repo.push(sha, f"refs/heads/{branch_ref}", expected=old_head)
-            if pr is None:
-                self.repo.hub.ready(number)
-            self.repo.update_ref(f"refs/pr/{number}", sha)
-            self.repo.update_ref(f"refs/flock/pr/{number}/{sha}", sha)
-            return number, sha, main
+                with self._hub_write(agent, "open_pr", pr, deadline):
+                    if pr is None:
+                        self._create_gap(agent, deadline)
+                        with self.lock:  # nothing exists on the Hub yet: redo on a moved main
+                            if self.repo.sha() != main:
+                                continue
+                        pr = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
+                        with self.gap_lock:
+                            self.last_create = max(self.last_create, time.monotonic())
+                    sha, main = self._land(agent, snapshot, base, title, branch_ref, pr, sha, main,
+                                           started)
+            self.repo.update_ref(f"refs/pr/{pr}", sha)
+            self.repo.update_ref(f"refs/flock/pr/{pr}/{sha}", sha)
+            return pr, sha, main
         raise ToolError("main kept moving while opening the PR; open it again", "busy")
+
+    def _land(self, agent, snapshot, base, title, branch_ref, number, sha, main, started):
+        """Push the head of the world's own (draft) Hub PR and mark it ready; the caller holds
+        a Hub slot. Retries briefly within the call budget, then parks the draft."""
+        delays = list(PUSH_RETRY_DELAYS)
+        while True:
+            try:
+                # refs/pr/N and the agent's branch are written only by the world: overwrite.
+                self.repo.push(sha, f"refs/pr/{number}", force=True)
+                self.repo.push(sha, f"refs/heads/{branch_ref}", force=True)
+                self.repo.hub.ready(number)
+                return sha, main
+            except Exception as exc:  # noqa: BLE001 -- the Hub PR exists: never orphan it
+                failure = exc
+            delay = delays.pop(0) if delays else None
+            if delay is None or time.monotonic() + delay + PUSH_ESTIMATE_S > started + CALL_BUDGET:
+                break
+            time.sleep(delay)
+            try:
+                self.repo.fetch()
+                if self.repo.sha() != main:  # main moved: rebase within the same PR number
+                    main = self.repo.sha()
+                    sha = self._build(agent, snapshot, base, title, main)
+            except Exception as exc:  # noqa: BLE001
+                failure = exc
+                break
+        code = getattr(failure, "code", type(failure).__name__)
+        with self.lock:
+            self.state["drafts"][branch_ref] = {
+                "pr": number, "author": agent.name, "branch": branch_ref, "base_sha": main,
+                "sha": sha, "title": title, "parked_at": time.time(),
+                "url": f"https://huggingface.co/datasets/{self.repo_id}/discussions/{number}"}
+            self._save()
+            self._event("parked", agent, pr=number, branch=branch_ref, code=code)
+        log.warning("parked draft PR #%s for agent=%s: %s", number, agent.name, code)
+        if code == "stale_base":
+            raise ToolError(f"{failure.message}; your PR #{number} is kept: retry open_pr with "
+                            f"pr={number}", "stale_base")
+        raise ToolError(f"the Hub did not accept the push for your PR #{number}; retry open_pr "
+                        f"with pr={number} in a minute", "hub_busy")
 
     @tool
     @logs_refusals
@@ -367,7 +479,8 @@ class Chatbot4World(World):
             base = check()["base_sha"]
         review = {"head_sha": head_sha, "patch_id": self._patch_id(base, head_sha),
                   "verdict": verdict, "comment": comment}
-        self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
+        with self._hub_write(agent, "comment", pr):
+            self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
         with self.lock:
             check()["reviews"][agent.name] = review
             self._save()
@@ -412,6 +525,7 @@ class Chatbot4World(World):
     def merge_pr(self, agent: Agent, pr: int) -> dict:
         """Merge an independently approved PR after checking its base and bot contract."""
         self._identity(agent)
+        self._check_paused()
         self.repo.refresh(FETCH_TTL)
         with self.lock:
             rec = self._pr(pr)
@@ -431,7 +545,8 @@ class Chatbot4World(World):
             if not verdict["ok"]:
                 raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
         self.repo.refresh(0)  # outside the lock; the compare-and-swap below uses local refs
-        with self.lock:
+        # The Hub slot is taken before the lock (see _hub_write).
+        with self._hub_write(agent, "merge", pr), self.lock:
             rec = self._pr(pr)
             reviewers = self._approved(rec)
             if (self.repo.sha() != main or rec["head_sha"] != head
@@ -473,6 +588,10 @@ class Chatbot4World(World):
         if not reason.strip() or len(reason) > 2000:
             raise ToolError("give a short reason (at most 2000 chars)")
         with self.lock:
+            draft = self._draft(pr)
+        if draft:
+            return self._close_draft(agent, draft, reason)
+        with self.lock:
             rec = self.state["prs"].get(str(pr))
             if rec is not None and rec["state"] == "open":
                 self._reconcile(rec["author"])
@@ -484,8 +603,11 @@ class Chatbot4World(World):
             rec["state"] = "closing"  # no update, review or merge while the Hub call runs
         try:
             try:
-                self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
-            except ToolError:
+                with self._hub_write(agent, "close", pr):
+                    self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
+            except ToolError as exc:
+                if exc.code == "hub_busy":
+                    raise
                 status = getattr(self.repo.hub, "status", None)
                 if status is None or status(pr) != "closed":
                     raise
@@ -500,10 +622,31 @@ class Chatbot4World(World):
             self._event("pr_closed", agent, **event)
             return {**event, "state": "closed", "closed_by": agent.name}
 
+    def _close_draft(self, agent, draft, reason):
+        pr = draft["pr"]
+        with self.lock:
+            if draft["author"] != agent.name and agent.name not in self.operators:
+                raise ToolError("only the author or the run operator can close this PR")
+            if any(p[2] == pr for p in self.pending.values()):
+                raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
+        with self._hub_write(agent, "close", pr):
+            self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
+        with self.lock:
+            self.state["drafts"].pop(draft["branch"], None)
+            self._save()
+            event = {"pr": pr, "author": draft["author"], "head_sha": None, "reason": reason}
+            self._event("pr_closed", agent, draft=True, **event)
+            return {**event, "state": "closed", "closed_by": agent.name}
+
     @tool
     def list_prs(self, state: str = "open", author: str = "", needs_review: bool = False,
                  offset: int = 0) -> list[dict]:
-        """Find PRs, their head SHA and reviews. state is open, merged, closed or all."""
+        """Find PRs, their head SHA and reviews. state is open, merged, closed or all.
+
+        A PR with "draft": true is open on the Hub but its head is not pushed yet (head_sha is
+        null); it counts toward its author's open PRs and cannot be reviewed or merged until
+        its author retries open_pr with pr=<number>.
+        """
         if offset < 0:
             raise ToolError("offset must be nonnegative")
         if state not in ("open", "merged", "closed", "all"):
@@ -517,6 +660,12 @@ class Chatbot4World(World):
                                         for r in self._current_reviews(rec).values()):
                     continue
                 records.append(json.loads(json.dumps(rec)))
+            if state in ("open", "all") and not needs_review:
+                records += [{"pr": d["pr"], "state": "open", "draft": True, "author": d["author"],
+                             "branch": d["branch"], "base_sha": d["base_sha"], "head_sha": None,
+                             "url": d["url"], "title": d["title"], "reviews": {}}
+                            for d in self.state["drafts"].values()
+                            if not author or d["author"] == author]
             return records[offset:offset + 100]
 
     @tool

@@ -57,6 +57,7 @@ def setup(tmp_path, monkeypatch):
     # Workflow/contract unit tests. Real kernel isolation is checked separately in
     # test_run4_isolation.py and required by the prepared cluster dry run.
     monkeypatch.setattr("sandbox.isolate_command", lambda argv, *args, **kwargs: argv)
+    monkeypatch.setenv("CHATBOT_PR_CREATE_GAP_S", "0")  # the gap has its own test
     seed = tmp_path / "seed"
     shutil.copytree(ROOT / "worlds/chatbot4/seed", seed, ignore=shutil.ignore_patterns("__pycache__"))
     git(seed, "init", "-b", "main")
@@ -332,16 +333,189 @@ def test_open_pr_from_an_older_main_rebases_or_refuses_before_the_hub(setup):
     assert world.repo.hub.n == opened and not getattr(world.repo.hub, "closed", [])
 
 
-def test_a_failed_push_after_creating_the_hub_pr_closes_it(setup, monkeypatch):
-    world, clone, _ = setup
+def failing_pr_push(world, monkeypatch, failures):
+    """Make the next `failures` pushes to refs/pr/* fail; returns the list of attempted refs."""
+    import chatbot4
 
-    def push(sha, ref, expected=None):
-        raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+    monkeypatch.setattr(chatbot4, "PUSH_RETRY_DELAYS", (0.01, 0.01))
+    real, attempts = world.repo.push, []
+
+    def push(sha, ref, expected=None, force=False):
+        attempts.append(ref)
+        if ref.startswith("refs/pr/") and failures[0] > 0:
+            failures[0] -= 1
+            raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+        return real(sha, ref, expected, force)
 
     monkeypatch.setattr(world.repo, "push", push)
-    with pytest.raises(ToolError, match="repository operation failed"):
+    return attempts
+
+
+def test_a_failed_push_after_creating_the_hub_pr_parks_a_draft_and_reuses_it(setup, monkeypatch, caplog):
+    world, clone, _ = setup
+    failures = [3]  # the push and both retries
+    attempts = failing_pr_push(world, monkeypatch, failures)
+    with caplog.at_level("WARNING"), pytest.raises(ToolError) as exc:
         submit(world, clone)
-    assert world.repo.hub.closed == [world.repo.hub.n] and world.list_prs() == []
+    number = world.repo.hub.n
+    assert exc.value.code == "hub_busy" and exc.value.message == (
+        f"the Hub did not accept the push for your PR #{number}; retry open_pr with pr={number} in a minute")
+    assert attempts == [f"refs/pr/{number}"] * 3
+    assert number == 1 and not getattr(world.repo.hub, "closed", [])  # never closed
+    assert f"parked draft PR #{number} for agent=cedar" in caplog.text
+    [draft] = world.list_prs()
+    assert draft["pr"] == number and draft["draft"] is True and draft["state"] == "open"
+    assert draft["head_sha"] is None and world.list_prs(needs_review=True) == []
+    with pytest.raises(ToolError, match=f"PR #{number} is a draft"):
+        world.review_pr(Agent("birch"), number, "0" * 40, "approve", "looks fine")
+    # the draft is one of cedar's two open PRs, and its slug stays cedar's
+    (clone / "bot/modules/other.py").write_text('def respond(text, memory):\n    return None\n')
+    other = submit(world, clone, branch="other")
+    with pytest.raises(ToolError, match=f"at most two open PRs.*yours: {other['pr']}, {number}\\)"):
+        submit(world, clone, branch="third")
+    with pytest.raises(ToolError, match="only the author"):
+        submit(world, clone, author="birch", pr=number)
+    # the next open_pr for that branch (with or without pr=) reuses the PR number
+    opened = world.repo.hub.n
+    rec = submit(world, clone)
+    assert rec["pr"] == number and world.repo.hub.n == opened
+    assert world.state["drafts"] == {} and "draft" not in world.list_prs()[0]
+    approve(world, rec)
+    assert world.merge_pr(Agent("birch"), number)["merged_sha"]
+
+
+def test_a_parked_draft_survives_a_world_restart(setup, monkeypatch):
+    world, clone, _ = setup
+    failing_pr_push(world, monkeypatch, [3])
+    with pytest.raises(ToolError, match="did not accept the push"):
+        submit(world, clone)
+    number = world.repo.hub.n
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert [(r["pr"], r.get("draft")) for r in restarted.list_prs()] == [(number, True)]
+    rec = submit(restarted, clone, pr=number)
+    assert rec["pr"] == number and restarted.repo.hub.n == number
+    assert Chatbot4World(world.ws, world.repo).list_prs()[0]["head_sha"] == rec["head_sha"]
+
+
+def test_a_push_retry_after_main_moved_rebases_within_the_same_pr(setup, monkeypatch):
+    world, clone, remote = setup
+    other = clone.parent / "other"
+    git(clone.parent, "clone", str(remote), str(other))
+    (other / "bot/modules/first.py").write_text('def respond(text, memory):\n    return None\n')
+    first = submit(world, other, author="pine", branch="first")
+    real_push = world.repo.push
+
+    def push_then_merge(sha, ref, expected=None, force=False):
+        if ref.startswith("refs/pr/") and ref != f"refs/pr/{first['pr']}":
+            world.repo.hub.merge(first["pr"], "merged outside the world")  # main moves
+            monkeypatch.setattr(world.repo, "push", real_push)
+            raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+        return real_push(sha, ref, expected, force)
+
+    import chatbot4
+    monkeypatch.setattr(chatbot4, "PUSH_RETRY_DELAYS", (0.01, 0.01))
+    monkeypatch.setattr(world.repo, "push", push_then_merge)
+    (clone / "bot/modules/second.py").write_text('def respond(text, memory):\n    return None\n')
+    rec = submit(world, clone, author="birch", branch="second")
+    assert rec["pr"] == world.repo.hub.n == first["pr"] + 1  # one Hub PR, none closed
+    assert rec["base_sha"] == git(remote, "rev-parse", "main") != first["base_sha"]
+    assert not getattr(world.repo.hub, "closed", [])
+
+
+def test_concurrent_open_prs_never_run_two_hub_writes_at_once(setup, monkeypatch):
+    import threading
+    import time
+
+    world, clone, _ = setup
+    rec = submit(world, clone, branch="seed")
+    active, peak, guard = [0], [0], threading.Lock()
+
+    def tracked(fn):
+        def wrapper(*args, **kwargs):
+            with guard:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                time.sleep(0.05)
+                return fn(*args, **kwargs)
+            finally:
+                with guard:
+                    active[0] -= 1
+        return wrapper
+
+    hub = world.repo.hub
+    for name in ("open", "ready", "comment", "close", "merge"):
+        monkeypatch.setattr(hub, name, tracked(getattr(hub, name)))
+    monkeypatch.setattr(world.repo, "push", tracked(world.repo.push))
+    snapshot, errors = capture(clone.parent, clone.name), []
+
+    def call(fn):
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call, args=(lambda who=who: world.call_workspace(
+        "open_pr", {"branch": "topic", "title": "Topic", "description": "tested"},
+        Agent(who), snapshot),)) for who in ("birch", "pine", "oak", "elm", "ash")]
+    threads.append(threading.Thread(target=call, args=(lambda: approve(world, rec, "fir"),)))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert errors == [] and peak[0] == 1
+    assert hub.n == 6 and len(world.list_prs()) == 6
+
+
+def test_pr_creation_gap_and_busy_hub_refuse_before_creating(setup, monkeypatch, caplog):
+    import time
+
+    world, clone, _ = setup
+    submit(world, clone, branch="first")
+    world.pr_gap, world.hub_wait = 60, 0.5
+    with caplog.at_level("WARNING"), pytest.raises(ToolError) as exc:
+        submit(world, clone, author="birch", branch="second")
+    assert (exc.value.code, exc.value.message) == ("hub_busy", "the Hub is busy; retry in about a minute")
+    assert world.repo.hub.n == 1 and "reason=pr_create_gap" in caplog.text
+    world.pr_gap, world.last_create = 0.4, time.monotonic()
+    started = time.monotonic()
+    assert submit(world, clone, author="birch", branch="second")["pr"] == 2  # waits the gap
+    assert time.monotonic() - started >= 0.3
+    world.pr_gap = 0
+    assert world.hub_slots.acquire(timeout=1)  # another Hub write in progress
+    try:
+        with pytest.raises(ToolError, match="the Hub is busy") as exc:
+            submit(world, clone, author="pine", branch="third")
+    finally:
+        world.hub_slots.release()
+    assert exc.value.code == "hub_busy" and world.repo.hub.n == 2
+
+
+def test_pause_flag_refuses_open_and_merge_but_not_reviews_or_run_bot(setup, tmp_path, monkeypatch):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    flag = tmp_path / "shared" / "prs-paused"
+    flag.parent.mkdir()
+    monkeypatch.setenv("CHATBOT_PRS_PAUSED_FILE", str(flag))
+    world = Chatbot4World(world.ws, world.repo)
+    flag.touch()  # read per call: no restart needed
+    paused = "PRs are paused by the operators; keep working locally, run_bot and reviews still work"
+    for attempt in (lambda: submit(world, clone, pr=rec["pr"]),
+                    lambda: world.merge_pr(Agent("birch"), rec["pr"])):
+        with pytest.raises(ToolError) as exc:
+            attempt()
+        assert (exc.value.code, exc.value.message) == ("paused", paused)
+    assert approve(world, rec)["verdict"] == "approve"
+    assert world.run_bot("main", ["hi"])["ok"]
+    assert world.list_prs()[0]["pr"] == rec["pr"]
+    flag.unlink()
+    assert world.merge_pr(Agent("birch"), rec["pr"])["merged_sha"]
+    other = submit(world, clone, branch="other")
+    monkeypatch.setenv("CHATBOT_PRS_PAUSED", "1")  # start-time override
+    world = Chatbot4World(world.ws, world.repo)
+    with pytest.raises(ToolError, match="paused by the operators"):
+        submit(world, clone, branch="third")
+    assert world.close_pr(Agent("cedar"), other["pr"], "paused")["state"] == "closed"
 
 
 def test_hub_merge_that_fails_after_merging_is_reconciled(setup, monkeypatch):
@@ -461,26 +635,25 @@ def test_racing_merges_never_both_land(setup, monkeypatch):
     assert len(world.list_prs("merged")) == 1
 
 
-def test_main_moving_before_the_hub_pr_is_created_is_redone_without_orphans(setup, monkeypatch):
+def test_main_moving_while_the_hub_pr_is_created_keeps_one_pr(setup, monkeypatch):
     world, clone, remote = setup
     other = clone.parent / "other"
     git(clone.parent, "clone", str(remote), str(other))
     (other / "bot/modules/first.py").write_text('def respond(text, memory):\n    return None\n')
     first = submit(world, other, author="pine", branch="first")
-    approve(world, first)
     real, calls = world.repo.hub.open, []
 
     def open_after_a_merge(title, description):
-        if not calls:  # a merge lands after the world's main check, before the Hub PR exists
-            calls.append(world.merge_pr(Agent("pine"), first["pr"])["merged_sha"])
+        if not calls:  # main moves outside the world after its check, before the Hub PR exists
+            calls.append(world.repo.hub.merge(first["pr"], "merged outside the world"))
         return real(title, description)
 
     monkeypatch.setattr(world.repo.hub, "open", open_after_a_merge)
     (clone / "bot/modules/second.py").write_text('def respond(text, memory):\n    return None\n')
     rec = submit(world, clone, author="birch", branch="second")
-    assert rec["base_sha"] == calls[0] == git(remote, "rev-parse", "main")
-    assert world.repo.hub.closed == [rec["pr"] - 1]  # the first attempt's Hub PR, closed
-    assert [r["pr"] for r in world.list_prs()] == [rec["pr"]]
+    assert rec["pr"] == world.repo.hub.n == first["pr"] + 1 and calls
+    assert not getattr(world.repo.hub, "closed", [])
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == rec["head_sha"]
 
 
 def test_refusals_are_logged_and_request_keys_are_bounded(setup, monkeypatch):

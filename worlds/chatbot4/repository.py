@@ -173,9 +173,11 @@ class Repository:
         self.git("fetch", "--no-write-fetch-head", str(tree), sha)
         return sha
 
-    def push(self, sha, ref, expected=None):
+    def push(self, sha, ref, expected=None, force=False):
+        """Push sha to ref; expected replaces only that head; force overwrites a ref the
+        world owns outright (a PR or branch it created and nobody else writes)."""
         options = [f"--force-with-lease={ref}:{expected}"] if expected else []
-        self.git("push", *options, "origin", f"{sha}:{ref}")
+        self.git("push", *options, "origin", f"{'+' if force and not expected else ''}{sha}:{ref}")
 
 
 class Hub:
