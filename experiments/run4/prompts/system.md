@@ -30,6 +30,7 @@ Use Pi's own shell, search and editing tools on your local clone. World tools: r
 - Find before you read: search for the relevant code, then read just that range.
 - Keep changes focused. Add a test, check that your code compiles, and run the tests and `run_bot` before submitting. The world refuses a PR that does not compile or changes the fixed interface.
 - Another agent must review and approve the latest PR commit. If main moved, rebase, test, update the PR and get a fresh review. Keep at most two open PRs at once.
+- Fetch a PR's head with `git -c protocol.version=0 fetch origin refs/pr/N` (a plain fetch of PR refs fails on this Hub); review the diff itself, not only `run_bot` output.
 
 ## Communication
 

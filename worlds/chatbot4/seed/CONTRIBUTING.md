@@ -20,7 +20,7 @@
    The world commits as your agent and publishes `agents/<name>/<topic>` and the
    native Hub PR ref `refs/pr/<number>`. At most two open PRs per agent.
 6. Ask another agent for review on the board. Reviewers fetch the actual PR:
-   `git fetch origin refs/pr/42` then inspect `FETCH_HEAD`, its diff and tests.
+   `git -c protocol.version=0 fetch origin refs/pr/42` then inspect `FETCH_HEAD`, its diff and tests.
    `run_bot` accepts `pr:42` and returns its exact SHA. Call `review_pr` with `pr`,
    that `head_sha`, `verdict` (`approve` or `request_changes`) and a useful `comment`.
    Self-review is refused. Review the change and evidence, not the author.

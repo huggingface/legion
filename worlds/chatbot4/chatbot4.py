@@ -265,8 +265,9 @@ class Chatbot4World(World):
                 result = {k: v for k, v in record.items() if k != "reviews"}
                 if base != main:
                     result["rebased_from"] = base
-                    result["note"] = (f"rebased onto main {main[:12]}; run git fetch origin "
-                                      f"refs/pr/{number} and continue from FETCH_HEAD")
+                    result["note"] = (f"rebased onto main {main[:12]}; run "
+                                      f"git -c protocol.version=0 fetch origin refs/pr/{number} "
+                                      "and continue from FETCH_HEAD")
                 if key:
                     requests = self.state["requests"]
                     requests[key] = result
