@@ -162,12 +162,16 @@ done
 wait "$SRUN_PID"; rc=$?   # the real status even when the last wait was cut by a trap
 log "world step exited with $rc (requeue=$REQUEUE, term=${TERM_MODE:-none}); the final sync ran inside it"
 [ "$REQUEUE" = 1 ] && exit 0  # already requeued by the Spot handler
-if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ] && [ "${SLURM_RESTART_COUNT:-0}" -lt 5 ]; then
-  log "world failed (rc=$rc): automatic recovery requeue $(( ${SLURM_RESTART_COUNT:-0} + 1 ))/5"
+# Crash requeues only: SLURM_RESTART_COUNT also counts Spot requeues, so keep our own count on /fsx.
+CRASHES_FILE=$WORLD_CTL/crash-requeues
+crashes=$(cat "$CRASHES_FILE" 2>/dev/null); case $crashes in ""|*[!0-9]*) crashes=0;; esac
+if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ] && [ "$crashes" -lt 5 ]; then
+  log "world failed (rc=$rc): automatic recovery requeue $(( crashes + 1 ))/5"
+  echo $(( crashes + 1 )) > "$CRASHES_FILE"
   scontrol requeue "$SLURM_JOB_ID" || exit "$rc"
   exit 0
 fi
 if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ]; then
-  log "FATAL: world recovery exhausted after ${SLURM_RESTART_COUNT:-0} restarts; operator action required"
+  log "FATAL: world recovery exhausted after $crashes crash requeues ($CRASHES_FILE); operator action required"
 fi
 exit "$rc"

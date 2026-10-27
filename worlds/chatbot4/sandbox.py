@@ -54,7 +54,7 @@ def run(root: Path, lines: list[str], timeout: float = 300) -> dict:
     with (tempfile.TemporaryDirectory() as tmp,
           open(Path(tmp) / "out", "w+b") as out,
           open(Path(tmp) / "err", "w+b") as err):
-        argv = isolate_command([sys.executable, "-I", "-c", SHIM, str(root.resolve())],
+        argv = isolate_command([sys.executable, "-I", "-S", "-c", SHIM, str(root.resolve())],
                                Path(tmp) / "root", cwd=root.resolve(), readonly=[root.resolve()],
                                python_only=True)
         proc = subprocess.Popen(argv, cwd=tmp,

@@ -84,7 +84,9 @@ if sys.argv[1] == 'restore':
 def test_world_failure_requeues_with_a_bound_and_respects_stop(tmp_path, code, restarts, stopping, requeue):
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", HF_TOKEN="fake-shared",
-               CHATBOT_WORLD_TOKEN="fake-world", SLURM_RESTART_COUNT=str(restarts))
+               CHATBOT_WORLD_TOKEN="fake-world", SLURM_RESTART_COUNT="9")  # Spot requeues do not count
+    (tmp_path / "run/world").mkdir(parents=True)
+    (tmp_path / "run/world/crash-requeues").write_text(f"{restarts}\n")
     (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
 die() { echo "$*" >&2; exit 2; }
 require_var() { :; }
@@ -101,6 +103,7 @@ container_srun_args() { CTR_SRUN=(); }
     if requeue:
         assert marker.read_text().splitlines() == ["requeue 123"]
         assert result.returncode == 0
+        assert (tmp_path / "run/world/crash-requeues").read_text().strip() == str(restarts + 1)
 
 
 async def test_busy_board_polling_rotates_once_per_minute_on_a_busy_feed(monkeypatch):
@@ -158,7 +161,7 @@ def test_capacity_holds_persist_and_warn_without_growing(tmp_path, monkeypatch):
     assert json.loads(state.read_text())["start"] == 123
 
 
-def test_controller_wait_for_world_has_a_deadline(tmp_path):
+def test_controller_wait_for_world_requeues_after_the_deadline(tmp_path):
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URL="http://fake/v1",
                CHATBOT_BOARD_URL="http://fake-board", CHATBOT_CHANNEL="general", MODEL_WORKER="fake",
@@ -176,8 +179,9 @@ http_status() { echo 000; }
     executable(tmp_path / "venv/bin/sacct", '#!/bin/bash\nexit 97\n')
     executable(tmp_path / "venv/bin/date", '#!/bin/bash\nn=$(cat "$CLOCK" 2>/dev/null || echo 0)\nn=$((n+1))\necho "$n" > "$CLOCK"\necho "$n"\n')
     result = run_script(tmp_path, "controller.sbatch", env)
-    assert result.returncode == 2
-    assert "world unavailable after 2s" in result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "world unavailable after 2s" in result.stdout
+    assert (tmp_path / "requeues").read_text().splitlines() == ["requeue 123"]
 
 
 def test_role_preparation_plan_and_existing_checkout_protection(tmp_path):

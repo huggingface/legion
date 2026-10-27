@@ -106,8 +106,12 @@ while :; do
   world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null)
   world_url="http://$world_host:7860"
   [ -n "$world_host" ] && [ "$(http_status "$world_url/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ] && break
-  [ $(( $(date +%s) - t0 )) -lt "$WORLD_WAIT_S" ] \
-    || die "world unavailable after ${WORLD_WAIT_S}s; inspect the world recovery log before restarting the controller"
+  if [ $(( $(date +%s) - t0 )) -ge "$WORLD_WAIT_S" ]; then  # e.g. controller and world requeued together
+    log "world unavailable after ${WORLD_WAIT_S}s: requeue the controller to wait again (scontrol requeue $SLURM_JOB_ID)"
+    REQUEUE=1
+    scontrol requeue "$SLURM_JOB_ID" || die "scontrol requeue failed; inspect the world recovery log and resubmit the controller"
+    exit 0
+  fi
   if [ "$(date +%s)" -ge "$next_log" ]; then
     log "waiting for the world ($(( $(date +%s) - t0 ))s): world.host='${world_host}', no 200 on GET /manifest yet (start world.sbatch if it is not queued)"
     next_log=$(( $(date +%s) + WORLD_LOG_S ))
