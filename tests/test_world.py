@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import random
+import re
 import shutil
 import socket
 import sys
@@ -197,8 +198,10 @@ def test_server_protocol():
         "code": "bad_args", "message": "echo: text must be string, got int 3"}
     assert c.post("/tools/refuse", json={}, headers=H).json() == {
         "ok": False, "error": {"code": "nope", "message": "not today"}}
-    assert c.post("/tools/crash", json={"args": {}}, headers=H).json()["error"] == {
-        "code": "internal", "message": "ZeroDivisionError: division by zero"}
+    crash = c.post("/tools/crash", json={"args": {}}, headers=H).json()["error"]
+    assert crash["code"] == "internal" and "division" not in crash["message"]
+    assert re.fullmatch(r"the tool failed with an internal error \(error id [0-9a-f]{8}\)",
+                        crash["message"])
     assert c.post("/tools/later", json={"args": {}}, headers=H).json()["result"] == "later dev-0001"
     assert c.post("/hooks", json={"event": "turn", "agent": "dev-0001", "turn": "t-1",
                                   "data": {"status": "completed"}}, headers=H).json() == {"ok": True}
@@ -567,7 +570,7 @@ async def test_hub_forwards_calls_with_the_agent_and_the_token(recorder):
         r = await hub.call("dev-0001", "world:refuse", {})
         assert r.error and json.loads(r.output) == {"error": "not today"}
         r = await hub.call("dev-0001", "world:crash", {})
-        assert r.error and "ZeroDivisionError" in r.output
+        assert r.error and "internal error (error id " in r.output and "Division" not in r.output
         r = await hub.call("dev-0001", "world:echo", {"txt": "hi"})  # refused before the world
         assert r.error and "unknown argument(s) txt" in r.output and len(recorder.world.calls) == 1
         r = await hub.call("dev-0001", "world:later", {})
@@ -875,3 +878,15 @@ async def test_a_pinned_turn_keeps_its_world_through_the_gateway(tmp_path, recor
         other.close()
         await comms.aclose()
         await world.aclose()
+
+
+def test_tool_results_and_errors_never_carry_secret_env_values(monkeypatch):
+    from flock.world.server import redact
+
+    monkeypatch.setenv("HF_TOKEN", "hf_supersecretvalue")
+    monkeypatch.setenv("CHATBOT_BOARD_INVITE", "invite-code-1234")
+    monkeypatch.setenv("SHORT_TOKEN", "abc")  # too short to redact safely
+    out = redact({"log": "push with hf_supersecretvalue failed", "n": 3,
+                  "nested": ["invite-code-1234", "abc"]})
+    assert out == {"log": "push with [redacted] failed", "n": 3, "nested": ["[redacted]", "abc"]}
+    assert redact("nothing here") == "nothing here"

@@ -19,8 +19,10 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import threading
+import uuid
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -47,6 +49,29 @@ from flock.world.workspace import MAX_BYTES
 log = logging.getLogger("flock.world")
 
 DEFAULT_PORT = 8765
+
+
+_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|INVITE|API_KEY|_KEY$", re.IGNORECASE)
+
+
+def _secret_values(env=None) -> list[str]:
+    """Values of the world process's secret-looking variables (8+ chars), longest first."""
+    env = os.environ if env is None else env
+    return sorted({v for k, v in env.items() if _SECRET_NAME.search(k) and len(v) >= 8},
+                  key=len, reverse=True)
+
+
+def redact(value: Any, secrets: list[str] | None = None) -> Any:
+    """`value` (JSON-able) with every secret value replaced by "[redacted]"."""
+    secrets = _secret_values() if secrets is None else secrets
+    if not secrets:
+        return value
+    text = json.dumps(value, default=str)
+    if not any(s in text for s in secrets):
+        return value
+    for s in secrets:
+        text = text.replace(json.dumps(s)[1:-1], "[redacted]")
+    return json.loads(text)
 
 
 def _error(code: str, message: str, status: int = 200) -> JSONResponse:
@@ -164,12 +189,15 @@ def create_app(world: World, token: str | None) -> FastAPI:
                         return _error("cancelled", "the caller disconnected", 499)
                 else:
                     result = await result
-            result = json.loads(json.dumps(result, default=str))
+            result = redact(json.loads(json.dumps(result, default=str)))
         except ToolError as e:
-            return _error(e.code, e.message)
-        except Exception as e:
-            log.exception("tool %s failed for %s", name, agent.name)
-            return _error("internal", f"{type(e).__name__}: {e}")
+            return _error(e.code, redact(e.message))
+        except Exception:
+            # The exception text can hold paths, command output or credentials: it stays in
+            # the world's log, under an id the agent can quote.
+            ref = uuid.uuid4().hex[:8]
+            log.exception("tool %s failed for %s (error id %s)", name, agent.name, ref)
+            return _error("internal", f"the tool failed with an internal error (error id {ref})")
         return {"ok": True, "result": result}
 
     @app.post("/hooks")
