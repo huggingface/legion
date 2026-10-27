@@ -88,6 +88,22 @@ def test_config_from_env(tmp_path):
     assert cfg.deadline.year == 2026 and cfg.deadline.tzinfo is not None
     assert cfg.sync_interval == 180 and cfg.bucket == "hf://buckets/ns/b"
     assert cfg.drain_window == timedelta(minutes=10)  # default until the env says otherwise
+    assert cfg.comms_poll_cycle_s is None  # the spec's comms.poll_cycle_s (default 300 s)
+
+
+async def test_comms_poll_cycle_env_reaches_the_worker_poller():
+    base = {"FLOCK_URL": "http://c", "FLOCK_TOKEN": "t", "WORKER_ID": WID, "SWARM": "sw",
+            "TYPE": "researcher", "DEADLINE": "2026-10-15T09:12:00Z"}
+    cfg = WorkerConfig.from_env({**base, "FLOCK_COMMS_POLL_CYCLE_S": "60"})
+    assert cfg.comms_poll_cycle_s == 60.0
+    w = Worker(cfg, ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(
+        FakeController().handler)))
+    assert w.comms.poll_cycle_s == 60.0
+    await w.client.aclose()
+    w = Worker(WorkerConfig.from_env(base), ControllerClient(
+        "http://c", "t", transport=httpx.MockTransport(FakeController().handler)))
+    assert w.comms.poll_cycle_s is None  # the spec decides
+    await w.client.aclose()
 
 
 async def test_drain_window_from_env_applies_before_any_assign(tmp_path):

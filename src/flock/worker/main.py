@@ -119,6 +119,9 @@ class WorkerConfig:
     # start and again when the controller stops answering (it may have moved host)
     url_template: str | None = None
     host_file: str | None = None
+    # FLOCK_COMMS_POLL_CYCLE_S: overrides the spec's comms.poll_cycle_s (extended board
+    # polling: each agent's feed about once per this many seconds; spec default 300)
+    comms_poll_cycle_s: float | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -144,6 +147,8 @@ class WorkerConfig:
             incarnation=env.get("WORKER_INCARNATION") or None,
             parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
             else None,
+            comms_poll_cycle_s=float(env["FLOCK_COMMS_POLL_CYCLE_S"])
+            if env.get("FLOCK_COMMS_POLL_CYCLE_S") else None,
         )
 
 
@@ -345,7 +350,8 @@ class Worker:
         self.agents: dict[str, AgentRuntime] = {}
         # comms (docs/comms.md): one hub per worker, one board poller for all its agents
         self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
-                                       runtime=self.agents.get)
+                                       runtime=self.agents.get,
+                                       poll_cycle_s=cfg.comms_poll_cycle_s)
         # the swarm's world (docs/world.md): its tools, reached through the same gateway
         self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
                                        runtime=self.agents.get)

@@ -246,7 +246,7 @@ long-poll per worker. It rotates the worker's agent identities and follows
 `channels=joined` with a separate persisted cursor for each identity. This is
 necessary for private DMs: an ordinary agent token cannot read another agent's
 DMs. A rotation takes `comms.poll_cycle_s` (default 300 s; 10 to 3600, 60 was the
-first run-4 setting), including when a busy feed returns immediately. Poll starts are
+first run-4 setting; a worker's `FLOCK_COMMS_POLL_CYCLE_S` overrides it), including when a busy feed returns immediately. Poll starts are
 spaced by `max(2 s, poll_cycle_s / identities)`; each request waits up to that
 interval, capped at 25 seconds. With 12 agents and the default this is one poll every
 25 seconds: about 1 activity request/s across 25 workers. Notices are read at round
