@@ -130,9 +130,10 @@ of syncing thousands of workspace files. The archive contains a consistent git
 bundle and PR state, and excludes transient git lock files. Restore occurs before
 serving; transient failures retry five times with 30 s backoff. A missing archive
 still permits a first start. Exhausted restore failures stop startup without
-dropping review state. Abnormal world exits requeue up to five Slurm restarts
-unless stopping. The controller stops waiting for a world after 30 min instead
-of waiting forever. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S` and
+dropping review state. Abnormal world exits requeue up to five times unless
+stopping; only crash requeues count (in `<run>/world/crash-requeues`, delete it
+to reset), Spot reclaims do not. If no world is up after 30 min, the controller
+requeues itself instead of waiting forever. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S` and
 `WORLD_WAIT_S` configure these bounds. The controller snapshots state.db and uploads only changed event files after its
 first full sync. Test real restart timing on the cluster before launch.
 
