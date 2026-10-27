@@ -148,10 +148,21 @@ export FLOCK_JOB_LABELS="run=$RUN"              # -> worker labels, so `list` fi
 # itself; with the default export the worker inherits this environment (same user: tolerable).
 # hopper-cpu MaxMemPerCPU=2000: keep FLOCK_SLURM_MEM / FLOCK_SLURM_CPUS at or under 2000 MB per CPU
 # (7G / 4 = 1792) or Slurm silently raises the CPU count.
+# WORKER_CPUS / WORKER_MEM in run.env (sourced by common.sh at run time, so a requeued controller
+# picks them up) size the workers launched from then on; the guard below enforces the 2000 MB/CPU
+# rule, the Slurm client checks the 28 CPU / 54G node rule (slurm.py size_problem).
 export FLOCK_SLURM_PARTITION=hopper-cpu
-export FLOCK_SLURM_CPUS=4                       # 12 agents per worker: 2x cpu-basic (fact sheet §4)
-export FLOCK_SLURM_MEM=7G                       # 1.75 GB/CPU -> 4 CPUs; the 28/54 size rule holds
+export FLOCK_SLURM_CPUS=${WORKER_CPUS:-4}       # 12 agents per worker: 2x cpu-basic (fact sheet §4)
+export FLOCK_SLURM_MEM=${WORKER_MEM:-7G}        # 1.75 GB/CPU -> 4 CPUs; the 28/54 size rule holds
 export FLOCK_SLURM_TIME=54:00:00                # matches worker_lifetime 54h; run duration is 48h
+case $FLOCK_SLURM_CPUS in ''|0|*[!0-9]*) die "WORKER_CPUS=$FLOCK_SLURM_CPUS: must be a positive integer";; esac
+_mem_n=${FLOCK_SLURM_MEM%[GgMm]}                # sbatch --mem: an integer, bare (MB) or with M or G
+case $_mem_n in ''|*[!0-9]*) die "WORKER_MEM=$FLOCK_SLURM_MEM: use an integer with M or G (e.g. 7G, 11G, 3800M)";; esac
+case $FLOCK_SLURM_MEM in *[Gg]) _mem_mb=$(( _mem_n * 1024 ));; *) _mem_mb=$_mem_n;; esac
+_mem_per_cpu=$(( (_mem_mb + FLOCK_SLURM_CPUS - 1) / FLOCK_SLURM_CPUS ))  # ceiling, as Slurm rounds
+[ "$_mem_per_cpu" -le 2000 ] \
+  || die "WORKER_MEM=$FLOCK_SLURM_MEM / WORKER_CPUS=$FLOCK_SLURM_CPUS = $_mem_per_cpu MB per CPU, over hopper-cpu MaxMemPerCPU=2000: raise WORKER_CPUS or lower WORKER_MEM"
+unset _mem_n _mem_mb _mem_per_cpu
 export FLOCK_SLURM_WORKER_SCRIPT=$SLURM_DIR/worker.sbatch
 export FLOCK_SLURM_LAUNCH_DIR=$RUN_DIR/launch   # one mode-600 env file per worker launch (worker.env.example)
 export FLOCK_SLURM_LOG_DIR=$RUN_DIR/logs        # sbatch -o <dir>/<worker id>-%j.out, so logs_tail can read them
