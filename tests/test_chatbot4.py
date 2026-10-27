@@ -834,3 +834,106 @@ def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
     rec = submit(world, clone)
     first = world.repo.patch_id(rec["base_sha"], rec["head_sha"])
     assert first and world.repo.patch_ids[(rec["base_sha"], rec["head_sha"])] == first
+
+
+def _review(world, rec, who, verdict, comment="Looked at the diff"):
+    return world.call("review_pr", {"pr": rec["pr"], "head_sha": rec["head_sha"],
+                                    "verdict": verdict, "comment": comment}, Agent(who))
+
+
+def test_review_news_reaches_the_author_once_and_never_on_a_refusal(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    result = _review(world, rec, "birch", "request_changes", "Please add a test. " + "x" * 300)
+    assert "inbox" not in result  # the reviewer acted; no news for it
+    with pytest.raises(ToolError):
+        world.call("list_prs", {"state": "bogus"}, Agent("cedar"))
+    with pytest.raises(ToolError):
+        world.call("merge_pr", {"pr": rec["pr"]}, Agent("cedar"))
+    got = world.call("list_prs", {"author": "cedar"}, Agent("cedar"))
+    assert set(got) == {"prs", "inbox"} and got["prs"][0]["pr"] == rec["pr"]
+    [line] = got["inbox"]
+    assert line.startswith(f"birch reviewed your PR #{rec['pr']}: request_changes: Please add a test.")
+    assert line.endswith("(just now)") and len(line) < 220
+    again = world.call("list_prs", {"author": "cedar"}, Agent("cedar"))
+    assert isinstance(again, list) and again[0]["pr"] == rec["pr"]
+    assert world.state["inbox"].get("cedar") is None
+
+
+def test_update_after_request_changes_tells_the_reviewer_and_approval_tells_mergeable(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    _review(world, rec, "birch", "request_changes")
+    _review(world, rec, "aspen", "approve")
+    (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hi!"\n')
+    new = world.call_workspace("open_pr", {"branch": "greeting", "title": "Improve greetings",
+                               "description": "Added a test.", "pr": rec["pr"]},
+                               Agent("cedar"), capture(clone.parent, clone.name))
+    assert len(new["inbox"]) == 2  # birch's and aspen's reviews, no mergeable (changes requested)
+    assert not any("ready to merge_pr" in line for line in new["inbox"])
+    assert "cedar" not in world.state["inbox"]
+    assert "aspen" not in world.state["inbox"]  # aspen approved: no re-review notice
+    [notice] = world.call("list_prs", {}, Agent("birch"))["inbox"]
+    assert notice.startswith(f"PR #{rec['pr']} was updated by cedar after your request_changes")
+    _review(world, new, "birch", "approve", "Thanks")
+    inbox = world.call("run_bot", {"ref_or_path": "main", "lines": ["Hello"]}, Agent("cedar"))["inbox"]
+    assert inbox[0].startswith(f"birch reviewed your PR #{rec['pr']}: approve: Thanks")
+    assert inbox[1].startswith(f"PR #{rec['pr']} approved by birch; ready to merge_pr")
+    world.call("merge_pr", {"pr": rec["pr"]}, Agent("cedar"))  # own merge: no news
+    assert "cedar" not in world.state["inbox"]
+
+
+def test_merge_and_close_by_others_are_news_for_the_author(setup):
+    world, clone, _ = setup
+    world.operators = {"oak"}
+    one = submit(world, clone, branch="first")
+    _module(clone, "second", "Second")
+    two = submit(world, clone, branch="second")
+    _review(world, one, "birch", "approve")
+    world.call("merge_pr", {"pr": one["pr"]}, Agent("birch"))
+    world.call("close_pr", {"pr": two["pr"], "reason": "duplicate of #1"}, Agent("oak"))
+    inbox = world.call("list_prs", {"state": "all"}, Agent("cedar"))["inbox"]
+    assert inbox[-2].startswith(f"your PR #{one['pr']} was merged by birch")
+    assert inbox[-1].startswith(f"your PR #{two['pr']} was closed by oak: duplicate of #1")
+    assert not any("ready to merge_pr" in line for line in inbox)  # superseded by the merge
+
+
+def test_inbox_is_capped_deduped_and_survives_a_restart(setup):
+    world, clone, _ = setup
+    with world.lock:
+        for n in range(30):
+            world._notify("cedar", n, "merged", f"news {n}")
+        world._notify("cedar", 29, "merged", "news 29 again")
+        world._notify("cedar", 29, "closed", "closed 29")
+        world._save()
+    box = world.state["inbox"]["cedar"]
+    assert len(box) == 20 and [e["text"] for e in box[-2:]] == ["news 29 again", "closed 29"]
+    assert sum(e["pr"] == 29 for e in box) == 2
+    restarted = Chatbot4World(world.ws, world.repo)
+    inbox = restarted.call("list_prs", {}, Agent("cedar"))["inbox"]
+    assert len(inbox) == 20 and inbox[-1] == "closed 29 (just now)"
+    assert Chatbot4World(world.ws, world.repo).state["inbox"] == {}  # delivery was saved
+    state = json.loads(world.db.read_text())
+    del state["inbox"]  # an archive from before the inbox existed
+    world.db.write_text(json.dumps(state))
+    old = Chatbot4World(world.ws, world.repo)
+    assert old.call("list_prs", {}, Agent("cedar")) == []
+    rec = submit(old, clone)
+    _review(old, rec, "birch", "approve")
+    assert len(old.call("list_prs", {}, Agent("cedar"))["inbox"]) == 2
+
+
+def test_inbox_age_and_idempotent_retry_keep_the_cached_result(setup):
+    world, clone, _ = setup
+    assert [Chatbot4World._age(s) for s in (5, 180, 7200, 200000)] == [
+        "just now", "3 min ago", "2 h ago", "2 d ago"]
+    first = world.call_workspace("open_pr", {"branch": "greeting", "title": "Improve greetings",
+                                 "description": "Tested."}, Agent("cedar", request_id="k1"),
+                                 capture(clone.parent, clone.name))
+    with world.lock:
+        world._notify("cedar", 99, "merged", "news")
+    retry = world.call_workspace("open_pr", {"branch": "greeting", "title": "Improve greetings",
+                                 "description": "Tested."}, Agent("cedar", request_id="k1"),
+                                 capture(clone.parent, clone.name))
+    assert retry["inbox"] == ["news (just now)"] and retry["pr"] == first["pr"]
+    assert "inbox" not in world.state["requests"]["k1"]

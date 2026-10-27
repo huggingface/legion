@@ -38,6 +38,8 @@ CALL_BUDGET = float(os.environ.get("CHATBOT_CALL_BUDGET_S", "50"))
 PUSH_RETRY_DELAYS = (2, 5)
 PUSH_ESTIMATE_S = 8.0  # time kept free for one more push attempt
 BUSY = "the Hub is busy; retry in about a minute"
+INBOX_MAX = 20  # unread inbox entries kept per agent (oldest dropped)
+INBOX_SNIPPET = 160  # review comment characters quoted in an inbox entry
 PAUSED = "PRs are paused by the operators; keep working locally, run_bot and reviews still work"
 log = logging.getLogger(__name__)
 
@@ -66,7 +68,9 @@ class Chatbot4World(World):
     capabilities: ClassVar[list[str]] = ["workspace-upload-v1"]
     description = ("Edit your local git clone, then submit with open_pr. Another agent must "
                    "approve the PR's current change (a clean rebase keeps the approval) before merge. Bot input/output and module loading "
-                   "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation.")
+                   "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation. "
+                   "Tool results may carry an `inbox` with news about your PRs (reviews, "
+                   "merges, closes, updates); handle it first.")
 
     def __init__(self, ws=None, repository=None):
         protect_supervisor()
@@ -96,6 +100,8 @@ class Chatbot4World(World):
         self.pause_file = Path(os.environ.get("CHATBOT_PRS_PAUSED_FILE") or self.ws / "prs-paused")
         # Hub PRs whose head could not be pushed: branch ref -> draft, reused by the next open_pr.
         self.state.setdefault("drafts", {})
+        # Unread news per agent: name -> [{"pr", "kind", "text", "ts"}], newest last.
+        self.state.setdefault("inbox", {})
         with self.lock:  # the archive may predate merges that already landed on the Hub
             for rec in self.state["prs"].values():
                 if rec["state"] == "closing":  # interrupted close_pr: the author may retry
@@ -183,6 +189,51 @@ class Chatbot4World(World):
         if changed:
             self._save()
         return changed
+
+    def _notify(self, name, pr, kind, text):
+        """Queue news for agent name (call with the lock held; the caller saves). One entry
+        per (pr, kind): a repeated event replaces the older one. Keeps the newest INBOX_MAX."""
+        box = [e for e in self.state["inbox"].get(name, ()) if (e["pr"], e["kind"]) != (pr, kind)]
+        box.append({"pr": pr, "kind": kind, "text": text, "ts": time.time()})
+        self.state["inbox"][name] = box[-INBOX_MAX:]
+
+    def _unnotify(self, name, pr, kind):
+        box = self.state["inbox"].get(name)
+        if box:
+            self.state["inbox"][name] = [e for e in box if (e["pr"], e["kind"]) != (pr, kind)]
+
+    @staticmethod
+    def _age(seconds):
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            return f"{seconds // 60} min ago"
+        if seconds < 86400:
+            return f"{seconds // 3600} h ago"
+        return f"{seconds // 86400} d ago"
+
+    def call(self, tool, args, agent):
+        """Run the tool; on success, attach and clear the caller's unread inbox.
+
+        A dict result gets a top-level "inbox" list of strings (newest last). A list result
+        (list_prs) becomes {"prs": [...], "inbox": [...]}, only when the inbox is non-empty.
+        A ToolError leaves the inbox untouched."""
+        result = super().call(tool, args, agent)
+        if inspect.isawaitable(result) or not self.state["inbox"].get(agent.name):
+            return result
+        with self.lock:
+            box = self.state["inbox"].pop(agent.name, None)
+            if not box:
+                return result
+            self._save()
+        now = time.time()
+        inbox = [f"{e['text']} ({self._age(now - e['ts'])})" for e in box]
+        if isinstance(result, dict):
+            return {**result, "inbox": inbox}
+        if isinstance(result, list):
+            return {"prs": result, "inbox": inbox}
+        return {"result": result, "inbox": inbox}
 
     def _identity(self, agent):
         if not NAME.fullmatch(agent.name):
@@ -357,6 +408,11 @@ class Chatbot4World(World):
                           "reviews": dict(old["reviews"]) if old else {}}
                 self.state["prs"][str(number)] = record
                 self.state["drafts"].pop(branch_ref, None)
+                for name, r in (old["reviews"] if old else {}).items():
+                    if r["verdict"] == "request_changes" and name != agent.name:
+                        self._notify(name, number, "updated",
+                                     f"PR #{number} was updated by {agent.name} after your "
+                                     "request_changes; re-review the new head")
                 result = {k: v for k, v in record.items() if k != "reviews"}
                 if base != main:
                     result["rebased_from"] = base
@@ -482,7 +538,21 @@ class Chatbot4World(World):
         with self._hub_write(agent, "comment", pr):
             self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
         with self.lock:
-            check()["reviews"][agent.name] = review
+            rec = check()
+            rec["reviews"][agent.name] = review
+            snippet = " ".join(comment.split())
+            if len(snippet) > INBOX_SNIPPET:
+                snippet = snippet[:INBOX_SNIPPET - 3] + "..."
+            author = rec["author"]
+            self._notify(author, pr, f"review:{agent.name}",
+                         f"{agent.name} reviewed your PR #{pr}: {verdict}: {snippet}")
+            try:
+                approvers = self._approved(rec)
+            except ToolError:
+                self._unnotify(author, pr, "mergeable")
+            else:
+                self._notify(author, pr, "mergeable", f"PR #{pr} approved by "
+                             f"{', '.join(sorted(approvers))}; ready to merge_pr")
             self._save()
             self._event("reviewed", agent, pr=pr, **review)
             return {"pr": pr, "reviewer": agent.name, **review}
@@ -567,6 +637,9 @@ class Chatbot4World(World):
             self.repo.fetch()
             merged = self.repo.sha()
             rec.update(state="merged", merged_sha=merged)
+            if rec["author"] != agent.name:
+                self._unnotify(rec["author"], pr, "mergeable")
+                self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
             self._save()
             event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
                      "parent_sha": main, "head_sha": head, "merged_sha": merged}
@@ -617,10 +690,17 @@ class Chatbot4World(World):
             raise
         with self.lock:
             rec.update(state="closed", closed_by=agent.name, close_reason=reason)
+            self._notify_closed(agent, rec["author"], pr, reason)
             self._save()
             event = {"pr": pr, "author": rec["author"], "head_sha": rec["head_sha"], "reason": reason}
             self._event("pr_closed", agent, **event)
             return {**event, "state": "closed", "closed_by": agent.name}
+
+    def _notify_closed(self, agent, author, pr, reason):
+        if author != agent.name:
+            self._unnotify(author, pr, "mergeable")
+            self._notify(author, pr, "closed",
+                         f"your PR #{pr} was closed by {agent.name}: {reason[:INBOX_SNIPPET]}")
 
     def _close_draft(self, agent, draft, reason):
         pr = draft["pr"]
@@ -633,6 +713,7 @@ class Chatbot4World(World):
             self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
         with self.lock:
             self.state["drafts"].pop(draft["branch"], None)
+            self._notify_closed(agent, draft["author"], pr, reason)
             self._save()
             event = {"pr": pr, "author": draft["author"], "head_sha": None, "reason": reason}
             self._event("pr_closed", agent, draft=True, **event)
@@ -646,6 +727,7 @@ class Chatbot4World(World):
         A PR with "draft": true is open on the Hub but its head is not pushed yet (head_sha is
         null); it counts toward its author's open PRs and cannot be reviewed or merged until
         its author retries open_pr with pr=<number>.
+        Returns a list of PRs; if you have unread inbox news it is {"prs": [...], "inbox": [...]}.
         """
         if offset < 0:
             raise ToolError("offset must be nonnegative")
