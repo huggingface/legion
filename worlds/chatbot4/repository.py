@@ -50,6 +50,10 @@ class Repository:
         self.patch_ids = {}  # (base, head) -> stable patch-id or None
         self.env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_LFS_SKIP_SMUDGE": "1"}
+        # The dataset is public: PR refs are fetched anonymously first (the Hub throttles git
+        # fetches per token), then with the token. CHATBOT_ANON_FETCH=0 disables it.
+        self.anonymous = (remote.startswith("https://")
+                          and os.environ.get("CHATBOT_ANON_FETCH", "1").strip() != "0")
         if hub is not None:
             # The URL, argv and repository config contain no token.
             askpass = root.parent / "git-askpass.py"
@@ -67,9 +71,9 @@ class Repository:
                 bundle.unlink()
         self.fetch()
 
-    def git(self, *args, at=None, data=None):
+    def git(self, *args, at=None, data=None, env=None):
         p = subprocess.run(["git", "-C", str(at or self.root), *args], input=data,
-                           capture_output=True, env=self.env, timeout=120, check=False)
+                           capture_output=True, env=env or self.env, timeout=120, check=False)
         if p.returncode:
             # Git's stderr can contain remote data or credentials: never expose it to agents;
             # the world's log gets it redacted.
@@ -82,13 +86,27 @@ class Repository:
             raise ToolError("repository operation failed; refresh your clone and retry", code)
         return p.stdout.decode().strip()
 
+    def negotiation(self):
+        """Offer only main's history as haves: with ~2,000 local refs the default negotiation
+        makes the request large enough for the Hub to drop it. Git refuses a tip that doesn't
+        exist yet (before the first fetch), so it's passed only when main is there."""
+        p = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--verify", "-q", "refs/heads/main"],
+                           env=self.env, capture_output=True, timeout=10, check=False)
+        return ["--negotiation-tip=refs/heads/main"] if p.returncode == 0 else []
+
+    def hub_fetch(self, remote, *specs, options=(), env=None):
+        """Every fetch from the Hub: protocol v2 (explicit; v0 floods haves) with main as the
+        only negotiation tip, explicit refspecs only (the Hub drops wildcard PR-ref fetches)."""
+        self.git("-c", "protocol.version=2", *options, "fetch", "--no-write-fetch-head",
+                 *self.negotiation(), remote, *specs, env=env)
+
     def fetch(self):
         """Fetch main only. The world writes refs/pr/N itself after every push (update_ref), so
         PR refs never come from the Hub here; a wildcard over refs/pr/* is also refused by the
         Hub's git backend once there are many PRs (hang-up / 'expected acknowledgments')."""
         with self.refs_lock:
             started = time.monotonic()
-            self.git("fetch", "--no-write-fetch-head", "origin", "+refs/heads/main:refs/heads/main")
+            self.hub_fetch("origin", "+refs/heads/main:refs/heads/main")
             self.fetched = started
 
     def has_commit(self, sha):
@@ -98,19 +116,36 @@ class Repository:
                            env=self.env, capture_output=True, timeout=10, check=False)
         return p.returncode == 0
 
+    def fetch_anonymous(self, *specs):
+        """Fetch specs from the plain remote URL without credentials (no askpass, no token, no
+        credential helper). Never raises: returns False on failure (or when disabled)."""
+        if not self.anonymous:
+            return False
+        env = {k: v for k, v in self.env.items()
+               if k not in ("GIT_ASKPASS", "SSH_ASKPASS", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")}
+        try:
+            with self.refs_lock:
+                self.hub_fetch(self.remote, *specs, options=("-c", "credential.helper="), env=env)
+            return True
+        except Exception:  # noqa: BLE001 - logged by git() (the URL holds no credentials)
+            return False
+
     def fetch_pr_refs(self, numbers, batch=8, delays=(1, 3, 9)):
         """Fetch refs/pr/N for the given PR numbers from the Hub, explicitly, in small batches
-        (the Hub hangs up on large or wildcard PR-ref fetches). Never raises: a batch that still
-        fails after the retries is logged, and the list of PR numbers left unfetched is returned."""
+        (the Hub hangs up on large or wildcard PR-ref fetches): anonymously first, then with the
+        token. Never raises: a batch that still fails after the retries is logged, and the list
+        of PR numbers left unfetched is returned."""
         missing = []
         numbers = [int(n) for n in numbers]
         for start in range(0, len(numbers), batch):
             chunk = numbers[start:start + batch]
             specs = [f"+refs/pr/{n}:refs/pr/{n}" for n in chunk]
+            if self.fetch_anonymous(*specs):
+                continue
             for attempt, delay in enumerate(delays + (None,)):
                 try:
                     with self.refs_lock:
-                        self.git("fetch", "--no-write-fetch-head", "origin", *specs)
+                        self.hub_fetch("origin", *specs)
                     break
                 except ToolError:
                     if delay is None:
@@ -121,10 +156,13 @@ class Repository:
         return missing
 
     def fetch_ref(self, remote_ref, local_ref):
-        """Fetch one ref from the Hub into local_ref. Never raises: returns False on failure."""
+        """Fetch one ref from the Hub into local_ref, anonymously first, then with the token.
+        Never raises: returns False on failure."""
+        if self.fetch_anonymous(f"+{remote_ref}:{local_ref}"):
+            return True
         try:
             with self.refs_lock:
-                self.git("fetch", "--no-write-fetch-head", "origin", f"+{remote_ref}:{local_ref}")
+                self.hub_fetch("origin", f"+{remote_ref}:{local_ref}")
             return True
         except Exception:  # noqa: BLE001 - logged by git(); the caller refuses cleanly
             return False
@@ -230,6 +268,9 @@ class Hub:
         if not token:
             raise ToolError("HF_TOKEN is required for the bucket and dataset", "configuration")
         self.api = HfApi(token=token)
+        self.refs_ttl = float(os.environ.get("CHATBOT_HUB_REFS_TTL_S", "5"))
+        self.refs_lock = threading.Lock()  # one refresh at a time; waiters reuse its result
+        self.refs_cache, self.refs_at = None, 0.0
 
     def request(self, method, **kwargs):
         # Retry 429 only (only merges call this under the world's state lock); other
@@ -251,6 +292,25 @@ class Hub:
                 # The world reports this as an internal error with an id; name the class here.
                 log.warning("Hub call %s failed for %s: %s", method, self.repo_id, type(exc).__name__)
                 raise
+
+    def refs(self):
+        """{ref: sha} for the Hub's refs/pr/N and refs/heads/<branch>, from the refs API (a
+        read: no Hub-write slot). Cached for CHATBOT_HUB_REFS_TTL_S so a burst costs one
+        request; on failure, a WARNING and the stale cache (or {})."""
+        with self.refs_lock:
+            if self.refs_cache is not None and time.monotonic() - self.refs_at < self.refs_ttl:
+                return self.refs_cache
+            try:
+                found = self.request("list_repo_refs", include_pull_requests=True)
+                refs = {r.ref: r.target_commit for r in [*(found.branches or []),
+                                                         *(found.pull_requests or [])]
+                        if r.ref and r.target_commit}
+            except Exception as exc:  # noqa: BLE001 - request() logged the details, never secrets
+                log.warning("Hub refs not listed for %s (%s); using %s", self.repo_id,
+                            type(exc).__name__, "the stale cache" if self.refs_cache else "nothing")
+                return self.refs_cache or {}
+            self.refs_cache, self.refs_at = refs, time.monotonic()
+            return refs
 
     def open(self, title, description):
         pr = self.request("create_pull_request", title=title, description=description)

@@ -18,7 +18,7 @@ from flock.world.workspace import capture
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worlds/chatbot4"))
 from chatbot4 import Chatbot4World
-from repository import Repository
+from repository import Hub, Repository
 from sandbox import run
 
 
@@ -1174,3 +1174,148 @@ def test_a_lease_rejection_has_its_own_code(setup):
     with pytest.raises(ToolError) as err:
         world.repo.push("1" * 40, "refs/pr/999")
     assert err.value.code == "git_error"
+
+
+def test_stale_lease_adopts_the_hub_head_from_the_refs_api(setup, monkeypatch, caplog):
+    world, clone, remote = setup
+    rec, gap = _hub_moved_past_the_record(world, clone, remote)
+    assert not world.repo.has_commit(gap)  # the lease needs the sha only, not the object
+    calls = []
+    world.repo.hub.refs = lambda: calls.append(1) or {f"refs/pr/{rec['pr']}": gap,
+                                                      f"refs/heads/{rec['branch']}": gap}
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda *a, **k: pytest.fail("fetched"))
+    monkeypatch.setattr(world.repo, "fetch_ref", lambda *a, **k: pytest.fail("fetched"))
+    caplog.set_level("WARNING")
+    _module(clone, "later", "a later change")
+    new = submit(world, clone, pr=rec["pr"])
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
+    assert git(remote, "rev-parse", f"refs/heads/{rec['branch']}") == new["head_sha"]
+    assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
+    assert f"adopted Hub head for PR #{rec['pr']} after a stale lease (via API)" in caplog.text
+    assert calls == [1]  # the branch push then leases on the adopted head: no second lookup
+
+
+@pytest.mark.parametrize("api", ["empty", "raises"])
+def test_refs_api_failure_falls_back_to_git_fetch_then_refuses(setup, monkeypatch, api):
+    world, clone, remote = setup
+    rec, _gap = _hub_moved_past_the_record(world, clone, remote)
+
+    def refs():
+        if api == "raises":
+            raise RuntimeError("down")
+        return {}
+
+    world.repo.hub.refs = refs
+    calls, real = [], world.repo.fetch_pr_refs
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda numbers, **kw: calls.append(numbers) or list(numbers))
+    _module(clone, "later", "a later change")
+    with pytest.raises(ToolError, match="newer than the world's record") as err:
+        submit(world, clone, pr=rec["pr"])
+    assert err.value.code == "stale_lease" and calls == [[rec["pr"]]]
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", real)  # the git fetch works: adopt and land
+    new = submit(world, clone, pr=rec["pr"])
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
+
+
+class _Ref:
+    def __init__(self, ref, sha):
+        self.ref, self.target_commit, self.name = ref, sha, ref.rsplit("/", 1)[-1]
+
+
+class _Refs:
+    def __init__(self):
+        self.branches = [_Ref("refs/heads/main", "a" * 40), _Ref("refs/heads/greeting", "b" * 40)]
+        self.pull_requests = [_Ref("refs/pr/7", "c" * 40)]
+        self.converts, self.tags = [_Ref("refs/convert/parquet", "d" * 40)], []
+
+
+def test_hub_refs_map_is_cached_per_burst_and_survives_failures(monkeypatch, caplog):
+    import threading
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_token")
+    monkeypatch.setenv("CHATBOT_HUB_REFS_TTL_S", "60")
+    hub = Hub("org/data")
+    calls, fail = [], []
+
+    class Api:
+        def list_repo_refs(self, repo_id, repo_type, include_pull_requests):
+            calls.append((repo_id, repo_type, include_pull_requests))
+            if fail:
+                raise RuntimeError("down")
+            return _Refs()
+
+    hub.api = Api()
+    caplog.set_level("WARNING")
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(hub.refs())) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    expected = {"refs/heads/main": "a" * 40, "refs/heads/greeting": "b" * 40, "refs/pr/7": "c" * 40}
+    assert results == [expected] * 8 and calls == [("org/data", "dataset", True)]
+    hub.refs_at -= 61  # the TTL expired: one new request; a failure keeps the stale map
+    fail.append(1)
+    assert hub.refs() == expected and len(calls) == 2
+    assert "Hub refs not listed for org/data" in caplog.text and "hf_secret_token" not in caplog.text
+    hub.refs_cache = None
+    assert hub.refs() == {} and len(calls) == 3
+
+
+def test_pr_refs_are_fetched_anonymously_first(setup, monkeypatch):
+    world, clone, remote = setup
+    rec, gap = _hub_moved_past_the_record(world, clone, remote)
+    repo, real, seen = world.repo, world.repo.git, []
+
+    def spy(*args, **kw):
+        if "fetch" in args:
+            seen.append((str(remote) in args, "GIT_ASKPASS" in (kw.get("env") or repo.env), "credential.helper=" in args))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(repo, "git", spy)
+    repo.env["GIT_ASKPASS"] = "/nonexistent-askpass"  # the authenticated path's helper
+    repo.anonymous = True
+    assert repo.fetch_pr_refs([rec["pr"]]) == [] and repo.has_commit(gap)
+    assert seen == [(True, False, True)]  # the plain URL, no askpass, no credential helper
+    seen.clear()
+    repo.remote = str(remote.parent / "missing.git")  # the anonymous fetch fails: use the token
+    git(remote, "update-ref", "refs/pr/99", gap)
+    assert repo.fetch_pr_refs([99], delays=()) == []
+    assert seen == [(False, False, True), (False, True, False)]
+    repo.anonymous = False  # disabled (a local or private remote): straight to the token
+    seen.clear()
+    assert repo.fetch_ref(f"refs/heads/{rec['branch']}", "refs/flock/hub/x")
+    assert seen == [(False, True, False)]
+
+
+def test_hub_fetches_offer_only_mains_history(setup, monkeypatch):
+    world, clone, remote = setup
+    rec, _gap = _hub_moved_past_the_record(world, clone, remote)
+    repo, real, fetches = world.repo, world.repo.git, []
+
+    def spy(*args, **kw):
+        if "fetch" in args:
+            fetches.append(args)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(repo, "git", spy)
+    repo.fetch()
+    repo.anonymous = True
+    assert repo.fetch_pr_refs([rec["pr"]]) == []  # anonymous
+    repo.anonymous = False
+    assert repo.fetch_pr_refs([rec["pr"]]) == []  # with the token
+    assert repo.fetch_ref(f"refs/heads/{rec['branch']}", "refs/flock/hub/x")
+    assert len(fetches) == 4
+    for args in fetches:  # git -c protocol.version=2 [...] fetch ... --negotiation-tip=refs/heads/main
+        at = args.index("fetch")
+        assert args[:2] == ("-c", "protocol.version=2")
+        assert "--negotiation-tip=refs/heads/main" in args[at:]
+        assert not any("*" in a for a in args)  # explicit refspecs only
+
+
+def test_the_first_fetch_of_an_empty_repository_skips_the_negotiation_tip(tmp_path):
+    seed = tmp_path / "seed"
+    git(tmp_path, "init", "-q", "-b", "main", str(seed))
+    git(seed, "-c", "user.name=s", "-c", "user.email=s@x", "commit", "-q", "--allow-empty", "-m", "s")
+    repo = Repository(tmp_path / "w" / "repo.git", str(seed))
+    assert repo.negotiation() == ["--negotiation-tip=refs/heads/main"]
+    assert repo.sha() == git(seed, "rev-parse", "main")

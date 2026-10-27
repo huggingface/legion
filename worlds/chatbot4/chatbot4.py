@@ -687,8 +687,8 @@ class Chatbot4World(World):
     def _lease_push(self, agent, pr, sha, ref, expected, started):
         """Push sha to ref (refs/pr/N or the PR's branch) with a lease on expected; the caller
         holds a Hub slot, never the world lock. On a stale lease (the Hub's ref moved past the
-        world's record, e.g. after a restart from an older archive), fetch the Hub's value,
-        adopt it (for refs/pr/N: into the record's head_sha) and retry the push once.
+        world's record, e.g. after a restart from an older archive), read the Hub's value from
+        the refs API (or, failing that, fetch it with git), adopt it (for refs/pr/N: into the record's head_sha) and retry the push once.
         Returns the expected value the push landed with."""
         try:
             self.repo.push(sha, ref, expected=expected)
@@ -699,19 +699,29 @@ class Chatbot4World(World):
         refusal = ToolError(f"your PR #{pr}'s head on the Hub is newer than the world's record; "
                             f"the world is catching up, retry open_pr with pr={pr} in a minute",
                             "stale_lease")
-        room = started + CALL_BUDGET - time.monotonic()
-        if ref == f"refs/pr/{pr}":
-            local = ref
-            fetched = not self.repo.fetch_pr_refs([pr], delays=(1,) if room > 1 + 2 * PUSH_ESTIMATE_S else ())
-        else:
-            local = f"refs/flock/hub/{ref.removeprefix('refs/')}"
-            fetched = self.repo.fetch_ref(ref, local)
-        hub = None
-        if fetched:
+        # The refs API gives the Hub's value (the lease needs only the sha, not the object);
+        # a git fetch of the ref is the fallback when the API gives nothing.
+        hub, via = None, ""
+        refs = getattr(self.repo.hub, "refs", None)
+        if refs is not None:
             try:
-                hub = self.repo.git("rev-parse", "--verify", f"{local}^{{commit}}")
-            except ToolError:
-                hub = None
+                hub = refs().get(ref)
+            except Exception as e:  # noqa: BLE001 - fall back to the git fetch
+                log.warning("Hub refs lookup failed for PR #%s: %s", pr, type(e).__name__)
+            via = " (via API)" if hub else ""
+        if not hub:
+            room = started + CALL_BUDGET - time.monotonic()
+            if ref == f"refs/pr/{pr}":
+                local = ref
+                fetched = not self.repo.fetch_pr_refs([pr], delays=(1,) if room > 1 + 2 * PUSH_ESTIMATE_S else ())
+            else:
+                local = f"refs/flock/hub/{ref.removeprefix('refs/')}"
+                fetched = self.repo.fetch_ref(ref, local)
+            if fetched:
+                try:
+                    hub = self.repo.git("rev-parse", "--verify", f"{local}^{{commit}}")
+                except ToolError:
+                    hub = None
         if not hub or hub == expected:
             log.warning("stale lease on %s for PR #%s (agent=%s): Hub head not fetched; refused",
                         ref, pr, agent.name)
@@ -723,10 +733,10 @@ class Chatbot4World(World):
                     raise ToolError("the PR was merged or closed during the update")
                 rec["head_sha"] = hub
                 self._save()
-            log.warning("adopted Hub head for PR #%s after a stale lease: %s -> %s",
-                        pr, expected[:12], hub[:12])
+            log.warning("adopted Hub head for PR #%s after a stale lease%s: %s -> %s",
+                        pr, via, expected[:12], hub[:12])
         else:
-            log.warning("adopted Hub value of %s for PR #%s after a stale lease", ref, pr)
+            log.warning("adopted Hub value of %s for PR #%s after a stale lease%s", ref, pr, via)
         if time.monotonic() + PUSH_ESTIMATE_S > started + CALL_BUDGET:
             raise refusal
         try:
