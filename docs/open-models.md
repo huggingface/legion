@@ -140,7 +140,7 @@ shows $0 today.
 makes the controller probe each distinct provider-backed model the way a harness starts: two
 turns, streamed on the Responses API for `openai_compat` (shaped like Codex's requests:
 `store: false`, encrypted reasoning, parallel tool calls), non-streamed Chat Completions with
-`extra` for types on the `llm` harness (a tool call written as text passes with a warning,
+`extra` for types on the `llm` or `pi` harness (a tool call written as text passes with a warning,
 since that harness accepts it), or the Messages API for `anthropic`.
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,

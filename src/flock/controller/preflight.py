@@ -7,7 +7,7 @@ result and must complete. A server that accepts turn one but fails the follow-up
 auto provider choice did, 2026-10-16) fails preflight. Zero reported usage is a warning. `openai_compat` providers are probed on the Responses API,
 because that is the only wire Codex 0.162.1 speaks (`wire_api = "chat"` is rejected);
 `anthropic` providers on the Messages API, which is what Claude Code speaks. Types whose harness
-is `llm` are probed on Chat Completions, non-streamed with the alias's `extra`, as that harness
+is `llm` or `pi` are probed on Chat Completions, non-streamed with the alias's `extra`, as that harness
 sends them; a tool call the model writes as text (which the harness accepts) passes with a
 warning.
 """
@@ -322,8 +322,8 @@ async def probe(
 
 
 def api_for(harness: Harness, r: ResolvedModel) -> str:
-    """The wire API a type's harness speaks to its provider."""
-    if harness == Harness.llm:
+    """The wire API a type's harness speaks to its provider (`llm` and Pi: chat completions)."""
+    if harness in (Harness.llm, Harness.pi):
         return "chat_completions"
     return "responses" if r.provider.type == "openai_compat" else "messages"
 
