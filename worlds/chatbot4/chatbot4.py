@@ -172,18 +172,28 @@ class Chatbot4World(World):
             if not old and sum(r["state"] == "open" and r["author"] == agent.name
                                for r in self.state["prs"].values()) >= 2:
                 raise ToolError("at most two open PRs per agent")
+            branch_ref = f"agents/{agent.name}/{branch}"
+            if not old and any(r["branch"] == branch_ref for r in self.state["prs"].values()):
+                raise ToolError("branch slug already used; choose a new topic slug")
             with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
                 tree = Path(tmp) / "tree"
                 self.repo.checkout(base, tree)
                 self._files(snapshot, tree)
                 self._contract(tree, self.repo.staged(tree))
-                sha = self.repo.commit(tree, base, agent.name, title)
-            branch_ref = f"agents/{agent.name}/{branch}"
-            if not old and any(r["branch"] == branch_ref for r in self.state["prs"].values()):
-                raise ToolError("branch slug already used; choose a new topic slug")
+                # An older base is rebased onto main here, before anything exists on the Hub.
+                sha = self.repo.commit(tree, base, agent.name, title, onto=main)
+            rebased_from, base = (base, main) if base != main else (None, base)
             number = pr if old else self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {base}\n\n{description}")
             # Only agent/PR refs may be replaced, with an exact expected old head.
-            self.repo.push(sha, f"refs/pr/{number}", expected=old["head_sha"] if old else None)
+            try:
+                self.repo.push(sha, f"refs/pr/{number}", expected=old["head_sha"] if old else None)
+            except ToolError:
+                if not old:  # never leave an orphan Hub PR behind
+                    try:
+                        self.repo.hub.close(number, "Closed by the world: the head could not be pushed.")
+                    except ToolError:
+                        pass
+                raise
             self.repo.push(sha, f"refs/heads/{branch_ref}", expected=old["head_sha"] if old else None)
             if not old:
                 self.repo.hub.ready(number)
@@ -194,6 +204,10 @@ class Chatbot4World(World):
                       "title": title, "description": description, "reviews": {}}
             self.state["prs"][str(number)] = record
             result = {k: v for k, v in record.items() if k != "reviews"}
+            if rebased_from:
+                result["rebased_from"] = rebased_from
+                result["note"] = (f"rebased onto main {main[:12]}; run git fetch origin "
+                                  f"refs/pr/{number} and continue from FETCH_HEAD")
             if key:
                 self.state["requests"][key] = result
             self._save()

@@ -71,11 +71,23 @@ class Repository:
                          "--diff-filter=AM", "HEAD", at=tree)
         return [name for name in names.split("\0") if name]
 
-    def commit(self, tree, parent, author, title):
+    def commit(self, tree, parent, author, title, onto=None):
+        """Commit tree on parent; with onto != parent, replay that commit onto it."""
+        who = ("-c", f"user.name={author}", "-c", f"user.email={author}@flock.invalid")
         self.git("add", "-A", at=tree)
-        self.git("-c", f"user.name={author}", "-c", f"user.email={author}@flock.invalid",
-                 "commit", "--allow-empty", "-m", title, at=tree)
+        self.git(*who, "commit", "--allow-empty", "-m", title, at=tree)
         sha = self.git("rev-parse", "HEAD", at=tree)
+        if onto and onto != parent:
+            self.git("checkout", "-q", "--detach", onto, at=tree)
+            try:
+                self.git(*who, "cherry-pick", "--allow-empty", "--keep-redundant-commits", sha, at=tree)
+            except ToolError:
+                subprocess.run(["git", "-C", str(tree), "cherry-pick", "--abort"], env=self.env,
+                               capture_output=True, timeout=60, check=False)
+                raise ToolError(f"your branch is based on {parent}, main is {onto}, and your "
+                                "changes conflict with main: pull, rebase onto origin/main, "
+                                "then open again", "stale_base") from None
+            sha = self.git("rev-parse", "HEAD", at=tree)
         self.git("fetch", str(tree), sha)
         return sha
 
@@ -117,6 +129,10 @@ class Hub:
 
     def comment(self, pr, text):
         self.request("comment_discussion", discussion_num=pr, comment=text)
+
+    def close(self, pr, comment):
+        self.request("change_discussion_status", discussion_num=pr, new_status="closed",
+                     comment=comment)
 
     def merge(self, pr, comment):
         self.request("merge_pull_request", discussion_num=pr, comment=comment)

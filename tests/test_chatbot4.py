@@ -42,6 +42,9 @@ class LocalHub:
     def comment(self, pr, text):
         self.comments.append((pr, text))
 
+    def close(self, pr, comment):
+        self.closed = [*getattr(self, "closed", []), pr]
+
     def merge(self, pr, comment):
         main, head = git(self.remote, "rev-parse", "main"), git(self.remote, "rev-parse", f"refs/pr/{pr}")
         sha = git(self.remote, "-c", "user.name=world", "-c", "user.email=world@flock.invalid",
@@ -301,3 +304,41 @@ def test_upload_respects_ignores_size_limit_and_compiles_only_changes(setup, mon
         world.call_workspace("run_bot", {"ref_or_path": "chatbot-swarm", "lines": ["hi"]},
                              Agent("cedar"), capture(clone.parent, clone.name))
     assert world.repo.hub.n == 1  # the refused upload created no Hub PR
+
+
+def test_open_pr_from_an_older_main_rebases_or_refuses_before_the_hub(setup):
+    world, clone, remote = setup
+    old_base = git(clone, "rev-parse", "HEAD")
+    other = clone.parent / "other"
+    git(clone.parent, "clone", str(remote), str(other))
+    (other / "bot/modules/weather.py").write_text('def respond(text, memory):\n    return None\n')
+    first = submit(world, other, author="pine", branch="weather")
+    approve(world, first)
+    merged = world.merge_pr(Agent("pine"), first["pr"])["merged_sha"]
+    # birch still has the old main: a non-conflicting change is rebased onto main
+    (clone / "bot/modules/time.py").write_text('def respond(text, memory):\n    return None\n')
+    rec = submit(world, clone, author="birch", branch="time")
+    assert rec["base_sha"] == merged and rec["rebased_from"] == old_base
+    assert git(remote, "rev-parse", f"{rec['head_sha']}^") == merged
+    files = git(remote, "ls-tree", "-r", "--name-only", rec["head_sha"]).splitlines()
+    assert {"bot/modules/weather.py", "bot/modules/time.py"} <= set(files)
+    approve(world, rec, "cedar")
+    assert world.merge_pr(Agent("cedar"), rec["pr"])["merged_sha"]
+    # a conflicting change from the old base is refused, and no Hub PR is created
+    opened = world.repo.hub.n
+    (clone / "bot/modules/weather.py").write_text('def respond(text, memory):\n    return "Sunny"\n')
+    with pytest.raises(ToolError, match=f"based on {old_base}, main is .*pull, rebase"):
+        submit(world, clone, author="oak", branch="sunny")
+    assert world.repo.hub.n == opened and not getattr(world.repo.hub, "closed", [])
+
+
+def test_a_failed_push_after_creating_the_hub_pr_closes_it(setup, monkeypatch):
+    world, clone, _ = setup
+
+    def push(sha, ref, expected=None):
+        raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+
+    monkeypatch.setattr(world.repo, "push", push)
+    with pytest.raises(ToolError, match="repository operation failed"):
+        submit(world, clone)
+    assert world.repo.hub.closed == [world.repo.hub.n] and world.list_prs() == []
