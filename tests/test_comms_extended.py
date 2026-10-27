@@ -161,3 +161,34 @@ async def test_group_mentions_wake_agents_only_when_a_human_posts_them(tmp_path,
     finally:
         await team.close()
 
+
+async def test_retried_channel_create_does_not_use_another_slot(tmp_path, board, monkeypatch):
+    """The real board answers a repeated create by its creator with the existing channel."""
+    from flock.comms.board import AsyncBoard
+
+    real, made = AsyncBoard.request, {}
+
+    async def request(self, route, cred, *a, **kw):
+        if route[:2] == ("POST", "/v1/channels"):
+            name = route[2]["json"]["name"]
+            if name not in made:
+                made[name] = await real(self, route, cred, *a, **kw)
+            return made[name]
+        return await real(self, route, cred, *a, **kw)
+
+    monkeypatch.setattr(AsyncBoard, "request", request)
+    team = Team(tmp_path, board, ["cedar"])
+    team.spec.extended = True
+    team.spec.rules = CommsRules(max_channels_per_agent=2)
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    try:
+        await team.start()
+        first, error = await team.call("cedar", "create_channel", name="memory", purpose="work")
+        assert not error, first
+        again, error = await team.call("cedar", "create_channel", name="memory", purpose="work")
+        assert not error and again["id"] == first["id"], again
+        assert team.agents["cedar"].state.comms_created_channels == [first["id"]]
+        _, error = await team.call("cedar", "create_channel", name="other", purpose="work")
+        assert not error
+    finally:
+        await team.close()

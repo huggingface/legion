@@ -55,9 +55,13 @@ class ExtendedComms:
                 channels = await board.channels(ident)
                 if len([c for c in channels if c.get("kind") != "dm"]) >= op.c.rules.max_channels:
                     raise Refused("max_channels", "the channel limit is reached; join an existing channel")
+                # The count is read from the board, but two workers can both pass it before
+                # either creates: the cap can be exceeded by at most one channel per other
+                # worker creating at the same moment (docs/comms.md).
                 channel = await board.request(("POST", "/v1/channels", {"json": {
                     "name": args["name"], "description": args["purpose"], "private": False}}), ident)
-                created.append(channel["id"])
+                if channel["id"] not in created:  # a retried create returns the same channel
+                    created.append(channel["id"])
                 m.channels.add(channel["id"])
                 if rt:
                     rt.save_state()

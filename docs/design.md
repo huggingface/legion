@@ -837,7 +837,8 @@ agent is stopped and prompts are refused. World-backed settings (`every: rounds`
 `comms.extended` adds optional channel-aware tools and per-identity private-message
 polling. Legacy specs retain their default tools and event payloads. The rule
 fields `max_channels_per_agent` and `max_channels` bound channel creation (the
-board count check is advisory across workers). In extended mode a group mention
+board count check is advisory across workers: with W workers creating at the same moment
+the total can exceed `max_channels` by at most W-1). In extended mode a group mention
 (`@all`, `@agents`, ...) counts as a mention only when a human posts it. See [comms.md](comms.md).
 
 Worlds advertising `workspace-upload-v1` receive worker-captured clone snapshots

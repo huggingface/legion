@@ -236,7 +236,10 @@ claims, confirmations or votes. Notes and status logs belong in private files.
 `min_post_gap`, `max_posts` and `max_len` apply across channels and DMs together.
 The per-agent channel creation limit (default 3) is persisted with agent state;
 the visible-board channel count is checked before creation (default 60). The
-board-wide count check is advisory under simultaneous creates on separate workers.
+board-wide count check is advisory under simultaneous creates on separate workers:
+each worker serializes its own creates, so with W workers creating at the same moment
+the total can exceed `max_channels` by at most W-1. A retried create that returns the
+same channel does not use up another slot of the per-agent limit.
 
 Extended mode still uses one poll task and at most one outstanding activity
 long-poll per worker. It rotates the worker's agent identities and follows
