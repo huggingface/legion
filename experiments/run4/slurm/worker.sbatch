@@ -19,10 +19,14 @@
 #   <run>/hosts is mounted read-only in the container, so FLOCK_CTL_HOST_FILE is readable there.
 # - CONTAINER: flock-worker runs in an Enroot/Pyxis container (worker-inner.sh): home not mounted,
 #   /fsx read-only and limited to the venv, uv Python, repo, slurm dir and <run>/hosts. Agent files
-#   go to /work/flock/<WORKER_ID>/{work,llm} on the container root (node disk, deleted with the
+#   go to /work/flock/agents/{work,llm} on the container root (node disk, deleted with the
 #   container; not /tmp, a tmpfs counted against the job memory). WORK_ROOT and FLOCK_LLM_HOME of
-#   the env file (/tmp/flock/<id>/...) are overridden here; the paths are the same on every node,
-#   so sessions/workdirs restore to the same absolute paths.
+#   the env file (/tmp/flock/<id>/...) are overridden here; the paths are the same on every node
+#   AND carry no worker id, so sessions/workdirs restore to the same absolute paths when the
+#   controller relaunches a slot under a new id (w0000 -> w0001 after a Spot reclaim): a Pi session
+#   only resumes from the cwd it was written from (adapters/pi.py find_session), the agent's
+#   workdir WORK_ROOT/<agent>. No collision: agent names are unique and each job has its own
+#   container root, so two workers on one node never share /work.
 # - Spot reclaim: the watcher sends SIGUSR1 to this shell, to srun AND to every process of the
 #   container step. worker-inner.sh exec's flock-worker with USR1 ignored (SIG_IGN survives exec),
 #   so the direct signal cannot kill it by default action; flock-worker's own Python handler (being
@@ -73,8 +77,10 @@ require_var FLOCK_URL FLOCK_TOKEN WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLI
 case $WORKER_ID in *[!A-Za-z0-9._-]*|"") die "WORKER_ID=$WORKER_ID: unexpected characters";; esac
 
 # ---------------------------------------------------------------- agent files: the container root, never /fsx
-export WORK_ROOT=/work/flock/$WORKER_ID/work        # agents' workdirs (restored from <BUCKET>/<swarm>/<type>/<agent>/)
-export FLOCK_LLM_HOME=/work/flock/$WORKER_ID/llm    # llm harness sessions
+# No WORKER_ID in these paths (see the header): an agent's workdir must be the same absolute
+# path on every worker that ever hosts it, or its Pi session cannot be resumed.
+export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent> (restored from <BUCKET>/<swarm>/<type>/<agent>/)
+export FLOCK_LLM_HOME=/work/flock/agents/llm    # llm harness sessions
 export SYNC_INTERVAL=${SYNC_INTERVAL:-180} HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30} LOG_LEVEL=${LOG_LEVEL:-INFO}
 select_worker_image "$TYPE"        # per-type image (common.sh): run.env CONTAINER_IMAGE_<type>, else the default
 container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for FLOCK_CTL_HOST_FILE

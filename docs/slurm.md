@@ -159,7 +159,10 @@ Workers and the world may run in a container (`srun --container-image`), the con
 on the host (it needs `sbatch`). In the container `/tmp` is a RAM tmpfs counted against the
 job's memory, so nothing goes there: with `container_root: /work` the env file sets
 `WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`
-(the world: `/work/world/ws`). A worker with no usable HOME derives HOME, HF_HOME,
+(the world: `/work/world/ws`). The run-4 `worker.sbatch` overrides `WORK_ROOT FLOCK_LLM_HOME`
+with worker-id-free paths (`/work/flock/agents/{work,llm}`): a Pi session resumes only from the
+cwd it was written from, so an agent's workdir must not change when the controller relaunches
+its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HOME,
 XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
 `FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
 `experiments/run3/slurm/Containerfile` builds the image.

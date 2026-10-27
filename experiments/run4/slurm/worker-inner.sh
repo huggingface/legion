@@ -21,10 +21,12 @@ export HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp
 export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
 mkdir -p "$WORK_ROOT" "$FLOCK_LLM_HOME" "$HOME" "$HF_HOME" "$TMPDIR" || { log "FATAL: cannot create /work dirs"; exit 2; }
 cd /work || exit 2
-# Pi harness (an image with the Pi CLI, e.g. pi-worker-node22.sqsh for agent-pi): its binary and one
-# agent dir per worker (models.json, sessions) on /work. Images without pi are untouched.
+# Pi harness (an image with the Pi CLI, e.g. pi-worker-node22.sqsh for agent-pi): its binary and the
+# agent dir (models.json, sessions) on /work. Like WORK_ROOT the path carries no worker id, so a
+# slot relaunched under a new id finds its sessions at the same place (the container root is
+# per job: no collision between workers on one node). Images without pi are untouched.
 if [ -x /usr/local/bin/pi ]; then
-  export FLOCK_PI_CLI=/usr/local/bin/pi PI_CODING_AGENT_DIR=/work/pi/${WORKER_ID:-worker}
+  export FLOCK_PI_CLI=/usr/local/bin/pi PI_CODING_AGENT_DIR=/work/pi/agents
   mkdir -p "$PI_CODING_AGENT_DIR" || { log "FATAL: cannot create $PI_CODING_AGENT_DIR"; exit 2; }
   log "pi harness: FLOCK_PI_CLI=$FLOCK_PI_CLI PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR"
 fi
