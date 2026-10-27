@@ -30,6 +30,7 @@ import functools
 import hmac
 import json
 import logging
+import random
 import re
 import secrets
 import time
@@ -41,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from flock.comms.board import AsyncBoard, BoardError, same_board
+from flock.comms.board import AsyncBoard, BoardError, parse_retry_after, same_board
 from flock.comms.tools import (
     GROUP_NAMES,
     READ_DEFAULT,
@@ -70,7 +71,17 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 POLL_WAIT_S = 25.0
-JOIN_RETRY_S = 30.0
+JOIN_RETRY_S = 30.0  # first failed join: retry within uniform(0, 30 s), doubling per failure
+JOIN_RETRY_MAX_S = 600.0
+POLL_RETRY_MAX_S = 30.0
+
+
+def full_jitter(failures: int, base: float, cap: float, retry_after: float | None = None,
+                floor: float = 0.0) -> float:
+    """uniform(0, min(cap, base * 2^(failures-1))), never shorter than a Retry-After (or
+    `floor`)."""
+    return max(random.uniform(0.0, min(cap, base * 2 ** min(max(failures - 1, 0), 16))),
+               retry_after or 0.0, floor)
 JOIN_ATTEMPTS = 3  # joins in a row made stale by a configure() before giving up
 BACKLOG_MESSAGES = 500  # per agent, kept for an agent whose re-join is pending
 CACHE_MESSAGES = 2000
@@ -89,6 +100,7 @@ class Member:
     rejoin: bool = False  # the token was refused (rotated elsewhere): join again
     error: str | None = None
     retry_at: float = 0.0
+    join_failures: int = 0  # consecutive failed joins (the retry backoff)
     threads: set[int] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # set when a reconfiguration dropped the agent's identity: messages for it that arrive
@@ -378,7 +390,11 @@ class CommsHub(ExtendedComms):
                     if gen != self._gen:
                         m.rejoin = True
                         continue
-                    m.error, m.retry_at = str(e), self._clock() + JOIN_RETRY_S
+                    m.join_failures += 1
+                    m.error = str(e)
+                    m.retry_at = self._clock() + full_jitter(m.join_failures, JOIN_RETRY_S,
+                                                             JOIN_RETRY_MAX_S, e.retry_after,
+                                                             floor=1.0)
                     self._emit(agent, "comms_join_failed", {"error": m.error})
                     log.warning("%s: comms join failed: %s", agent, m.error)
                     raise
@@ -388,7 +404,7 @@ class CommsHub(ExtendedComms):
                 break
             else:
                 raise BoardError("the comms settings kept changing during the join; retry")
-            m.ident, m.rejoin, m.error = ident, False, None
+            m.ident, m.rejoin, m.error, m.join_failures = ident, False, None, 0
             rt = self._runtime(agent)
             if rt is not None:
                 m.threads.update(rt.state.comms_threads)
@@ -423,7 +439,8 @@ class CommsHub(ExtendedComms):
             ident = await self.identities.join(m.name, c.url, code, again=m.rejoin)
         except httpx.HTTPStatusError as e:
             fresh()
-            raise BoardError(f"join refused: HTTP {e.response.status_code}") from None
+            raise BoardError(f"join refused: HTTP {e.response.status_code}", e.response.status_code,
+                             retry_after=parse_retry_after(e.response.headers.get("retry-after"))) from None
         except (httpx.HTTPError, KeyError, ValueError) as e:
             fresh()
             raise BoardError(f"join failed: {type(e).__name__}") from None
@@ -623,11 +640,12 @@ class CommsHub(ExtendedComms):
                     continue
                 attempt += 1
                 log.warning("comms poll failed: %s", e)
-                await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(attempt, 5)))
+                await asyncio.sleep(full_jitter(attempt + 1, self.backoff_s, POLL_RETRY_MAX_S,
+                                                e.retry_after))
             except Exception as e:  # noqa: BLE001 - keep polling
                 attempt += 1
                 log.warning("comms poll failed: %s: %s", type(e).__name__, e)
-                await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(attempt, 5)))
+                await asyncio.sleep(full_jitter(attempt + 1, self.backoff_s, POLL_RETRY_MAX_S))
 
     # ------------------------------------------------------------------ tools
     async def call(self, agent: str, entry: str, args: dict[str, Any]) -> Result:

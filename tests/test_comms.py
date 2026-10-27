@@ -855,3 +855,46 @@ async def test_read_since_is_exclusive_and_says_caught_up(tmp_path, board):
         assert not err and [m["text"] for m in out["messages"]] == ["two"] and "note" not in out
     finally:
         await t.close()
+
+
+def test_full_jitter_envelope_and_retry_after(monkeypatch):
+    from flock.worker import comms as comms_mod
+
+    monkeypatch.setattr(comms_mod.random, "uniform", lambda a, b: b)
+    assert [comms_mod.full_jitter(n, 30.0, 600.0) for n in (1, 2, 3, 6, 9)] == \
+        [30.0, 60.0, 120.0, 600.0, 600.0]
+    monkeypatch.setattr(comms_mod.random, "uniform", lambda a, b: a)
+    assert comms_mod.full_jitter(4, 30.0, 600.0) == 0.0
+    assert comms_mod.full_jitter(4, 30.0, 600.0, retry_after=45.0) == 45.0
+    assert comms_mod.full_jitter(4, 30.0, 600.0, floor=1.0) == 1.0
+
+
+async def test_a_rate_limited_join_waits_at_least_retry_after_and_backs_off(monkeypatch):
+    from flock.worker import comms as comms_mod
+
+    now = [1000.0]
+    monkeypatch.setattr(comms_mod.random, "uniform", lambda a, b: b)
+
+    def handler(request):
+        if request.url.path == "/v1/join":
+            return httpx.Response(429, headers={"retry-after": "90"})
+        return httpx.Response(200, json={})
+
+    hub = CommsHub(swarm="sw", env={"INV": "code"}, transport=httpx.MockTransport(handler),
+                   clock=lambda: now[0])
+    hub.configure(CommsSpec(url="http://b.invalid", invite_env="INV", channel="team", channel_id=12),
+                  list(COMMS_TOOLS))
+    try:
+        await hub.on_prompt("dev-0000", "llm")
+        m = hub.members["dev-0000"]
+        assert m.join_failures == 1 and m.retry_at - now[0] == 90.0  # Retry-After beats 30 s
+        with pytest.raises(BoardError, match="not on the board yet"):
+            await hub._member("dev-0000")
+        now[0] = m.retry_at + 1
+        await hub.on_prompt("dev-0000", "llm")
+        assert m.join_failures == 2 and m.retry_at - now[0] == 90.0  # 60 s envelope < 90 s
+        now[0] = m.retry_at + 1
+        await hub.on_prompt("dev-0000", "llm")
+        assert m.join_failures == 3 and m.retry_at - now[0] == 120.0  # the envelope grew
+    finally:
+        await hub.aclose()
