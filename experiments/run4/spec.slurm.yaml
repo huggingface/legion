@@ -60,6 +60,7 @@ types:
     - world:review_pr
     - world:merge_pr
     - world:list_prs
+    - world:close_pr
     persist_workdir: true
     secrets:
     - OPENAI_API_KEY
