@@ -99,6 +99,8 @@ class AgentState(BaseModel):
     comms_posts: int = 0
     comms_last_post: float | None = None
     comms_threads: list[int] = Field(default_factory=list)
+    # board news (DMs, mentions, thread replies) not yet attached to a flock-tool result
+    comms_news: list[dict] = Field(default_factory=list)
 
 
 def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path, why: str) -> str:

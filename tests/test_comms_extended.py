@@ -339,3 +339,86 @@ async def test_tool_fan_out_is_cached_and_limited_per_agent(tmp_path, board, mon
         assert [p for p in sent if p[1] != "/v1/activity"] == [("GET", "/v1/channels")]  # 1st only
     finally:
         await team.close()
+
+
+async def gateway(hub, agent, tool, **args):
+    """One flock-tool call through the hub's gateway, as the CLI sends it."""
+    import json
+    host, port = hub.address.rsplit(":", 1)
+    reader, writer = await asyncio.open_connection(host, int(port))
+    writer.write(json.dumps({"agent": agent, "key": hub.key(agent), "tool": tool,
+                             "args": args}).encode() + b"\n")
+    await writer.drain()
+    r = json.loads(await reader.readline())
+    writer.close()
+    return json.loads(r["output"]), r["error"]
+
+
+async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path, board):
+    from flock.tools.runner import Result
+
+    team = Team(tmp_path, board, ["cedar", "birch"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.03
+    team.spec.extended = True
+    team.spec.wake = ["mention", "thread", "dm", "channel"]
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    worlds = []
+
+    async def world(agent, entry, args):
+        worlds.append(entry)
+        if entry == "world:list_prs":
+            return Result("[1, 2]", False)
+        if entry == "world:fail":
+            return Result('{"error": "nope"}', True)
+        return Result('{"ok": 1, "inbox": ["PR #3 approved"]}', False)
+
+    team.hub.routes["world"] = world
+    try:
+        await team.start()
+        assert "board_news" in team.hub.section("birch")
+        out, error = await team.call("cedar", "dm", to="birch", text="Private  review\nquestion " + "x" * 200)
+        assert not error, out
+        dm_id = out["posted"]
+        await until(lambda: custom(team.agents["birch"], "comms_dm"))
+        rt = team.agents["birch"]
+        assert rt.state.comms_news and rt.state.comms_news[0]["id"] == dm_id  # persisted state
+        # errors and refusals keep the news
+        out, error = await gateway(team.hub, "birch", "comms:post", text=3)
+        assert error and "board_news" not in out
+        out, error = await gateway(team.hub, "birch", "world:fail")
+        assert error and "board_news" not in out
+        # a world dict result: board_news next to the world's own inbox
+        out, error = await gateway(team.hub, "birch", "world:status")
+        assert not error and out["inbox"] == ["PR #3 approved"] and out["ok"] == 1
+        [line] = out["board_news"]
+        assert line.startswith("DM from cedar (channel ") and f"(msg {dm_id}): Private review question x" in line
+        assert line.endswith("...") and len(line.split(": ", 1)[1]) == 120
+        # only once
+        out, error = await gateway(team.hub, "birch", "world:status")
+        assert not error and "board_news" not in out
+        assert rt.state.comms_news == []
+        # a list result is wrapped, only when there is news
+        out, error = await gateway(team.hub, "birch", "world:list_prs")
+        assert out == [1, 2]
+        _, error = await team.call("cedar", "post", text="@birch please look", thread="new")
+        assert not error
+        await until(lambda: rt.state.comms_news)
+        out, error = await gateway(team.hub, "birch", "world:list_prs")
+        assert not error and out["result"] == [1, 2]
+        assert out["board_news"][0].startswith("cedar mentioned you in #flock-test, thread ")
+        # read_dms drops what it returned itself; the other news still comes along
+        out, error = await team.call("cedar", "dm", to="birch", text="second dm")
+        assert not error
+        _, error = await team.call("cedar", "post", text="@birch and this", thread="new")
+        assert not error
+        await until(lambda: len(rt.state.comms_news) == 2)
+        out, error = await gateway(team.hub, "birch", "comms:read_dms")
+        assert not error and [m["text"] for m in out["messages"]][-1] == "second dm"
+        assert len(out["board_news"]) == 1 and "mentioned you" in out["board_news"][0]
+        assert rt.state.comms_news == []
+        # the comms result itself is unchanged when there is no news
+        out, error = await gateway(team.hub, "birch", "comms:read_dms")
+        assert not error and "board_news" not in out and "result" not in out
+    finally:
+        await team.close()

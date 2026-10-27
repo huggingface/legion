@@ -86,6 +86,9 @@ JOIN_ATTEMPTS = 3  # joins in a row made stale by a configure() before giving up
 BACKLOG_MESSAGES = 500  # per agent, kept for an agent whose re-join is pending
 CACHE_MESSAGES = 2000
 THREADS_KEPT = 500
+NEWS_MAX = 20  # pending board news entries kept per agent (oldest dropped)
+NEWS_CHARS = 120  # message characters quoted in a board news entry
+NEWS_READS = ("comms:read", "comms:read_dms")  # results that list messages (by id)
 SECTION_START = "<!-- flock:comms -->"
 SECTION_END = "<!-- /flock:comms -->"
 
@@ -113,6 +116,7 @@ class Member:
     channels: set[int] = field(default_factory=set)
     created_channels: list[int] = field(default_factory=list)
     cursor: int | None = None
+    news: list[dict] = field(default_factory=list)  # board news not shown yet: {"id", "text"}
 
 
 class _Stale(Exception):
@@ -351,6 +355,8 @@ class CommsHub(ExtendedComms):
                   f"{', '.join(names)} tools for it (you hold no board token, so not curl).")]
         if c.kickoff_id:
             lines.append(f"The kickoff is message {c.kickoff_id}; its thread is the run's main thread.")
+        lines.append("`flock-tool` results may carry `board_news` (DMs, mentions and replies to "
+                     "you since your last call); read and answer them promptly.")
         if rules:
             lines += ["", "Rules (the post tool refuses a post that breaks one and says why):"]
             lines += [f"- {x}" for x in rules]
@@ -582,18 +588,73 @@ class CommsHub(ExtendedComms):
         if channel and c.extended:
             data.update(channel=channel.get("name") or str(channel.get("id")),
                         channel_id=channel.get("id"), identity_type=(x.get("sender") or {}).get("identity_type"))
+        where = channel.get("name") or channel.get("id") or c.channel
         if channel.get("kind") == "dm":
             if "dm" in c.wake:
                 self._emit(m.name, "comms_dm", data)
+                self._add_news(m, x, f"DM from {sender} (channel {where})")
             return
         if "mention" in c.wake and self._mentions(x, m):
             self.stats["mentions"] += 1
             self._emit(m.name, "comms_mention", data)
+            self._add_news(m, x, f"{sender} mentioned you in #{where}, thread {data['thread']}")
         elif "thread" in c.wake and x.get("thread_id") and x["thread_id"] in m.threads:
             self.stats["thread_replies"] += 1
             self._emit(m.name, "comms_thread_reply", data)
+            self._add_news(m, x, f"reply from {sender} in #{where}, thread {data['thread']}")
         elif "channel" in c.wake and not x.get("thread_id"):
             self._emit(m.name, "comms_channel_message", data)
+
+    # ------------------------------------------------------------------ board news
+    def _news(self, m: Member) -> list[dict]:
+        """The agent's pending board news (its synced state when it has a runtime, so a
+        relaunch keeps it): DMs, mentions and thread replies not yet shown in a tool result."""
+        rt = self._runtime(m.name)
+        return rt.state.comms_news if rt is not None else m.news
+
+    def _set_news(self, m: Member, news: list[dict]) -> None:
+        rt = self._runtime(m.name)
+        if rt is None:
+            m.news = news
+            return
+        rt.state.comms_news = news
+        with contextlib.suppress(OSError):
+            rt.save_state()
+
+    def _add_news(self, m: Member, x: dict, head: str) -> None:
+        news = self._news(m)
+        if any(e.get("id") == x["id"] for e in news):
+            return
+        text = " ".join(str(x.get("body") or "").split())
+        if len(text) > NEWS_CHARS:
+            text = text[:NEWS_CHARS - 3] + "..."
+        self._set_news(m, [*news, {"id": x["id"], "text": f"{head} (msg {x['id']}): {text}"}][-NEWS_MAX:])
+
+    def with_news(self, agent: str, entry: str, r: Result) -> Result:
+        """A successful gateway call's result with the agent's pending board news attached
+        (then cleared): a JSON object gains `board_news` (a list of strings, oldest first);
+        any other result becomes {"result": <it>, "board_news": [...]}. Messages a read
+        call returned itself are dropped from the news, not repeated. Errors keep it."""
+        m = self.members.get(agent)
+        if r.error or m is None or not self._news(m):
+            return r
+        try:
+            out = json.loads(r.output)
+        except ValueError:
+            out = r.output
+        news = self._news(m)
+        if entry in NEWS_READS and isinstance(out, dict):
+            seen = {x.get("id") for x in out.get("messages") or [] if isinstance(x, dict)}
+            news = [e for e in news if e.get("id") not in seen]
+        self._set_news(m, [])
+        if not news:
+            return r
+        lines = [e["text"] for e in news]
+        if isinstance(out, dict) and "board_news" not in out:
+            out = {**out, "board_news": lines}
+        else:
+            out = {"result": out, "board_news": lines}
+        return replace(r, output=json.dumps(out, ensure_ascii=False))
 
     def _replay(self, m: Member) -> None:
         """An agent is back after a re-join: the messages the poller saw meanwhile."""
@@ -835,7 +896,7 @@ class CommsHub(ExtendedComms):
             else:
                 tool = str(req.get("tool"))
                 handler = self.routes.get(tool.split(":", 1)[0], self.call)
-                r = await handler(agent, tool, req.get("args") or {})
+                r = self.with_news(agent, tool, await handler(agent, tool, req.get("args") or {}))
             writer.write(json.dumps({"output": r.output, "error": r.error,
                                      "duration_s": r.duration_s}).encode() + b"\n")
             await writer.drain()

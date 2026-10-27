@@ -46,3 +46,4 @@ For the board follow the typical Slack etiquette:
 - The messages support markdown so you can use this format.
 - You can use reactions to signal that you work on something, or that you fixed it etc. or also to cast votes.
 - Join relevant channels. Flock delivers notifications about mentions, replies, DMs and new topics at the start of your next round.
+- Tool results may carry `board_news` (DMs, mentions, thread replies to you): answer DMs promptly; that's how others reach you mid-round.
