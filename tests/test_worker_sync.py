@@ -389,3 +389,25 @@ async def test_restore_logs_skipped_files_as_one_summary_line(tmp_path, monkeypa
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1 and "12 file(s) skipped" in warnings[0]
     assert warnings[0].count(pre + "workdir/") == 10
+
+
+def test_restore_batch_size_from_env(monkeypatch):
+    from flock.worker.sync import restore_batch
+    monkeypatch.delenv("FLOCK_RESTORE_BATCH", raising=False)
+    assert restore_batch() == 1000
+    for raw, want in (("7", 7), ("1", 1), ("0", 1000), ("-3", 1000), ("abc", 1000), ("", 1000)):
+        monkeypatch.setenv("FLOCK_RESTORE_BATCH", raw)
+        assert restore_batch() == want
+
+
+def test_failed_big_batch_falls_back_per_file(tmp_path, monkeypatch):
+    from flock.worker.sync import download_resilient
+    monkeypatch.setenv("FLOCK_RESTORE_BATCH", "4")
+    store = FlakyStore(bad={"r/f2"})
+    for i in range(6):
+        store.files[f"r/f{i}"] = b"x"
+    files = [(f"r/f{i}", tmp_path / f"f{i}") for i in range(6)]
+    done, failed = download_resilient(store, files, backoff=(), sleep=lambda s: None)
+    assert failed == ["r/f2"] and len(done) == 5
+    assert [len(c) for c in store.calls[:2]] == [4, 2]  # batches of 4 from the env
+    assert ["r/f2"] in store.calls  # the failed batch retried file by file

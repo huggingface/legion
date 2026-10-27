@@ -12,7 +12,8 @@ same absolute paths (workdir and work root are fixed, harness homes are fixed by
 before the first resume.
 
 Restore lists the agent's prefix once, then downloads every file it found in batches
-(`RESTORE_BATCH`), each to a `.flock-part` sibling renamed into place on success. A batch that
+(`restore_batch()`: env `FLOCK_RESTORE_BATCH`, default 1000, minimum 1, an invalid value
+means the default), each to a `.flock-part` sibling renamed into place on success. A batch that
 fails is retried file by file, with backoff (`RESTORE_BACKOFF`) between rounds: one unreadable
 file is skipped and reported in `RestoreResult.failed` instead of aborting the whole restore. A
 permanent "not found" (HTTP 404, e.g. xet "CAS Client Error: ... 404 Not Found" on the
@@ -68,7 +69,18 @@ log = logging.getLogger(__name__)
 
 UPLOAD_CHUNK = 200
 MODES_FILE = ".flock-modes.json"
-RESTORE_BATCH = 100
+RESTORE_BATCH = 1000  # default of FLOCK_RESTORE_BATCH
+
+
+def restore_batch() -> int:
+    """Files per restore download batch: env FLOCK_RESTORE_BATCH (>= 1), else RESTORE_BATCH."""
+    try:
+        n = int(os.environ.get("FLOCK_RESTORE_BATCH", ""))
+    except ValueError:
+        return RESTORE_BATCH
+    return n if n >= 1 else RESTORE_BATCH
+
+
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
 PART_SUFFIX = ".flock-part"
 PUSH_EXCLUDE = ["*" + PART_SUFFIX]  # sync_bucket patterns, matched on relative paths
@@ -348,8 +360,9 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
     sleep = sleep or time.sleep
     done: list[tuple[str, Path]] = []
     pending: list[tuple[str, Path]] = []
-    for i in range(0, len(files), RESTORE_BATCH):
-        ok, bad = attempt(files[i : i + RESTORE_BATCH])
+    size = restore_batch()
+    for i in range(0, len(files), size):
+        ok, bad = attempt(files[i : i + size])
         done += ok
         pending += bad
     if pending:  # each file alone, so one bad file costs only itself
