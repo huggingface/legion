@@ -48,6 +48,8 @@ WINDOW = 3600.0  # the new-PR budget counts opens and merges in this rolling win
 WINDOW_MAX = 10000  # timestamps kept per list (oldest dropped)
 OUTBOX_TRIES = 12  # attempts per queued Hub comment before it is dropped
 OUTBOX_BACKOFF = (5.0, 600.0)  # first retry delay, longest retry delay (doubling)
+HUB_SYNC_EVERY = float(os.environ.get("CHATBOT_HUB_STATES_EVERY_S", "600"))  # PR state check
+FINAL_CODES = ("pr_closed", "pr_merged")  # Hub 400: the PR is already closed / merged
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
 
@@ -141,6 +143,8 @@ class Chatbot4World(World):
                     rec["state"] = "open"
             self._fetch_missing_heads()
             self._reconcile()
+        self.hub_states_at = float("-inf")
+        self._sync_hub_states()  # outside the lock: a Hub read
         self.drainer = threading.Thread(target=self._drain, name="chatbot4-hub-outbox", daemon=True)
         self.drainer.start()
         _LIVE[str(self.ws.resolve())] = self
@@ -174,6 +178,14 @@ class Chatbot4World(World):
             failure = getattr(exc, "code", type(exc).__name__)
         finally:
             self.hub_slots.release()
+        if failure in FINAL_CODES:  # the PR is closed or merged: no point retrying
+            with self.lock:
+                self._mark_hub_final(item["pr"], failure)
+                self.state["hub_outbox"] = [e for e in self.state["hub_outbox"] if e["id"] != item["id"]]
+                self._save()
+            log.warning("hub_outbox: dropped the comment on PR #%s: already %s on the Hub",
+                        item["pr"], failure[3:])
+            return True
         with self.lock:
             box = self.state["hub_outbox"]
             entry = next((e for e in box if e["id"] == item["id"]), None)
@@ -198,6 +210,7 @@ class Chatbot4World(World):
     def _drain(self):
         """Background thread: post due comments one at a time, never blocking a tool call."""
         while not self.stopping.is_set():
+            self._sync_hub_states(every=HUB_SYNC_EVERY)
             with self.lock:
                 now = time.time()
                 box = self.state["hub_outbox"]
@@ -351,6 +364,59 @@ class Chatbot4World(World):
                         len(missing) - len(left), left or "none")
         except Exception as e:  # noqa: BLE001 - a fake or failing repository must not stop the start
             log.warning("startup: PR head check skipped: %s", e)
+
+    def _sync_hub_states(self, every=0.0):
+        """Reconcile records the world has as open with the Hub's PR states (a restore from a
+        stale archive keeps PRs open that the Hub already closed or merged). At most once per
+        `every` seconds; a Hub read taken outside the world lock and the Hub-write slot. Never
+        raises."""
+        now = time.monotonic()
+        if now - self.hub_states_at < every:
+            return
+        self.hub_states_at = now
+        states = getattr(self.repo.hub, "pr_states", None)
+        if states is None:
+            return
+        try:
+            seen = states()
+        except Exception as exc:  # noqa: BLE001 - retried at the next period
+            log.warning("Hub PR states not listed (%s); keeping the local records", type(exc).__name__)
+            return
+        with self.lock:
+            changed = False
+            for rec in self.state["prs"].values():
+                status = seen.get(rec["pr"])
+                if rec["state"] == "open" and status in ("closed", "merged"):
+                    self._apply_hub_final(rec, status)
+                    changed = True
+            if changed:
+                self._save()
+
+    def _apply_hub_final(self, rec, status):
+        """Record that the Hub closed or merged an open PR (lock held; the caller saves)."""
+        if status == "merged":
+            rec.update(state="merged", merged_sha=None, reconciled_from_hub=True)
+        else:
+            rec.update(state="closed", reconciled_from_hub=True)
+        self._unnotify(rec["author"], rec["pr"], "mergeable")
+        log.warning("PR #%s is %s on the Hub but was open here (author=%s); marked %s",
+                    rec["pr"], status, rec["author"], rec["state"])
+
+    def _mark_hub_final(self, pr, code):
+        """A Hub write said PR `pr` is already closed or merged: update the record (or drop a
+        parked draft) and return the ToolError for the agent. Lock held or not; caller saves
+        if it needs to."""
+        status = code[3:]
+        with self.lock:
+            rec = self.state["prs"].get(str(pr))
+            if rec is not None and rec["state"] in ("open", "closing"):
+                self._apply_hub_final(rec, status)
+                self._save()
+            draft = self._draft(pr)
+            if draft:
+                self.state["drafts"].pop(draft["branch"], None)
+                self._save()
+        return ToolError(f"PR #{pr} is already {status} on the Hub", code)
 
     def _reconcile(self, author=None):
         """Mark open PRs whose head is already in main as merged (call with the lock held).
@@ -759,6 +825,10 @@ class Chatbot4World(World):
                 self.repo.push(sha, f"refs/heads/{branch_ref}", force=True)
                 self.repo.hub.ready(number)
                 return sha, main
+            except ToolError as exc:
+                if exc.code in FINAL_CODES:  # closed or merged on the Hub: no retry loop
+                    raise self._mark_hub_final(number, exc.code) from None
+                failure = exc
             except Exception as exc:  # noqa: BLE001 -- the Hub PR exists: never orphan it
                 failure = exc
             delay = delays.pop(0) if delays else None
@@ -912,7 +982,7 @@ class Chatbot4World(World):
                 raise ToolError("main or the PR changed during checks; update and review again")
             try:
                 self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
-            except ToolError:
+            except ToolError as exc:
                 # The Hub may have merged before failing (a 5xx or timeout after commit).
                 try:
                     self.repo.fetch()
@@ -920,6 +990,8 @@ class Chatbot4World(World):
                     pass
                 if self._reconcile(rec["author"]) and rec["state"] == "merged":
                     return self._merged_event(rec)
+                if exc.code in FINAL_CODES:  # already closed or merged on the Hub
+                    raise self._mark_hub_final(pr, exc.code) from None
                 raise
             # Local main must move before the lock is released: opens compare against it.
             self.repo.fetch()
@@ -970,12 +1042,15 @@ class Chatbot4World(World):
             except ToolError as exc:
                 if exc.code == "hub_busy":
                     raise
+                if exc.code in FINAL_CODES:
+                    raise self._mark_hub_final(pr, exc.code) from None
                 status = getattr(self.repo.hub, "status", None)
                 if status is None or status(pr) != "closed":
                     raise
         except BaseException:
             with self.lock:
-                rec["state"] = "open"
+                if rec["state"] == "closing":  # not already settled from the Hub's answer
+                    rec["state"] = "open"
             raise
         with self.lock:
             rec.update(state="closed", closed_by=agent.name, close_reason=reason)
@@ -998,8 +1073,13 @@ class Chatbot4World(World):
                 raise ToolError("only the author or the run operator can close this PR")
             if any(p[2] == pr for p in self.pending.values()):
                 raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
-        with self._hub_write(agent, "close", pr):
-            self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
+        try:
+            with self._hub_write(agent, "close", pr):
+                self.repo.hub.close(pr, f"Closed by {agent.name}: {reason}")
+        except ToolError as exc:
+            if exc.code in FINAL_CODES:
+                raise self._mark_hub_final(pr, exc.code) from None
+            raise
         with self.lock:
             self.state["drafts"].pop(draft["branch"], None)
             self._notify_closed(agent, draft["author"], pr, reason)

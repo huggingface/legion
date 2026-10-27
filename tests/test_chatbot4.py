@@ -1419,3 +1419,107 @@ def test_the_first_fetch_of_an_empty_repository_skips_the_negotiation_tip(tmp_pa
     repo = Repository(tmp_path / "w" / "repo.git", str(seed))
     assert repo.negotiation() == ["--negotiation-tip=refs/heads/main"]
     assert repo.sha() == git(seed, "rev-parse", "main")
+
+
+def test_startup_reconciles_prs_the_hub_closed_or_merged(setup, caplog):
+    world, clone, _ = setup
+    recs = []
+    for name, who in (("one", "cedar"), ("two", "cedar"), ("three", "fern"), ("four", "fern")):
+        (clone / "bot/modules" / f"{name}.py").write_text(f'def respond(text, memory):\n    return "{name}"\n')
+        recs.append(submit(world, clone, author=who, branch=name))
+    n = [r["pr"] for r in recs]
+    world.repo.hub.pr_states = lambda: {n[0]: "merged", n[1]: "closed", n[2]: "open", 999: "closed"}
+    with caplog.at_level("WARNING"):
+        world.hub_states_at = float("-inf")
+        world._sync_hub_states()
+    by = {r["pr"]: r for r in world.state["prs"].values()}
+    assert (by[n[0]]["state"], by[n[0]]["merged_sha"], by[n[0]]["reconciled_from_hub"]) == ("merged", None, True)
+    assert (by[n[1]]["state"], by[n[1]]["reconciled_from_hub"]) == ("closed", True)
+    assert by[n[2]]["state"] == "open" and "reconciled_from_hub" not in by[n[2]]  # Hub: open
+    assert by[n[3]]["state"] == "open" and "reconciled_from_hub" not in by[n[3]]  # not listed
+    assert sum("on the Hub but was open here" in r.message for r in caplog.records) == 2
+    # throttled: a second call within the period does not read the Hub again
+    calls = []
+    world.repo.hub.pr_states = lambda: calls.append(1) or {}
+    world._sync_hub_states(every=600)
+    assert calls == []
+    # a failing read keeps the records and never raises
+    world.repo.hub.pr_states = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    world._sync_hub_states()
+    assert by[n[3]]["state"] == "open"
+
+
+def _http_400(message):
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+    req = httpx.Request("POST", "https://hub.invalid/api/datasets/x/y/discussions/7/status")
+    resp = httpx.Response(400, headers={"x-error-message": message}, request=req)
+    return HfHubHTTPError("bad", response=resp)
+
+
+def test_hub_request_names_an_already_closed_or_merged_pr(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "t")
+    hub = Hub("x/y")
+    calls = []
+
+    def api(repo_id, **kw):
+        calls.append(kw)
+        raise _http_400("Cannot change the status of a merged discussion")
+
+    hub.api.change_discussion_status = api
+    with pytest.raises(ToolError) as exc:
+        hub.close(7, "bye")
+    assert exc.value.code == "pr_merged" and exc.value.message == "PR #7 is already merged on the Hub"
+    assert len(calls) == 1
+    hub.api.change_discussion_status = lambda repo_id, **kw: (_ for _ in ()).throw(_http_400("bad title"))
+    with pytest.raises(ToolError) as exc:
+        hub.ready(7)
+    assert exc.value.code == "hub_error"
+
+
+def test_status_change_on_a_closed_pr_is_not_retried(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    calls = []
+
+    def closed(pr, *args):
+        calls.append(pr)
+        raise ToolError(f"PR #{pr} is already closed on the Hub", "pr_closed")
+
+    monkeypatch.setattr(world.repo.hub, "close", closed)
+    with pytest.raises(ToolError, match=f"PR #{rec['pr']} is already closed on the Hub"):
+        world.close_pr(Agent("cedar"), rec["pr"], "obsolete")
+    assert calls == [rec["pr"]] and world.state["prs"][str(rec["pr"])]["state"] == "closed"
+    assert world.state["prs"][str(rec["pr"])]["reconciled_from_hub"] is True
+
+    # merge on a PR the Hub already merged elsewhere
+    (clone / "bot/modules/two.py").write_text('def respond(text, memory):\n    return None\n')
+    two = submit(world, clone, branch="two")
+    approve(world, two)
+    merges = []
+
+    def merged(pr, comment):
+        merges.append(pr)
+        raise ToolError(f"PR #{pr} is already merged on the Hub", "pr_merged")
+
+    monkeypatch.setattr(world.repo.hub, "merge", merged)
+    with pytest.raises(ToolError, match="already merged on the Hub"):
+        world.merge_pr(Agent("birch"), two["pr"])
+    assert merges == [two["pr"]] and world.state["prs"][str(two["pr"])]["state"] == "merged"
+
+    # a queued comment on a closed PR is dropped, not retried 12 times
+    three = submit(world, clone, branch="three")
+    posts = []
+
+    def refused(pr, text):
+        posts.append(pr)
+        raise ToolError(f"PR #{pr} is already closed on the Hub", "pr_closed")
+
+    monkeypatch.setattr(world.repo.hub, "comment", refused)
+    with world.lock:
+        world._queue_comment(Agent("birch"), three["pr"], "looks fine")
+        item = dict(world.state["hub_outbox"][0])
+    assert world._post(item, 1.0)
+    assert posts == [three["pr"]] and world.state["hub_outbox"] == []
+    assert world.state["prs"][str(three["pr"])]["state"] == "closed"

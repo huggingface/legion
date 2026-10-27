@@ -271,6 +271,24 @@ class Repository:
         self.git("push", *options, "origin", f"{'+' if force and not expected else ''}{sha}:{ref}")
 
 
+FINAL_CODES = {"closed": "pr_closed", "merged": "pr_merged"}
+_FINAL_WORDS = re.compile(r"\b(merged|closed)\b")
+
+
+def _final_state(exc):
+    """"closed" or "merged" when an HTTP 400 says the PR is already closed or merged (matched on
+    the x-error-message header, else the response text; neither is ever logged), else None."""
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) != 400:
+        return None
+    try:
+        text = str(response.headers.get("x-error-message") or "") or str(response.text or "")
+    except Exception:  # noqa: BLE001 - an unreadable body is just "unknown"
+        return None
+    found = _FINAL_WORDS.search(text[:2000].lower())
+    return found.group(1) if found else None
+
+
 class Hub:
     def __init__(self, repo_id):
         self.repo_id = repo_id
@@ -291,6 +309,11 @@ class Hub:
             except HfHubHTTPError as exc:
                 if exc.response.status_code != 429 or attempt == 4:
                     _log_hub_failure(method, self.repo_id, exc)
+                    final = _final_state(exc)
+                    if final and isinstance(kwargs.get("discussion_num"), int):
+                        num = kwargs["discussion_num"]
+                        raise ToolError(f"PR #{num} is already {final} on the Hub",
+                                        FINAL_CODES[final]) from None
                     raise ToolError("Hub request failed; retry later", "hub_error") from None
                 delay = exc.response.headers.get("Retry-After", "1")
                 try:
@@ -302,6 +325,11 @@ class Hub:
                 # The world reports this as an internal error with an id; name the class here.
                 log.warning("Hub call %s failed for %s: %s", method, self.repo_id, type(exc).__name__)
                 raise
+
+    def pr_states(self):
+        """{PR number: status} (open, closed, merged or draft) of the Hub's pull requests, a read
+        (no Hub-write slot). Raises on failure."""
+        return {d.num: d.status for d in self.request("get_repo_discussions") if d.is_pull_request}
 
     def refs(self):
         """{ref: sha} for the Hub's refs/pr/N and refs/heads/<branch>, from the refs API (a
