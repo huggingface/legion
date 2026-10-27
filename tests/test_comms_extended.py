@@ -192,3 +192,50 @@ async def test_retried_channel_create_does_not_use_another_slot(tmp_path, board,
         assert not error
     finally:
         await team.close()
+
+
+def test_poll_backoff_is_full_jitter_and_honours_retry_after():
+    from flock.worker.comms_extended import POLL_BACKOFF_MAX_S, poll_backoff
+
+    top = lambda a, b: b
+    assert [poll_backoff(n, 1.0, rng=top) for n in (1, 2, 3, 7, 8, 40)] == \
+        [2.0, 4.0, 8.0, 120.0, 120.0, POLL_BACKOFF_MAX_S]
+    assert poll_backoff(3, 1.0, rng=lambda a, b: a) == 0.0  # full jitter reaches zero
+    assert poll_backoff(1, 1.0, retry_after=45.0, rng=top) == 45.0  # never shorter
+
+
+async def test_rate_limited_poller_backs_off_for_the_whole_worker_then_resets(tmp_path, board,
+                                                                               monkeypatch):
+    """429s space the single poller by Retry-After (all identities wait), and a success
+    resets the backoff."""
+    from flock.comms.board import AsyncBoard, BoardError
+    from flock.worker import comms_extended
+
+    real, calls, delays = AsyncBoard.activity, [], []
+
+    async def limited(self, cred, channel, after, wait=0):
+        if after is not None:
+            calls.append(cred)
+            if len(calls) <= 2:
+                raise BoardError("board: GET /v1/activity: HTTP 429", 429, "rate_limited", 0.05)
+        return await real(self, cred, channel, after, wait)
+
+    def spy(failures, base, retry_after=None, rng=None):
+        delays.append((failures, retry_after))
+        return retry_after or 0.0
+
+    monkeypatch.setattr(AsyncBoard, "activity", limited)
+    monkeypatch.setattr(comms_extended, "poll_backoff", spy)
+    team = Team(tmp_path, board, ["cedar", "birch"])
+    team.hub.poll_min_interval = 0.01
+    team.hub.poll_cycle_s = 0.02
+    team.spec.extended = True
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    try:
+        await team.start()
+        await until(lambda: len(calls) >= 3)
+        assert delays == [(1, 0.05), (2, 0.05)]
+        await until(lambda: len(calls) >= 6)
+        assert len(delays) == 2  # reset after the success: no further backoff
+    finally:
+        await team.close()

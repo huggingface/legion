@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import re
 from collections import OrderedDict
 from dataclasses import replace
@@ -18,6 +19,15 @@ from flock.comms.board import BoardError
 from flock.comms.tools import Refused, as_id, author, brief, check_content, check_rate, thread_of
 
 log = logging.getLogger(__name__)
+
+POLL_BACKOFF_MAX_S = 120.0
+
+
+def poll_backoff(failures: int, base: float, retry_after: float | None = None,
+                 rng=random.uniform) -> float:
+    """Full jitter: uniform(0, min(cap, base * 2^failures)), never shorter than Retry-After."""
+    d = rng(0.0, min(POLL_BACKOFF_MAX_S, base * 2 ** min(failures, 16)))
+    return max(d, retry_after or 0.0)
 
 
 class ExtendedComms:
@@ -177,13 +187,17 @@ class ExtendedComms:
                     with contextlib.suppress(Exception):
                         await self._member(m.name)
                 else:
+                    # One task polls for every agent of the worker: this spaces all of them.
                     failures += 1
-                    log.warning("comms poll for %s failed: %s", m.name, exc)
-                    await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(failures, 5)))
+                    delay = poll_backoff(failures, self.backoff_s, exc.retry_after)
+                    log.warning("comms poll for %s failed: %s; next poll in %.1f s", m.name, exc, delay)
+                    await asyncio.sleep(delay)
             except Exception as exc:  # noqa: BLE001 - one bad page must not stop every agent's notices
                 failures += 1
-                log.warning("comms poll for %s failed: %s: %s", m.name, type(exc).__name__, exc)
-                await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(failures, 5)))
+                delay = poll_backoff(failures, self.backoff_s)
+                log.warning("comms poll for %s failed: %s: %s; next poll in %.1f s", m.name,
+                            type(exc).__name__, exc, delay)
+                await asyncio.sleep(delay)
             await asyncio.sleep(max(0, spacing - (monotonic() - started)))
 
     def _init_extended(self):
