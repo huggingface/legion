@@ -422,3 +422,33 @@ async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path,
         assert not error and "board_news" not in out and "result" not in out
     finally:
         await team.close()
+
+
+async def test_tool_cache_is_bounded_per_agent_and_dropped_with_the_agent():
+    from types import SimpleNamespace
+
+    from flock.worker import comms_extended
+    from flock.worker.comms import CommsHub
+
+    hub = CommsHub(swarm="sw", env={})
+    cedar, birch = SimpleNamespace(name="cedar"), SimpleNamespace(name="birch")
+    calls = []
+
+    async def fetch():
+        calls.append(1)
+        return ["page"]
+
+    assert await hub._cached(cedar, "channels", fetch) == (["page"], False)
+    assert await hub._cached(cedar, "channels", fetch) == (["page"], True)  # within the TTL
+    for i in range(comms_extended.TOOL_CACHE_MAX + 20):  # read_dms pages: one per channel and n
+        hub._remember("cedar", ("dm", i, 20), (i, {"messages": []}))
+    hub._remember("birch", ("dm", 1, 20), (1, {"messages": []}))
+    assert len(hub._tool_cache["cedar"]) == comms_extended.TOOL_CACHE_MAX
+    assert hub._recall("cedar", ("dm", comms_extended.TOOL_CACHE_MAX + 19, 20)) is not None
+    assert hub._recall("cedar", "channels") is None  # the oldest went first
+    assert hub._recall("cedar", ("dm", 0, 20)) is None
+    hub._forget(birch, ("dm", 1, 20))
+    assert hub._tool_cache["birch"] == {}
+    hub.forget("cedar")  # unassigned: nothing of it stays
+    assert "cedar" not in hub._tool_cache and len(calls) == 1
+    await hub.aclose()

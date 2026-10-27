@@ -579,3 +579,36 @@ def test_update_spec_carries_new_endpoints_to_the_next_pi_start(tmp_path):
     native = PiAdapter(tmp_path / "w", agent="agent-0002", home=tmp_path / "pi2")
     native.update_spec(spec(["http://new-a/v1"]))  # no provider config: nothing to update
     assert native.model_config is None
+
+
+def test_reader_skips_only_records_the_mapper_ignores():
+    """The reader drops message_update / tool_execution_update / turn_end / agent_end lines
+    unparsed (they repeat whole messages). The mapper must ignore them, and Pi must write
+    `type` first so the prefix matches (as in the recorded fixture)."""
+    from flock.worker.adapters import pi as pi_mod
+
+    lines = [x.encode() for x in (FIX / "pi_rpc.jsonl").read_text().splitlines()]
+    skipped = [json.loads(x) for x in lines if x.startswith(pi_mod._SKIP_PREFIXES)]
+    assert {r["type"] for r in skipped} == set(pi_mod.SKIPPED_RECORDS)
+    kept = [json.loads(x) for x in lines if not x.startswith(pi_mod._SKIP_PREFIXES)]
+    assert not any(r.get("type") in pi_mod.SKIPPED_RECORDS for r in kept)
+    m = PiMapper("fake/fake-model")
+    m.on_record({"type": "agent_start"})
+    for r in skipped:
+        assert m.on_record(r) == [], r["type"]
+    assert replay(kept) == replay([json.loads(x) for x in lines])  # same events either way
+
+
+async def test_reader_skips_streaming_records_from_the_process(tmp_path):
+    a = PiAdapter(tmp_path, agent="pi-0001", home=tmp_path / "pi")
+    script = ("import json,sys\n"
+              "print(json.dumps({'type': 'message_update', 'message': {'role': 'assistant'}}, separators=(',', ':')))\n"
+              "print(json.dumps({'type': 'agent_start'}, separators=(',', ':')))\n"
+              "print(json.dumps({'type': 'agent_end', 'messages': []}, separators=(',', ':')))\n"
+              "print(json.dumps({'type': 'agent_settled', 'aborted': False}, separators=(',', ':')))\n")
+    a._proc = await asyncio.create_subprocess_exec(
+        "python3", "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    seen = []
+    a._dispatch = lambda rec: seen.append(rec["type"])  # what the reader parsed
+    await a._read()
+    assert seen == ["agent_start", "agent_settled"]

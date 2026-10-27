@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 POLL_BACKOFF_MAX_S = 120.0
 CACHE_TTL_S = 60.0  # per agent: its channel list and the principals directory
+TOOL_CACHE_MAX = 64  # entries kept per agent (channel list, directory, DM pages); oldest out
 READ_DMS_CHANNELS = 10  # read_dms reads at most this many DM channels (the newest)
 
 
@@ -37,15 +38,27 @@ class ExtendedComms:
     async def _cached(self, m, key, fetch, *, fresh=False):
         """`fetch()` at most once per CACHE_TTL_S per agent and key. Returns (value, hit)."""
         now = monotonic()
-        hit = self._tool_cache.get((m.name, key))
+        hit = self._recall(m.name, key)
         if not fresh and hit is not None and now - hit[0] < CACHE_TTL_S:
             return hit[1], True
         value = await fetch()
-        self._tool_cache[(m.name, key)] = (now, value)
+        self._remember(m.name, key, (now, value))
         return value, False
 
+    def _remember(self, agent, key, entry):
+        """Store a tool cache entry, newest last; an agent keeps at most TOOL_CACHE_MAX (a
+        read_dms page per DM channel and page size would otherwise pile up for the run)."""
+        cache = self._tool_cache.setdefault(agent, {})
+        cache.pop(key, None)
+        cache[key] = entry
+        while len(cache) > TOOL_CACHE_MAX:
+            cache.pop(next(iter(cache)))
+
+    def _recall(self, agent, key):
+        return self._tool_cache.get(agent, {}).get(key)
+
     def _forget(self, m, key):
-        self._tool_cache.pop((m.name, key), None)
+        self._tool_cache.get(m.name, {}).pop(key, None)
 
     async def _channels(self, op, *, fresh=False):
         return await self._cached(op.m, "channels", lambda: op.board(self).channels(op.ident),
@@ -135,13 +148,13 @@ class ExtendedComms:
             messages = []
             for channel in channels:
                 key = ("dm", channel["id"], n)
-                seen = self._tool_cache.get((m.name, key))
+                seen = self._recall(m.name, key)
                 if seen is not None and channel.get("last_seq") is not None \
                         and seen[0] == channel["last_seq"]:
                     page = seen[1]
                 else:
                     page = await board.latest(ident, channel["id"], n)
-                    self._tool_cache[(m.name, key)] = (channel.get("last_seq"), page)
+                    self._remember(m.name, key, (channel.get("last_seq"), page))
                 messages.extend({**brief(x), "channel": channel["id"]}
                                 for x in page.get("messages", []) if x["id"] > since)
             return {"messages": sorted(messages, key=lambda x: x["id"])[-n:]}
@@ -246,5 +259,5 @@ class ExtendedComms:
 
     def _init_extended(self):
         self._channel_lock = asyncio.Lock()
-        self._tool_cache: dict[tuple, tuple] = {}  # (agent, key) -> (stamp, value)
+        self._tool_cache: dict[str, dict] = {}  # agent -> {key: (stamp, value)}
         self._delivered: OrderedDict[tuple[str, str, int], bool] = OrderedDict()

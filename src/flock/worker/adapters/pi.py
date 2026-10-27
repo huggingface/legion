@@ -66,6 +66,12 @@ PI_ENV_DEFAULTS = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETR
 PI_FLAGS = ("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-approve")
 HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b", re.IGNORECASE)
 RPC_TIMEOUT = 60.0
+# Records PiMapper ignores that carry whole messages: each `message_update` repeats the partial
+# message so far (per token), `tool_execution_update` the output so far, `turn_end` and
+# `agent_end` the turn's / run's messages again. The reader skips them unparsed (Pi writes
+# `type` first), which spares the worker most of the JSON it would decode and drop.
+SKIPPED_RECORDS = ("message_update", "tool_execution_update", "turn_end", "agent_end")
+_SKIP_PREFIXES = tuple(f'{{"type":"{t}"'.encode() for t in SKIPPED_RECORDS)
 STOP_GRACE = 5.0
 
 
@@ -429,6 +435,8 @@ class PiAdapter:
         assert self._proc and self._proc.stdout
         try:
             while line := await self._proc.stdout.readline():
+                if line.startswith(_SKIP_PREFIXES):
+                    continue
                 try:
                     rec = json.loads(line)
                 except ValueError:
@@ -514,8 +522,11 @@ class PiAdapter:
                 readonly.append(pin_path.parent)
             self.env.update(self.scratch_env())
             self._isolation_dir = tempfile.TemporaryDirectory(prefix="flock-pi-root-")
+            # The root is a size-capped tmpfs (RAM); its /tmp is this agent's disk-backed TMPDIR,
+            # so files a tool writes to a literal /tmp never accumulate in memory.
             launch = isolate_command(self.argv, Path(self._isolation_dir.name), cwd=self.workdir,
-                                     readonly=readonly, writable=[self.workdir, self.home], network=True)
+                                     readonly=readonly, writable=[self.workdir, self.home], network=True,
+                                     tmp=self.home / "tmp")
         self._queue = EventQueue()
         self._mapper = PiMapper(cfg.model_ref if cfg else spec.model, max_turns=spec.max_turns,
                                 max_budget_usd=spec.max_budget_usd, prices=self.prices)

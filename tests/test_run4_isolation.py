@@ -256,6 +256,7 @@ async def test_pi_start_uses_namespace_wrapper_and_explicit_environment(tmp_path
         calls.append((args, kwargs))
         raise RuntimeError("stop before exec")
     monkeypatch.setattr(pi.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(isolation, "SANDBOX_TMP", "/nonexistent-sandbox-tmp")  # tmp_path is in /tmp
     try:
         with pytest.raises(RuntimeError, match="stop before exec"):
             await adapter.start(workspace, None, TypeSpec(harness="pi", model="m"), env={
@@ -277,6 +278,8 @@ async def test_pi_start_uses_namespace_wrapper_and_explicit_environment(tmp_path
             assert d.is_dir() and (d.stat().st_mode & 0o777) == 0o700
         config = json.loads(args[args.index(str(Path(isolation.__file__).resolve())) + 1])
         assert str(home.resolve()) in config["writable"] and config["private_dirs"] == []
+        # the sandbox's /tmp is the agent's disk-backed TMPDIR; the tmpfs root is capped
+        assert config["tmp"] == str((home / "tmp").resolve()) and config["tmpfs_size"] == "256m"
     finally:
         await adapter.stop()
 
@@ -451,3 +454,123 @@ def test_setup_errors_name_the_step_and_path(tmp_path, monkeypatch):
         assert "argv-secret" not in result.stderr
     finally:
         locked.chmod(0o755)
+
+
+def test_tmpfs_root_has_a_size_cap_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv(isolation.TMPFS_SIZE_ENV, raising=False)
+    assert isolation.tmpfs_size() == isolation.TMPFS_SIZE_DEFAULT == "256m"
+    for value, expected in (("512m", "512m"), ("1G", "1g"), ("1048576", "1048576"),
+                            ("0", "256m"), ("unlimited", "256m"), ("50%", "256m"), ("-1m", "256m")):
+        assert isolation.tmpfs_size({isolation.TMPFS_SIZE_ENV: value}) == expected, value
+    monkeypatch.setenv(isolation.TMPFS_SIZE_ENV, "128m")
+    argv = isolation.command([sys.executable, "-c", "pass"], tmp_path / "root", cwd=tmp_path,
+                             python_only=True)
+    assert json.loads(argv[argv.index(str(Path(isolation.__file__).resolve())) + 1])["tmpfs_size"] == "128m"
+
+
+def test_sandbox_tmp_is_the_callers_disk_dir_unless_it_would_hide_a_planned_path(tmp_path, monkeypatch):
+    work, disk_tmp = tmp_path / "work", tmp_path / "home/tmp"
+    for d in (work, disk_tmp):
+        d.mkdir(parents=True)
+    # tmp_path itself is under /tmp here: a /tmp bind would hide the workdir, so none
+    if os.path.realpath(tmp_path).startswith("/tmp/"):
+        plan = isolation.plan([sys.executable], cwd=work, writable=[work], python_only=True, tmp=disk_tmp)
+        assert plan["tmp"] is None
+    # with nothing planned under the sandbox's /tmp, it is the disk dir
+    monkeypatch.setattr(isolation, "SANDBOX_TMP", "/nonexistent-sandbox-tmp")
+    plan = isolation.plan([sys.executable], cwd=work, writable=[work], python_only=True, tmp=disk_tmp)
+    assert plan["tmp"] == os.path.realpath(disk_tmp)
+    assert isolation.plan([sys.executable], cwd=work, writable=[work], python_only=True)["tmp"] is None
+
+
+def test_enter_mounts_a_capped_tmpfs_and_binds_tmp_from_disk(tmp_path, monkeypatch):
+    """The setup order without namespaces: a size-capped tmpfs root, the planned binds, then
+    the caller's disk dir over /tmp (writable, and expected by the fail-closed mount check)."""
+    work, disk_tmp, root = tmp_path / "work", tmp_path / "home/tmp", tmp_path / "root"
+    for d in (work, disk_tmp):
+        d.mkdir(parents=True)
+    mounts, checked = [], []
+    monkeypatch.setattr(isolation, "_mount", lambda *a, **k: mounts.append((a, k)))
+    monkeypatch.setattr(isolation, "check_mounts", lambda *a: checked.append(a))
+    monkeypatch.setattr(isolation.os, "getpgrp", os.getpid)
+
+    def chroot(path):
+        raise RuntimeError("stop before chroot")
+
+    monkeypatch.setattr(isolation.os, "chroot", chroot)
+    config = {"root": str(root), "cwd": str(work), "readonly": [], "writable": [str(work)],
+              "readonly_root": False, "private_dirs": [], "symlinks": [], "tmp": str(disk_tmp),
+              "tmpfs_size": "64m"}
+    with pytest.raises(RuntimeError, match="stop before chroot"):
+        isolation._enter(config, ["/bin/true"])
+    assert mounts[0] == (("tmpfs", root, "tmpfs", isolation.MS_NOSUID | isolation.MS_NODEV,
+                          "mode=755,size=64m"), {})
+    binds = [(a[0], a[1]) for a, k in mounts if k.get("flags") == isolation.MS_BIND | isolation.MS_REC]
+    assert (str(disk_tmp), root / "tmp") in binds
+    assert binds.index((str(disk_tmp), root / "tmp")) > binds.index((str(work), root / work.relative_to("/")))
+    writable = checked[0][3]
+    assert os.path.realpath(root / "tmp") in writable
+
+    # no tmp dir and an older config without a size: /tmp stays on the (default-capped) tmpfs
+    mounts.clear()
+    checked.clear()
+    del config["tmpfs_size"]
+    root = tmp_path / "root2"  # (no real tmpfs here: a fresh directory)
+    config.update(tmp=None, root=str(root))
+    with pytest.raises(RuntimeError, match="stop before chroot"):
+        isolation._enter(config, ["/bin/true"])
+    assert mounts[0][0][4] == "mode=755,size=256m"
+    assert not any(a[1] == root / "tmp" for a, _ in mounts)
+    assert os.path.realpath(root / "tmp") not in checked[0][3]
+
+    config.update(tmpfs_size="0,nr_inodes=0", root=str(tmp_path / "root3"))  # never an injection
+    with pytest.raises(isolation.IsolationSetupError, match="tmpfs size is invalid"):
+        isolation._enter(config, ["/bin/true"])
+
+
+def test_mountinfo_check_accepts_the_tmp_bind_only_when_planned():
+    root = "/run/flock-root"
+    info = (f"30 22 0:50 / {root} rw - tmpfs tmpfs rw\n"
+            f"31 30 259:1 /state/pi/a/tmp {root}/tmp rw,relatime - ext4 /dev/x rw\n")
+    mounts = isolation.parse_mountinfo(info)
+    isolation.check_mounts(mounts, root, [], [f"{root}/tmp"])
+    with pytest.raises(isolation.IsolationMountError, match="unexpected mount"):
+        isolation.check_mounts(mounts, root, [], [])
+
+
+def _outside_tmp_dir() -> Path | None:
+    import tempfile
+
+    for base in (ROOT, Path.home()):
+        real = os.path.realpath(base)
+        if real == "/tmp" or real.startswith("/tmp/") or not os.access(base, os.W_OK):
+            continue
+        return Path(tempfile.mkdtemp(prefix=".isolation-test-", dir=base))
+    return None
+
+
+def test_sandbox_tmp_writes_land_on_disk_and_the_root_is_capped(tmp_path, monkeypatch, kernel_namespaces):
+    """In namespaces (the cluster dry run): a literal /tmp write lands in the caller's disk dir,
+    and the tmpfs root reports the configured size cap."""
+    base = _outside_tmp_dir()
+    if base is None:
+        pytest.skip("needs a writable directory outside /tmp (a /tmp bind would hide /tmp paths)")
+    try:
+        work, disk_tmp = base / "work", base / "home/tmp"
+        for d in (work, disk_tmp):
+            d.mkdir(parents=True)
+        monkeypatch.setenv(isolation.TMPFS_SIZE_ENV, "32m")
+        script = '''
+import os, pathlib
+pathlib.Path("/tmp/probe").write_text("on-disk")
+st = os.statvfs("/")
+print(st.f_blocks * st.f_frsize)
+'''
+        argv = isolation.command([sys.executable, "-I", "-c", script], base / "root", cwd=work,
+                                 writable=[work], network=True, python_only=True, tmp=disk_tmp)
+        result = subprocess.run(argv, env={}, capture_output=True, timeout=10, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        assert (disk_tmp / "probe").read_text() == "on-disk"
+        assert int(result.stdout) == 32 * 1024 * 1024
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

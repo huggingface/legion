@@ -306,3 +306,44 @@ async def test_periodic_sync_skips_an_agent_until_its_restore_finished(tmp_path)
     assert store.files[pre + "workdir/a.txt"] == b"A" and store.files[pre + "workdir/b.txt"] == b"B"
     await worker.drain("test")
     assert await asyncio.wait_for(run, 5) == 0
+
+
+def test_memory_helpers_trim_and_cap_arenas_safely(monkeypatch):
+    rss = wmain.rss_mb()
+    assert rss is None or rss > 0
+    wmain.trim_heap()  # no-op off glibc
+    assert wmain.limit_malloc_arenas({"MALLOC_ARENA_MAX": "2"}) is False  # the env wins
+    calls = []
+
+    class Libc:
+        def malloc_trim(self, pad):
+            calls.append(("trim", pad))
+
+        def mallopt(self, param, value):
+            calls.append(("mallopt", param, value))
+            return 1
+
+    monkeypatch.setattr(wmain, "_glibc", Libc)
+    assert wmain.limit_malloc_arenas({}) is True
+    wmain.trim_heap()
+    assert calls == [("mallopt", -8, wmain.ARENAS), ("trim", 0)]
+
+
+async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch, caplog):
+    import logging
+
+    ctrl = FakeController()
+    w, _ = make_worker(tmp_path, ctrl)
+    trims = []
+    monkeypatch.setattr(wmain, "trim_heap", lambda: trims.append(1))
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.01")
+    caplog.set_level(logging.INFO, logger="flock.worker")
+    task = asyncio.create_task(w.memory_loop())
+    await until(lambda: len(trims) >= 2)
+    task.cancel()
+    report = w.memory_report()
+    assert report["outbox_events"] == 0 and report["outbox_bytes"] == 0 and report["agents"] == 0
+    if wmain.rss_mb() is not None:
+        assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # off
+    await asyncio.wait_for(w.memory_loop(), 1)

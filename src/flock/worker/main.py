@@ -297,6 +297,48 @@ class ControllerClient:
         await self.http.aclose()
 
 
+MEMORY_INTERVAL = 600.0  # s, FLOCK_MEMORY_LOG_S: heap trim and one memory line in the log
+ARENAS = 4  # glibc malloc arenas unless MALLOC_ARENA_MAX is set (see limit_malloc_arenas)
+
+
+def _glibc():
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        return libc if hasattr(libc, "malloc_trim") else None
+    except OSError:
+        return None
+
+
+def rss_mb() -> float | None:
+    """This process's resident set (VmRSS), in MiB; None off Linux."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def trim_heap() -> None:
+    """Give memory freed in the C heap back to the system (glibc `malloc_trim`, every arena).
+    Large transient buffers (JSON of message entries, bucket listings in sync threads) leave
+    freed pages in the heap that the allocator otherwise keeps for the life of the process."""
+    if (libc := _glibc()) is not None:
+        libc.malloc_trim(0)
+
+
+def limit_malloc_arenas(env: Mapping[str, str] = os.environ, arenas: int = ARENAS) -> bool:
+    """Cap glibc's malloc arenas (default 8 per core) before threads start: each executor
+    thread (bucket syncs, file I/O) would otherwise keep its own arena's high-water mark. An
+    explicit MALLOC_ARENA_MAX wins (glibc reads it itself)."""
+    if env.get("MALLOC_ARENA_MAX") or (libc := _glibc()) is None:
+        return False
+    return libc.mallopt(-8, arenas) == 1  # M_ARENA_MAX
+
+
 def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
         workdir = cfg.work_root / name
@@ -660,6 +702,28 @@ class Worker:
             log.info("sync cycle: %d of %d agents in %.1f s; bucket %s", len(due), len(self.agents),
                      loop.time() - t0, self.sync.stats.since(snap))
 
+    def memory_report(self) -> dict:
+        """What the worker holds that can grow, for the periodic memory line."""
+        return {"outbox_events": len(self.outbox), "outbox_bytes": self.outbox.bytes,
+                "outbox_dropped": self.outbox.dropped, "agents": len(self.agents),
+                "live": self.working_count(), "tasks": len(asyncio.all_tasks()),
+                "comms_cache": len(self.comms._cache) if hasattr(self.comms, "_cache") else None}
+
+    async def memory_loop(self) -> None:
+        """Every MEMORY_INTERVAL: trim the C heap, then log the RSS before and after with the
+        sizes of the worker's bounded queues, so a growing worker shows what grows."""
+        interval = float(os.environ.get("FLOCK_MEMORY_LOG_S") or MEMORY_INTERVAL)
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            before = rss_mb()
+            await asyncio.to_thread(trim_heap)
+            after = rss_mb()
+            if before is not None and after is not None:
+                log.info("memory: rss %.0f MiB (%.0f MiB before heap trim); %s", after, before,
+                         self.memory_report())
+
     async def deadline_loop(self) -> None:
         while True:
             left = (self.cfg.deadline - self.drain_window - utcnow()).total_seconds()
@@ -784,7 +848,7 @@ class Worker:
 
     async def run(self) -> int:
         loops = [self.poll_loop(), self.heartbeat_loop(), self.flush_loop(), self.sync_loop(),
-                 self.deadline_loop(), self.parent_loop()]
+                 self.deadline_loop(), self.parent_loop(), self.memory_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
         loop = asyncio.get_running_loop()
         # compute local: SIGTERM is `flock run` stopping (terminate). Elsewhere SIGTERM and
@@ -864,6 +928,7 @@ def main() -> None:
 
     if enabled():
         protect_supervisor()
+    limit_malloc_arenas()  # before any thread starts
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     quiet_libraries()

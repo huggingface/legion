@@ -27,6 +27,11 @@ _LOCKED = ((os.ST_RDONLY, MS_RDONLY), (os.ST_NOSUID, MS_NOSUID), (os.ST_NODEV, M
 
 
 DEV_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
+# The chroot's root is a tmpfs: RAM that counts against the job's memory. Only mount points
+# and stray writes outside the bound dirs land there; the cap bounds each sandbox.
+TMPFS_SIZE_ENV, TMPFS_SIZE_DEFAULT = "FLOCK_ISOLATION_TMPFS_SIZE", "256m"
+SANDBOX_TMP = "/tmp"  # where `command(tmp=...)` binds the caller's disk-backed temp dir
+_SIZE = re.compile(r"[1-9][0-9]*[kmg]?", re.IGNORECASE)
 MOUNT_ATTR_RDONLY, AT_FDCWD, AT_RECURSIVE, SYS_MOUNT_SETATTR = 0x1, -100, 0x8000, 442
 
 
@@ -62,6 +67,18 @@ def protect_supervisor() -> None:
     """Deny same-UID ptrace and /proc/<pid>/{environ,mem,root} on worker/world."""
     if not sys.platform.startswith("linux") or _libc().prctl(4, 0, 0, 0, 0) != 0:
         raise RuntimeError("PR_SET_DUMPABLE=0 is required for run4")
+
+
+def tmpfs_size(env=os.environ) -> str:
+    """The size cap of a sandbox's tmpfs root: $FLOCK_ISOLATION_TMPFS_SIZE (bytes, or with a
+    k/m/g suffix; never unlimited), else 256m. An unusable value falls back to the default."""
+    value = (env.get(TMPFS_SIZE_ENV) or "").strip()
+    if _SIZE.fullmatch(value):
+        return value.lower()
+    if value:
+        print(f"isolation: ignoring {TMPFS_SIZE_ENV}={value!r}; using {TMPFS_SIZE_DEFAULT}",
+              file=sys.stderr)
+    return TMPFS_SIZE_DEFAULT
 
 
 def runtime_paths(command: list[str], *, python_only=False) -> list[str]:
@@ -116,7 +133,7 @@ def _within(path: str, roots: list[str]) -> bool:
 
 
 def plan(argv: list[str], *, cwd: Path, readonly=(), writable=(), python_only=False,
-         private_dirs=()) -> dict:
+         private_dirs=(), tmp=None) -> dict:
     """Mounts and symlinks for the chroot. Every path is bound at its real location, and each
     symlink hop on the way to it (and to the interpreter, the command and node) is recreated
     inside, so the original spelling resolves there too (a uv venv's python links through
@@ -142,21 +159,28 @@ def plan(argv: list[str], *, cwd: Path, readonly=(), writable=(), python_only=Fa
     def ordered(paths: list[str]) -> list[str]:  # parents before nested mounts
         return sorted(dict.fromkeys(paths), key=lambda p: (len(p), p))
 
+    # `tmp` (a disk-backed dir) is bound over the sandbox's /tmp, so files written there do not
+    # fill the tmpfs root. Not when a planned path lives under /tmp itself (a test's tmp_path):
+    # the bind would hide it, and /tmp stays on the size-capped tmpfs.
+    tmp_dir = real(tmp) if tmp is not None else None
+    if tmp_dir is not None and any(_within(p, [SANDBOX_TMP]) for p in [*ro, *rw, *links, real(cwd)]):
+        tmp_dir = None
     return {"readonly": ordered(ro), "writable": list(dict.fromkeys(rw)),
             "symlinks": sorted(links.items(), key=lambda kv: (len(kv[0]), kv[0])),
-            "private_dirs": [str(Path(p).absolute()) for p in private_dirs]}
+            "private_dirs": [str(Path(p).absolute()) for p in private_dirs], "tmp": tmp_dir}
 
 
 def command(argv: list[str], root: Path, *, cwd: Path, readonly=(), writable=(), network=False,
-            python_only=False, private_dirs=()) -> list[str]:
-    """Build a trusted invocation. Only explicitly mounted paths survive the chroot."""
+            python_only=False, private_dirs=(), tmp=None) -> list[str]:
+    """Build a trusted invocation. Only explicitly mounted paths survive the chroot. `tmp`: a
+    disk-backed directory bound writable at the sandbox's /tmp (see `plan`)."""
     unshare = shutil.which("unshare")
     if not unshare:
         raise RuntimeError("unshare is required for run4 process isolation")
     config = {"root": str(root.absolute()), "cwd": str(cwd.absolute()),
-              "readonly_root": not network,
+              "readonly_root": not network, "tmpfs_size": tmpfs_size(),
               **plan(argv, cwd=cwd, readonly=readonly, writable=writable, python_only=python_only,
-                     private_dirs=private_dirs)}
+                     private_dirs=private_dirs, tmp=tmp)}
     # Slurm sends USR1 to every process on reclaim. Only worker/world supervisors
     # handle it; an unshare wrapper must survive long enough for their bounded drain.
     return ["/bin/sh", "-c", 'trap "" USR1; exec "$@"', "flock-isolate",
@@ -241,11 +265,12 @@ def check_mounts(mounts: list[tuple[str, set[str]]], root: str, readonly: list[s
                                           "read-only path")
 
 
-def _bind(root: Path, source: str, *, readonly: bool):
+def _bind(root: Path, source: str, *, readonly: bool, target: Path | None = None):
+    """Bind `source` at its own path under `root` (or at `target`, a path under `root`)."""
     path = Path(source)
     if not path.exists():
         raise IsolationSetupError(2, f"isolation bind failed: required path is missing: path={source}")
-    target = root / path.relative_to("/")
+    target = target if target is not None else root / path.relative_to("/")
     # Create the mount point only when missing: it may already exist on a read-only bind
     # (/etc/localtime -> /usr/share/zoneinfo/... under the /usr bind), where touch()'s utime
     # fails with EROFS.
@@ -292,7 +317,10 @@ def _enter(config, argv):
     root = Path(config["root"])
     with _step("root creation", root):
         root.mkdir(parents=True, exist_ok=True)
-    _mount("tmpfs", root, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755,size=256m")
+    size = config.get("tmpfs_size") or TMPFS_SIZE_DEFAULT
+    if not _SIZE.fullmatch(size):
+        raise IsolationSetupError(22, f"isolation tmpfs size is invalid: path={root}")
+    _mount("tmpfs", root, "tmpfs", MS_NOSUID | MS_NODEV, f"mode=755,size={size}")
     for path in config["readonly"]:
         _bind(root, path, readonly=True)
     for path in config["writable"]:
@@ -310,6 +338,8 @@ def _enter(config, argv):
     for path in ("tmp", "proc", "dev"):
         with _step("directory creation", root / path):
             (root / path).mkdir(exist_ok=True)
+    if config.get("tmp"):  # the sandbox's /tmp on the caller's disk-backed dir, not the tmpfs
+        _bind(root, config["tmp"], readonly=False, target=root / SANDBOX_TMP.lstrip("/"))
     for path in DEV_NODES:
         _bind(root, path, readonly=False)
     with _step("symlink creation", root / "dev/fd"):
@@ -317,7 +347,8 @@ def _enter(config, argv):
     _mount("proc", root / "proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
     inside = lambda p: os.path.realpath(root / Path(p).relative_to("/"))
     check_mounts(parse_mountinfo(Path("/proc/self/mountinfo").read_text()), os.path.realpath(root),
-                 [inside(p) for p in config["readonly"]], [inside(p) for p in config["writable"]],
+                 [inside(p) for p in config["readonly"]],
+                 [inside(p) for p in (*config["writable"], *([SANDBOX_TMP] if config.get("tmp") else []))],
                  [inside(p) for p in ("/proc", *DEV_NODES)])
     if config["readonly_root"]:
         _mount(None, root, flags=MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV)

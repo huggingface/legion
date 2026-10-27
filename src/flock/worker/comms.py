@@ -484,6 +484,8 @@ class CommsHub(ExtendedComms):
         self.members.pop(agent, None)
         self._keys.pop(agent, None)
         self.grants.pop(agent, None)
+        self._agent_limits.pop(agent, None)
+        self._tool_cache.pop(agent, None)
         self.identities.forget(agent)
         if self._poll_agent == agent and self._poller is not None:
             self._poller.cancel()
