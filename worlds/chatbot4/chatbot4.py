@@ -1,6 +1,7 @@
 """Run-4 world: local snapshots, native Hub PRs and independent reviews."""
 from __future__ import annotations
 
+import atexit
 import base64
 import contextlib
 import contextvars
@@ -8,11 +9,13 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 
@@ -41,7 +44,18 @@ BUSY = "the Hub is busy; retry in about a minute"
 INBOX_MAX = 20  # unread inbox entries kept per agent (oldest dropped)
 INBOX_SNIPPET = 160  # review comment characters quoted in an inbox entry
 PAUSED = "PRs are paused by the operators; keep working locally, run_bot and reviews still work"
+WINDOW = 3600.0  # the new-PR budget counts opens and merges in this rolling window (seconds)
+WINDOW_MAX = 10000  # timestamps kept per list (oldest dropped)
+OUTBOX_TRIES = 12  # attempts per queued Hub comment before it is dropped
+OUTBOX_BACKOFF = (5.0, 600.0)  # first retry delay, longest retry delay (doubling)
 log = logging.getLogger(__name__)
+_LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
+
+
+@atexit.register
+def _close_all():
+    for world in list(_LIVE.values()):
+        world.close()
 
 
 def logs_refusals(fn):
@@ -70,12 +84,16 @@ class Chatbot4World(World):
                    "approve the PR's current change (a clean rebase keeps the approval) before merge. Bot input/output and module loading "
                    "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation. "
                    "Tool results may carry an `inbox` with news about your PRs (reviews, "
-                   "merges, closes, updates); handle it first.")
+                   "merges, closes, updates); handle it first. New PRs are limited swarm-wide to "
+                   "about the merge rate (pr_budget); reviews are unlimited.")
 
     def __init__(self, ws=None, repository=None):
         protect_supervisor()
         self.ws = Path(ws or os.environ.get("CHATBOT_WS", HERE / "ws"))
         self.ws.mkdir(parents=True, exist_ok=True)
+        previous = _LIVE.get(str(self.ws.resolve()))
+        if previous is not None:  # flush and stop its outbox before reading the saved state
+            previous.close()
         self.lock = threading.RLock()
         self.db = self.ws / "prs.json"
         self.state = json.loads(self.db.read_text()) if self.db.exists() else {"prs": {}, "requests": {}}
@@ -102,11 +120,164 @@ class Chatbot4World(World):
         self.state.setdefault("drafts", {})
         # Unread news per agent: name -> [{"pr", "kind", "text", "ts"}], newest last.
         self.state.setdefault("inbox", {})
+        # New-PR budget: Hub PR creations and merges (unix times, last WINDOW seconds).
+        self.state.setdefault("pr_opens", [])
+        self.state.setdefault("pr_merges", [])
+        budget = os.environ.get("CHATBOT_PR_OPEN_BUDGET", "merges").strip().lower() or "merges"
+        if budget not in ("merges", "off"):
+            raise ValueError("CHATBOT_PR_OPEN_BUDGET must be merges or off")
+        self.budget_on = budget == "merges"
+        self.budget_floor = int(os.environ.get("CHATBOT_PR_OPEN_FLOOR", "20"))
+        self.open_reserved = set()  # new-PR calls past the budget check, Hub PR not yet created
+        # Review comments wait here for the Hub; a background thread posts them.
+        self.state.setdefault("hub_outbox", [])
+        self.outbox_max = int(os.environ.get("CHATBOT_HUB_OUTBOX_MAX", "2000"))
+        self.outbox_gap = float(os.environ.get("CHATBOT_HUB_OUTBOX_GAP_S", "1"))
+        self.stopping = threading.Event()
+        self.wake = threading.Event()
         with self.lock:  # the archive may predate merges that already landed on the Hub
             for rec in self.state["prs"].values():
                 if rec["state"] == "closing":  # interrupted close_pr: the author may retry
                     rec["state"] = "open"
             self._reconcile()
+        self.drainer = threading.Thread(target=self._drain, name="chatbot4-hub-outbox", daemon=True)
+        self.drainer.start()
+        _LIVE[str(self.ws.resolve())] = self
+
+    # -- review comment outbox -------------------------------------------------------------
+
+    def _queue_comment(self, agent, pr, text):
+        """Queue a Hub comment (call with the lock held; the caller saves)."""
+        box = self.state["hub_outbox"]
+        box.append({"id": uuid.uuid4().hex, "pr": pr, "agent": agent.name, "text": text,
+                    "tries": 0, "next_at": 0.0, "queued_at": time.time()})
+        if len(box) > self.outbox_max:
+            dropped = box[:len(box) - self.outbox_max]
+            del box[:len(dropped)]
+            log.warning("hub_outbox: over %d comments, dropped the %d oldest (PRs %s)",
+                        self.outbox_max, len(dropped), sorted({d["pr"] for d in dropped}))
+        self.wake.set()
+
+    def _post(self, item, wait):
+        """Post one queued comment holding the Hub slot (waiting at most wait seconds), then
+        update the outbox. Returns False if the slot stayed busy."""
+        if not self.hub_slots.acquire(timeout=max(0.0, wait)):
+            return False
+        try:
+            with self.lock:  # dropped while waiting for the slot: nothing to post
+                if not any(e["id"] == item["id"] for e in self.state["hub_outbox"]):
+                    return True
+            self.repo.hub.comment(item["pr"], item["text"])
+            failure = None
+        except Exception as exc:  # noqa: BLE001 -- retried later, never raised to a tool call
+            failure = getattr(exc, "code", type(exc).__name__)
+        finally:
+            self.hub_slots.release()
+        with self.lock:
+            box = self.state["hub_outbox"]
+            entry = next((e for e in box if e["id"] == item["id"]), None)
+            if entry is None:  # dropped meanwhile
+                return True
+            if failure is None:
+                box.remove(entry)
+            else:
+                entry["tries"] += 1
+                if entry["tries"] >= OUTBOX_TRIES:
+                    box.remove(entry)
+                    log.warning("hub_outbox: dropped the comment on PR #%s by %s after %d "
+                                "attempts: %s", entry["pr"], entry["agent"], entry["tries"], failure)
+                else:
+                    delay = min(OUTBOX_BACKOFF[1], OUTBOX_BACKOFF[0] * 2 ** (entry["tries"] - 1))
+                    entry["next_at"] = time.time() + delay
+                    log.warning("hub_outbox: comment on PR #%s failed (%s); retry %d in %.0f s",
+                                entry["pr"], failure, entry["tries"], delay)
+            self._save()
+        return True
+
+    def _drain(self):
+        """Background thread: post due comments one at a time, never blocking a tool call."""
+        while not self.stopping.is_set():
+            with self.lock:
+                now = time.time()
+                box = self.state["hub_outbox"]
+                item = next((dict(e) for e in box if e["next_at"] <= now), None)
+                idle = min((e["next_at"] - now for e in box), default=5.0)
+            if item is None:
+                self.wake.wait(min(5.0, max(0.05, idle)))
+                self.wake.clear()
+                continue
+            try:
+                posted = self._post(item, 1.0)
+            except Exception:  # keep the thread alive
+                log.exception("hub_outbox: drain failed")
+                posted = False
+            self.stopping.wait(self.outbox_gap if posted else 0.2)
+
+    def close(self, timeout=5.0):
+        """Stop the outbox thread and try each queued comment once within timeout seconds;
+        what is left stays in prs.json for the next start."""
+        deadline = time.monotonic() + timeout
+        self.stopping.set()
+        self.wake.set()
+        if self.drainer.is_alive() and self.drainer is not threading.current_thread():
+            self.drainer.join(max(0.0, deadline - time.monotonic()))
+            if self.drainer.is_alive():
+                return
+        with self.lock:
+            items = [dict(e) for e in self.state["hub_outbox"]]
+        for item in items:
+            left = deadline - time.monotonic()
+            if left <= 0 or not self._post(item, left):
+                break
+        if _LIVE.get(str(self.ws.resolve())) is self:
+            del _LIVE[str(self.ws.resolve())]
+
+    # -- new-PR budget ---------------------------------------------------------------------
+
+    @staticmethod
+    def _recent(stamps, now):
+        """Drop timestamps older than WINDOW (in place); return the list."""
+        cut = now - WINDOW
+        stamps[:] = [t for t in stamps if t > cut][-WINDOW_MAX:]
+        return stamps
+
+    def _budget(self):
+        """Current new-PR budget (call with the lock held)."""
+        now = time.time()
+        opens = self._recent(self.state["pr_opens"], now)
+        merges = self._recent(self.state["pr_merges"], now)
+        limit = max(len(merges), self.budget_floor)
+        used = len(opens) + len(self.open_reserved)
+        info = {"mode": "merges" if self.budget_on else "off", "opened_last_hour": used,
+                "merged_last_hour": len(merges), "limit": limit,
+                "available": max(0, limit - used) if self.budget_on else None}
+        if self.budget_on and used >= limit:
+            # The next slot frees when enough of the oldest opens leave the window.
+            index = used - limit
+            info["next_slot_min"] = (math.ceil(max(0.0, opens[index] + WINDOW - now) / 60)
+                                     if index < len(opens) else 1)
+        return info
+
+    def _check_budget(self, agent):
+        """Refuse a new PR when the swarm's opens in the last hour reached
+        max(merges in the last hour, CHATBOT_PR_OPEN_FLOOR) (call with the lock held)."""
+        if not self.budget_on:
+            return
+        info = self._budget()
+        if info["opened_last_hour"] < info["limit"]:
+            return
+        n, m, k = info["opened_last_hour"], info["merged_last_hour"], info["next_slot_min"]
+        log.warning("open_budget: refused a new PR for agent=%s opened=%d merged=%d limit=%d",
+                    agent.name, n, m, info["limit"])
+        raise ToolError(f"the swarm opened {n} PRs in the last hour and merged {m}; new PRs wait "
+                        f"until more merge (next slot in ~{k} min). Meanwhile review others' PRs "
+                        "(list_prs needs_review=true) or improve your open PR with pr=<n>.",
+                        "open_budget")
+
+    def _note_merge(self):
+        """Count a merge for the new-PR budget (call with the lock held; the caller saves)."""
+        now = time.time()
+        self._recent(self.state["pr_merges"], now).append(now)
 
     def _save(self):
         tmp = self.db.with_suffix(".tmp")
@@ -179,6 +350,7 @@ class Chatbot4World(World):
             reviewers = sorted(name for name, r in self._current_reviews(rec).items()
                                if r["verdict"] == "approve")
             rec.update(state="merged", merged_sha=merged)
+            self._note_merge()
             event = {"pr": rec["pr"], "author": rec["author"], "reviewers": reviewers,
                      "parent_sha": self.repo.git("rev-parse", f"{merged}^1") if merged else None,
                      "head_sha": rec["head_sha"], "merged_sha": merged, "reconciled": True}
@@ -217,22 +389,29 @@ class Chatbot4World(World):
         """Run the tool; on success, attach and clear the caller's unread inbox.
 
         A dict result gets a top-level "inbox" list of strings (newest last). A list result
-        (list_prs) becomes {"prs": [...], "inbox": [...]}, only when the inbox is non-empty.
+        (list_prs) becomes {"prs": [...], "inbox": [...], "pr_budget": {...}}, only when the
+        inbox is non-empty. open_pr, review_pr, merge_pr and close_pr results carry pr_budget.
         A ToolError leaves the inbox untouched."""
         result = super().call(tool, args, agent)
-        if inspect.isawaitable(result) or not self.state["inbox"].get(agent.name):
+        if inspect.isawaitable(result):
+            return result
+        if isinstance(result, dict) and tool in ("open_pr", "review_pr", "merge_pr", "close_pr"):
+            with self.lock:
+                result = {**result, "pr_budget": self._budget()}
+        if not self.state["inbox"].get(agent.name):
             return result
         with self.lock:
             box = self.state["inbox"].pop(agent.name, None)
             if not box:
                 return result
             self._save()
+            budget = self._budget()
         now = time.time()
         inbox = [f"{e['text']} ({self._age(now - e['ts'])})" for e in box]
         if isinstance(result, dict):
             return {**result, "inbox": inbox}
         if isinstance(result, list):
-            return {"prs": result, "inbox": inbox}
+            return {"prs": result, "inbox": inbox, "pr_budget": budget}
         return {"result": result, "inbox": inbox}
 
     def _identity(self, agent):
@@ -339,6 +518,9 @@ class Chatbot4World(World):
         The worker uploads path from your private workspace. Include tests and run_bot
         evidence in description. At most two open PRs per agent. Read CONTRIBUTING.md.
         branch is a short slug like my-topic; the world stores it as agents/<you>/<slug>.
+        New PRs are budgeted swarm-wide: one is refused (code open_budget) while the swarm
+        opened max(merges in the last hour, 20) new PRs in the last hour; updates with
+        pr=<n> are never counted. Results carry pr_budget with the current counts.
         """
         started = time.monotonic()
         self._identity(agent)
@@ -352,14 +534,16 @@ class Chatbot4World(World):
         if not isinstance(snapshot, dict):
             raise ToolError("submit a local clone through flock-tool; the worker uploads it")
         key = agent.request_id
+        branch_ref = f"agents/{agent.name}/{branch}"
         with self.lock:
             if key and key in self.state["requests"]:
                 return self.state["requests"][key]
+            if pr is None and branch_ref not in self.state["drafts"]:
+                self._check_budget(agent)  # before any fetch, build or Hub call
         # The lock is held only for state and the main check; fetches, copies, compiles,
         # Hub calls and pushes run outside it. A reservation keeps the cap and slugs exact.
         self.repo.refresh(FETCH_TTL)
         base = snapshot.get("base_sha", "")
-        branch_ref = f"agents/{agent.name}/{branch}"
         token = object()
         with self.lock:
             if key and key in self.state["requests"]:
@@ -392,11 +576,13 @@ class Chatbot4World(World):
                         or branch_ref in self.state["drafts"]
                         or any(p[1] == branch_ref for p in pending)):
                     raise ToolError("branch slug already used; choose a new topic slug")
+                self._check_budget(agent)
+                self.open_reserved.add(token)
             old_head = old["head_sha"] if old else None
             self.pending[token] = (agent.name, branch_ref, number, key)
         try:
             number, sha, main = self._publish(agent, snapshot, base, title, description,
-                                              branch_ref, number, old_head, started)
+                                              branch_ref, number, old_head, started, token)
             with self.lock:
                 if old and (old["state"] != "open" or old["head_sha"] != old_head):
                     raise ToolError("the PR was merged or closed during the update")
@@ -430,6 +616,7 @@ class Chatbot4World(World):
         finally:
             with self.lock:
                 self.pending.pop(token, None)
+                self.open_reserved.discard(token)
 
     def _build(self, agent, snapshot, base, title, main):
         """Commit the upload on base, replayed onto main (outside the world lock)."""
@@ -441,7 +628,8 @@ class Chatbot4World(World):
             # An older base is rebased onto main here, before anything exists on the Hub.
             return self.repo.commit(tree, base, agent.name, title, onto=main)
 
-    def _publish(self, agent, snapshot, base, title, description, branch_ref, pr, old_head, started):
+    def _publish(self, agent, snapshot, base, title, description, branch_ref, pr, old_head, started,
+                 token=None):
         """Publish the upload: update open PR pr (old_head set), finish parked draft pr, or
         create one Hub PR. At most one create_pull_request per call, and a created PR is
         never closed by the world: if its head cannot be pushed it is parked as a draft."""
@@ -464,6 +652,11 @@ class Chatbot4World(World):
                             if self.repo.sha() != main:
                                 continue
                         pr = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
+                        with self.lock:  # the reservation becomes a counted open
+                            self.open_reserved.discard(token)
+                            now = time.time()
+                            self._recent(self.state["pr_opens"], now).append(now)
+                            self._save()
                         with self.gap_lock:
                             self.last_create = max(self.last_create, time.monotonic())
                     sha, main = self._land(agent, snapshot, base, title, branch_ref, pr, sha, main,
@@ -517,7 +710,10 @@ class Chatbot4World(World):
     @logs_refusals
     def review_pr(self, agent: Agent, pr: int, head_sha: str,
                   verdict: Literal["approve", "request_changes"], comment: str) -> dict:
-        """Review the exact head SHA you inspected or tested, independently of the author."""
+        """Review the exact head SHA you inspected or tested, independently of the author.
+
+        Reviews are unlimited: the review counts at once, and its Hub comment is posted
+        in the background."""
         self._identity(agent)
         if verdict not in ("approve", "request_changes") or not comment.strip():
             raise ToolError("give a verdict and a review comment")
@@ -535,11 +731,11 @@ class Chatbot4World(World):
             base = check()["base_sha"]
         review = {"head_sha": head_sha, "patch_id": self._patch_id(base, head_sha),
                   "verdict": verdict, "comment": comment}
-        with self._hub_write(agent, "comment", pr):
-            self.repo.hub.comment(pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
         with self.lock:
             rec = check()
             rec["reviews"][agent.name] = review
+            # No Hub call here: the outbox thread posts the comment when the Hub slot is free.
+            self._queue_comment(agent, pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
             snippet = " ".join(comment.split())
             if len(snippet) > INBOX_SNIPPET:
                 snippet = snippet[:INBOX_SNIPPET - 3] + "..."
@@ -637,6 +833,7 @@ class Chatbot4World(World):
             self.repo.fetch()
             merged = self.repo.sha()
             rec.update(state="merged", merged_sha=merged)
+            self._note_merge()
             if rec["author"] != agent.name:
                 self._unnotify(rec["author"], pr, "mergeable")
                 self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
@@ -727,7 +924,8 @@ class Chatbot4World(World):
         A PR with "draft": true is open on the Hub but its head is not pushed yet (head_sha is
         null); it counts toward its author's open PRs and cannot be reviewed or merged until
         its author retries open_pr with pr=<number>.
-        Returns a list of PRs; if you have unread inbox news it is {"prs": [...], "inbox": [...]}.
+        Returns a list of PRs; if you have unread inbox news it is
+        {"prs": [...], "inbox": [...], "pr_budget": {...}} (the swarm's new-PR budget).
         """
         if offset < 0:
             raise ToolError("offset must be nonnegative")
