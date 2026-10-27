@@ -89,8 +89,10 @@ class Team:
             rt = self.agents[n]
             await rt.setup(restore=False)
             await rt.prompt("hello")
+        # comms_joined comes after the whole join, including the extended mode's "now" cursor:
+        # a message posted before that is history, not news, and is never delivered.
         await until(lambda: all(self.hub.members.get(n) and self.hub.members[n].ident
-                                for n in names or self.agents))
+                                and custom(self.agents[n], "comms_joined") for n in names or self.agents))
 
     async def call(self, agent, tool, **args):
         r = await self.hub.call(agent, f"comms:{tool}", args)

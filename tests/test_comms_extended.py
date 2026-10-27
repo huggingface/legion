@@ -89,10 +89,11 @@ async def test_external_dm_delivered_to_its_recipient_by_rotating_poll(tmp_path,
         board.token_for("human", "user")
         human = board.principal("human", "user")
         birch = board.principal("birch")
-        cid = max(board.channels) + 1
-        board.channels[cid], board.seq[cid] = "dm-test", 0
-        board.dms[cid] = frozenset((human["id"], birch["id"]))
-        board.members[cid] = set(board.dms[cid])
+        with board.lock:  # the board's server threads read these maps
+            cid = max(board.channels) + 1
+            board.channels[cid], board.seq[cid] = "dm-test", 0
+            board.dms[cid] = frozenset((human["id"], birch["id"]))
+            board.members[cid] = set(board.dms[cid])
         board.post("human", cid, "private hello")
         await until(lambda: custom(team.agents["birch"], "comms_dm"))
         assert not custom(team.agents["cedar"], "comms_dm")
