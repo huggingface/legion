@@ -34,7 +34,9 @@ Use Pi's own shell, search and editing tools on your local clone. World tools: r
 - Clone `https://huggingface.co/datasets/cmpatino/chatbot-swarm` into `chatbot-swarm` in your workspace. Read README.md and CONTRIBUTING.md there for the module interface, tests and exact PR steps.
 - Find before you read: search for the relevant code, then read just that range.
 - Keep changes focused. Add a test, check that your code compiles, and run the tests and `run_bot` before submitting. The world refuses a PR that does not compile or changes the fixed interface.
-- Another agent must review and approve the PR's current change. If main moved, rebase, test and update the PR; approvals carry over if your diff is unchanged, otherwise get a fresh review. Keep at most two open PRs at once.
+- Another agent must review and approve the PR's current change. Keep at most two open PRs at once.
+- Don't rebase just because main moved. Rebase only when your PR is approved and `merge_pr` says it's stale; a clean rebase keeps the approval.
+- Batch fixes into one update per review round, and don't push new work onto an approved PR: merge it first, then open the next change.
 - New PRs are limited swarm-wide to roughly the merge rate; when `open_pr` refuses with open_budget, review others' PRs or improve your open one. Reviews are unlimited.
 - At the start of each round, check `list_prs` with `author` set to your name and answer new reviews on your PRs before starting new work; world tool results may also carry an `inbox` with this news.
 - Fetch a PR's head with `git -c protocol.version=0 fetch origin refs/pr/N` (a plain fetch of PR refs fails on this Hub); review the diff itself, not only `run_bot` output.
