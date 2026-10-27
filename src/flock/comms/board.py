@@ -10,6 +10,7 @@ codes are never part of an error message.
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 import uuid
@@ -27,6 +28,8 @@ ATTEMPTS = 4
 BACKOFF_S = 1.0
 BACKOFF_MAX_S = 20.0
 RETRY_AFTER_MAX_S = 120.0  # a board's Retry-After is honoured up to this (plus jitter)
+GATE_DEFAULT_S = 5.0  # a 429 without Retry-After closes the gate this long (plus jitter)
+TOOL_WAIT_S = 10.0  # a foreground request waits at most this for the worker's request budget
 NEWEST = 2 ** 53  # `before=` that means "the newest messages"
 
 
@@ -55,6 +58,44 @@ def parse_retry_after(value: str | None, now: datetime | None = None) -> float |
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
     return max(0.0, (when - (now or datetime.now(UTC))).total_seconds())
+
+
+def _busy(what: str, wait: float) -> BoardError:
+    return BoardError(f"board busy ({what}), retry in {max(1, math.ceil(wait))} s", 429,
+                      "board_busy", wait)
+
+
+class RateLimiter:
+    """A worker's request budget for the board: a token bucket (`rate` requests/s, `burst`),
+    shared by the poller and every tool call. Background requests (the poller) yield: they
+    take a token only while no foreground request is waiting."""
+
+    def __init__(self, rate: float, burst: float = 5.0, clock=time.monotonic) -> None:
+        self.rate, self.burst, self._clock = rate, max(1.0, burst), clock
+        self.tokens, self._at, self.waiting = self.burst, clock(), 0
+
+    def _refill(self) -> None:
+        now = self._clock()
+        self.tokens = min(self.burst, self.tokens + (now - self._at) * self.rate)
+        self._at = now
+
+    async def acquire(self, *, background: bool = False, max_wait: float | None = TOOL_WAIT_S) -> None:
+        start = self._clock()
+        if not background:
+            self.waiting += 1
+        try:
+            while True:
+                self._refill()
+                if self.tokens >= 1 and (not background or self.waiting == 0):
+                    self.tokens -= 1
+                    return
+                wait = max(0.05, (1 - self.tokens) / self.rate)
+                if max_wait is not None and self._clock() - start + wait > max_wait:
+                    raise _busy("worker request budget", wait)
+                await asyncio.sleep(wait)
+        finally:
+            if not background:
+                self.waiting -= 1
 
 
 def idem_key(prefix: str = "flock") -> str:
@@ -160,17 +201,36 @@ class AsyncBoard:
     anywhere else."""
 
     def __init__(self, url: str, *, transport: httpx.AsyncBaseTransport | None = None,
-                 backoff_s: float = BACKOFF_S) -> None:
+                 backoff_s: float = BACKOFF_S, limiter: RateLimiter | None = None) -> None:
         self.url = normalize_board_url(url)
         self.http = httpx.AsyncClient(base_url=self.url, transport=transport,
                                       timeout=httpx.Timeout(20, read=45))
         self.backoff_s = backoff_s
+        self.limiter = limiter
+        # Shared gate: a 429 closes it until Retry-After (plus jitter) for every caller of
+        # this board; meanwhile requests fail at once, without being sent.
+        self.blocked_until = 0.0
 
     async def aclose(self) -> None:
         await self.http.aclose()
 
-    async def request(self, route: tuple[str, str, dict], cred: Credential | None = None) -> dict:
+    def _check_gate(self) -> None:
+        left = self.blocked_until - time.monotonic()
+        if left > 0:
+            raise _busy("rate limited", left)
+
+    def _close_gate(self, error: BoardError) -> None:
+        ra = error.retry_after if error.retry_after is not None else GATE_DEFAULT_S
+        wait = min(RETRY_AFTER_MAX_S, ra + random.uniform(0, max(1.0, 0.2 * ra)))
+        self.blocked_until = max(self.blocked_until, time.monotonic() + wait)
+        error.retry_after = max(ra, wait)
+
+    async def request(self, route: tuple[str, str, dict], cred: Credential | None = None, *,
+                      background: bool = False) -> dict:
+        """`background`: the poller's request, which yields to tool calls for the budget
+        and waits for it as long as needed; a tool call waits at most TOOL_WAIT_S."""
         method, path, kw = route
+        self._check_gate()
         headers = {}
         if cred is not None:
             # a token is only ever sent to the board that issued it
@@ -181,6 +241,10 @@ class AsyncBoard:
         if method in ("POST", "PUT", "PATCH"):
             headers["Idempotency-Key"] = idem_key()
         for attempt in range(ATTEMPTS):
+            if self.limiter is not None:
+                await self.limiter.acquire(background=background,
+                                           max_wait=None if background else TOOL_WAIT_S)
+                self._check_gate()
             r: httpx.Response | None = None
             try:
                 r = await self.http.request(method, path, headers=headers, **kw)
@@ -189,8 +253,11 @@ class AsyncBoard:
                     raise BoardError(f"board: {method} {path}: {type(e).__name__}") from None
             if r is not None and r.status_code == 429:
                 # Rate limited: never retried here (a retry is another request against the
-                # same limit); the caller sees retry_after and decides.
-                raise _error(r, method, path)
+                # same limit); the gate closes for every caller and the error carries
+                # retry_after.
+                error = _error(r, method, path)
+                self._close_gate(error)
+                raise error
             if r is not None and r.status_code not in RETRY_STATUSES:
                 if r.status_code >= 400:
                     raise _error(r, method, path)
@@ -227,7 +294,8 @@ class AsyncBoard:
         return await self.request(_Routes.thread(channel, root, n), cred)
 
     async def activity(self, cred: Credential, channel: int | str, after: int | None, wait: float = 0) -> dict:
-        return await self.request(_Routes.activity(channel, after, wait), cred)
+        return await self.request(_Routes.activity(channel, after, wait), cred,
+                                  background=after is not None and bool(wait))
 
     async def search(self, cred: Credential, q: str, *, sort: str = "relevance", limit: int = 20) -> dict:
         return await self.request(_Routes.search(q, sort, limit), cred)

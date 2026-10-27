@@ -122,6 +122,10 @@ class WorkerConfig:
     # FLOCK_COMMS_POLL_CYCLE_S: overrides the spec's comms.poll_cycle_s (extended board
     # polling: each agent's feed about once per this many seconds; spec default 300)
     comms_poll_cycle_s: float | None = None
+    # FLOCK_COMMS_RATE / FLOCK_COMMS_BURST: the worker's board request budget (token bucket
+    # shared by the poller and every comms tool call); 0 turns it off
+    comms_rate: float = 0.5
+    comms_burst: float = 5.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -149,6 +153,8 @@ class WorkerConfig:
             else None,
             comms_poll_cycle_s=float(env["FLOCK_COMMS_POLL_CYCLE_S"])
             if env.get("FLOCK_COMMS_POLL_CYCLE_S") else None,
+            comms_rate=float(env.get("FLOCK_COMMS_RATE") or 0.5),
+            comms_burst=float(env.get("FLOCK_COMMS_BURST") or 5.0),
         )
 
 
@@ -351,7 +357,8 @@ class Worker:
         # comms (docs/comms.md): one hub per worker, one board poller for all its agents
         self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
                                        runtime=self.agents.get,
-                                       poll_cycle_s=cfg.comms_poll_cycle_s)
+                                       poll_cycle_s=cfg.comms_poll_cycle_s,
+                                       rate=cfg.comms_rate, burst=cfg.comms_burst)
         # the swarm's world (docs/world.md): its tools, reached through the same gateway
         self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
                                        runtime=self.agents.get)

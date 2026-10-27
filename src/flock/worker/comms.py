@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from flock.comms.board import AsyncBoard, BoardError, parse_retry_after, same_board
+from flock.comms.board import AsyncBoard, BoardError, RateLimiter, parse_retry_after, same_board
 from flock.comms.tools import (
     GROUP_NAMES,
     READ_DEFAULT,
@@ -170,7 +170,8 @@ class CommsHub(ExtendedComms):
                  transport: httpx.AsyncBaseTransport | None = None,
                  clock: Callable[[], float] = time.time, poll_wait: float = POLL_WAIT_S,
                  backoff_s: float = 1.0, poll_min_interval: float = 2.0,
-                 poll_cycle_s: float | None = None) -> None:
+                 poll_cycle_s: float | None = None, rate: float | None = None,
+                 burst: float = 5.0) -> None:
         self.swarm = swarm
         self._init_extended()
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
@@ -182,6 +183,8 @@ class CommsHub(ExtendedComms):
         self.poll_wait = poll_wait
         self.poll_min_interval = poll_min_interval
         self.poll_cycle_s = poll_cycle_s  # overrides the spec's comms.poll_cycle_s (tests)
+        # the worker's board request budget (requests/s), shared by the poller and all tools
+        self.limiter = RateLimiter(rate, burst) if rate else None
         self.backoff_s = backoff_s
         self.spec: CommsSpec | None = None
         self.entries: list[str] = []
@@ -272,7 +275,8 @@ class CommsHub(ExtendedComms):
         spec" read after an await."""
         key = normalize_board_url(url)
         if key not in self._boards:
-            self._boards[key] = AsyncBoard(key, transport=self._transport, backoff_s=self.backoff_s)
+            self._boards[key] = AsyncBoard(key, transport=self._transport, backoff_s=self.backoff_s,
+                                           limiter=self.limiter)
         return self._boards[key]
 
     def entries_for(self, agent: str) -> list[str]:

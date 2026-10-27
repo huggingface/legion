@@ -52,11 +52,87 @@ async def test_async_board_raises_429_at_once_but_retries_5xx(monkeypatch):
     try:
         with pytest.raises(BoardError) as e:
             await board.channels(cred)
-        assert e.value.status == 429 and e.value.retry_after == 30.0
+        assert e.value.status == 429 and 30.0 <= e.value.retry_after <= 36.0  # + gate jitter
         assert len(seen) == 1 and sleeps == []  # one request, no in-client retry
+        board.blocked_until = 0.0  # (the 429 closed the gate)
         status[0] = 503
         seen.clear()
         assert await board.channels(cred) == []
         assert len(seen) == 3 and len(sleeps) == 2  # 5xx still retried in the client
     finally:
         await board.aclose()
+
+
+async def test_a_429_closes_the_gate_for_every_caller_without_sending(monkeypatch):
+    seen = []
+
+    def handler(r):
+        seen.append(r.url.path)
+        return httpx.Response(429, headers={"retry-after": "40"})
+
+    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(handler))
+    cred = type("C", (), {"url": "http://b.invalid", "token": "t"})()
+    try:
+        with pytest.raises(BoardError):
+            await board.post(cred, 12, "hello")
+        assert 40.0 <= board.blocked_until - board_mod.time.monotonic() <= 49.0  # + jitter
+        for call in (board.channels(cred), board.activity(cred, "joined", 5, wait=25),
+                     board.search(cred, "x")):
+            with pytest.raises(BoardError) as e:
+                await call
+            assert e.value.code == "board_busy" and e.value.retry_after >= 39
+            assert str(e.value).startswith("board busy (rate limited), retry in ")
+        assert seen == ["/v1/channels/12/messages"]  # nothing else was sent
+    finally:
+        await board.aclose()
+
+
+async def test_worker_budget_tool_calls_wait_briefly_and_the_poller_yields(monkeypatch):
+    now = [0.0]
+    limiter = board_mod.RateLimiter(0.5, burst=2, clock=lambda: now[0])
+
+    async def sleep(s):
+        now[0] += s
+
+    monkeypatch.setattr(board_mod.asyncio, "sleep", sleep)
+    await limiter.acquire()
+    await limiter.acquire()  # the burst
+    await limiter.acquire()  # waits 2 s for the next token (0.5 req/s)
+    assert now[0] == 2.0
+    limiter.waiting = 1  # a tool call is waiting: the poller does not take the token
+    now[0] += 2.0
+    limiter._refill()
+    assert limiter.tokens >= 1
+    with pytest.raises(BoardError) as e:  # (bounded here only to end the test)
+        await limiter.acquire(background=True, max_wait=1.0)
+    limiter.waiting = 0
+    await limiter.acquire(background=True, max_wait=None)
+    with pytest.raises(BoardError) as e:  # a tool call never waits more than TOOL_WAIT_S
+        await limiter.acquire(max_wait=1.0)
+    assert e.value.code == "board_busy" and "worker request budget" in str(e.value)
+
+
+async def test_tool_call_reports_board_busy_to_the_model(monkeypatch):
+    from flock.models import ALL_COMMS_TOOLS, CommsSpec
+    from flock.worker.comms import CommsHub
+
+    def handler(r):
+        if r.url.path == "/v1/join":
+            return httpx.Response(200, json={"token": "tok", "principal": {"id": 1, "external_id": "dev-0000"}})
+        if r.url.path == "/v1/channels":
+            return httpx.Response(200, json={"channels": [{"id": 12, "name": "team", "member": True}]})
+        if r.url.path == "/v1/activity":
+            return httpx.Response(200, json={"messages": [], "next_cursor": 0})
+        return httpx.Response(429, headers={"retry-after": "30"})
+
+    hub = CommsHub(swarm="sw", env={"INV": "c"}, transport=httpx.MockTransport(handler), rate=0.5)
+    hub.configure(CommsSpec(url="http://b.invalid", invite_env="INV", channel="team", channel_id=12),
+                  list(ALL_COMMS_TOOLS))
+    try:
+        first = await hub.call("dev-0000", "comms:read", {})
+        assert first.error
+        second = await hub.call("dev-0000", "comms:read", {})
+        assert second.error and "board busy (rate limited), retry in" in second.output
+        assert hub.limiter.rate == 0.5
+    finally:
+        await hub.aclose()

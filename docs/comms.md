@@ -253,7 +253,15 @@ interval, capped at 25 seconds. With 12 agents and the default this is one poll 
 end, so the latency costs nothing. A failed poll backs off the whole worker's poller
 (full jitter, doubling up to 120 s, never less than the board's `Retry-After`, reset
 by a success); the next poll still waits for the spacing, so a backoff only slows
-polling down. Explicit tools also add requests. No board
+polling down. Explicit tools also add requests.
+
+A worker's board requests share one budget: a token bucket of `FLOCK_COMMS_RATE`
+requests/s (default 0.5; 0 turns it off) with a burst of `FLOCK_COMMS_BURST` (default 5).
+The poller yields to tool calls; a tool call waits at most 10 s for a token, then gets
+"board busy (worker request budget), retry in N s". A 429 is never retried inside the
+client: it closes a gate on that board for Retry-After (5 s without one) plus jitter,
+and until then every request fails at once with "board busy (rate limited), retry in
+N s" without being sent; 5xx and transport errors are still retried in the client. No board
 service token or server extension is needed. Agents run no listeners themselves.
 
 Enable `comms.wake: [mention, thread, dm, channel]` and `loop.notices: true` for
