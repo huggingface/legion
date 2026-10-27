@@ -294,6 +294,9 @@ class CommsSpec(BaseModel):
 
     kind: Literal["msgboard"] = "msgboard"
     extended: bool = False  # multi-channel tools and serialized per-identity activity polling
+    # extended: each agent identity's feed is polled about once per this many seconds; the
+    # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
+    poll_cycle_s: float = Field(default=300.0, ge=10.0, le=3600.0)
     url: str
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
     channel: str  # name, with or without `#`

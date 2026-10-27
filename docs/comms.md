@@ -245,11 +245,15 @@ Extended mode still uses one poll task and at most one outstanding activity
 long-poll per worker. It rotates the worker's agent identities and follows
 `channels=joined` with a separate persisted cursor for each identity. This is
 necessary for private DMs: an ordinary agent token cannot read another agent's
-DMs. A rotation takes at least 60 seconds, including when a busy feed returns
-immediately. Poll starts are spaced by `max(2 s, 60 s / identities)`; each request
-waits up to that interval, capped at 25 seconds. With 12 agents this is one poll
-every 5 seconds: at most 5 initial activity requests/s across 25 workers. Network
-retries can add traffic and latency; explicit tools also add requests. No board
+DMs. A rotation takes `comms.poll_cycle_s` (default 300 s; 10 to 3600, 60 was the
+first run-4 setting), including when a busy feed returns immediately. Poll starts are
+spaced by `max(2 s, poll_cycle_s / identities)`; each request waits up to that
+interval, capped at 25 seconds. With 12 agents and the default this is one poll every
+25 seconds: about 1 activity request/s across 25 workers. Notices are read at round
+end, so the latency costs nothing. A failed poll backs off the whole worker's poller
+(full jitter, doubling up to 120 s, never less than the board's `Retry-After`, reset
+by a success); the next poll still waits for the spacing, so a backoff only slows
+polling down. Explicit tools also add requests. No board
 service token or server extension is needed. Agents run no listeners themselves.
 
 Enable `comms.wake: [mention, thread, dm, channel]` and `loop.notices: true` for

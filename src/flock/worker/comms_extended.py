@@ -1,7 +1,8 @@
 """Multi-channel tools and one rotating activity task per worker.
 
 Each identity keeps its own cursor: another agent's token cannot see its DMs.
-The single polling task rotates identities on a 60-second cycle, even on busy feeds.
+The single polling task rotates identities on a `comms.poll_cycle_s` cycle (default 300 s),
+even on busy feeds.
 No service credential, per-agent poll tasks, or per-channel pollers are needed.
 """
 from __future__ import annotations
@@ -160,7 +161,10 @@ class ExtendedComms:
             m = members[index % len(members)]
             index += 1
             ident, c, gen = m.ident, self.spec, self._gen
-            spacing = max(self.poll_min_interval, self.poll_cycle_s / len(members))
+            # A failed poll sleeps its backoff first; the next start still waits for the
+            # spacing, so a backoff can only slow polling down, never speed it up.
+            cycle = self.poll_cycle_s or c.poll_cycle_s
+            spacing = max(self.poll_min_interval, cycle / len(members))
             try:
                 self.stats["polls"] += 1
                 page = await self._board(ident.url).activity(ident, "joined", m.cursor,

@@ -1,5 +1,6 @@
 """Multi-channel and private DM delivery through one rotating worker poller."""
 import asyncio
+import itertools
 
 import pytest
 
@@ -239,3 +240,47 @@ async def test_rate_limited_poller_backs_off_for_the_whole_worker_then_resets(tm
         assert len(delays) == 2  # reset after the success: no further backoff
     finally:
         await team.close()
+
+
+async def test_poll_backoff_only_slows_the_rotation(monkeypatch):
+    """Virtual time: a 429 with a short backoff keeps the normal spacing; one with a long
+    Retry-After delays the next poll by at least that much."""
+    from types import SimpleNamespace
+
+    import flock.worker.comms_extended as module
+    from flock.comms.board import BoardError
+    from flock.models import CommsSpec
+    from flock.worker.comms import CommsHub, Member
+    from flock.worker.identity import MsgboardIdentity
+
+    now, starts = 0.0, []
+    hub = CommsHub(swarm="run4")
+    hub.configure(CommsSpec(url="http://board", invite_env="INVITE", channel="general",
+                            channel_id=12, extended=True), ["comms:read"])
+    for i in range(4):
+        hub.members[f"a{i}"] = Member(f"a{i}", ident=MsgboardIdentity("http://board", "t", f"a{i}", i),
+                                      cursor=0)
+
+    async def sleep(delay):
+        nonlocal now
+        now += delay
+
+    async def activity(*args, **kwargs):
+        starts.append(now)
+        if len(starts) == 2:
+            raise BoardError("HTTP 429", 429, "rate_limited", retry_after=1.0)
+        if len(starts) == 3:
+            raise BoardError("HTTP 429", 429, "rate_limited", retry_after=400.0)
+        if len(starts) == 6:
+            hub.entries = []
+        return {"messages": [], "next_cursor": 1}
+
+    monkeypatch.setattr(module, "monotonic", lambda: now, raising=False)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(module.random, "uniform", lambda a, b: 0.0)
+    monkeypatch.setattr(hub, "_board", lambda _: SimpleNamespace(activity=activity))
+    await hub._poll_extended()
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
+    assert gaps[0] == 75.0 and gaps[1] == 75.0  # 300 s / 4; the 1 s Retry-After changes nothing
+    assert gaps[2] == 400.0  # the long Retry-After wins over the spacing
+    assert gaps[3] == 75.0  # and the next success is back to normal

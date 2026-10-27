@@ -106,14 +106,17 @@ container_srun_args() { CTR_SRUN=(); }
         assert (tmp_path / "run/world/crash-requeues").read_text().strip() == str(restarts + 1)
 
 
-async def test_busy_board_polling_rotates_once_per_minute_on_a_busy_feed(monkeypatch):
+@pytest.mark.parametrize("cycle", [None, 60.0])
+async def test_busy_board_polling_rotates_once_per_cycle_on_a_busy_feed(monkeypatch, cycle):
     import flock.worker.comms_extended as module
 
     now = 0.0
     starts = []
     hub = CommsHub(swarm="run4")
-    hub.configure(CommsSpec(url="http://board", invite_env="INVITE", channel="general",
-                            channel_id=12, extended=True), ["comms:read"])
+    spec = CommsSpec(url="http://board", invite_env="INVITE", channel="general",
+                     channel_id=12, extended=True, **({"poll_cycle_s": cycle} if cycle else {}))
+    assert spec.poll_cycle_s == (cycle or 300.0)  # default: each identity every 5 minutes
+    hub.configure(spec, ["comms:read"])
     for i in range(12):
         name = f"agent-{i:04d}"
         hub.members[name] = Member(name, ident=MsgboardIdentity("http://board", "fake", name, i), cursor=0)
@@ -133,7 +136,9 @@ async def test_busy_board_polling_rotates_once_per_minute_on_a_busy_feed(monkeyp
     monkeypatch.setattr(hub, "_board", lambda _: SimpleNamespace(activity=activity))
     await hub._poll_extended()
     assert len(starts) == 48
-    assert all(b - a >= 5 for a, b in pairwise(starts))
+    spacing = (cycle or 300.0) / 12  # 25 s per worker by default: ~1 req/s for 25 workers
+    assert all(b - a >= spacing for a, b in pairwise(starts))
+    assert starts[-1] - starts[0] < 47 * spacing + 1
 
 
 def test_capacity_holds_persist_and_warn_without_growing(tmp_path, monkeypatch):
