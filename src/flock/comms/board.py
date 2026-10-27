@@ -2,7 +2,7 @@
 
 Writes carry an `Idempotency-Key` that stays the same across retries, so a retried post never
 posts twice. 429, 5xx and transport errors are retried with jittered backoff, honouring
-`Retry-After`; other errors raise `BoardError` with the board's own message. Tokens and invite
+`Retry-After` (its value plus jitter, up to RETRY_AFTER_MAX_S); other errors raise `BoardError` with the board's own message. Tokens and invite
 codes are never part of an error message.
 """
 
@@ -12,6 +12,8 @@ import asyncio
 import random
 import time
 import uuid
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -23,13 +25,35 @@ RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 ATTEMPTS = 4
 BACKOFF_S = 1.0
 BACKOFF_MAX_S = 20.0
+RETRY_AFTER_MAX_S = 120.0  # a board's Retry-After is honoured up to this (plus jitter)
 NEWEST = 2 ** 53  # `before=` that means "the newest messages"
 
 
 class BoardError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None, code: str | None = None) -> None:
+    """`retry_after`: seconds from the response's Retry-After header, when it had one."""
+
+    def __init__(self, message: str, status: int | None = None, code: str | None = None,
+                 retry_after: float | None = None) -> None:
         super().__init__(message)
-        self.status, self.code = status, code
+        self.status, self.code, self.retry_after = status, code, retry_after
+
+
+def parse_retry_after(value: str | None, now: datetime | None = None) -> float | None:
+    """Retry-After as seconds (>= 0): delta-seconds or an HTTP-date; None if absent or invalid."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - (now or datetime.now(UTC))).total_seconds())
 
 
 def idem_key(prefix: str = "flock") -> str:
@@ -44,18 +68,19 @@ def _error(r: httpx.Response, method: str, path: str) -> BoardError:
     msg = err.get("message") if isinstance(err, dict) else None
     code = err.get("code") if isinstance(err, dict) else None
     return BoardError(f"board: {method} {path.split('?')[0]}: HTTP {r.status_code}"
-                      + (f" {code}: {msg}" if msg else ""), r.status_code, code)
+                      + (f" {code}: {msg}" if msg else ""), r.status_code, code,
+                      parse_retry_after(r.headers.get("retry-after")))
 
 
 def _delay(attempt: int, r: httpx.Response | None, base: float) -> float:
-    ra = None
-    if r is not None:
-        try:
-            ra = float(r.headers.get("retry-after") or "")
-        except ValueError:
-            ra = None
+    """Jittered exponential backoff; with a Retry-After, that wait plus up to 20% (at least
+    1 s) of jitter, so clients told the same time do not come back together. Capped at
+    RETRY_AFTER_MAX_S."""
     d = min(BACKOFF_MAX_S, base * 2 ** attempt) * (0.5 + random.random() / 2)
-    return max(d, min(ra, BACKOFF_MAX_S)) if ra is not None else d
+    ra = parse_retry_after(r.headers.get("retry-after")) if r is not None else None
+    if ra is None:
+        return d
+    return min(RETRY_AFTER_MAX_S, max(d, ra + random.uniform(0, max(1.0, 0.2 * ra))))
 
 
 def _query(params: dict[str, Any]) -> dict[str, Any]:
