@@ -40,7 +40,7 @@ def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
 
 
 async def apply(client, spec: SwarmSpec) -> None:
-    r = await client.put(f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    r = await client.put(f"/swarms/{spec.swarm}", params={"replicas": "spec"}, json=spec.model_dump(mode="json"))
     assert r.status_code == 200, r.text
 
 
