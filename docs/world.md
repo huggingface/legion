@@ -278,8 +278,37 @@ queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is t
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
 concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
 `merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
-`stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s`, `save_age_s`,
-`state_bytes`, and its lanes' numbers as `lane_<lane>_<key>` (below).
+`stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s` (the last `state.db`
+flush), `save_age_s`, `state_bytes` (`state.db` plus its WAL), `dirty_rows` (changed rows not yet
+saved), and its lanes' numbers as `lane_<lane>_<key>` (below).
+
+**Saving state.** A world that keeps its state in memory can save it in O(changes) with
+`flock.world.store`, a `(kind, key) -> JSON` table on SQLite in WAL mode:
+
+```python
+from flock.world.store import Store
+
+store = Store(state_dir / "state.db")
+prs = dict(store.iter("prs"))                   # hot rows, at start
+prs["7"] = {...}; store.dirty("prs", "7")       # at every change
+store.flush(lambda kind, key: prs.get(key), lock)  # saver: dirty rows, one transaction; None deletes
+store.put("prs", "3", rec, cold=True)           # out of the hot set; get() and iter(cold=True) still read it
+store.backup_to(path)                           # consistent copy while others write (archives)
+```
+
+`lock` (what guards your dicts) is held only while the dirty rows are read; the commit runs
+after, and a row changed meanwhile stays dirty. A failed flush writes nothing and keeps the
+rows dirty for the next one. `close()` checkpoints the WAL into the database file. `backup_to(db_file,
+path)` (module function) copies a database another process is writing, for archive scripts.
+
+chatbot4 keeps its dicts in memory and saves through `state.db` (rows: one per PR, cached
+`open_pr` result, parked draft and inbox, plus `pr_opens` and `pr_merges`), at most every
+`save.interval_s`. On a first start without `state.db` it imports `prs.json`. With `save.legacy_json` off,
+merged and closed PRs leave memory an hour after they ended (`ended_at`), for the cold table; `get_pr` and `list_prs` with
+`state` merged, closed or all still return them. While the knob `save.legacy_json` is on
+(default) it also writes the whole state to `prs.json`, keeps every PR in memory (so a rollback
+to `prs.json` loses nothing), and warns at start when the two differ.
+The archive (`snapshot.py`) carries a `backup_to` copy of `state.db`.
 
 **Lanes for external writes.** A world that writes to an outside service with one token (a
 Git host, an API) can give each kind of write its own lane, from `flock.world.lanes`:
@@ -397,7 +426,7 @@ flock world pause <swarm> open push --reason "hub outage"
 flock world resume <swarm> open push
 ```
 
-chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `pr.open_floor`
+chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`
 (`CHATBOT_PR_OPEN_FLOOR`), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
 `hub.comment.gap_s` (its Hub write lanes, below). `open_pr` honours the `open` lane (new PRs)
 and `push`, `merge_pr` the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file;

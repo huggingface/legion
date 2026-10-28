@@ -27,6 +27,7 @@ from sandbox import run
 from flock.isolation import protect_supervisor
 from flock.world import Agent, ToolError, World, tool
 from flock.world.lanes import Lane, LaneBusy, Lanes
+from flock.world.store import Store
 from flock.world.workspace import apply_patch, unpack
 
 HERE = Path(__file__).resolve().parent
@@ -38,8 +39,9 @@ EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", 
 MAX_REQUESTS = 5000  # open_pr idempotency keys kept for worker retries (oldest dropped)
 # ... and for at most this long (a worker retries within minutes).
 REQUEST_TTL = float(os.environ.get("CHATBOT_REQUEST_TTL_S", "21600"))
-# prs.json is written by a background thread at most once per this many seconds while the
-# state changed (0: write synchronously on every change). close() always writes it.
+# state.db (and prs.json, see save.legacy_json) is written by a background thread at most once
+# per this many seconds while the state changed (0: write synchronously on every change).
+# close() always writes it.
 SAVE_INTERVAL = float(os.environ.get("CHATBOT_SAVE_INTERVAL_S", "2.0"))
 FETCH_TTL = float(os.environ.get("CHATBOT_FETCH_TTL_S", "60"))
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -63,6 +65,10 @@ TRANSIENT_CODES = ("git_error", "hub_error")
 COMMENT_SEPARATOR = "\n\n---\n\n"  # between review comments joined into one Hub post
 # get_pr: diff bytes returned (cut at a line end, with truncated: true beyond this).
 MAX_DIFF_BYTES = int(os.environ.get("CHATBOT_GET_PR_DIFF_BYTES", str(200 << 10)))
+# State rows in state.db (flock.world.store): these top-level dicts get one row per entry;
+# every other top-level value (pr_opens, pr_merges) is one row of kind "_".
+KINDS = ("prs", "requests", "drafts", "inbox")
+COLD_AFTER = 3600.0  # merged/closed PR records leave memory for the cold table after this
 DESCRIPTION_CHARS = 4000  # PR description characters returned by get_pr  # Hub 400: the PR is already closed / merged
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
@@ -139,21 +145,53 @@ class Chatbot4World(World):
         self.db = self.ws / "prs.json"
         for stale in self.ws.glob("prs.json.*.tmp"):  # a write cut by a crash
             stale.unlink(missing_ok=True)
-        self.state = json.loads(self.db.read_text()) if self.db.exists() else {"prs": {}, "requests": {}}
-        # Saving (see _save): every change bumps save_gen; written_gen is the generation on disk.
+        old_json = json.loads(self.db.read_text()) if self.db.exists() else None
+        # Saving (see _save): every change marks its rows dirty (_dirty) and bumps save_gen;
+        # the saver writes the dirty rows to state.db and, while save.legacy_json is on, the
+        # whole state to prs.json (written_gen is the generation in prs.json).
         self.save_interval = self.knob(  # admin knobs (docs/world.md): the env sets the default
             "save.interval_s", float, float(os.environ.get("CHATBOT_SAVE_INTERVAL_S", SAVE_INTERVAL)),
-            min=0, doc="Seconds between prs.json writes (0: write on every change).",
+            min=0, doc="Seconds between state saves (0: write on every change).",
             on_change=lambda v: setattr(self, "save_interval", v))
+        self.legacy_json = self.knob(
+            "save.legacy_json", bool, True,
+            doc="Also write the whole state to prs.json (compared with state.db at start).",
+            on_change=lambda v: setattr(self, "legacy_json", v))
+        self.ended = {}  # merged/closed PR number -> unix time first seen ended (for the cold move)
+        self.store = Store(self.ws / "state.db")
+        # Decided on rows, not on the file: an import cut by a kill leaves an empty state.db.
+        # Every import writes the pr_opens and pr_merges rows.
+        migrate = next(self.store.iter("_"), None) is None
+        empty = {**{kind: {} for kind in KINDS}, "pr_opens": [], "pr_merges": []}
+        if migrate:  # first start, or an archive from before state.db: import prs.json
+            self.state = {**empty, **(old_json or {})}
+            self.store.write(list(self._rows()))
+            if old_json is not None:
+                log.warning("state: migrated prs.json to state.db (%d PRs)", len(self.state["prs"]))
+        else:
+            self.state = {name: value.copy() for name, value in empty.items()}
+            for kind in KINDS:
+                for key, value in self.store.iter(kind):
+                    self.state.setdefault(kind, {})[key] = value
+            self.state.update(self.store.iter("_"))
+            # Pruning expects oldest first; an upsert keeps a re-cached key's first position.
+            self.state["requests"] = dict(sorted(self.state["requests"].items(),
+                                                 key=lambda kv: kv[1].get("_ts", 0)))
+            if old_json is not None and self.legacy_json and {**empty, **old_json} != self.state:
+                log.warning("state: prs.json and state.db differ at start; using state.db")
+        self.cold_branches = {rec["branch"] for _, rec in self.store.iter("prs", cold=True)}
+        now = time.time()
+        for key, rec in self.state["prs"].items():
+            if rec["state"] in ("merged", "closed"):
+                self.ended[key] = rec.get("ended_at", now)
         self.save_gen = self.written_gen = 0
         self.save_sync = self.save_interval <= 0  # also set by close(): later saves write at once
         self.replace_lock = threading.Lock()  # a leaf lock: never take self.lock while holding it
         self.save_wake = threading.Event()
         self.save_stop = threading.Event()
         self.saver = None
-        # For metrics(): the last prs.json write and in-memory counters since start.
-        self.save_s, self.saved_at = 0.0, self.db.stat().st_mtime if self.db.exists() else time.time()
-        self.state_bytes = self.db.stat().st_size if self.db.exists() else 0
+        # For metrics(): the last state.db write and in-memory counters since start.
+        self.save_s, self.saved_at = 0.0, time.time()
         self.budget_refusals = []  # unix times of open_budget refusals (last WINDOW seconds)
         self.stale_adoptions = self.hub_busy_total = self.comments_rejected = 0
         self.counts_lock = threading.Lock()  # a leaf lock: the counters above, from tool threads
@@ -217,6 +255,7 @@ class Chatbot4World(World):
             for rec in self.state["prs"].values():
                 if rec["state"] in ("closing", "merging"):  # interrupted: the agent may retry
                     rec["state"] = "open"
+                    self._dirty("prs", rec["pr"])
             self._fetch_missing_heads()
             self._reconcile()
         self.hub_states_at = float("-inf")
@@ -229,6 +268,7 @@ class Chatbot4World(World):
             for entry in legacy:
                 self.outbox.put(entry["pr"], entry["text"])
             with self.lock:
+                self._dirty("_", "hub_outbox")
                 self._save()
         self.syncer = threading.Thread(target=self._sync_loop, name="chatbot4-hub-sync", daemon=True)
         self.syncer.start()
@@ -277,7 +317,7 @@ class Chatbot4World(World):
             self._sync_hub_states(every=HUB_SYNC_EVERY)
 
     def close(self, timeout=5.0):
-        """Write prs.json now and stop the background threads within timeout seconds; queued
+        """Write the state now and stop the background threads within timeout seconds; queued
         comments stay in the outbox file for the next start. Saves after this write
         synchronously."""
         self.save_sync = True
@@ -287,6 +327,7 @@ class Chatbot4World(World):
         self.stopping.set()
         self.lanes.close(timeout)
         self.flush()
+        self.store.checkpoint()
         if _LIVE.get(str(self.ws.resolve())) is self:
             del _LIVE[str(self.ws.resolve())]
 
@@ -338,6 +379,7 @@ class Chatbot4World(World):
         """Count a merge for the new-PR budget (call with the lock held; the caller saves)."""
         now = time.time()
         self._recent(self.state["pr_merges"], now).append(now)
+        self._dirty("_", "pr_merges")
 
     def _count(self, name, n=1):
         with self.counts_lock:
@@ -358,13 +400,55 @@ class Chatbot4World(World):
                 "hub_busy_total": self.hub_busy_total,
                 "hub_comments_rejected_total": self.comments_rejected,
                 "save_duration_s": self.save_s, "save_age_s": now - self.saved_at,
-                "state_bytes": self.state_bytes}
+                "state_bytes": self.store.size(), "dirty_rows": self.store.pending}
 
-    # -- saving prs.json -------------------------------------------------------------------
+    # -- saving state.db (and prs.json) -----------------------------------------------------
+
+    def _dirty(self, kind, *keys):
+        """Mark state rows changed (call with the lock held; the caller then calls _save):
+        kind is one of KINDS (keys: entries of self.state[kind]) or "_" (keys: top-level
+        names). Every state change must mark its rows, or state.db misses it."""
+        for key in map(str, keys):
+            self.store.dirty(kind, key)
+            if kind == "prs":
+                rec = self.state["prs"].get(key)
+                if rec is not None and rec["state"] in ("merged", "closed"):
+                    self.ended.setdefault(key, rec.setdefault("ended_at", time.time()))
+
+    def _row(self, kind, key):
+        """A row's current value (None: gone)."""
+        return self.state.get(key) if kind == "_" else self.state.get(kind, {}).get(key)
+
+    def _rows(self):
+        """Every state row as (kind, key, value)."""
+        for name, value in self.state.items():
+            if name in KINDS:
+                yield from ((name, key, v) for key, v in value.items())
+            else:
+                yield "_", name, value
+
+    def _move_cold(self, now):
+        """Move PR records merged or closed more than COLD_AFTER ago from memory to the cold
+        table (lock held); get_pr and list_prs still read them. Returns True if any moved."""
+        if self.legacy_json:  # prs.json must keep every PR while a rollback to it is possible
+            return False
+        keys = [key for key, t in self.ended.items() if t < now - COLD_AFTER]
+        rows = []
+        for key in keys:
+            del self.ended[key]
+            rec = self.state["prs"].get(key)
+            if rec is not None and rec["state"] in ("merged", "closed"):
+                rows.append(("prs", key, rec))
+        if rows:
+            self.store.write(rows, cold=True)
+            for _, key, rec in rows:
+                del self.state["prs"][key]
+                self.cold_branches.add(rec["branch"])
+        return bool(rows)
 
     def _save(self):
-        """Record that the state changed (call with the lock held). The saver thread writes
-        prs.json at most once per CHATBOT_SAVE_INTERVAL_S; flush() writes it at once."""
+        """Record that the state changed (call with the lock held, after _dirty). The saver
+        thread writes at most once per CHATBOT_SAVE_INTERVAL_S; flush() writes at once."""
         self.save_gen += 1
         if self.save_sync:
             self.flush()
@@ -372,7 +456,7 @@ class Chatbot4World(World):
             self.save_wake.set()
 
     def _saver(self):
-        """Background thread: write prs.json when the state changed, at most once per
+        """Background thread: write the state when it changed, at most once per
         save_interval. close() stops it and writes the last change itself."""
         last = float("-inf")
         while True:
@@ -384,7 +468,7 @@ class Chatbot4World(World):
             try:
                 self.flush()
             except Exception:  # keep the thread alive; the next change or close() retries
-                log.exception("prs.json: save failed; retrying")
+                log.exception("state: save failed; retrying")
                 self.save_wake.set()
 
     def _snapshot(self):
@@ -422,6 +506,17 @@ class Chatbot4World(World):
         out.write("}")
 
     def flush(self):
+        """Write the dirty rows to state.db in one transaction (the lock is held only to read
+        them: O(changes)), then prs.json if save.legacy_json is on."""
+        with self.lock:
+            self._move_cold(time.time())
+        now, started = time.time(), time.monotonic()
+        if self.store.flush(self._row, self.lock):
+            self.save_s, self.saved_at = time.monotonic() - started, now
+        if self.legacy_json:
+            self._flush_json()
+
+    def _flush_json(self):
         """Write prs.json now if the state changed since the last write. The lock is held
         only for the snapshot; a write never replaces a newer one (tmp file + os.replace)."""
         if self.save_gen == self.written_gen:
@@ -432,17 +527,13 @@ class Chatbot4World(World):
                 return
             parts = self._snapshot()
         tmp = self.db.with_name(f"prs.json.{uuid.uuid4().hex}.tmp")
-        started = time.monotonic()
         try:
             with open(tmp, "w") as out:
                 self._encode(parts, out)
-                size = out.tell()
             with self.replace_lock:
                 if gen > self.written_gen:
                     os.replace(tmp, self.db)
                     self.written_gen = gen
-                    self.save_s, self.saved_at, self.state_bytes = (
-                        time.monotonic() - started, time.time(), size)
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -473,6 +564,7 @@ class Chatbot4World(World):
         requests = self.state["requests"]
         requests.pop(key, None)
         requests[key] = entry
+        self._dirty("requests", key)
         self._prune_requests(now)
 
     def _prune_requests(self, now):
@@ -488,6 +580,7 @@ class Chatbot4World(World):
         stale += list(requests)[len(stale):max(len(stale), len(requests) - MAX_REQUESTS)]
         for key in stale:
             del requests[key]
+        self._dirty("requests", *stale)
         return bool(stale)
 
     def _slim_requests(self):
@@ -495,8 +588,10 @@ class Chatbot4World(World):
         current time) and prune. Returns True if the state changed."""
         now = time.time()
         changed = False
-        for entry in self.state["requests"].values():
-            changed |= self._slim(entry, now)
+        for key, entry in self.state["requests"].items():
+            if self._slim(entry, now):
+                self._dirty("requests", key)
+                changed = True
         return self._prune_requests(now) or changed
 
     def _replay(self, key, description):
@@ -642,6 +737,7 @@ class Chatbot4World(World):
             rec.update(state="merged", merged_sha=None, reconciled_from_hub=True)
         else:
             rec.update(state="closed", reconciled_from_hub=True)
+        self._dirty("prs", rec["pr"])
         self._unnotify(rec["author"], rec["pr"], "mergeable")
         log.warning("PR #%s is %s on the Hub but was open here (author=%s); marked %s",
                     rec["pr"], status, rec["author"], rec["state"])
@@ -659,6 +755,7 @@ class Chatbot4World(World):
             draft = self._draft(pr)
             if draft:
                 self.state["drafts"].pop(draft["branch"], None)
+                self._dirty("drafts", draft["branch"])
                 self._save()
         return ToolError(f"PR #{pr} is already {status} on the Hub", code)
 
@@ -683,6 +780,7 @@ class Chatbot4World(World):
             reviewers = sorted(name for name, r in self._current_reviews(rec).items()
                                if r["verdict"] == "approve")
             rec.update(state="merged", merged_sha=merged)
+            self._dirty("prs", rec["pr"])
             self._note_merge()
             event = {"pr": rec["pr"], "author": rec["author"], "reviewers": reviewers,
                      "parent_sha": self.repo.git("rev-parse", f"{merged}^1") if merged else None,
@@ -701,11 +799,13 @@ class Chatbot4World(World):
         box = [e for e in self.state["inbox"].get(name, ()) if (e["pr"], e["kind"]) != (pr, kind)]
         box.append({"pr": pr, "kind": kind, "text": text, "ts": time.time()})
         self.state["inbox"][name] = box[-INBOX_MAX:]
+        self._dirty("inbox", name)
 
     def _unnotify(self, name, pr, kind):
         box = self.state["inbox"].get(name)
         if box:
             self.state["inbox"][name] = [e for e in box if (e["pr"], e["kind"]) != (pr, kind)]
+            self._dirty("inbox", name)
 
     @staticmethod
     def _age(seconds):
@@ -737,6 +837,7 @@ class Chatbot4World(World):
             box = self.state["inbox"].pop(agent.name, None)
             if not box:
                 return result
+            self._dirty("inbox", agent.name)
             self._save()
             budget = self._budget()
         now = time.time()
@@ -919,7 +1020,7 @@ class Chatbot4World(World):
                     raise ToolError(f"at most two open PRs per agent: update one with pr=<n> or "
                                     f"close one with close_pr (yours: {', '.join(map(str, mine))})")
                 if (any(r["branch"] == branch_ref for r in self.state["prs"].values())
-                        or branch_ref in self.state["drafts"]
+                        or branch_ref in self.state["drafts"] or branch_ref in self.cold_branches
                         or any(p[1] == branch_ref for p in pending)):
                     raise ToolError("branch slug already used; choose a new topic slug")
                 self._check_budget(agent)
@@ -940,6 +1041,8 @@ class Chatbot4World(World):
                           "reviews": dict(old["reviews"]) if old else {}}
                 self.state["prs"][str(number)] = record
                 self.state["drafts"].pop(branch_ref, None)
+                self._dirty("prs", number)
+                self._dirty("drafts", branch_ref)
                 for name, r in (old["reviews"] if old else {}).items():
                     if r["verdict"] == "request_changes" and name != agent.name:
                         self._notify(name, number, "updated",
@@ -999,6 +1102,7 @@ class Chatbot4World(World):
                             self.open_reserved.discard(token)
                             now = time.time()
                             self._recent(self.state["pr_opens"], now).append(now)
+                            self._dirty("_", "pr_opens")
                             self._save()
                         with self.gap_lock:
                             self.last_create = max(self.last_create, time.monotonic())
@@ -1057,6 +1161,7 @@ class Chatbot4World(World):
                 if rec is None or rec["state"] != "open" or rec["head_sha"] != expected:
                     raise ToolError("the PR was merged or closed during the update")
                 rec["head_sha"] = hub
+                self._dirty("prs", pr)
                 self._save()
             log.warning("adopted Hub head for PR #%s after a stale lease%s: %s -> %s",
                         pr, via, expected[:12], hub[:12])
@@ -1112,6 +1217,7 @@ class Chatbot4World(World):
                 "pr": number, "author": agent.name, "branch": branch_ref, "base_sha": main,
                 "sha": sha, "title": title, "parked_at": time.time(),
                 "url": f"https://huggingface.co/datasets/{self.repo_id}/discussions/{number}"}
+            self._dirty("drafts", branch_ref)
             self._save()
             self._event("parked", agent, pr=number, branch=branch_ref, code=code)
         log.warning("parked draft PR #%s for agent=%s: %s", number, agent.name, code)
@@ -1151,6 +1257,7 @@ class Chatbot4World(World):
         with self.lock:
             rec = check()
             rec["reviews"][agent.name] = review
+            self._dirty("prs", pr)
             # No Hub call here: the outbox thread posts the comment when the Hub slot is free.
             self._queue_comment(agent, pr, f"{verdict} by {agent.name} on {head_sha}\n\n{comment}")
             snippet = " ".join(comment.split())
@@ -1268,6 +1375,7 @@ class Chatbot4World(World):
                 merged = self.repo.sha()
                 with self.lock:
                     rec.update(state="merged", merged_sha=merged)
+                    self._dirty("prs", pr)
                     self._note_merge()
                     if rec["author"] != agent.name:
                         self._unnotify(rec["author"], pr, "mergeable")
@@ -1331,6 +1439,7 @@ class Chatbot4World(World):
             raise
         with self.lock:
             rec.update(state="closed", closed_by=agent.name, close_reason=reason)
+            self._dirty("prs", pr)
             self._notify_closed(agent, rec["author"], pr, reason)
             self._save()
             event = {"pr": pr, "author": rec["author"], "head_sha": rec["head_sha"], "reason": reason}
@@ -1359,6 +1468,7 @@ class Chatbot4World(World):
             raise
         with self.lock:
             self.state["drafts"].pop(draft["branch"], None)
+            self._dirty("drafts", draft["branch"])
             self._notify_closed(agent, draft["author"], pr, reason)
             self._save()
             event = {"pr": pr, "author": draft["author"], "head_sha": None, "reason": reason}
@@ -1393,6 +1503,10 @@ class Chatbot4World(World):
                  "branch": d["branch"], "base_sha": d["base_sha"], "head_sha": None,
                  "url": d["url"], "title": d["title"], "reviews": {}}
                 for d in self.state["drafts"].values() if not author or d["author"] == author]
+        if state in ("merged", "closed", "all"):  # cold records never change: read unlocked
+            records[:0] = [rec for _, rec in self.store.iter("prs", cold=True)
+                           if (state == "all" or rec["state"] == state)
+                           and (not author or rec["author"] == author)]
         if needs_review:
             records = [rec for rec in records if not any(
                 r["verdict"] == "approve" for r in self._current_reviews(rec).values())]
@@ -1410,7 +1524,7 @@ class Chatbot4World(World):
                 raise ToolError("path must be a relative file path inside the repository")
             path = rel.as_posix()
         with self.lock:  # a quick state read; git runs below without the lock
-            rec = self.state["prs"].get(str(pr))
+            rec = self.state["prs"].get(str(pr)) or self.store.get("prs", str(pr))  # or cold
             if rec is None:
                 if self._draft(pr):
                     raise ToolError(f"PR #{pr} is a draft whose head is not on the Hub yet; "
