@@ -868,3 +868,81 @@ async def test_unreadable_base_is_an_incomplete_restore_and_blocks_deletes(tmp_p
     await rt2.sync.push(rt2, rebase=True)  # uploads, but no new base and no deletes
     assert set(before) <= set(store.files) and store.files[PRE + BASE_TAR] == before[PRE + BASE_TAR]
     assert PRE + "workdir/x.txt" in store.files
+
+
+async def test_a_push_during_a_push_keeps_the_delta_it_uploaded(tmp_path, umask022):
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+
+    class Interleaved(MemoryStore):
+        """On the first workdir listing, another push (a preempt) runs with a new file."""
+        hook = False
+
+        def list_info(self, prefix):
+            if self.hook and prefix.endswith("workdir/"):
+                self.hook = False
+                (rt.workdir / "x.txt").write_text("written after the periodic walk")
+                asyncio.run_coroutine_threadsafe(rt.sync.push(rt), loop).result()
+            return super().list_info(prefix)
+
+    store = Interleaved()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    (rt.workdir / "run.sh").write_text("#!/bin/sh\necho 2\n")
+    store.hook = True
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + "workdir/x.txt" in store.files
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert _tree(rt2.workdir) == _kept(_tree(rt.workdir)) and res.failed == []
+
+
+async def test_a_delta_replacing_a_base_symlink_is_not_written_through_it(tmp_path, umask022):
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    (rt.workdir / "link").unlink()  # in the tar: link -> src/pkg/a.py
+    (rt.workdir / "link").write_text("now a regular file")
+    (rt.workdir / "dirlink").unlink()  # in the tar: dirlink -> src
+    (rt.workdir / "dirlink" / "pkg").mkdir(parents=True)
+    (rt.workdir / "dirlink" / "pkg" / "a.py").write_text("not src/pkg/a.py")
+    rt.sync._mirror[PRE] = False  # as after an incomplete restore: deltas, no tombstones
+    await rt.sync.push(rt)
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert not (rt2.workdir / "link").is_symlink() and not (rt2.workdir / "dirlink").is_symlink()
+    assert _tree(rt2.workdir) == _kept(_tree(rt.workdir)) and res.failed == []
+
+
+async def test_drain_stops_a_base_build_and_nothing_is_committed(tmp_path, umask022):
+    from flock.worker.sync import BASE_JSON, BASE_TAR
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    rt.sync.stop_rebase = True
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON not in store.files and PRE + BASE_TAR not in store.files
+    assert PRE + "workdir/run.sh" in store.files  # the plain mirror instead
+    assert not list(rt.sessions_dir.glob("*.base*"))
+
+
+async def test_no_base_and_no_restore_without_free_disk(tmp_path, umask022, monkeypatch):
+    import shutil
+
+    from flock.worker.sync import BASE_JSON, BASE_TAR
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    full = shutil.disk_usage(tmp_path)._replace(free=0)
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: full)
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON not in store.files and PRE + "workdir/run.sh" in store.files
+    monkeypatch.undo()
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON in store.files
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: full)
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert res.failed == [PRE + BASE_TAR] and not rt2.sync.mirror_deletes(rt2)

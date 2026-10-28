@@ -349,14 +349,29 @@ class _Padded:
         return b + bytes(max(0, n - len(b)))
 
 
-def write_base_tar(workdir: Path, exclude: list[str], dest: Path) -> dict[str, list]:
+TAR_PER_FILE = 2048  # bytes of tar overhead per member, at most (pax header + padding)
+
+
+def _fits(needs: list[tuple[Path, int]]) -> bool:
+    """Do these byte counts fit in the free space of their file systems (summed per device)?"""
+    per: dict[int, list] = {}
+    for p, n in needs:
+        p.mkdir(parents=True, exist_ok=True)
+        per.setdefault(os.stat(p).st_dev, [p, 0])[1] += n
+    return all(shutil.disk_usage(p).free >= n for p, n in per.values())
+
+
+def write_base_tar(workdir: Path, exclude: list[str], dest: Path,
+                   stop=lambda: False) -> dict[str, list] | None:
     """Write an uncompressed tar of the workdir (regular files and symlinks, sorted, with modes
     and mtimes) to `dest`; returns the index {relative path: [mtime, size]} of what it holds
-    (lstat before each read)."""
+    (lstat before each read), or None when `stop()` turned true between two members."""
     index: dict[str, list] = {}
     dest.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(dest, "w", format=tarfile.PAX_FORMAT) as tf:
         for rel, st in _walk(workdir, exclude):
+            if stop():
+                return None
             ti = tarfile.TarInfo(rel)
             ti.mode, ti.mtime = stat.S_IMODE(st.st_mode), int(st.st_mtime)
             ti.pax_headers = {"mtime": f"{st.st_mtime_ns / 1e9:.9f}"}  # sub-second mtimes
@@ -760,6 +775,7 @@ class BucketSync:
         self._quota_note: dict[str, str] = {}  # per agent prefix: the quota note last queued
         self._base: dict[str, dict] = {}  # per agent prefix: its committed workdir.base.json
         self._building: set[str] = set()  # agent prefixes with a base tar being made
+        self.stop_rebase = False  # set by drain/preempt: base builds stop, none start
         self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
         self.restore_progress: dict[str, list] = {}
@@ -839,9 +855,8 @@ class BucketSync:
                 log.info("%s: workdir push without remote deletes (last restore incomplete)",
                          rt.name)
             w = rt.spec.workdir or WorkdirSpec()
-            if w.base and (pre in self._base or (rebase and delete)):
-                await self._push_base(rt, exclude, w, rebase and delete)
-            else:
+            if not (w.base and (pre in self._base or (rebase and delete))
+                    and await self._push_base(rt, exclude, w, rebase and delete, ws)):
                 await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
                                         delete=delete, exclude=exclude)
                 if pre in self._base and delete:  # base turned off: the full mirror replaces it
@@ -859,9 +874,10 @@ class BucketSync:
         return rt.sessions_dir / f"{rt.name}.base-index.json"
 
     async def _push_base(self, rt: AgentRuntime, exclude: list[str], w: WorkdirSpec,
-                         may_rebase: bool) -> None:
+                         may_rebase: bool, ws: WorkdirStats) -> bool:
         """Workdir push with a base tar (module docstring, "Base tar"): a new base when due,
-        then the files changed since the base, and tombstones and symlinks in the manifest."""
+        then the files changed since the base, and tombstones and symlinks in the manifest.
+        False: no base yet and none made (stopped, no disk); the caller mirrors as before."""
         pre, dpre = self.prefix(rt), self.prefix(rt) + "workdir/"
         base = self._base.get(pre)
 
@@ -869,37 +885,74 @@ class BucketSync:
             index = _load_index(self._index_path(rt))
             return workdir_delta(rt.workdir, exclude, index, base["created_at"])
 
+        async def send() -> dict[str, float | None]:
+            remote = {r[len(dpre):]: mt for r, mt in
+                      await asyncio.to_thread(self.store.list_info, dpre)}
+            up = [(rt.workdir / r, dpre + r) for r, mt in files.items()
+                  if remote.get(r) is None or abs(remote[r] - mt) > 2e-3]
+            if up:
+                await asyncio.to_thread(self.store.upload, up)
+            return remote
+
         if base is not None:
             files, links, deleted = await asyncio.to_thread(delta)
         if may_rebase and (base is None or time.time() - base["created_at"] >= w.base_interval_s
                            or len(files) + len(links) + len(deleted) > w.base_delta_files):
-            base = await self._make_base(rt, exclude)
+            if not _fits([(rt.sessions_dir, ws.bytes + ws.files * TAR_PER_FILE)]):
+                log.warning("%s: no new workdir base, not enough free disk for a %s tar",
+                            rt.name, ws.summary())
+            elif (new := await self._make_base(rt, exclude)) is not None:
+                base = new
+                files, links, deleted = await asyncio.to_thread(delta)
+        if base is None:
+            return False
+        remote = await send()
+        if not self.mirror_deletes(rt):  # tombstones and remote deletes: full baseline only
+            return True
+        while pre in self._building:  # another push is making a base: its manifest goes first
+            await asyncio.sleep(0.1)
+        if self._base.get(pre) is not base:  # ... and was committed: diff against it
+            base = self._base[pre]
             files, links, deleted = await asyncio.to_thread(delta)
-        remote = {r[len(dpre):]: mt for r, mt in
-                  await asyncio.to_thread(self.store.list_info, dpre)}
-        up = [(rt.workdir / r, dpre + r) for r, mt in files.items()
-              if remote.get(r) is None or abs(remote[r] - mt) > 2e-3]
-        if up:
-            await asyncio.to_thread(self.store.upload, up)
-        # tombstones and remote deletes only from a full baseline, never during a base build
-        if not self.mirror_deletes(rt) or pre in self._building:
-            return
+            remote = await send()
         if base.get("deleted", []) != deleted or base.get("links", {}) != links:
             await self._write_base(rt, {**base, "deleted": deleted, "links": links})
-        gone = [dpre + r for r in remote if r not in files and not is_excluded(r, exclude)]
+
+        def stale(index: dict[str, list], r: str) -> bool:
+            """Remote delta not needed: not changed in this walk and, locally, gone or as in the
+            base (a file a concurrent push uploaded after this walk differs from it: it stays)."""
+            if r in files or is_excluded(r, exclude):
+                return False
+            try:
+                st = os.lstat(rt.workdir / r)
+            except OSError:
+                return True
+            return _same(index.get(r), st.st_mtime, st.st_size)
+
+        def stale_all() -> list[str]:
+            index = _load_index(self._index_path(rt))
+            return [dpre + r for r in remote if stale(index, r)]
+
+        gone = await asyncio.to_thread(stale_all)
         if gone:  # deltas now in the base, or deleted
             await asyncio.to_thread(self.store.delete, gone)
+        return True
 
-    async def _make_base(self, rt: AgentRuntime, exclude: list[str]) -> dict:
+    async def _make_base(self, rt: AgentRuntime, exclude: list[str]) -> dict | None:
         """Tar the workdir, upload it, then commit `workdir.base.json` (the commit point); the
-        local index of the base replaces the old one only after the commit."""
+        local index of the base replaces the old one only after the commit. None when
+        `stop_rebase` (drain, preempt) stopped it before the upload: nothing was written."""
         pre = self.prefix(rt)
         tar, idx = rt.sessions_dir / f"{rt.name}.base.tar", self._index_path(rt)
         new_idx = idx.with_name(idx.name + ".new")
         self._building.add(pre)
         try:
             t0 = time.time()
-            index = await asyncio.to_thread(write_base_tar, rt.workdir, exclude, tar)
+            index = await asyncio.to_thread(write_base_tar, rt.workdir, exclude, tar,
+                                            lambda: self.stop_rebase)
+            if index is None or self.stop_rebase:
+                log.info("%s: workdir base build stopped (drain or preempt)", rt.name)
+                return None
             await asyncio.to_thread(new_idx.write_text, json.dumps(index))
             await asyncio.to_thread(self.store.upload, [(tar, pre + BASE_TAR)])
             base = {"created_at": t0, "files": len(index),
@@ -928,12 +981,22 @@ class BucketSync:
         files extracted)."""
         pre = self.prefix(rt)
         mpath, tar = rt.sessions_dir / f"{rt.name}.base.json", rt.sessions_dir / f"{rt.name}.base.tar"
-        files = [(pre + BASE_JSON, mpath), (pre + BASE_TAR, tar)]
         try:
-            _, failed = await asyncio.to_thread(download_resilient, self.store, files)
+            _, failed = await asyncio.to_thread(download_resilient, self.store,
+                                                [(pre + BASE_JSON, mpath)])
             if failed:
                 return None, failed, 0
             base = json.loads(mpath.read_text())
+            size = int(base["bytes"])
+            if not _fits([(rt.sessions_dir, size + int(base["files"]) * TAR_PER_FILE),
+                          (rt.workdir, size)]):
+                log.error("%s: workdir base not restored: not enough free disk for %d MB "
+                          "(tar plus files)", rt.name, 2 * size // 2**20)
+                return None, [pre + BASE_TAR], 0
+            _, failed = await asyncio.to_thread(download_resilient, self.store,
+                                                [(pre + BASE_TAR, tar)])
+            if failed:
+                return None, failed, 0
             index, bad = await asyncio.to_thread(extract_base_tar, tar, rt.workdir, skip, base)
         except (OSError, ValueError, KeyError, AttributeError, tarfile.TarError) as e:
             log.warning("%s: workdir base not restored: %s", rt.name, _short(e))
@@ -1031,6 +1094,7 @@ class BucketSync:
             if base is not None:  # older deltas are already in the tar (or stale)
                 work = [(r, p) for r, p in work
                         if mtimes.get(r) is None or mtimes[r] > base["created_at"]]
+                await asyncio.to_thread(_no_links, rt.workdir, work)
         if work:
             rt.workdir.mkdir(parents=True, exist_ok=True)
             got, failed = await asyncio.to_thread(download_resilient, self.store, work,
@@ -1071,6 +1135,20 @@ class BucketSync:
         else:
             log.info("%s: restored %s", rt.name, res)
         return res
+
+
+def _no_links(workdir: Path, work: list[tuple[str, Path]]) -> None:
+    """Deltas over a tar's symlinks: a file or directory replaced a symlink after the base, so
+    remove symlinks at a delta's path and its parents, or the download writes through them."""
+    for _, p in work:
+        parts = p.relative_to(workdir).parts
+        for i in range(1, len(parts) + 1):
+            q = workdir.joinpath(*parts[:i])
+            if q.is_symlink():
+                q.unlink()
+                break
+            if not q.is_dir():
+                break
 
 
 def _set_mtimes(files: list[tuple[str, Path]], mtimes: dict[str, float | None]) -> None:
