@@ -17,7 +17,9 @@ import yaml
 
 from flock.models import load_spec_yaml
 
-# `$$` is a literal `$`: `$${WORLD_HOST}` stays `${WORLD_HOST}` for the controller to expand.
+# `$$` is a literal `$`. `${WORLD_HOST}` is left as is: the controller expands it at run time
+# (world.url, docs/slurm.md; flock.world.protocol.WORLD_HOST_VAR).
+_RUNTIME = {"WORLD_HOST"}
 _VAR = re.compile(r"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -61,13 +63,16 @@ def substitute(data: Any, env: dict[str, str]) -> Any:
     missing: set[str] = set()
 
     def rep(m: re.Match) -> str:
-        if m.group(1) is None:
+        name, default = m.groups()
+        if name is None:
             return "$"
-        if m.group(1) in env:
-            return env[m.group(1)]
-        if m.group(2) is not None:
-            return m.group(2)
-        missing.add(m.group(1))
+        value = env.get(name)
+        if value or (value is not None and default is None):  # `:-` as in sh: empty = unset
+            return value
+        if default is not None:
+            return default
+        if name not in _RUNTIME:
+            missing.add(name)
         return m.group(0)
 
     def one(s: str) -> Any:

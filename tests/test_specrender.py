@@ -15,14 +15,16 @@ from .test_cli import _wire, runner
 
 
 def test_substitution_types_interpolates_defaults_and_escapes():
-    env = {"N": "7", "HOST": "gpu1", "FLAG": "false"}
+    env = {"N": "7", "HOST": "gpu1", "FLAG": "false", "BLANK": ""}
     data = {"replicas": "${N}", "other": "${M:-20}", "ratio": "${R:-0.5}", "on": "${FLAG}",
             "url": "http://${HOST}:${PORT:-8000}/v1", "model": "vllm:${MODEL:-MODEL_WORKER}",
-            "world": "http://$${WORLD_HOST}:7860", "empty": "${E:-}", "${N}": ["${HOST}"]}
+            "world": "http://$${WORLD_HOST}:7860", "empty": "${E:-}", "${N}": ["${HOST}"],
+            "blank": "${BLANK}", "blank_default": "${BLANK:-d}", "runtime": "${WORLD_HOST}"}
     assert substitute(data, env) == {
         "replicas": 7, "other": 20, "ratio": 0.5, "on": False,
         "url": "http://gpu1:8000/v1", "model": "vllm:MODEL_WORKER",
-        "world": "http://${WORLD_HOST}:7860", "empty": "", "${N}": ["gpu1"]}  # keys untouched
+        "world": "http://${WORLD_HOST}:7860", "empty": "", "${N}": ["gpu1"],  # keys untouched
+        "blank": "", "blank_default": "d", "runtime": "${WORLD_HOST}"}
     assert substitute({"m": "${HOST}"}, {"HOST": "a: b"}) == {"m": "a: b"}  # only scalars typed
 
 

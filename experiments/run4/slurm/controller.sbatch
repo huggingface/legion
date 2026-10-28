@@ -182,9 +182,10 @@ waves_step() {  # runs in a background subshell (below) and exec's into waves.py
     mkdir -p "$EXP" && cp -a "$REPO/experiments/run4/." "$EXP/" || { log "copy of experiments/run4 failed"; return 1; }
     log "experiment folder: $EXP (from $REPO/experiments/run4)"
   fi
-  # Render for Slurm: RUN3_VARIANT (jobs, or smoke for the 30-min smoke) with `--compute slurm`
-  # (compute.kind slurm, bucket, worker slots, world.url http://${WORLD_HOST}:7860 followed by the
-  # controller through FLOCK_WORLD_HOST_FILE; RUN3_WORLD_URL must stay unset for that).
+  # Render for Slurm: RUN3_VARIANT (jobs, or smoke for the 30-min smoke) with `--compute slurm`:
+  # spec.yaml with the spec.slurm.yaml overlay and ${VAR} from this environment (run.env), as
+  # `flock apply --env --overlay` does (compute.kind slurm, bucket, world.url
+  # http://${WORLD_HOST}:7860 followed by the controller through FLOCK_WORLD_HOST_FILE).
   "$VENV/bin/python" "$EXP/render.py" --variant "${RUN3_VARIANT:-jobs}" --compute slurm --out "$SPEC" >/dev/null \
     || { log "render.py failed"; return 1; }
   # compute: {kind: slurm, types: {interviewer: {cpus: 2, mem: 3800M}}}. Per-type sizes exist only
@@ -210,9 +211,7 @@ PY
   code=$(http_status "http://127.0.0.1:$CTL_PORT/swarms/$swarm" X-Flock-Token FLOCK_TOKEN)
   if [ "$code" = 404 ]; then  # first start: runbook B step 5 (replicas 0: swarm, kickoff, world check)
     # First launch only: apply checks the world, so wait for it (a requeue restores its state and
-    # follows the world's host by itself; it never waits). The URL stays local: an exported
-    # RUN3_WORLD_URL would make render.py write a literal world.url and the ${WORLD_HOST} follow
-    # (FLOCK_WORLD_HOST_FILE) would never trigger.
+    # follows the world's host by itself; it never waits).
     local t0 world_host
     t0=$(date +%s)
     until world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null) && [ -n "$world_host" ] &&

@@ -8,8 +8,15 @@ module interface. This folder prepares the run; nothing here has been launched.
 
 - `spec.yaml`, `prompts/`: the agreed system prompt, continuation-only rounds,
   150 model calls / 2 h per round, 12 Pi agents per worker and a 48 h run.
-- `render.py`: generates `spec.slurm.local.yaml` from environment variables without
-  contacting a service. `--committed` writes the placeholder `spec.slurm.yaml`.
+- `spec.slurm.yaml`: an overlay with only what differs on the cluster (`compute`,
+  `world`, `bucket`, `namespace`), deep-merged over `spec.yaml` by
+  `flock apply|update spec.yaml --env run.env --overlay spec.slurm.yaml`. `spec.yaml` holds
+  `${VAR:-default}` placeholders (CHATBOT_RUN, OPENAI_BASE_URL, MODEL_WORKER,
+  CHATBOT_BOARD_URL, CHATBOT_CHANNEL; the overlay RUN3_BUCKET, RUN3_NAMESPACE,
+  RUN3_SLURM_PARTITION), so the defaults give a placeholder spec offline.
+- `render.py`: writes `spec.slurm.local.yaml` with flock's own substitution and overlay,
+  plus the list form of `OPENAI_BASE_URLS` and the `smoke` variant (30-min loops); the
+  controller job and `waves.py` use that file. It contacts no service.
 - `waves.py`, `waves.yaml`: 20 every 5 min to 100, then +20 every 10 minutes to 300.
   `load_guard.py` checks every configured node before any increase beyond 100:
   three samples across two minutes; hold on persistent queues, >15 s/request,
@@ -38,7 +45,7 @@ From the flock checkout, using its environment:
 ruff check .
 pytest -q
 FLOCK_PI_CLI=/path/to/pi pytest -q tests/test_run4_pi_smoke.py
-python experiments/run4/render.py --committed
+python experiments/run4/render.py --env runs/run4/run.env --out /tmp/run4-spec.yaml
 python experiments/run4/waves.py plan
 ```
 
@@ -125,8 +132,9 @@ no external model calls. The separate held-out evaluator consumes
    it does not deploy the existing viewer or chat Space.
 
 The controller still uses RUN3_* environment aliases so existing cluster secrets
-and settings can be reused. The renderer also accepts RUN4_BUCKET,
-RUN4_NAMESPACE and RUN4_WORLD_URL. The namespace/bucket do not create jobs.
+and settings can be reused (the RUN4_BUCKET, RUN4_NAMESPACE and RUN4_WORLD_URL aliases
+are gone: set RUN3_BUCKET and RUN3_NAMESPACE; world.url is always followed through
+`${WORLD_HOST}`). The namespace/bucket do not create jobs.
 
 The Slurm scripts retain the existing host controller and bounded Spot-requeue
 paths. The world now stores `world.tar.gz` under the run's bucket prefix instead
@@ -173,7 +181,11 @@ to 4 peer helpers (20 + 80 = 100).
   (this commit or later): an older CLI drops the group sections without an error. The
   controller and workers only get the combined `system_prompt`.
 
-Launch, after rendering the spec again (`render.py`):
+Launch, after rendering the spec again (`render.py`). `flock update experiments/run4
+--env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml` (add `--ref <commit>`
+for the committed folder) gives the same spec only with a single `OPENAI_BASE_URL`: the
+`OPENAI_BASE_URLS` list is added by `render.py` alone, so while it is set, render and
+`flock update spec.slurm.local.yaml`:
 
 ```sh
 python experiments/run4/waves.py add 20 --spec experiments/run4/spec.slurm.local.yaml \
