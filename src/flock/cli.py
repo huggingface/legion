@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
 import time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -158,6 +159,25 @@ def _is_swarm(name: str) -> bool:
         return _request(c, "GET", f"/agents/{name}").status_code != 200
 
 
+def source_header(spec_file: str | Path | None) -> dict[str, str]:
+    """`X-Flock-Source` for an apply (`flock history`): who applied it and, when the spec's
+    folder is in a git repo, its commit, branch and whether the folder has local changes."""
+    src: dict[str, Any] = {"by": os.environ.get("USER")}
+    if spec_file is not None:
+        d = str(Path(spec_file).resolve().parent)
+        try:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=False,
+                                            capture_output=True, text=True, timeout=10)
+            head = git("rev-parse", "HEAD")
+            if head.returncode == 0:
+                src["git_sha"] = head.stdout.strip()
+                src["ref"] = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+                src["dirty"] = bool(git("status", "--porcelain", "--", ".").stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass  # no git: `by` only
+    return {"X-Flock-Source": json.dumps(src)}
+
+
 def _table(rows: list[list[Any]], header: list[str]) -> None:
     cells = [header] + [[("" if v is None else str(v)) for v in row] for row in rows]
     widths = [max(len(r[i]) for r in cells) for i in range(len(header))]
@@ -173,6 +193,7 @@ def _print_status(st: dict) -> None:
     typer.echo(
         f"{st['swarm']}  agents={st['agents_total']} workers={st['workers_total']} "
         f"pending={st['pending_prompts']} cost=${st['cost_usd']:.2f}"
+        + (f" gen {st['generation']}" if st.get("generation") else "")
     )
     rows = [
         [
@@ -443,7 +464,7 @@ def apply(
         names = ", ".join(up["tools"]) or "none"
         typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
     st = _call("PUT", f"/swarms/{spec.swarm}", params={"replicas": "spec"},
-               json=spec.model_dump(mode="json"))
+               json=spec.model_dump(mode="json"), headers=source_header(spec_file))
     _print_status(st)
 
 
@@ -516,7 +537,8 @@ def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = No
     if not lines and not check:
         return [*warnings, *kept, "no changes"]
     r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
-                 params={"replicas": "spec", **({"dry_run": 1} if check else {})})
+                 params={"replicas": "spec", **({"dry_run": 1} if check else {})},
+                 headers=source_header(spec_file))
     if r.status_code >= 400:
         raise SpecError([f"refused: {_detail(r)}"])
     if check:  # the stored spec is untouched: the new manifest is in the reply
@@ -773,6 +795,33 @@ def status(swarm: str = typer.Argument(None)) -> None:
 
 
 @app.command()
+def history(
+    swarm: str,
+    diff: Annotated[tuple[int, int] | None, typer.Option(
+        "--diff", metavar="A B", help="What changed from generation A to generation B.")] = None,
+) -> None:
+    """A swarm's spec generations (docs/live.md): when each apply that changed the spec ran, who
+    ran it, from which commit, and what it changed. --diff A B diffs two stored specs."""
+    if diff is not None:
+        from flock.live import diff_specs
+
+        a, b = (SwarmSpec.model_validate(_call("GET", f"/swarms/{swarm}/history/{g}")["spec"])
+                for g in diff)
+        for line in diff_specs(a, b) or ["no changes"]:
+            typer.echo(line)
+        return
+    rows = []
+    for h in _call("GET", f"/swarms/{swarm}/history"):
+        src, changes = h["source"], h["diff_summary"]
+        git = " ".join(x for x in (src.get("git_sha", "")[:8] + ("+dirty" if src.get("dirty")
+                                                                   else ""), src.get("ref")) if x)
+        more = f" (+{len(changes) - 1} more)" if len(changes) > 1 else ""
+        rows.append([h["generation"], h["ts"][:19].replace("T", " "), src.get("by") or "-",
+                     git or "-", (changes[0] if changes else "-") + more])
+    _table(rows, ["gen", "applied (UTC)", "by", "git", "changes"])
+
+
+@app.command()
 def agents(
     swarm: str,
     type: str = typer.Option(None, "--type"),
@@ -973,7 +1022,7 @@ def scale(swarm: str, type: str, replicas: int) -> None:
         raise typer.Exit(1)
     spec.types[type].replicas = replicas
     _print_status(_call("PUT", f"/swarms/{swarm}", params={"replicas": "spec"},
-                        json=spec.model_dump(mode="json")))
+                        json=spec.model_dump(mode="json"), headers=source_header(None)))
 
 
 @app.command()

@@ -231,6 +231,52 @@ def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
     assert "type cl:" in err and "type cx:" not in err
 
 
+def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
+    import subprocess
+
+    _wire(monkeypatch, app)
+    monkeypatch.setenv("USER", "carlos")
+    git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
+                                     "-c", "user.email=t@t", *a], check=True, capture_output=True)
+    git("init", "-q", "-b", "exp")
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
+    git("add", ".")
+    git("commit", "-qm", "spec")
+    sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    (gen1,) = store.spec_history("demo")
+    assert gen1["source"] == {"by": "carlos", "git_sha": sha, "ref": "exp", "dirty": False}
+    assert json.loads(cli.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
+        "by": "carlos"}  # not a repo (the folder does not exist)
+    spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
+    assert json.loads(cli.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
+
+
+def test_history_lists_generations_and_diffs_two(tmp_path, monkeypatch, app, store):
+    _wire(monkeypatch, app)
+    monkeypatch.setenv("USER", "carlos")
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
+    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    assert runner.invoke(cli.app, ["scale", "demo", "researcher", "5"]).exit_code == 0
+    r = runner.invoke(cli.app, ["status", "demo"])
+    assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[0], r.output
+    r = runner.invoke(cli.app, ["history", "demo"])
+    assert r.exit_code == 0, r.output
+    lines = r.output.splitlines()
+    assert lines[0].split() == ["gen", "applied", "(UTC)", "by", "git", "changes"]
+    assert lines[1].split()[0] == "1" and lines[1].endswith("created")
+    assert lines[2].split()[0] == "2" and "carlos" in lines[2]
+    assert lines[2].endswith("types.researcher.replicas: 3 -> 5")
+    r = runner.invoke(cli.app, ["history", "demo", "--diff", "1", "2"])
+    assert r.exit_code == 0 and r.output == "types.researcher.replicas: 3 -> 5\n", r.output
+    r = runner.invoke(cli.app, ["history", "demo", "--diff", "2", "2"])
+    assert r.output == "no changes\n"
+    assert runner.invoke(cli.app, ["history", "demo", "--diff", "1", "9"]).exit_code == 1
+
+
 def test_extra_warnings_flags_pi_env_dropped_by_isolation():
     from flock.models import SwarmSpec
 

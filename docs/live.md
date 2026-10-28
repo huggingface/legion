@@ -50,6 +50,43 @@ Preflight runs only when the update adds a provider-backed model the running spe
 have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
 through `.flock/current`, like the other commands do.
 
+## Generations and `flock history`
+
+Every apply that changes the spec (`flock apply`, `flock update`, `flock scale`, the first
+apply of `flock run`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
+apply that changes nothing keeps it. `flock status` shows it as `gen N` on the swarm line.
+
+The controller keeps each generation's applied spec with its UTC time, the diff lines (as
+`flock update` prints them) and its source. The CLI sends the source in the `X-Flock-Source`
+header: `by` from `$USER` and, when the spec's folder is in a git repo, `git_sha`, `ref` (the
+branch) and `dirty` (the folder has uncommitted changes). Each generation is also a
+`spec_applied {generation, source, diff_summary}` event on the swarm stream.
+
+```console
+$ flock history calc
+gen  applied (UTC)        by      git                     changes
+1    2026-10-28 09:12:03  carlos  3f9c0e2a main           created
+2    2026-10-28 10:40:51  carlos  9a1b2c3d+dirty main     types.calc.replicas: 2 -> 3
+$ flock history calc --diff 1 2
+types.calc.replicas: 2 -> 3
+```
+
+| Method | Path | |
+|---|---|---|
+| GET | `/swarms/{swarm}/history` | `[{generation, ts, source, diff_summary}]`, oldest first |
+| GET | `/swarms/{swarm}/history/{generation}` | the same fields plus `spec`, the stored spec |
+
+Removing the swarm drops its history.
+
+## Control-plane events
+
+Besides `spec_applied`, the swarm stream (`flock events <swarm>`) carries what the reconcile
+loop does, as `{target, detail}`: `launch`, `launch_failed`, `launch_refused`, `crash`
+(detail: stage, message, backoff), `crashloop`, `planned_restart` (job timeout, drain,
+preemption), `cancel`, `retire`, `remove_worker`, `external_wait`. Per-agent placement
+(`assign`, `unassign`) and conditions repeated every pass (`workers_full`, the launch rate
+budget) are not written.
+
 ## `flock run --watch`
 
 `flock run spec.yaml --watch` polls the files the spec references and the tools folder every

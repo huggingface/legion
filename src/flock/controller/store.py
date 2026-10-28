@@ -24,7 +24,17 @@ CREATE TABLE IF NOT EXISTS swarms (
   name TEXT PRIMARY KEY,
   spec TEXT NOT NULL,
   applied_at REAL NOT NULL,
-  removing INTEGER NOT NULL DEFAULT 0
+  removing INTEGER NOT NULL DEFAULT 0,
+  generation INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS spec_history (
+  swarm TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  ts REAL NOT NULL,
+  source TEXT NOT NULL,
+  diff TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  PRIMARY KEY (swarm, generation)
 );
 CREATE TABLE IF NOT EXISTS types (
   swarm TEXT NOT NULL,
@@ -226,6 +236,8 @@ class Store:
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
             self._x("ALTER TABLE swarms ADD COLUMN removed_cost REAL NOT NULL DEFAULT 0")
+        if "generation" not in cols:  # bumped by every apply that changes the spec
+            self._x("ALTER TABLE swarms ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
 
     # ----------------------------------------------------------------- low level
 
@@ -329,6 +341,34 @@ class Store:
         """Replace a stored spec in place (no re-apply side effects): a world that moved."""
         self._x("UPDATE swarms SET spec = ? WHERE name = ?", [spec.model_dump_json(), spec.swarm])
 
+    def record_spec(self, spec: SwarmSpec, now: float, source: dict[str, Any],
+                    diff: list[str], new: bool) -> int:
+        """Bump the swarm's generation (1 for a new swarm) and keep the applied spec."""
+        with self.transaction():
+            self._x("UPDATE swarms SET generation = CASE WHEN ? THEN 1 ELSE generation + 1 END "
+                    "WHERE name = ?", [new, spec.swarm])
+            gen = self._one("SELECT generation FROM swarms WHERE name = ?",
+                            [spec.swarm])["generation"]
+            self._x("INSERT OR REPLACE INTO spec_history (swarm, generation, ts, source, diff, "
+                    "spec) VALUES (?, ?, ?, ?, ?, ?)",
+                    [spec.swarm, gen, now, json.dumps(source), json.dumps(diff),
+                     spec.model_dump_json()])
+        return gen
+
+    def generation(self, swarm: str) -> int | None:
+        row = self._one("SELECT generation FROM swarms WHERE name = ?", [swarm])
+        return row["generation"] if row else None
+
+    def spec_history(self, swarm: str, generation: int | None = None) -> list[Row]:
+        """Applied specs, oldest first; the spec body only when one generation is asked for."""
+        cols = "generation, ts, source, diff" + (", spec" if generation is not None else "")
+        rows = self._q(f"SELECT {cols} FROM spec_history WHERE swarm = ?"
+                       + (" AND generation = ?" if generation is not None else "")
+                       + " ORDER BY generation", [swarm, *([generation] if generation is not None else [])])
+        for r in rows:
+            r["source"], r["diff"] = json.loads(r["source"]), json.loads(r["diff"])
+        return rows
+
     def get_swarm(self, name: str) -> Row | None:
         row = self._one("SELECT * FROM swarms WHERE name = ?", [name])
         if row:
@@ -355,6 +395,7 @@ class Store:
             self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
             self._x("DELETE FROM grants WHERE swarm = ?", [name])
             self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
+            self._x("DELETE FROM spec_history WHERE swarm = ?", [name])
 
     # ----------------------------------------------------------------- grants (docs/live.md)
 

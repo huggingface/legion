@@ -211,6 +211,7 @@ def test_job_timeout_is_planned_restart(store, jobs, clock, tick):
     clock.advance(100)
     actions = tick()
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
+    assert "planned_restart" in [e["type"] for e in store.read_events("_swarm.demo", 0)]
     w = store.get_worker(W0)
     assert w["consecutive_crashes"] == 0 and w["crashes"] == 0
     (cmd,) = queued(store, W0)
@@ -250,6 +251,12 @@ def test_repeated_crashes_back_off_then_crashloop(store, jobs, clock, tick):
         tick()
     assert backoffs == [30, 60, 120, 240, 480]
     assert store.type_health("demo", "researcher") == "crashlooping"
+    evs = store.read_events("_swarm.demo", 0)
+    types = [e["type"] for e in evs]
+    assert types.count("crash") == CRASHLOOP_THRESHOLD and types[-1] == "crashloop"
+    assert "launch" in types and "assign" not in types
+    crash = next(e for e in evs if e["type"] == "crash")
+    assert crash["data"] == {"target": W0, "detail": "ERROR: boom; backoff 30s"}
     n = len(jobs.launches)
     assert n == CRASHLOOP_THRESHOLD  # first launch + 4 relaunches; the 5th crash stops it
     clock.advance(3600)
@@ -411,6 +418,21 @@ def test_store_migrates_workers_table_without_incarnation(tmp_path):
     s.insert_worker("w", "sw", "t", 0, 0)
     s.update_worker("w", incarnation="abc")
     assert s.get_worker("w")["incarnation"] == "abc"
+
+
+def test_store_migrates_swarms_to_generation_1(tmp_path):
+    import sqlite3
+
+    (tmp_path / "old").mkdir()
+    db = sqlite3.connect(tmp_path / "old" / "controller.db")
+    db.execute("CREATE TABLE swarms (name TEXT PRIMARY KEY, spec TEXT NOT NULL, "
+               "applied_at REAL NOT NULL, removing INTEGER NOT NULL DEFAULT 0)")
+    db.execute("INSERT INTO swarms VALUES ('demo', ?, 0, 0)", [make_spec().model_dump_json()])
+    db.commit()
+    db.close()
+    s = Store(tmp_path / "old")
+    assert s.generation("demo") == 1 and s.spec_history("demo") == []
+    assert s.record_spec(make_spec(), 5, {}, ["x: 1 -> 2"], new=False) == 2
 
 
 class _HubError(Exception):

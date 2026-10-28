@@ -38,7 +38,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from flock.controller.reconcile import agent_state
+from flock.controller.reconcile import agent_state, swarm_stream
 from flock.controller.store import Row, Store
 from flock.models import (
     AgentState,
@@ -75,11 +75,6 @@ NOTICE_HEAD = "New for you since your last round: "
 # as the round that carried it: one emitted just before the fetch can arrive up to a worker
 # event flush (3 s) later. Erring late shows the line twice, never drops it.
 NOTICE_FETCH_MARGIN = 5.0
-
-
-def swarm_stream(swarm: str) -> str:
-    """Event stream key for swarm-level events (agent names never contain a dot)."""
-    return f"_swarm.{swarm}"
 
 
 def _ts(t: float) -> datetime:

@@ -76,7 +76,8 @@ class Sim:
         assert all(n <= 1 for n in self.store.pending_counts("demo").values())  # never stacked
 
     def swarm_events(self) -> list[tuple[str, dict]]:
-        return [(e["type"], e["data"]) for e in self.store.read_events("_swarm.demo", 0)]
+        return [(e["type"], e["data"]) for e in self.store.read_events("_swarm.demo", 0)
+                if e["type"] not in ("launch", "spec_applied")]  # control-plane events
 
 
 @pytest.fixture
@@ -479,7 +480,8 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     assert r.exit_code == 0 and A0 in r.output and "looping" in r.output
     assert run.invoke(cli.app, ["loop", "demo", "--stop"]).exit_code == 1  # needs --type
     r = run.invoke(cli.app, ["events", "demo"])
-    assert [json.loads(x)["type"] for x in r.output.splitlines()][:2] == ["loop_started", "loop_tick"]
+    got = [json.loads(x)["type"] for x in r.output.splitlines()]
+    assert [k for k in got if k.startswith("loop_")][:2] == ["loop_started", "loop_tick"]
 
 
 async def test_live_change_and_removal(sim):

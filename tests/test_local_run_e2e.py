@@ -94,6 +94,7 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
                 and e["data"]["message"].get("role") == "toolResult"]
         assert tool and f"hi-from-{name}" in json.dumps(tool[0]), tool  # its own bash ran
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    merged = [e for e in merged if e["agent"]]  # the swarm stream: control-plane events
     assert {e["agent"] for e in merged} == set(AGENTS)
     assert len(merged) == sum(len(_bundle_events(run, a)) for a in AGENTS)
     for log in (run / "logs").glob("hello-writer-w*.log"):
@@ -277,7 +278,8 @@ def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_s
     run = _run_dir(tmp_path)
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
     swarm = [e for e in merged if e["agent"] == ""]
-    kinds = [e["type"] for e in swarm if e["type"] != "loop_tick"]
+    kinds = [e["type"] for e in swarm
+             if e["type"].startswith(("loop_", "final_", "budget_")) and e["type"] != "loop_tick"]
     assert kinds == ["loop_started", "loop_stopped", "final_done"], kinds
     assert [e["type"] for e in merged].count("final_round") == 2  # once per agent, not twice
     stamps = [datetime.fromisoformat(e["ts"]) for e in merged]
