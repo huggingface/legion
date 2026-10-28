@@ -655,3 +655,33 @@ async def test_reader_skips_streaming_records_from_the_process(tmp_path):
     a._dispatch = lambda rec: seen.append(rec["type"])  # what the reader parsed
     await a._read()
     assert seen == ["agent_start", "agent_settled"]
+
+
+async def test_tool_limits_through_bash_env(tmp_path, monkeypatch):
+    """limits for tools in a flock-owned BASH_ENV file (bash -c sources it), Pi's heap cap in
+    NODE_OPTIONS for Pi only; BASH_ENV passes the isolation allowlist."""
+    from flock.worker.adapters.pi import write_bash_env
+
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    home = tmp_path / "pi" / "agents" / "pi-0001"
+    a = PiAdapter(wd, agent="pi-0001", home=home, pi_bin="/nonexistent/pi")
+    with pytest.raises(OSError):  # never spawned; the environment is built by then
+        await a.start(wd, None, pi_spec(tool_memory_mb=512, node_heap_mb=2048))
+    path = Path(a.env["BASH_ENV"])
+    assert path == tmp_path / "pi" / "agents" / "pi-0001.bash_env"  # outside the writable home
+    assert path.read_text().splitlines()[1:] == ["ulimit -d 524288", "unset NODE_OPTIONS"]
+    assert path.stat().st_mode & 0o777 == 0o444
+    assert a.env["NODE_OPTIONS"] == "--max-old-space-size=2048"
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "-c", "ulimit -d; echo ${NODE_OPTIONS:-none}", stdout=asyncio.subprocess.PIPE,
+        env={"PATH": os.environ["PATH"], **a.env})
+    out = (await proc.communicate())[0].decode()
+    assert out.split() == ["524288", "none"]
+    assert write_bash_env(path, None).read_text().splitlines()[1:] == ["unset NODE_OPTIONS"]
+    assert isolated_env({"BASH_ENV": str(path), "OTHER": "x"}, None)[0] == {"BASH_ENV": str(path)}
+
+    plain = PiAdapter(wd, agent="pi-0002", home=tmp_path / "pi2", pi_bin="/nonexistent/pi")
+    with pytest.raises(OSError):
+        await plain.start(wd, None, pi_spec())
+    assert "BASH_ENV" not in plain.env and "NODE_OPTIONS" not in plain.env

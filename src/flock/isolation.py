@@ -310,10 +310,24 @@ def _drop_privileges():
         raise RuntimeError("cannot clear sandbox capabilities")
 
 
+OOM_SCORE_ADJ = 800  # sandboxed processes die before the worker (which keeps 0) on an OOM kill
+
+
+def set_oom_score_adj(value: int = OOM_SCORE_ADJ, path: str = "/proc/self/oom_score_adj") -> bool:
+    """Raise this process's OOM score (inherited by what it execs). Raising needs no
+    privilege; False when /proc refuses it."""
+    try:
+        Path(path).write_text(str(value))
+        return True
+    except OSError:
+        return False
+
+
 def _enter(config, argv):
     # Never share a process group with a supervisor outside the PID namespace.
     if os.getpgrp() != os.getpid():
         os.setsid()
+    set_oom_score_adj()
     root = Path(config["root"])
     with _step("root creation", root):
         root.mkdir(parents=True, exist_ok=True)

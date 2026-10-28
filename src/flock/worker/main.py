@@ -483,6 +483,7 @@ class Worker:
         self._rung = 0  # highest ladder rung logged in this episode (0: below `rotate`)
         self._oom_kills: int | None = None
         self._last_recycle = float("-inf")  # loop time of the last memory recycle
+        self._delegated = False  # per-agent cgroups (memory_start's probe)
         self.knobs_rev = knobs_rev(cfg)
 
     async def _fetch_tools(self, version: str) -> bytes:
@@ -781,6 +782,13 @@ class Worker:
         cg = self.cgroup
         log.info("memory: cgroup v%d %s, limit %s MB%s", cg.version, cg.path, cg.limit_mb,
                  "" if cg.armed else " (no limit found: memory is reported, nothing is armed)")
+        self._delegated = cg.armed and cg.delegated()
+        log.info("memory: per-agent cgroups %s; memory.oom.group=%s",
+                 "delegated: each harness in agent-<name>/ with memory.max" if self._delegated
+                 else "not delegated (skipped)", cg.oom_group())
+        if cg.oom_group() == "1":
+            log.warning("memory.oom.group is 1: one OOM kill ends every process in the job; "
+                        "only the relief ladder and the tool limits help")
         if (kind := fs_type(self.cfg.work_root)) in TMPFS_TYPES:
             log.warning("work root %s is on %s: every workdir file counts as memory",
                         self.cfg.work_root, kind)
@@ -839,6 +847,8 @@ class Worker:
         `rotate`). `worker_lifetime` stays the backstop."""
         th, mem = self.mem_thresholds, self.mem
         if any(rt.live for rt in self.agents.values()):
+            if self._delegated:
+                await asyncio.to_thread(self._place_agents)
             for rt, data in await asyncio.to_thread(self.agent_memory, False):
                 rt.pss_mb = data.get("pi_pss_mb")
                 tools = data.get("tools_pss_mb") or 0
@@ -873,6 +883,22 @@ class Worker:
             if (running and now - self._last_recycle >= th.recycle_gap_s
                     and max(running, key=lambda rt: rt.pss_mb or 0).recycle("memory")):
                 self._last_recycle = now
+
+    def _place_agents(self) -> None:
+        """Each live harness and its tools in its own delegated cgroup (blocking)."""
+        from flock.worker.adapters.pi import _descendants
+
+        assert self.cgroup.limit_mb is not None
+        for rt in list(self.agents.values()):
+            if (pid := _harness_pid(rt)) is None:
+                continue
+            try:
+                self.cgroup.place(rt.name, [pid, *(p for p, _ in _descendants(pid))],
+                                  self.cgroup.limit_mb * self.mem_thresholds.agent)
+            except OSError as e:
+                log.warning("memory: per-agent cgroup for %s failed (%s); not using them", rt.name, e)
+                self._delegated = False
+                return
 
     async def deadline_loop(self) -> None:
         while True:
