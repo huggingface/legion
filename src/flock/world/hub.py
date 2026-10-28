@@ -58,7 +58,7 @@ from flock.world.protocol import (
     credential_id,
     origin_matches,
 )
-from flock.world.workspace import capture
+from flock.world.workspace import capture, capture_v2
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +98,26 @@ def _parked(r: httpx.Response) -> dict | None:
     except ValueError:
         return None
     return body if isinstance(body, dict) and body.get("parked") is True else None
+
+
+def _need_full(r: httpx.Response) -> bool:
+    """The world lacks a v2 upload's base: send the whole tree (v1) instead."""
+    try:
+        body = r.json()
+        return body.get("ok") is False and body["error"].get("code") == "need_full"
+    except (ValueError, AttributeError, KeyError, TypeError):
+        return False
+
+
+def _capture(workdir: Any, local: str, v2: bool) -> dict:
+    """A v2 patch when the world takes one and it fits, else the v1 snapshot."""
+    if v2:
+        try:
+            if (snap := capture_v2(workdir, local)) is not None:
+                return snap
+        except (ValueError, OSError) as e:  # v1 below raises the error the agent should read
+            log.info("workspace v2 capture failed, sending v1: %s", e)
+    return capture(workdir, local)
 
 
 def _loopback(url: str) -> bool:
@@ -441,15 +461,16 @@ class WorldHub:
                     ws.skip_prefix and str(local).startswith(ws.skip_prefix)):
                 if rt is None:
                     return _err("no local workspace is available", t0)
+                v2 = "workspace-upload-v2" in snap.manifest.capabilities
                 try:
-                    payload["workspace"] = await asyncio.to_thread(capture, rt.workdir, local)
+                    payload["workspace"] = await asyncio.to_thread(_capture, rt.workdir, local, v2)
                 except (ValueError, OSError) as exc:
                     return _err(str(exc), t0)
         wname = snap.manifest.name
         timeout = max(self.timeout, tool.timeout_s or 0)
         # a write may have happened: never resent; a read-only call during a holdoff tries once
         retries = RETRIES if tool.read_only and self._world_hold is None else 0
-        for attempt in range(retries + 1):
+        for attempt in range(retries + 2):  # one more for a need_full resend
             try:
                 r = await self._http().post(f"{snap.endpoint}/tools/{name}", json=payload,
                                             headers=headers, timeout=timeout)
@@ -461,6 +482,12 @@ class WorldHub:
             seen["status"] = r.status_code
             if r.status_code in (429, 503) and attempt < retries and not _parked(r):
                 await asyncio.sleep(_retry_after(r))
+                continue
+            if "patch" in (payload.get("workspace") or {}) and _need_full(r):
+                try:  # nothing happened in the world yet: resend once as a full tree
+                    payload["workspace"] = await asyncio.to_thread(capture, rt.workdir, local)
+                except (ValueError, OSError) as exc:
+                    return _err(str(exc), t0)
                 continue
             break
         if r.status_code == 401:
