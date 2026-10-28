@@ -30,7 +30,7 @@ import functools
 import hmac
 import json
 import logging
-import os
+import random
 import re
 import secrets
 import time
@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from flock.comms.board import AsyncBoard, BoardError, same_board
+from flock.comms.board import AsyncBoard, BoardError, RateLimiter, parse_retry_after, same_board
 from flock.comms.tools import (
     GROUP_NAMES,
     READ_DEFAULT,
@@ -57,9 +57,12 @@ from flock.comms.tools import (
     thread_of,
     tool_def,
 )
+from flock.models import ALL_COMMS_TOOLS as COMMS_TOOLS
 from flock.models import CommsSpec, comms_name, normalize_board_url
+from flock.secrets_file import secret_env
 from flock.tools.runner import Result, check_args
 from flock.tools.toolset import GATEWAY_LINE_MAX, Toolset
+from flock.worker.comms_extended import ExtendedComms
 from flock.worker.identity import Identities, MsgboardIdentity
 
 if TYPE_CHECKING:
@@ -68,11 +71,24 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 POLL_WAIT_S = 25.0
-JOIN_RETRY_S = 30.0
+JOIN_RETRY_S = 30.0  # first failed join: retry within uniform(0, 30 s), doubling per failure
+JOIN_RETRY_MAX_S = 600.0
+POLL_RETRY_MAX_S = 30.0
+
+
+def full_jitter(failures: int, base: float, cap: float, retry_after: float | None = None,
+                floor: float = 0.0) -> float:
+    """uniform(0, min(cap, base * 2^(failures-1))), never shorter than a Retry-After (or
+    `floor`)."""
+    return max(random.uniform(0.0, min(cap, base * 2 ** min(max(failures - 1, 0), 16))),
+               retry_after or 0.0, floor)
 JOIN_ATTEMPTS = 3  # joins in a row made stale by a configure() before giving up
 BACKLOG_MESSAGES = 500  # per agent, kept for an agent whose re-join is pending
 CACHE_MESSAGES = 2000
 THREADS_KEPT = 500
+NEWS_MAX = 20  # pending board news entries kept per agent (oldest dropped)
+NEWS_CHARS = 120  # message characters quoted in a board news entry
+NEWS_READS = ("comms:read", "comms:read_dms")  # results that list messages (by id)
 SECTION_START = "<!-- flock:comms -->"
 SECTION_END = "<!-- /flock:comms -->"
 
@@ -87,6 +103,7 @@ class Member:
     rejoin: bool = False  # the token was refused (rotated elsewhere): join again
     error: str | None = None
     retry_at: float = 0.0
+    join_failures: int = 0  # consecutive failed joins (the retry backoff)
     threads: set[int] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # set when a reconfiguration dropped the agent's identity: messages for it that arrive
@@ -96,6 +113,10 @@ class Member:
     # fallbacks when the agent has no runtime (tests); otherwise its synced AgentState
     posts: int = 0
     last_post: float | None = None
+    channels: set[int] = field(default_factory=set)
+    created_channels: list[int] = field(default_factory=list)
+    cursor: int | None = None
+    news: list[dict] = field(default_factory=list)  # board news not shown yet: {"id", "text"}
 
 
 class _Stale(Exception):
@@ -146,24 +167,38 @@ def _err(msg: str, t0: float) -> Result:
     return Result(json.dumps({"error": msg}, ensure_ascii=False), True, time.monotonic() - t0)
 
 
-class CommsHub:
+class CommsHub(ExtendedComms):
     def __init__(self, *, swarm: str, identities: Identities | None = None,
                  runtime: Callable[[str], AgentRuntime | None] | None = None,
                  env: Mapping[str, str] | None = None,
                  transport: httpx.AsyncBaseTransport | None = None,
                  clock: Callable[[], float] = time.time, poll_wait: float = POLL_WAIT_S,
-                 backoff_s: float = 1.0) -> None:
+                 backoff_s: float = 1.0, poll_min_interval: float = 2.0,
+                 poll_cycle_s: float | None = None, rate: float | None = None,
+                 burst: float = 5.0, agent_rate: float | None = None,
+                 agent_burst: float = 10.0) -> None:
         self.swarm = swarm
+        self._init_extended()
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
                                                                              timeout=20))
         self._runtime = runtime or (lambda name: None)
-        self._env = env if env is not None else os.environ
+        self._env = env if env is not None else secret_env()
         self._transport = transport
         self._clock = clock
         self.poll_wait = poll_wait
+        self.poll_min_interval = poll_min_interval
+        self.poll_cycle_s = poll_cycle_s  # overrides the spec's comms.poll_cycle_s (tests)
+        # the worker's board request budget (requests/s), shared by the poller and all tools
+        self.limiter = RateLimiter(rate, burst) if rate else None
+        # per agent: comms tool calls beyond this rate are refused locally, before any request
+        self.agent_rate, self.agent_burst = agent_rate, agent_burst
+        self._agent_limits: dict[str, RateLimiter] = {}
         self.backoff_s = backoff_s
         self.spec: CommsSpec | None = None
         self.entries: list[str] = []
+        # `flock grant` per agent (docs/live.md): comms entry -> on / off on top of `entries`,
+        # set by the agent's runtime at its turn boundaries
+        self.grants: dict[str, dict[str, bool]] = {}
         # one client per board url; a credential is only ever sent through its own board's
         # client (and AsyncBoard refuses a credential issued by another board)
         self._boards: dict[str, AsyncBoard] = {}
@@ -179,6 +214,8 @@ class CommsHub:
         self._gen = 0  # bumped by every reconfiguration that invalidates identities
         self.address: str | None = None
         self.stats: Counter[str] = Counter()
+        # Other built-ins the gateway serves, by entry prefix (`world`: flock.world.hub)
+        self.routes: dict[str, Callable[[str, str, dict[str, Any]], Any]] = {}
 
     # ------------------------------------------------------------------ configuration
     @property
@@ -246,11 +283,29 @@ class CommsHub:
         spec" read after an await."""
         key = normalize_board_url(url)
         if key not in self._boards:
-            self._boards[key] = AsyncBoard(key, transport=self._transport, backoff_s=self.backoff_s)
+            self._boards[key] = AsyncBoard(key, transport=self._transport, backoff_s=self.backoff_s,
+                                           limiter=self.limiter)
         return self._boards[key]
 
-    def tooldefs(self) -> tuple:
-        return tuple(tool_def(e) for e in self.entries) if self.active else ()
+    def entries_for(self, agent: str) -> list[str]:
+        """The type's comms tools with the agent's grant applied."""
+        g = self.grants.get(agent)
+        if not g:
+            return list(self.entries)
+        out = [e for e in self.entries if g.get(e, True)]
+        return out + [e for e in COMMS_TOOLS if g.get(e) and e not in out]
+
+    def set_grant(self, agent: str, tools: dict[str, bool] | None) -> None:
+        g = {k: v for k, v in (tools or {}).items() if k in COMMS_TOOLS}
+        if g:
+            self.grants[agent] = g
+        else:
+            self.grants.pop(agent, None)
+
+    def tooldefs(self, agent: str | None = None) -> tuple:
+        if not self.active:
+            return ()
+        return tuple(tool_def(e) for e in (self.entries if agent is None else self.entries_for(agent)))
 
     def deny_env(self) -> list[str]:
         """Variables a tool call never inherits: the comms invite (and MSGBOARD_TOKEN, the
@@ -266,7 +321,7 @@ class CommsHub:
 
     def toolset_for(self, agent: str, base: Toolset) -> Toolset:
         """`base` (the folder tools of this turn) plus this agent's comms tools."""
-        defs = self.tooldefs()
+        defs = self.tooldefs(agent)
         if not defs:
             return base
         names = set(base.names())
@@ -277,11 +332,11 @@ class CommsHub:
     def section(self, agent: str) -> str:
         """The comms section of the agent's instructions: who it is on the board, the tools,
         the rules in force, then the protocol files (`comms.protocols`)."""
-        if not self.active:
+        if not self.active or not self.entries_for(agent):
             return ""
         c = self.spec
         assert c is not None
-        names = [f"`{comms_name(e)}`" for e in self.entries]
+        names = [f"`{comms_name(e)}`" for e in self.entries_for(agent)]
         r = c.rules
         rules = []
         if r.min_post_gap:
@@ -300,6 +355,8 @@ class CommsHub:
                   f"{', '.join(names)} tools for it (you hold no board token, so not curl).")]
         if c.kickoff_id:
             lines.append(f"The kickoff is message {c.kickoff_id}; its thread is the run's main thread.")
+        lines.append("`flock-tool` results may carry `board_news` (DMs, mentions and replies to "
+                     "you since your last call); read and answer them promptly.")
         if rules:
             lines += ["", "Rules (the post tool refuses a post that breaks one and says why):"]
             lines += [f"- {x}" for x in rules]
@@ -347,7 +404,11 @@ class CommsHub:
                     if gen != self._gen:
                         m.rejoin = True
                         continue
-                    m.error, m.retry_at = str(e), self._clock() + JOIN_RETRY_S
+                    m.join_failures += 1
+                    m.error = str(e)
+                    m.retry_at = self._clock() + full_jitter(m.join_failures, JOIN_RETRY_S,
+                                                             JOIN_RETRY_MAX_S, e.retry_after,
+                                                             floor=1.0)
                     self._emit(agent, "comms_join_failed", {"error": m.error})
                     log.warning("%s: comms join failed: %s", agent, m.error)
                     raise
@@ -357,10 +418,12 @@ class CommsHub:
                 break
             else:
                 raise BoardError("the comms settings kept changing during the join; retry")
-            m.ident, m.rejoin, m.error = ident, False, None
+            m.ident, m.rejoin, m.error, m.join_failures = ident, False, None, 0
             rt = self._runtime(agent)
             if rt is not None:
                 m.threads.update(rt.state.comms_threads)
+            if c.extended:
+                await self._extended_join(m, c)
             self.stats["joins"] += 1
             self._emit(agent, "comms_joined", {"principal": ident.principal, "principal_id": ident.id,
                                                "channel": c.channel, "channel_id": c.channel_id})
@@ -390,7 +453,8 @@ class CommsHub:
             ident = await self.identities.join(m.name, c.url, code, again=m.rejoin)
         except httpx.HTTPStatusError as e:
             fresh()
-            raise BoardError(f"join refused: HTTP {e.response.status_code}") from None
+            raise BoardError(f"join refused: HTTP {e.response.status_code}", e.response.status_code,
+                             retry_after=parse_retry_after(e.response.headers.get("retry-after"))) from None
         except (httpx.HTTPError, KeyError, ValueError) as e:
             fresh()
             raise BoardError(f"join failed: {type(e).__name__}") from None
@@ -419,6 +483,9 @@ class CommsHub:
         """The agent left this worker (unassign)."""
         self.members.pop(agent, None)
         self._keys.pop(agent, None)
+        self.grants.pop(agent, None)
+        self._agent_limits.pop(agent, None)
+        self._tool_cache.pop(agent, None)
         self.identities.forget(agent)
         if self._poll_agent == agent and self._poller is not None:
             self._poller.cancel()
@@ -461,11 +528,15 @@ class CommsHub:
             rt.state.comms_threads = [*rt.state.comms_threads, root][-THREADS_KEPT:]
 
     def _mentions(self, msg: dict, m: Member) -> bool:
-        """A direct @mention of this agent (group mentions such as @agents do not count)."""
+        """A direct @mention of this agent. Group mentions such as @all do not count, except
+        in extended mode when a human posts them: one agent's @all must not wake every agent
+        of the swarm (hundreds of mention notices and wakes)."""
         if "mentions" in msg:
+            human = (msg.get("sender") or {}).get("identity_type") not in (None, "agent")
             for x in msg.get("mentions") or []:
                 who = (m.ident is not None and x.get("id") == m.ident.id) or x.get("external_id") == m.name
-                if who and str(x.get("as") or "").lstrip("@").lower() not in GROUP_NAMES:
+                group = str(x.get("as") or "").lstrip("@").lower() in GROUP_NAMES
+                if who and (not group or (self.spec.extended and human)):
                     return True
             return False
         return re.search(rf"(?<![\w@])@{re.escape(m.name)}(?![\w-])", msg.get("body") or "") is not None
@@ -483,6 +554,9 @@ class CommsHub:
         messages of the current subscription count: data returned by a request of an older
         generation, another board or another channel is dropped (no cache entry, no event)."""
         c = self.spec
+        if c is not None and c.extended:
+            self._extended_fanout(msgs, source)
+            return
         if c is None or source != self.current():
             return
         for x in sorted(msgs, key=lambda x: x.get("id") or 0):
@@ -511,13 +585,78 @@ class CommsHub:
         c = self.spec
         assert c is not None
         sender = author(x)
+        channel = x.get("channel") or {}
         data = {"msg_id": x["id"], "thread": thread_of(x), "from": sender}
+        if channel and c.extended:
+            data.update(channel=channel.get("name") or str(channel.get("id")),
+                        channel_id=channel.get("id"), identity_type=(x.get("sender") or {}).get("identity_type"))
+        where = channel.get("name") or channel.get("id") or c.channel
+        if channel.get("kind") == "dm":
+            if "dm" in c.wake:
+                self._emit(m.name, "comms_dm", data)
+                self._add_news(m, x, f"DM from {sender} (channel {where})")
+            return
         if "mention" in c.wake and self._mentions(x, m):
             self.stats["mentions"] += 1
             self._emit(m.name, "comms_mention", data)
+            self._add_news(m, x, f"{sender} mentioned you in #{where}, thread {data['thread']}")
         elif "thread" in c.wake and x.get("thread_id") and x["thread_id"] in m.threads:
             self.stats["thread_replies"] += 1
             self._emit(m.name, "comms_thread_reply", data)
+            self._add_news(m, x, f"reply from {sender} in #{where}, thread {data['thread']}")
+        elif "channel" in c.wake and not x.get("thread_id"):
+            self._emit(m.name, "comms_channel_message", data)
+
+    # ------------------------------------------------------------------ board news
+    def _news(self, m: Member) -> list[dict]:
+        """The agent's pending board news (its synced state when it has a runtime, so a
+        relaunch keeps it): DMs, mentions and thread replies not yet shown in a tool result."""
+        rt = self._runtime(m.name)
+        return rt.state.comms_news if rt is not None else m.news
+
+    def _set_news(self, m: Member, news: list[dict]) -> None:
+        rt = self._runtime(m.name)
+        if rt is None:
+            m.news = news
+            return
+        rt.state.comms_news = news
+        with contextlib.suppress(OSError):
+            rt.save_state()
+
+    def _add_news(self, m: Member, x: dict, head: str) -> None:
+        news = self._news(m)
+        if any(e.get("id") == x["id"] for e in news):
+            return
+        text = " ".join(str(x.get("body") or "").split())
+        if len(text) > NEWS_CHARS:
+            text = text[:NEWS_CHARS - 3] + "..."
+        self._set_news(m, [*news, {"id": x["id"], "text": f"{head} (msg {x['id']}): {text}"}][-NEWS_MAX:])
+
+    def with_news(self, agent: str, entry: str, r: Result) -> Result:
+        """A successful gateway call's result with the agent's pending board news attached
+        (then cleared): a JSON object gains `board_news` (a list of strings, oldest first);
+        any other result becomes {"result": <it>, "board_news": [...]}. Messages a read
+        call returned itself are dropped from the news, not repeated. Errors keep it."""
+        m = self.members.get(agent)
+        if r.error or m is None or not self._news(m):
+            return r
+        try:
+            out = json.loads(r.output)
+        except ValueError:
+            out = r.output
+        news = self._news(m)
+        if entry in NEWS_READS and isinstance(out, dict):
+            seen = {x.get("id") for x in out.get("messages") or [] if isinstance(x, dict)}
+            news = [e for e in news if e.get("id") not in seen]
+        self._set_news(m, [])
+        if not news:
+            return r
+        lines = [e["text"] for e in news]
+        if isinstance(out, dict) and "board_news" not in out:
+            out = {**out, "board_news": lines}
+        else:
+            out = {"result": out, "board_news": lines}
+        return replace(r, output=json.dumps(out, ensure_ascii=False))
 
     def _replay(self, m: Member) -> None:
         """An agent is back after a re-join: the messages the poller saw meanwhile."""
@@ -542,6 +681,9 @@ class CommsHub:
         return m
 
     async def _poll_loop(self) -> None:
+        if self.spec is not None and self.spec.extended:
+            await self._poll_extended()
+            return
         attempt = 0
         while self.active:
             m = self._poll_member()
@@ -569,27 +711,40 @@ class CommsHub:
                     continue
                 attempt += 1
                 log.warning("comms poll failed: %s", e)
-                await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(attempt, 5)))
+                await asyncio.sleep(full_jitter(attempt + 1, self.backoff_s, POLL_RETRY_MAX_S,
+                                                e.retry_after))
             except Exception as e:  # noqa: BLE001 - keep polling
                 attempt += 1
                 log.warning("comms poll failed: %s: %s", type(e).__name__, e)
-                await asyncio.sleep(min(30.0, self.backoff_s * 2 ** min(attempt, 5)))
+                await asyncio.sleep(full_jitter(attempt + 1, self.backoff_s, POLL_RETRY_MAX_S))
 
     # ------------------------------------------------------------------ tools
     async def call(self, agent: str, entry: str, args: dict[str, Any]) -> Result:
         """One built-in comms call by `agent` (the llm harness in process, flock-tool through the
         gateway). Never raises: errors and refusals are results the model reads."""
         t0 = time.monotonic()
-        if not self.active or entry not in self.entries:
+        if not self.active or entry not in self.entries_for(agent):
             return _err(f"{entry} is not enabled for this agent", t0)
         if err := check_args(tool_def(entry).parameters, args):
             return _err(f"{comms_name(entry)}: {err}", t0)
+        if self.agent_rate:
+            limit = self._agent_limits.setdefault(agent, RateLimiter(self.agent_rate, self.agent_burst))
+            if wait := limit.try_take():
+                self.stats["refused"] += 1
+                error = (f"too many board calls from you; retry in {max(1, int(wait) + 1)} s "
+                         "(nothing was sent)")
+                self._emit(agent, "comms_refused", {"rule": "agent_rate", "error": error})
+                return _err(error, t0)
         for attempt in (0, 1):
             try:
                 m = await self._member(agent)
                 op = _Op(m, m.ident, self.spec, self._gen)  # one identity, its own board
                 if op.ident is None or op.c is None or not same_board(op.ident.url, op.c.url):
                     raise BoardError("comms settings changed during the call; try again")
+                if entry not in ("comms:post", "comms:read", "comms:search"):
+                    return _ok(await self._extended_call(op, entry, args), t0)
+                if args.get("channel") is not None:
+                    op = await self._channel_op(op, args["channel"])
                 fn = {"comms:post": self._post, "comms:read": self._read,
                       "comms:search": self._search}[entry]
                 return _ok(await fn(op, args), t0)
@@ -654,6 +809,8 @@ class CommsHub:
         self.stats["posts"] += 1
         if isinstance(msg, dict) and isinstance(msg.get("id"), int):
             msg.setdefault("channel_id", c.channel_id)
+            if c.extended:
+                msg.setdefault("channel", {"id": c.channel_id, "name": c.channel, "kind": "public"})
             self.fanout([msg], op.source)  # dropped if the settings changed during the post
         out: dict[str, Any] = {"posted": msg.get("id"), "thread": thread_of(msg) if msg.get("id") else None}
         if rules.max_posts:
@@ -689,7 +846,9 @@ class CommsHub:
             since = c.kickoff_id  # on a reused channel, history from before the run stays out
         reached = older = False  # reached: the page goes back to `since`, nothing after it is cut
         if since is not None:
-            kept = [x for x in msgs if isinstance(x.get("id"), int) and x["id"] >= since]
+            # an explicit `since` is a cursor: strictly newer; the default keeps the kickoff itself
+            kept = [x for x in msgs if isinstance(x.get("id"), int)
+                    and (x["id"] >= since if default else x["id"] > since)]
             reached = len(kept) < len(msgs) or (bool(kept) and kept[0]["id"] == since)
             older = len(kept) < len(msgs) or bool(page.get("has_more"))
             msgs, out["since"] = kept, since
@@ -701,6 +860,8 @@ class CommsHub:
         elif default and reached and older:
             out["note"] = (f"from the kickoff (message {since}) on; for older ones read with "
                            "since: <message id>")
+        elif since is not None and not default and not msgs:
+            out["note"] = f"caught up: nothing newer than {since}"
         return out
 
     async def _search(self, op: _Op, args: dict[str, Any]) -> dict[str, Any]:
@@ -735,7 +896,9 @@ class CommsHub:
             if agent not in self._keys or not hmac.compare_digest(key, self._keys[agent]):
                 r = Result(json.dumps({"error": "gateway: unknown agent or key"}), True)
             else:
-                r = await self.call(agent, str(req.get("tool")), req.get("args") or {})
+                tool = str(req.get("tool"))
+                handler = self.routes.get(tool.split(":", 1)[0], self.call)
+                r = self.with_news(agent, tool, await handler(agent, tool, req.get("args") or {}))
             writer.write(json.dumps({"output": r.output, "error": r.error,
                                      "duration_s": r.duration_s}).encode() + b"\n")
             await writer.drain()

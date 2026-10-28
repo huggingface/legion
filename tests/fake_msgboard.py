@@ -47,6 +47,7 @@ class Board:
         self.invite = invite
         self.channels = dict(channels or {12: "flock-test"})
         self.invites = dict(invites) if invites is not None else {invite: list(self.channels)}
+        self.dms = {}
         self.private = set(private or ())
         self.archived = set(archived or ())
         self.lock = threading.Condition()
@@ -83,6 +84,8 @@ class Board:
             return tok
 
     def visible(self, pid: int, channel: int) -> bool:
+        if channel in self.dms:
+            return pid in self.members[channel]
         return channel in self.channels and (channel not in self.private or pid in self.members[channel])
 
     def names(self) -> set[str]:
@@ -124,8 +127,12 @@ class Board:
                 x["thread_id"] for x in self.msgs if x["sender"]["id"] == me and x["thread_id"]}
             out["reason"] = ("mention" if any(x["id"] == me for x in m["mentions"])
                              else "reply" if m["thread_id"] in mine else "channel")
-            out["channel"] = {"id": m["channel_id"], "name": self.channels[m["channel_id"]],
-                              "kind": "public"}
+            cid = m["channel_id"]
+            out["channel"] = {"id": cid, "name": self.channels[cid],
+                              "kind": "dm" if cid in self.dms else "public"}
+            if cid in self.dms:
+                out["channel"]["members"] = [self.principals[p] for p in self.members[cid]]
+                out["reason"] = "dm"
         return out
 
     # ------------------------------------------------------------------ search
@@ -231,8 +238,25 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                                                            "created": created})
             if me is None:
                 return self.fail(401, "unauthorized")
+            if method == "GET" and u.path == "/v1/principals":
+                return self.send(200, {"principals": list(board.principals.values())})
+            if method == "POST" and u.path in ("/v1/channels", "/v1/dms"):
+                with board.lock:
+                    pair = frozenset((me, body.get("with")))
+                    cid = next((c for c, p in board.dms.items() if p == pair), None) if u.path == "/v1/dms" else None
+                    if cid is None:
+                        cid = max(board.channels, default=0) + 1
+                        board.channels[cid] = body.get("name") or f"dm-{cid}"
+                        board.seq[cid] = 0
+                        board.members[cid] = set(pair) if u.path == "/v1/dms" else {me}
+                        if u.path == "/v1/dms":
+                            board.dms[cid] = pair
+                    result = {"id": cid, "name": board.channels[cid], "kind": "dm" if cid in board.dms else "public"}
+                    if cid in board.dms:
+                        result["members"] = [board.principals[p] for p in pair]
+                return self.send(201, result)
             if method == "GET" and u.path == "/v1/channels":
-                out = [{"id": c, "name": n, "kind": "public", "member": me in board.members[c],
+                out = [{"id": c, "name": n, "kind": "dm" if c in board.dms else "public", "member": me in board.members[c],
                         "last_seq": board.seq[c], "archived": c in board.archived}
                        for c, n in board.channels.items()
                        if q.get("name") in (None, n) and board.visible(me, c)]
@@ -288,6 +312,8 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                 return self.send(200, {"messages": out, "next_cursor": cursor, "has_more": more})
             if method == "GET" and u.path == "/v1/activity":
                 follow = [int(x) for x in (q.get("channels") or "").split(",") if x.strip().isdigit()]
+                if q.get("channels") == "joined":
+                    follow = [c for c in board.channels if me in board.members[c]]
                 if any(not board.visible(me, c) for c in follow):
                     return self.fail(404, "not_found", "channel not found")
                 wait = float(q.get("wait") or 0)
@@ -300,6 +326,7 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                     def mine() -> list[dict]:
                         return [board._view(x, me, reason=True) for x in board.msgs
                                 if x["id"] > after and x["sender"]["id"] != me
+                                and board.visible(me, x["channel_id"])
                                 and (x["channel_id"] in follow
                                      or any(y["id"] == me for y in x["mentions"]))]
 
