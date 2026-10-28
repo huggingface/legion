@@ -77,6 +77,13 @@ def setup(tmp_path, monkeypatch):
     return world, clone, remote
 
 
+def _write_archive(world, state):
+    """Leave the workspace as an archive from before state.db restores it: prs.json only."""
+    world.db.write_text(json.dumps(state))
+    for name in ("state.db", "state.db-wal", "state.db-shm"):
+        (world.ws / name).unlink(missing_ok=True)
+
+
 def submit(world, clone, author="cedar", branch="greeting", pr=None):
     return world.call_workspace("open_pr", {"branch": branch, "title": "Improve greetings",
         "description": "Tested a conversation and the interface.", "pr": pr},
@@ -523,7 +530,7 @@ def test_admin_lanes_and_knobs(setup):
     world, clone, _ = setup
     rec = submit(world, clone)
     approve(world, rec)
-    assert world.knobs == {"save.interval_s": world.save_interval, "pr.open_floor": 20,
+    assert world.knobs == {"save.interval_s": world.save_interval, "save.legacy_json": True, "pr.open_floor": 20,
                            "hub.push.slots": 1, "hub.merge.slots": 1, "hub.comment.slots": 1,
                            "hub.comment.gap_s": 0.0}
     world.admin.set({"hub.push.slots": 2, "hub.comment.gap_s": 0.5})
@@ -576,7 +583,7 @@ def test_restore_from_an_archive_older_than_a_merge_reconciles(setup):
     world.flush()
     before = (world.ws / "prs.json").read_text()
     merged = world.merge_pr(Agent("birch"), rec["pr"])["merged_sha"]
-    (world.ws / "prs.json").write_text(before)  # restored from an archive taken before the merge
+    _write_archive(world, json.loads(before))  # restored from an archive taken before the merge
     restarted = Chatbot4World(world.ws, world.repo)
     assert restarted.list_prs() == []
     assert restarted.list_prs("merged")[0]["merged_sha"] == merged
@@ -847,7 +854,7 @@ def test_reviews_without_patch_id_only_count_for_their_exact_head(setup):
     state = json.loads(world.db.read_text())
     del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id"]
     del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id0"]
-    world.db.write_text(json.dumps(state))
+    _write_archive(world, state)
     world = Chatbot4World(world.ws, world.repo)
     assert world.list_prs(needs_review=True) == []  # still approved at its exact head
     _rebase(clone)
@@ -928,7 +935,7 @@ def _drop_patch_id0(world, pr):
     world.flush()
     state = json.loads(world.db.read_text())
     del state["prs"][str(pr)]["reviews"]["birch"]["patch_id0"]
-    world.db.write_text(json.dumps(state))
+    _write_archive(world, state)
     return Chatbot4World(world.ws, world.repo)
 
 
@@ -1048,7 +1055,7 @@ def test_inbox_is_capped_deduped_and_survives_a_restart(setup):
     assert Chatbot4World(world.ws, world.repo).state["inbox"] == {}  # delivery was saved
     state = json.loads(world.db.read_text())
     del state["inbox"]  # an archive from before the inbox existed
-    world.db.write_text(json.dumps(state))
+    _write_archive(world, state)
     old = Chatbot4World(world.ws, world.repo)
     assert old.call("list_prs", {}, Agent("cedar")) == []
     rec = submit(old, clone)
@@ -1226,7 +1233,7 @@ def test_legacy_hub_outbox_in_prs_json_moves_to_the_outbox_file(setup):
     state = json.loads((world.ws / "prs.json").read_text())
     state["hub_outbox"] = [{"id": "x", "pr": rec["pr"], "agent": "birch", "text": "old review",
                             "tries": 3, "next_at": 0.0, "queued_at": 1.0}]
-    (world.ws / "prs.json").write_text(json.dumps(state))
+    _write_archive(world, state)
     restarted = Chatbot4World(world.ws, world.repo)
     assert _wait(lambda: restarted.repo.hub.comments == [(rec["pr"], "old review")])
     restarted.flush()
@@ -1720,7 +1727,7 @@ def test_old_request_cache_is_slimmed_on_load_and_expires(setup, monkeypatch):
     # An archive from before slimming: the full result, no timestamp.
     state["requests"]["k1"] = dict(first)
     state["requests"]["old"] = {**first, "description": "y" * 10000}
-    world.db.write_text(json.dumps(state))
+    _write_archive(world, state)
     restarted = Chatbot4World(world.ws, world.repo)
     restarted.close()
     on_disk = _on_disk(restarted)["requests"]
@@ -1998,10 +2005,11 @@ def test_metrics_report_prs_budget_outbox_and_saves(setup):
     assert set(m) == {"open_prs", "opens_last_hour", "merges_last_hour", "open_budget_limit",
                       "budget_refusals_last_hour", "parked_drafts", "stale_lease_adoptions_total",
                       "hub_busy_total", "hub_comments_rejected_total", "save_duration_s",
-                      "save_age_s", "state_bytes", *lanes}
+                      "save_age_s", "state_bytes", "dirty_rows", *lanes}
     assert all(isinstance(v, int | float) for v in m.values())
     assert (m["open_prs"], m["opens_last_hour"], m["parked_drafts"]) == (1, 1, 0)
-    assert m["state_bytes"] == (world.ws / "prs.json").stat().st_size and m["save_age_s"] < 60
+    assert m["state_bytes"] >= (world.ws / "state.db").stat().st_size > 0 and m["save_age_s"] < 60
+    assert m["dirty_rows"] == 0
 
 
 def test_vote_failures_trip_the_push_lane_and_comments_survive_a_restart(setup, monkeypatch):
