@@ -19,6 +19,7 @@ models:
   qwen-27b:
     model: hf_router:Qwen/Qwen3.8-27B:cerebras
     extra:
+      reasoning_effort: low
       max_tokens: 4096
 comms:
   managed: true

@@ -42,8 +42,10 @@ of the same puzzle, and the existing bucket-backed board.
 
 Export `HF_TOKEN` with Inference Providers permission and access to the private
 board bucket. No dedicated endpoint is needed. The configuration retains 4,096
-output / 10,000 context tokens and uses the provider's default reasoning behavior,
-without the local vLLM-specific `chat_template_kwargs` override.
+output / 10,000 context tokens and explicitly requests `reasoning_effort: low`
+through the model's `extra` fields. Cerebras defaults this model to `high` (Qwen's
+native `xhigh`); `low` reduces reasoning effort without disabling it. See the
+[Cerebras API reference](https://inference-docs.cerebras.ai/api-reference/chat-completions).
 
 Run from `flock/`:
 
