@@ -18,12 +18,10 @@ from time import monotonic
 
 from flock.comms.board import BoardError
 from flock.comms.tools import Refused, as_id, author, brief, check_content, check_rate, thread_of
-from flock.models import CommsSpec
 
 log = logging.getLogger(__name__)
 
 POLL_BACKOFF_MAX_S = 120.0
-DEFAULT_POLL_CYCLE_S = CommsSpec.model_fields["poll_cycle_s"].default
 CACHE_TTL_S = 60.0  # per agent: its channel list and the principals directory
 TOOL_CACHE_MAX = 64  # entries kept per agent (channel list, directory, DM pages); oldest out
 READ_DMS_CHANNELS = 10  # read_dms reads at most this many DM channels (the newest)
@@ -261,11 +259,8 @@ class ExtendedComms:
 
     def _poll_cycle(self, c) -> float:
         """worker.comms_poll_cycle_s (spec) > comms.poll_cycle_s > FLOCK_COMMS_POLL_CYCLE_S."""
-        # shortcut: comms.poll_cycle_s equal to its default counts as unset (the heartbeat's
-        # dump carries every field), so an explicit 300 loses to the env value
-        explicit = c.poll_cycle_s != DEFAULT_POLL_CYCLE_S
-        env = None if explicit else getattr(self, "poll_cycle_env", None)
-        return self.poll_cycle_s or env or c.poll_cycle_s
+        return (self.poll_cycle_s or c.poll_cycle_s or getattr(self, "poll_cycle_env", None)
+                or 300.0)
 
     def _init_extended(self):
         self._channel_lock = asyncio.Lock()
