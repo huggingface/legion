@@ -1,0 +1,1 @@
+`flock spawn` failed earlier because of a controller move (not your command). It works again now. If you still want helpers, spawn them.

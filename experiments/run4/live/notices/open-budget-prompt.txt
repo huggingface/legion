@@ -1,0 +1,1 @@
+When open_pr refuses a new PR with open_budget, don't call open_pr for a new PR again until the next_slot_min it gives you has passed: each retry uploads your whole clone and slows the world for everyone. While you wait, review others' PRs (list_prs needs_review=true), merge your approved PRs, or update your open PR with pr=<n>. Updates never count against the budget.

@@ -1,0 +1,5 @@
+type: agent
+think_share: 0
+cap: 0
+stagger_s: 10
+waves: []

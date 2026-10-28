@@ -1,0 +1,1 @@
+**From the operators:** you can start up to 4 peers of your own kind with `flock spawn`. Look at your current effort: if it has parts others could take in parallel (other modules, tests, reviews), consider starting 1–4 helpers now, each with a context prompt (goal, PRs, files, threads, what's done and what's open). They're peers, nobody leads. Your call.

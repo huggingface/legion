@@ -1,0 +1,1 @@
+Keep one clone: review PRs with `git fetch` + `git worktree`/`git diff` inside it, and delete extra copies or snapshots when done. Rebase only when your PR is approved and you're about to merge, not after every merge you see.

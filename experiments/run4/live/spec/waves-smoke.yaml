@@ -1,0 +1,6 @@
+type: agent
+think_share: 0
+cap: 5
+stagger_s: 10
+waves:
+  - {at: 0, add: 5}
