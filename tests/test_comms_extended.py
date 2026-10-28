@@ -458,3 +458,68 @@ async def test_tool_cache_is_bounded_per_agent_and_dropped_with_the_agent():
     hub.forget("cedar")  # unassigned: nothing of it stays
     assert "cedar" not in hub._tool_cache and len(calls) == 1
     await hub.aclose()
+
+
+def _reacted(**by):
+    """A board message with `reactions` as the real board shapes them."""
+    return {"reactions": [{"emoji": e, "count": len(names), "by": [{"external_id": n} for n in names]}
+                          for e, names in by.items()]}
+
+
+@pytest.mark.parametrize("up,down,passed", [(2, 1, True), (1, 0, False), (2, 2, False), (3, 0, True)])
+def test_votes_rule(up, down, passed):
+    from flock.comms.tools import votes
+    m = _reacted(**{"👍": [f"u{i}" for i in range(up)], "👎": [f"d{i}" for i in range(down)]})
+    v = votes(m)
+    assert (v["up"], v["down"], v["passed"]) == (up, down, passed)
+    assert v["voters_up"] == [f"u{i}" for i in range(up)]
+
+
+def test_votes_merge_emoji_variants():
+    from flock.comms.tools import votes
+    v = votes(_reacted(**{"👍": ["a"], "👍️": ["a", "b"], "👍🏽": ["c"], "👎🏿": ["d"]}))
+    assert (v["up"], v["down"], v["voters_up"], v["voters_down"], v["passed"]) == (
+        3, 1, ["a", "b", "c"], ["d"], True)
+
+
+async def test_reactions_votes_and_channel_doc(tmp_path, board):
+    team = Team(tmp_path, board, ["cedar", "birch", "pine"])
+    team.spec.extended = True
+    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
+    try:
+        await team.start()
+        out, error = await team.call("cedar", "post", text="proposal: ship it", thread="new")
+        assert not error, out
+        mid = out["posted"]
+        for name in ("cedar", "birch"):
+            result, error = await team.call(name, "react", msg_id=mid, emoji="👍")
+            assert not error, result
+        assert result["reactions"] == {"👍": 2} and result["reactors"] == {"👍": ["cedar", "birch"]}
+        await team.call("pine", "react", msg_id=mid, emoji="👎")
+        v, error = await team.call("pine", "votes", msg_id=mid)
+        assert not error and v == {"msg_id": mid, "up": 2, "down": 1, "voters_up": ["cedar", "birch"],
+                                   "voters_down": ["pine"], "passed": True}
+        page, _ = await team.call("pine", "read")
+        assert page["messages"][-1]["reactions"] == {"👍": 2, "👎": 1}
+
+        doc, error = await team.call("cedar", "doc")
+        assert not error and doc == {"body": "", "version": 0}
+        out, error = await team.call("cedar", "edit_doc", body="plan v1", base_version=0)
+        assert not error and out == {"version": 1}
+        out, error = await team.call("birch", "edit_doc", body="stale edit", base_version=0)
+        assert error and out["version"] == 1 and out["body"] == "plan v1", out
+        out, error = await team.call("birch", "edit_doc", body="plan v1", base_version=0)
+        assert not error and out == {"version": 1}  # a retry of a save that already landed
+        doc, _ = await team.call("birch", "doc")
+        assert doc == {"body": "plan v1", "version": 1}
+        board.docs = False
+        out, error = await team.call("cedar", "doc")
+        assert error and "board has no channel documents" in out["error"]
+    finally:
+        await team.close()
+
+
+def test_readonly_comms_tools():
+    from flock.comms.tools import DEFS, READONLY
+    assert set(ALL_COMMS_TOOLS) == set(DEFS) and READONLY <= set(DEFS)
+    assert {"comms:votes", "comms:doc"} <= READONLY and "comms:edit_doc" not in READONLY
