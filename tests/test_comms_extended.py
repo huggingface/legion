@@ -374,6 +374,8 @@ async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path,
         return Result('{"ok": 1, "inbox": ["PR #3 approved"]}', False)
 
     team.hub.routes["world"] = world
+    team.hub.routes["controller"] = lambda agent, entry, args: asyncio.sleep(
+        0, Result('{"status": 200, "body": {}}', False))
     try:
         await team.start()
         assert "board_news" in team.hub.section("birch")
@@ -388,6 +390,10 @@ async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path,
         assert error and "board_news" not in out
         out, error = await gateway(team.hub, "birch", "world:fail")
         assert error and "board_news" not in out
+        # a `flock` CLI controller call leaves the news for the next tool result
+        out, error = await gateway(team.hub, "birch", "controller:request")
+        assert not error and out == {"status": 200, "body": {}}
+        assert rt.state.comms_news and rt.state.comms_news[0]["id"] == dm_id
         # a world dict result: board_news next to the world's own inbox
         out, error = await gateway(team.hub, "birch", "world:status")
         assert not error and out["inbox"] == ["PR #3 approved"] and out["ok"] == 1

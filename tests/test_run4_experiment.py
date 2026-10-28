@@ -7,10 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import yaml
 
 from flock.cli import load_spec
 from flock.controller.loop import notice_line
-from flock.models import load_spec_yaml
 
 EXP = Path(__file__).resolve().parents[1] / "experiments/run4"
 
@@ -44,16 +44,35 @@ def test_spec_fixed_prompt_and_waves():
     assert waves.events[-1] == (7200, 300)
 
 
-def test_render_multiple_endpoints_and_cluster_lifetime(monkeypatch):
+def test_render_multiple_endpoints_and_cluster_lifetime(monkeypatch, tmp_path):
+    """render.py is flock's own --env/--overlay plus OPENAI_BASE_URLS; its output reads back
+    unchanged (the rendered file goes through substitution again at `flock apply`)."""
+    for name in ("RUN3_BUCKET", "RUN3_NAMESPACE", "CHATBOT_RUN", "MODEL_WORKER"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENAI_BASE_URLS", "http://first/v1,http://second/v1")
-    monkeypatch.setenv("MODEL_WORKER", "fake-model")
-    data = module("render").render()
-    assert data["compute"]["kind"] == "slurm"
-    assert data["compute"]["time"] == "54:00:00"
-    assert data["providers"]["vllm"]["base_urls"] == ["http://first/v1", "http://second/v1"]
-    assert data["types"]["agent"]["replicas"] == 0
-    committed = load_spec_yaml((EXP / "spec.slurm.yaml").read_text())
-    assert committed["types"]["agent"]["replicas"] == 0
+    (tmp_path / "run.env").write_text("MODEL_WORKER=fake-model\nRUN3_BUCKET=hf://buckets/x/y\n")
+    data = module("render").render(env_files=[tmp_path / "run.env"])
+    smoke = module("render").render("smoke", env_files=[tmp_path / "run.env"])
+    assert all(t["loop"]["while"] == {"until": "30m", "max_rounds": 100}
+               for t in smoke["types"].values()) and smoke["compute"] == "local"
+    assert data["compute"] == {"kind": "slurm", "partition": "hopper-cpu", "cpus": 4,
+                               "mem": "7G", "time": "54:00:00"}
+    assert data["bucket"] == "hf://buckets/x/y" and data["namespace"] == "cmpatino"
+    assert data["world"] == {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"}
+    assert data["models"]["worker-pi"]["model"] == "vllm:fake-model"
+    tools = {"world:run_bot", "world:open_pr", "world:review_pr", "world:merge_pr",
+             "world:list_prs", "world:close_pr", "world:get_pr"}
+    for t in data["types"].values():  # the overlay keeps every type's settings from spec.yaml
+        assert t["replicas"] == 0 and t["harness"] == "pi" and set(t["tools"]) == tools
+    out = tmp_path / "experiment" / "spec.slurm.local.yaml"
+    out.parent.mkdir()
+    (out.parent / "prompts").symlink_to(EXP / "prompts")
+    out.write_text(yaml.safe_dump(data, sort_keys=False))
+    spec = load_spec(str(out))  # as controller.sbatch applies it
+    assert spec.world.url == "http://${WORLD_HOST}:7860" and spec.compute.kind == "slurm"
+    assert set(spec.types["agent-child"].tools) == tools
+    assert spec.providers["vllm"].base_urls == ["http://first/v1", "http://second/v1"]
+    assert spec.providers["vllm"].base_url == "http://first/v1"
 
 
 def test_capacity_guard_checks_each_node_and_holds_on_missing_metrics():

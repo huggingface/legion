@@ -383,9 +383,10 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     # goes to pending_prompts after the assign instead of riding inside it.
     r = ts.resolved_model
     # Held as a pending prompt (not inside the assign) when admission must see it: a provider
-    # with max_working, or a swarm under the hard budget stop (docs/loop.md), where pending
-    # prompts are not delivered until the budget is raised.
-    hard = store.swarm_flags(a["swarm"]).get("budget_stop") == "hard"
+    # with max_working, or a swarm under the hard budget stop or a paused agent (docs/loop.md),
+    # where pending prompts are not delivered until the budget is raised or the hold lifted.
+    flags = store.swarm_flags(a["swarm"])
+    hard = flags.get("budget_stop") == "hard" or store.held(a, flags)  # or paused
     hold = bool(resume) and (hard or bool(r and r.provider.max_working))
     held, resume = (resume, None) if hold else (None, resume)
     cmd = AssignCommand(
@@ -393,7 +394,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
         tools_version=tools_version,
         comms=comms,
-        world=world,
+        world=world.model_copy(update={"down_pause_s": None}) if world else None,  # controller only
     )
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:

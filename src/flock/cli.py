@@ -3,7 +3,8 @@
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
 FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
 a live `flock run` in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
-agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
+agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; when the
+agent's pin file (FLOCK_TOOLS_PIN) names a worker gateway, calls go through it instead. See
 docs/spawn.md for what an agent may call.
 """
 
@@ -24,7 +25,8 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, load_spec_yaml, loop_refusals
+from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, loop_refusals
+from flock.specrender import at_ref, render
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -130,7 +132,50 @@ def _request(c: httpx.Client, method: str, path: str, **kw) -> httpx.Response:
     raise AssertionError("unreachable")
 
 
+def _gateway(env=os.environ) -> tuple[str, str, str] | None:
+    """(address, key, agent) of the worker gateway named in the agent's pin file
+    (FLOCK_TOOLS_PIN), or None outside an agent or on a worker without one."""
+    from flock.tools.toolset import PIN_ENV, read_pin
+
+    if not (pin := env.get(PIN_ENV)):
+        return None
+    try:
+        ts, agent, _ = read_pin(pin)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return (ts.gateway, ts.gateway_key or "", agent) if ts.gateway else None
+
+
+def _call_gateway(gw: tuple[str, str, str], method: str, path: str, timeout: float | None,
+                  **kw) -> Any:
+    """One controller call through the worker (`controller:request`): the worker sends it with
+    this agent's token to wherever the controller is now, retrying there."""
+    import asyncio
+
+    from flock.tools.toolset import gateway_call
+
+    address, key, agent = gw
+    args = {"method": method, "path": path, "params": kw.get("params"), "json": kw.get("json")}
+    r = asyncio.run(gateway_call(address, key, agent, "controller:request", args,
+                                 timeout=(timeout or 60) + 120))
+    try:
+        out = json.loads(r.output)
+    except ValueError:
+        out = {}
+    if not isinstance(out, dict) or "status" not in out:
+        err = out.get("error") if isinstance(out, dict) else None
+        typer.echo(f"error: {err or r.output}", err=True)
+        raise typer.Exit(1)
+    if out["status"] >= 400:
+        body = out["body"] if isinstance(out["body"], str) else json.dumps(out["body"])
+        typer.echo(f"error {out['status']}: {body}", err=True)
+        raise typer.Exit(1)
+    return out["body"]
+
+
 def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
+    if (gw := _gateway()) is not None:  # inside an agent: through its worker (docs/spawn.md)
+        return _call_gateway(gw, method, path, timeout, **kw)
     if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
         kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
     with client() as c:
@@ -142,8 +187,9 @@ def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
 
 
 def _as_agent() -> bool:
-    """Running inside an agent with its scoped token: names are agents, never swarms."""
-    return bool(os.environ.get("FLOCK_AGENT_TOKEN"))
+    """Running inside an agent (its scoped token or its worker's gateway): names are agents,
+    never swarms."""
+    return bool(os.environ.get("FLOCK_AGENT_TOKEN") or _gateway())
 
 
 def _is_swarm(name: str) -> bool:
@@ -208,6 +254,11 @@ def _print_status(st: dict) -> None:
         for t in st["types"].values()
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
+    held = st.get("held") or {}
+    for kind in ("types", "agents"):
+        for name, h in (held.get(kind) or {}).items():
+            typer.echo(f"HELD {kind[:-1]} {name}: {h['reason'] or '-'} (by {h['by']}"
+                       f"{', auto' if h.get('auto') else ''}, since {h['since'][:19]}Z)")
     for t in st["types"].values():
         if t.get("loop"):
             typer.echo(_loop_line(t["loop"]))
@@ -263,29 +314,32 @@ def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
     setattr(holder, target, src.read_text(encoding="utf-8"))
 
 
-def load_spec(spec_file: str) -> SwarmSpec:
+def load_spec(spec_file: str, env_files=(), overlays=()) -> SwarmSpec:
     """`read_spec`, exiting 1 with the reasons on stderr."""
     try:
-        return read_spec(spec_file)
+        return read_spec(spec_file, env_files, overlays)
     except SpecError as e:
         for line in e.lines:
             typer.echo(line, err=True)
         raise typer.Exit(1) from None
 
 
-def read_spec(spec_file: str) -> SwarmSpec:
-    """Read a spec and inline each type's system_prompt_file (plus system_prompt_append_file)
-    and loop prompt files, and the comms kickoff and protocol files (relative to the spec
-    file). Raises SpecError."""
+def read_spec(spec_file: str, env_files=(), overlays=()) -> SwarmSpec:
+    """Read a spec (its --overlay files merged, then ${VAR} from --env files and the
+    environment substituted: flock.specrender) and inline each type's system_prompt_file (plus
+    system_prompt_append_file) and loop prompt files, and the comms kickoff and protocol files
+    (relative to the spec file). Raises SpecError."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(load_spec_yaml(path.read_text(encoding="utf-8")))
+        spec = SwarmSpec.model_validate(render(path, env_files, overlays))
     except ValidationError as e:
         lines = []
         for err in e.errors():
             where = ".".join(str(x) for x in err["loc"])
             lines.append(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}")
         raise SpecError(lines) from None
+    except ValueError as e:  # an unset ${VAR}, a bad --env line
+        raise SpecError([f"{spec_file}: {e}"]) from None
     except (OSError, yaml.YAMLError) as e:  # unreadable file, broken YAML (a save in progress)
         raise SpecError([f"{spec_file}: {' '.join(str(e).split())}"]) from None
     for name, ts in spec.types.items():
@@ -428,6 +482,27 @@ def _preflight(spec: SwarmSpec, strict: bool) -> bool:
     return bool(rep["ok"]) and not (strict and unverified)
 
 
+ENV_OPT = typer.Option(None, "--env", help="NAME=value file for ${VAR} in the spec (repeatable; "
+                       "later files win, the process environment wins over all).")
+OVERLAY_OPT = typer.Option(None, "--overlay", help="YAML deep-merged over the spec (repeatable): "
+                           "mappings merge, lists replace, null deletes a key.")
+REF_OPT = typer.Option(None, "--ref", metavar="GIT_REF[:PATH]",
+                       help="Apply the folder as committed at GIT_REF (git archive); PATH is "
+                            "repo-relative, default the given folder's own path.")
+
+
+def _at_ref(spec_file: str, ref: str | None, overlays: list[str] | None):
+    """(spec_file, overlays, X-Flock-Source header or None) for --ref; exit 1 on a bad ref."""
+    if ref is None:
+        return spec_file, overlays or [], None
+    try:
+        spec, overlays, header = at_ref(spec_file, ref, overlays or [])
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    return str(spec), overlays, header
+
+
 @app.command()
 def apply(
     spec_file: str,
@@ -436,12 +511,16 @@ def apply(
         help="Probe provider-backed models before applying (default: on when the spec has any)."),
     strict: bool = typer.Option(
         False, "--strict", help="Treat models that were not probed (unverified) as failures."),
+    env_files: list[str] | None = ENV_OPT,
+    overlays: list[str] | None = OVERLAY_OPT,
+    ref: str | None = REF_OPT,
 ) -> None:
     """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight; a model
     that could not be probed is reported as unverified and applied anyway unless --strict.
     A tools folder (docs/tools.md) is checked, uploaded and named in the spec by its hash;
     re-applying with a changed folder switches running agents at their next turn."""
-    spec = load_spec(spec_file)
+    spec_file, overlays, ref_header = _at_ref(spec_file, ref, overlays)
+    spec = load_spec(spec_file, env_files or (), overlays)
     _check_loops(spec)
     _warn_extra(spec)
     bundle = _tools_bundle(spec, spec_file)
@@ -465,7 +544,7 @@ def apply(
         names = ", ".join(up["tools"]) or "none"
         typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
     st = _call("PUT", f"/swarms/{spec.swarm}", params={"replicas": "spec"},
-               json=spec.model_dump(mode="json"), headers=source_header(spec_file))
+               json=spec.model_dump(mode="json"), headers=ref_header or source_header(spec_file))
     _print_status(st)
 
 
@@ -478,19 +557,21 @@ def _detail(r: httpx.Response) -> str:
 
 
 def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = None,
-                 strict: bool = False, replicas: str = "keep", check: bool = False) -> list[str]:
+                 strict: bool = False, replicas: str = "keep", check: bool = False,
+                 env_files=(), overlays=(), source: dict[str, str] | None = None) -> list[str]:
     """Re-read the experiment folder and apply it to the running swarm (docs/live.md): the
     spec, its prompt files and the tools folder, as `flock apply` reads them. Returns the
     lines to show (warnings, then what changed, or "no changes"); raises SpecError with the
     refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
     by default only when the spec names a provider-backed model the running one does not.
     `replicas="keep"` keeps the live counts of existing types; `check` runs the controller's
-    validation (dry run) and stores nothing."""
+    validation (dry run) and stores nothing. `env_files`/`overlays` as in `read_spec`; `source`
+    replaces the `X-Flock-Source` header (--ref)."""
     from flock.live import diff_specs, keep_replicas, world_tool_changes
     from flock.tools.loader import ToolsError
     from flock.tools.spec import prepare
 
-    spec = read_spec(spec_file)
+    spec = read_spec(spec_file, env_files, overlays)
     refused, warnings = loop_problems(spec)
     if refused:
         raise SpecError(refused)
@@ -539,7 +620,7 @@ def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = No
         return [*warnings, *kept, "no changes"]
     r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
                  params={"replicas": "spec", **({"dry_run": 1} if check else {})},
-                 headers=source_header(spec_file))
+                 headers=source or source_header(spec_file))
     if r.status_code >= 400:
         raise SpecError([f"refused: {_detail(r)}"])
     if check:  # the stored spec is untouched: the new manifest is in the reply
@@ -562,19 +643,24 @@ def update(
         "keep", "--replicas", help="`keep` (default): the running replica counts; `spec`: the file's."),
     check: bool = typer.Option(
         False, "--check", help="Run every check and print the diff; apply nothing (exit 1 if refused)."),
+    env_files: list[str] | None = ENV_OPT,
+    overlays: list[str] | None = OVERLAY_OPT,
+    ref: str | None = REF_OPT,
 ) -> None:
     """Re-read an experiment folder (spec.yaml, prompts, tools/) and apply what changed to the
     running swarm (docs/live.md): new tools version, prompts, loop and comms settings, limits,
     replicas. Running agents take tools, prompts and grants at their next turn boundary.
     Prints what changed; a refused change applies nothing."""
     path = Path(target)
-    spec_file = path / "spec.yaml" if path.is_dir() else path
+    spec_file, overlays, ref_header = _at_ref(
+        str(path / "spec.yaml" if path.is_dir() else path), ref, overlays)
     try:
         with client() as c:
             if replicas not in ("keep", "spec"):
                 raise SpecError([f"--replicas {replicas!r}: use keep or spec"])
-            lines = update_swarm(c, str(spec_file), preflight=preflight, strict=strict,
-                                 replicas=replicas, check=check)
+            lines = update_swarm(c, spec_file, preflight=preflight, strict=strict,
+                                 replicas=replicas, check=check, env_files=env_files or (),
+                                 overlays=overlays, source=ref_header)
     except SpecError as e:
         for line in e.lines:
             typer.echo(line, err=True)
@@ -704,6 +790,8 @@ def run(
         False, "--watch",
         help="Watch the experiment folder (spec, prompts, tools/) and apply each saved change "
              "to the running swarm, as `flock update` does (docs/live.md)."),
+    env_files: list[str] | None = ENV_OPT,
+    overlays: list[str] | None = OVERLAY_OPT,
 ) -> None:
     """Run a `compute: local` swarm on this machine: controller on 127.0.0.1, workers as
     subprocesses, a live view in the terminal, a run bundle at the end (docs/local.md). Other
@@ -718,7 +806,8 @@ def run(
         typer.echo(f"flock run needs the controller extra (pip install 'flock[controller]'): {e}",
                    err=True)
         raise typer.Exit(1) from None
-    spec = load_spec(spec_file)
+    env_files, overlays = env_files or [], overlays or []
+    spec = load_spec(spec_file, env_files, overlays)
     if spec.compute.kind != "local":
         typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}; `flock run` runs "
                    "`compute: local` specs. For hf-jobs, deploy a controller and use "
@@ -743,7 +832,8 @@ def run(
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
                       tools=bundle.data if bundle is not None else None,
-                      watch=Path(spec_file) if watch else None)
+                      watch=Path(spec_file) if watch else None, env_files=env_files,
+                      overlays=overlays)
     result = asyncio.run(run_local(opts))
     raise typer.Exit(result.exit_code)
 
@@ -1230,6 +1320,49 @@ def workers(swarm: str) -> None:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
+def add_pause_commands(app: typer.Typer) -> None:
+    """`flock pause` / `flock resume` (docs/loop.md "Pause and resume")."""
+
+    def _body(type_: list[str] | None, agent: list[str] | None) -> dict:
+        return {"types": type_ or None, "agents": agent or None}
+
+    def _show(r: dict) -> None:
+        h = r["held"]
+        held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
+        typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
+
+    @app.command()
+    def pause(
+        swarm: str,
+        reason: Annotated[str, typer.Option("--reason", help="why (shown in status and events)")],
+        type_: Annotated[list[str] | None, typer.Option("--type", help="a type to hold "
+                                                         "(repeatable; default: every type)")] = None,
+        agent: Annotated[list[str] | None, typer.Option("--agent", help="an agent to hold "
+                                                         "(repeatable)")] = None,
+        interrupt: Annotated[bool, typer.Option("--interrupt", help="also stop the turns in "
+                                                "flight")] = False,
+    ) -> None:
+        """Hold types or agents: no new prompts or loop rounds reach them (queued ones wait),
+        rounds are not counted, until `flock resume`. Not `flock loop --stop`. To pause world
+        lanes instead, see `flock world pause`."""
+        _show(_call("POST", f"/swarms/{swarm}/pause", json={
+            **_body(type_, agent), "interrupt": interrupt, "reason": reason}))
+
+    @app.command()
+    def resume(
+        swarm: str,
+        type_: Annotated[list[str] | None, typer.Option("--type", help="a type to resume "
+                                                         "(repeatable)")] = None,
+        agent: Annotated[list[str] | None, typer.Option("--agent", help="an agent to resume "
+                                                         "(repeatable)")] = None,
+    ) -> None:
+        """Lift holds (default: every hold); queued prompts and wakes go out."""
+        _show(_call("POST", f"/swarms/{swarm}/resume", json=_body(type_, agent)))
+
+
+add_pause_commands(app)
+
+
 world_app = typer.Typer(help="Worlds: shared state behind tools (docs/world.md).",
                         no_args_is_help=True)
 app.add_typer(world_app, name="world")
@@ -1317,7 +1450,8 @@ def world_pause(
     lanes: Annotated[list[str], typer.Argument(help="Lanes the world names (e.g. push open merge).")],
     reason: str = typer.Option("", "--reason", help="Shown with the pause; recorded in events."),
 ) -> None:
-    """Pause world lanes (the world refuses or defers that kind of work)."""
+    """Pause world lanes (the world refuses or defers that kind of work). To hold agents
+    instead, see `flock pause`."""
     out = _call("POST", f"/swarms/{swarm}/world/pause", json={"lanes": lanes, "reason": reason},
                 headers=source_header(None))
     typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
