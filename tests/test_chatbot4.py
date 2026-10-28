@@ -2192,18 +2192,38 @@ def test_a_run4_prs_json_is_migrated_on_the_first_start(setup, caplog):
     assert "differ" not in caplog.text
 
 
+def test_an_import_cut_before_its_commit_is_redone(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    world.close()
+    world.store.close()
+    for f in world.ws.glob("state.db*"):
+        f.unlink()
+    from flock.world.store import Store
+
+    Store(world.ws / "state.db").close()  # a kill during the first import: schema, no rows
+    again = Chatbot4World(world.ws, world.repo)
+    assert again.state["prs"][str(rec["pr"])]["head_sha"] == rec["head_sha"]
+
+
 def test_old_merged_and_closed_prs_move_to_the_cold_table(setup):
     world, clone, _ = setup
     one, two = submit(world, clone, branch="one"), submit(world, clone, branch="two")
     world.close_pr(Agent("cedar"), one["pr"], "superseded")
     approve(world, two)
     world.merge_pr(Agent("birch"), two["pr"])
+    world.close()
+    ended = world.state["prs"][str(one["pr"])]["ended_at"]
+    world = Chatbot4World(world.ws, world.repo)
+    assert world.ended[str(one["pr"])] == ended  # the hour counts across restarts
     with world.lock:
         for key in world.ended:
             world.ended[key] -= chatbot4.COLD_AFTER + 1
     world.flush()
+    assert len(world.state["prs"]) == 2  # save.legacy_json on: prs.json keeps every PR
+    world.legacy_json = False
+    world.flush()
     assert world.state["prs"] == {} and world.store.get("prs", str(one["pr"]))["state"] == "closed"
-    assert "closed" not in json.loads(world.db.read_text())["prs"]  # prs.json drops them too
     for w in (world, Chatbot4World(world.ws, world.repo)):
         assert w.state["prs"] == {}
         assert [r["pr"] for r in w.list_prs("closed")] == [one["pr"]]

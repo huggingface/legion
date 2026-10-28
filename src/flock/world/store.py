@@ -16,6 +16,7 @@ Rows moved out of the hot set (`put(..., cold=True)`) stay readable with `get` a
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -41,7 +42,12 @@ class Store:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._dirty: dict[tuple[str, str], None] = {}  # insertion-ordered set
+        # (kind, key) -> generation of its newest change; _written: generation last committed,
+        # so a flush that lost a race never commits an older value over a newer one.
+        self._dirty: dict[tuple[str, str], int] = {}
+        self._written: dict[tuple[str, str], int] = {}
+        self._gen = 0
+        self._flushing = 0  # flushes between their read and their commit
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")  # WAL: durable at checkpoints, never corrupt
@@ -73,44 +79,54 @@ class Store:
 
     def write(self, rows: list[tuple[str, str, Any]], cold: bool = False) -> None:
         """Upsert (value None: delete) several rows in one transaction."""
-        encoded = [(kind, key, None if value is None else json.dumps(value))
-                   for kind, key, value in rows]
         with self._lock:
+            self._gen += 1
+            encoded = [(kind, key, self._gen, None if value is None else json.dumps(value))
+                       for kind, key, value in rows]
             self._commit(encoded, cold)
-            for kind, key, _ in rows:
-                self._dirty.pop((kind, key), None)
 
     def dirty(self, kind: str, key: str) -> None:
         """Mark a row changed; the next flush writes it."""
         with self._lock:
-            self._dirty[(kind, key)] = None
+            self._gen += 1
+            self._dirty.pop((kind, key), None)  # re-insert: keeps the newest change last
+            self._dirty[(kind, key)] = self._gen
 
     @property
     def pending(self) -> int:
         """Rows marked dirty and not yet flushed."""
         return len(self._dirty)
 
-    def flush(self, read: Callable[[str, str], Any]) -> int:
+    def flush(self, read: Callable[[str, str], Any], lock=None) -> int:
         """Write every dirty row in one transaction: `read(kind, key)` gives its current value
-        (None: delete it). Call it holding the lock that guards what `read` reads. On a failed
-        commit nothing is written and the rows stay dirty. Returns the rows written."""
-        with self._lock:
-            if not self._dirty:
-                return 0
-            keys = list(self._dirty)
+        (None: delete it). `lock` guards what `read` reads: it is held only while the rows are
+        read and encoded, not during the commit. A row changed again meanwhile stays dirty. On a
+        failed commit nothing is written and the rows stay dirty. Returns the rows written."""
+        with lock or contextlib.nullcontext(), self._lock:
             rows = []
-            for kind, key in keys:
+            for (kind, key), gen in self._dirty.items():
                 value = read(kind, key)
-                rows.append((kind, key, None if value is None else json.dumps(value)))
-            self._commit(rows, False)
-            self._dirty.clear()
+                rows.append((kind, key, gen, None if value is None else json.dumps(value)))
+            if not rows:
+                return 0
+            self._flushing += 1
+        with self._lock:
+            try:
+                self._commit(rows, False)
+            finally:
+                self._flushing -= 1
+                if not self._flushing:  # no older read left in flight: nothing to guard against
+                    self._written.clear()
         return len(rows)
 
     def _commit(self, rows, cold):
+        """Write rows (kind, key, generation, encoded value or None) in one transaction,
+        skipping any already written at a newer generation; then drop their dirty marks."""
+        rows = [r for r in rows if self._written.get(r[:2], 0) < r[2]]
         now = time.time()
         self._db.execute("BEGIN IMMEDIATE")
         try:
-            for kind, key, value in rows:
+            for kind, key, _, value in rows:
                 if value is None:
                     self._db.execute("DELETE FROM rows WHERE kind = ? AND key = ?", (kind, key))
                 else:
@@ -119,9 +135,14 @@ class Store:
         except BaseException:
             self._db.execute("ROLLBACK")
             raise
+        for kind, key, gen, _ in rows:
+            self._written[(kind, key)] = gen
+            if self._dirty.get((kind, key), gen + 1) <= gen:
+                del self._dirty[(kind, key)]
 
     def backup_to(self, path: str | Path) -> None:
-        """Consistent copy of the database, WAL included (SQLite online backup API)."""
+        """Consistent copy of the database, WAL included (SQLite online backup API). Holds the
+        store's lock for the copy: writers wait."""
         backup_to(self._db, path, self._lock)
 
     def size(self) -> int:
@@ -129,7 +150,13 @@ class Store:
         return sum(p.stat().st_size for p in (self.path, self.path.with_name(self.path.name + "-wal"))
                    if p.exists())
 
+    def checkpoint(self) -> None:
+        """Fold the WAL into the database file and truncate it."""
+        with self._lock:
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     def close(self) -> None:
+        self.checkpoint()
         with self._lock:
             self._db.close()
 

@@ -100,3 +100,27 @@ def test_backup_while_50_threads_write(tmp_path):
         for t in threads:
             t.join()
     assert len(dict(store.iter("t"))) == 50
+
+
+def test_a_change_during_a_flush_is_kept_dirty_and_never_overwritten(tmp_path):
+    store = Store(tmp_path / "s.db")
+    state = {"1": "old"}
+    store.dirty("k", "1")
+
+    class Racing:  # a change lands, and a second flush commits it, between read and commit
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            if state["1"] == "old":
+                state["1"] = "new"
+                store.dirty("k", "1")
+                assert store.flush(lambda kind, key: state[key]) == 1
+                state["1"] = "newest"
+                store.dirty("k", "1")
+
+    store.flush(lambda kind, key: state[key], Racing())
+    assert store.get("k", "1") == "new" and store.pending == 1  # the stale "old" was skipped
+    store.flush(lambda kind, key: state[key])
+    assert store.get("k", "1") == "newest" and store.pending == 0
+    assert store._written == {}

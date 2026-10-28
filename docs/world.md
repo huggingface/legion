@@ -291,21 +291,23 @@ from flock.world.store import Store
 store = Store(state_dir / "state.db")
 prs = dict(store.iter("prs"))                   # hot rows, at start
 prs["7"] = {...}; store.dirty("prs", "7")       # at every change
-with lock:                                      # the saver thread, every few seconds
-    store.flush(lambda kind, key: prs.get(key))  # dirty rows only, one transaction; None deletes
+store.flush(lambda kind, key: prs.get(key), lock)  # saver: dirty rows, one transaction; None deletes
 store.put("prs", "3", rec, cold=True)           # out of the hot set; get() and iter(cold=True) still read it
 store.backup_to(path)                           # consistent copy while others write (archives)
 ```
 
-A failed flush writes nothing and keeps the rows dirty for the next one. `backup_to(db_file,
+`lock` (what guards your dicts) is held only while the dirty rows are read; the commit runs
+after, and a row changed meanwhile stays dirty. A failed flush writes nothing and keeps the
+rows dirty for the next one. `close()` checkpoints the WAL into the database file. `backup_to(db_file,
 path)` (module function) copies a database another process is writing, for archive scripts.
 
 chatbot4 keeps its dicts in memory and saves through `state.db` (rows: one per PR, cached
 `open_pr` result, parked draft and inbox, plus `pr_opens` and `pr_merges`), at most every
-`save.interval_s`. On a first start without `state.db` it imports `prs.json`. Merged and closed
-PRs leave memory an hour after they ended, for the cold table; `get_pr` and `list_prs` with
+`save.interval_s`. On a first start without `state.db` it imports `prs.json`. With `save.legacy_json` off,
+merged and closed PRs leave memory an hour after they ended (`ended_at`), for the cold table; `get_pr` and `list_prs` with
 `state` merged, closed or all still return them. While the knob `save.legacy_json` is on
-(default) it also writes the whole state to `prs.json` and warns at start when the two differ.
+(default) it also writes the whole state to `prs.json`, keeps every PR in memory (so a rollback
+to `prs.json` loses nothing), and warns at start when the two differ.
 The archive (`snapshot.py`) carries a `backup_to` copy of `state.db`.
 
 **Lanes for external writes.** A world that writes to an outside service with one token (a

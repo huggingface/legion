@@ -158,8 +158,10 @@ class Chatbot4World(World):
             doc="Also write the whole state to prs.json (compared with state.db at start).",
             on_change=lambda v: setattr(self, "legacy_json", v))
         self.ended = {}  # merged/closed PR number -> unix time first seen ended (for the cold move)
-        migrate = not (self.ws / "state.db").exists()
         self.store = Store(self.ws / "state.db")
+        # Decided on rows, not on the file: an import cut by a kill leaves an empty state.db.
+        # Every import writes the pr_opens and pr_merges rows.
+        migrate = next(self.store.iter("_"), None) is None
         empty = {**{kind: {} for kind in KINDS}, "pr_opens": [], "pr_merges": []}
         if migrate:  # first start, or an archive from before state.db: import prs.json
             self.state = {**empty, **(old_json or {})}
@@ -181,7 +183,7 @@ class Chatbot4World(World):
         now = time.time()
         for key, rec in self.state["prs"].items():
             if rec["state"] in ("merged", "closed"):
-                self.ended[key] = now
+                self.ended[key] = rec.get("ended_at", now)
         self.save_gen = self.written_gen = 0
         self.save_sync = self.save_interval <= 0  # also set by close(): later saves write at once
         self.replace_lock = threading.Lock()  # a leaf lock: never take self.lock while holding it
@@ -325,6 +327,7 @@ class Chatbot4World(World):
         self.stopping.set()
         self.lanes.close(timeout)
         self.flush()
+        self.store.checkpoint()
         if _LIVE.get(str(self.ws.resolve())) is self:
             del _LIVE[str(self.ws.resolve())]
 
@@ -410,7 +413,7 @@ class Chatbot4World(World):
             if kind == "prs":
                 rec = self.state["prs"].get(key)
                 if rec is not None and rec["state"] in ("merged", "closed"):
-                    self.ended.setdefault(key, time.time())
+                    self.ended.setdefault(key, rec.setdefault("ended_at", time.time()))
 
     def _row(self, kind, key):
         """A row's current value (None: gone)."""
@@ -427,6 +430,8 @@ class Chatbot4World(World):
     def _move_cold(self, now):
         """Move PR records merged or closed more than COLD_AFTER ago from memory to the cold
         table (lock held); get_pr and list_prs still read them. Returns True if any moved."""
+        if self.legacy_json:  # prs.json must keep every PR while a rollback to it is possible
+            return False
         keys = [key for key, t in self.ended.items() if t < now - COLD_AFTER]
         rows = []
         for key in keys:
@@ -501,15 +506,13 @@ class Chatbot4World(World):
         out.write("}")
 
     def flush(self):
-        """Write the dirty rows to state.db in one transaction (under the lock: O(changes)),
-        then prs.json if save.legacy_json is on."""
+        """Write the dirty rows to state.db in one transaction (the lock is held only to read
+        them: O(changes)), then prs.json if save.legacy_json is on."""
         with self.lock:
-            now = time.time()
-            if self._move_cold(now):
-                self.save_gen += 1  # prs.json drops them too
-            started = time.monotonic()
-            if self.store.flush(self._row):
-                self.save_s, self.saved_at = time.monotonic() - started, now
+            self._move_cold(time.time())
+        now, started = time.time(), time.monotonic()
+        if self.store.flush(self._row, self.lock):
+            self.save_s, self.saved_at = time.monotonic() - started, now
         if self.legacy_json:
             self._flush_json()
 
