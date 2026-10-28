@@ -216,3 +216,34 @@ async def test_hub_falls_back_to_v1_over_the_cap_or_on_errors(monkeypatch, tmp_p
 
     _, seen = await _hub_calls(monkeypatch, tmp_path, caps, [OK], v2=broken)
     assert seen == [["base_sha", "files"]]
+
+
+def test_server_counts_uploads_and_answers_need_full_without_v2():
+    from fastapi.testclient import TestClient
+
+    from flock.world import World, tool
+    from flock.world.server import create_app
+
+    class Up(World):
+        name, version = "up", "1"
+        capabilities = ("workspace-upload-v1",)
+
+        @tool
+        def put(self) -> str:
+            """Upload."""
+            return "plain"
+
+        def call_workspace(self, name, args, agent, snapshot):
+            return sorted(snapshot)
+
+    world = Up()
+    c = TestClient(create_app(world, None))
+    h = {"X-Flock-Agent": "a"}
+    v1 = {"args": {}, "workspace": {"base_sha": "b", "files": {}}}
+    v2 = {"args": {}, "workspace": {"base_sha": "b", "patch": ""}}
+    assert c.post("/tools/put", json=v1, headers=h).json()["ok"]
+    assert c.post("/tools/put", json=v2, headers=h).json()["error"]["code"] == "need_full"
+    world.capabilities = ["workspace-upload-v1", "workspace-upload-v2"]
+    assert c.post("/tools/put", json=v2, headers=h).json()["result"] == ["base_sha", "patch"]
+    m = c.get("/metrics").json()
+    assert (m["upload_v1_total"], m["upload_v2_total"]) == (1, 1)
