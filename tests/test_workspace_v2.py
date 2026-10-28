@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import subprocess
 
@@ -135,7 +136,6 @@ def test_clone_filters_never_run(repos, tmp_path):
 
 def test_payload_size_5k_files(tmp_path, capsys):
     """Measured: a 5,000-file clone with a 3-file change, v1 vs v2 JSON payload sizes."""
-    import json
     seed = tmp_path / "seed"
     for i in range(5000):
         d = seed / f"pkg{i // 100}"
@@ -155,3 +155,64 @@ def test_payload_size_5k_files(tmp_path, capsys):
     with capsys.disabled():
         print(f"\n5k files, 3 changed: v1 {v1:,} bytes, v2 {v2:,} bytes")
     assert v2 * 100 < v1
+
+
+async def _hub_calls(monkeypatch, tmp_path, caps, answers, v2=lambda w, p: {"base_sha": "b", "patch": "p"}):
+    """The workspace each request carried, for one call to an upload tool."""
+    import httpx
+
+    from flock.models import WorldSpec
+    from flock.world.hub import WorldHub
+    from flock.world.protocol import WorldManifest
+
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["workspace"])
+        return httpx.Response(200, json=answers[len(seen) - 1])
+
+    monkeypatch.setattr("flock.world.hub.capture", lambda w, p: {"base_sha": "b", "files": {}})
+    monkeypatch.setattr("flock.world.hub.capture_v2", v2)
+    hub = WorldHub(swarm="sw", type_name="dev", env={}, transport=httpx.MockTransport(handler),
+                   runtime=lambda name: type("Rt", (), {"workdir": tmp_path})())
+    m = WorldManifest(world_api="v1", name="w", version="1", capabilities=caps,
+                      tools=[{"name": "open", "x-flock-workspace": {"arg": "path", "default": "c"}}])
+    hub.configure(WorldSpec(url="http://w", endpoint="http://w", manifest=m), ["open"])
+    r = await hub.call("x", "world:open", {})
+    await hub.aclose()
+    return r, [sorted(w) for w in seen]
+
+
+OK = {"ok": True, "result": "done"}
+NEED_FULL = {"ok": False, "error": {"code": "need_full", "message": "no base"}}
+
+
+async def test_hub_sends_v2_when_advertised(monkeypatch, tmp_path):
+    r, seen = await _hub_calls(monkeypatch, tmp_path, ["workspace-upload-v1", "workspace-upload-v2"], [OK])
+    assert not r.error and seen == [["base_sha", "patch"]]
+
+
+async def test_hub_keeps_v1_for_a_v1_world(monkeypatch, tmp_path):
+    r, seen = await _hub_calls(monkeypatch, tmp_path, ["workspace-upload-v1"], [OK])
+    assert not r.error and seen == [["base_sha", "files"]]
+
+
+async def test_hub_resends_v1_once_on_need_full(monkeypatch, tmp_path):
+    caps = ["workspace-upload-v1", "workspace-upload-v2"]
+    r, seen = await _hub_calls(monkeypatch, tmp_path, caps, [NEED_FULL, OK])
+    assert not r.error and seen == [["base_sha", "patch"], ["base_sha", "files"]]
+    # a v1 upload answered need_full is not resent again
+    r, seen = await _hub_calls(monkeypatch, tmp_path, caps, [NEED_FULL, NEED_FULL])
+    assert r.error and json.loads(r.output)["code"] == "need_full" and len(seen) == 2
+
+
+async def test_hub_falls_back_to_v1_over_the_cap_or_on_errors(monkeypatch, tmp_path):
+    caps = ["workspace-upload-v1", "workspace-upload-v2"]
+    _, seen = await _hub_calls(monkeypatch, tmp_path, caps, [OK], v2=lambda w, p: None)
+    assert seen == [["base_sha", "files"]]
+
+    def broken(w, p):
+        raise ValueError("not a git clone")
+
+    _, seen = await _hub_calls(monkeypatch, tmp_path, caps, [OK], v2=broken)
+    assert seen == [["base_sha", "files"]]
