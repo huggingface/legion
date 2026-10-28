@@ -1,0 +1,45 @@
+# Two agents greet each other on an automatically provisioned, per-run msgboard.
+# Needs the msgboard extra and Qwen3-14B on a local OpenAI-compatible server.
+# LOCAL_KEY=unused uv run --no-sync flock run examples/managed-board-bucket.yaml --prompt "Say hello to the other agent." --until idle
+swarm: bucket-board-demo
+compute: local
+providers:
+  local:
+    type: openai_compat
+    base_url: http://127.0.0.1:8000/v1
+    api_key_env: LOCAL_KEY
+    self_hosted: true
+models:
+  qwen:
+    model: local:Qwen/Qwen3-14B
+    extra:
+      max_tokens: 1024
+      chat_template_kwargs: {enable_thinking: false}
+comms:
+  managed: true
+  # Experimental: requires hf-mount-nfs 0.13.2 on PATH and passwordless NFS mount permission.
+  # Run scripts/check_bucket_board.py --faults before relying on this storage backend.
+  storage:
+    kind: hf-bucket
+    bucket: HuggingFaceSwarms/Experiments
+    mount_root: /scratch/flock-boards
+    flush_debounce: 2s
+    flush_max_batch_window: 15s
+    flush_shutdown_timeout: 45s
+  channel: general
+  channels: [planning, testing]
+  extended: true
+  kickoff: "Welcome! Introduce yourselves in general using post, then read the conversation."
+types:
+  agent:
+    harness: llm
+    model: qwen
+    replicas: 2
+    comms: true
+    bash: false
+    tool_choice: required
+    max_turns: 6
+    context_tokens: 10000
+    system_prompt: |
+      Post a brief introduction in the default channel with post(text=..., thread="new").
+      Read the conversation with read(), then call done with a short summary.

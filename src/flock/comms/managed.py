@@ -1,7 +1,8 @@
 """A private msgboard per local run. No package installs or remote services at startup.
 
-Live SQLite files are node-local; consistent snapshots and credentials live in the run's
-private board/ directory. The child inherits a pre-bound socket (no port selection race),
+Live SQLite files default to node-local disk; opt-in bucket mounts own their writeback.
+Local snapshots or bucket location metadata live in the run's private board/ directory.
+The child inherits a pre-bound socket (no port selection race),
 not the controller's credentials, and exits when its parent disappears.
 """
 
@@ -25,6 +26,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from flock.comms.bucket import BucketMount, BucketStorageError
+from flock.models import BucketBoardStorage
+
 if TYPE_CHECKING:
     from flock.models import CommsSpec, SwarmSpec
 
@@ -41,7 +45,8 @@ class ManagedBoardError(ValueError):
 
 
 def _signature(comms: CommsSpec) -> tuple:
-    return (comms.channel, tuple(sorted(set(comms.channels))), comms.allow_create_channels)
+    return (comms.channel, tuple(sorted(set(comms.channels))), comms.allow_create_channels,
+            comms.storage.model_dump_json())
 
 
 class ManagedBoard:
@@ -52,6 +57,7 @@ class ManagedBoard:
         self.startup_timeout = startup_timeout
         self.proc: subprocess.Popen | None = None
         self.local: Path | None = None
+        self.bucket: BucketMount | None = None
         self.url: str | None = None
         self.invite: str | None = None
         self._operator: str | None = None
@@ -82,29 +88,50 @@ class ManagedBoard:
         """Start and provision once, or reopen a snapshot without changing its identities."""
         if importlib.util.find_spec("msgboard") is None:
             raise ManagedBoardError(INSTALL_HINT)
-        if restore and not (self.archive / DB_NAME).is_file():
-            raise ManagedBoardError(f"No retained board in {self.archive}")
+        retained = {}
+        if not restore and ((self.archive / "metadata.json").exists()
+                            or (self.archive / DB_NAME).exists()):
+            raise ManagedBoardError("Refusing to overwrite an existing board; use flock board.")
+        if restore:
+            meta = self.archive / "metadata.json"
+            if meta.is_file():
+                retained = json.loads(meta.read_text())
+            if (retained.get("storage", {}).get("kind") != "hf-bucket"
+                    and not (self.archive / DB_NAME).is_file()):
+                raise ManagedBoardError(f"No retained board in {self.archive}")
         with self._lock:
             self._acquire()
             try:
-                # /tmp is node-local on our supported Linux hosts; ignore an inherited TMPDIR
-                # that may point at /fsx. Allow explicit node-local scratch on other clusters.
-                root = Path(os.environ.get("FLOCK_BOARD_LOCAL_ROOT", "/tmp"))
-                self._check_local(root)
-                root.mkdir(parents=True, exist_ok=True)
-                self.local = Path(tempfile.mkdtemp(prefix="flock-board-", dir=root))
+                storage = (BucketBoardStorage.model_validate({
+                    k: v for k, v in retained["storage"].items()
+                    if k in BucketBoardStorage.model_fields
+                }) if retained.get("storage", {}).get("kind") == "hf-bucket"
+                    else spec.comms.storage if spec and spec.comms else None)
+                if isinstance(storage, BucketBoardStorage):
+                    self._check_local(Path(storage.mount_root))  # cache/staging must be local
+                    self.bucket = BucketMount(
+                        storage, spec.swarm if spec else "retained",
+                        self.run_dir / "logs" / "hf-mount.log",
+                        prefix=retained.get("storage", {}).get("prefix"))
+                    self._save_metadata()  # retain the exact remote prefix even if setup fails
+                    self.local = self.bucket.start(self._cancel_start, self.startup_timeout,
+                                                   restore=restore)
+                else:
+                    root = Path(os.environ.get("FLOCK_BOARD_LOCAL_ROOT", "/tmp"))
+                    self._check_local(root)
+                    root.mkdir(parents=True, exist_ok=True)
+                    self.local = Path(tempfile.mkdtemp(prefix="flock-board-", dir=root))
+                    if restore:
+                        for p in self.archive.iterdir():
+                            if p.name.startswith(".") or p.name == "metadata.json":
+                                continue
+                            dest = self.local / p.name
+                            if p.is_dir():
+                                shutil.copytree(p, dest)
+                            else:
+                                shutil.copy2(p, dest)
                 if restore:
-                    for p in self.archive.iterdir():
-                        if p.name.startswith(".") or p.name == "metadata.json":
-                            continue
-                        dest = self.local / p.name
-                        if p.is_dir():
-                            shutil.copytree(p, dest)
-                        else:
-                            shutil.copy2(p, dest)
-                    meta = self.archive / "metadata.json"
-                    if meta.is_file():
-                        self._details = json.loads(meta.read_text()).get("configuration", {})
+                    self._details = retained.get("configuration", {})
                 elif (self.archive / DB_NAME).exists():
                     raise ManagedBoardError("Refusing to overwrite an existing board; use flock board.")
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,11 +160,19 @@ class ManagedBoard:
                     assert spec is not None and spec.comms is not None
                     self._provision(spec)
                 self.snapshot()
-            except BaseException:
+            except BaseException as exc:
                 try:
                     self._terminate()
+                    if self.bucket:
+                        try:
+                            self.bucket.stop(verify=False)
+                        except BucketStorageError:
+                            log.exception("Bucket startup cleanup failed; cache retained")
+                        self._save_metadata()
                 finally:
                     self._release(remove_local=True)
+                if isinstance(exc, BucketStorageError):
+                    raise ManagedBoardError(str(exc)) from None
                 raise
 
     @staticmethod
@@ -156,7 +191,7 @@ class ManagedBoard:
                     candidates.append((len(mount), parts[2]))
         if candidates:
             fs = max(candidates)[1]
-            if fs in {"nfs", "nfs4", "wekafs", "lustre", "cifs", "smb3", "9p"}:
+            if fs.startswith("fuse") or fs in {"nfs", "nfs4", "wekafs", "lustre", "cifs", "smb3", "9p"}:
                 raise ManagedBoardError("FLOCK_BOARD_LOCAL_ROOT must be on node-local disk.")
 
     @staticmethod
@@ -169,7 +204,20 @@ class ManagedBoard:
         """Signals may interrupt readiness without stopping a board used by live workers."""
         self._cancel_start.set()
 
+    @property
+    def periodic_snapshots(self) -> bool:
+        return self.bucket is None
+
+    @property
+    def operator_token_path(self) -> Path:
+        return (self.local if self.bucket and self.local else self.archive) / TOKEN_FILE
+
     def check(self) -> None:
+        if self.bucket:
+            try:
+                self.bucket.check()
+            except BucketStorageError as exc:
+                raise ManagedBoardError(str(exc)) from None
         if self.proc is None or self.proc.poll() is not None:
             raise ManagedBoardError(f"Managed msgboard exited; see {self.log_path}")
 
@@ -224,7 +272,7 @@ class ManagedBoard:
         if (c is None or not c.managed or spec.swarm != self._swarm
                 or _signature(c) != self._signature):
             raise ManagedBoardError("Managed board mode, channel, channels and creation permissions "
-                                    "cannot change during a run; start a new run instead.")
+                                    "and storage cannot change during a run; start a new run instead.")
         self.check()
         c.url, c.invite_env = self.url, INVITE_ENV
 
@@ -233,12 +281,24 @@ class ManagedBoard:
                 "pid": self.proc.pid if self.proc is not None else None,
                 "running": self.proc is not None and self.proc.poll() is None,
                 "configuration": self._details, "snapshot_at": self._snapshot_at,
-                "operator_token_file": str(self.archive / TOKEN_FILE),
-                "data_dir": str(self.archive), "log": "logs/msgboard.log"}
+                "operator_token_file": str(self.operator_token_path),
+                "data_dir": (f"hf://buckets/{self.bucket.config.bucket}/{self.bucket.prefix}"
+                             if self.bucket else str(self.archive)),
+                "storage": self.bucket.metadata() if self.bucket else {"kind": "local"},
+                "log": "logs/msgboard.log"}
+
+    def _save_metadata(self) -> None:
+        meta = self.archive / ".metadata.tmp"
+        meta.write_text(json.dumps(self.metadata(), indent=2) + "\n")
+        meta.chmod(0o600)
+        os.replace(meta, self.archive / "metadata.json")
 
     def snapshot(self) -> None:
         """Atomic online SQLite backup; copy attachments and credentials before publishing it."""
         with self._lock:
+            if self.bucket:
+                self._save_metadata()
+                return
             if self.local is None or not (self.local / DB_NAME).is_file():
                 return
             tmp = self.archive / ".board.snapshot"
@@ -261,10 +321,7 @@ class ManagedBoard:
                         os.replace(copied, dest)
                 os.replace(tmp, self.archive / DB_NAME)
                 self._snapshot_at = datetime.now(UTC).isoformat()
-                meta = self.archive / ".metadata.tmp"
-                meta.write_text(json.dumps(self.metadata(), indent=2) + "\n")
-                meta.chmod(0o600)
-                os.replace(meta, self.archive / "metadata.json")
+                self._save_metadata()
             finally:
                 tmp.unlink(missing_ok=True)
 
@@ -280,7 +337,7 @@ class ManagedBoard:
                 self.proc.wait(timeout=5)
 
     def _release(self, *, remove_local: bool) -> None:
-        if self.local is not None and remove_local:
+        if self.bucket is None and self.local is not None and remove_local:
             shutil.rmtree(self.local, ignore_errors=True)
             self.local = None
         if self._file_lock is not None:
@@ -295,12 +352,21 @@ class ManagedBoard:
             self._terminate()
             saved = False
             try:
-                self.snapshot()
+                if self.bucket:
+                    self.bucket.stop(verify=True)
+                else:
+                    self.snapshot()
                 saved = True
+            except BucketStorageError as exc:
+                raise ManagedBoardError(str(exc)) from None
             finally:
                 if not saved:
-                    log.error("Board snapshot failed; live data retained at %s", self.local)
-                self._release(remove_local=saved)
+                    log.error("Board persistence failed; live data retained at %s", self.local)
+                try:
+                    if self.bucket:
+                        self._save_metadata()
+                finally:
+                    self._release(remove_local=saved)
 
 
 def reopen(run_dir: Path) -> int:
@@ -316,11 +382,11 @@ def reopen(run_dir: Path) -> int:
         handlers[sig] = signal.signal(sig, on_signal)
     try:
         board.start(restore=True)
-        print(f"board: {board.url}; operator token: {board.archive / TOKEN_FILE}", flush=True)
+        print(f"board: {board.url}; operator token: {board.operator_token_path}", flush=True)
         next_snapshot = time.monotonic() + SNAPSHOT_INTERVAL
         while not done.wait(1):
             board.check()
-            if time.monotonic() >= next_snapshot:
+            if board.periodic_snapshots and time.monotonic() >= next_snapshot:
                 board.snapshot()
                 next_snapshot = time.monotonic() + SNAPSHOT_INTERVAL
         return 0
