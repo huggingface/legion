@@ -290,7 +290,7 @@ class LocalBoardStorage(BaseModel):
 
 
 class BucketBoardStorage(BaseModel):
-    """Opt-in single-owner SQLite storage on an hf-mount NFS mount."""
+    """Opt-in single-owner SQLite storage on an hf-mount FUSE mount."""
 
     model_config = {"extra": "forbid"}
     kind: Literal["hf-bucket"] = "hf-bucket"
