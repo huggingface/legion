@@ -19,7 +19,14 @@ from typer.testing import CliRunner
 from flock import cli
 from flock.comms.tools import tool_def
 from flock.controller import localrun
-from flock.live import FolderWatch, diff_specs, grant_patch, revoke_patch
+from flock.live import (
+    FolderWatch,
+    diff_specs,
+    grant_patch,
+    keep_replicas,
+    revoke_patch,
+    world_tool_changes,
+)
 from flock.models import (
     AgentHeartbeat,
     CommsSpec,
@@ -98,6 +105,31 @@ def test_diff_lists_tools_prompts_and_keys():
     same.types["calc"].system_prompt = "v1"
     same.types["x"] = same.types["researcher"].model_copy()
     assert diff_specs(old, same) == []
+
+
+def test_diff_lists_element_wise_and_skips_world_keys():
+    world = {"url": "http://w.invalid", "endpoint": "http://w.invalid", "credential_id": "a",
+             "manifest": {"world_api": "v1", "name": "w", "version": "1",
+                          "tools": [{"name": "foo", "description": "d"}]}}
+    old = SwarmSpec.model_validate({**raw(), "world": world})
+    new = SwarmSpec.model_validate({**raw(), "world": {"url": "http://w.invalid"}})
+    assert diff_specs(old, new) == []  # blanked by the file side, refilled by the controller
+    long = [f"world:tool_{i}" for i in range(12)]
+    old.types["calc"].tools = long
+    new.types["calc"].tools = [*long[1:], "world:get_pr"]
+    assert diff_specs(old, new) == [f"types.calc.tools: +world:get_pr -{long[0]}"]
+    new.types["calc"].tools = long[::-1]
+    assert diff_specs(old, new) == ["types.calc.tools: reordered"]
+    assert world_tool_changes(old, new) == "world tools: -foo"
+    assert world_tool_changes(old, old) is None
+
+
+def test_keep_replicas_copies_live_counts_of_existing_types():
+    old, new = SwarmSpec.model_validate(raw()), SwarmSpec.model_validate(raw())
+    new.types["calc"].replicas = 20
+    new.types["fresh"] = new.types["calc"].model_copy(update={"replicas": 7})
+    assert keep_replicas(old, new) == ["calc: replicas kept (spec 20, live 2)"]
+    assert (new.types["calc"].replicas, new.types["fresh"].replicas) == (2, 7)
 
 
 # --------------------------------------------------------------------------- grant arguments
@@ -242,7 +274,7 @@ async def test_comms_tools_can_be_granted_only_to_a_type_on_the_board(client, st
                                                                       tmp_path, monkeypatch):
     import flock.controller.api as api_mod
 
-    monkeypatch.setattr(api_mod, "comms_resolve", lambda spec, prev, env, transport=None: None)
+    monkeypatch.setattr(api_mod, "comms_resolve", lambda spec, prev, env, **kw: None)
     comms = {"url": "http://board.invalid", "invite_env": "INV", "channel": "team",
              "channel_id": 7, "search": None}
     await applied(client, tmp_path, tick, {"comms": comms},
@@ -323,7 +355,12 @@ async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client
     assert r.json()["generation"] == 1  # nothing changed: same generation, no history entry
     n = spec.types["researcher"].replicas
     spec.types["researcher"].replicas = n + 1
-    r = await client.put("/swarms/demo", json=spec.model_dump(mode="json"), headers=hdr)
+    r = await client.put("/swarms/demo?replicas=spec&dry_run=1", json=spec.model_dump(mode="json"),
+                         headers=hdr)
+    assert r.json()["dry_run"] and store.generation("demo") == 1  # a check stores nothing
+    assert len(store.spec_history("demo")) == 1
+    r = await client.put("/swarms/demo?replicas=spec", json=spec.model_dump(mode="json"),
+                         headers=hdr)
     assert r.json()["generation"] == 2
     hist = (await client.get("/swarms/demo/history")).json()
     assert [(h["generation"], h["diff_summary"]) for h in hist] == [
@@ -505,7 +542,7 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
 
     _experiment(exp, replicas=3, prompt="You are a careful researcher.", tools=TOOLS_V2)
     v2 = pack(exp / "tools").version
-    r = runner.invoke(cli.app, ["update", str(f)])  # the spec file works as well as the folder
+    r = runner.invoke(cli.app, ["update", str(f), "--replicas", "spec"])  # file or folder
     assert r.exit_code == 0, r.output
     assert r.output.splitlines() == [f"tools: {v1} -> {v2} (+mul)",
                                      "prompts changed: researcher (system_prompt)",
@@ -525,6 +562,50 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
     r = runner.invoke(cli.app, ["update", str(exp)])
     assert r.exit_code == 1 and "tools:" in r.output
     assert store.get_swarm("demo")["spec"] == applied  # nothing was applied
+
+
+def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, store, tick):
+    _wire(monkeypatch, app)
+    exp = tmp_path / "exp"
+    f = _experiment(exp, replicas=4)
+    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
+    tick()
+    _experiment(exp, replicas=2, prompt="v2")
+    before = store.get_swarm("demo")["spec"]
+    r = runner.invoke(cli.app, ["update", str(exp), "--check"])
+    assert r.exit_code == 0, r.output
+    assert r.output.splitlines() == ["researcher: replicas kept (spec 2, live 4)",
+                                     "prompts changed: researcher (system_prompt)",
+                                     "check ok: nothing was applied"]
+    assert store.get_swarm("demo")["spec"] == before
+    r = runner.invoke(cli.app, ["update", str(exp)])
+    assert r.exit_code == 0 and "replicas kept (spec 2, live 4)" in r.output, r.output
+    assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 4
+    r = runner.invoke(cli.app, ["update", str(exp), "--replicas", "spec"])
+    assert r.exit_code == 0 and "types.researcher.replicas: 4 -> 2" in r.output, r.output
+    assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 2
+    # --check exits 1 on what the controller refuses (a tool the bundle lacks)
+    d = yaml.safe_load(f.read_text())
+    d["types"]["researcher"]["tools"] = ["add", "nope"]
+    f.write_text(yaml.safe_dump(d))
+    r = runner.invoke(cli.app, ["update", str(exp), "--check"])
+    assert r.exit_code == 1 and "unknown tool(s) nope" in r.output, r.output
+    assert runner.invoke(cli.app, ["update", str(exp), "--replicas", "x"]).exit_code == 1
+
+
+async def test_put_replicas_keep_and_dry_run(client, store):
+    spec = SwarmSpec.model_validate(raw(calc={"harness": "llm", "model": "gpu:m", "replicas": 2,
+                                              "agents_per_worker": 2}))
+    assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
+    spec.types["calc"].replicas = 5
+    body = spec.model_dump(mode="json")
+    r = await client.put("/swarms/demo", params={"dry_run": 1}, json=body)
+    assert r.status_code == 200 and r.json()["dry_run"] is True
+    assert store.get_swarm("demo")["spec"].types["calc"].replicas == 2  # stored nothing
+    assert (await client.put("/swarms/demo", json=body)).status_code == 200  # default: keep
+    assert store.get_swarm("demo")["spec"].types["calc"].replicas == 2
+    r = await client.put("/swarms/demo", params={"replicas": "spec"}, json=body)
+    assert r.status_code == 200 and store.get_swarm("demo")["spec"].types["calc"].replicas == 5
 
 
 def test_cli_grant_revoke_and_list(tmp_path, monkeypatch, app, store, tick):

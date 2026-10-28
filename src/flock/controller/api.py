@@ -16,7 +16,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
@@ -43,7 +43,7 @@ from flock.controller.spawn import (
 )
 from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
-from flock.live import diff_specs
+from flock.live import diff_specs, keep_replicas
 from flock.models import (
     COMMS_TOOLS,
     AgentState,
@@ -693,9 +693,17 @@ def create_app(
         now = clock().timestamp()
         return [swarm_status(store, sw["spec"], now) for sw in store.list_swarms()]
 
-    @api.put("/swarms/{swarm}")
-    def apply(swarm: str, spec: SwarmSpec,
-              x_flock_source: Annotated[str | None, Header()] = None) -> SwarmStatus:
+    @api.put("/swarms/{swarm}", response_model=None)
+    def apply(swarm: str, spec: SwarmSpec, replicas: Literal["keep", "spec"] = "keep",
+              dry_run: bool = False,
+              x_flock_source: Annotated[str | None, Header()] = None) -> SwarmStatus | dict:
+        """Apply `spec`. `replicas=keep` (default) keeps the live replica count of types that
+        already exist; `spec` takes the spec's. `dry_run` runs every check and returns the
+        resolved spec without storing anything (`flock update --check`). An apply that changes
+        the spec bumps the swarm's generation and keeps the spec (`flock history`)."""
+        prev = store.get_swarm(swarm)
+        if prev and replicas == "keep":
+            keep_replicas(prev["spec"], spec)
         if spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
         if namespace and spec.namespace != namespace:
@@ -720,7 +728,6 @@ def create_app(
         check_tools(swarm, spec)
         if refused := loop_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
-        prev = store.get_swarm(swarm)
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
             if old is not None and old.harness != ts.harness and store.list_agents(swarm, type_name):
@@ -730,7 +737,7 @@ def create_app(
                                          "new type name")
         try:  # channel name -> id once, kickoff once (docs/comms.md)
             comms_resolve(spec, prev["spec"] if prev else None, secret_source,
-                          transport=comms_transport)
+                          transport=comms_transport, dry_run=dry_run)
         except CommsError as e:
             raise HTTPException(400, str(e)) from None
         try:  # start or reach the world, fetch and check its manifest (docs/world.md)
@@ -739,6 +746,9 @@ def create_app(
                           transport=world_transport)
         except WorldError as e:
             raise HTTPException(400, str(e)) from None
+        if dry_run:
+            worlds.discard(swarm)  # a candidate world started for the check
+            return {"dry_run": True, "spec": spec.model_dump(mode="json")}
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
         store.put_swarm(spec, clock().timestamp())
         if diff:  # an effective apply: a new generation, its spec kept for `flock history`

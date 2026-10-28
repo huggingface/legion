@@ -188,7 +188,7 @@ async def test_spawn_end_to_end(tmp_path):
         assert removed == [{"child": names[0], "type": "analyst", "reason": "removed"}]
 
         # 5. the leader leaving (scale to 0) takes the remaining analysts
-        r = await admin.put("/swarms/e2e", json=e2e_spec(0).model_dump(mode="json"))
+        r = await admin.put("/swarms/e2e", params={"replicas": "spec"}, json=e2e_spec(0).model_dump(mode="json"))
         assert r.status_code == 200
         h.tick()
         assert h.store.list_agents("e2e") == []
