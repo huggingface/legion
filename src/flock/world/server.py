@@ -83,9 +83,12 @@ def _ok_body(result: Any) -> bytes:
                       ).encode()
 
 
-def _error(code: str, message: str, status: int = 200) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": {"code": code, "message": message}},
-                        status_code=status)
+def _error(code: str, message: str, status: int = 200,
+           retry_after_s: float | None = None) -> JSONResponse:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if retry_after_s is not None:
+        error["retry_after_s"] = retry_after_s
+    return JSONResponse({"ok": False, "error": error}, status_code=status)
 
 
 class _Auth:
@@ -215,7 +218,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
                     result = await result
             out = await asyncio.to_thread(_ok_body, result)
         except ToolError as e:
-            return _error(e.code, redact(e.message))
+            return _error(e.code, redact(e.message), retry_after_s=e.retry_after_s)
         except Exception:
             # The exception text can hold paths, command output or credentials: it stays in
             # the world's log, under an id the agent can quote.

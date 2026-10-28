@@ -349,7 +349,7 @@ class Chatbot4World(World):
         raise ToolError(f"the swarm opened {n} PRs in the last hour and merged {m}; new PRs wait "
                         f"until more merge (next slot in ~{k} min). Meanwhile review others' PRs "
                         "(list_prs needs_review=true) or improve your open PR with pr=<n>.",
-                        "open_budget")
+                        "open_budget", retry_after_s=k * 60)
 
     def _note_merge(self):
         """Count a merge for the new-PR budget (call with the lock held; the caller saves)."""
@@ -531,7 +531,7 @@ class Chatbot4World(World):
 
     def _busy(self, agent, what, pr=None, reason="slot_wait"):
         log.warning("hub_busy: refused %s for agent=%s pr=%s reason=%s", what, agent.name, pr, reason)
-        raise ToolError(BUSY, "hub_busy")
+        raise ToolError(BUSY, "hub_busy", retry_after_s=60)
 
     @contextlib.contextmanager
     def _hub_write(self, agent, what, pr=None, deadline=None, slots=None):
@@ -1070,7 +1070,7 @@ class Chatbot4World(World):
             raise ToolError(f"{failure.message}; your PR #{number} is kept: retry open_pr with "
                             f"pr={number}", "stale_base")
         raise ToolError(f"the Hub did not accept the push for your PR #{number}; retry open_pr "
-                        f"with pr={number} in a minute", "hub_busy")
+                        f"with pr={number} in a minute", "hub_busy", retry_after_s=60)
 
     @tool
     @logs_refusals

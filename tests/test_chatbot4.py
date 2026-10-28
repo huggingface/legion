@@ -479,6 +479,7 @@ def test_pr_creation_gap_and_busy_hub_refuse_before_creating(setup, monkeypatch,
     with caplog.at_level("WARNING"), pytest.raises(ToolError) as exc:
         submit(world, clone, author="birch", branch="second")
     assert (exc.value.code, exc.value.message) == ("hub_busy", "the Hub is busy; retry in about a minute")
+    assert exc.value.retry_after_s == 60
     assert world.repo.hub.n == 1 and "reason=pr_create_gap" in caplog.text
     world.pr_gap, world.last_create = 0.4, time.monotonic()
     started = time.monotonic()
@@ -1068,6 +1069,7 @@ def test_new_pr_budget_floor_refuses_before_the_hub_and_logs(setup, monkeypatch,
     with caplog.at_level("WARNING"), pytest.raises(ToolError) as exc:
         submit(world, clone, "pine", "three")
     assert exc.value.code == "open_budget" and world.repo.hub.n == 2
+    assert exc.value.retry_after_s == 3600  # the structured form of "next slot in ~60 min"
     assert exc.value.message == (
         "the swarm opened 2 PRs in the last hour and merged 0; new PRs wait until more merge "
         "(next slot in ~60 min). Meanwhile review others' PRs (list_prs needs_review=true) or "
