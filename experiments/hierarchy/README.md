@@ -27,8 +27,9 @@ are the same agent without the right to spawn, with a different role prompt.
   workers (`max_extra: 17`, opened on demand); `limits: {alive: 250, spawned_total: 400}`.
   `spawned_total` never frees a place, so it leaves room for teams to be rebuilt. To grow,
   raise `cap`/`until` in `waves.yaml`, `coordinator.workers.initial` and `limits` together.
-- The shared plan is a `PLAN: <topic>` thread in the team channel; the newest full plan reply
-  is the current plan (see Gaps).
+- The shared plan is the team channel's shared document, read with `doc` and rewritten with
+  `edit_doc`. These two board tools come from a separate comms PR (per-channel documents);
+  this setup needs it merged first.
 
 ## Launch
 
@@ -50,12 +51,8 @@ Offline checks: `python experiments/hierarchy/render.py --committed --out /tmp/h
 
 ## Gaps
 
-- **Shared planning document.** The board has no editable or pinned post, and a PR per plan
-  change is too slow (it needs review). The prompts use a `PLAN: <topic>` thread with the full
-  plan re-posted as a reply, capped by `max_len` (2000 characters). Needed: a comms tool to edit
-  one's own message or pin one per channel (`comms:edit`/`comms:pin` in
-  `src/flock/comms/tools.py` + `worker/comms_extended.py`, if the board API has them), or a
-  world tool for a plan file outside PR review.
+- **Shared planning document.** Depends on the comms PR that adds `doc`/`edit_doc`
+  (one document per channel). Without it there is no editable shared place on the board.
 - **Finding a similar channel.** `channels` lists every channel with the board's fields
   (name, purpose as given at creation), and `search` reads one channel at a time. Enough for
   60 channels; a cross-channel search (`search` with `channel: "*"`) would scale better.

@@ -29,7 +29,7 @@ The bot: pure standard-library Python (re, random, string, collections, datetime
       print(reply(line.strip()), flush=True)
 - Never crash, never print an empty line. 5 min in total for a whole conversation.
 
-Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr, get_pr. Board tools: channels, create_channel, join_channel, post, read, search, dm, read_dms, react.
+Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr, get_pr. Board tools: channels, create_channel, join_channel, post, read, search, dm, read_dms, react, doc, edit_doc (`doc` and `edit_doc` read and rewrite a channel's shared document).
 - Call a world or board tool with `flock-tool <name> --json '<arguments>'`; `flock-tool --list` shows the parameters. End a round with a plain-text reply; there is no `done` command.
 - Clone `https://huggingface.co/datasets/cmpatino/chatbot-swarm` into `chatbot-swarm` in your workspace. Read README.md and CONTRIBUTING.md there for the module interface, tests and exact PR steps.
 - Find before you read: search for the relevant code, then read just that range.

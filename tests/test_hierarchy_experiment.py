@@ -25,7 +25,8 @@ def check_types(exp: Path):
     spec = load_spec(str(exp / "spec.yaml"))
     run4 = load_spec(str(ROOT / "run4/spec.yaml")).types["agent"]
     assert set(spec.types) == {"coordinator", "worker"}
-    skip = {"system_prompt", "system_prompt_append_file", "workers"}
+    skip = {"system_prompt": True, "system_prompt_append_file": True, "workers": True,
+            "loop": {"prompt"}}  # voting's round prompt adds the vote
     for t in spec.types.values():  # run 4's agent, the same world tools, board and loop
         assert t.replicas == 0 and t.model_dump(exclude=skip) == run4.model_dump(exclude=skip)
     assert set(spec.spawn) == {"coordinator"}  # workers: depth 0, no spawning
@@ -33,8 +34,9 @@ def check_types(exp: Path):
     coord, worker = spec.types["coordinator"].system_prompt, spec.types["worker"].system_prompt
     assert "flock spawn worker" in coord and "flock spawn" not in worker
     assert "You cannot start other agents" in worker and "$FLOCK_PARENT" in worker
-    team = (exp / "prompts/coordinator.md").read_text().split("## Team rules")[1].split("\n", 1)[1]
-    assert team.strip() and team == (exp / "prompts/worker.md").read_text().split("## Team rules")[1].split("\n", 1)[1]
+    def team(role):  # the shared rules: the same text for both roles
+        return (exp / f"prompts/{role}.md").read_text().split("## Team rules")[1].split("\n", 1)[1].split("\n## ")[0]
+    assert SHARED in team("coordinator") and team("coordinator") == team("worker")
     return spec, coord, worker
 
 
@@ -44,7 +46,7 @@ def test_types_prompts_and_spawn_policy():
     for text in ("benefits the goal of the task", "join that channel", "up to 4 new workers",
                  "opens and merges the PRs", "After every merge, assess"):
         assert text in coord, text
-    for text in (SHARED, "Establish the goal", "Build the shared plan", "PLAN: <topic>",
+    for text in (SHARED, "Establish the goal", "Build the shared plan", "`edit_doc`",
                  "Claim and execute", "Reassess", "Verify and hand off"):
         assert text in coord and text in worker, text
     assert spec.limits.alive >= 50 + 4 * 50
