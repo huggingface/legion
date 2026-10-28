@@ -668,7 +668,7 @@ async def test_hub_holds_off_locally_after_a_429_then_tries_again(monkeypatch, t
     assert body["local"] and body["code"] == "overloaded" and body["retry_after_s"] == 20
     assert "next slot in 1 min; do other work or end your turn" in body["error"]
     assert len(seen) == 1 and captured == ["b"]  # no request, no capture
-    assert hub.counters["up"].refused == 2
+    assert hub.counters["up"].refused == 2 and hub.counters["up"].n == 1  # local: not in n
     await hub.call("x", "world:peek", {})  # read-only tools still try, once
     assert len(seen) == 2
     now[0] = 141.0  # the read-only try at 110 got its own 429: hold until 140
@@ -697,6 +697,16 @@ async def test_hub_holds_off_one_agent_and_tool_after_a_retry_hint():
     now[0] = 91.0
     await hub.call("a", "world:open", {})
     assert len(seen) == 4
+    await hub.aclose()
+
+
+async def test_hub_tool_hint_of_nan_does_not_hold_off_forever():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"ok": false, "error": {"message": "m", "retry_after_s": NaN}}')
+
+    hub = _holdoff_hub(handler, [{"name": "t"}], lambda: 0.0)
+    await hub.call("a", "world:t", {})
+    assert "local" not in (await hub.call("a", "world:t", {})).output
     await hub.aclose()
 
 

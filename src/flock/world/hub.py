@@ -351,9 +351,10 @@ class WorldHub:
         seen: dict[str, Any] = {}
         res = await self._send(snap, agent, name, args, seen)
         c = self.counters.setdefault(name, ToolCounters())
-        c.n += 1
-        c.sum_s = round(c.sum_s + res.duration_s, 3)
-        c.max_s = round(max(c.max_s, res.duration_s), 3)
+        if not seen.get("local"):  # local refusals would drag the latency mean down
+            c.n += 1
+            c.sum_s = round(c.sum_s + res.duration_s, 3)
+            c.max_s = round(max(c.max_s, res.duration_s), 3)
         c.timeouts += bool(seen.get("timeout"))
         if res.error:
             c.err += 1
@@ -390,6 +391,7 @@ class WorldHub:
         if held := self._held(agent, name, tool.read_only):  # before any capture or upload
             until, msg, code = held
             left = max(0.0, until - self._clock())
+            seen["local"] = True
             return _err(f"{msg} (next slot in {max(1, math.ceil(left / 60))} min; do other work "
                         "or end your turn)", t0, code=code, retry_after_s=math.ceil(left),
                         local=True)
@@ -463,7 +465,7 @@ class WorldHub:
             wait = extra.get("retry_after_s")
             if isinstance(wait, (int, float)) and not tool.read_only:
                 self._tool_hold[(agent, name)] = (
-                    self._clock() + min(float(wait), HOLDOFF_CAP_S), str(msg or f"{name} failed"),
+                    self._clock() + max(0.0, min(float(wait), HOLDOFF_CAP_S)), str(msg or f"{name} failed"),
                     str(extra.get("code") or "overloaded"))
             return _err(str(msg or f"{name} failed"), t0, **extra)
         return _err(f"{name}: world {wname} answered HTTP {r.status_code} without "
