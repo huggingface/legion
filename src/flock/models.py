@@ -412,6 +412,17 @@ class WorldSpec(BaseModel):
     # The world's Slurm job name, when it runs as one: health shows its squeue state, so a
     # world waiting for a node (PENDING) is told apart from a crashed one (docs/health.md).
     slurm_job_name: str | None = None
+    # Seconds the world may be down (health probe) before the controller pauses the types that
+    # use it; resumed when it is back (docs/health.md). None: FLOCK_WORLD_DOWN_PAUSE_S or 1800;
+    # 0: never. Controller only (not sent to workers).
+    down_pause_s: float | None = Field(default=None, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):  # unset: dumps exactly as before the key existed (older workers)
+        out = handler(self)
+        if isinstance(out, dict) and out.get("down_pause_s", 0) is None:
+            out.pop("down_pause_s")
+        return out
 
     @field_validator("command", mode="before")
     @classmethod
@@ -1902,6 +1913,9 @@ class SwarmStatus(BaseModel):
     # limits.budget_usd as a stop (docs/loop.md): None (under the threshold or no budget),
     # "final_reserve" (loops stopped, final rounds) or "hard" (every agent stopped).
     budget_stop: Literal["final_reserve", "hard"] | None = None
+    # pause holds (docs/loop.md "Pause and resume"): {types: {T: {since, reason, by, auto}},
+    # agents: {A: ...}}; None when nothing is held
+    held: dict[str, dict[str, dict[str, Any]]] | None = None
     # bumped by every apply that changes the spec (docs/live.md, `flock history`)
     generation: int | None = None
 
