@@ -53,12 +53,16 @@ class Agent:
 
 
 class ToolError(Exception):
-    """Raise from a tool: the agent reads `message` as the tool's error result."""
+    """Raise from a tool: the agent reads `message` as the tool's error result.
+    `retry_after_s`: the call cannot succeed before then (a budget, a busy backend); the
+    server sends it in the error envelope and the worker may hold the tool off until then."""
 
-    def __init__(self, message: str, code: str = "tool_error") -> None:
+    def __init__(self, message: str, code: str = "tool_error",
+                 retry_after_s: float | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.retry_after_s = retry_after_s
 
 
 POOLS = ("fast", "slow")
@@ -176,6 +180,12 @@ class World:
         HTTP client gave up, e.g. on its own timeout)? Default False: the work always runs to
         the end. A world returns True for tools whose work is wasted once nobody reads it."""
         return False
+
+    def metrics(self) -> dict[str, float]:
+        """World-specific numbers for `GET /metrics` (under `world`). Called in a thread,
+        concurrently with tools, every scrape (about every 30 s): keep it cheap; take your
+        own lock if you need one. Default: none."""
+        return {}
 
     # ------------------------------------------------------------------ hooks
     def on_agent_start(self, agent: Agent) -> None:

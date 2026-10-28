@@ -479,6 +479,7 @@ def test_pr_creation_gap_and_busy_hub_refuse_before_creating(setup, monkeypatch,
     with caplog.at_level("WARNING"), pytest.raises(ToolError) as exc:
         submit(world, clone, author="birch", branch="second")
     assert (exc.value.code, exc.value.message) == ("hub_busy", "the Hub is busy; retry in about a minute")
+    assert exc.value.retry_after_s == 60
     assert world.repo.hub.n == 1 and "reason=pr_create_gap" in caplog.text
     world.pr_gap, world.last_create = 0.4, time.monotonic()
     started = time.monotonic()
@@ -1068,6 +1069,8 @@ def test_new_pr_budget_floor_refuses_before_the_hub_and_logs(setup, monkeypatch,
     with caplog.at_level("WARNING"), pytest.raises(ToolError) as exc:
         submit(world, clone, "pine", "three")
     assert exc.value.code == "open_budget" and world.repo.hub.n == 2
+    assert exc.value.retry_after_s == 3600  # the structured form of "next slot in ~60 min"
+    assert world.metrics()["budget_refusals_last_hour"] == 1
     assert exc.value.message == (
         "the swarm opened 2 PRs in the last hour and merged 0; new PRs wait until more merge "
         "(next slot in ~60 min). Meanwhile review others' PRs (list_prs needs_review=true) or "
@@ -1223,6 +1226,7 @@ def test_stale_lease_adopts_the_hub_head_and_retries_once(setup, caplog):
     assert git(remote, "rev-parse", f"refs/heads/{rec['branch']}") == new["head_sha"]
     assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
     assert f"adopted Hub head for PR #{rec['pr']} after a stale lease" in caplog.text
+    assert world.metrics()["stale_lease_adoptions_total"] == 1
 
 
 def test_stale_lease_with_a_failed_fetch_refuses_cleanly(setup, monkeypatch):
@@ -1958,3 +1962,18 @@ def test_a_hub_merge_that_raises_puts_the_pr_back_to_open(setup, monkeypatch):
     with pytest.raises(RuntimeError):
         world.merge_pr(Agent("birch"), rec["pr"])
     assert world.state["prs"][str(rec["pr"])]["state"] == "open"
+
+
+def test_metrics_report_prs_budget_outbox_and_saves(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    world.flush()
+    m = world.metrics()
+    assert set(m) == {"open_prs", "opens_last_hour", "merges_last_hour", "open_budget_limit",
+                      "budget_refusals_last_hour", "parked_drafts", "outbox_depth",
+                      "outbox_oldest_age_s", "stale_lease_adoptions_total", "hub_busy_total",
+                      "hub_slot_wait_s_total", "save_duration_s", "save_age_s", "state_bytes"}
+    assert all(isinstance(v, int | float) for v in m.values())
+    assert (m["open_prs"], m["opens_last_hour"], m["parked_drafts"]) == (1, 1, 0)
+    assert m["state_bytes"] == (world.ws / "prs.json").stat().st_size and m["save_age_s"] < 60
