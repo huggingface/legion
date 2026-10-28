@@ -246,7 +246,8 @@ class ResolvedModel(BaseModel):
 # Built-in comms tools a type may list in `tools:`; the model sees the bare name (`post`).
 COMMS_TOOLS = ("comms:post", "comms:read", "comms:search")
 EXTENDED_COMMS_TOOLS = ("comms:channels", "comms:create_channel", "comms:join_channel",
-                        "comms:dm", "comms:read_dms", "comms:react")
+                        "comms:dm", "comms:read_dms", "comms:react", "comms:votes", "comms:doc",
+                        "comms:edit_doc")
 ALL_COMMS_TOOLS = COMMS_TOOLS + EXTENDED_COMMS_TOOLS
 COMMS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 

@@ -89,7 +89,8 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
 RUN3_BUCKET=${RUN3_BUCKET%/}
 CTL_PORT=7860
 CTL_HOST=$(hostname)
-EXP=$RUN_DIR/experiment                         # a writable copy of experiments/run4 (waves.py writes next to the spec)
+EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy or voting
+EXP=$RUN_DIR/experiment                         # a writable copy of experiments/$EXPERIMENT (waves.py writes next to the spec)
 SPEC=$EXP/spec.slurm.local.yaml
 WAVES_FILE=$EXP/${RUN3_WAVES:-waves.yaml}
 HEALTH_WAIT_S=${HEALTH_WAIT_S:-300}
@@ -179,8 +180,9 @@ waves_step() {  # runs in a background subshell (below) and exec's into waves.py
   # The experiment folder, copied once per run (the spec's prompts/, tools/, protocols/ are read
   # relative to the spec file; waves.py writes <spec>.waves.json and the jsonl next to it).
   if [ ! -d "$EXP" ]; then
-    mkdir -p "$EXP" && cp -a "$REPO/experiments/run4/." "$EXP/" || { log "copy of experiments/run4 failed"; return 1; }
-    log "experiment folder: $EXP (from $REPO/experiments/run4)"
+    # -L: hierarchy/voting link run4's scripts and prompts; the copy holds real files.
+    mkdir -p "$EXP" && cp -aL "$REPO/experiments/$EXPERIMENT/." "$EXP/" || { log "copy of experiments/$EXPERIMENT failed"; return 1; }
+    log "experiment folder: $EXP (from $REPO/experiments/$EXPERIMENT)"
   fi
   # Render for Slurm: RUN3_VARIANT (jobs, or smoke for the 30-min smoke) with `--compute slurm`:
   # spec.yaml with the spec.slurm.yaml overlay and ${VAR} from this environment (run.env), as
