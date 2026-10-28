@@ -1,0 +1,26 @@
+# run3 agent-pi worker image: the run3 worker image (Containerfile) + Node 22 + Pi, for the
+# `agent-pi` type (harness: pi). Same pins as the repo's Dockerfile.worker and
+# controller/jobs.py: Node 22.23.3 (Pi needs >= 22.19), @earendil-works/pi-coding-agent@1.2.0
+# (the version is part of the Pi session/resume contract).
+#   build -f Containerfile.pi --build-arg BASE=run3-flock:<sha> -t run3-flock-pi:<sha> .
+#   enroot import -o /fsx/run3/images/run3-flock-pi-<sha>.sqsh dockerd://run3-flock-pi:<sha>
+# The worker script picks this image for workers whose env file has TYPE=agent-pi
+# (worker id and Slurm job name: <swarm>-agent-pi-w<NNNN>).
+ARG BASE=run3-flock:latest
+FROM ${BASE}
+
+ARG NODE_VERSION=22.23.3
+ARG PI_VERSION=1.2.0
+USER root
+RUN set -eu; apt-get update; apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \
+    arch=$(dpkg --print-architecture); case "$arch" in amd64) n=x64 ;; arm64) n=arm64 ;; *) exit 1 ;; esac; \
+    f="node-v${NODE_VERSION}-linux-${n}.tar.xz"; cd /tmp; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/$f"; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" | grep " $f\$" | sha256sum -c -; \
+    tar -xJf "$f" -C /usr/local --strip-components=1 --no-same-owner; rm -f "$f"; cd /; \
+    npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}"; npm cache clean --force; \
+    apt-get purge -y curl xz-utils; apt-get autoremove -y; rm -rf /var/lib/apt/lists/* /root/.npm; \
+    node --version; pi --version
+# Pi's network extras off; the adapter sets the same defaults. PI_CODING_AGENT_DIR is set per
+# worker by the worker script (one agent dir per worker, never holding an AGENTS.md).
+ENV FLOCK_PI_CLI=/usr/local/bin/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0

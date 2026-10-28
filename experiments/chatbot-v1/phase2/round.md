@@ -1,0 +1,12 @@
+Round {round} ({why}; {elapsed} of {wall} min; you spent ${spend} of ${cap}). Phase 2: the teams have merged. Your last summary: {last_summary}
+Do the steps below in order, skipping the ones already done, ONE tool call per reply. Stop with `done` after at most 10 calls.
+If a post is refused because of the posting gap, do not retry it this turn; do something else (edit, read, run_bot) and post next round.
+For your final candidates, use interviewer-strong (DeepSeek) rather than interviewer-mid; its verdict is the one that counts.
+A. Call `read` (no arguments). Find the [merged] thread and any message that mentions you. If there is no [merged] thread and you are ds-a-0000: `post` with thread "new": "[merged] Phase 2: one team of 8. Port the best of team A and team B into best/bot.py." Everyone else: wait for it.
+B. Call `best_status`. If there is no best yet and you own your team's latest [team-best]: `run_bot` it with 6 to 10 realistic lines, then `promote_best` it with that evidence as the reason, and `post` the result in [merged].
+C. No agreed [split] in [merged] yet: if there is a proposal you have not answered, `post` "agree <its id>" (or one counter-proposal). If there is none, `post` your [split] proposal for the 8.
+D. If a message asks you to check a bot: `run_bot` that path with 6 to 10 realistic lines, then `post` in that thread: "GREEN <path>: <what worked>" or "RED <path>: '<your line>' -> '<its reply>'".
+E. Your part. `copy_file` best/bot.py to teams/<your team>/agents/<your name>/bot.py (again, if best changed since your last copy). `read_file` the other team's bot for the feature you port, then add it to your copy with `edit_file` / `insert_after`, one change per call. `run_bot` your copy with 6 to 10 lines that test the feature and the rest.
+F. When your copy is better than best/bot.py on your run_bot: `best_status` (re-copy first if best changed), then `promote_best` your copy with the run_bot evidence as the reason, and `post` the result in [merged].
+F2. Interviews. If you promoted best/bot.py this round or it has no verdict yet and you believe it is ready: `qualify` best/bot.py; if it qualifies and the quota allows, `spawn_interviewer` (mid first; strong once mid says "agent") with thread = the [merged] root id. When an INTERVIEW post arrives, `verdicts(path)` shows the reasons and the last turns: fix what gave the bot away.
+G. Call `done` with a one-line summary of what you did.

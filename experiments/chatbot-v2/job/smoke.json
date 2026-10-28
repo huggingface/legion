@@ -1,0 +1,15 @@
+{
+ "every": "60s",
+ "while": {"until": "20m", "max_rounds": 40, "agent_usd": {"deepseek": 2.50, "glm": 2.50}},
+ "reserve_usd": 0.30,
+ "limits": {"budget_usd": 15.0, "spawned_total": 64},
+ "variants": {
+  "resmoke": {
+   "while": {"until": "10m", "max_rounds": 10, "agent_usd": {"deepseek": 0.80, "glm": 0.80}},
+   "reserve_usd": 0.15,
+   "limits": {"budget_usd": 5.0, "spawned_total": 24},
+   "world": {"merge": {"compare_minutes": 1}, "interviews": {"start_minutes": 1}},
+   "round_note": "SMOKE (this test run only): in round 2, or the first round after it in which you have a bot, call `book_interview('mid', <your bot path>)` then `spawn_interviewer(<the booking id>, <your team thread root id>)`. If the booking is refused as not qualified, fix the repeated or empty reply it names and book again next round."
+  }
+ }
+}

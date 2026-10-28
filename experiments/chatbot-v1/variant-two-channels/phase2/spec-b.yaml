@@ -1,0 +1,144 @@
+# Two-channel variant, swarm B, phase 2: moves team B to the main channel (its kickoff
+# ../kickoff-b-joins.md is posted there once), with the phase-2 prompts.
+swarm: chatbot-v1-b
+compute: local
+tools_dir: ../../tools
+providers:
+  hf:
+    type: openai_compat
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_TOKEN
+    timeout_s: 180
+    max_retries: 5
+    pricing:
+      deepseek-ai/DeepSeek-V4.1-Flash-1017:novita: [0.3, 1.2, 0.3]
+      zai-org/GLM-5.3-Flash:novita: [0.15, 0.5, 0.15]
+      Qwen/Qwen3.5-9B:deepinfra: [0.1, 0.15, 0.1]
+models:
+  deepseek:
+    model: hf:deepseek-ai/DeepSeek-V4.1-Flash-1017:novita
+    extra:
+      max_tokens: 32000
+      temperature: 0.6
+      chat_template_kwargs: {thinking: false}
+  glm:
+    model: hf:zai-org/GLM-5.3-Flash:novita
+    extra:
+      max_tokens: 32000
+      temperature: 0.6
+      chat_template_kwargs: {enable_thinking: false}
+  qwen9b:
+    model: hf:Qwen/Qwen3.5-9B:deepinfra
+    extra:
+      max_tokens: 1024
+      temperature: 0.7
+      chat_template_kwargs: {enable_thinking: false}
+world: {url: 'http://127.0.0.1:8790', token_env: CHATBOT_WORLD_TOKEN}
+comms:
+  kind: msgboard
+  url: https://msgboard.example.invalid
+  invite_env: CHATBOT_BOARD_INVITE
+  channel: your-chatbot-channel
+  kickoff_file: ../kickoff-b-joins.md
+  rules: {min_post_gap: 10s, max_len: 800, threads: per_topic, no_group_mentions: true}
+  protocols: [../../protocols/chatbot.md, ../../phase2/protocol.md]
+types:
+  ds-b:
+    harness: llm
+    model: deepseek
+    replicas: 2
+    agents_per_worker: 4
+    system_prompt_file: ../../phase2/system.md
+    comms: true
+    tools: [spawn_interviewer, 'world:read_file', 'world:write_file', 'world:copy_file', 'world:edit_file',
+      'world:insert_after', 'world:list_files', 'world:run_bot', 'world:promote_best', 'world:best_status',
+      'world:qualify', 'world:verdicts']
+    bash: false
+    tool_choice: required
+    max_turns: 12
+    max_budget_usd: 0.2
+    tool_output_chars: 32000
+    context_tokens: 64000
+    loop:
+      first: "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n\
+        2. If you are ds-b-0000: call `post` with thread \"new\" and this text, then go to step 3:\n \
+        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree\
+        \ on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>.\"\
+        \n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
+      prompt_file: ../../phase2/round.md
+      every: 90s
+      stagger: 4s
+      'on': [comms.mention, comms.thread]
+      wake: {min_gap: 30s, max: 3, window: 30m}
+      while:
+        until: 4h
+        max_rounds: 200
+        agent_usd: {deepseek: 34.0, glm: 16.0}
+      final: {prompt_file: ../../phase2/final.md, reserve_usd: 0.3}
+  glm-b:
+    harness: llm
+    model: glm
+    replicas: 2
+    agents_per_worker: 4
+    system_prompt_file: ../../phase2/system.md
+    comms: true
+    tools: [spawn_interviewer, 'world:read_file', 'world:write_file', 'world:copy_file', 'world:edit_file',
+      'world:insert_after', 'world:list_files', 'world:run_bot', 'world:promote_best', 'world:best_status',
+      'world:qualify', 'world:verdicts']
+    bash: false
+    tool_choice: required
+    max_turns: 12
+    max_budget_usd: 0.2
+    tool_output_chars: 32000
+    context_tokens: 64000
+    loop:
+      first: "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n\
+        2. If you are ds-b-0000: call `post` with thread \"new\" and this text, then go to step 3:\n \
+        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree\
+        \ on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>.\"\
+        \n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
+      prompt_file: ../../phase2/round.md
+      every: 90s
+      stagger: 4s
+      'on': [comms.mention, comms.thread]
+      wake: {min_gap: 30s, max: 3, window: 30m}
+      while:
+        until: 4h
+        max_rounds: 200
+        agent_usd: {deepseek: 34.0, glm: 16.0}
+      final: {prompt_file: ../../phase2/final.md, reserve_usd: 0.3}
+  interviewer-mid:
+    harness: llm
+    model: qwen9b
+    replicas: 0
+    agents_per_worker: 8
+    workers: {initial: 0, max_extra: 2}
+    ephemeral: true
+    system_prompt_file: ../../prompts/interviewer.md
+    tools: ['world:chat', 'world:submit_verdict', 'comms:post']
+    bash: false
+    tool_choice: required
+    max_turns: 12
+    max_budget_usd: 0.15
+    tool_output_chars: 4000
+  interviewer-strong:
+    harness: llm
+    model: deepseek
+    replicas: 0
+    agents_per_worker: 8
+    workers: {initial: 0, max_extra: 2}
+    ephemeral: true
+    system_prompt_file: ../../prompts/interviewer.md
+    tools: ['world:chat', 'world:submit_verdict', 'comms:post']
+    bash: false
+    tool_choice: required
+    max_turns: 12
+    max_budget_usd: 0.15
+    tool_output_chars: 4000
+spawn:
+  ds-b: &id001
+    types: [interviewer-mid, interviewer-strong]
+    max: 2
+    depth: 1
+  glm-b: *id001
+limits: {budget_usd: 85.0, spawned_total: 32}
