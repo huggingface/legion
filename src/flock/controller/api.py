@@ -81,9 +81,9 @@ from flock.models import (
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
 from flock.tools.spec import comms_clashes
-from flock.world.host import WorldError, WorldHost, world_token
+from flock.world.host import WorldError, WorldHost, world_admin_token
 from flock.world.host import resolve as world_resolve
-from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER, admin_token
+from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER
 
 log = logging.getLogger(__name__)
 # Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
@@ -543,8 +543,8 @@ def add_world_admin_routes(api: APIRouter, store: Store, token: str,
                            transport: httpx.BaseTransport | None,
                            clock: Callable[[], datetime]) -> None:
     """`/swarms/{swarm}/world/...`: the world's admin API (knobs, lane pauses; docs/world.md)
-    through the controller, which knows the world's secret and derives the admin secret from
-    it ($FLOCK_WORLD_ADMIN_TOKEN when set). Every change is a swarm event."""
+    through the controller with the world's admin secret (`world_admin_token`). Every change
+    is a swarm event."""
 
     def world_admin(swarm: str, method: str, path: str, body: Any = None) -> Any:
         row = store.get_swarm(swarm)
@@ -553,12 +553,14 @@ def add_world_admin_routes(api: APIRouter, store: Store, token: str,
         spec = row["spec"]
         if spec.world is None or not spec.world.endpoint:
             raise HTTPException(404, f"swarm {swarm!r} has no world")
-        wt = world_token(spec, token, secret_source)
-        secret = secret_source.get(ADMIN_TOKEN_ENV) or (admin_token(wt) if wt else "")
+        secret = world_admin_token(spec, token, secret_source)
+        if not secret:
+            raise HTTPException(409, f"no admin secret for the world of {swarm!r}: set "
+                                     f"{ADMIN_TOKEN_ENV} on the controller and the world")
         try:
             with httpx.Client(transport=transport, timeout=30) as http:
                 r = http.request(method, f"{spec.world.endpoint}{path}", json=body,
-                                 headers={TOKEN_HEADER: secret} if secret else {})
+                                 headers={TOKEN_HEADER: secret})
         except httpx.HTTPError as e:
             raise HTTPException(502, f"world unreachable: {type(e).__name__}") from None
         try:

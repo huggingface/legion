@@ -14,14 +14,19 @@ from flock import cli
 from flock.controller.api import create_app as controller_app
 from flock.models import SwarmSpec
 from flock.world import Admin, World, server, tool
-from flock.world.host import derived_token
-from flock.world.protocol import admin_token
+from flock.world.host import derived_token, world_admin_token
 from flock.world.server import create_app
 
 from .conftest import TOKEN
 
 SECRET = "world-secret"
-ADMIN = {"X-World-Token": admin_token(SECRET)}
+ADMIN_SECRET = "admin-secret-value"
+ADMIN = {"X-World-Token": ADMIN_SECRET}
+
+
+@pytest.fixture(autouse=True)
+def admin_secret(monkeypatch):
+    monkeypatch.setenv("FLOCK_WORLD_ADMIN_TOKEN", ADMIN_SECRET)
 H = {"X-World-Token": SECRET, "X-Flock-Agent": "dev-0001"}
 
 
@@ -116,11 +121,64 @@ def test_healthz_needs_no_token_and_admin_needs_the_admin_secret():
         "value": 1, "default": 1, "type": "int", "min": 0, "max": 4, "doc": "Hub write slots."}
 
 
-def test_admin_token_from_the_environment(monkeypatch):
-    monkeypatch.setenv("FLOCK_WORLD_ADMIN_TOKEN", "operator-only")
+def test_admin_is_403_without_an_admin_secret(monkeypatch):
+    monkeypatch.delenv("FLOCK_WORLD_ADMIN_TOKEN")
+    for token in (SECRET, None):
+        c = TestClient(create_app(Knobbed(), token))
+        for h in (ADMIN, {"X-World-Token": SECRET}, {}):
+            assert c.get("/admin/knobs", headers=h).status_code == 403
+        assert c.get("/manifest", headers={"X-World-Token": SECRET}).status_code == 200
+
+
+def test_admin_bodies_are_capped():
     c = TestClient(create_app(Knobbed(), SECRET))
-    assert c.get("/admin/knobs", headers=ADMIN).status_code == 401
-    assert c.get("/admin/knobs", headers={"X-World-Token": "operator-only"}).status_code == 200
+    big = {"lanes": ["push"], "reason": "x" * (65 << 10)}
+    r = c.post("/admin/pause", json=big, headers=ADMIN)
+    assert r.status_code == 400 and "over 65536 bytes" in r.json()["error"]
+    assert c.patch("/admin/knobs", json={"hub.push.slots": 2, "pad": "x" * (65 << 10)},
+                   headers=ADMIN).status_code == 400
+
+
+def test_a_failing_on_change_rolls_the_whole_patch_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path))
+    w = Knobbed()
+    seen = []
+    w.admin.knobs["save.interval_s"].on_change = lambda v: (seen.append(v), 1 / 0)
+    c = TestClient(create_app(w, SECRET))
+    r = c.patch("/admin/knobs", json={"hub.push.slots": 3, "save.interval_s": 5}, headers=ADMIN)
+    assert r.status_code == 400 and r.json()["error"].startswith("save.interval_s: the world refused 5")
+    assert w.slots_seen == [3, 1] and seen == [5.0]  # applied, then given its old value back
+    assert w.knobs == {"hub.push.slots": 1, "save.interval_s": 2.0}
+    assert not (tmp_path / "knobs.json").exists()
+
+
+@pytest.mark.parametrize("text", ['{"paused": ["x"]}', '{"knobs": [1]}', '[]', '{"paused": {"a": 1}}',
+                                  'not json'])
+def test_a_wrong_shaped_knobs_file_falls_back_to_the_defaults(monkeypatch, tmp_path, text):
+    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path))
+    (tmp_path / "knobs.json").write_text(text)
+    w = Knobbed()
+    assert w.slots == 1 and w.admin.paused == {}
+
+
+def test_a_bad_target_exits_before_serving(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notworld.py").write_text("class X:\n    pass\n")
+    for target, exc in (("nosuchmodule:X", ImportError), ("notworld:X", TypeError),
+                        ("notworld", ValueError)):
+        with pytest.raises(exc):
+            server.serve(target, insecure=True)
+
+
+def test_sys_exit_in_init_parks(monkeypatch):
+    monkeypatch.setattr(server, "PARK_FIRST_S", 60)
+
+    def build(admin):
+        raise SystemExit(3)
+
+    with TestClient(create_app(build, SECRET)) as c:
+        wait_for(lambda: c.get("/manifest", headers=H).json()["error"] == "SystemExit: 3")
+        assert c.get("/healthz").json() == {"status": "parked"}
 
 
 def test_knob_validation_and_persistence_across_restart(monkeypatch, tmp_path):
@@ -202,8 +260,16 @@ async def test_hub_treats_a_parked_503_as_a_world_holdoff(monkeypatch, tmp_path)
     await hub.aclose()
 
 
-def test_admin_token_is_the_derived_token():
-    assert admin_token(SECRET) == derived_token(SECRET, "flock-world-admin")
+def test_world_admin_token_is_never_the_world_secret():
+    def spec(world):
+        return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": world,
+                                         "types": {"dev": {"harness": "claude", "model": "m"}}})
+    local = spec({"command": ["python", "w.py"]})
+    assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "flock-world-admin:sw")
+    assert world_admin_token(local, TOKEN, {}) != derived_token(TOKEN, "sw")  # the world secret
+    url = spec({"url": "http://w.invalid", "token_env": "WORLD_SECRET"})
+    assert world_admin_token(url, TOKEN, {"WORLD_SECRET": SECRET}) is None
+    assert world_admin_token(url, TOKEN, {"FLOCK_WORLD_ADMIN_TOKEN": "a"}) == "a"
 
 
 def _forward(world_client: TestClient):
@@ -216,7 +282,8 @@ def _forward(world_client: TestClient):
 
 
 def _swarm(world_client, store, clock):
-    app = controller_app(store, TOKEN, clock=clock, secret_source={"WORLD_SECRET": SECRET},
+    app = controller_app(store, TOKEN, clock=clock, secret_source={
+        "WORLD_SECRET": SECRET, "FLOCK_WORLD_ADMIN_TOKEN": ADMIN_SECRET},
                          loop_interval=0, world_transport=_forward(world_client))
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local", "world": {"url": "http://w.invalid", "token_env": "WORLD_SECRET"},

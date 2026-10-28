@@ -30,6 +30,7 @@ import httpx
 
 from flock.models import COMMS_TOOLS, SwarmSpec, WorldSpec, comms_name, comms_tools, world_tools
 from flock.world.protocol import (
+    ADMIN_TOKEN_ENV,
     HOST_ENV,
     PORT_ENV,
     SWARM_ENV,
@@ -133,6 +134,20 @@ def world_token(spec: SwarmSpec, controller_token: str, secrets: Mapping[str, st
     if w.command is not None and spec.compute.kind == "local" and controller_token:
         return derived_token(controller_token, spec.swarm)
     return None
+
+
+def world_admin_token(spec: SwarmSpec, controller_token: str,
+                      secrets: Mapping[str, str]) -> str | None:
+    """The secret of the world's /admin routes (docs/world.md, "Admin API"): for a world flock
+    starts, derived from the controller's token and the swarm (the world gets it as
+    $FLOCK_WORLD_ADMIN_TOKEN); otherwise $FLOCK_WORLD_ADMIN_TOKEN from the controller's secrets.
+    Never derived from the world secret: every worker holds that one."""
+    w = spec.world
+    if w is None:
+        return None
+    if w.command is not None and spec.compute.kind == "local" and controller_token:
+        return derived_token(controller_token, f"flock-world-admin:{spec.swarm}")
+    return secrets.get(ADMIN_TOKEN_ENV) or None
 
 
 def fetch_manifest(url: str, token: str | None, *, transport: httpx.BaseTransport | None = None,
@@ -239,7 +254,8 @@ class WorldHost:
         p = self._procs.get(swarm)
         return p.url if p is not None and p.alive() else None
 
-    def ensure(self, swarm: str, w: WorldSpec, token: str | None) -> tuple[str, bool]:
+    def ensure(self, swarm: str, w: WorldSpec, token: str | None,
+               admin: str | None = None) -> tuple[str, bool]:
         """The url of the swarm's started world: the running one when its command, dir, secret
         and Python files are unchanged, else a new candidate process (the running one is left
         alone until `commit`). Returns (url, started now)."""
@@ -247,7 +263,7 @@ class WorldHost:
         cwd = Path(w.dir).resolve() if w.dir else Path.cwd()
         if not cwd.is_dir():
             raise WorldError(f"world.dir {cwd} does not exist")
-        key = (tuple(w.command), str(cwd), token, py_fingerprint(cwd))
+        key = (tuple(w.command), str(cwd), token, admin, py_fingerprint(cwd))
         with self._lock:
             p = self._procs.get(swarm)
             if p is not None and p.alive() and p.key == key:
@@ -257,7 +273,7 @@ class WorldHost:
                 log.info("world for %s: %s; starting a replacement", swarm,
                          "changed" if p.alive() else f"exited ({p.popen.returncode})")
             self.discard(swarm)
-            proc = self._start(swarm, w.command, cwd, key, token)
+            proc = self._start(swarm, w.command, cwd, key, token, admin)
             self._pending[swarm] = proc
             return proc.url, True
 
@@ -282,7 +298,7 @@ class WorldHost:
             self._terminate(p)
 
     def _start(self, swarm: str, command: list[str], cwd: Path, key: tuple,
-               token: str | None) -> _Proc:
+               token: str | None, admin: str | None = None) -> _Proc:
         port = _free_port(self.host)
         argv = [x.replace("{port}", str(port)).replace("{python}", sys.executable)
                 for x in command]
@@ -290,6 +306,8 @@ class WorldHost:
         env.update({PORT_ENV: str(port), HOST_ENV: self.host, SWARM_ENV: swarm})
         if token:
             env[TOKEN_ENV] = token
+        if admin:
+            env[ADMIN_TOKEN_ENV] = admin
         log_path = log_file = None
         if self.log_dir is not None:
             self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -412,7 +430,8 @@ def resolve(spec: SwarmSpec, *, host: WorldHost | None, controller_token: str,
         if host is None:
             raise WorldError("world.command: this controller does not start worlds; give "
                              "world.url instead")
-        url, started = host.ensure(spec.swarm, w, token)
+        url, started = host.ensure(spec.swarm, w, token,
+                                   world_admin_token(spec, controller_token, secrets))
     else:
         assert w.url is not None
         url = world_endpoint(w.url)

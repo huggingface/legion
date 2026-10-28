@@ -76,18 +76,25 @@ class Admin:
         """Read `knobs.json` from `state_dir` and save there from now on. Lanes paused before
         (while the world could not be built) stay paused."""
         path = Path(state_dir) / KNOBS_FILE
+        knobs: dict[str, Any] = {}
+        paused: dict[str, str] = {}
         try:
             data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")  # noqa: TRY004 (handled below)
+            knobs, paused = data.get("knobs") or {}, data.get("paused") or {}
+            if not isinstance(knobs, dict) or not isinstance(paused, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in paused.items()):
+                raise ValueError('expected {"knobs": {name: value}, "paused": {lane: reason}}')
         except FileNotFoundError:
-            data = {}
-        except (OSError, ValueError) as e:
+            pass
+        except (OSError, ValueError) as e:  # never park the world over this file
             log.warning("%s: unreadable (%s); starting from the defaults", path, e)
-            data = {}
-        data = data if isinstance(data, dict) else {}
+            knobs, paused = {}, {}
         with self.lock:
             self.path = path
-            self.stored = dict(data.get("knobs") or {})
-            self.paused = {**dict(data.get("paused") or {}), **self.paused}
+            self.stored = dict(knobs)
+            self.paused = {**paused, **self.paused}
 
     def register(self, knob: Knob) -> Any:
         with self.lock:
@@ -106,8 +113,9 @@ class Admin:
             return {n: k.describe(self.values[n]) for n, k in self.knobs.items()}
 
     def set(self, updates: dict[str, Any]) -> list[dict[str, Any]]:
-        """Validate every update first, then apply them (on_change callbacks included) and save.
-        Returns [{name, old, new}] (raises ValueError, nothing applied, on a bad one)."""
+        """Validate every update, apply them (on_change callbacks included) and save, all or
+        nothing. Returns [{name, old, new}]; raises ValueError (nothing changed) on a bad value
+        or a failing on_change (those already applied get on_change(old) back)."""
         if not isinstance(updates, dict) or not updates:
             raise ValueError("expected {knob: value, ...}")
         with self.lock:
@@ -116,16 +124,23 @@ class Admin:
                 raise ValueError(f"unknown knob(s) {', '.join(unknown)}; knobs: "
                                  f"{', '.join(self.knobs) or 'none'}")
             checked = {n: self.knobs[n].check(v) for n, v in updates.items()}
-            changes = []
-            try:
-                for n, v in checked.items():
-                    old = self.values[n]
+            changes: list[dict[str, Any]] = []
+            for n, v in checked.items():
+                try:
                     if self.knobs[n].on_change is not None:
                         self.knobs[n].on_change(v)
-                    self.values[n] = self.stored[n] = v
-                    changes.append({"name": n, "old": old, "new": v})
-            finally:  # what was applied before a failing callback is kept
-                self._save()
+                except Exception as e:  # noqa: BLE001 (any refusal rolls the patch back)
+                    for c in reversed(changes):
+                        try:
+                            if self.knobs[c["name"]].on_change is not None:
+                                self.knobs[c["name"]].on_change(c["old"])
+                        except Exception:
+                            log.exception("knob %s: restoring %r failed", c["name"], c["old"])
+                    raise ValueError(f"{n}: the world refused {json.dumps(v)}: {e}") from None
+                changes.append({"name": n, "old": self.values[n], "new": v})
+            for c in changes:
+                self.values[c["name"]] = self.stored[c["name"]] = c["new"]
+            self._save()
             return changes
 
     def pause(self, lanes: list[str], reason: str = "") -> None:

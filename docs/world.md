@@ -331,12 +331,17 @@ The manifest lists the knob names under `knobs` and adds the capability `admin-v
 | `POST /admin/resume` | `{"lanes": [...]}` | the same |
 
 `/admin/*` takes the admin secret in `X-World-Token`, never the world secret (that gets `401`):
-`$FLOCK_WORLD_ADMIN_TOKEN` if set, else HMAC-SHA256(world secret, `flock-world:flock-world-admin`)
-in hex (`flock.world.protocol.admin_token`). Workers never have it. Admission control never
-applies to `/admin`. Operators go through the controller, which knows the world secret, derives
-the admin secret (or uses its own `$FLOCK_WORLD_ADMIN_TOKEN`) and records each change as a swarm
-event (`world_knob {name, old, new, by, reason}`, `world_pause {lanes, reason, by}`,
-`world_resume {lanes, by}`):
+`$FLOCK_WORLD_ADMIN_TOKEN` in the world's environment; unset, `/admin` answers `403`. It is
+never derived from the world secret, which every worker holds. Bodies are capped at 64 KB, and
+admission control never applies to `/admin`. Operators go through the controller, which sends
+the same secret and records each change as a swarm event (`world_knob {name, old, new, by,
+reason}`, `world_pause {lanes, reason, by}`, `world_resume {lanes, by}`):
+
+- a world flock starts (`command`, `compute: local`): the controller derives the secret from
+  its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
+- any other world (`url`; Slurm, a Space): set `FLOCK_WORLD_ADMIN_TOKEN` in the world's
+  environment and in the controller's secrets (the run's secrets file on Slurm,
+  `experiments/run4/slurm/secrets.env.example`), and keep it from the workers.
 
 ```bash
 flock world knobs <swarm>                                   # values, defaults, ranges, paused lanes
