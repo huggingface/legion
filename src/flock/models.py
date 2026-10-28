@@ -448,6 +448,17 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     return world.manifest.names() if world.manifest is not None else []
 
 
+class RecycleAfter(BaseModel):
+    """`recycle_after`: restart an agent's harness process (same session) at the first turn
+    boundary past any of these, counted from the process start (docs/pi.md "Memory")."""
+
+    model_config = {"extra": "forbid"}
+
+    turns: int | None = None
+    hours: float | None = None
+    pss_mb: float | None = None  # the harness process's PSS, sampled every 15 s
+
+
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
@@ -506,6 +517,12 @@ class TypeSpec(BaseModel):
     tool_output_chars: int | None = None
     persist_workdir: bool = True
     resume_prompt: str | None = None
+    # Memory (docs/pi.md "Memory"): restart the harness process at a turn boundary, keeping the
+    # session; RLIMIT_DATA (MB) on every tool command of a Pi agent (through BASH_ENV); Pi's
+    # V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
+    recycle_after: RecycleAfter | None = None
+    tool_memory_mb: int | None = None
+    node_heap_mb: int | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
     # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
     # `flock apply` refuses a name the folder does not define. None: no folder tools.
@@ -1503,6 +1520,9 @@ class WorkerHeartbeat(BaseModel):
     restore: RestoreProgress | None = None  # None when no restore is in flight
     tools: dict[str, ToolCounters] | None = None  # world tools by name
     knobs_rev: str | None = None  # hash of the worker's effective settings
+    # nonreclaimable memory passed FLOCK_MEM_ROTATE of the limit: the controller drains the
+    # worker when its rotation budget allows (docs/slurm.md "Memory")
+    wants_rotation: bool = False
 
 
 class Event(BaseModel):

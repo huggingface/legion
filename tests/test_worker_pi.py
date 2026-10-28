@@ -613,10 +613,11 @@ def test_update_spec_carries_new_endpoints_to_the_next_pi_start(tmp_path):
     old = spec(["http://old/v1"])
     a = PiAdapter(tmp_path / "w", agent="agent-0001", home=tmp_path / "pi",
                   model_config=pi_model_config(old, "agent-0001"))
-    a.update_spec(spec(["http://new-a/v1", "http://new-b/v1"]))
+    assert a.update_spec(spec(["http://new-a/v1", "http://new-b/v1"]))  # the runtime recycles pi
+    assert not a.update_spec(spec(["http://new-a/v1", "http://new-b/v1"]))  # no change
     assert a.model_config.base_url in ("http://new-a/v1", "http://new-b/v1")
     before = a.model_config
-    a.update_spec(spec(["http://other/v1"], key="OTHER_KEY"))  # a key change waits for a restart
+    assert not a.update_spec(spec(["http://other/v1"], key="OTHER_KEY"))  # a key change waits for a restart
     assert a.model_config == before
     native = PiAdapter(tmp_path / "w", agent="agent-0002", home=tmp_path / "pi2")
     native.update_spec(spec(["http://new-a/v1"]))  # no provider config: nothing to update
