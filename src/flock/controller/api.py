@@ -445,10 +445,10 @@ def _chips(counts: dict[str, int], tones: dict[str, str]) -> str:
     )
 
 
-def _health_line(store: Store, swarm: str) -> str:
-    """The newest health snapshot as one line of aggregates (the page has no auth: no agent
-    names)."""
-    rows = store.health_samples(swarm, "30s", limit=1)
+def _health_line(health: Health | None, swarm: str) -> str:
+    """The newest 30 s health snapshot as one line of aggregates (the page has no auth: no
+    agent names)."""
+    rows = health.history(swarm, 0)[-1:] if health is not None else []
     if not rows:
         return ""
     e, b = html.escape, rows[0]["body"]
@@ -471,7 +471,7 @@ def _health_line(store: Store, swarm: str) -> str:
     return f'<p class="sub">health: {" · ".join(bits)} {alerts}</p>'
 
 
-def _status_page(store: Store, now: float) -> str:
+def _status_page(store: Store, now: float, sampler: Health | None = None) -> str:
     e = html.escape
     parts = []
     for sw in store.list_swarms():
@@ -537,7 +537,7 @@ def _status_page(store: Store, now: float) -> str:
             for pv in st.providers.values()
         )
         provs = f'<p class="sub">providers: {provs}</p>' if provs else ""
-        provs += _health_line(store, spec.swarm)
+        provs += _health_line(sampler, spec.swarm)
         parts.append(
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
             f"<h2>{e(spec.swarm)}</h2>{removing}</div>"
@@ -720,7 +720,7 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return _status_page(store, clock().timestamp())
+        return _status_page(store, clock().timestamp(), health)
 
     # ------------------------------------------------------------- swarms
 
@@ -810,16 +810,17 @@ def create_app(
         """The newest snapshot (ts in epoch s), the generation and the last control-plane
         events of the swarm stream."""
         sw = spec_or_404(swarm)
-        rows = store.health_samples(swarm, "30s", limit=1)
-        if not rows:
+        latest = health.latest(swarm)
+        if latest is None:
             raise HTTPException(404, f"no health snapshot of {swarm!r} yet")
-        return {"swarm": swarm, "generation": sw["generation"], **rows[0],
+        return {"swarm": swarm, "generation": sw["generation"], **latest,
                 "recent_events": health.recent_events(swarm)}
 
     @api.get("/swarms/{swarm}/health/history")
     def health_history(swarm: str, since: str = "0", res: Literal["30s", "5m"] = "30s",
                        limit: int = 5000) -> list[dict]:
-        """Snapshots since `since` (epoch s or ISO-8601), oldest first."""
+        """Snapshots since `since` (epoch s or ISO-8601), oldest first: 30 s ones from memory
+        (6 h, none from before a controller restart), 5-min ones slim from the store (48 h)."""
         spec_or_404(swarm)
         try:
             t = float(since)
@@ -828,7 +829,9 @@ def create_app(
                 t = datetime.fromisoformat(since).timestamp()
             except ValueError:
                 raise HTTPException(422, f"since {since!r}: epoch seconds or ISO-8601") from None
-        return store.health_samples(swarm, res, t, max(1, min(limit, 20000)))
+        limit = max(1, min(limit, 20000))
+        return health.history(swarm, t)[-limit:] if res == "30s" else store.health_samples(
+            swarm, res, t, limit)
 
     @api.get("/swarms/{swarm}/usage")
     def usage(swarm: str, by: Literal["type", "hour"] = "type") -> dict:

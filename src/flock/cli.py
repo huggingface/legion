@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import subprocess
 import time
 from email.utils import parsedate_to_datetime
@@ -880,9 +881,20 @@ def _print_health(st: dict, h: dict | None) -> None:
                 f"429s {_num(m.get('overloaded_429_total'))}"]
         bits += [f"{p} queue {_num(q.get('queue_wait_oldest_s'), '{:.1f}')} s"
                  for p, q in (m.get("pools") or {}).items()]
-        bits += [f"{k} {v:g}" for k, v in (m.get("world") or {}).items()
-                 if isinstance(v, (int, float))]
+        wm = {k: v for k, v in (m.get("world") or {}).items() if isinstance(v, (int, float))}
+        if "lane_comment_outbox_depth" in wm:
+            bits.append(f"comment outbox {wm.pop('lane_comment_outbox_depth'):g} (oldest "
+                        f"{_num(wm.pop('lane_comment_outbox_oldest_age_s', None))} s)")
+        lanes: dict[str, dict[str, float]] = {}
+        for k in list(wm):
+            if mt := re.match(r"lane_(.+)_(tripped|paused|effective_slots|in_flight)$", k):
+                lanes.setdefault(mt[1], {})[mt[2]] = wm.pop(k)
+        bits += [f"{k} {v:g}" for k, v in sorted(wm.items())]  # any world's own numbers
         typer.echo("world metrics: " + ", ".join(bits))
+        for lane, lv in sorted(lanes.items()):
+            st = "TRIPPED" if lv.get("tripped") else "paused" if lv.get("paused") else "ok"
+            typer.echo(f"  lane {lane}: {st} slots {_num(lv.get('effective_slots'))} "
+                       f"in flight {_num(lv.get('in_flight'))}")
     for p, q in b["providers"].items():
         typer.echo(f"provider {p}: waiting {_num(q.get('waiting'))} running "
                    f"{_num(q.get('running'))} kv {_num(q.get('kv'), '{:.0%}')}")

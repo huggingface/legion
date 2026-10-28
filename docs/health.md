@@ -1,8 +1,8 @@
 # Health: snapshots, usage, rollups
 
-The controller samples each swarm every 30 s (`FLOCK_HEALTH_INTERVAL`, 0 = off) and keeps the
-result in its store and next to its event files. Nothing here re-reads agent event files:
-counters are fed by the event batches as they arrive.
+The controller samples each swarm every 30 s (`FLOCK_HEALTH_INTERVAL`, 0 = off). Agent event
+files are never read: counters are fed by the event batches as they arrive, and the swarm
+stream is tailed by byte offset.
 
 ## What is probed
 
@@ -12,7 +12,8 @@ counters are fed by the event batches as they arrive.
   success writes `world_up`.
 - **World Slurm job.** With `world.slurm_job_name: <name>` and `compute: slurm`, the
   controller asks `squeue -n <name>` and shows `slurm_state` (`RUNNING`, `PENDING`, ...,
-  `absent`), so a world waiting for a node is told apart from a crash.
+  `absent` when no such job is queued, `unknown` when squeue is missing, fails or times out),
+  so a world waiting for a node is told apart from a crash.
 - **vLLM.** With `providers.<p>.metrics: true`, each base URL's server root `/metrics`
   (Prometheus text): `waiting` and `running` are summed over servers, `kv` is the highest
   `gpu_cache_usage_perc` (or `kv_cache_usage_perc`).
@@ -39,15 +40,19 @@ counters are fed by the event batches as they arrive.
 - Alerts: world down, a worker within 1 h of its memory limit, stuck agents, a tool with
   20 % or more errors or refusals over the last sample.
 
-Retention: 30 s samples for 6 h and every 10th one as a 5-min sample for 7 days (table
-`health_samples`, pruned on insert).
+Retention: the 30 s samples stay in the controller's memory for 6 h (gone after a restart).
+Every 10th one is stored as a 5-min sample for 48 h (table `health_samples`, pruned on
+insert) in a slim form: `workers` becomes `{count, max_nonreclaim_frac, min_eta_limit_s,
+restoring, relaunches}` and each type keeps at most 20 `stuck` entries (`stuck_n` has the
+count).
 
 ## Token usage
 
 Tokens per UTC hour and agent type, stored in the `usage` table. The rule: a turn's
-`turn_ended` tokens count; assistant `message` usage counts only for a turn that never got a
-`turn_ended` (cut by a worker death or an interrupt), at the agent's next `turn_started`,
-`turn_interrupted` or `session_*` event. A cut turn of an agent that never sends another event
+`turn_ended` tokens count; assistant `message` usage counts instead when the `turn_ended`
+total is empty (`usage_missing`), and for a turn that never got a `turn_ended` (cut by a
+worker death or an interrupt), at the agent's next `turn_started`, `turn_interrupted` or
+`session_*` event. A cut turn of an agent that never sends another event
 is not counted. Hours are by the time the controller received the events.
 
 ## Files (mirrored by the state sync)
@@ -58,8 +63,9 @@ Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flo
 ```
 run.json                                 {schema: 1, run, swarm, swarms, started_at, ended_at|null,
                                           status: running|ended, generation, types: {t: {harness, model, replicas}}}
-metrics/<swarm>/latest.json              {ts, body}: the newest 30 s sample, overwritten
-metrics/<swarm>/<YYYY-MM-DD>.jsonl       {ts, body} per 5-min sample
+metrics/<swarm>/latest.json              {ts, body}: the newest 30 s sample (full), overwritten
+metrics/<swarm>/<YYYY-MM-DD>T<HH>.jsonl  {ts, body} per 5-min sample (slim); one file per 6 h,
+                                         HH = 00, 06, 12, 18, so each upload stays small
 rollups/<swarm>/<YYYY-MM-DDTHH>.jsonl    one line per agent active that hour
 ```
 
@@ -70,8 +76,11 @@ shutdown.
 A rollup line: `{h, agent, type, parent, ephemeral, turns, out: {done, max_turns, max_budget,
 error}, working_s, pending_s, idle_s, tool_calls, tools: {name: {n, err}}, tokens: {model:
 {input, output, cache_read, cache_write, reasoning}}, events: {type: n}, wakes, errors, first_ts,
-last_ts}`. An hour's file is appended when the hour closes and at shutdown, so after a
-controller restart within an hour an agent can have two lines for that hour: sum them.
+last_ts}`. Token keys are the full names. The open hour's file is rewritten whole with the
+running totals every 5 min, once more when the hour closes and at shutdown; a closed hour
+never changes. There is exactly one line per (agent, h): read it with replace semantics. A
+controller restarted within the hour reloads that hour's file (restored from the bucket) and
+keeps adding to it, so a SIGKILL loses at most the last 5 minutes.
 `working_s`/`pending_s`/`idle_s` are sampled (each sample adds its interval to the agent's
 state; pending = idle with a prompt queued); `tools` counts tool results; `wakes` counts
 `loop_wake`; `errors` counts `error` events (failed turns are in `out.error`).
@@ -79,8 +88,13 @@ state; pending = idle with a prompt queued); `tools` counts tool results; `wakes
 ## Surface
 
 - `GET /swarms/{s}/health`: `{swarm, generation, ts, body, recent_events}` (the last 10
-  control-plane events of the swarm stream, `loop_tick`/`loop_wake` left out).
-- `GET /swarms/{s}/health/history?since=<epoch s or ISO>&res=30s|5m`: `[{ts, body}]`.
+  control-plane events of the swarm stream, `loop_tick`/`loop_wake` left out). Right after a
+  controller restart, until the first sample, `body` is the newest stored slim one.
+- `GET /swarms/{s}/health/history?since=<epoch s or ISO>&res=30s|5m`: `[{ts, body}]`; `30s`
+  from memory (full bodies), `5m` from the store (slim).
+- `flock status --watch` also shows the world's `/metrics`: event-loop lag, 429s, each pool's
+  oldest queue wait, `lane_<lane>_tripped/paused/effective_slots/in_flight` per lane, the
+  comment outbox depth and age, and any other number under `world`.
 - `GET /swarms/{s}/usage?by=type|hour`: token rows.
 - `flock status [swarm] --watch` (every 10 s), `flock status [swarm] --json`,
   `flock usage <swarm> [--by type|hour]`.

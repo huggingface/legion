@@ -167,7 +167,7 @@ def test_tokens_turn_total_wins_over_message_usage_and_cut_turns_count(store):
     assert store.usage("demo") == [{"hour": "2026-09-21T14", "type": "researcher", "input": 22,
                                     "output": 5, "cache_read": 10, "cache_write": 0,
                                     "reasoning": 0}]
-    body = store.health_samples("demo")[-1]["body"]
+    body = h.latest("demo")["body"]
     assert body["tokens"]["by_type"]["researcher"]["input"] == 22
 
 
@@ -180,7 +180,7 @@ def test_snapshot_workers_types_stuck_tool_rates_and_alerts(store):
               data={"target": "demo-researcher-w0000", "detail": ""})
         for k in ("crash", "loop_tick", "planned_restart")])
     h.tick(T)  # baseline: first sight of the worker's tool counters
-    first = store.health_samples("demo")[-1]["body"]
+    first = h.latest("demo")["body"]
     assert first["tools"]["open_pr"]["rate_per_min"] is None
     t1 = T + 31 * 60
     store.update_worker("demo-researcher-w0000", last_heartbeat=t1, telemetry=json.dumps({
@@ -190,7 +190,7 @@ def test_snapshot_workers_types_stuck_tool_rates_and_alerts(store):
         store.update_agent(a["name"], last_heartbeat=t1)
     h.on_events(a1, [_ev(a1["name"], "turn_ended")], t1)  # a1 spoke; a0 is silent 31 min
     h.tick(t1)
-    body = store.health_samples("demo")[-1]["body"]
+    body = h.latest("demo")["body"]
     w = body["workers"]["demo-researcher-w0000"]
     assert w["slope_mb_h"] == 120.0 and w["eta_limit_s"] == 1800.0 and w["relaunches"] == 2
     assert body["tools"]["open_pr"] == {"rate_per_min": 0.97, "err_pct": 10.0,
@@ -206,8 +206,14 @@ def test_snapshot_workers_types_stuck_tool_rates_and_alerts(store):
     # files: latest.json (newest sample) and the day's 5-min jsonl
     latest = json.loads((store.data_dir / "metrics/demo/latest.json").read_text())
     assert latest["ts"] == t1
-    day = (store.data_dir / "metrics/demo/2026-09-21.jsonl").read_text().splitlines()
+    day = (store.data_dir / "metrics/demo/2026-09-21T12.jsonl").read_text().splitlines()
     assert len(day) == 2  # T and T+31 min are 5-min samples, nothing in between
+    stored = json.loads(day[-1])["body"]  # slim: worker aggregates, no per-worker map
+    assert stored["workers"] == {"count": 1, "max_nonreclaim_frac": None,
+                                 "min_eta_limit_s": 1800.0, "restoring": 0, "relaunches": 2}
+    assert stored["types"]["researcher"]["stuck_n"] == 1
+    assert [r["ts"] for r in store.health_samples("demo", "5m")] == [T, t1]
+    assert [x["ts"] for x in h.history("demo", T + 1)] == [t1]
 
 
 def test_health_samples_are_pruned_on_insert(store):
@@ -231,14 +237,16 @@ def test_health_files_mirror_through_state_sync(tmp_path, store):
     sync = StateSync(bucket, store.data_dir)
     sync.push(store)
     assert (tmp_path / "bucket/metrics/demo/latest.json").exists()
-    assert (tmp_path / "bucket/metrics/demo/2026-09-21.jsonl").exists()
+    assert (tmp_path / "bucket/metrics/demo/2026-09-21T12.jsonl").exists()
     h.tick(T + 30)
     before = len(bucket.ops)
-    assert sync.push(store) == 2  # state.db and latest.json; the day file did not change
-    assert len(bucket.ops) == before + 2
+    # latest.json only: the DB did not change (30 s samples are in memory), nor did the
+    # 6-hour file
+    assert sync.push(store) == 1
+    assert len(bucket.ops) == before + 1
     restored = tmp_path / "restored"
     assert StateSync(bucket, restored).restore()
-    assert (restored / "metrics/demo/2026-09-21.jsonl").exists()
+    assert (restored / "metrics/demo/2026-09-21T12.jsonl").exists()
 
 
 # --------------------------------------------------------------------------- rollups, run.json
@@ -372,7 +380,12 @@ def test_watch_shows_world_metrics_and_provider_queues(capsys):
 
     m = {"loop_lag_s": 0.012, "overloaded_429_total": 7,
          "pools": {"fast": {"queue_wait_oldest_s": 0.4}, "slow": {"queue_wait_oldest_s": 12.0}},
-         "world": {"open_prs": 41, "outbox_depth": 3}}
+         "world": {"open_prs": 41, "lane_comment_outbox_depth": 3,
+                   "lane_comment_outbox_oldest_age_s": 95.0, "lane_push_wait_s_total": 12.5,
+                   "lane_merge_tripped": 1, "lane_merge_paused": 0,
+                   "lane_merge_effective_slots": 1, "lane_merge_in_flight": 1,
+                   "lane_push_tripped": 0, "lane_push_paused": 1,
+                   "lane_push_effective_slots": 2, "lane_push_in_flight": 0, "note": "text"}}
     body = {"world": {"up": False, "manifest_ms": None, "slurm_state": "PENDING", "metrics": m},
             "workers": {}, "types": {}, "tools": {}, "tokens": {"by_type": {}},
             "providers": {"v": {"waiting": 3.0, "running": 5.0, "kv": 0.42}},
@@ -382,5 +395,80 @@ def test_watch_shows_world_metrics_and_provider_queues(capsys):
     cli._print_health(st, {"ts": T, "generation": 3, "body": body})
     out = capsys.readouterr().out
     for want in ("world DOWN - ms slurm PENDING", "waiting for a node", "loop lag 0.012 s",
-                 "429s 7", "slow queue 12.0 s", "open_prs 41", "provider v: waiting 3 running 5 kv 42%"):
+                 "429s 7", "slow queue 12.0 s", "open_prs 41",
+                 "comment outbox 3 (oldest 95 s)", "lane merge: TRIPPED slots 1 in flight 1",
+                 "lane push: paused slots 2 in flight 0", "lane_push_wait_s_total 12.5",
+                 "provider v: waiting 3 running 5 kv 42%"):
         assert want in out, (want, out)
+
+
+# --------------------------------------------------------------------------- review fixes
+
+async def test_a_failing_probe_does_not_end_the_loop(store, monkeypatch):
+    import asyncio
+
+    h = Health(store)
+    ticks = []
+
+    async def boom(now):
+        raise RuntimeError("probe broke")
+
+    monkeypatch.setattr(h, "probe", boom)
+    monkeypatch.setattr(h, "tick", ticks.append)
+    task = asyncio.create_task(h.run(0.01))
+    for _ in range(200):
+        if len(ticks) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    alive = not task.done()
+    task.cancel()
+    assert len(ticks) >= 2 and alive
+
+
+async def test_squeue_failure_is_unknown_and_down_still_counts(store):
+    class NoSqueue:
+        def state_by_name(self, name):
+            raise FileNotFoundError("squeue")
+
+    world = FakeWorld()
+    world.up = False
+    store.put_swarm(world_spec(slurm_job_name="world-job"), T)
+    h = Health(store, secrets={"WT": "s"}, jobs=NoSqueue(), transport=httpx.MockTransport(world))
+    await h.probe(T)
+    await h.probe(T + 30)
+    assert h.world["demo"]["slurm_state"] == "unknown"
+    evs = store.read_events(swarm_stream("demo"), 0)
+    assert [e["type"] for e in evs] == ["world_down"] and evs[0]["data"]["slurm_state"] == "unknown"
+
+
+def test_turn_without_usage_counts_its_message_usage(store):
+    a0, _ = _fleet(store, T)
+    h = Health(store)
+    msg = {"message": {"role": "assistant", "model": "m", "usage": {"input": 9, "output": 4}}}
+    h.on_events(a0, [_ev(a0["name"], "turn_started"), _ev(a0["name"], "message", msg),
+                     _ev(a0["name"], "turn_ended", {"usage_missing": True, "tokens": {
+                         "m": {"input": 0, "output": 0}}})], T)
+    h.tick(T + 1)
+    (row,) = store.usage("demo")
+    assert (row["input"], row["output"]) == (9, 4)
+
+
+def test_restart_within_an_hour_keeps_one_line_per_agent_with_summed_totals(store):
+    a0, _ = _fleet(store, T)
+    tok = {"tokens": {"m": {"input": 10, "output": 1}}}
+    first = Health(store)
+    first.tick(T)
+    first.on_events(a0, [_ev(a0["name"], "turn_ended", tok)], T + 10)
+    first.tick(T + 300)  # the open hour's file, rewritten every 5 min
+    path = store.data_dir / "rollups/demo/2026-09-21T14.jsonl"
+    assert json.loads(path.read_text())["turns"] == 1
+    # SIGKILL here; a new controller (the state sync restored the file) goes on from it
+    second = Health(store)
+    second.on_events(a0, [_ev(a0["name"], "turn_ended", tok)], T + 400)
+    second.close(T + 500)
+    lines = [json.loads(x) for x in path.read_text().splitlines()]
+    assert [x["agent"] for x in lines] == ["researcher-0000"]  # 0001 idle all hour: not active
+    a = lines[0]
+    assert a["turns"] == 2 and a["tokens"]["m"]["input"] == 20 and a["events"]["turn_ended"] == 2
+    second.close(T + 600)  # closing again rewrites, never appends
+    assert len(path.read_text().splitlines()) == 1

@@ -360,9 +360,12 @@ class SlurmJobsClient:
 
     def state_by_name(self, name: str) -> str | None:
         """squeue state of the job(s) named `name` (`world.slurm_job_name`): RUNNING when one
-        runs, else the first one's (PENDING, ...); None when none is queued."""
+        runs, else the first one's (PENDING, ...); None when none is queued. Raises when
+        squeue fails (missing, timeout, error)."""
         r = self._call("squeue", ["squeue", "-h", "-n", name, "-o", "%T"])
-        states = (r.stdout or "").split() if r.returncode == 0 else []
+        if r.returncode != 0:
+            raise RuntimeError(f"squeue exit {r.returncode}: {(r.stderr or '').strip()[:200]}")
+        states = (r.stdout or "").split()
         return "RUNNING" if "RUNNING" in states else (states[0] if states else None)
 
     def map_state(self, job_id: str, state: str, exit_code: str = "") -> JobState:

@@ -5,11 +5,15 @@ Every SAMPLE_S the controller probes each swarm's world (`GET /manifest` timed, 
 when the manifest lists `metrics-v1`, the Slurm job state when `world.slurm_job_name` is set)
 and the providers with `metrics: true` (vLLM Prometheus text), then builds one snapshot per
 swarm from the store (heartbeats, telemetry), the swarm stream and in-memory counters fed by
-`post_events`. Event files are never re-read.
+`post_events`. Agent event files are never read; the swarm stream is tailed by byte offset.
+The 30 s snapshots stay in memory (6 h); every 10th one, slimmed, is stored (48 h) and
+appended to `metrics/<swarm>/<YYYY-MM-DD>T<HH>.jsonl` (one file per 6 hours).
 
-For the run viewer it also writes `rollups/<swarm>/<YYYY-MM-DDTHH>.jsonl` (one line per agent
-active that hour, appended when the hour closes; hours are by arrival time at the controller)
-and `run.json` at the state root (at start, on each new generation, at the end).
+For the run viewer it also writes `rollups/<swarm>/<YYYY-MM-DDTHH>.jsonl`: one line per agent
+active that hour, the whole file rewritten with the running totals every 5 min, when the hour
+closes and at shutdown (hours by arrival time at the controller; a restart within an hour
+reloads the file and keeps adding to it). And `run.json` at the state root (at start, on each
+new generation, at the end).
 """
 
 from __future__ import annotations
@@ -39,9 +43,10 @@ log = logging.getLogger("flock.health")
 
 SAMPLE_S = 30.0  # FLOCK_HEALTH_INTERVAL overrides
 PROBE_TIMEOUT_S = 5.0
-KEEP_30S = 6 * 3600.0
-ROLLUP_S = 300.0  # every 10th sample is also kept as a 5-min sample, 7 days
-KEEP_5M = 7 * 86400.0
+KEEP_30S = 6 * 3600.0  # in memory only
+ROLLUP_S = 300.0  # every 10th sample is stored (slim) and the open hour's rollups rewritten
+KEEP_5M = 48 * 3600.0
+STUCK_KEPT = 20  # stuck agents per type in a stored (slim) sample
 STUCK_S = 30 * 60.0  # working with no event for longer: listed as stuck (FLOCK_STUCK_MIN)
 NEAR_LIMIT_S = 3600.0  # alert: a worker reaches its memory limit within this
 TOOL_ALERT_PCT = 20.0  # alert: a tool's error or refusal share over the last sample
@@ -87,11 +92,31 @@ def _add(acc: dict[str, int], d: Mapping[str, int]) -> None:
         acc[k] = acc.get(k, 0) + v
 
 
-def _write_json(path: Path, doc: Any) -> None:
+def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _write_json(path: Path, doc: Any) -> None:
+    _write_text(path, json.dumps(doc, sort_keys=True) + "\n")
+
+
+def slim(body: dict[str, Any]) -> dict[str, Any]:
+    """A snapshot body for storage: worker aggregates instead of the per-worker map, at most
+    STUCK_KEPT stuck agents per type (`stuck_n` has the count)."""
+    ws = list(body["workers"].values())
+    fracs = [w["mem"]["nonreclaim_mb"] / w["mem"]["limit_mb"] for w in ws
+             if w["mem"].get("nonreclaim_mb") is not None and w["mem"].get("limit_mb")]
+    etas = [w["eta_limit_s"] for w in ws if w.get("eta_limit_s") is not None]
+    workers = {"count": len(ws), "max_nonreclaim_frac": round(max(fracs), 3) if fracs else None,
+               "min_eta_limit_s": min(etas) if etas else None,
+               "restoring": sum(1 for w in ws if w.get("restore")),
+               "relaunches": sum(w.get("relaunches", 0) for w in ws)}
+    types = {t: {**ty, "stuck": ty["stuck"][:STUCK_KEPT], "stuck_n": len(ty["stuck"])}
+             for t, ty in body["types"].items()}
+    return {**body, "workers": workers, "types": types}
 
 
 class Health:
@@ -110,7 +135,8 @@ class Health:
         self._last_event: dict[str, float] = {}  # agent -> when its last event arrived
         self._open: dict[str, dict[str, dict[str, int]]] = {}  # agent -> model -> message usage
         self._usage: dict[tuple[str, str, str], dict[str, int]] = {}  # (swarm, hour, type) -> new
-        self._cursor: dict[str, int] = {}  # swarm stream lines read
+        self._offset: dict[str, int] = {}  # swarm stream bytes read
+        self.samples: dict[str, deque] = {}  # swarm -> the 30 s samples {ts, body}, 6 h
         self._relaunches: dict[str, Counter] = {}  # swarm -> worker id -> crash/planned_restart
         self._recent: dict[str, deque] = {}  # swarm -> last control-plane events
         self._tools: dict[str, dict[str, dict]] = {}  # swarm -> worker -> counters, last tick
@@ -119,14 +145,16 @@ class Health:
         self._hour: str | None = None  # the open rollup hour
         self._rollups: dict[str, dict[str, Any]] = {}  # agent -> its line for the open hour
         self._closed: list[dict[str, dict[str, Any]]] = []  # closed hours not yet written
+        self._rollups_at = 0.0  # when the open hour's files were last written
         self._run_gens: dict[str, int] | None = None  # generations run.json was written for
 
     # ------------------------------------------------------------------ counters (post_events)
     def on_events(self, a: Row, evs: list[Event], now: float) -> None:
         """Token usage by type and hour from `turn_ended`, with assistant `message` usage
-        counted only for turns that never got one (cut by a worker death or an interrupt): a
-        turn's message usage is held until its turn_ended (then dropped: the turn total wins)
-        or until the next turn_started / turn_interrupted / session_* event (then counted)."""
+        counted only for turns that never got one (cut by a worker death or an interrupt) or
+        whose total is empty: a turn's message usage is held until its turn_ended (then
+        dropped: a non-empty turn total wins) or until the next turn_started /
+        turn_interrupted / session_* event (then counted)."""
         with self._lock:
             self._last_event[a["name"]] = now
             for ev in evs:
@@ -159,9 +187,12 @@ class Health:
                    else "error" if p.get("error") or p.get("status") not in (None, "completed")
                    else "done")
             r["out"][out] += 1
-            self._open.pop(name, None)
-            for model, u in (p.get("tokens") or {}).items():
-                self._spend(a, model, _tokens(u), now)
+            held = self._open.pop(name, {})
+            tokens = {m: _tokens(u) for m, u in (p.get("tokens") or {}).items()}
+            if not any(any(u.values()) for u in tokens.values()):
+                tokens = held  # no usage in the turn total (usage_missing): what messages had
+            for model, u in tokens.items():
+                self._spend(a, model, u, now)
         elif ev.type == "turn_started" or ev.type == "turn_interrupted" or ev.type.startswith(
                 "session_"):
             for model, u in self._open.pop(name, {}).items():
@@ -179,6 +210,15 @@ class Health:
             if self._rollups:
                 self._closed.append(self._rollups)
             self._hour, self._rollups = h, {}
+            # a restart within the hour: go on from the lines written before it
+            for path in (self.store.data_dir / "rollups").glob(f"*/{h}.jsonl"):
+                try:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        r = json.loads(line)
+                        r.pop("ephemeral", None)
+                        self._rollups[r["agent"]] = {**r, "swarm": path.parent.name}
+                except (OSError, ValueError, KeyError):
+                    log.exception("cannot reload %s", path)
 
     def _rollup(self, a: Row, now: float) -> dict[str, Any]:
         self._roll(now)
@@ -193,24 +233,28 @@ class Health:
                 "last_ts": None}
         return r
 
-    def _write_rollups(self, hours: list[dict[str, dict[str, Any]]]) -> None:
+    def _write_hour(self, rollups: dict[str, dict[str, Any]]) -> None:
+        """Write one hour's files whole: one line per active agent (replace, never append)."""
         specs = {sw["name"]: sw["spec"] for sw in self.store.list_swarms()}
-        for lines in hours:
-            files: dict[Path, list[str]] = {}
-            for r in lines.values():
-                if not (r["events"] or r["working_s"] or r["pending_s"]):
-                    continue  # idle all hour, nothing happened: not active
-                r = dict(r)
-                swarm = r.pop("swarm")
-                ts = specs[swarm].types.get(r["type"]) if swarm in specs else None
-                r["ephemeral"] = bool(ts and ts.ephemeral)
-                path = self.store.data_dir / "rollups" / swarm / f"{r['h']}.jsonl"
-                files.setdefault(path, []).append(json.dumps(r, sort_keys=True))
-            for path, out in files.items():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # append: a controller restart mid-hour leaves two lines for an agent; sum them
-                with path.open("a", encoding="utf-8") as f:
-                    f.write("\n".join(out) + "\n")
+        files: dict[Path, list[str]] = {}
+        for r in rollups.values():
+            if not (r["events"] or r["working_s"] or r["pending_s"]):
+                continue  # idle all hour, nothing happened: not active
+            r = dict(r)
+            swarm = r.pop("swarm")
+            ts = specs[swarm].types.get(r["type"]) if swarm in specs else None
+            r["ephemeral"] = bool(ts and ts.ephemeral)
+            path = self.store.data_dir / "rollups" / swarm / f"{r['h']}.jsonl"
+            files.setdefault(path, []).append(json.dumps(r, sort_keys=True))
+        for path, out in files.items():
+            _write_text(path, "\n".join(sorted(out)) + "\n")
+
+    def _write_open_hour(self, now: float) -> None:
+        with self._lock:
+            self._roll(now)
+            current = json.loads(json.dumps(self._rollups))  # a copy, taken under the lock
+        self._write_hour(current)
+        self._rollups_at = now
 
     def _sample_states(self, swarm: str, agents: list[Row], states: dict[str, str],
                        dt: float, now: float) -> None:
@@ -252,24 +296,36 @@ class Health:
     def close(self, now: float) -> None:
         """At shutdown: a last snapshot, the open hour's rollups, run.json as ended."""
         self.tick(now)
-        with self._lock:
-            hours, self._rollups = [self._rollups], {}
-        self._write_rollups(hours)
+        self._write_open_hour(now)
         self.write_run(now, ended=True)
 
     # ------------------------------------------------------------------ snapshots
     def tick(self, now: float) -> None:
-        """One snapshot per swarm: stored (30 s for 6 h, every 10th as 5-min for 7 d) and
-        written as metrics/<swarm>/latest.json and metrics/<swarm>/<date>.jsonl (5-min)."""
+        """One snapshot per swarm: kept in memory (30 s, 6 h) and as metrics/<swarm>/latest.json;
+        every 5 min also stored slim (48 h) and appended to metrics/<swarm>/<date>T<HH>.jsonl,
+        and the open hour's rollups rewritten."""
         with self._lock:
             if self._since is None:
                 self._since = now
             self._roll(now)
             usage, self._usage = self._usage, {}
             closed, self._closed = self._closed, []
-        for (swarm, hour, type_name), u in usage.items():
-            self.store.add_usage(swarm, hour, type_name, u)
-        self._write_rollups(closed)
+        try:
+            while usage:
+                key = next(iter(usage))
+                self.store.add_usage(*key, usage[key])
+                del usage[key]
+            while closed:
+                self._write_hour(closed[0])
+                closed.pop(0)
+        except Exception:  # put back what was not written: the next tick retries it
+            with self._lock:
+                for key, u in usage.items():
+                    _add(self._usage.setdefault(key, {}), u)
+                self._closed[:0] = closed
+            raise
+        if now - self._rollups_at >= ROLLUP_S - 1:
+            self._write_open_hour(now)
         swarms = self.store.list_swarms()
         if self._run_gens != {sw["name"]: sw["generation"] for sw in swarms}:
             self.write_run(now)
@@ -277,35 +333,63 @@ class Health:
             spec: SwarmSpec = sw["spec"]
             self._tail(spec.swarm, now)
             body = self.snapshot(spec, now)
-            self.store.add_health_sample(spec.swarm, now, "30s", body, KEEP_30S)
             sample = {"ts": now, "body": body}
+            with self._lock:
+                self.samples.setdefault(spec.swarm, deque(maxlen=int(KEEP_30S / SAMPLE_S))
+                                        ).append(sample)
             _write_json(self.store.data_dir / "metrics" / spec.swarm / "latest.json", sample)
             if now - self._last_5m.get(spec.swarm, 0.0) >= ROLLUP_S - 1:
                 self._last_5m[spec.swarm] = now
-                self.store.add_health_sample(spec.swarm, now, "5m", body, KEEP_5M)
-                day = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d")
-                path = self.store.data_dir / "metrics" / spec.swarm / f"{day}.jsonl"
+                small = slim(body)
+                self.store.add_health_sample(spec.swarm, now, "5m", small, KEEP_5M)
+                d = datetime.fromtimestamp(now, UTC)
+                # 6-hour files: each state push re-uploads a changed file whole, keep them small
+                name = f"{d:%Y-%m-%d}T{d.hour // 6 * 6:02d}.jsonl"
+                path = self.store.data_dir / "metrics" / spec.swarm / name
                 with path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(sample, sort_keys=True) + "\n")
+                    f.write(json.dumps({"ts": now, "body": small}, sort_keys=True) + "\n")
+
+    def latest(self, swarm: str) -> dict[str, Any] | None:
+        """The newest 30 s sample, else (after a restart) the newest stored slim one."""
+        with self._lock:
+            mem = self.samples.get(swarm)
+            if mem:
+                return mem[-1]
+        rows = self.store.health_samples(swarm, "5m", limit=1)
+        return rows[0] if rows else None
+
+    def history(self, swarm: str, since: float) -> list[dict[str, Any]]:
+        with self._lock:
+            return [x for x in self.samples.get(swarm, ()) if x["ts"] >= since]
 
     def _tail(self, swarm: str, now: float) -> None:
         """New swarm-stream events: relaunch counts and the recent control-plane actions."""
         key = swarm_stream(swarm)
         relaunches = self._relaunches.setdefault(swarm, Counter())
         recent = self._recent.setdefault(swarm, deque(maxlen=RECENT_EVENTS))
-        live = swarm in self._cursor  # the first read is history: no wakes counted from it
-        while evs := self.store.read_events(key, self._cursor.get(swarm, 0), limit=5000):
-            self._cursor[swarm] = self._cursor.get(swarm, 0) + len(evs)
-            for e in evs:
-                data = e.get("data") or {}
-                if live and e["type"] == "loop_wake" and (a := self.store.get_agent(e["agent"])):
-                    with self._lock:
-                        self._rollup(a, now)["wakes"] += 1
-                if e["type"] in ("crash", "planned_restart"):
-                    relaunches[data.get("target")] += 1
-                if e["type"] not in NOISY:
-                    with self._lock:
-                        recent.append({"ts": e["ts"], "type": e["type"], "data": data})
+        off = self._offset.get(swarm)
+        live = off is not None  # the first read is history: no wakes counted from it
+        path = self.store._events_path(swarm, key)
+        if not path.exists():
+            self._offset[swarm] = 0
+            return
+        off = 0 if off is None or path.stat().st_size < off else off  # shorter: a new file
+        with path.open("rb") as f:
+            f.seek(off)
+            data = f.read()
+        end = data.rfind(b"\n") + 1  # whole lines only
+        self._offset[swarm] = off + end
+        for raw in data[:end].splitlines():
+            e = json.loads(raw)
+            data_ = e.get("data") or {}
+            if live and e["type"] == "loop_wake" and (a := self.store.get_agent(e["agent"])):
+                with self._lock:
+                    self._rollup(a, now)["wakes"] += 1
+            if e["type"] in ("crash", "planned_restart"):
+                relaunches[data_.get("target")] += 1
+            if e["type"] not in NOISY:
+                with self._lock:
+                    recent.append({"ts": e["ts"], "type": e["type"], "data": data_})
 
     def recent_events(self, swarm: str) -> list[dict]:
         with self._lock:
@@ -380,7 +464,10 @@ class Health:
         """Probe, then snapshot, every `interval` s, until cancelled."""
         while True:
             now = time.time()
-            await self.probe(now)
+            try:
+                await self.probe(now)
+            except Exception:
+                log.exception("health probe failed")
             try:
                 await asyncio.to_thread(self.tick, now)
             except Exception:
@@ -422,8 +509,12 @@ class Health:
         except (httpx.HTTPError, ValueError) as e:
             error = f"{type(e).__name__}: {e}"[:200]
         if w.slurm_job_name and hasattr(self.jobs, "state_by_name"):
-            st = await asyncio.to_thread(self.jobs.state_by_name, w.slurm_job_name)
-            state["slurm_state"] = st or "absent"
+            try:
+                st = await asyncio.to_thread(self.jobs.state_by_name, w.slurm_job_name)
+                state["slurm_state"] = st or "absent"
+            except Exception as e:  # noqa: BLE001 - squeue missing, failing or timing out
+                log.warning("squeue for world %s: %s: %s", w.slurm_job_name, type(e).__name__, e)
+                state["slurm_state"] = "unknown"
         self.world[spec.swarm] = state
         fails = 0 if state["up"] else self._fails.get(spec.swarm, 0) + 1
         prev, self._fails[spec.swarm] = self._fails.get(spec.swarm, 0), fails

@@ -17,9 +17,10 @@ tails to their file (in offset order, stopping at a gap), and the next periodic 
 whole file again and deletes them. After a restore the restored files count as uploaded, so the
 first push after a restart is incremental too.
 
-Health files (docs/health.md) are mirrored too: `metrics/<swarm>/latest.json` and
-`<date>.jsonl`, `rollups/<swarm>/<hour>.jsonl` and `run.json`, each uploaded whole when it
-changed, and restored with the snapshot so the day and hour files keep growing.
+Health files (docs/health.md) are mirrored too: `metrics/<swarm>/latest.json` and the 6-hour
+`<date>T<HH>.jsonl`, `rollups/<swarm>/<hour>.jsonl` and `run.json`, each uploaded whole when it
+changed (also when the DB did not), and restored with the snapshot so a restarted controller
+keeps adding to them.
 
 A snapshot with no swarms is never restored: once the last swarm is removed, the next push
 writes an empty snapshot, so a later controller in the same group starts clean.
@@ -176,24 +177,26 @@ class StateSync:
         `final` (the shutdown push): upload only the bytes appended to each event file."""
         with self._lock:
             changes = store.changes()
-            if not force and changes == self._pushed_at_change:
-                return 0
-            snap = self.data_dir / (STATE_DB + ".snapshot")
-            store.backup_to(snap)
-            try:
-                self.bucket.upload([(snap, STATE_DB)])
-            finally:
-                snap.unlink(missing_ok=True)
-            files = 1
-            events_dir = self.data_dir / EVENTS
-            if self.events and events_dir.is_dir():
-                files += self._push_events(events_dir, final)
+            files = 0
+            # health files change without the DB (in-memory samples): sent on their own
             changed = [(rel, rec) for rel, rec in self._scan_mirrored()
                        if self._mirrored.get(rel) != rec]
             if changed:
                 self.bucket.upload([(self.data_dir / rel, rel) for rel, _ in changed])
                 self._mirrored.update(changed)
                 files += len(changed)
+            if not force and changes == self._pushed_at_change:
+                return files
+            snap = self.data_dir / (STATE_DB + ".snapshot")
+            store.backup_to(snap)
+            try:
+                self.bucket.upload([(snap, STATE_DB)])
+            finally:
+                snap.unlink(missing_ok=True)
+            files += 1
+            events_dir = self.data_dir / EVENTS
+            if self.events and events_dir.is_dir():
+                files += self._push_events(events_dir, final)
             self._pushed_at_change = changes
             self.pushes += 1
             return files

@@ -937,7 +937,8 @@ class Store:
         with self.transaction():
             self._x("INSERT INTO health_samples (swarm, ts, res, body) VALUES (?, ?, ?, ?)",
                     [swarm, ts, res, json.dumps(body, sort_keys=True)])
-            self._x("DELETE FROM health_samples WHERE res = ? AND ts < ?", [res, ts - keep_s])
+            self._x("DELETE FROM health_samples WHERE swarm = ? AND res = ? AND ts < ?",
+                    [swarm, res, ts - keep_s])
 
     def health_samples(self, swarm: str, res: str = "30s", since: float = 0.0,
                        limit: int = 5000) -> list[Row]:
