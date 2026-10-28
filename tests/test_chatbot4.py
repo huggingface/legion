@@ -260,6 +260,7 @@ def test_world_archive_restores_git_reviews_and_merge_hook(setup, tmp_path, monk
     assert snapshot.transfer("restore", restored, "hf://buckets/fake/run4", store)
     assert not snapshot.transfer("restore", restored, "hf://buckets/fake/absent",
                                  FakeBucket(tmp_path / "absent"))
+    (restored / "prs.json").unlink()  # the state comes from the state.db backup in the archive
     repo = Repository(restored / "repo.git", str(remote))
     repo.hub = LocalHub(remote)
     restarted = Chatbot4World(restored, repo)

@@ -10,8 +10,10 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 from flock.worker.sync import HubBucketStore
+from flock.world.store import backup_to
 
-FILES = ("repo.bundle", "prs.json", "prs.jsonl", "eval-queue.jsonl", "knobs.json",
+# state.db is copied with the online backup API (consistent while the world writes it).
+FILES = ("repo.bundle", "state.db", "prs.json", "prs.jsonl", "eval-queue.jsonl", "knobs.json",
          "outbox-comment.jsonl")
 
 
@@ -29,7 +31,10 @@ def transfer(mode, workspace, bucket, store=None):
                             str(bundle), "--all"], check=True, capture_output=True)
             with tarfile.open(archive, "w:gz", compresslevel=1) as out:
                 out.add(bundle, arcname="repo.bundle")
-                for name in FILES[1:]:
+                if (workspace / "state.db").exists():
+                    backup_to(workspace / "state.db", Path(tmp) / "state.db")
+                    out.add(Path(tmp) / "state.db", arcname="state.db")
+                for name in FILES[2:]:
                     if (workspace / name).exists():
                         out.add(workspace / name, arcname=name)
             store.upload([(archive, "world.tar.gz")])
@@ -47,6 +52,8 @@ def transfer(mode, workspace, bucket, store=None):
                         target.mkdir(parents=True, exist_ok=True)
                     else:
                         target.parent.mkdir(parents=True, exist_ok=True)
+                        for wal in ("-wal", "-shm"):  # a stale WAL would replay onto the restored db
+                            target.with_name(target.name + wal).unlink(missing_ok=True)
                         with source.extractfile(member) as src, target.open("wb") as dst:
                             shutil.copyfileobj(src, dst)
 
