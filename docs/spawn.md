@@ -221,8 +221,8 @@ agent's identity:
 |---|---|
 | `FLOCK_AGENT` | the agent's own name |
 | `FLOCK_PARENT` | its parent's name, or empty |
-| `FLOCK_URL` | the controller URL |
-| `FLOCK_AGENT_TOKEN` | the agent's scoped token |
+| `FLOCK_URL` | the controller URL at harness start (direct calls only, see "CLI inside an agent") |
+| `FLOCK_AGENT_TOKEN` | the agent's scoped token (direct calls only; the gateway uses the worker's copy) |
 | `FLOCK_TOKEN` | empty: the worker's own token never reaches an agent |
 
 An agent token may: read its own status and events and call `whoami`; spawn under itself and
@@ -238,9 +238,30 @@ invalidates every agent token; agents get the new one with their next assign.
 
 ## CLI inside an agent
 
-The worker image and the bootstrap put the `flock` CLI on PATH (same package). It reads
-`FLOCK_URL` and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`). Inside an agent, names are
-always agent names.
+The worker image and the bootstrap put the `flock` CLI on PATH (same package). Inside an agent,
+names are always agent names.
+
+**Through the worker.** When the agent's pin file (`FLOCK_TOOLS_PIN`) names the worker's
+gateway (every CLI harness: claude, codex, pi), each call goes there as `controller:request
+{method, path, params, json}`. The worker accepts only the routes an agent token may use:
+
+| Method | Path |
+|---|---|
+| GET | `/whoami`, `/agents/{name}`, `/agents/{name}/events`, `/swarms/{s}/agents` |
+| POST | `/agents/{name}/spawn`, `/agents/{name}/prompt`, `/agents/{name}/children/prompts` |
+| DELETE | `/agents/{name}` |
+
+It sends the call with the agent's own token through its own controller client, which re-reads
+the controller's address (`FLOCK_CTL_HOST_FILE` on Slurm) before every heartbeat and after any
+connection error, and retries there. So a controller that moved host is reached at its new
+address; `FLOCK_URL` in the harness environment, fixed when the harness started, is not used.
+The controller still checks the token's scope (below). A call that still fails after the
+retries (unreachable, or 5xx) is an error for the CLI and a `controller_call_failed {path,
+error}` event on the agent's stream (`flock events <agent>`).
+
+**Directly.** Without a gateway (the `llm` harness, or no pin file) the CLI reads `FLOCK_URL`
+and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in the harness
+environment for that fallback; with the gateway they are not needed and can be dropped.
 
 ```sh
 flock whoami                               # name, parent, depth, children
