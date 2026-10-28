@@ -548,6 +548,26 @@ async def test_over_soft_limit_notes_hourly_and_hard_limit_emits_event(tmp_path)
     await rt.stop()
 
 
+async def test_quota_note_replaced_and_not_timestamped_when_dropped(tmp_path):
+    sync = BucketSync(MemoryStore(), "sw")
+    rt, _ = runtime(tmp_path, sync=sync, workdir={"soft_files": 2, "max_files": 5})
+    await rt.setup(restore=False)
+    rt.workdir.mkdir(parents=True, exist_ok=True)
+    for i in range(4):
+        (rt.workdir / f"f{i}").write_text("x")
+    await sync.push(rt)  # no turn yet: the note is dropped, so nothing is timestamped
+    assert not rt._notes and not sync._quota_at
+    await rt.prompt("hi")
+    await until(lambda: rt.state.turns == 1)
+    await sync.push(rt)
+    assert len(rt._notes) == 1 and sync._quota_at
+    (rt.workdir / "g").write_text("x")
+    sync._quota_at[sync.prefix(rt)] -= 3600.0
+    await sync.push(rt)  # an unread note is replaced, not stacked
+    assert len(rt._notes) == 1 and "5 files" in next(iter(rt._notes))
+    await rt.stop()
+
+
 def over_quota(rt):
     return [e.data["data"] for e in list(rt.outbox._q)
             if e.data.get("customType") == "workdir_over_quota"]

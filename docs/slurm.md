@@ -121,8 +121,7 @@ types:
                                 # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT, _SPIKE_MB, _RECYCLE_GAP_S
 ```
 
-Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` when it is not
-the default 300, else `FLOCK_COMMS_POLL_CYCLE_S`, else 300. Each heartbeat carries `knobs_rev`,
+Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` when set, else `FLOCK_COMMS_POLL_CYCLE_S`, else 300. Each heartbeat carries `knobs_rev`,
 a hash of the settings in force, and `flock workers` shows it (`knobs`), so workers running
 an older configuration stand out.
 

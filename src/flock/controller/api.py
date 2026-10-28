@@ -82,8 +82,9 @@ from flock.models import (
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
 from flock.tools.spec import comms_clashes
-from flock.world.host import WorldError, WorldHost
+from flock.world.host import WorldError, WorldHost, world_admin_token
 from flock.world.host import resolve as world_resolve
+from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER
 
 log = logging.getLogger(__name__)
 # Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
@@ -574,6 +575,74 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
 # --------------------------------------------------------------------------- app
 
 
+def add_world_admin_routes(api: APIRouter, store: Store, token: str,
+                           secret_source: Mapping[str, str],
+                           transport: httpx.BaseTransport | None,
+                           clock: Callable[[], datetime]) -> None:
+    """`/swarms/{swarm}/world/...`: the world's admin API (knobs, lane pauses; docs/world.md)
+    through the controller with the world's admin secret (`world_admin_token`). Every change
+    is a swarm event."""
+
+    def world_admin(swarm: str, method: str, path: str, body: Any = None) -> Any:
+        row = store.get_swarm(swarm)
+        if row is None:
+            raise HTTPException(404, f"no swarm {swarm!r}")
+        spec = row["spec"]
+        if spec.world is None or not spec.world.endpoint:
+            raise HTTPException(404, f"swarm {swarm!r} has no world")
+        secret = world_admin_token(spec, token, secret_source)
+        if not secret:
+            raise HTTPException(409, f"no admin secret for the world of {swarm!r}: set "
+                                     f"{ADMIN_TOKEN_ENV} on the controller and the world")
+        try:
+            with httpx.Client(transport=transport, timeout=30) as http:
+                r = http.request(method, f"{spec.world.endpoint}{path}", json=body,
+                                 headers={TOKEN_HEADER: secret})
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"world unreachable: {type(e).__name__}") from None
+        try:
+            out = r.json()
+        except ValueError:
+            out = None
+        if r.status_code != 200 or out is None:
+            err = out.get("error") if isinstance(out, dict) else None
+            msg = err.get("message") if isinstance(err, dict) else err or r.text[:300]
+            raise HTTPException(400 if r.status_code in (400, 404) else 502,
+                                f"world answered {r.status_code}: {msg}")
+        return out
+
+    def audit(swarm: str, kind: str, data: dict) -> None:
+        store.append_events(swarm, swarm_stream(swarm), [Event(type=kind, ts=clock(), agent="",
+                                                               data=data)])
+
+    def by(x_flock_source: str | None) -> str:
+        return spec_source(x_flock_source).get("by") or "operator"
+
+    @api.get("/swarms/{swarm}/world/knobs")
+    def world_knobs(swarm: str) -> dict:
+        return {"knobs": world_admin(swarm, "GET", "/admin/knobs"),
+                **world_admin(swarm, "GET", "/admin/paused")}
+
+    @api.patch("/swarms/{swarm}/world/knobs")
+    def set_world_knobs(swarm: str, values: Annotated[dict[str, Any], Body()], reason: str = "",
+                        x_flock_source: Annotated[str | None, Header()] = None) -> dict:
+        out = world_admin(swarm, "PATCH", "/admin/knobs", values)
+        for c in out.get("changes") or []:
+            audit(swarm, "world_knob", {**c, "by": by(x_flock_source), "reason": reason})
+        return out
+
+    @api.post("/swarms/{swarm}/world/{action}")
+    def world_pause(swarm: str, action: Literal["pause", "resume"],
+                    body: Annotated[dict[str, Any], Body()],
+                    x_flock_source: Annotated[str | None, Header()] = None) -> dict:
+        lanes, reason = body.get("lanes"), str(body.get("reason") or "")
+        out = world_admin(swarm, "POST", f"/admin/{action}",
+                          {"lanes": lanes, **({"reason": reason} if action == "pause" else {})})
+        audit(swarm, f"world_{action}", {"lanes": lanes, "by": by(x_flock_source),
+                                         **({"reason": reason} if action == "pause" else {})})
+        return out
+
+
 def create_app(
     store: Store,
     token: str,
@@ -789,7 +858,8 @@ def create_app(
         try:  # start or reach the world, fetch and check its manifest (docs/world.md)
             world_resolve(spec, host=worlds, controller_token=token, secrets=secret_source,
                           folder=lambda t: folder_names(swarm, spec, t),
-                          transport=world_transport)
+                          transport=world_transport,
+                          previous=prev["spec"].world if prev else None)
         except WorldError as e:
             raise HTTPException(400, str(e)) from None
         if dry_run:
@@ -1599,6 +1669,7 @@ def create_app(
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
 
+    add_world_admin_routes(api, store, token, secret_source, world_transport, clock)
     add_pause_routes(api, loops)
     app.include_router(api)
     return app

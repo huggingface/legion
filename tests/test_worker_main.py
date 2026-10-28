@@ -113,6 +113,7 @@ async def test_comms_poll_cycle_env_reaches_the_worker_poller():
     c = CommsSpec(url="http://b", channel="c", invite_env="INV")
     assert hub._poll_cycle(c) == 60.0  # env over the spec default
     assert hub._poll_cycle(c.model_copy(update={"poll_cycle_s": 120.0})) == 120.0  # live spec
+    assert hub._poll_cycle(c.model_copy(update={"poll_cycle_s": 300.0})) == 300.0  # explicit 300
     hub.poll_cycle_s = 30.0  # worker.comms_poll_cycle_s
     assert hub._poll_cycle(c.model_copy(update={"poll_cycle_s": 120.0})) == 30.0
 
@@ -462,3 +463,19 @@ async def test_memory_loop_survives_a_failed_sample(tmp_path, monkeypatch):
     await until(lambda: len(calls) >= 3 and worker.mem is not None)
     task.cancel()
     await worker.client.aclose()
+
+
+def test_restore_threads_env_is_capped_and_spec_knobs_rebind(monkeypatch):
+    from flock.worker import sync as sync_mod
+    monkeypatch.setenv("FLOCK_RESTORE_THREADS", "500")
+    assert sync_mod.restore_threads() == 32
+    monkeypatch.setenv("FLOCK_RESTORE_THREADS", "0")
+    assert sync_mod.restore_threads() == sync_mod.RESTORE_THREADS
+
+
+@pytest.mark.parametrize("bad", ["../x", "/x", "a/..", "."])
+def test_workdir_ephemeral_rejects_escapes(bad):
+    from flock.models import WorkdirSpec
+    with pytest.raises(ValueError):
+        WorkdirSpec(ephemeral=[bad])
+    assert WorkdirSpec(ephemeral=["scratch"]).ephemeral == ["scratch/"]

@@ -74,7 +74,7 @@ HOLDOFF_DEFAULT_S = 30.0  # a 429 that names no wait
 SNAPSHOTS_KEPT = 32
 # world error codes that mean "not now" rather than "wrong" (counted as `refused`); any error
 # with a `retry_after_s` and any HTTP 429 counts too
-REFUSED_CODES = frozenset({"open_budget", "hub_busy", "busy", "paused", "overloaded"})
+REFUSED_CODES = frozenset({"open_budget", "hub_busy", "busy", "paused", "overloaded", "parked"})
 
 
 def _err(msg: str, t0: float, **extra: Any) -> Result:
@@ -87,6 +87,17 @@ def _retry_after(r: httpx.Response, default: float = 1.0, cap: float = RETRY_CAP
         return max(0.0, min(float(r.headers.get("retry-after", default)), cap))
     except ValueError:
         return default
+
+
+def _parked(r: httpx.Response) -> dict | None:
+    """The body of a parked world's 503 (docs/world.md, "Parked mode"), else None."""
+    if r.status_code != 503:
+        return None
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) and body.get("parked") is True else None
 
 
 def _loopback(url: str) -> bool:
@@ -390,7 +401,7 @@ class WorldHub:
             return (now + DOWN_HOLD_S, self._down, "world_down")
         if self._world_hold is not None and self._world_hold[0] <= now:
             self._world_hold = None
-        if self._world_hold is not None and not read_only:
+        if self._world_hold is not None and (not read_only or self._world_hold[2] == "parked"):
             return self._world_hold
         h = self._tool_hold.get((agent, name))
         if h is not None and h[0] <= now:
@@ -448,12 +459,20 @@ class WorldHub:
             except httpx.HTTPError as e:
                 return _err(f"{name}: world {wname} is unreachable ({type(e).__name__})", t0)
             seen["status"] = r.status_code
-            if r.status_code in (429, 503) and attempt < retries:
+            if r.status_code in (429, 503) and attempt < retries and not _parked(r):
                 await asyncio.sleep(_retry_after(r))
                 continue
             break
         if r.status_code == 401:
             return _err(f"{name}: world {wname} refused flock's token (401)", t0)
+        if parked := _parked(r):  # a world-level holdoff: no call (or upload) until it is back
+            wait = parked.get("next_retry_s")
+            wait = float(wait) if isinstance(wait, int | float) and wait > 0 else HOLDOFF_DEFAULT_S
+            wait = min(wait, HOLDOFF_CAP_S)
+            msg = (f"world {wname} unavailable ({str(parked.get('error') or 'parked')[:300]}); "
+                   "work locally")
+            self._world_hold = (self._clock() + wait, msg, "parked")
+            return _err(msg, t0, code="parked", retry_after_s=wait)
         try:
             body = r.json()
         except ValueError:

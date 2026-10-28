@@ -18,6 +18,7 @@ from flock.world.workspace import capture
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worlds/chatbot4"))
+import chatbot4
 from chatbot4 import Chatbot4World
 from repository import Hub, Repository
 from sandbox import run
@@ -425,7 +426,7 @@ def test_a_push_retry_after_main_moved_rebases_within_the_same_pr(setup, monkeyp
     assert not getattr(world.repo.hub, "closed", [])
 
 
-def test_concurrent_open_prs_never_run_two_hub_writes_at_once(setup, monkeypatch):
+def test_concurrent_open_prs_never_run_two_hub_pushes_at_once(setup, monkeypatch):
     import threading
     import time
 
@@ -447,7 +448,7 @@ def test_concurrent_open_prs_never_run_two_hub_writes_at_once(setup, monkeypatch
         return wrapper
 
     hub = world.repo.hub
-    for name in ("open", "ready", "comment", "close", "merge"):
+    for name in ("open", "ready", "close"):  # the push lane; comments and merges have their own
         monkeypatch.setattr(hub, name, tracked(getattr(hub, name)))
     monkeypatch.setattr(world.repo, "push", tracked(world.repo.push))
     snapshot, errors = capture(clone.parent, clone.name), []
@@ -486,12 +487,8 @@ def test_pr_creation_gap_and_busy_hub_refuse_before_creating(setup, monkeypatch,
     assert submit(world, clone, author="birch", branch="second")["pr"] == 2  # waits the gap
     assert time.monotonic() - started >= 0.3
     world.pr_gap = 0
-    assert world.hub_slots.acquire(timeout=1)  # another Hub write in progress
-    try:
-        with pytest.raises(ToolError, match="the Hub is busy") as exc:
-            submit(world, clone, author="pine", branch="third")
-    finally:
-        world.hub_slots.release()
+    with world.lanes.hold("push"), pytest.raises(ToolError, match="the Hub is busy") as exc:
+        submit(world, clone, author="pine", branch="third")  # another Hub write in progress
     assert exc.value.code == "hub_busy" and world.repo.hub.n == 2
 
 
@@ -520,6 +517,35 @@ def test_pause_flag_refuses_open_and_merge_but_not_reviews_or_run_bot(setup, tmp
     with pytest.raises(ToolError, match="paused by the operators"):
         submit(world, clone, branch="third")
     assert world.close_pr(Agent("cedar"), other["pr"], "paused")["state"] == "closed"
+
+
+def test_admin_lanes_and_knobs(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    assert world.knobs == {"save.interval_s": world.save_interval, "pr.open_floor": 20,
+                           "hub.push.slots": 1, "hub.merge.slots": 1, "hub.comment.slots": 1,
+                           "hub.comment.gap_s": 0.0}
+    world.admin.set({"hub.push.slots": 2, "hub.comment.gap_s": 0.5})
+    assert world.lanes["push"].slots == 2 and world.lanes["comment"].gap_s == 0.5
+    world.admin.pause(["comment"])
+    assert world.lanes.metrics()["comment"]["paused"] == 1
+    world.admin.resume(["comment"])
+    world.admin.pause(["open"], "hub 429s")
+    with pytest.raises(ToolError, match="paused by the operators"):
+        submit(world, clone, branch="second")  # a new PR: the open lane
+    assert submit(world, clone, pr=rec["pr"])["pr"] == rec["pr"]  # an update is a push only
+    world.admin.pause(["merge"])
+    with pytest.raises(ToolError, match="paused by the operators"):
+        world.merge_pr(Agent("birch"), rec["pr"])
+    world.admin.set({"pr.open_floor": 3})
+    assert world.budget_floor == 3
+    world = Chatbot4World(world.ws, world.repo)  # restart: knobs.json in the workspace
+    assert world.budget_floor == 3 and world.paused("open") and world.paused("merge")
+    assert world.lanes["push"].slots == 2 and world.lanes.metrics()["merge"]["paused"] == 1
+    world.admin.resume(["merge", "open"])
+    approve(world, rec)
+    assert world.merge_pr(Agent("birch"), rec["pr"])["merged_sha"]
 
 
 def test_hub_merge_that_fails_after_merging_is_reconciled(setup, monkeypatch):
@@ -1140,19 +1166,17 @@ def test_review_makes_no_hub_call_and_is_never_hub_busy(setup, monkeypatch):
     monkeypatch.setattr(hub, "comment", lambda pr, text: (posted_by.append(
         threading.current_thread().name), real(pr, text)))
     world.hub_wait = 0.1
-    assert world.hub_slots.acquire(timeout=1)  # another Hub write runs for a long time
-    try:
+    with world.lanes.hold("comment"):  # another comment is being posted for a long time
         started = time.monotonic()
         for who in ("birch", "pine", "oak", "elm"):
             assert approve(world, rec, who)["verdict"] == "approve"
         assert time.monotonic() - started < 2 and hub.comments == []
-        assert len(world.state["hub_outbox"]) == 4
-    finally:
-        world.hub_slots.release()
-    assert _wait(lambda: len(hub.comments) == 4)
-    assert set(posted_by) == {"chatbot4-hub-outbox"} and world.state["hub_outbox"] == []
-    text = f"approve by birch on {rec['head_sha']}\n\nChecked the code and bot"
-    assert hub.comments[0] == (rec["pr"], text)
+        assert world.outbox.depth()[0] == 4
+    assert _wait(lambda: world.outbox.depth()[0] == 0)
+    assert posted_by == ["lane-comment-outbox"]  # the backlog of one PR is one post
+    texts = [f"approve by {who} on {rec['head_sha']}\n\nChecked the code and bot"
+             for who in ("birch", "pine", "oak", "elm")]
+    assert hub.comments == [(rec["pr"], chatbot4.COMMENT_SEPARATOR.join(texts))]
 
 
 def test_outbox_retries_persists_across_restarts_and_merge_needs_no_comment(setup, monkeypatch):
@@ -1167,40 +1191,46 @@ def test_outbox_retries_persists_across_restarts_and_merge_needs_no_comment(setu
             raise ToolError("Hub 503", "hub_error")
         real(pr, text)
     monkeypatch.setattr(hub, "comment", flaky)
+    world.outbox.backoff = chatbot4.OUTBOX_BACKOFF
     approve(world, rec)
-    assert _wait(lambda: world.state["hub_outbox"] and world.state["hub_outbox"][0]["tries"] >= 2)
+    assert _wait(lambda: world.outbox.entries.get(rec["pr"], {}).get("tries", 0) >= 2)
     result = world.merge_pr(Agent("cedar"), rec["pr"])  # the comment is still unposted
     assert git(remote, "rev-parse", "main") == result["merged_sha"] and hub.comments == []
     restarted = Chatbot4World(world.ws, world.repo)  # stops the old outbox, keeps the comment
-    assert [e["pr"] for e in restarted.state["hub_outbox"]] == [rec["pr"]]
+    assert list(restarted.outbox.entries) == [rec["pr"]]
     fail[0] = False
     assert _wait(lambda: len(hub.comments) == 1) and hub.comments[0][0] == rec["pr"]
-    assert _wait(lambda: restarted.state["hub_outbox"] == [])
+    assert _wait(lambda: restarted.outbox.depth()[0] == 0)
     restarted.flush()
-    assert json.loads((world.ws / "prs.json").read_text())["hub_outbox"] == []
+    assert "hub_outbox" not in json.loads((world.ws / "prs.json").read_text())
 
 
-def test_outbox_is_bounded_and_close_flushes_within_the_timeout(setup, monkeypatch, caplog):
-    import threading
-
+def test_outbox_never_drops_and_close_leaves_it_for_the_next_start(setup):
     world, clone, _ = setup
     rec = submit(world, clone)
-    world.outbox_max = 3
-    assert world.hub_slots.acquire(timeout=1)
-    try:
-        with caplog.at_level("WARNING"):
-            for who in ("birch", "pine", "oak", "elm", "ash"):
-                approve(world, rec, who)
-        assert [e["agent"] for e in world.state["hub_outbox"]] == ["oak", "elm", "ash"]
-        assert "hub_outbox: over 3 comments, dropped the 1 oldest" in caplog.text
-        threading.Timer(0.3, world.hub_slots.release).start()
+    with world.lanes.hold("comment"):
+        for who in ("birch", "pine", "oak", "elm", "ash"):
+            approve(world, rec, who)
         world.close(timeout=5)
-    except BaseException:
-        world.hub_slots.release()
-        raise
-    assert len(world.repo.hub.comments) == 3 and world.state["hub_outbox"] == []
-    assert not world.drainer.is_alive()
-    assert json.loads((world.ws / "prs.json").read_text())["hub_outbox"] == []
+    assert world.repo.hub.comments == [] and not world.outbox.thread.is_alive()
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert _wait(lambda: restarted.outbox.depth()[0] == 0)
+    [(pr, text)] = restarted.repo.hub.comments
+    assert pr == rec["pr"] and text.count(chatbot4.COMMENT_SEPARATOR) == 4
+
+
+def test_legacy_hub_outbox_in_prs_json_moves_to_the_outbox_file(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    world.close()
+    state = json.loads((world.ws / "prs.json").read_text())
+    state["hub_outbox"] = [{"id": "x", "pr": rec["pr"], "agent": "birch", "text": "old review",
+                            "tries": 3, "next_at": 0.0, "queued_at": 1.0}]
+    (world.ws / "prs.json").write_text(json.dumps(state))
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert _wait(lambda: restarted.repo.hub.comments == [(rec["pr"], "old review")])
+    restarted.flush()
+    assert "hub_outbox" not in json.loads((world.ws / "prs.json").read_text())
 
 
 def _hub_moved_past_the_record(world, clone, remote):
@@ -1527,11 +1557,9 @@ def test_status_change_on_a_closed_pr_is_not_retried(setup, monkeypatch):
         raise ToolError(f"PR #{pr} is already closed on the Hub", "pr_closed")
 
     monkeypatch.setattr(world.repo.hub, "comment", refused)
-    with world.lock:
-        world._queue_comment(Agent("birch"), three["pr"], "looks fine")
-        item = dict(world.state["hub_outbox"][0])
-    assert world._post(item, 1.0)
-    assert posts == [three["pr"]] and world.state["hub_outbox"] == []
+    world._queue_comment(Agent("birch"), three["pr"], "looks fine")
+    assert _wait(lambda: world.outbox.depth()[0] == 0)
+    assert posts == [three["pr"]] and world.lanes.metrics()["comment"]["final"] == 1
     assert world.state["prs"][str(three["pr"])]["state"] == "closed"
 
 
@@ -1715,17 +1743,14 @@ def test_merge_has_its_own_hub_slot(setup):
     approve(world, rec)
     other = submit(world, clone, author="pine", branch="other")
     world.hub_wait = 0.2
-    assert world.hub_slots.acquire(timeout=1)  # every regular Hub write slot is held
-    try:
+    with world.lanes.hold("push"):  # every push lane slot is held
         with pytest.raises(ToolError, match="the Hub is busy"):  # pushes still respect the cap
             (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hey!"\n')
             submit(world, clone, author="pine", branch="other", pr=other["pr"])
         result = world.merge_pr(Agent("cedar"), rec["pr"])  # does not wait for them
-    finally:
-        world.hub_slots.release()
     assert git(remote, "rev-parse", "main") == result["merged_sha"]
-    assert world.merge_hub_slots.acquire(timeout=0)  # released after the merge
-    world.merge_hub_slots.release()
+    m = world.lanes.metrics()["merge"]
+    assert (m["in_flight"], m["ok"]) == (0, 1)  # released after the merge
 
 
 def test_merge_waits_for_its_own_slot_only(setup):
@@ -1733,23 +1758,19 @@ def test_merge_waits_for_its_own_slot_only(setup):
     rec = submit(world, clone)
     approve(world, rec)
     world.hub_wait = 0.2
-    assert world.merge_hub_slots.acquire(timeout=1)  # another merge in progress
-    try:
+    with world.lanes.hold("merge"):  # another merge in progress
         with pytest.raises(ToolError, match="the Hub is busy") as exc:
             world.merge_pr(Agent("cedar"), rec["pr"])
         assert exc.value.code == "hub_busy"
         (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hey!"\n')
         assert submit(world, clone, pr=rec["pr"])["head_sha"]  # pushes don't wait for merges
-    finally:
-        world.merge_hub_slots.release()
 
 
 def test_merge_hub_slots_env(setup, monkeypatch):
     world, _, _ = setup
     monkeypatch.setenv("CHATBOT_MERGE_HUB_SLOTS", "3")
     restarted = Chatbot4World(world.ws, world.repo)
-    assert all(restarted.merge_hub_slots.acquire(timeout=0) for _ in range(3))
-    assert not restarted.merge_hub_slots.acquire(timeout=0)
+    assert restarted.lanes["merge"].slots == 3 and restarted.lanes["push"].slots == 1
 
 
 def _pr_with_changes(world, clone, author="cedar", branch="greeting"):
@@ -1970,10 +1991,78 @@ def test_metrics_report_prs_budget_outbox_and_saves(setup):
     approve(world, rec)
     world.flush()
     m = world.metrics()
+    lanes = {f"lane_{lane}_{k}" for lane in ("push", "merge", "comment")
+             for k in ("slots", "effective_slots", "in_flight", "waits_total", "wait_s_total",
+                       "ok", "transient", "final", "tripped", "paused", "outbox_depth",
+                       "outbox_oldest_age_s")}
     assert set(m) == {"open_prs", "opens_last_hour", "merges_last_hour", "open_budget_limit",
-                      "budget_refusals_last_hour", "parked_drafts", "outbox_depth",
-                      "outbox_oldest_age_s", "stale_lease_adoptions_total", "hub_busy_total",
-                      "hub_slot_wait_s_total", "save_duration_s", "save_age_s", "state_bytes"}
+                      "budget_refusals_last_hour", "parked_drafts", "stale_lease_adoptions_total",
+                      "hub_busy_total", "hub_comments_rejected_total", "save_duration_s",
+                      "save_age_s", "state_bytes", *lanes}
     assert all(isinstance(v, int | float) for v in m.values())
     assert (m["open_prs"], m["opens_last_hour"], m["parked_drafts"]) == (1, 1, 0)
     assert m["state_bytes"] == (world.ws / "prs.json").stat().st_size and m["save_age_s"] < 60
+
+
+def test_vote_failures_trip_the_push_lane_and_comments_survive_a_restart(setup, monkeypatch):
+    world, clone, _ = setup
+    monkeypatch.setenv("CHATBOT_HUB_WRITE_SLOTS", "2")
+    world = Chatbot4World(world.ws, world.repo)
+    world.lanes["push"].trip_gap_s = 0.2  # tripped: one push at a time, 0.2 s apart
+    failing_pr_push(world, monkeypatch, [3])  # "vote failed: transaction was aborted", 3 times
+    with pytest.raises(ToolError) as exc:
+        submit(world, clone)
+    assert exc.value.code == "hub_busy" and exc.value.retry_after_s == 60
+    m = world.lanes.metrics()["push"]
+    assert (m["transient"], m["tripped"], m["slots"], m["effective_slots"]) == (3, 1, 2, 1)
+    assert world.lanes.metrics()["merge"]["tripped"] == 1  # push and merge share one breaker
+    assert world.lanes.metrics()["comment"]["tripped"] == 0
+    rec = submit(world, clone, pr=1)  # the parked draft lands on the tripped lane
+    assert world.lanes.metrics()["push"]["ok"] == 1  # the parked attempt counts no outcome
+
+    hub, fail = world.repo.hub, [True]
+    real = hub.comment
+
+    def flaky(pr, text):
+        if fail[0]:
+            raise ToolError("Hub request failed; retry later", "hub_error")
+        real(pr, text)
+
+    monkeypatch.setattr(hub, "comment", flaky)
+    approve(world, rec)
+    assert _wait(lambda: world.lanes.metrics()["comment"]["transient"] >= 1)
+    assert world.metrics()["lane_comment_outbox_depth"] == 1
+    monkeypatch.setattr(chatbot4, "OUTBOX_BACKOFF", (0.05, 0.1))
+    restarted = Chatbot4World(world.ws, world.repo)  # the breaker resets, the outbox does not
+    assert not restarted.lanes.metrics()["push"]["tripped"]
+    fail[0] = False
+    assert _wait(lambda: restarted.outbox.depth()[0] == 0)
+    assert hub.comments == [(rec["pr"], f"approve by birch on {rec['head_sha']}\n\nChecked the code and bot")]
+
+    lane = world.lanes["push"]  # the first world's lane recovers after 10 quiet minutes
+    lane.clock = lambda: time.monotonic() + 601
+    m = world.lanes.metrics()["push"]
+    assert (m["tripped"], m["effective_slots"]) == (0, 2)
+
+
+def test_a_comment_the_hub_refuses_is_dropped_and_joined_ones_are_split(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    hub = world.repo.hub
+    real = hub.comment
+
+    def picky(pr, text):
+        if chatbot4.COMMENT_SEPARATOR in text or "spam" in text:
+            error = ToolError("Hub request failed; retry later", "hub_error")
+            error.status = 400
+            raise error
+        real(pr, text)
+
+    monkeypatch.setattr(hub, "comment", picky)
+    with world.lanes.hold("comment"):  # three comments pile up and are joined
+        for who, text in (("birch", "fine"), ("pine", "spam"), ("oak", "good")):
+            world.review_pr(Agent(who), rec["pr"], rec["head_sha"], "approve", text)
+    assert _wait(lambda: world.outbox.depth()[0] == 0)
+    assert [text.split("\n\n")[1] for _, text in hub.comments] == ["fine", "good"]
+    assert world.metrics()["hub_comments_rejected_total"] == 1
+    assert world.lanes.metrics()["comment"]["final"] == 1

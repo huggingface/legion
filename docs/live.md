@@ -89,6 +89,11 @@ preemption), `cancel`, `retire`, `remove_worker`, `external_wait`. Per-agent pla
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).
 
+World admin changes made through the controller (`flock world set`, `flock world pause`,
+`flock world resume`; docs/world.md, "Admin API") are recorded as `world_knob {name, old,
+new, by, reason}`, `world_pause {lanes, reason, by}` and `world_resume {lanes, by}`. They
+take effect in the world at once and survive its restarts; they are not part of the spec.
+
 ## `flock run --watch`
 
 `flock run spec.yaml --watch` polls the files the spec references and the tools folder every

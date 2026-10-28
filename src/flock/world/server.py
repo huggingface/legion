@@ -11,6 +11,10 @@ more stops instead of running to the end.
 `GET /metrics` (same token) reports calls, errors, latencies and bytes per tool over the last
 5 minutes, the pools' queues, event-loop lag, RSS, CPU and the world's own `metrics()` (JSON, or
 Prometheus text for `Accept: text/plain`).
+Parked mode: `serve` binds the port first and builds the world in a background thread, retrying
+with backoff while that raises; meanwhile `/manifest`, tools and hooks answer 503 (`parked`).
+`GET /healthz` (no token) says "ready" or "parked". `/admin/*` (the admin secret, never the world
+token) reads and sets the world's knobs and pauses its lanes (`flock.world.admin`).
 Needs the `controller` extra (FastAPI, uvicorn).
 """
 
@@ -32,6 +36,7 @@ import threading
 import time
 import uuid
 from collections import Counter, deque
+from collections.abc import Callable
 from typing import Any
 
 from anyio import CapacityLimiter, to_thread
@@ -40,8 +45,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from starlette.datastructures import Headers
 
 from flock.tools.runner import check_args
-from flock.world import Agent, ToolError, World
+from flock.world import Admin, Agent, ToolError, World
 from flock.world.protocol import (
+    ADMIN_TOKEN_ENV,
     AGENT_HEADER,
     HOOK_EVENTS,
     HOST_ENV,
@@ -65,6 +71,9 @@ SLOW_THREADS = 64  # tools that block for seconds or minutes (`@tool(pool="slow"
 FAST_MAX_WAIT_ENV, FAST_MAX_WAIT_S = "FLOCK_WORLD_FAST_MAX_WAIT_S", 2.0
 SLOW_QUEUE_ENV, SLOW_QUEUE = "FLOCK_WORLD_SLOW_QUEUE", 8
 RETRY_AFTER_ENV, RETRY_AFTER_S = "FLOCK_WORLD_RETRY_AFTER_S", 30.0
+# Parked mode: a world whose construction raises is built again after 30 s, doubling to 10 min.
+PARK_FIRST_S, PARK_CAP_S = 30.0, 600.0
+ADMIN_MAX_BYTES = 64 << 10  # an /admin request body
 
 
 WINDOW_S = 300.0  # /metrics: calls, latencies, bytes and queue waits over the last 5 minutes
@@ -215,17 +224,25 @@ def _error(code: str, message: str, status: int = 200,
 
 
 class _Auth:
-    """Every route needs `X-World-Token: <token>`."""
+    """`X-World-Token`: the world secret on every route but `/healthz` (none) and `/admin/*`
+    (the admin secret). An empty world secret: open; an empty admin secret: /admin is 403."""
 
-    def __init__(self, app: Any, token: str) -> None:
-        self.app, self.token = app, token
+    def __init__(self, app: Any, token: str, admin: str) -> None:
+        self.app, self.token, self.admin = app, token, admin
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] == "http" and not hmac.compare_digest(
-                Headers(scope=scope).get(TOKEN_HEADER, ""), self.token):
-            await _error("unauthorized", f"missing or wrong {TOKEN_HEADER}", 401)(
-                scope, receive, send)
-            return
+        if scope["type"] == "http":
+            path = scope["path"]
+            admin = path == "/admin" or path.startswith("/admin/")
+            need = "" if path == "/healthz" else self.admin if admin else self.token
+            if admin and not need:
+                await _error("forbidden", f"no admin secret: set {ADMIN_TOKEN_ENV} on the world",
+                             403)(scope, receive, send)
+                return
+            if need and not hmac.compare_digest(Headers(scope=scope).get(TOKEN_HEADER, ""), need):
+                await _error("unauthorized", f"missing or wrong {TOKEN_HEADER}", 401)(
+                    scope, receive, send)
+                return
         await self.app(scope, receive, send)
 
 
@@ -259,20 +276,65 @@ def _agent(headers: Any) -> Agent:
                  request_id=headers.get(REQUEST_HEADER, ""))
 
 
-def create_app(world: World, token: str | None) -> FastAPI:
+def create_app(world: World | Callable[[Admin], World], token: str | None) -> FastAPI:
     """The ASGI app for `world`. `token` None or "": no authentication (tests, a trusted
-    network); otherwise every route needs `X-World-Token: <token>`."""
+    network); otherwise every route needs `X-World-Token: <token>`. `/admin/*` needs the admin
+    secret, $FLOCK_WORLD_ADMIN_TOKEN (unset: 403).
+    `world` may be a builder, `build(admin) -> World`: the app starts parked and builds the
+    world in a thread once it runs, again with backoff while that raises."""
     metrics = _Metrics()
+    build = None if isinstance(world, World) else world
+    world = world if isinstance(world, World) else None
+    parked_admin = Admin()  # /admin while no world is built; the builder hands it to the world
+    park: dict[str, Any] = {"error": "the world is starting", "attempt": 0, "retry_at": 0.0}
+    stop = threading.Event()
+
+    def builder() -> None:
+        nonlocal world
+        delay = PARK_FIRST_S
+        while not stop.is_set():
+            park["attempt"] += 1
+            try:
+                built = build(parked_admin)
+            except BaseException as e:  # SystemExit too: a parked error, not a dead thread
+                log.exception("world: construction failed (attempt %d); retrying in %g s",
+                              park["attempt"], delay)
+                line = (f"{type(e).__name__}: {e}".strip().splitlines() or [""])[0][:300]
+                park.update(error=redact(line), retry_at=time.monotonic() + delay)
+                if stop.wait(delay):
+                    return
+                delay = min(delay * 2, PARK_CAP_S)
+                continue
+            world = built
+            log.info("world %s %s: ready after %d attempt(s)", built.name, built.version,
+                     park["attempt"])
+            return
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
         task = asyncio.create_task(metrics.sample_lag())
+        if build is not None:
+            threading.Thread(target=builder, name="world-build", daemon=True).start()
         try:
             yield
         finally:
+            stop.set()
             task.cancel()
 
-    app = FastAPI(title=f"world {world.name}", docs_url=None, redoc_url=None, openapi_url=None,
+    def admin() -> Admin:
+        return world.admin if world is not None else parked_admin
+
+    def parked() -> Response | None:
+        """503 while the world is not built (parked mode), else None."""
+        if world is not None:
+            return None
+        left = max(0.0, park["retry_at"] - time.monotonic())
+        resp = JSONResponse({"ok": False, "parked": True, "error": park["error"],
+                             "attempt": park["attempt"], "next_retry_s": math.ceil(left)}, 503)
+        resp.headers["Retry-After"] = str(max(1, math.ceil(left)))
+        return resp
+
+    app = FastAPI(title="world", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
     lock = threading.Lock()
     # Separate thread budgets: a slow tool (minutes) never takes a fast tool's or a hook's thread.
@@ -328,9 +390,11 @@ def create_app(world: World, token: str | None) -> FastAPI:
         `version` changes: a world that changes its description or capabilities at runtime
         must bump `version`."""
         m = world.manifest()
-        if cache["version"] != m.get("version"):
-            caps = list(dict.fromkeys([*(m.get("capabilities") or []), "metrics-v1"]))
-            cache.update(version=m.get("version"), body=json.dumps({**m, "capabilities": caps}).encode(), schemas={
+        knobs = list(world.admin.knobs)
+        if cache["version"] != (m.get("version"), knobs):
+            caps = list(dict.fromkeys([*(m.get("capabilities") or []), "metrics-v1", "admin-v1"]))
+            body = {**m, "capabilities": caps, "knobs": knobs}
+            cache.update(version=(m.get("version"), knobs), body=json.dumps(body).encode(), schemas={
                 t["name"]: t.get("parameters") or {"type": "object", "properties": {}}
                 for t in m.get("tools") or []})
         return cache
@@ -341,21 +405,75 @@ def create_app(world: World, token: str | None) -> FastAPI:
         with lock:
             return fn(*args)
 
-    if token:  # plain ASGI (not @app.middleware): a client's disconnect still reaches the route
-        app.add_middleware(_Auth, token=token)
+    # plain ASGI (not @app.middleware): a client's disconnect still reaches the route
+    app.add_middleware(_Auth, token=token or "", admin=os.environ.get(ADMIN_TOKEN_ENV) or "")
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"status": "parked" if world is None else "ready"}
 
     @app.get("/manifest")
     async def manifest() -> Response:
+        if resp := parked():
+            return resp
         return Response(served()["body"], media_type="application/json")
+
+    # ------------------------------------------------------------------ admin (docs/world.md)
+    def admin_error(e: Exception) -> JSONResponse:
+        return JSONResponse({"ok": False, "error": str(e)}, 400)
+
+    async def admin_body(request: Request) -> Any:
+        """The JSON body (None if it is not JSON); ValueError over ADMIN_MAX_BYTES."""
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > ADMIN_MAX_BYTES:
+                raise ValueError(f"the body is over {ADMIN_MAX_BYTES} bytes")
+        try:
+            return json.loads(data)
+        except ValueError:
+            return None
+
+    @app.get("/admin/knobs")
+    async def get_knobs() -> dict:
+        return admin().describe()
+
+    @app.patch("/admin/knobs")
+    async def patch_knobs(request: Request) -> Response:
+        try:  # in a thread: a knob's on_change may take the world's locks
+            changes = await asyncio.to_thread(admin().set, await admin_body(request))
+        except ValueError as e:
+            return admin_error(e)
+        return JSONResponse({"ok": True, "changes": changes, "knobs": admin().describe()})
+
+    @app.get("/admin/paused")
+    async def get_paused() -> dict:
+        return {"parked": world is None, "paused": dict(admin().paused)}
+
+    @app.post("/admin/{action}")
+    async def pause_resume(action: str, request: Request) -> Response:
+        if action not in ("pause", "resume"):
+            return JSONResponse({"ok": False, "error": f"no admin action {action!r}"}, 404)
+        try:
+            body = await admin_body(request)
+            body = body if isinstance(body, dict) else {}
+            if action == "pause":
+                await asyncio.to_thread(admin().pause, body.get("lanes"), str(body.get("reason") or ""))
+            else:
+                await asyncio.to_thread(admin().resume, body.get("lanes"))
+        except ValueError as e:
+            return admin_error(e)
+        return JSONResponse({"ok": True, "paused": dict(admin().paused)})
 
     @app.get("/metrics")
     async def get_metrics(request: Request) -> Response:
         try:
-            custom = await asyncio.to_thread(world.metrics)
+            custom = await asyncio.to_thread(world.metrics) if world is not None else {}
         except Exception:
             log.exception("world.metrics() failed")
             custom = {}
-        m = {**metrics.snapshot(pool_stats()),
+        m = {**metrics.snapshot(pool_stats()), "parked": int(world is None),
+             "attempt": park["attempt"], "paused": len(admin().paused),
              "world": {k: v for k, v in (custom or {}).items() if _finite(v)}}
         if "text/plain" in request.headers.get("accept", ""):
             return PlainTextResponse(_prometheus(m), media_type="text/plain; version=0.0.4")
@@ -363,6 +481,8 @@ def create_app(world: World, token: str | None) -> FastAPI:
 
     @app.post("/tools/{name}")
     async def call(name: str, request: Request) -> Response:
+        if resp := parked():
+            return resp
         t0 = metrics.clock()
         pool = getattr(world, "pool", lambda _: "fast")(name)
         # Decided from the path alone, before the body (an upload can be 100+ MB) is read.
@@ -438,7 +558,9 @@ def create_app(world: World, token: str | None) -> FastAPI:
         return Response(out, media_type="application/json")
 
     @app.post("/hooks")
-    async def hooks(request: Request) -> dict:
+    async def hooks(request: Request) -> Any:
+        if resp := parked():
+            return resp
         try:
             body = await request.json()
         except ValueError:
@@ -461,17 +583,39 @@ def create_app(world: World, token: str | None) -> FastAPI:
     return app
 
 
-def load(target: str, path: str | None = None) -> World:
-    """`module:Class` (or `module:instance`) from `path` (default: the current directory)."""
+def resolve_target(target: str, path: str | None = None) -> Any:
+    """The World subclass or instance `module:attr` names, imported from `path` (default: the
+    current directory)."""
     module_name, _, attr = target.partition(":")
     if not module_name or not attr:
         raise ValueError(f"{target!r}: expected module:Class, e.g. taskboard:TaskBoard")
-    sys.path.insert(0, path or os.getcwd())
+    where = path or os.getcwd()
+    if where not in sys.path:
+        sys.path.insert(0, where)
     obj = getattr(importlib.import_module(module_name), attr)
-    world = obj() if isinstance(obj, type) else obj
-    if not isinstance(world, World):
+    if not (isinstance(obj, World) or isinstance(obj, type) and issubclass(obj, World)):
         raise TypeError(f"{target!r} is not a flock.world.World (subclass or instance)")
+    return obj
+
+
+def build(obj: Any, admin: Admin | None = None) -> World:
+    """An instance of the World subclass `obj` (an instance is returned as is). `admin`: the
+    knobs and pauses it gets, attached to its `state_dir()` before `__init__` runs."""
+    if isinstance(obj, World):
+        return obj
+    if admin is None:
+        return obj()
+    world = obj.__new__(obj)  # the admin goes in first: __init__ registers its knobs
+    if admin.path is None and (d := world.state_dir()):
+        admin.attach(d)
+    world.__dict__["_flock_admin"] = admin
+    world.__init__()
     return world
+
+
+def load(target: str, path: str | None = None, admin: Admin | None = None) -> World:
+    """`module:Class` (or `module:instance`) from `path`, built."""
+    return build(resolve_target(target, path), admin)
 
 
 def stop_on_usr1() -> None:
@@ -503,10 +647,16 @@ def serve(target: str, *, host: str | None = None, port: int | None = None,
     if not token and not insecure:
         raise SystemExit(f"{token_env} is not set: a world needs its shared secret "
                          "(or pass --insecure for a world without one)")
-    world = load(target)
+    obj = resolve_target(target)  # a bad target exits here; only __init__ may park
     host = host or os.environ.get(HOST_ENV) or "127.0.0.1"
     port = port or int(os.environ.get(PORT_ENV) or DEFAULT_PORT)
-    print(f"world {world.name} {world.version} on http://{host}:{port}", flush=True)
+
+    def built(admin: Admin) -> World:
+        world = build(obj, admin)
+        print(f"world {world.name} {world.version} on http://{host}:{port}", flush=True)
+        return world
+
     stop_on_usr1()
-    uvicorn.run(create_app(world, token or None), host=host, port=port, log_level="warning",
+    # the port is bound first; the world is built (and rebuilt while that raises) in a thread
+    uvicorn.run(create_app(built, token or None), host=host, port=port, log_level="warning",
                 access_log=False)

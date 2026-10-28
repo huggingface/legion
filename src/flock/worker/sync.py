@@ -94,12 +94,12 @@ RESTORE_THREADS = 4  # default of FLOCK_RESTORE_THREADS
 SPEC_KNOBS: dict[str, object] = {}
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, cap: int | None = None) -> int:
     try:
         n = int(os.environ.get(name, ""))
     except ValueError:
         return default
-    return n if n >= 1 else default
+    return min(n, cap or n) if n >= 1 else default
 
 
 def restore_batch() -> int:
@@ -111,7 +111,7 @@ def restore_batch() -> int:
 def restore_threads() -> int:
     """Batches of one agent's restore downloaded in parallel: the spec's, else env
     FLOCK_RESTORE_THREADS (>= 1), else RESTORE_THREADS."""
-    return SPEC_KNOBS.get("restore_threads") or _env_int("FLOCK_RESTORE_THREADS", RESTORE_THREADS)
+    return SPEC_KNOBS.get("restore_threads") or _env_int("FLOCK_RESTORE_THREADS", RESTORE_THREADS, 32)
 
 
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
@@ -579,6 +579,7 @@ class BucketSync:
         self._mirror: dict[str, bool] = {}
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
         self._meta: dict[str, dict] = {}  # per agent prefix: the meta.json last pushed
+        self._quota_note: dict[str, str] = {}  # per agent prefix: the quota note last queued
         self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
         self.restore_progress: dict[str, list] = {}
@@ -672,8 +673,12 @@ class BucketSync:
         note, pre, now = quota_note(ws, w), self.prefix(rt), time.monotonic()
         if note is None or now - self._quota_at.get(pre, -QUOTA_NOTE_EVERY) < QUOTA_NOTE_EVERY:
             return
-        self._quota_at[pre] = now
+        rt._notes.pop(self._quota_note.pop(pre, None), None)  # replace, do not stack
         rt._note(note)
+        if note not in rt._notes:  # dropped (no turn yet): try again at the next push
+            return
+        self._quota_at[pre] = now
+        self._quota_note[pre] = note
         if over_hard_limit(ws, w):
             rt.emit("workdir_over_quota", {"files": ws.files, "bytes": ws.bytes,
                                            "top_dirs": [list(t) for t in ws.top_dirs]})

@@ -1304,5 +1304,79 @@ def world_serve(
     serve(target, host=host, port=port, token_env=token_env, insecure=insecure)
 
 
+
+@world_app.command("doctor")
+def world_doctor(
+    url: str = typer.Argument(..., help="The world's URL."),
+    token: str = typer.Option(None, "--token", envvar="FLOCK_WORLD_TOKEN", help="The world secret."),
+    calls: int = typer.Option(0, "--calls", help="Concurrent calls of each read-only tool (0: none)."),
+) -> None:
+    """Check a world against the author checklist (docs/world.md); non-zero on a hard failure."""
+    from flock.world.doctor import doctor
+
+    lines, failed = doctor(url, token, calls)
+    typer.echo("\n".join(lines))
+    raise typer.Exit(1 if failed else 0)
+
+
+# -- the world's admin API through the controller (docs/world.md, "Admin API") ----------------
+
+@world_app.command("knobs")
+def world_knobs(swarm: str) -> None:
+    """The world's knobs (value, default, range) and paused lanes."""
+    out = _call("GET", f"/swarms/{swarm}/world/knobs")
+    rows = [[n, json.dumps(k["value"]), json.dumps(k["default"]), k["type"],
+             f"{'' if k['min'] is None else k['min']}..{'' if k['max'] is None else k['max']}",
+             k["doc"]] for n, k in out["knobs"].items()]
+    _table(rows, ["knob", "value", "default", "type", "range", "doc"])
+    if out.get("parked"):
+        typer.echo("world is parked (not built yet; it retries)")
+    for lane, why in out.get("paused", {}).items():
+        typer.echo(f"paused: {lane}{f' ({why})' if why else ''}")
+
+
+@world_app.command("set")
+def world_set(
+    swarm: str,
+    assignments: Annotated[list[str], typer.Argument(help="name=value (JSON, else a string)")],
+    reason: str = typer.Option("", "--reason", help="Recorded in the swarm's events."),
+) -> None:
+    """Set world knobs at runtime; the world keeps them across restarts."""
+    values = {}
+    for a in assignments:
+        name, eq, raw = a.partition("=")
+        if not eq or not name:
+            typer.echo(f"expected name=value, got {a!r}", err=True)
+            raise typer.Exit(2)
+        try:
+            values[name] = json.loads(raw)
+        except ValueError:
+            values[name] = raw
+    out = _call("PATCH", f"/swarms/{swarm}/world/knobs", json=values, params={"reason": reason},
+                headers=source_header(None))
+    for c in out["changes"]:
+        typer.echo(f"{c['name']}: {json.dumps(c['old'])} -> {json.dumps(c['new'])}")
+
+
+@world_app.command("pause")
+def world_pause(
+    swarm: str,
+    lanes: Annotated[list[str], typer.Argument(help="Lanes the world names (e.g. push open merge).")],
+    reason: str = typer.Option("", "--reason", help="Shown with the pause; recorded in events."),
+) -> None:
+    """Pause world lanes (the world refuses or defers that kind of work)."""
+    out = _call("POST", f"/swarms/{swarm}/world/pause", json={"lanes": lanes, "reason": reason},
+                headers=source_header(None))
+    typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
+
+
+@world_app.command("resume")
+def world_resume(swarm: str, lanes: Annotated[list[str], typer.Argument()]) -> None:
+    """Resume paused world lanes."""
+    out = _call("POST", f"/swarms/{swarm}/world/resume", json={"lanes": lanes},
+                headers=source_header(None))
+    typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
+
+
 if __name__ == "__main__":
     app()

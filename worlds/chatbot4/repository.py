@@ -319,7 +319,9 @@ class Hub:
                         num = kwargs["discussion_num"]
                         raise ToolError(f"PR #{num} is already {final} on the Hub",
                                         FINAL_CODES[final]) from None
-                    raise ToolError("Hub request failed; retry later", "hub_error") from None
+                    error = ToolError("Hub request failed; retry later", "hub_error")
+                    error.status = exc.response.status_code  # for the world, never sent to agents
+                    raise error from None
                 delay = exc.response.headers.get("Retry-After", "1")
                 try:
                     delay = float(delay)
