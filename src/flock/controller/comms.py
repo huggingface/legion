@@ -31,7 +31,7 @@ def host_name(swarm: str) -> str:
 
 
 def resolve(spec: SwarmSpec, previous: SwarmSpec | None, secrets: Mapping[str, str], *,
-            transport: httpx.BaseTransport | None = None) -> None:
+            transport: httpx.BaseTransport | None = None, dry_run: bool = False) -> None:
     """Fill `spec.comms.channel_id` (and `kickoff_id` once the kickoff is posted). Raises
     CommsError. Values a client sent for either field are replaced."""
     c = spec.comms
@@ -73,7 +73,7 @@ def resolve(spec: SwarmSpec, previous: SwarmSpec | None, secrets: Mapping[str, s
             except BoardError as e:
                 log.warning("comms: %s could not join #%s: %s", host_name(spec.swarm), c.channel, e)
         c.channel_id = int(ch["id"])
-        if want_kickoff:
+        if want_kickoff and not dry_run:
             assert c.kickoff is not None
             msg = board.post(token, c.channel_id, c.kickoff,
                              key=f"flock-kickoff-{spec.swarm}-{c.channel_id}")

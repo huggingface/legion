@@ -438,7 +438,8 @@ def apply(
         spec.tools_version = up["version"]
         names = ", ".join(up["tools"]) or "none"
         typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
-    st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    st = _call("PUT", f"/swarms/{spec.swarm}", params={"replicas": "spec"},
+               json=spec.model_dump(mode="json"))
     _print_status(st)
 
 
@@ -451,13 +452,15 @@ def _detail(r: httpx.Response) -> str:
 
 
 def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = None,
-                 strict: bool = False) -> list[str]:
+                 strict: bool = False, replicas: str = "keep", check: bool = False) -> list[str]:
     """Re-read the experiment folder and apply it to the running swarm (docs/live.md): the
     spec, its prompt files and the tools folder, as `flock apply` reads them. Returns the
     lines to show (warnings, then what changed, or "no changes"); raises SpecError with the
     refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
-    by default only when the spec names a provider-backed model the running one does not."""
-    from flock.live import diff_specs
+    by default only when the spec names a provider-backed model the running one does not.
+    `replicas="keep"` keeps the live counts of existing types; `check` runs the controller's
+    validation (dry run) and stores nothing."""
+    from flock.live import diff_specs, keep_replicas, world_tool_changes
     from flock.tools.loader import ToolsError
     from flock.tools.spec import prepare
 
@@ -504,13 +507,21 @@ def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = No
             listed = _request(c, "GET", f"/swarms/{spec.swarm}/tools").json().get("bundles", [])
             before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
             names = (before, r.json()["tools"])
+    kept = keep_replicas(old, spec) if replicas == "keep" else []
     lines = diff_specs(old, spec, names)
-    if not lines:
-        return [*warnings, "no changes"]
-    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    if not lines and not check:
+        return [*warnings, *kept, "no changes"]
+    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
+                 params={"replicas": "spec", **({"dry_run": 1} if check else {})})
     if r.status_code >= 400:
         raise SpecError([f"refused: {_detail(r)}"])
-    return [*warnings, *lines]
+    if check:  # the stored spec is untouched: the new manifest is in the reply
+        new = SwarmSpec.model_validate(r.json()["spec"])
+    else:
+        new = SwarmSpec.model_validate(_request(c, "GET", f"/swarms/{spec.swarm}").json()["spec"])
+    wt = world_tool_changes(old, new)
+    return [*warnings, *kept, *lines, *([wt] if wt else []),
+            *(["check ok: nothing was applied"] if check else [])]
 
 
 @app.command()
@@ -520,6 +531,10 @@ def update(
         None, "--preflight/--skip-preflight",
         help="Probe provider-backed models first (default: only when the update adds one)."),
     strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
+    replicas: str = typer.Option(
+        "keep", "--replicas", help="`keep` (default): the running replica counts; `spec`: the file's."),
+    check: bool = typer.Option(
+        False, "--check", help="Run every check and print the diff; apply nothing (exit 1 if refused)."),
 ) -> None:
     """Re-read an experiment folder (spec.yaml, prompts, tools/) and apply what changed to the
     running swarm (docs/live.md): new tools version, prompts, loop and comms settings, limits,
@@ -529,7 +544,10 @@ def update(
     spec_file = path / "spec.yaml" if path.is_dir() else path
     try:
         with client() as c:
-            lines = update_swarm(c, str(spec_file), preflight=preflight, strict=strict)
+            if replicas not in ("keep", "spec"):
+                raise SpecError([f"--replicas {replicas!r}: use keep or spec"])
+            lines = update_swarm(c, str(spec_file), preflight=preflight, strict=strict,
+                                 replicas=replicas, check=check)
     except SpecError as e:
         for line in e.lines:
             typer.echo(line, err=True)
@@ -950,7 +968,8 @@ def scale(swarm: str, type: str, replicas: int) -> None:
         typer.echo(f"no type {type!r} in swarm {swarm!r}", err=True)
         raise typer.Exit(1)
     spec.types[type].replicas = replicas
-    _print_status(_call("PUT", f"/swarms/{swarm}", json=spec.model_dump(mode="json")))
+    _print_status(_call("PUT", f"/swarms/{swarm}", params={"replicas": "spec"},
+                        json=spec.model_dump(mode="json")))
 
 
 @app.command()

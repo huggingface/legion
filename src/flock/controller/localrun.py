@@ -488,7 +488,7 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
         spec.tools_version = up["version"]
         say(f"tools: version {up['version']} ({len(opts.tools)} bytes): "
             f"{', '.join(up['tools']) or 'none'}")
-    r = await http.put(f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    r = await http.put(f"/swarms/{spec.swarm}", params={"replicas": "spec"}, json=spec.model_dump(mode="json"))
     if r.status_code >= 400:
         say(f"apply refused ({r.status_code}): {r.text}")
         return False

@@ -24,6 +24,23 @@ change: the tools version (old -> new, with the tools added and removed), the pr
 per type, then every other key as `path: old -> new`. When nothing changed it prints
 `no changes` and applies nothing.
 
+Replicas: `flock update` keeps the running replica count of every type that already exists
+(a type with `replicas: 20` in the file and 300 running stays at 300) and prints
+`agent: replicas kept (spec 20, live 300)`. `--replicas spec` applies the file's counts
+instead. The same switch is the `replicas=keep|spec` query on `PUT /swarms/{swarm}` (default
+`keep`; `flock apply`, `flock scale` and `flock run` send `spec`).
+
+Lists print element by element (`types.agent.tools: +world:get_pr -world:foo`); only long
+scalar strings are shortened. `world.endpoint`, `manifest` and the credential fields are
+written by the controller and never listed; after the update the world's tool changes print
+as `world tools: +a -b`.
+
+`flock update --check` runs every check the controller runs on an apply (tools against the
+bundle and the live world manifest, world, comms channel, harness changes) and prints the
+diff, storing and posting nothing (`PUT /swarms/{swarm}?dry_run=1` returns the resolved
+spec). It exits 1 with the reason when the update would be refused. A world started for the
+check is stopped again.
+
 A refused update exits 1, prints the reason and applies nothing. The reasons are the ones
 `flock apply` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
 from the controller. On a running swarm the controller also refuses to change the harness of a
