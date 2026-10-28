@@ -1,6 +1,7 @@
 """Bucket sync: per agent, `<BUCKET>/<swarm>/<type>/<agent>/` holds
 
     workdir/<path relative to the workdir>        (if persist_workdir)
+    meta.json                                     ({files, bytes, ts} of the workdir when it last changed)
     sessions/<agent>.jsonl, <agent>.state.json    (pi session log + worker state)
     harness/<path relative to the harness home>   (CLAUDE_CONFIG_DIR, CODEX_HOME or PI_CODING_AGENT_DIR)
 
@@ -123,9 +124,9 @@ def is_excluded(rel: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(rel, pat.replace("\\", "/")) for pat in patterns)
 
 
-def collect_modes(workdir: Path) -> dict[str, str]:
+def collect_modes(workdir: Path, stats: dict[str, int] | None = None) -> dict[str, str]:
     """{relative posix path: "0o755"} for regular files with any executable bit (symlinks and
-    the manifest itself excluded)."""
+    the manifest itself excluded). `stats` gets the walk's regular file count and bytes."""
     out: dict[str, str] = {}
     for root, dirs, files in os.walk(workdir):
         dirs.sort()
@@ -135,6 +136,9 @@ def collect_modes(workdir: Path) -> dict[str, str]:
                 st = p.lstat()
             except OSError:
                 continue
+            if stats is not None and stat.S_ISREG(st.st_mode):
+                stats["files"] = stats.get("files", 0) + 1
+                stats["bytes"] = stats.get("bytes", 0) + st.st_size
             if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
                 rel = p.relative_to(workdir).as_posix()
                 if rel != MODES_FILE:
@@ -142,11 +146,11 @@ def collect_modes(workdir: Path) -> dict[str, str]:
     return dict(sorted(out.items()))
 
 
-def write_modes(workdir: Path) -> bool:
+def write_modes(workdir: Path, stats: dict[str, int] | None = None) -> bool:
     """(Re)write the manifest if its content changed, remove it when nothing is executable.
     Returns whether the file changed."""
     path = workdir / MODES_FILE
-    modes = collect_modes(workdir)
+    modes = collect_modes(workdir, stats)
     old = path.read_text() if path.is_file() else None
     if not modes:
         if old is not None:
@@ -453,6 +457,7 @@ class BucketSync:
         # completes with every file; stays False after an incomplete one (module docstring).
         self._mirror: dict[str, bool] = {}
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
+        self._meta: dict[str, dict] = {}  # per agent prefix: the meta.json last pushed
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
         self.restore_progress: dict[str, list] = {}
 
@@ -511,18 +516,29 @@ class BucketSync:
         if pre in self._restoring:  # never mirror a half-restored agent (module docstring)
             log.warning("%s: push skipped, its restore is still running", rt.name)
             return 0
+        meta: list[tuple[Path, str]] = []
         if rt.spec.persist_workdir and rt.workdir.is_dir():
-            await asyncio.to_thread(write_modes, rt.workdir)
+            # shortcut: counts excluded caches too; good enough to predict a restore's size
+            stats = {"files": 0, "bytes": 0}
+            await asyncio.to_thread(write_modes, rt.workdir, stats)
+            rt.workdir_files = stats["files"]
+            if self._meta.get(pre) != stats:  # the workdir's size: predicts a restore's time
+                path = rt.sessions_dir / f"{rt.name}.meta.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({**stats, "ts": datetime.now(UTC).isoformat()}))
+                meta = [(path, pre + "meta.json")]
             delete = self.mirror_deletes(rt)
             if not delete:
                 log.info("%s: workdir push without remote deletes (last restore incomplete)",
                          rt.name)
             await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
                                     delete=delete, exclude=workdir_excludes())
-        files = self._changed(self.collect(rt))
+        files = self._changed(self.collect(rt)) + meta
         if files:
             await asyncio.to_thread(self.store.upload, files)
             self._mark(files)
+            if meta:
+                self._meta[pre] = stats
         return len(files)
 
     async def restore(self, rt: AgentRuntime) -> RestoreResult:
@@ -563,6 +579,9 @@ class BucketSync:
         for r, _ in listed:
             rel = r[len(pre):]
             area, _, sub = rel.partition("/")
+            if rel == "meta.json":  # known, the first push after a move need not resend it
+                plan.append((r, rt.sessions_dir / f"{rt.name}.meta.json"))
+                continue
             if not sub or ".." in Path(sub).parts:
                 continue
             if area == "workdir":
@@ -595,8 +614,14 @@ class BucketSync:
                                                   progress=progress)
             res.failed += failed
             await asyncio.to_thread(_set_mtimes, got, mtimes)
-            for r, _ in got:
-                if r.startswith(pre + "sessions/"):
+            for r, p in got:
+                if r == pre + "meta.json":
+                    try:
+                        self._meta[pre] = {k: v for k, v in json.loads(p.read_text()).items()
+                                           if k in ("files", "bytes")}
+                    except (OSError, ValueError, AttributeError):
+                        pass
+                elif r.startswith(pre + "sessions/"):
                     res.sessions += 1
                 else:
                     res.harness += 1

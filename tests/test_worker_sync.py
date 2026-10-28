@@ -30,7 +30,9 @@ async def test_push_and_restore_round_trip(tmp_path):
     pre = "sw/researcher/researcher-0001/"
     assert set(store.files) == {
         pre + "workdir/sub/f.txt", pre + "sessions/researcher-0001.jsonl",
-        pre + "sessions/researcher-0001.state.json", pre + "harness/s-1.jsonl"}
+        pre + "sessions/researcher-0001.state.json", pre + "harness/s-1.jsonl",
+        pre + "meta.json"}
+    assert json.loads(store.files[pre + "meta.json"])["files"] == 1
     # second push uploads only what changed (the session log gained a sync event)
     n = await sync.push(rt)
     assert n == 0 or store.uploads[-1] == [pre + "sessions/researcher-0001.jsonl"]
@@ -203,8 +205,8 @@ async def test_restore_reports_progress_while_in_flight(tmp_path):
     store.download = download
     rt2, _ = runtime(tmp_path / "b", sync=sync)
     await sync.restore(rt2)
-    # 3 workdir files, then the 2 session files and 1 harness file in a second batch
-    assert seen == [[0, 6], [3, 6]] and sync.restore_progress == {}
+    # 3 workdir files, then meta.json, 2 session files and 1 harness file in a second batch
+    assert seen == [[0, 7], [3, 7]] and sync.restore_progress == {}
 
 
 async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, monkeypatch):
@@ -357,6 +359,8 @@ async def test_first_push_after_full_restore_uploads_nothing_unchanged(tmp_path)
     await rt2.sync.push(rt2)
     assert store.synced[-1] == [pre + "workdir/f1.txt"]
     assert pre + "workdir/f0.txt" not in store.files
+    meta = json.loads(store.files[pre + "meta.json"])  # one file fewer, 3 bytes more
+    assert (meta["files"], meta["bytes"]) == (4, 4 * 5 + 3) and rt2.workdir_files == 4
 
 
 def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog):
