@@ -172,14 +172,11 @@ DROP_VAR = "FLOCK_HARNESS_ENV_DROP"  # comma-separated names a deployment also k
 SECRET_NAME = re.compile(r".*(TOKEN|SECRET)$", re.IGNORECASE)
 
 
-def _denied(k: str) -> bool:
-    return (k in ISOLATED_DENY or bool(SECRET_NAME.fullmatch(k))
-            or k in set(filter(None, os.environ.get(DROP_VAR, "").split(","))))
-
-
-def env_dropped(keys: Iterable[str]) -> list[str]:
-    """The spec.env names Pi isolation drops (pure; `flock update` warns with it)."""
-    return sorted(k for k in keys if _denied(k))
+def env_dropped(keys: Iterable[str], provider_key: str | None = None) -> list[str]:
+    """The spec.env names Pi isolation drops: `isolated_env` itself (`flock update` warns with
+    it). FLOCK_HARNESS_ENV_DROP is read here from this process, not the worker's."""
+    keys = list(keys)
+    return isolated_env(dict.fromkeys(keys, ""), provider_key, keys)[1]
 
 
 def isolated_env(env: dict[str, str], provider_key: str | None,

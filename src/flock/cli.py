@@ -377,7 +377,7 @@ def extra_warnings(spec: SwarmSpec) -> list[str]:
 
     return [f"warning: types.{name}.env.{k}: dropped by pi isolation (use `secrets`)"
             for name, ts in spec.types.items() if ts.harness.value == "pi"
-            for k in env_dropped(ts.env)] + [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
+            for k in env_dropped(ts.env, ts.resolved_model and ts.resolved_model.provider.api_key_env)] + [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
             f"{ts.harness.value} harness (docs/open-models.md)"
             for name, ts in spec.types.items()
             if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
