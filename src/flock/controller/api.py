@@ -694,11 +694,11 @@ def create_app(
         return [swarm_status(store, sw["spec"], now) for sw in store.list_swarms()]
 
     @api.put("/swarms/{swarm}", response_model=None)
-    def apply(swarm: str, spec: SwarmSpec, replicas: Literal["keep", "spec"] = "keep",
+    def apply(swarm: str, spec: SwarmSpec, replicas: Literal["keep", "spec"] = "spec",
               dry_run: bool = False,
               x_flock_source: Annotated[str | None, Header()] = None) -> SwarmStatus | dict:
-        """Apply `spec`. `replicas=keep` (default) keeps the live replica count of types that
-        already exist; `spec` takes the spec's. `dry_run` runs every check and returns the
+        """Apply `spec` as sent (`replicas=spec`, the default); `replicas=keep` keeps the live
+        replica count of types that already exist (`flock update` does that client-side). `dry_run` runs every check and returns the
         resolved spec without storing anything (`flock update --check`). An apply that changes
         the spec bumps the swarm's generation and keeps the spec (`flock history`)."""
         prev = store.get_swarm(swarm)

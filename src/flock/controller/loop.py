@@ -720,7 +720,7 @@ class LoopEngine:
         assert ts.loop is not None
         until = ts.loop.while_.until
         return LoopMeta(kind=kind, type=type_name, round=round, started_at=_ts(L["started_at"]),
-                        wall_s=until_deadline(until, L["started_at"]) - L["started_at"] if until else None,
+                        wall_s=max(0.0, until_deadline(until, L["started_at"]) - L["started_at"]) if until else None,
                         cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake,
                         add_tools=list(ts.loop.final.add_tools) if kind == "final" and ts.loop.final else [])
 

@@ -213,3 +213,17 @@ def test_until_takes_a_duration_or_a_clock_time():
     for bad in ("soon", "2026-13-40", "25"):
         with pytest.raises(ValidationError):
             LoopSpec.model_validate({"prompt": "x", "while": {"until": bad}})
+
+
+def test_until_accepts_unquoted_yaml_times():
+    from datetime import UTC, datetime
+
+    import yaml
+
+    from flock.models import until_deadline
+    for text, t in (("2026-10-28T20:00:00Z", datetime(2026, 10, 28, 20, tzinfo=UTC)),
+                    ("2026-10-28", datetime(2026, 10, 28, tzinfo=UTC))):
+        w = yaml.safe_load(f"prompt: x\nwhile: {{until: {text}}}\n")
+        assert not isinstance(w["while"]["until"], str)  # YAML parsed it
+        until = LoopSpec.model_validate(w).while_.until
+        assert until_deadline(until, 5.0) == t.timestamp()

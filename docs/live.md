@@ -27,8 +27,9 @@ per type, then every other key as `path: old -> new`. When nothing changed it pr
 Replicas: `flock update` keeps the running replica count of every type that already exists
 (a type with `replicas: 20` in the file and 300 running stays at 300) and prints
 `agent: replicas kept (spec 20, live 300)`. `--replicas spec` applies the file's counts
-instead. The same switch is the `replicas=keep|spec` query on `PUT /swarms/{swarm}` (default
-`keep`; `flock apply`, `flock scale` and `flock run` send `spec`).
+instead. `flock update` does this client-side; `PUT /swarms/{swarm}` applies the replicas it
+is sent unless the request asks `?replicas=keep` (`flock apply`, `flock scale` and `flock run`
+send the spec as is).
 
 Lists print element by element (`types.agent.tools: +world:get_pr -world:foo`); only long
 scalar strings are shortened. `world.endpoint`, `manifest` and the credential fields are

@@ -1913,8 +1913,11 @@ def test_a_slow_hub_merge_does_not_block_reads(setup, monkeypatch):
         assert world.get_pr(rec["pr"])["head_sha"] == rec["head_sha"]
         world.list_prs("all")
         assert time.monotonic() - started < 2, "reads waited for the Hub merge"
-        with pytest.raises(ToolError, match="no open PR"):  # no second merge meanwhile
+        with pytest.raises(ToolError, match="being merged; retry shortly"):  # no second merge
             world.merge_pr(Agent("pine"), rec["pr"])
+        with pytest.raises(ToolError, match="being merged; retry shortly"):
+            approve(world, rec, "pine")
+        assert [(r["pr"], r["state"]) for r in world.list_prs()] == [(rec["pr"], "merging")]
     finally:
         release.set()
         merging.join(30)
@@ -1940,3 +1943,18 @@ def test_reconcile_runs_git_only_when_main_moved(setup, monkeypatch):
     with world.lock:
         world._reconcile()
     assert len(calls) == 1
+
+
+def test_a_hub_merge_that_raises_puts_the_pr_back_to_open(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+
+    def broken(pr, comment):
+        assert world.state["prs"][str(pr)]["state"] == "merging"
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(world.repo.hub, "merge", broken)
+    with pytest.raises(RuntimeError):
+        world.merge_pr(Agent("birch"), rec["pr"])
+    assert world.state["prs"][str(rec["pr"])]["state"] == "open"
