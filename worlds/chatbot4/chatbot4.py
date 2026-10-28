@@ -1216,7 +1216,7 @@ class Chatbot4World(World):
         return {"pr": rec["pr"], "author": rec["author"], "head_sha": rec["head_sha"],
                 "merged_sha": rec.get("merged_sha"), "already_merged": True}
 
-    @tool
+    @tool(pool="slow")
     @logs_refusals
     def close_pr(self, agent: Agent, pr: int, reason: str) -> dict:
         """Close your open PR (frees one of your two open-PR slots). Give a short reason."""
