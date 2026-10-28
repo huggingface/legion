@@ -30,12 +30,14 @@ subclass overrides them (the manifest lists them in `hooks`).
 from __future__ import annotations
 
 import inspect
+import os
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from flock.world.protocol import HOOK_EVENTS, WORLD_API
+from flock.world.admin import TYPES, Admin, Knob
+from flock.world.protocol import HOOK_EVENTS, STATE_DIR_ENV, WORLD_API
 
 AGENT_PARAM = "agent"
 
@@ -187,6 +189,42 @@ class World:
         own lock if you need one. Default: none."""
         return {}
 
+    # ------------------------------------------------------------------ admin (docs/world.md)
+    def state_dir(self) -> str | os.PathLike | None:
+        """Where `knobs.json` lives (knob values and paused lanes set through the admin API,
+        read back at the next start). Default: $FLOCK_WORLD_STATE_DIR, else None (kept in
+        memory only). The server may call it before `__init__` ran (to serve /admin while the
+        world cannot be built): do not rely on attributes `__init__` sets without a fallback."""
+        return os.environ.get(STATE_DIR_ENV) or None
+
+    @property
+    def admin(self) -> Admin:
+        """This world's knobs and paused lanes (the server may install one before __init__)."""
+        if "_flock_admin" not in self.__dict__:
+            self.__dict__["_flock_admin"] = Admin(self.state_dir())
+        return self.__dict__["_flock_admin"]
+
+    def knob(self, name: str, type: type, default: Any, *, min: float | None = None,
+             max: float | None = None, doc: str = "",
+             on_change: Callable[[Any], None] | None = None) -> Any:
+        """Register a runtime knob (int, float, bool or str) and return its current value: the
+        value set through `PATCH /admin/knobs` if any (it survives restarts), else `default`.
+        A change calls `on_change(value)` (in a thread; raise to refuse it) and shows in
+        `self.knobs[name]`."""
+        if type not in TYPES:
+            raise ValueError(f"knob {name}: type must be one of int, float, bool, str")
+        return self.admin.register(Knob(name, type, default, min, max, doc, on_change))
+
+    @property
+    def knobs(self) -> dict[str, Any]:
+        """The knobs' current values, by name (live: reflects admin changes)."""
+        return self.admin.values
+
+    def paused(self, lane: str) -> bool:
+        """Did an operator pause `lane` (`POST /admin/pause`)? Lanes are names the world
+        chooses and documents (e.g. "push", "open", "merge")."""
+        return lane in self.admin.paused
+
     # ------------------------------------------------------------------ hooks
     def on_agent_start(self, agent: Agent) -> None:
         """An agent got its first prompt on its worker (again after a relaunch)."""
@@ -198,4 +236,4 @@ class World:
         """An agent's turn ended: `data` has status, tool_calls, turn."""
 
 
-__all__ = ["Agent", "ToolError", "World", "tool", "tool_schema"]
+__all__ = ["Admin", "Agent", "ToolError", "World", "tool", "tool_schema"]

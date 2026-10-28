@@ -141,7 +141,10 @@ class Chatbot4World(World):
             stale.unlink(missing_ok=True)
         self.state = json.loads(self.db.read_text()) if self.db.exists() else {"prs": {}, "requests": {}}
         # Saving (see _save): every change bumps save_gen; written_gen is the generation on disk.
-        self.save_interval = float(os.environ.get("CHATBOT_SAVE_INTERVAL_S", SAVE_INTERVAL))
+        self.save_interval = self.knob(  # admin knobs (docs/world.md): the env sets the default
+            "save.interval_s", float, float(os.environ.get("CHATBOT_SAVE_INTERVAL_S", SAVE_INTERVAL)),
+            min=0, doc="Seconds between prs.json writes (0: write on every change).",
+            on_change=lambda v: setattr(self, "save_interval", v))
         self.save_gen = self.written_gen = 0
         self.save_sync = self.save_interval <= 0  # also set by close(): later saves write at once
         self.replace_lock = threading.Lock()  # a leaf lock: never take self.lock while holding it
@@ -171,11 +174,20 @@ class Chatbot4World(World):
         # merges (never queued behind pushes, whose wait would let main or the PR move under
         # its checks), "comment" for review comments, posted from the outbox. Each lane has a
         # breaker (flock.world.lanes); the pause covers push and merge. Lock order: see self.lock.
-        self.lanes = Lanes({
-            "push": Lane(slots=int(os.environ.get("CHATBOT_HUB_WRITE_SLOTS", "1"))),
-            "merge": Lane(slots=int(os.environ.get("CHATBOT_MERGE_HUB_SLOTS", "1"))),
-            "comment": Lane(slots=1, gap_s=float(os.environ.get("CHATBOT_HUB_OUTBOX_GAP_S", "1")))},
-            dir=self.ws, paused=lambda lane: lane in ("push", "merge") and self._prs_paused())
+        # Admin pauses (POST /admin/pause) apply per lane; the pause flag pauses push and merge.
+        self.lanes = Lanes({"push": Lane(), "merge": Lane(), "comment": Lane()}, dir=self.ws,
+                           paused=lambda lane: self.paused(lane) or (
+                               lane in ("push", "merge") and self._prs_paused()))
+        for lane, env, default in (("push", "CHATBOT_HUB_WRITE_SLOTS", "1"),
+                                   ("merge", "CHATBOT_MERGE_HUB_SLOTS", "1"), ("comment", None, "1")):
+            self.lanes[lane].configure(slots=self.knob(
+                f"hub.{lane}.slots", int, int(os.environ.get(env, default) if env else default),
+                min=0, max=4, doc=f"Concurrent Hub writes in the {lane} lane (a tripped lane uses 1).",
+                on_change=lambda v, lane=lane: self.lanes[lane].configure(slots=v)))
+        self.lanes["comment"].configure(gap_s=self.knob(
+            "hub.comment.gap_s", float, float(os.environ.get("CHATBOT_HUB_OUTBOX_GAP_S", "1")),
+            min=0, max=60, doc="Seconds between review comment posts (a tripped lane uses 5).",
+            on_change=lambda v: self.lanes["comment"].configure(gap_s=v)))
         self.hub_wait = float(os.environ.get("CHATBOT_HUB_WAIT_S", "20"))
         self.pr_gap = float(os.environ.get("CHATBOT_PR_CREATE_GAP_S", "10"))
         self.gap_lock = threading.Lock()
@@ -191,7 +203,10 @@ class Chatbot4World(World):
         if budget not in ("merges", "off"):
             raise ValueError("CHATBOT_PR_OPEN_BUDGET must be merges or off")
         self.budget_on = budget == "merges"
-        self.budget_floor = int(os.environ.get("CHATBOT_PR_OPEN_FLOOR", "20"))
+        self.budget_floor = self.knob(
+            "pr.open_floor", int, int(os.environ.get("CHATBOT_PR_OPEN_FLOOR", "20")), min=0,
+            doc="New PRs allowed per hour however few merged (the open budget's floor).",
+            on_change=lambda v: setattr(self, "budget_floor", v))
         self.open_reserved = set()  # new-PR calls past the budget check, Hub PR not yet created
         self.stopping = threading.Event()
         with self.lock:  # cached results from before slimming: the first save is already small
@@ -507,8 +522,13 @@ class Chatbot4World(World):
     def _prs_paused(self):
         return self.paused_env or os.path.exists(self.pause_file)
 
-    def _check_paused(self):
-        if self._prs_paused():
+    def state_dir(self):
+        """knobs.json (admin knobs and paused lanes) lives in the workspace, archived with it."""
+        return getattr(self, "ws", None) or os.environ.get("CHATBOT_WS", HERE / "ws")
+
+    def _check_paused(self, *lanes):
+        """The pause flag (env or file), or an admin pause of one of `lanes` (open, push, merge)."""
+        if self._prs_paused() or any(map(self.paused, lanes)):
             raise ToolError(PAUSED, "paused")
 
     def _busy(self, agent, what, pr=None, reason="slot_wait"):
@@ -823,7 +843,7 @@ class Chatbot4World(World):
         """
         started = time.monotonic()
         self._identity(agent)
-        self._check_paused()
+        self._check_paused("push", *(("open",) if pr is None else ()))
         branch = self._slug(agent, branch)
         if not isinstance(title, str) or not 3 <= len(title) <= 200:
             raise ToolError(f"title must be 3–200 characters (got {len(title) if isinstance(title, str) else 0})")
@@ -1170,7 +1190,7 @@ class Chatbot4World(World):
     def merge_pr(self, agent: Agent, pr: int) -> dict:
         """Merge an independently approved PR after checking its base and bot contract."""
         self._identity(agent)
-        self._check_paused()
+        self._check_paused("merge")
         self.repo.refresh(FETCH_TTL)
         with self.lock:
             rec = self._pr(pr)

@@ -55,6 +55,10 @@ class WorldError(ValueError):
     """Why the world cannot be applied (the message says what to fix)."""
 
 
+class WorldParked(WorldError):
+    """The world answers but is parked: it could not build itself and retries (docs/world.md)."""
+
+
 def derived_token(controller_token: str, swarm: str) -> str:
     """The secret of a world flock starts without `token_env`: stable for the controller's
     token and the swarm, so a relaunched worker and a restarted world agree without storing it."""
@@ -142,6 +146,13 @@ def fetch_manifest(url: str, token: str | None, *, transport: httpx.BaseTranspor
         raise WorldError(f"world: cannot reach {url}/manifest: {type(e).__name__}: {e}") from None
     if r.status_code == 401:
         raise WorldError(f"world: {url} refused the token (401): check world.token_env")
+    if r.status_code == 503:
+        body = None
+        with contextlib.suppress(ValueError):
+            body = r.json()
+        if isinstance(body, dict) and body.get("parked") is True:
+            raise WorldParked(f"world parked at {url} (attempt {body.get('attempt')}, next "
+                              f"retry in {body.get('next_retry_s')} s): {body.get('error')}")
     if r.status_code != 200:
         raise WorldError(f"world: GET {url}/manifest answered {r.status_code}: {r.text[:300]}")
     try:
@@ -380,11 +391,14 @@ def _group_alive(pgid: int) -> bool:
 
 def resolve(spec: SwarmSpec, *, host: WorldHost | None, controller_token: str,
             secrets: Mapping[str, str], folder: Callable[[str], list[str]],
-            transport: httpx.BaseTransport | None = None) -> None:
+            transport: httpx.BaseTransport | None = None,
+            previous: WorldSpec | None = None) -> None:
     """Fill `spec.world.endpoint`, `manifest` and the credential's origin and id (raises
     WorldError); values a client sent are replaced. A `command` world with `compute: local`
     that is new or changed is started as a candidate: the caller stores the spec, then
-    `host.commit(swarm)`; on any refusal the candidate is dropped and the running world kept."""
+    `host.commit(swarm)`; on any refusal the candidate is dropped and the running world kept.
+    A parked world at the endpoint of `previous` (the stored world block) keeps its last
+    manifest: the apply goes through and the world serves again once it is built."""
     w = spec.world
     if w is None:
         return
@@ -403,7 +417,13 @@ def resolve(spec: SwarmSpec, *, host: WorldHost | None, controller_token: str,
         assert w.url is not None
         url = world_endpoint(w.url)
     try:
-        w.manifest = fetch_manifest(url, token, transport=transport)
+        try:
+            w.manifest = fetch_manifest(url, token, transport=transport)
+        except WorldParked as e:
+            if previous is None or previous.manifest is None or previous.endpoint != url:
+                raise WorldParked(f"{e}; apply again once it serves its manifest") from None
+            log.warning("%s; keeping the last manifest (version %s)", e, previous.manifest.version)
+            w.manifest = previous.manifest
         w.endpoint = url
         check_tools(spec, folder)
     except WorldError:

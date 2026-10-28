@@ -35,6 +35,8 @@ TOKEN_ENV = "FLOCK_WORLD_TOKEN"
 PORT_ENV = "FLOCK_WORLD_PORT"
 HOST_ENV = "FLOCK_WORLD_HOST"
 SWARM_ENV = "FLOCK_SWARM"
+STATE_DIR_ENV = "FLOCK_WORLD_STATE_DIR"  # knobs.json (World.state_dir)
+ADMIN_TOKEN_ENV = "FLOCK_WORLD_ADMIN_TOKEN"  # the /admin secret, when not derived (admin_token)
 
 # Hooks flock sends to a world that lists them in its manifest's `hooks` (POST /hooks).
 HOOK_EVENTS = ("agent_start", "agent_done", "turn")
@@ -151,6 +153,14 @@ def credential_id(token: str, origin: str) -> str:
     into the world block, a worker compares it with its own secret's before sending it."""
     return hmac.new(token.encode(), f"flock-world-credential\0{origin}".encode(),
                     hashlib.sha256).hexdigest()[:32]
+
+
+def admin_token(world_token: str) -> str:
+    """The secret of a world's `/admin` routes, derived from its world secret (the world, and a
+    controller that knows the world secret, compute it; workers never send it). Same as
+    `flock.world.host.derived_token(world_token, "flock-world-admin")`."""
+    return hmac.new(world_token.encode(), b"flock-world:flock-world-admin",
+                    hashlib.sha256).hexdigest()
 
 
 WORLD_HOST_VAR = "${WORLD_HOST}"  # in world.url: the host is read from FLOCK_WORLD_HOST_FILE
