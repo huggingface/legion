@@ -141,7 +141,7 @@ def test_alert_mode_and_unenforced_actions_are_would_do(store):
     p.evaluate(spec, body({"up": True, "ts": 4}), 4, 30)
     # the alert-mode episode's clear_do was not enforced
     assert loops.calls == [("pause", {"types": [], "reason": "gone", "by": "policy", "auto": True}),
-                           ("resume", {"types": [], "by": "policy", "auto_only": True})]
+                           ("resume", {"types": [], "by": "policy", "auto_only": True, "reason": "gone"})]
 
 
 def test_mute(store):
@@ -370,3 +370,141 @@ async def test_pause_type_uses_automatic_holds(store, clock):
     app.state.loops.pause("demo", types=["researcher"], reason="operator", by="me")
     p.evaluate(spec, by_state(0), t + 30, 30)  # clear_do: an operator's hold stays
     assert store.swarm_flags("demo")["holds"]["types"]["researcher"]["by"] == "me"
+
+
+# ---------------------------------------------------------------- review: holds, checks, locks
+
+PAUSE = {"name": "busy", "metric": "types.researcher.idle", "op": ">=", "value": 1,
+         "do": {"pause_type": "researcher"}, "clear_do": {"resume_type": "researcher"}}
+
+
+def idle(n):
+    return {"types": {"researcher": {"by_state": {"idle": n}}}}
+
+
+def holds(store):
+    return (store.swarm_flags("demo").get("holds") or {}).get("types", {})
+
+
+def test_muted_rule_clearing_still_lifts_its_hold(store, clock):
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0)
+    spec = spec_with({"mode": "enforce", "rules": [PAUSE]})
+    store.put_swarm(spec, 0)
+    p, t = app.state.health.policies, clock().timestamp()
+    p.evaluate(spec, idle(2), t, 30)
+    assert holds(store)["researcher"]["reason"] == "busy"
+    p.mute("demo", "busy", None)
+    out = p.evaluate(spec, idle(0), t + 30, 30)
+    assert holds(store) == {} and [k for k, _ in out] == ["policy_action"]  # no alert_cleared
+
+
+def test_a_restart_lifts_a_hold_left_by_a_rule(store, clock):
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0)
+    spec = spec_with({"mode": "enforce", "rules": [PAUSE]})
+    store.put_swarm(spec, 0)
+    t = clock().timestamp()
+    app.state.health.policies.evaluate(spec, idle(2), t, 30)
+    p = Policies(store, secrets={})  # a new controller process: no rule state
+    p.loops = app.state.loops
+    p.evaluate(spec, idle(0), t + 30, 30)
+    assert holds(store) == {}
+    # a rule removed by an apply: its hold goes on the next tick
+    p.evaluate(spec, idle(2), t + 60, 30)
+    assert "researcher" in holds(store)
+    p.evaluate(spec_with({"rules": []}), idle(2), t + 90, 30)
+    assert holds(store) == {}
+
+
+def test_world_down_and_policy_holds_are_lifted_separately(store, clock):
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0)
+    data = spec_with({"mode": "enforce", "rules": [PAUSE]},
+                     researcher={"replicas": 1}, writer={"replicas": 1}).model_dump(mode="json")
+    data["world"] = {"url": "http://world", "endpoint": "http://world", "token_env": "WT"}
+    spec = SwarmSpec.model_validate(data)
+    store.put_swarm(spec, 0)
+    loops, p, t = app.state.loops, app.state.health.policies, clock().timestamp()
+    loops.pause("demo", types=["writer"], reason="world_down", by="controller", auto=True)
+    p.evaluate(spec, idle(2), t, 30)
+    assert {k: v["reason"] for k, v in holds(store).items()} == {"writer": "world_down",
+                                                                "researcher": "busy"}
+    app.state.health._world_holds(spec, t, up=True)  # the world is back
+    assert set(holds(store)) == {"researcher"}
+    loops.pause("demo", types=["writer"], reason="world_down", by="controller", auto=True)
+    p.evaluate(spec, idle(0), t + 30, 30)  # the rule clears: the world-down hold stays
+    assert set(holds(store)) == {"writer"}
+
+
+def test_rules_naming_what_the_spec_lacks_are_refused():
+    from flock.models import policy_refusals
+
+    bad = spec_with({"rules": [{**MEM, "name": "a", "metric": "types.nope.stuck_n"},
+                               {**MEM, "name": "b", "metric": "providers.p.waiting"},
+                               {**MEM, "name": "c", "metric": "tools.open_pr.err_pct"},
+                               {**MEM, "name": "d", "do": {"pause_type": ["nope"]}}]})
+    assert [r.split(":")[0] for r in policy_refusals(bad)] == [
+        "policies.a.metric", "policies.b.metric", "policies.d.pause_type"]  # tools: unknown
+
+
+def test_a_rule_without_values_warns_once(store):
+    spec = spec_with({"rules": [{**MEM, "metric": "tools.open_pr.err_pct"}]})
+    store.put_swarm(spec, 0)
+    p = Policies(store, secrets={})
+    for t in (0, 30, 60):
+        p.evaluate(spec, body(), t, 30)
+    assert [d["rule"] for _, d in events(store, "policy_warning")] == ["mem"]
+
+
+def test_policy_drain_waits_for_the_rotation_lock(store, jobs, clock, tick):
+    import threading
+
+    from flock.controller.reconcile import ROTATE_LOCK
+
+    wids = _workers(store, jobs, clock, tick, n=1)
+    sw = store.get_swarm("demo")["spec"].model_dump(mode="json")
+    spec = SwarmSpec.model_validate({**sw, "policies": {"mode": "enforce", "rules": [
+        {**MEM, "for": "0s", "do": "drain_worker"}]}})
+    _beat(store, clock, wids, 990)
+    p = Policies(store, secrets={})
+    b = {"workers": {wids[0]: {"hb": 1, "mem": {"nonreclaim_mb": 990, "limit_mb": 1000}}}}
+    with ROTATE_LOCK:
+        th = threading.Thread(target=p.evaluate, args=(spec, b, clock().timestamp(), 30))
+        th.start()
+        th.join(0.3)
+        assert th.is_alive() and _drains(store, wids[0]) == []
+    th.join(5)
+    assert len(_drains(store, wids[0])) == 1
+
+
+def test_ramp_keeps_an_operator_scale_down_until_the_next_step(store, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 0, "agents_per_worker": 2,
+                                          "replicas_ramp": {"start": 4, "add": 4, "every": "10m",
+                                                            "max": 12}}), 0)
+    reps = lambda: store.get_swarm("demo")["spec"].types["researcher"].replicas
+    tick()
+    assert reps() == 4
+    spec = store.get_swarm("demo")["spec"]
+    spec.types["researcher"].replicas = 1  # `flock scale demo researcher 1`
+    store.update_swarm_spec(spec)
+    clock.advance(300)
+    tick()
+    assert reps() == 1  # same step: not undone
+    clock.advance(300)
+    tick()
+    assert reps() == 8
+    assert [d["step"] for _, d in events(store, "ramp_step")] == [0, 1]
+
+
+async def test_held_agents_take_no_max_working_slot(store, clock, tick):
+    spec = make_spec(researcher={"replicas": 2, "agents_per_worker": 2, "max_working": 1})
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        assert (await c.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
+        tick()
+        await c.get(f"/workers/{W0}/commands", params={"wait": 0})
+        idle_ = [AgentHeartbeat(name=n, state="idle") for n in ("researcher-0000", "researcher-0001")]
+        await c.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, idle_))
+        await c.post("/swarms/demo/pause", json={"agents": ["researcher-0000"]})
+        await c.post("/swarms/demo/prompts", json={"type": "researcher", "text": "go"})
+        cmds = (await c.get(f"/workers/{W0}/commands", params={"wait": 0})).json()["commands"]
+        assert [x["agent"] for x in cmds if x["kind"] == "prompt"] == ["researcher-0001"]

@@ -137,15 +137,17 @@ types:
 ```
 
 The reconciler raises the type's replicas to `start` on the first pass that sees the ramp.
-It then adds `add` every `every`, up to `max`. Each raise rewrites the stored spec and writes
-`ramp_step {type, from, replicas, step, max}`. The ramp never lowers replicas, so an operator's
-`flock scale` up stays. The ramp's start time is stored, so a controller restart keeps the
-schedule. `flock update` keeps the live replicas by default. This replaces
+It then adds `add` every `every`, up to `max`. Replicas change only when a new step is due,
+and never go down. An operator's `flock scale` between steps, up or down, stays until the
+next step asks for more. Each raise rewrites the stored spec and writes `ramp_step {type,
+from, replicas, step, max}`. The start time and the last step are stored, so a controller
+restart keeps the schedule. `flock update` keeps the live replicas by default. This replaces
 `experiments/run4/waves.py run` (fixed schedule only; there is no load guard).
 
 ## Per-type concurrency (`max_working`)
 
-`types.T.max_working: N` admits at most N turns of the type at once, swarm-wide. It uses the
+`types.T.max_working: N` admits at most N turns of the type at once, swarm-wide. Paused agents
+never take a slot. It uses the
 same admission as a provider's `max_working`: prompts wait in the controller, and free slots
 go to the oldest pending prompt first. When both caps are set, a prompt needs a slot in both.
 A type with it runs its `turn_end` loop on the controller (docs/loop.md).

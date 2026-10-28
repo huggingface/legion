@@ -77,6 +77,7 @@ from flock.models import (
     loop_refusals,
     merge_grants,
     parse_duration,
+    policy_refusals,
     type_spec_rev,
     worker_type_spec,
     world_tools,
@@ -772,6 +773,7 @@ def create_app(
     # "working" (turn_started seen) or "idle" (turn_ended / turn_interrupted / prompt_deferred
     # seen). A heartbeat that reports the agent replaces it (see `heartbeat_seen`).
     live: dict[str, tuple[str, float]] = {}
+    broadcast_lock = threading.Lock()  # tracked broadcasts: read-modify-write of one row
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
     set_token_key(store, token)
@@ -923,7 +925,7 @@ def create_app(
         if conflicts := worker_cap_conflicts(store, spec):
             raise HTTPException(409, "; ".join(conflicts))
         check_tools(swarm, spec)
-        if refused := loop_refusals(spec):
+        if refused := loop_refusals(spec) + policy_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
@@ -1406,11 +1408,12 @@ def create_app(
                 if not (isinstance(pid, str) and pid.startswith("b-")):
                     continue
                 key = f"broadcast:{pid}"
-                b = store.get_control(a["swarm"], key)
                 field = "started" if ev.type == "turn_started" else "finished"
-                if b is not None and a["name"] not in b[field]:
-                    b[field].append(a["name"])
-                    store.put_control(a["swarm"], key, b)
+                with broadcast_lock:  # event posts of several workers at once
+                    b = store.get_control(a["swarm"], key)
+                    if b is not None and a["name"] not in b[field]:
+                        b[field].append(a["name"])
+                        store.put_control(a["swarm"], key, b)
 
     # ------------------------------------------------------------- loops (docs/loop.md)
 
@@ -1540,15 +1543,22 @@ def create_app(
         workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
         taken: set[str] = set()
         owner: dict[str, str | None] = {}
+        types_of: dict[str, str] = {}
         for a in store.agent_states(spec.swarm, users):
             owner[a["name"]] = a["worker"]
+            types_of[a["name"]] = a["type"]
             if busy(a, workers.get(a["worker"]), now):
                 taken.add(a["name"])
         free = cap - len(taken)
         window: list[str] = []
         if free > 0:
+            flags = store.swarm_flags(spec.swarm)
+            held = {n for n in owner if store.held(
+                {"swarm": spec.swarm, "type": types_of[n], "name": n}, flags)}
             for name in store.oldest_pending(spec.swarm, users):
                 w = workers.get(owner.get(name))
+                if name in held:
+                    continue  # paused: its prompt waits, and must not hold a slot meanwhile
                 if name in taken or w is None or w["job_id"] is None or w["draining"] \
                         or w["retire_at"] or worker_state(w, now) != WorkerState.running:
                     continue  # a worker that cannot start the turn must not hold a slot

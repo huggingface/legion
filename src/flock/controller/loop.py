@@ -387,10 +387,12 @@ class LoopEngine:
             return h
 
     def resume(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
-               *, by: str = "operator", auto_only: bool = False) -> dict[str, Any]:
+               *, by: str = "operator", auto_only: bool = False,
+               reason: str | None = None) -> dict[str, Any]:
         """Lift holds: the named ones, or all (both None). `auto_only`: only the holds the
-        controller made itself (world down), never an operator's. Queued prompts and wakes go
-        out on the next poll / tick. Returns the swarm's holds."""
+        controller made itself (world down, policies), never an operator's. `reason`: only
+        holds with that reason (each automatic source lifts its own). Queued prompts and wakes
+        go out on the next poll / tick. Returns the swarm's holds."""
         with self._lock:
             flags = self.store.swarm_flags(swarm)
             h = flags.get("holds")
@@ -401,7 +403,8 @@ class LoopEngine:
                 pick = names if names is not None else (list(h[key]) if types is None
                                                         and agents is None else [])
                 for n in pick:
-                    if n in h[key] and (not auto_only or h[key][n].get("auto")):
+                    if n in h[key] and (not auto_only or h[key][n].get("auto")) and (
+                            reason is None or h[key][n].get("reason") == reason):
                         del h[key][n]
                         gone[key].append(n)
             if not gone["types"] and not gone["agents"]:

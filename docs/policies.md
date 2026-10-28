@@ -66,7 +66,17 @@ value (no world, a tool with no calls yet) is skipped the same way.
 | `prompt` | `{text}` | no: always logged as `would_do` |
 
 In `alert` mode every action except `notify` is logged as `would_do`. A target's `clear_do` is
-enforced only when that episode's `do` was enforced.
+enforced only when that episode's `do` was enforced, and it runs even while the rule is muted.
+
+**Holds a policy leaves behind.** Each policy hold has `by: policy` and its rule's name as the
+reason, and `resume_type` lifts only that rule's holds. The world-down hold (`world_down`) and
+a policy hold on the same type are lifted separately. Holds are kept in the store, but rule
+state is not. So when a rule has a fresh sample under its threshold and no target is firing,
+the controller lifts any hold that rule left: after a restart, for example, or when a
+`clear_do` failed. When a rule is removed by an apply, its holds are lifted on the next tick.
+Lane pauses (`world_pause`) are kept by the world and have no such sweep: a lane paused by a
+rule that was removed, or that was firing when the controller restarted, stays paused until
+`flock world resume`.
 
 World down already has a built-in response: workers refuse world calls at once, and after
 `world.down_pause_s` (default 30 min) the controller holds the types that use the world. It
@@ -84,12 +94,19 @@ To enforce it, copy it into a block with `mode: enforce`.
 - Global budget: `FLOCK_POLICY_MAX_ACTIONS_PER_HOUR` enforced episodes per swarm (default 20).
   Past it, rules drop to alert-only (`would_do`) until the hour frees a slot, and
   `policy_budget_exhausted {rule, max_actions_per_hour}` is written at most once an hour.
-- `flock policy mute <swarm> <rule> [--for 2h]`: no alerts and no actions. The rule's state
-  keeps updating. `flock policy unmute <swarm> <rule>`. Mutes are stored and survive a
+- `flock policy mute <swarm> <rule> [--for 2h]`: no alert events and no new episodes. The
+  rule's state keeps updating, and an enforced episode that clears still runs its
+  `clear_do`. `flock policy unmute <swarm> <rule>`. Mutes are stored and survive a
   restart.
 - Rule state (counts, firing, cooldowns) is in memory. After a controller restart, a
   condition that still holds fires again after `for`. Drains still respect the rotation
   budget.
+
+**Checks.** At apply, a metric naming a type or provider the spec does not have is refused,
+and so is a `pause_type` or `resume_type` naming an unknown type. A tool name is checked only
+when the world's tools are known: types list `world:*` tools, or the manifest is known. While
+no target of a rule has a value (for example a tool no agent has called yet), the controller
+writes `policy_warning {rule, msg}` once.
 
 ## Events
 

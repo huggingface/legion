@@ -32,7 +32,13 @@ from typing import Any
 
 import httpx
 
-from flock.controller.reconcile import rotatable, rotate_worker, rotation_room, swarm_stream
+from flock.controller.reconcile import (
+    ROTATE_LOCK,
+    rotatable,
+    rotate_worker,
+    rotation_room,
+    swarm_stream,
+)
 from flock.controller.store import Store
 from flock.models import Event, PolicyRule, SwarmSpec, parse_duration, world_tools
 
@@ -115,6 +121,7 @@ class Policies:
         self._hb: dict[tuple[str, str], Any] = {}  # (swarm, worker) -> heartbeat last seen
         self._probe: dict[str, Any] = {}  # swarm -> world probe time last seen
         self.recent: dict[str, deque] = {}  # swarm -> (ts, policy event) for the digest
+        self._warned: set[tuple[str, str]] = set()  # (swarm, rule) with no value, warned
 
     # ------------------------------------------------------------------ mutes
     def mutes(self, swarm: str, now: float) -> dict[str, float | None]:
@@ -160,9 +167,21 @@ class Policies:
         names = {r.name for r in rules}
         for key in [k for k in self.state if k[0] == swarm and k[1] not in names]:
             del self.state[key]  # a rule removed by an apply
+        holds = self._policy_holds(swarm)
+        for reason in sorted(holds - names):  # its rule was removed: nothing would lift it
+            out += self._lift(spec, reason, now)
         for rule in rules:
+            healthy = False  # a fresh sample under the threshold, this tick
             need = max(1, math.ceil(parse_duration(rule.for_).total_seconds() / interval))
             values = metric_values(rule.metric, body)
+            if not any(v is not None for v in values.values()):
+                if (swarm, rule.name) not in self._warned:  # e.g. a tool no worker called yet
+                    self._warned.add((swarm, rule.name))
+                    log.warning("%s: policy %s: no value for %s", swarm, rule.name, rule.metric)
+                    self._emit(swarm, now, "policy_warning", {
+                        "rule": rule.name, "msg": f"no value for {rule.metric} yet"})
+            else:
+                self._warned.discard((swarm, rule.name))
             for key in [k for k in self.state if k[:2] == (swarm, rule.name)
                         and k[2] not in values]:
                 st = self.state.pop(key)  # the worker is gone
@@ -177,6 +196,7 @@ class Policies:
                 muted = rule.name in mutes
                 if not st["firing"]:
                     st["n"] = st["n"] + 1 if OPS[rule.op](v, rule.value) else 0
+                    healthy |= st["n"] == 0
                     if st["n"] < need:
                         continue
                     st.update(firing=True, acted=False, enforced=False)
@@ -188,18 +208,37 @@ class Policies:
                     if not muted:
                         out.append(self._emit(swarm, now, "alert_cleared", {
                             "rule": rule.name, "target": target, "value": v}))
-                        if st["acted"]:  # enforced only after an enforced `do`
-                            out += self._run(spec, rule, (rule.mode or mode) if st.get(
-                                "enforced") else "alert", target, rule.clear_do, now,
-                                clearing=True)
+                    if st["acted"]:  # muted too: undo what the episode did
+                        out += self._run(spec, rule, (rule.mode or mode) if st.get(
+                            "enforced") else "alert", target, rule.clear_do, now,
+                            clearing=True)
                     continue
                 st["value"] = v
                 if st["firing"] and not st["acted"] and not muted:
                     out += self._act(spec, rule, mode, target, st, now)
+            # a hold of this rule with nothing firing (after a restart, a cleared episode whose
+            # clear_do failed, ...): lift it
+            if healthy and rule.name in holds and not any(
+                    x["firing"] for k, x in self.state.items() if k[:2] == (swarm, rule.name)):
+                out += self._lift(spec, rule.name, now)
         for wid, w in (body.get("workers") or {}).items():
             self._hb[(swarm, wid)] = w.get("hb")
         self._probe[swarm] = world.get("ts")
         return out
+
+    def _policy_holds(self, swarm: str) -> set[str]:
+        """Rule names that hold a type or agent now (automatic holds made by a policy)."""
+        h = self.store.swarm_flags(swarm).get("holds") or {}
+        return {e.get("reason") for k in ("types", "agents") for e in (h.get(k) or {}).values()
+                if e.get("auto") and e.get("by") == "policy"}
+
+    def _lift(self, spec: SwarmSpec, rule: str, now: float) -> list[tuple[str, dict[str, Any]]]:
+        if getattr(self.loops, "resume", None) is None:
+            return []
+        self.loops.resume(spec.swarm, by="policy", auto_only=True, reason=rule)
+        return [self._emit(spec.swarm, now, "policy_action", {
+            "rule": rule, "target": "swarm", "action": "resume_type", "mode": "done",
+            "orphan": True})]
 
     def _act(self, spec: SwarmSpec, rule: PolicyRule, mode: str, target: str,
              st: dict[str, Any], now: float) -> list[tuple[str, dict[str, Any]]]:
@@ -233,13 +272,19 @@ class Policies:
                         "rule": rule.name, "max_actions_per_hour": self.max_actions}))
                 st["acted"] = True
                 return out + self._run(spec, rule, "alert", target, rule.do, now)
-            if any(next(iter(a)) == "drain_worker" for a in rule.do) and rotation_room(
-                    self.store, swarm, self.max_rotating, now) <= 0:
-                return []  # no rotation slot: wait for one
-            acts.append(now)
-            budget.append(now)
-            st["last_act"], st["enforced"] = now, True
+            if any(next(iter(a)) == "drain_worker" for a in rule.do):
+                with ROTATE_LOCK:  # the room check and the drain, against the reconciler's
+                    if rotation_room(self.store, swarm, self.max_rotating, now) <= 0:
+                        return []  # no rotation slot: wait for one
+                    return self._enforce(spec, rule, mode, target, st, now, acts, budget)
+            return self._enforce(spec, rule, mode, target, st, now, acts, budget)
         st["acted"] = True
+        return self._run(spec, rule, rule.mode or mode, target, rule.do, now)
+
+    def _enforce(self, spec, rule, mode, target, st, now, acts, budget):
+        acts.append(now)
+        budget.append(now)
+        st["last_act"], st["enforced"], st["acted"] = now, True, True
         return self._run(spec, rule, rule.mode or mode, target, rule.do, now)
 
     def _run(self, spec: SwarmSpec, rule: PolicyRule, mode: str, target: str,
@@ -291,7 +336,7 @@ class Policies:
             if name == "pause_type":
                 fn(swarm, types=types, reason=rule.name, by="policy", auto=True)
             else:
-                fn(swarm, types=types, by="policy", auto_only=True)
+                fn(swarm, types=types, by="policy", auto_only=True, reason=rule.name)
             return {"types": types}
         if self.world_admin is None:
             raise RuntimeError("no world admin route")

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 import uuid
 from collections import Counter
@@ -252,6 +253,11 @@ def _record(p: _Pass, swarm: str, actions: list[Action]) -> None:
         p.store.append_events(swarm, swarm_stream(swarm), evs)
 
 
+# The reconcile pass and the health tick (policies) run in different threads: the room check
+# and the drain it allows happen under this lock in both.
+ROTATE_LOCK = threading.Lock()
+
+
 def rotation_room(store: Store, swarm: str, max_rotating: int | None, now: float) -> int:
     """Drains the rotation budget allows now: `max_rotating` (default 10% of the swarm's
     worker slots, at least 1) minus the workers restoring (launched, or a restore in flight)
@@ -293,40 +299,50 @@ def _rotate(p: _Pass, spec: SwarmSpec) -> None:
     want = [w for w in workers if tel[w["id"]].get("wants_rotation") and rotatable(w, p.now)]
     if not want:
         return
-    room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
     eta = {w["id"]: (tel[w["id"]].get("mem") or {}).get("eta_limit_s") for w in want}
-    for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0))[:max(0, room)]:
-        rotate_worker(p.store, spec.swarm, w, p.now)
+    with ROTATE_LOCK:
+        room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
+        for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)
+                        )[:max(0, room)]:
+            rotate_worker(p.store, spec.swarm, w, p.now)
 
 
 def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): raise replicas to `start`, then by
-    `add` every `every` from the first pass that saw the ramp, up to `max`; never lower them
-    (an operator's `flock scale` up stays). The clock lives in the store (`ramp:<type>`), so
-    a controller restart keeps it. Each raise rewrites the stored spec: `ramp_step`."""
-    raised = {}
+    `add` every `every` from the first pass that saw the ramp, up to `max`. Replicas move only
+    when a new step comes, and never down, so an operator's scale (up or down) between steps
+    stays. `{t0, step}` lives in the store (`ramp:<type>`): a restart keeps the schedule.
+    Each raise rewrites the stored spec (re-read just before) and writes `ramp_step`."""
+    due: dict[str, tuple[int, int]] = {}  # type -> (step, replicas the step wants)
     for name, ts in spec.types.items():
         r = ts.replicas_ramp
         if r is None:
             continue
         key = f"ramp:{name}"
-        t0 = p.store.get_control(spec.swarm, key)
-        if t0 is None:
-            t0 = p.now
-            p.store.put_control(spec.swarm, key, t0)
-        step = int((p.now - t0) // parse_duration(r.every).total_seconds())
-        want = min(r.max, r.start + r.add * step)
-        if want > ts.replicas:
-            raised[name] = ts.model_copy(update={"replicas": want})
-            p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
-                type="ramp_step", ts=datetime.fromtimestamp(p.now, UTC), agent="",
-                data={"type": name, "from": ts.replicas, "replicas": want, "step": step,
-                      "max": r.max})])
-    if not raised:
+        st = p.store.get_control(spec.swarm, key) or {"t0": p.now, "step": -1}
+        step = int((p.now - st["t0"]) // parse_duration(r.every).total_seconds())
+        if step > st["step"]:
+            p.store.put_control(spec.swarm, key, {"t0": st["t0"], "step": step})
+            due[name] = (step, min(r.max, r.start + r.add * step))
+    if not due:
         return spec
-    spec = spec.model_copy(update={"types": {**spec.types, **raised}})
-    p.store.update_swarm_spec(spec)
-    return spec
+    row = p.store.get_swarm(spec.swarm)
+    fresh: SwarmSpec = row["spec"] if row else spec
+    raised = {}
+    for name, (step, want) in due.items():
+        ts = fresh.types.get(name)
+        if ts is None or ts.replicas_ramp is None or want <= ts.replicas:
+            continue
+        raised[name] = ts.model_copy(update={"replicas": want})
+        p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
+            type="ramp_step", ts=datetime.fromtimestamp(p.now, UTC), agent="",
+            data={"type": name, "from": ts.replicas, "replicas": want, "step": step,
+                  "max": ts.replicas_ramp.max})])
+    if not raised:
+        return fresh
+    fresh = fresh.model_copy(update={"types": {**fresh.types, **raised}})
+    p.store.update_swarm_spec(fresh)
+    return fresh
 
 
 def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:

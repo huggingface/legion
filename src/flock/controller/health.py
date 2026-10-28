@@ -568,8 +568,10 @@ class Health:
         since = self.down_since.get(spec.swarm)
         held = (self.store.swarm_flags(spec.swarm).get("holds") or {}).get("types", {})
         if since is None:
-            if up and any(h.get("auto") for h in held.values()):
-                self.loops.resume(spec.swarm, by="controller", auto_only=True)
+            if up and any(h.get("auto") and h.get("reason") == "world_down"
+                          for h in held.values()):  # a policy's holds are its own to lift
+                self.loops.resume(spec.swarm, by="controller", auto_only=True,
+                                  reason="world_down")
             return
         limit = spec.world.down_pause_s
         limit = self.down_pause_s if limit is None else limit

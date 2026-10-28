@@ -1563,6 +1563,28 @@ def loop_refusals(spec: SwarmSpec) -> list[str]:
     return out
 
 
+def policy_refusals(spec: SwarmSpec) -> list[str]:
+    """Policy rules naming what the spec does not have: a type, provider or (when the world's
+    tools are known) tool in a metric path, or a type in pause_type / resume_type."""
+    if spec.policies is None:
+        return []
+    out: list[str] = []
+    tools = {t for ts in spec.types.values() for t in world_tools(ts, spec.world)}
+    for r in spec.policies.rules:
+        head, _, rest = r.metric.partition(".")
+        name = rest.rpartition(".")[0]
+        known = {"types": spec.types, "providers": spec.providers, "tools": tools}.get(head)
+        if known is not None and (known or head != "tools") and name not in known:
+            out.append(f"policies.{r.name}.metric: no {head[:-1]} {name!r} in the spec")
+        for a in r.do + r.clear_do:
+            (act, arg), = a.items()
+            if act in ("pause_type", "resume_type") and arg is not None:
+                for t in arg if isinstance(arg, list) else [arg]:
+                    if t not in spec.types:
+                        out.append(f"policies.{r.name}.{act}: no type {t!r} in the spec")
+    return out
+
+
 CommsSpec.model_rebuild()
 WorldSpec.model_rebuild()
 TypeSpec.model_rebuild()
