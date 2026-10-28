@@ -139,8 +139,8 @@ class Built:
     state: StateSync | None
     settings: Settings
     halt: object = None  # () -> None: cancel the reconcile and sync loops (shutdown)
-    health: Health | None = None
     final_push_timeout: float = FINAL_PUSH_TIMEOUT
+    health: Health | None = None
 
 
 WORLD_FOLLOW_INTERVAL = 15.0  # s between reads of FLOCK_WORLD_HOST_FILE
@@ -273,7 +273,7 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
                      compute=compute, health=health)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
-    return Built(app, store, dep, jobs, state, settings, halt, timeout, health)
+    return Built(app, store, dep, jobs, state, settings, halt, timeout, health=health)
 
 
 def build_app():
