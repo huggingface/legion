@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 import httpx
 from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from pydantic import Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 
@@ -346,9 +346,18 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
         workers_total=len(workers),
         pending_prompts=sum(pending.values()),
         cost_usd=round(sum(t.cost_usd for t in types.values()), 6),
-        budget_stop=store.swarm_flags(spec.swarm).get("budget_stop"),
+        budget_stop=(flags := store.swarm_flags(spec.swarm)).get("budget_stop"),
+        held=_held_view(flags.get("holds")),
         generation=store.generation(spec.swarm),
     )
+
+
+def _held_view(h: dict | None) -> dict | None:
+    """`SwarmStatus.held`: {types: {T: {since, reason, by, auto}}, agents: {A: ...}}."""
+    if not h:
+        return None
+    return {k: {n: {**e, "since": _dt(e["since"]).isoformat()} for n, e in h.get(k, {}).items()}
+            for k in ("types", "agents")}
 
 
 _AGENT_STATE_TONE = {
@@ -1486,7 +1495,12 @@ def create_app(
             # A draining worker starts no turns; its prompts wait for the replacement job. Under
             # the hard budget stop no prompt is delivered (a relaunch's resume prompt included).
             draining = w["draining"] or w["retire_at"] or loops.hard_stopped(w["swarm"])
-            prompts = [] if draining else admit(w, store.prompts_for_worker(worker_id))
+            # paused agents (docs/loop.md "Pause and resume"): their prompts wait in the queue
+            flags = store.swarm_flags(w["swarm"])
+            prompts = [] if draining else admit(w, [
+                p for p in store.prompts_for_worker(worker_id)
+                if not store.held({"swarm": w["swarm"], "type": w["type"], "name": p["agent"]},
+                                  flags)])
             return (cmds, prompts) if cmds or prompts else None
 
         found = await notifier.long_poll(f"commands:{worker_id}", check, wait)
@@ -1535,7 +1549,7 @@ def create_app(
         if spec is not None and spec.world is not None and w is not None:
             # the world's manifest, re-fetched at every apply (docs/world.md)
             ts = spec.types.get(w["type"])
-            out["world"] = {**spec.world.model_dump(mode="json"),
+            out["world"] = {**spec.world.model_dump(mode="json", exclude={"down_pause_s"}),
                             "tools": world_tools(ts, spec.world) if ts else []}
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
@@ -1582,5 +1596,34 @@ def create_app(
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
 
+    add_pause_routes(api, loops)
     app.include_router(api)
     return app
+
+
+class HoldRequest(BaseModel):
+    """`POST /swarms/{s}/pause` and `/resume` (docs/loop.md "Pause and resume"). Pause with
+    neither `types` nor `agents` holds every type; resume with neither lifts every hold."""
+
+    types: list[str] | None = None
+    agents: list[str] | None = None
+    interrupt: bool = False  # pause: also stop the turns in flight
+    reason: str = ""
+    by: str = "operator"
+
+
+def add_pause_routes(api: APIRouter, loops: LoopEngine) -> None:
+    def call(fn, swarm: str, **kw) -> dict:
+        try:
+            return {"swarm": swarm, "held": _held_view(fn(swarm, **kw)) or {"types": {}, "agents": {}}}
+        except KeyError as e:
+            raise HTTPException(404, str(e.args[0])) from None
+
+    @api.post("/swarms/{swarm}/pause")
+    def pause(swarm: str, req: HoldRequest) -> dict:
+        return call(loops.pause, swarm, types=req.types, agents=req.agents,
+                    interrupt=req.interrupt, reason=req.reason, by=req.by)
+
+    @api.post("/swarms/{swarm}/resume")
+    def resume(swarm: str, req: HoldRequest) -> dict:
+        return call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by)

@@ -208,6 +208,11 @@ def _print_status(st: dict) -> None:
         for t in st["types"].values()
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
+    held = st.get("held") or {}
+    for kind in ("types", "agents"):
+        for name, h in (held.get(kind) or {}).items():
+            typer.echo(f"HELD {kind[:-1]} {name}: {h['reason'] or '-'} (by {h['by']}"
+                       f"{', auto' if h.get('auto') else ''}, since {h['since'][:19]}Z)")
     for t in st["types"].values():
         if t.get("loop"):
             typer.echo(_loop_line(t["loop"]))
@@ -1228,6 +1233,48 @@ def workers(swarm: str) -> None:
         typer.echo("full job logs: <compute log_dir>/<worker id>-<job>.out", err=True)
     else:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
+
+
+def add_pause_commands(app: typer.Typer) -> None:
+    """`flock pause` / `flock resume` (docs/loop.md "Pause and resume")."""
+
+    def _body(type_: list[str] | None, agent: list[str] | None) -> dict:
+        return {"types": type_ or None, "agents": agent or None}
+
+    def _show(r: dict) -> None:
+        h = r["held"]
+        held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
+        typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
+
+    @app.command()
+    def pause(
+        swarm: str,
+        reason: Annotated[str, typer.Option("--reason", help="why (shown in status and events)")],
+        type_: Annotated[list[str] | None, typer.Option("--type", help="a type to hold "
+                                                         "(repeatable; default: every type)")] = None,
+        agent: Annotated[list[str] | None, typer.Option("--agent", help="an agent to hold "
+                                                         "(repeatable)")] = None,
+        interrupt: Annotated[bool, typer.Option("--interrupt", help="also stop the turns in "
+                                                "flight")] = False,
+    ) -> None:
+        """Hold types or agents: no new prompts or loop rounds reach them (queued ones wait),
+        rounds are not counted, until `flock resume`. Not `flock loop --stop`."""
+        _show(_call("POST", f"/swarms/{swarm}/pause", json={
+            **_body(type_, agent), "interrupt": interrupt, "reason": reason}))
+
+    @app.command()
+    def resume(
+        swarm: str,
+        type_: Annotated[list[str] | None, typer.Option("--type", help="a type to resume "
+                                                         "(repeatable)")] = None,
+        agent: Annotated[list[str] | None, typer.Option("--agent", help="an agent to resume "
+                                                         "(repeatable)")] = None,
+    ) -> None:
+        """Lift holds (default: every hold); queued prompts and wakes go out."""
+        _show(_call("POST", f"/swarms/{swarm}/resume", json=_body(type_, agent)))
+
+
+add_pause_commands(app)
 
 
 world_app = typer.Typer(help="Worlds: shared state behind tools (docs/world.md).",

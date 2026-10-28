@@ -324,6 +324,83 @@ class LoopEngine:
                     self._start(sw["spec"], type_name, ts, now, restart=L is not None)
             return self.status(swarm, type_name, detail=False)
 
+    def _put_budget(self, swarm: str, body: dict[str, Any]) -> None:
+        """Write the budget-stop flags, keeping the swarm's pause holds."""
+        holds = self.store.swarm_flags(swarm).get("holds")
+        self.store.put_swarm_flags(swarm, {**body, **({"holds": holds} if holds else {})})
+
+    # ------------------------------------------------------------------ pause / resume
+    def pause(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
+              *, interrupt: bool = False, reason: str = "", by: str = "operator",
+              auto: bool = False) -> dict[str, Any]:
+        """Hold types and/or agents (both None: every type): no new prompt reaches them and
+        their loops skip them without counting rounds, until `resume`. `interrupt` also stops
+        the turns in flight (`stop`). An automatic hold never replaces an operator's one.
+        Returns the swarm's holds."""
+        with self._lock:
+            sw = self.store.get_swarm(swarm)
+            if sw is None:
+                raise KeyError(f"no swarm {swarm!r}")
+            if types is None and agents is None:
+                types = sorted(sw["spec"].types)
+            unknown = [t for t in types or [] if t not in sw["spec"].types]
+            unknown += [n for n in agents or [] if (a := self.store.get_agent(n)) is None
+                        or a["swarm"] != swarm]
+            if unknown:
+                raise KeyError(f"not in swarm {swarm!r}: {', '.join(unknown)}")
+            flags = self.store.swarm_flags(swarm)
+            h = flags.setdefault("holds", {"types": {}, "agents": {}})
+            entry = {"since": self.clock().timestamp(), "reason": reason, "by": by, "auto": auto}
+            new: dict[str, list[str]] = {"types": [], "agents": []}
+            for key, names in (("types", types or []), ("agents", agents or [])):
+                for n in names:
+                    if n not in h[key] or (not auto and h[key][n].get("auto")):
+                        h[key][n] = entry
+                        new[key].append(n)
+            if not new["types"] and not new["agents"]:
+                return h
+            self.store.put_swarm_flags(swarm, flags)
+            self._event(swarm, "paused", {**new, "reason": reason, "by": by, "auto": auto,
+                                          "interrupt": interrupt})
+            if interrupt:
+                workers = {w["id"]: w for w in self.store.list_workers(swarm)}
+                now = self.clock().timestamp()
+                for a in self.store.list_agents(swarm):
+                    if (a["worker"] and not a["removing"] and self.store.held(a, flags)
+                            and self.turn_state(a, workers.get(a["worker"]), now)
+                            == AgentState.working):
+                        self.store.enqueue_command(a["worker"],
+                                                   StopCommand(agent=a["name"]).model_dump_json())
+            return h
+
+    def resume(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
+               *, by: str = "operator", auto_only: bool = False) -> dict[str, Any]:
+        """Lift holds: the named ones, or all (both None). `auto_only`: only the holds the
+        controller made itself (world down), never an operator's. Queued prompts and wakes go
+        out on the next poll / tick. Returns the swarm's holds."""
+        with self._lock:
+            flags = self.store.swarm_flags(swarm)
+            h = flags.get("holds")
+            if not h:
+                return {"types": {}, "agents": {}}
+            gone: dict[str, list[str]] = {"types": [], "agents": []}
+            for key, names in (("types", types), ("agents", agents)):
+                pick = names if names is not None else (list(h[key]) if types is None
+                                                        and agents is None else [])
+                for n in pick:
+                    if n in h[key] and (not auto_only or h[key][n].get("auto")):
+                        del h[key][n]
+                        gone[key].append(n)
+            if not gone["types"] and not gone["agents"]:
+                return h
+            if not h["types"] and not h["agents"]:
+                del flags["holds"]
+            self.store.put_swarm_flags(swarm, flags)
+            self._event(swarm, "resumed", {**gone, "by": by, "auto": auto_only})
+            for w in self.store.list_workers(swarm):  # wake parked command polls
+                self.store.listener("commands", w["id"])
+            return flags.get("holds") or {"types": {}, "agents": {}}
+
     def hard_stopped(self, swarm: str) -> bool:
         return self.store.swarm_flags(swarm).get("budget_stop") == "hard"
 
@@ -399,9 +476,10 @@ class LoopEngine:
                         continue
                     if st["phase"] != "looping":
                         continue
+                    held = self.store.held(a)  # a turn cut or ended under a pause hold: not counted
                     status = d.get("status") if ev.type == "turn_ended" else "interrupted"
                     w = ts.loop.while_
-                    if w.idle_rounds is not None and ev.type == "turn_ended":
+                    if w.idle_rounds is not None and ev.type == "turn_ended" and not held:
                         # read-only calls (`done`, comms read/search, `readonly` folder tools)
                         # are not activity; a worker older than `state_calls` sends tool_calls
                         busy = d.get("state_calls", d.get("tool_calls", 1))
@@ -410,7 +488,9 @@ class LoopEngine:
                             stop_reason = "idle_rounds"
                     if finished:
                         stop_reason = "done"
-                    if L.get("mode") == "controller":
+                    if L.get("mode") == "controller" and held:
+                        st["turn_done"] = True
+                    elif L.get("mode") == "controller":
                         st["errors"] = (0 if status == "completed" or max_turns else
                                         st["errors"] if d.get("reason") in ("timeout", "model_transport")
                                         else st["errors"] + 1)
@@ -508,7 +588,7 @@ class LoopEngine:
         if phase and (budget is None or budget != flags.get("budget_usd")):
             limit = None if budget is None else budget - reserve if phase == "final_reserve" else budget
             if limit is None or cost < limit:  # re-applied with more room: lift the stop
-                self.store.put_swarm_flags(spec.swarm, {})
+                self._put_budget(spec.swarm, {})
                 self._event(spec.swarm, "budget_cleared", {"cost_usd": round(cost, 6),
                                                            "budget_usd": budget})
                 phase = None
@@ -520,7 +600,7 @@ class LoopEngine:
         if cost >= budget and phase != "hard":
             self._event(spec.swarm, "budget_stop", {"phase": "hard", "cost_usd": round(cost, 6),
                                                     "budget_usd": budget})
-            self.store.put_swarm_flags(spec.swarm, {"budget_stop": "hard", "budget_usd": budget,
+            self._put_budget(spec.swarm, {"budget_stop": "hard", "budget_usd": budget,
                                                     "at": now})
             for type_name, L in loops.items():
                 ts = spec.types.get(type_name)
@@ -542,7 +622,7 @@ class LoopEngine:
             self._event(spec.swarm, "budget_stop", {
                 "phase": "final_reserve", "cost_usd": round(cost, 6), "budget_usd": budget,
                 "threshold_usd": round(budget - reserve, 6)})
-            self.store.put_swarm_flags(spec.swarm, {"budget_stop": "final_reserve",
+            self._put_budget(spec.swarm, {"budget_stop": "final_reserve",
                                                     "budget_usd": budget, "at": now})
             dropped = self._drop(spec.swarm)
             for type_name, L in loops.items():
@@ -740,6 +820,7 @@ class LoopEngine:
             deadline=_ts(until_deadline(until, L["started_at"])) if until else None)
         self.store.enqueue_command(a["worker"], cmd.model_dump_json())
         st["wstarted"], st["acked"], st["last_activity"] = now, False, now
+        st["stop_sent"] = None  # an earlier stop (a pause hold) is answered by this start
 
     def _type_reason(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, now: float,
                      budget: str | None) -> str | None:
@@ -773,6 +854,7 @@ class LoopEngine:
         cap = agent_cap(ts)
         max_rounds = lp.while_.max_rounds
         every = lp.every_s
+        flags = self.store.swarm_flags(spec.swarm)
         due: dict[str, PromptCommand] = {}
         wakes: dict[str, int] = {}  # agent -> wake events folded into its due prompt
         changed: set[str] = set()
@@ -783,6 +865,14 @@ class LoopEngine:
                 st = states[name] = _new_agent()
                 changed.add(name)
             if st["phase"] == "done":
+                continue
+            if self.store.held(a, flags):  # paused: no prompt, no round; wakes stay queued
+                if (L["mode"] == "worker" and st["wstarted"] and not st["acked"] and a["worker"]
+                        and (st["stop_sent"] or 0) < st["wstarted"]):
+                    self.store.enqueue_command(a["worker"], LoopStopCommand(
+                        agent=name, reason="held").model_dump_json())
+                    st["stop_sent"] = now
+                    changed.add(name)
                 continue
             if cap is not None and a["cost"] >= cap:
                 self._agent_done(a, st, L, "agent_usd", now)

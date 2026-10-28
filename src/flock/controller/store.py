@@ -920,6 +920,12 @@ class Store:
             [swarm, json.dumps(body, sort_keys=True)],
         )
 
+    def held(self, a: Row, flags: dict[str, Any] | None = None) -> bool:
+        """The agent is under a pause hold (docs/loop.md "Pause and resume"): its type or its
+        name is in the swarm's `holds`."""
+        h = (self.swarm_flags(a["swarm"]) if flags is None else flags).get("holds") or {}
+        return a["type"] in h.get("types", {}) or a["name"] in h.get("agents", {})
+
     # ----------------------------------------------------------------- launch budget
 
     def record_launch(self, now: float) -> None:
