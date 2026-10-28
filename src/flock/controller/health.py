@@ -35,7 +35,7 @@ import httpx
 
 from flock.controller.reconcile import agent_state, swarm_stream
 from flock.controller.store import Row, Store
-from flock.models import Event, SwarmSpec, hit_max_turns
+from flock.models import Event, SwarmSpec, hit_max_turns, world_tools
 from flock.world.host import world_token
 from flock.world.protocol import TOKEN_HEADER
 
@@ -55,6 +55,7 @@ NOISY = ("loop_tick", "loop_wake")  # swarm-stream events that are not control-p
 TOKEN_FIELDS = (("input", "input"), ("output", "output"), ("cache_read", "cacheRead"),
                 ("cache_write", "cacheWrite"), ("reasoning", "reasoning"))
 DOWN_AFTER = 2  # consecutive failed manifest probes before `world_down`
+DOWN_PAUSE_S = 1800.0  # world down this long: pause the types that use it (FLOCK_WORLD_DOWN_PAUSE_S)
 VLLM_METRICS = {"num_requests_waiting": "waiting", "num_requests_running": "running",
                 "gpu_cache_usage_perc": "kv", "kv_cache_usage_perc": "kv"}  # vLLM v0 / v1 names
 
@@ -129,6 +130,10 @@ class Health:
         self.world: dict[str, dict[str, Any]] = {}  # swarm -> {up, manifest_ms, slurm_state, metrics}
         self.providers: dict[str, dict[str, dict[str, float]]] = {}  # swarm -> provider -> queue
         self._fails: dict[str, int] = {}  # swarm -> consecutive failed manifest probes
+        self._first_fail: dict[str, float] = {}
+        self.down_since: dict[str, float] = {}  # swarm -> first failed probe of the outage
+        self.down_pause_s = float(secrets.get("FLOCK_WORLD_DOWN_PAUSE_S", DOWN_PAUSE_S))
+        self.loops: Any = None  # the LoopEngine (pause / resume), set by create_app
         self.stuck_s = float(secrets.get("FLOCK_STUCK_MIN", STUCK_S / 60)) * 60
         self._lock = threading.Lock()  # post_events (request threads) vs tick (a thread)
         self._since: float | None = None  # first tick: "no event since" baseline after a restart
@@ -518,12 +523,37 @@ class Health:
         self.world[spec.swarm] = state
         fails = 0 if state["up"] else self._fails.get(spec.swarm, 0) + 1
         prev, self._fails[spec.swarm] = self._fails.get(spec.swarm, 0), fails
+        if fails == 1:
+            self._first_fail[spec.swarm] = now
         if fails == DOWN_AFTER:
+            self.down_since[spec.swarm] = self._first_fail.get(spec.swarm, now)
             self._event(spec.swarm, now, "world_down", {
                 "endpoint": w.endpoint, "error": error, "slurm_state": state["slurm_state"]})
         elif fails == 0 and prev >= DOWN_AFTER:
+            self.down_since.pop(spec.swarm, None)
             self._event(spec.swarm, now, "world_up", {
                 "endpoint": w.endpoint, "manifest_ms": state["manifest_ms"]})
+        await asyncio.to_thread(self._world_holds, spec, now, state["up"])  # the loop lock: off the event loop
+
+    def _world_holds(self, spec: SwarmSpec, now: float, up: bool = False) -> None:
+        """Down for `world.down_pause_s` (default FLOCK_WORLD_DOWN_PAUSE_S, 1800 s; 0 never):
+        hold every type with world tools (`auto`, reason world_down). Up: lift the automatic
+        holds only (also those left by a controller restart); operator holds stay."""
+        if self.loops is None or spec.world is None:
+            return
+        since = self.down_since.get(spec.swarm)
+        held = (self.store.swarm_flags(spec.swarm).get("holds") or {}).get("types", {})
+        if since is None:
+            if up and any(h.get("auto") for h in held.values()):
+                self.loops.resume(spec.swarm, by="controller", auto_only=True)
+            return
+        limit = spec.world.down_pause_s
+        limit = self.down_pause_s if limit is None else limit
+        if limit and now - since >= limit:
+            types = [t for t, ts in spec.types.items() if world_tools(ts, spec.world)]
+            if types and not set(types) <= set(held):
+                self.loops.pause(spec.swarm, types=types, reason="world_down", by="controller",
+                                 auto=True)
 
     async def _probe_providers(self, http: httpx.AsyncClient, spec: SwarmSpec) -> None:
         out: dict[str, dict[str, float]] = {}

@@ -85,6 +85,8 @@ class RunOptions:
     watch: Path | None = None
     watch_interval: float = 1.0  # s between polls of the folder's files
     watch_quiet: float = 1.0  # s without a further change before the update runs
+    env_files: list[str] = field(default_factory=list)  # `--env` / `--overlay`, for --watch
+    overlays: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -524,8 +526,9 @@ async def _watch(opts: RunOptions, url: str, token: str, post) -> None:
 
     def update() -> tuple[list[str], SwarmSpec | None]:
         with httpx.Client(base_url=url, headers={"X-Flock-Token": token}, timeout=60) as c:
-            lines = update_swarm(c, str(spec_file), strict=opts.strict)
-        return lines, read_spec(str(spec_file))
+            lines = update_swarm(c, str(spec_file), strict=opts.strict,
+                                 env_files=opts.env_files, overlays=opts.overlays)
+        return lines, read_spec(str(spec_file), opts.env_files, opts.overlays)
 
     while True:
         await asyncio.sleep(opts.watch_interval)
