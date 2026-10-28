@@ -1303,6 +1303,20 @@ def world_serve(
 
 
 
+@world_app.command("doctor")
+def world_doctor(
+    url: str = typer.Argument(..., help="The world's URL."),
+    token: str = typer.Option(None, "--token", envvar="FLOCK_WORLD_TOKEN", help="The world secret."),
+    calls: int = typer.Option(0, "--calls", help="Concurrent calls of each read-only tool (0: none)."),
+) -> None:
+    """Check a world against the author checklist (docs/world.md); non-zero on a hard failure."""
+    from flock.world.doctor import doctor
+
+    lines, failed = doctor(url, token, calls)
+    typer.echo("\n".join(lines))
+    raise typer.Exit(1 if failed else 0)
+
+
 # -- the world's admin API through the controller (docs/world.md, "Admin API") ----------------
 
 @world_app.command("knobs")

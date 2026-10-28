@@ -403,6 +403,16 @@ pausing `comment` holds the review comment outbox.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
+## Checklist for world authors
+
+1. List the agent's workflow verbs (find, inspect, act, verify, follow up). Each needs a tool, and each write a read that shows its result.
+2. Serve reads from the world's own mirror, with a freshness field. Agents never need the service's credentials or a fragile transport.
+3. Mark read tools `read_only` (manifest `annotations.readOnlyHint`): they go to the fast pool, the worker may retry them, and admission control treats them separately.
+4. Bound results: byte caps, pagination, narrowing hints.
+5. Stable error codes plus `retry_after_s`; make writes idempotent on `X-Request-Id` where the backend allows.
+6. Inject the backend, and test with a fake.
+7. Pass `flock world doctor <url> [--token T] [--calls N]`. It warns about reads without the hint, writes with no read on the same noun and read tools with no limit/page argument, lists the capabilities, checks `/healthz` and `/metrics`, and with `--calls N` runs N concurrent calls of each read-only tool with empty args (p50/p95, error codes, `/manifest` latency meanwhile). It exits 1 when the manifest is unreachable or a read-only tool errors; warnings exit 0. Tools with required arguments are not called.
+
 ## Local and HF Jobs
 
 | | `compute: local` (`flock run`) | `compute: hf-jobs` |

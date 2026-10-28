@@ -24,6 +24,7 @@ import uvicorn
 import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
 from flock import cli
 from flock.controller.api import create_app as controller_app
@@ -1045,3 +1046,67 @@ def test_tool_results_and_errors_never_carry_secret_env_values(monkeypatch):
                   "nested": ["invite-code-1234", "abc"]})
     assert out == {"log": "push with [redacted] failed", "n": 3, "nested": ["[redacted]", "abc"]}
     assert redact("nothing here") == "nothing here"
+
+
+# --------------------------------------------------------------------------- doctor
+
+class Doctored(World):
+    name, version = "doc", "1.0"
+
+    @tool(read_only=True)
+    def list_items(self, agent: Agent, limit: int = 10) -> list:
+        """List items.
+
+        Args:
+            limit: max items
+        """
+        return []
+
+    @tool
+    def create_item(self, agent: Agent, text: str = "") -> dict:
+        """Create an item."""
+        return {}
+
+    @tool
+    def get_thing(self, agent: Agent) -> dict:
+        """Looks like a read, lacks the hint."""
+        return {}
+
+
+def test_doctor_warns_and_passes(capsys):
+    s = Served(Doctored())
+    try:
+        r = CliRunner().invoke(cli.app, ["world", "doctor", s.url, "--token", SECRET, "--calls", "5"])
+    finally:
+        s.close()
+    assert r.exit_code == 0, r.output
+    assert "warn: get_thing looks like a read but has no readOnlyHint" in r.output
+    assert "warn: write tool create_item has no read tool sharing its noun" not in r.output  # list_items
+    assert "warn: write tool get_thing" not in r.output
+    assert "list_items: 5 calls" in r.output and "errors none" in r.output
+    assert "/manifest during burst" in r.output and "/healthz: 200" in r.output
+
+
+def test_doctor_flags_a_missing_read_and_a_failing_read_only_tool():
+    from flock.world.doctor import doctor
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/manifest":
+            tool_ = lambda n, ro: {"name": n, "annotations": {"readOnlyHint": ro}}
+            return httpx.Response(200, json={"world_api": "v1", "name": "w", "version": "1",
+                                             "tools": [tool_("open_pr", False), tool_("list_runs", True)]})
+        if p.startswith("/tools/"):
+            return httpx.Response(200, json={"ok": False, "error": {"code": "backend_down"}})
+        return httpx.Response(200, json={})
+
+    lines, failed = doctor("http://w", None, 3, transport=httpx.MockTransport(handler))
+    text = "\n".join(lines)
+    assert failed
+    assert "warn: write tool open_pr has no read tool sharing its noun" in text
+    assert "FAIL: list_runs" in text and "backend_down" in text
+
+
+def test_doctor_manifest_unreachable():
+    r = CliRunner().invoke(cli.app, ["world", "doctor", "http://127.0.0.1:1"])
+    assert r.exit_code == 1 and "FAIL" in r.output
