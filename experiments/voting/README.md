@@ -12,20 +12,18 @@ the rule on their honour: flock and the world do not check it.
 |---|---|
 | `spec.yaml` | `../hierarchy/spec.yaml` with `swarm: voting` (a test keeps them equal) |
 | `prompts/coordinator.md`, `prompts/worker.md` | hierarchy's role prompts plus a Voting section |
-| `prompts/round.md` | "Continue your work. If you have time, read #proposals and vote on what interests you." |
+| `prompts/round.md` | "Continue your work. If you have time, vote on open proposals in your channels and in #general that interest you." |
 | `prompts/system.md`, `prompts/final.md`, `waves.yaml` | links to hierarchy's / run 4's |
 | `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
 | `spec.slurm.yaml`, `spec.smoke.yaml` | links to run 4's and hierarchy's overlays |
 
 ## Mechanics
 
-- Propose: a new thread in `#proposals` starting with `PROPOSAL (PR):` or `PROPOSAL (workers):`
-  (coordinators only). The proposer @mentions agents on similar topics and its team.
-- Agents do not join `#proposals`: a public channel can be read and posted to without joining
-  (the `post`/`read` channel argument), and the poller follows joined channels only, so a
-  proposal wakes only the agents it mentions (`tests/test_voting_experiment.py`).
-- Vote: each round, if it has time (`round.md`), an agent `read`s `#proposals` and votes on what
-  interests it; abstaining is fine. A 👎 says in the thread what would change it. The voter
+- Propose: a PR proposal (`PROPOSAL (PR):`) is a new thread in the channel of the PR's topic
+  (the team channel); a new-team proposal (`PROPOSAL (workers):`, coordinators only) is a new
+  thread in #general. The proposer @mentions agents working on similar topics.
+- Vote: each round, if it has time (`round.md`), an agent votes on open proposals in its
+  channels and in #general that interest it; abstaining is fine. A 👎 says in the thread what would change it. The voter
   whose vote makes a proposal pass @mentions the proposer, because reactions wake no one.
 - A proposal is a direction, not a step-by-step plan; details change without a new proposal.
 - Check: `votes` on the own proposal; act only when it says passed. The PR description or the
@@ -39,11 +37,8 @@ the rule on their honour: flock and the world do not check it.
 ## Launch
 
 As hierarchy (fill the same `[PROJECT: to be provided]` placeholders in `prompts/`), with
-`RUN3_EXPERIMENT=voting` and `CHATBOT_RUN=voting` in the run's `run.env`. Before the first
-apply, create a public `proposals` channel on the board, as `general` was created. The board
-invite must stay scoped to `general`: an invite that also covers `proposals` would make every
-agent a member, and every proposal would wake everyone. Then `sbatch world.sbatch voting` and
-`sbatch controller.sbatch voting`.
+`RUN3_EXPERIMENT=voting` and `CHATBOT_RUN=voting` in the run's `run.env`, then
+`sbatch world.sbatch voting` and `sbatch controller.sbatch voting`.
 
 ## Gaps
 
@@ -55,13 +50,11 @@ agent a member, and every proposal would wake everyone. Then `sbatch world.sbatc
    `src/flock/controller/spawn.py`) does not look at the board. A check would belong in the
    controller (a CLI-side check is bypassed by calling the API with the agent token): a
    `proposal` field, a `vote` refusal reason, and a board read token for the controller.
-3. **Replies in `#proposals` wake no one.** The proposer is not a member, so a 👎 reply in its
-   thread reaches it only on its next `votes`/`read`, or when the voter @mentions it. A 👎
-   with an @mention would fix that at the prompt level if needed.
-4. **The `#proposals` channel is seeded by hand.** flock seeds no channels; `comms.channel`
-   names one existing channel. An agent that runs `join_channel proposals` (or the creator, if
-   an agent creates it) is woken by every proposal.
-5. **Open proposals.** `read` returns the newest messages; there is no "open" or "not voted
-   by me" filter, so agents check each proposal with `votes`, one call each.
+3. **New-team proposals wake everyone.** Every agent is a member of #general and
+   `wake: channel` wakes members on each new thread, so each `PROPOSAL (workers):` wakes the
+   whole swarm: expect roughly one swarm-wide wake per new team. A PR proposal wakes only the
+   team channel's members and the agents it @mentions.
+4. **Open proposals.** `read` returns the newest messages of one channel; there is no "open"
+   or "not voted by me" filter, so agents check each proposal with `votes`, one call each.
 
 The hierarchy gaps (merge awareness by prompt, channel discovery, fixed spawn parent) apply too.
