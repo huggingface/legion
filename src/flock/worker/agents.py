@@ -184,6 +184,9 @@ class AgentRuntime:
         # only then may anything push this agent (flock.worker.sync, "Push safety")
         self.setup_done = False
         self._turn_started_at = 0.0
+        # prompt ids for the turn events (tracked broadcasts): the next turn's, the current one's
+        self._pids: list[str] = []
+        self._turn_pids: list[str] = []
         self._last_activity = 0.0
         self._turn_timeout = parse_duration(spec.turn_timeout).total_seconds()
         self._next_timeout: float | None = None
@@ -397,6 +400,8 @@ class AgentRuntime:
             return
         if timeout:
             self._next_timeout = parse_duration(timeout).total_seconds()
+        if prompt_id:  # joins the turn in flight, or starts the next one
+            (self._turn_pids if self.turn_id is not None else self._pids).append(prompt_id)
         if self.phase == "running" and not self._stop_req:
             await self._forward(text)
             return
@@ -432,6 +437,7 @@ class AgentRuntime:
             self.buffer.append(text)
 
     def _defer_buffer(self, reason: str) -> None:
+        self._pids = []
         for text in self.buffer:
             self.emit("prompt_deferred", {"text": text, "reason": reason, **self._loop_untaken()})
         self.buffer.clear()
@@ -673,6 +679,7 @@ class AgentRuntime:
                     extra["tools_version"] = self._turn_tools
                 if self._turn_finished:
                     extra["finished"] = True
+                extra.update(self._pid_fields())
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
                                          "tool_calls": self._turn_tool_calls,
                                          "state_calls": self._turn_state_calls, **extra,
@@ -745,9 +752,16 @@ class AgentRuntime:
         self._turn_state_calls, self._turn_finished = 0, False
         self._turn_call_names = []
         self._loop_inflight = None
-        self.emit("turn_started", data)
+        self._turn_pids, self._pids = self._pids, []
+        self.emit("turn_started", {**data, **self._pid_fields()})
+
+    def _pid_fields(self) -> dict[str, Any]:
+        """`prompt_id` (the last prompt of the turn), and `prompt_ids` when it took several."""
+        p = self._turn_pids
+        return ({"prompt_id": p[-1]} if p else {}) | ({"prompt_ids": list(p)} if len(p) > 1 else {})
 
     def _end_turn(self) -> None:
+        self._turn_pids = []
         self.state.turns += 1
         self.turn_id = None
         self._turn_tools = None

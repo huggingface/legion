@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from flock.controller import naming
 from flock.controller import spawn as spawning
@@ -217,6 +218,8 @@ def reconcile(
     p = _Pass(store, jobs, t, settings, budget=settings.launches_per_window - used)
     for sw in store.list_swarms():
         spec: SwarmSpec = sw["spec"]
+        if not sw["removing"]:
+            spec = _ramp(p, spec)
         p.listed = None
         first = len(p.actions)
         if sum(_needs_check(w, t) for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
@@ -249,33 +252,81 @@ def _record(p: _Pass, swarm: str, actions: list[Action]) -> None:
         p.store.append_events(swarm, swarm_stream(swarm), evs)
 
 
+def rotation_room(store: Store, swarm: str, max_rotating: int | None, now: float) -> int:
+    """Drains the rotation budget allows now: `max_rotating` (default 10% of the swarm's
+    worker slots, at least 1) minus the workers restoring (launched, or a restore in flight)
+    or draining."""
+    workers = store.list_workers(swarm)
+    budget = max_rotating or max(1, len(workers) // 10)
+    busy = sum(1 for w in workers if w["job_id"] is not None and (
+        w["draining"] or w["retire_at"] or w["last_heartbeat"] is None
+        or json.loads(w.get("telemetry") or "{}").get("restore")))
+    return budget - busy
+
+
+def rotate_worker(store: Store, swarm: str, w: Row, now: float, **why: Any) -> None:
+    """Drain one worker for a memory rotation (ends in a planned restart): `memory_rotation`."""
+    mem = json.loads(w.get("telemetry") or "{}").get("mem") or {}
+    store.enqueue_command(w["id"], DrainCommand().model_dump_json())
+    store.update_worker(w["id"], draining=1)  # counted as draining from now on
+    data = {"worker": w["id"], "nonreclaim_mb": mem.get("nonreclaim_mb"),
+            "eta_limit_s": mem.get("eta_limit_s"), **why}
+    log.info("memory rotation: %s", data)
+    store.append_events(swarm, swarm_stream(swarm), [Event(
+        type="memory_rotation", ts=datetime.fromtimestamp(now, UTC), agent="", data=data)])
+
+
+def rotatable(w: Row, now: float) -> bool:
+    return (w["job_id"] is not None and not w["draining"] and not w["retire_at"]
+            and worker_state(w, now) == WorkerState.running)
+
+
 def _rotate(p: _Pass, spec: SwarmSpec) -> None:
     """Memory rotation (docs/slurm.md "Memory"): workers whose heartbeat says
     `wants_rotation` are drained, the smallest `eta_limit_s` first, while fewer than
     `max_rotating` workers are restoring (launched, or a restore in flight) or draining. The
     drain ends in a planned restart. A worker's own drain or preemption at its hard
-    thresholds never waits for this budget (a preempted slot has already ended here)."""
+    thresholds never waits for this budget (a preempted slot has already ended here). The
+    `drain_worker` policy action (docs/policies.md) takes slots from the same budget."""
     workers = p.store.list_workers(spec.swarm)
-    budget = p.settings.max_rotating or max(1, len(workers) // 10)
     tel = {w["id"]: json.loads(w.get("telemetry") or "{}") for w in workers}
-    live = [w for w in workers if w["job_id"] is not None]
-    busy = sum(1 for w in live if w["draining"] or w["retire_at"] or w["last_heartbeat"] is None
-               or tel[w["id"]].get("restore"))
-    want = [w for w in live if tel[w["id"]].get("wants_rotation") and not w["draining"]
-            and not w["retire_at"] and worker_state(w, p.now) == WorkerState.running]
-    mem = {w["id"]: tel[w["id"]].get("mem") or {} for w in want}
-    eta = {k: v.get("eta_limit_s") for k, v in mem.items()}
-    for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)):
-        if busy >= budget:
-            break
-        p.store.enqueue_command(w["id"], DrainCommand().model_dump_json())
-        p.store.update_worker(w["id"], draining=1)  # counted as draining from now on
-        busy += 1
-        data = {"worker": w["id"], "nonreclaim_mb": mem[w["id"]].get("nonreclaim_mb"),
-                "eta_limit_s": eta[w["id"]]}
-        log.info("memory rotation: %s", data)
-        p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
-            type="memory_rotation", ts=datetime.fromtimestamp(p.now, UTC), agent="", data=data)])
+    want = [w for w in workers if tel[w["id"]].get("wants_rotation") and rotatable(w, p.now)]
+    if not want:
+        return
+    room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
+    eta = {w["id"]: (tel[w["id"]].get("mem") or {}).get("eta_limit_s") for w in want}
+    for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0))[:max(0, room)]:
+        rotate_worker(p.store, spec.swarm, w, p.now)
+
+
+def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
+    """`types.T.replicas_ramp` (docs/live.md "Ramp"): raise replicas to `start`, then by
+    `add` every `every` from the first pass that saw the ramp, up to `max`; never lower them
+    (an operator's `flock scale` up stays). The clock lives in the store (`ramp:<type>`), so
+    a controller restart keeps it. Each raise rewrites the stored spec: `ramp_step`."""
+    raised = {}
+    for name, ts in spec.types.items():
+        r = ts.replicas_ramp
+        if r is None:
+            continue
+        key = f"ramp:{name}"
+        t0 = p.store.get_control(spec.swarm, key)
+        if t0 is None:
+            t0 = p.now
+            p.store.put_control(spec.swarm, key, t0)
+        step = int((p.now - t0) // parse_duration(r.every).total_seconds())
+        want = min(r.max, r.start + r.add * step)
+        if want > ts.replicas:
+            raised[name] = ts.model_copy(update={"replicas": want})
+            p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
+                type="ramp_step", ts=datetime.fromtimestamp(p.now, UTC), agent="",
+                data={"type": name, "from": ts.replicas, "replicas": want, "step": step,
+                      "max": r.max})])
+    if not raised:
+        return spec
+    spec = spec.model_copy(update={"types": {**spec.types, **raised}})
+    p.store.update_swarm_spec(spec)
+    return spec
 
 
 def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:

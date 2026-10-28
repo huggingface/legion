@@ -178,6 +178,12 @@ CREATE TABLE IF NOT EXISTS usage (
   body TEXT NOT NULL,
   PRIMARY KEY (swarm, hour, type)
 );
+CREATE TABLE IF NOT EXISTS controls (
+  swarm TEXT NOT NULL,
+  key TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (swarm, key)
+);
 """
 
 Row = dict[str, Any]
@@ -417,6 +423,7 @@ class Store:
             self._x("DELETE FROM spec_history WHERE swarm = ?", [name])
             self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
+            self._x("DELETE FROM controls WHERE swarm = ?", [name])
 
     # ----------------------------------------------------------------- grants (docs/live.md)
 
@@ -925,6 +932,32 @@ class Store:
         name is in the swarm's `holds`."""
         h = (self.swarm_flags(a["swarm"]) if flags is None else flags).get("holds") or {}
         return a["type"] in h.get("types", {}) or a["name"] in h.get("agents", {})
+
+    # ------------------------------------------------- steering controls (docs/policies.md)
+    # Operator and controller settings kept across restarts: `notice:<type>` banners,
+    # `broadcast:<id>` prompt tracking, `ramp:<type>` start times, `policy_mutes`.
+
+    def get_control(self, swarm: str, key: str) -> Any:
+        row = self._one("SELECT body FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
+        return json.loads(row["body"]) if row else None
+
+    def put_control(self, swarm: str, key: str, body: Any) -> None:
+        self._x("INSERT INTO controls (swarm, key, body) VALUES (?, ?, ?) "
+                "ON CONFLICT(swarm, key) DO UPDATE SET body = excluded.body",
+                [swarm, key, json.dumps(body, sort_keys=True)])
+
+    def delete_control(self, swarm: str, key: str) -> None:
+        self._x("DELETE FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
+
+    def controls(self, swarm: str, prefix: str) -> dict[str, Any]:
+        rows = self._q("SELECT key, body FROM controls WHERE swarm = ? AND key LIKE ?",
+                       [swarm, prefix + "%"])
+        return {r["key"]: json.loads(r["body"]) for r in rows}
+
+    def pending_with(self, needle: str) -> int:
+        """Undelivered prompts whose command contains `needle` (a broadcast's prompt id)."""
+        return self._one("SELECT COUNT(*) AS n FROM pending_prompts WHERE body LIKE ?",
+                         [f"%{needle}%"])["n"]
 
     # ----------------------------------------------------------------- launch budget
 

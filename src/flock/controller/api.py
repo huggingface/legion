@@ -29,6 +29,7 @@ from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
 from flock.controller.health import Health
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
+from flock.controller.policy import rules_of
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
 from flock.controller.spawn import (
@@ -75,6 +76,7 @@ from flock.models import (
     comms_tools,
     loop_refusals,
     merge_grants,
+    parse_duration,
     type_spec_rev,
     worker_type_spec,
     world_tools,
@@ -578,7 +580,7 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
 def add_world_admin_routes(api: APIRouter, store: Store, token: str,
                            secret_source: Mapping[str, str],
                            transport: httpx.BaseTransport | None,
-                           clock: Callable[[], datetime]) -> None:
+                           clock: Callable[[], datetime]) -> Callable[..., Any]:
     """`/swarms/{swarm}/world/...`: the world's admin API (knobs, lane pauses; docs/world.md)
     through the controller with the world's admin secret (`world_admin_token`). Every change
     is a swarm event."""
@@ -640,6 +642,85 @@ def add_world_admin_routes(api: APIRouter, store: Store, token: str,
                           {"lanes": lanes, **({"reason": reason} if action == "pause" else {})})
         audit(swarm, f"world_{action}", {"lanes": lanes, "by": by(x_flock_source),
                                          **({"reason": reason} if action == "pause" else {})})
+        return out
+
+    return world_admin  # policies (docs/policies.md) call the world through it too
+
+
+def add_steering_routes(api: APIRouter, store: Store, health: Health,
+                        clock: Callable[[], datetime]) -> None:
+    """Policies (docs/policies.md), loop banners and broadcast counts (docs/live.md)."""
+
+    def spec_of(swarm: str) -> SwarmSpec:
+        row = store.get_swarm(swarm)
+        if row is None:
+            raise HTTPException(404, f"no swarm {swarm!r}")
+        return row["spec"]
+
+    def audit(swarm: str, kind: str, data: dict) -> None:
+        store.append_events(swarm, swarm_stream(swarm), [Event(type=kind, ts=clock(), agent="",
+                                                               data=data)])
+
+    @api.get("/swarms/{swarm}/policies")
+    def policies(swarm: str) -> dict:
+        return health.policies.view(spec_of(swarm), clock().timestamp())
+
+    @api.post("/swarms/{swarm}/policies/{rule}/{action}")
+    def mute(swarm: str, rule: str, action: Literal["mute", "unmute"],
+             body: Annotated[dict[str, Any] | None, Body()] = None) -> dict:
+        spec, now = spec_of(swarm), clock().timestamp()
+        if rule not in {r.name for r in rules_of(spec)[1]}:
+            raise HTTPException(404, f"no policy rule {rule!r} in swarm {swarm!r}")
+        if action == "unmute":
+            health.policies.unmute(swarm, rule)
+            audit(swarm, "policy_unmuted", {"rule": rule})
+        else:
+            dur = (body or {}).get("for")
+            try:
+                until = now + parse_duration(dur).total_seconds() if dur else None
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from None
+            health.policies.mute(swarm, rule, until)
+            audit(swarm, "policy_muted", {"rule": rule, "for": dur})
+        return health.policies.view(spec, now)
+
+    @api.get("/swarms/{swarm}/notices")
+    def notices(swarm: str) -> dict:
+        spec_of(swarm)
+        return {k.removeprefix("notice:"): v for k, v in store.controls(swarm, "notice:").items()}
+
+    @api.put("/swarms/{swarm}/notice")
+    def set_notice(swarm: str, body: Annotated[dict[str, Any], Body()]) -> dict:
+        """The banner line at the top of every loop prompt of `type` (None: every type)."""
+        spec = spec_of(swarm)
+        t, text = body.get("type") or "*", str(body.get("text") or "").strip()
+        if t != "*" and t not in spec.types:
+            raise HTTPException(404, f"no type {t!r} in swarm {swarm!r}")
+        if not text or "\n" in text or len(text) > 500:
+            raise HTTPException(400, "notice text: one line, 1-500 characters")
+        store.put_control(swarm, f"notice:{t}", {"text": text, "since": clock().timestamp()})
+        audit(swarm, "notice_set", {"type": t, "text": text})
+        return notices(swarm)
+
+    @api.delete("/swarms/{swarm}/notice")
+    def clear_notice(swarm: str, type: str | None = None) -> dict:
+        spec_of(swarm)
+        store.delete_control(swarm, f"notice:{type or '*'}")
+        audit(swarm, "notice_cleared", {"type": type or "*"})
+        return notices(swarm)
+
+    @api.get("/swarms/{swarm}/broadcasts")
+    def broadcasts(swarm: str, limit: int = 20) -> list[dict]:
+        """Tracked prompts, newest first: targets, delivered (left the queue), started,
+        finished (`acted`)."""
+        spec_of(swarm)
+        out = []
+        for b in sorted(store.controls(swarm, "broadcast:").values(), key=lambda b: -b["ts"]
+                        )[:max(1, limit)]:
+            n = len(b["agents"])
+            out.append({"id": b["id"], "ts": b["ts"], "type": b["type"], "text": b["text"],
+                        "targets": n, "delivered": n - store.pending_with(b["id"]),
+                        "started": len(b["started"]), "finished": len(b["finished"])})
         return out
 
 
@@ -704,8 +785,9 @@ def create_app(
         return sent
 
     loops = LoopEngine(store, send=loop_send, clock=clock,
-                       capped=lambda spec, t: provider_cap(spec, t) is not None,
+                       capped=lambda spec, t: bool(caps(spec, t)),
                        turn_state=lambda a, w, now: turn_state(a, w, now))
+    health.policies.loops = loops  # pause_type / resume_type (docs/policies.md)
 
     async def loop_ticker() -> None:
         while True:
@@ -1278,6 +1360,8 @@ def create_app(
         pending = store.pending_counts(swarm) if skip_pending else {}
         type_grants, agent_grants = store.agent_grants(swarm)
         rows: list[tuple[str, str]] = []
+        # `track` (docs/live.md "Broadcasts"): one prompt id for all, counted as turns report it
+        bid = f"b-{uuid.uuid4().hex[:12]}" if getattr(req, "track", False) else None
         for a in sorted(agents, key=lambda a: a["name"]):
             ack.matched += 1
             w = workers.get(a["worker"])
@@ -1294,8 +1378,8 @@ def create_app(
                 ack.skipped_budget += 1
                 continue
             cmd = build(a) if build else PromptCommand(
-                agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text, timeout=req.timeout,
-                reply_to=req.reply_to)
+                agent=a["name"], prompt_id=bid or uuid.uuid4().hex, text=req.text,
+                timeout=req.timeout, reply_to=req.reply_to)
             rows.append((a["name"], cmd.model_dump_json()))
             if sent is not None:
                 sent.append(a["name"])
@@ -1304,7 +1388,29 @@ def create_app(
             else:
                 ack.pending += 1
         store.add_prompts(rows, now)
+        if bid:
+            store.put_control(swarm, f"broadcast:{bid}", {
+                "id": bid, "ts": now, "type": req.type, "text": req.text[:200],
+                "agents": [n for n, _ in rows], "started": [], "finished": []})
+            ack.prompt_id = bid
         return ack
+
+    def track_broadcasts(a: Row, evs: list[Event]) -> None:
+        """Turn events of a tracked prompt (`prompt_id` / `prompt_ids` starting `b-`): the
+        agent counts as started / finished in that broadcast."""
+        for ev in evs:
+            if ev.type not in ("turn_started", "turn_ended"):
+                continue
+            d = ev.data.get("data") if isinstance(ev.data.get("data"), dict) else ev.data
+            for pid in {d.get("prompt_id"), *(d.get("prompt_ids") or [])}:
+                if not (isinstance(pid, str) and pid.startswith("b-")):
+                    continue
+                key = f"broadcast:{pid}"
+                b = store.get_control(a["swarm"], key)
+                field = "started" if ev.type == "turn_started" else "finished"
+                if b is not None and a["name"] not in b[field]:
+                    b[field].append(a["name"])
+                    store.put_control(a["swarm"], key, b)
 
     # ------------------------------------------------------------- loops (docs/loop.md)
 
@@ -1373,13 +1479,20 @@ def create_app(
         versions) are trusted, as before."""
         return incarnation is not None and w["incarnation"] != incarnation
 
-    def provider_cap(spec: SwarmSpec, type_name: str) -> tuple[str, int] | None:
-        """(provider name, max_working) when admission is enforced for this type's provider."""
+    def caps(spec: SwarmSpec, type_name: str) -> list[tuple[frozenset[str], int]]:
+        """The admission pools this type's turns count in, as (types sharing it, max_working):
+        its provider's `max_working` and its own `types.T.max_working`; [] when not enforced."""
         ts = spec.types.get(type_name)
-        r = ts.resolved_model if ts else None
-        if not enforce_max_working or r is None or r.provider.max_working is None:
-            return None
-        return r.provider_name, r.provider.max_working
+        if not enforce_max_working or ts is None:
+            return []
+        out = []
+        r = ts.resolved_model
+        if r is not None and r.provider.max_working is not None:
+            out.append((frozenset(t for t, x in spec.types.items()
+                                  if x.provider_name == r.provider_name), r.provider.max_working))
+        if ts.max_working is not None:
+            out.append((frozenset({type_name}), ts.max_working))
+        return out
 
     def busy(a: Row, w: Row | None, now: float) -> bool:
         """In a turn, or handed a prompt to start one, as far as the controller knows."""
@@ -1419,12 +1532,11 @@ def create_app(
                 continue
             live[name] = ("admitted", now)
 
-    def admission_view(spec: SwarmSpec, provider: str, cap: int, now: float
+    def admission_view(spec: SwarmSpec, users: frozenset[str], cap: int, now: float
                        ) -> tuple[set[str], list[str], dict[str, str | None]]:
-        """(busy agents, admission window, agent -> worker) for one provider. The window is
-        the agents that get the provider's free slots: not busy, on a running worker, ordered
+        """(busy agents, admission window, agent -> worker) for one pool (`caps`). The window
+        is the agents that get the pool's free slots: not busy, on a running worker, ordered
         by their oldest pending prompt across all workers (FIFO), at most `cap - busy` long."""
-        users = {t for t, x in spec.types.items() if x.provider_name == provider}
         workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
         taken: set[str] = set()
         owner: dict[str, str | None] = {}
@@ -1461,35 +1573,32 @@ def create_app(
         if not prompts:
             return prompts
         sw = store.get_swarm(w["swarm"])
-        cap = provider_cap(sw["spec"], w["type"]) if sw else None
+        pools = caps(sw["spec"], w["type"]) if sw else []
         now = clock().timestamp()
-        if cap is None:
+        if not pools:
             note_started({p["agent"] for p in prompts}, now)
             return prompts
-        taken, window, _ = admission_view(sw["spec"], cap[0], cap[1], now)
-        allowed = set(window)
+        views = [admission_view(sw["spec"], users, cap, now)[:2] for users, cap in pools]
         out = []
         for p in prompts:
             name = p["agent"]
-            if name not in taken:
-                if name not in allowed:
-                    continue  # no slot for it yet: stays queued
-                taken.add(name)
+            if name not in views[0][0]:  # busy is per agent: the same in every pool
+                if not all(name in window for _, window in views):
+                    continue  # no slot for it yet in one of its pools: stays queued
+                for taken, _ in views:
+                    taken.add(name)
                 live[name] = ("admitted", now)
             out.append(p)
         return out
 
-    def wake_window(swarm: str, providers: set[str]) -> None:
+    def wake_window(swarm: str, pools: list[tuple[frozenset[str], int]]) -> None:
         """A slot was released: wake the polls of the workers whose agents now get it."""
         sw = store.get_swarm(swarm)
         if sw is None:
             return
         spec, now = sw["spec"], clock().timestamp()
-        for prov in providers:
-            cap = spec.providers.get(prov)
-            if cap is None or cap.max_working is None:
-                continue
-            _, window, owner = admission_view(spec, prov, cap.max_working, now)
+        for users, cap in pools:
+            _, window, owner = admission_view(spec, users, cap, now)
             for wid in {owner[n] for n in window if owner.get(n)}:
                 notifier.notify(f"commands:{wid}")
 
@@ -1601,9 +1710,9 @@ def create_app(
             raise HTTPException(409, "worker slot has no live job")
         w = store.get_worker(worker_id)
         sw = store.get_swarm(w["swarm"]) if w else None
-        cap = provider_cap(sw["spec"], w["type"]) if sw else None
-        if heartbeat_seen(hb, clock().timestamp()) and cap is not None:
-            wake_window(w["swarm"], {cap[0]})
+        pools = caps(sw["spec"], w["type"]) if sw else []
+        if heartbeat_seen(hb, clock().timestamp()) and pools:
+            wake_window(w["swarm"], pools)
         if sw is not None and (ets := sw["spec"].types.get(w["type"])) and ets.ephemeral:
             reap_ephemeral(hb)
         out: dict[str, Any] = {"ok": True}
@@ -1649,7 +1758,7 @@ def create_app(
             grouped.setdefault(ev.agent, []).append(ev)
         now = clock().timestamp()
         sw = store.get_swarm(w["swarm"])
-        cap = provider_cap(sw["spec"], w["type"]) if sw else None
+        pools = caps(sw["spec"], w["type"]) if sw else []
         released = False
         for agent, evs in grouped.items():
             a = store.get_agent(agent)
@@ -1660,16 +1769,19 @@ def create_app(
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
             if a is not None:
+                track_broadcasts(a, evs)
                 loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
                 try:
                     health.on_events(a, evs, now)
                 except Exception:  # counters never break event ingestion
                     log.exception("health counters failed for %s", agent)
-        if released and cap is not None:  # slots freed now, not at the next heartbeat (run-1k finding 1)
-            wake_window(w["swarm"], {cap[0]})
+        if released and pools:  # slots freed now, not at the next heartbeat (run-1k finding 1)
+            wake_window(w["swarm"], pools)
         return {"ok": True, "accepted": len(batch.events)}
 
-    add_world_admin_routes(api, store, token, secret_source, world_transport, clock)
+    health.policies.world_admin = add_world_admin_routes(api, store, token, secret_source,
+                                                         world_transport, clock)
+    add_steering_routes(api, store, health, clock)
     add_pause_routes(api, loops)
     app.include_router(api)
     return app

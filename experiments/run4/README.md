@@ -22,6 +22,10 @@ module interface. This folder prepares the run; nothing here has been launched.
   `load_guard.py` checks every configured node before any increase beyond 100:
   three samples across two minutes; hold on persistent queues, >15 s/request,
   unavailable metrics or reset counters. A held final wave is retried, not dropped.
+  `waves.py run` is deprecated: from run 5 the controller runs the schedule from
+  `types.<type>.replicas_ramp: {start, add, every, max}` in the spec (`ramp_step` events;
+  docs/live.md, "Ramp"). It has no load guard: a fixed schedule only. `add`, `set` and
+  `pin` stay for manual changes.
   Three consecutive holds print `ACTION REQUIRED` and persist the streak across
   restarts. `RUN4_HOLD_WARN_AFTER` and `RUN4_MAX_REQUEST_SECONDS` are configurable;
   calibrate the latter on the live Pi smoke before growing past 100.

@@ -172,6 +172,10 @@ def with_notices(text: str, line: str | None) -> str:
     return f"{text.rstrip()}\n\n{line}" if line else text
 
 
+def with_banner(text: str, banner: str | None) -> str:
+    return f"{banner}\n\n{text}" if banner else text
+
+
 def _new_agent() -> dict[str, Any]:
     return {"phase": "new", "rounds": 0, "last_sent": None, "first_delivered": False,
             "wstarted": None, "stop_sent": None, "acked": False, "last_activity": None,
@@ -822,8 +826,9 @@ class LoopEngine:
         line = arm["line"] if arm and not arm.get("used") and lp.notices else None
         if line:
             arm["fetched"] = None  # a new command to wait for
+        st["banner"] = self.banner(spec.swarm, type_name)
         cmd = LoopStartCommand(
-            agent=a["name"], text=with_notices(lp.prompt, line),
+            agent=a["name"], text=with_banner(with_notices(lp.prompt, line), st["banner"]),
             meta=self._meta(ts, type_name, L, "loop", round=st["rounds"], why="turn_end"),
             max_rounds=lp.while_.max_rounds, run=L.get("run"),
             deadline=_ts(until_deadline(until, L["started_at"])) if until else None)
@@ -867,6 +872,7 @@ class LoopEngine:
         due: dict[str, PromptCommand] = {}
         wakes: dict[str, int] = {}  # agent -> wake events folded into its due prompt
         changed: set[str] = set()
+        banner = self.banner(spec.swarm, type_name)
         for i, a in enumerate(sorted(agents, key=lambda r: r["name"])):
             name = a["name"]
             st = states.get(name)
@@ -922,6 +928,10 @@ class LoopEngine:
                         ts, type_name, L, "loop", round=None, why=woken[0],
                         counted=lp.wake.counts_as_round, wake=True))
                     wakes[name] = woken[1]
+                elif (st.get("banner") != banner and not st["acked"]
+                      and not (st["stop_sent"] and not st["acked"])):
+                    self._loop_start(spec, type_name, ts, L, a, st, now)  # the banner changed
+                    changed.add(name)
                 else:
                     arm = st.get("notice_armed")
                     if (arm and not arm.get("used") and arm.get("fetched") is None
@@ -1048,7 +1058,14 @@ class LoopEngine:
         return "wake: " + ", ".join(dict.fromkeys(why)), n
 
     def _prompt(self, a: Row, text: str, meta: LoopMeta) -> PromptCommand:
-        return PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=text, loop=meta)
+        return PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, loop=meta,
+                             text=with_banner(text, self.banner(a["swarm"], a["type"])))
+
+    def banner(self, swarm: str, type_name: str) -> str | None:
+        """`flock notice set` (docs/loop.md "Banner"): the type's line, else the swarm's."""
+        n = (self.store.get_control(swarm, f"notice:{type_name}")
+             or self.store.get_control(swarm, "notice:*"))
+        return n["text"] if n else None
 
     # ------------------------------------------------------------------ final round
     def _final(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, now: float) -> None:
