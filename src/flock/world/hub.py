@@ -344,8 +344,8 @@ class WorldHub:
         res = await self._send(snap, agent, name, args, seen)
         c = self.counters.setdefault(name, ToolCounters())
         c.n += 1
-        c.sum_s += res.duration_s
-        c.max_s = max(c.max_s, res.duration_s)
+        c.sum_s = round(c.sum_s + res.duration_s, 3)
+        c.max_s = round(max(c.max_s, res.duration_s), 3)
         c.timeouts += bool(seen.get("timeout"))
         if res.error:
             c.err += 1

@@ -83,9 +83,12 @@ class CgroupMem:
             _, ctrl, rel = line.split(":", 2) if line.count(":") >= 2 else ("", "", "")
             rel = rel.strip().lstrip("/")
             if ctrl == "" and (base / "cgroup.controllers").exists():
-                return 2, base / rel
+                # a host-namespace path (/kubepods/...) is not mounted here: the base is ours
+                return 2, base / rel if (base / rel).is_dir() else base
             if "memory" in ctrl.split(","):
                 v1 = base / "memory" / rel
+                if not v1.is_dir():
+                    v1 = base / "memory"
         return (1, v1) if v1 is not None else (0, None)
 
     def _limit(self) -> float | None:

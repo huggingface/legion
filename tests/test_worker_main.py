@@ -404,3 +404,23 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     await asyncio.sleep(0.05)
     task.cancel()
     assert trims == []
+
+
+async def test_memory_loop_survives_a_failed_sample(tmp_path, monkeypatch):
+    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
+    worker, _ = make_worker(tmp_path, FakeController())
+    calls = []
+
+    def sample():
+        calls.append(1)
+        if len(calls) == 2:
+            raise PermissionError("nope")
+        return {"limit_mb": 1.0}
+
+    monkeypatch.setattr(worker.cgroup, "sample", sample)
+    task = asyncio.create_task(worker.memory_loop())
+    await until(lambda: len(calls) >= 2)
+    assert worker.mem is None  # no stale reading after a failure
+    await until(lambda: len(calls) >= 3 and worker.mem is not None)
+    task.cancel()
+    await worker.client.aclose()

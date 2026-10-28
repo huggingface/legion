@@ -234,9 +234,9 @@ class Store:
         self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
         if "removing" not in cols:  # set while a cascade removal is in flight
             self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
-        if "rev" not in cols:  # type spec revs from the last heartbeat (AgentHeartbeat)
-            self._x("ALTER TABLE agents ADD COLUMN rev TEXT")
-            self._x("ALTER TABLE agents ADD COLUMN start_rev TEXT")
+        for col in ("rev", "start_rev"):  # type spec revs from the last heartbeat
+            if col not in cols:
+                self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
         cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")

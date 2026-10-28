@@ -779,21 +779,25 @@ class Worker:
         self.memory_start()
         next_log = loop.time() + interval
         while True:
-            self.mem = WorkerMem(**await asyncio.to_thread(self.cgroup.sample))
-            if interval > 0 and loop.time() >= next_log:
-                next_log = loop.time() + interval
-                before = rss_mb()
-                await asyncio.to_thread(trim_heap)
-                after = rss_mb()
-                if before is not None and after is not None:
-                    log.info("memory: rss %.0f MiB (%.0f MiB before heap trim); cgroup %s; %s",
-                             after, before, self.mem.model_dump(exclude_none=True),
-                             self.memory_report())
-                for rt, data in await asyncio.to_thread(self.agent_memory):
-                    log.info("mem agent=%s %s", rt.name,
-                             " ".join(f"{k}={v}" for k, v in data.items()))
-                    # not rt.emit: that marks the agent dirty, and an idle agent would sync
-                    self.outbox.add(rt.log.custom("agent_memory", data))
+            try:
+                self.mem = WorkerMem(**await asyncio.to_thread(self.cgroup.sample))
+                if interval > 0 and loop.time() >= next_log:
+                    next_log = loop.time() + interval
+                    before = rss_mb()
+                    await asyncio.to_thread(trim_heap)
+                    after = rss_mb()
+                    if before is not None and after is not None:
+                        log.info("memory: rss %.0f MiB (%.0f MiB before heap trim); cgroup %s; %s",
+                                 after, before, self.mem.model_dump(exclude_none=True),
+                                 self.memory_report())
+                    for rt, data in await asyncio.to_thread(self.agent_memory):
+                        log.info("mem agent=%s %s", rt.name,
+                                 " ".join(f"{k}={v}" for k, v in data.items()))
+                        # not rt.emit: that marks the agent dirty, and an idle agent would sync
+                        self.outbox.add(rt.log.custom("agent_memory", data))
+            except Exception:  # one bad reading must not end the loop
+                log.exception("memory sample failed")
+                self.mem = None  # no stale reading in later heartbeats
             await asyncio.sleep(MEMORY_SAMPLE)
 
     async def deadline_loop(self) -> None:

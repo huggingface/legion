@@ -50,6 +50,14 @@ def test_no_limit_not_armed_unless_env(tmp_path):
     assert not CgroupMem(tmp_path / "nothing", env={}).armed
 
 
+def test_host_namespace_path_falls_back_to_the_base(tmp_path):
+    v2(tmp_path)
+    _w(tmp_path / "proc/self/cgroup", "0::/kubepods/burstable/pod1/abc\n")
+    _w(tmp_path / "sys/fs/cgroup/memory.max", str(4096 * MB))
+    cg = CgroupMem(tmp_path, env={})
+    assert cg.path == tmp_path / "sys/fs/cgroup" and cg.limit_mb == 4096
+
+
 def test_v1_fallback(tmp_path):
     _w(tmp_path / "proc/self/cgroup", "4:cpu,cpuacct:/x\n3:memory:/slurm/job7\n0::/\n")
     base = tmp_path / "sys/fs/cgroup/memory"
