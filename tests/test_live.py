@@ -602,10 +602,10 @@ async def test_put_replicas_keep_and_dry_run(client, store):
     r = await client.put("/swarms/demo", params={"dry_run": 1}, json=body)
     assert r.status_code == 200 and r.json()["dry_run"] is True
     assert store.get_swarm("demo")["spec"].types["calc"].replicas == 2  # stored nothing
-    assert (await client.put("/swarms/demo", json=body)).status_code == 200  # default: keep
-    assert store.get_swarm("demo")["spec"].types["calc"].replicas == 2
-    r = await client.put("/swarms/demo", params={"replicas": "spec"}, json=body)
-    assert r.status_code == 200 and store.get_swarm("demo")["spec"].types["calc"].replicas == 5
+    r = await client.put("/swarms/demo", params={"replicas": "keep"}, json=body)
+    assert r.status_code == 200 and store.get_swarm("demo")["spec"].types["calc"].replicas == 2
+    assert (await client.put("/swarms/demo", json=body)).status_code == 200  # default: spec
+    assert store.get_swarm("demo")["spec"].types["calc"].replicas == 5
 
 
 def test_cli_grant_revoke_and_list(tmp_path, monkeypatch, app, store, tick):
