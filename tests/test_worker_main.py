@@ -16,8 +16,11 @@ from flock.models import (
     EventBatch,
     PromptCommand,
     StopCommand,
+    ToolCounters,
     UnassignCommand,
     WorkerHeartbeat,
+    WorkerMem,
+    type_spec_rev,
 )
 from flock.worker import main as wmain
 from flock.worker.events import utcnow
@@ -141,6 +144,9 @@ async def test_dispatch_against_fake_controller(tmp_path):
     hb = ctrl.heartbeats[-1]
     assert hb.worker == WID and hb.draining is False
     assert {a.name for a in hb.agents} == {"researcher-0001", "researcher-0002"}
+    a1, a2 = sorted(hb.agents, key=lambda a: a.name)
+    assert a1.rev == a1.start_rev == type_spec_rev(spec()) and a2.rev is a2.start_rev is None
+    assert hb.knobs_rev == worker.knobs_rev and hb.restore is None and hb.tools is None
     types = [e.type for e in ctrl.events if e.agent == "researcher-0001"]
     assert types[:2] == ["session_started", "turn_started"] and "message" in types
 
@@ -152,6 +158,50 @@ async def test_dispatch_against_fake_controller(tmp_path):
     ctrl.batches.append([DrainCommand()])
     assert await asyncio.wait_for(run, 5) == 0
     assert ctrl.heartbeats[-1].draining is True
+
+
+async def test_heartbeat_carries_memory_restores_tools_and_knobs(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from flock.worker.sync import BucketSync
+
+    worker, _ = make_worker(tmp_path, FakeController(), sync=BucketSync(MemoryStore(), "sw"))
+    t0 = datetime(2026, 10, 28, 9, tzinfo=UTC)
+    worker.sync.restore_progress = {"a/": [3, 10, t0 + timedelta(minutes=1)], "b/": [0, 5, t0]}
+    worker.mem = WorkerMem(current_mb=1, limit_mb=2)
+    worker.world.counters["open_pr"] = ToolCounters(n=1)
+    hb = worker.heartbeat_payload()
+    assert hb.restore.model_dump() == {"agents": 2, "files_done": 3, "files_total": 15,
+                                       "started": t0}
+    assert hb.mem.limit_mb == 2 and hb.tools["open_pr"].n == 1 and len(hb.knobs_rev) == 12
+    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "big/")  # any knob changes the hash
+    assert wmain.knobs_rev(worker.cfg) != hb.knobs_rev
+    await worker.client.aclose()
+
+
+async def test_memory_loop_samples_the_cgroup_and_logs_each_agent(tmp_path, monkeypatch):
+    from flock.worker.cgroup import CgroupMem
+
+    from .test_worker_cgroup import v2
+
+    v2(tmp_path / "fs")
+    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.02")
+    worker, _ = make_worker(tmp_path, FakeController())
+    worker.cgroup = CgroupMem(tmp_path / "fs", env={})
+    await worker.dispatch(AssignCommand(agent="researcher-0001", type="researcher", spec=spec(),
+                                        restore=False))
+    rt = worker.agents["researcher-0001"]
+    await until(lambda: rt.setup_done)
+    rt.workdir_files = 7
+    task = asyncio.create_task(worker.memory_loop())
+    try:
+        await until(lambda: any(e.type == "agent_memory" for e in worker.outbox.take()))
+    finally:
+        task.cancel()
+    assert worker.mem.limit_mb == 11264 and worker.mem.nonreclaim_mb == 1300
+    assert worker.heartbeat_payload().mem == worker.mem and not rt.dirty
+    await worker.client.aclose()
 
 
 async def test_drain_sequence_at_deadline(tmp_path):
@@ -337,6 +387,7 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     trims = []
     monkeypatch.setattr(wmain, "trim_heap", lambda: trims.append(1))
     monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.01")
+    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
     caplog.set_level(logging.INFO, logger="flock.worker")
     task = asyncio.create_task(w.memory_loop())
     await until(lambda: len(trims) >= 2)
@@ -345,5 +396,31 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     assert report["outbox_events"] == 0 and report["outbox_bytes"] == 0 and report["agents"] == 0
     if wmain.rss_mb() is not None:
         assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
-    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # off
-    await asyncio.wait_for(w.memory_loop(), 1)
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # log off; the cgroup is still sampled
+    trims.clear()
+    w.mem = None
+    task = asyncio.create_task(w.memory_loop())
+    await until(lambda: w.mem is not None)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert trims == []
+
+
+async def test_memory_loop_survives_a_failed_sample(tmp_path, monkeypatch):
+    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
+    worker, _ = make_worker(tmp_path, FakeController())
+    calls = []
+
+    def sample():
+        calls.append(1)
+        if len(calls) == 2:
+            raise PermissionError("nope")
+        return {"limit_mb": 1.0}
+
+    monkeypatch.setattr(worker.cgroup, "sample", sample)
+    task = asyncio.create_task(worker.memory_loop())
+    await until(lambda: len(calls) >= 2)
+    assert worker.mem is None  # no stale reading after a failure
+    await until(lambda: len(calls) >= 3 and worker.mem is not None)
+    task.cancel()
+    await worker.client.aclose()

@@ -223,6 +223,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
         if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
             self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
+        if "telemetry" not in cols:  # the last heartbeat's mem/restore/tools/knobs_rev (JSON)
+            self._x("ALTER TABLE workers ADD COLUMN telemetry TEXT")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
@@ -232,6 +234,9 @@ class Store:
         self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
         if "removing" not in cols:  # set while a cascade removal is in flight
             self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
+        for col in ("rev", "start_rev"):  # type spec revs from the last heartbeat
+            if col not in cols:
+                self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
         cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")

@@ -549,6 +549,26 @@ The worker also sends `spec_rev`, a hash of the type spec it has. The response c
 spec changed, and `grants` (per agent of that worker, when any is in force). The worker applies
 a new type spec and grants at each agent's next turn boundary (docs/live.md).
 
+Telemetry, all optional (older workers send none; the controller stores the last values and
+`GET /workers`, `GET /agents/{name}` return them):
+
+- `mem` `{current_mb, limit_mb, nonreclaim_mb, slope_mb_h, eta_limit_s, psi_some_avg10,
+  oom_kills}`: the worker's cgroup, sampled every 15 s (`flock.worker.cgroup`). The limit is the
+  smallest `memory.max` up the tree, else `FLOCK_MEMORY_LIMIT_MB`; `nonreclaim_mb` is anon +
+  shmem + slab_unreclaimable + kernel_stack + pagetables; the slope is over the last hour.
+- `restore` `{agents, files_done, files_total, started}`: restores in flight, else null.
+- `tools` `{name: {n, err, refused, timeouts, sum_s, max_s}}`: world tool calls since the worker
+  process started; `refused` is an HTTP 429 or a busy/budget error code.
+- `knobs_rev`: a hash of the worker's own settings (drain budget, sync interval, comms rates,
+  sync excludes).
+- per agent `rev` (the type spec revision applied at its last turn boundary) and `start_rev` (the
+  one its running harness process started with).
+
+Each push also writes `<agent>/meta.json` `{files, bytes, ts}` in the bucket when the workdir's
+size changed, and every FLOCK_MEMORY_LOG_S (600 s) the worker logs one memory line per agent and
+an `agent_memory` event (`pi_pss_mb`, `tools_pss_mb`, `tools_by_comm`, `tmpfs_root_mb`, `tmp_mb`,
+`workdir_files`).
+
 `tokens` are cumulative per agent across workers (the worker restores them from the bucket
 state). An empty map means "not known yet", for an agent still restoring on a relaunched
 worker, and leaves the controller's totals alone. Folding there double-counted cost in the 1k

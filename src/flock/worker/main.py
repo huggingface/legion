@@ -21,6 +21,8 @@ planned restart, no crash backoff) and the new job restores every agent from the
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import random
@@ -50,10 +52,12 @@ from flock.models import (
     LoopStartCommand,
     LoopStopCommand,
     PromptCommand,
+    RestoreProgress,
     StopCommand,
     TypeSpec,
     UnassignCommand,
     WorkerHeartbeat,
+    WorkerMem,
     comms_tools,
     parse_duration,
     type_spec_rev,
@@ -64,10 +68,17 @@ from flock.secrets_file import secret_env
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
+from flock.worker.cgroup import TMPFS_TYPES, CgroupMem, agent_memory, fs_type
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
-from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
+from flock.worker.sync import (
+    BucketStats,
+    BucketSync,
+    HubBucketStore,
+    count_hub_http,
+    workdir_excludes,
+)
 from flock.worker.tools import ToolsManager, tools_root
 from flock.world.hub import WorldHub
 
@@ -297,7 +308,8 @@ class ControllerClient:
         await self.http.aclose()
 
 
-MEMORY_INTERVAL = 600.0  # s, FLOCK_MEMORY_LOG_S: heap trim and one memory line in the log
+MEMORY_INTERVAL = 600.0  # s, FLOCK_MEMORY_LOG_S: heap trim and the memory lines in the log
+MEMORY_SAMPLE = 15.0  # s, cgroup sample for the heartbeat
 ARENAS = 4  # glibc malloc arenas unless MALLOC_ARENA_MAX is set (see limit_malloc_arenas)
 
 
@@ -337,6 +349,13 @@ def limit_malloc_arenas(env: Mapping[str, str] = os.environ, arenas: int = ARENA
     if env.get("MALLOC_ARENA_MAX") or (libc := _glibc()) is None:
         return False
     return libc.mallopt(-8, arenas) == 1  # M_ARENA_MAX
+
+
+def knobs_rev(cfg: WorkerConfig) -> str:
+    """A short hash of the settings this worker runs with (shown next to `spec_rev`)."""
+    knobs = [cfg.drain_budget, cfg.sync_interval, cfg.comms_poll_cycle_s, cfg.comms_rate,
+             cfg.comms_burst, cfg.comms_agent_rate, cfg.comms_agent_burst, workdir_excludes()]
+    return hashlib.sha256(json.dumps(knobs).encode()).hexdigest()[:12]
 
 
 def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
@@ -392,6 +411,7 @@ class Worker:
         tools: ToolsManager | None = None,
         comms: CommsHub | None = None,
         world: WorldHub | None = None,
+        cgroup: CgroupMem | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
@@ -429,6 +449,9 @@ class Worker:
         self._interrupted: set[str] = set()  # agents whose turn a preemption cut
         self._deadline = 0.0  # loop time by which a preempted worker has exited
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
+        self.cgroup = cgroup or CgroupMem()
+        self.mem: WorkerMem | None = None  # the last cgroup sample (memory_loop)
+        self.knobs_rev = knobs_rev(cfg)
 
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
@@ -592,7 +615,18 @@ class Worker:
                                draining=self.draining, spec_rev=self.spec_rev,
                                preempted=self.preempt_synced,
                                interrupted=sorted(self._interrupted),
-                               agents=[a.heartbeat() for a in self.agents.values()])
+                               agents=[a.heartbeat() for a in self.agents.values()],
+                               mem=self.mem, restore=self.restore_progress(),
+                               tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev)
+
+    def restore_progress(self) -> RestoreProgress | None:
+        """Restores in flight, summed over agents (BucketSync.restore_progress)."""
+        prog = list(getattr(self.sync, "restore_progress", {}).values())
+        if not prog:
+            return None
+        return RestoreProgress(agents=len(prog), files_done=sum(p[0] for p in prog),
+                               files_total=sum(p[1] for p in prog),
+                               started=min(p[2] for p in prog))
 
     async def send_heartbeat(self) -> bool:
         try:  # retried inside the client for most of an interval: the controller declares a
@@ -709,20 +743,62 @@ class Worker:
                 "live": self.working_count(), "tasks": len(asyncio.all_tasks()),
                 "comms_cache": len(self.comms._cache) if hasattr(self.comms, "_cache") else None}
 
+    def memory_start(self) -> None:
+        """Once: where the memory numbers come from, and a warning for a work root in RAM."""
+        cg = self.cgroup
+        log.info("memory: cgroup v%d %s, limit %s MB%s", cg.version, cg.path, cg.limit_mb,
+                 "" if cg.armed else " (no limit found: memory is reported, nothing is armed)")
+        if (kind := fs_type(self.cfg.work_root)) in TMPFS_TYPES:
+            log.warning("work root %s is on %s: every workdir file counts as memory",
+                        self.cfg.work_root, kind)
+
+    def agent_memory(self) -> list[tuple[AgentRuntime, dict]]:
+        """Per agent: harness and tool PSS, tmpfs root, tmp dir, workdir files (blocking:
+        /proc and directory walks; run in a thread)."""
+        from flock.worker.adapters.pi import _descendants
+
+        out = []
+        for rt in list(self.agents.values()):
+            if not rt.setup_done:  # its session log may still be downloading
+                continue
+            proc = getattr(rt.adapter, "_proc", None)
+            pid = proc.pid if proc is not None and proc.returncode is None else None
+            home = getattr(rt.adapter, "home", None)
+            data = agent_memory(pid, _descendants, Path(home) / "tmp" if home else None)
+            data["workdir_files"] = rt.workdir_files
+            out.append((rt, data))
+        return out
+
     async def memory_loop(self) -> None:
-        """Every MEMORY_INTERVAL: trim the C heap, then log the RSS before and after with the
-        sizes of the worker's bounded queues, so a growing worker shows what grows."""
+        """Every MEMORY_SAMPLE s: sample the cgroup for the heartbeat. Every MEMORY_INTERVAL
+        (FLOCK_MEMORY_LOG_S, 0 turns it off): trim the C heap, log the RSS before and after
+        with the cgroup sample and the sizes of the worker's bounded queues, then the
+        per-agent lines, so a growing worker shows what grows."""
         interval = float(os.environ.get("FLOCK_MEMORY_LOG_S") or MEMORY_INTERVAL)
-        if interval <= 0:
-            return
+        loop = asyncio.get_running_loop()
+        self.memory_start()
+        next_log = loop.time() + interval
         while True:
-            await asyncio.sleep(interval)
-            before = rss_mb()
-            await asyncio.to_thread(trim_heap)
-            after = rss_mb()
-            if before is not None and after is not None:
-                log.info("memory: rss %.0f MiB (%.0f MiB before heap trim); %s", after, before,
-                         self.memory_report())
+            try:
+                self.mem = WorkerMem(**await asyncio.to_thread(self.cgroup.sample))
+                if interval > 0 and loop.time() >= next_log:
+                    next_log = loop.time() + interval
+                    before = rss_mb()
+                    await asyncio.to_thread(trim_heap)
+                    after = rss_mb()
+                    if before is not None and after is not None:
+                        log.info("memory: rss %.0f MiB (%.0f MiB before heap trim); cgroup %s; %s",
+                                 after, before, self.mem.model_dump(exclude_none=True),
+                                 self.memory_report())
+                    for rt, data in await asyncio.to_thread(self.agent_memory):
+                        log.info("mem agent=%s %s", rt.name,
+                                 " ".join(f"{k}={v}" for k, v in data.items()))
+                        # not rt.emit: that marks the agent dirty, and an idle agent would sync
+                        self.outbox.add(rt.log.custom("agent_memory", data))
+            except Exception:  # one bad reading must not end the loop
+                log.exception("memory sample failed")
+                self.mem = None  # no stale reading in later heartbeats
+            await asyncio.sleep(MEMORY_SAMPLE)
 
     async def deadline_loop(self) -> None:
         while True:
@@ -803,7 +879,6 @@ class Worker:
         """`<swarm>/_workers/<worker>/preempted.json` in the bucket: who, when, why."""
         if self.sync is None:
             return
-        import json
         import tempfile
 
         body = json.dumps({"worker": self.cfg.worker_id, "reason": reason,
