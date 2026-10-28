@@ -48,6 +48,7 @@ from flock.worker.adapters.base import (
 )
 from flock.worker.events import Outbox, SessionLog, utcnow
 from flock.worker.loop import render
+from flock.worker.sync import WorkdirStats, reset_ephemeral
 from flock.world import hub as world_hub
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ class AgentRuntime:
         self.rev: str | None = None
         self.start_rev: str | None = None
         self.workdir_files: int | None = None  # files in the workdir at the last push
+        self.workdir_stats: WorkdirStats | None = None  # the same walk's counts (`{workspace}`)
         self.work_root = Path(work_root)
         self.workdir = self.work_root / name
         self.sessions_dir = self.work_root / "_sessions"
@@ -364,6 +366,7 @@ class AgentRuntime:
                 except Exception as e:  # noqa: BLE001 - a failed listing means a fresh start
                     log.warning("%s: restore failed (fresh start): %s", self.name, e)
                     self.emit("error", {"error": f"restore failed: {e}"})
+            await asyncio.to_thread(reset_ephemeral, self.workdir, self.spec)
             self.setup_done = True
             self.load_state()
             if res is not None and res.failed:
@@ -801,7 +804,8 @@ class AgentRuntime:
                                   **({} if meta.counted else {"counted": False}),
                                   **({"wake": True} if meta.wake else {})})
         return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,
-                      now=utcnow())
+                      now=utcnow(), workspace=self.workdir_stats.summary()
+                      if self.workdir_stats else None)
 
     def _loop_untaken(self) -> dict[str, Any]:
         """A deferred prompt that was a loop prompt: it does not count as a round, and the
