@@ -246,13 +246,16 @@ class Outbox:
                 due = [(e["queued_at"], i, k) for i, (k, e) in enumerate(self.entries.items())
                        if e["next_at"] <= now]
                 key = min(due)[2] if due else None
-                payloads = list(self.entries[key]["payloads"][:self.max_batch]) if due else None
             if key is None:
                 self.wake.wait(POLL_S)
                 self.wake.clear()
                 continue
             try:
                 with self.lanes.hold(self.name, deadline=self.lanes.clock() + 1.0) as slot:
+                    with self.lock:  # taken with the slot held: joins what piled up meanwhile
+                        payloads = list(self.entries.get(key, {"payloads": []})["payloads"][:self.max_batch])
+                    if not payloads:
+                        continue
                     try:
                         kind = self.drain(key, payloads) or "ok"
                     except Exception:
