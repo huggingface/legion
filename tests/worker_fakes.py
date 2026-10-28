@@ -152,6 +152,11 @@ class MemoryStore:
         prefix = prefix.rstrip("/") + "/"
         self.download([(k, Path(local) / k[len(prefix):]) for k in self.list(prefix)])
 
+    def delete(self, paths):
+        for p in paths:
+            self.files.pop(p, None)
+            self.mtimes.pop(p, None)
+
 
 class RecordingSync(BucketSync):
     def __init__(self, store: MemoryStore, swarm: str = "sw", log: list | None = None) -> None:
