@@ -85,3 +85,21 @@ def test_notices_group_dm_channels_and_remain_bounded():
     many = [{"kind": "channel", "thread": i, "from": "cedar", "channel": f"topic-{i}"}
             for i in range(20)]
     assert "+15 more groups" in notice_line(many)
+
+
+def test_a_wave_raises_the_stored_replicas(tmp_path, monkeypatch, app, store, tick):
+    """`flock update` keeps live replicas by default; a wave must apply its own counts."""
+    from flock import cli
+
+    from .test_cli import _wire, runner
+    from .test_live import _experiment
+
+    _wire(monkeypatch, app)
+    f = _experiment(tmp_path / "exp", replicas=2)
+    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
+    tick()
+    waves = module("waves")
+    sched = waves.parse({"cap": 300, "type": "researcher"})
+    rec = waves.apply(cli.client(), f, sched, 5, "test", tmp_path / "w.jsonl")
+    assert "error" not in rec, rec
+    assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 5

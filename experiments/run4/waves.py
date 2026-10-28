@@ -218,7 +218,7 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
             time.sleep(stagger)
         write_replicas(spec, {**others, **split(k)})
         try:
-            rec["lines"] = update_swarm(c, str(spec))
+            rec["lines"] = update_swarm(c, str(spec), replicas="spec")  # waves set replicas
         except SpecError as e:
             rec["error"] = e.lines
             break

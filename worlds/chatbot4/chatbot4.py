@@ -513,6 +513,8 @@ class Chatbot4World(World):
 
     def _pr(self, pr):
         rec = self.state["prs"].get(str(pr))
+        if rec is not None and rec["state"] == "merging":
+            raise ToolError(f"PR #{pr} is being merged; retry shortly", "busy")
         if rec is None or rec["state"] != "open":
             if self._draft(pr):
                 raise ToolError(f"PR #{pr} is a draft whose head is not on the Hub yet; its author "
@@ -866,7 +868,7 @@ class Chatbot4World(World):
             if not old and not draft:
                 self._reconcile(agent.name)
                 mine = [r["pr"] for r in self.state["prs"].values()
-                        if r["state"] == "open" and r["author"] == agent.name]
+                        if r["state"] in ("open", "merging") and r["author"] == agent.name]
                 mine += [d["pr"] for d in self.state["drafts"].values() if d["author"] == agent.name]
                 if len(mine) + sum(p[0] == agent.name and p[2] is None for p in pending) >= 2:
                     raise ToolError(f"at most two open PRs per agent: update one with pr=<n> or "
@@ -1318,7 +1320,8 @@ class Chatbot4World(World):
 
         A PR with "draft": true is open on the Hub but its head is not pushed yet (head_sha is
         null); it counts toward its author's open PRs and cannot be reviewed or merged until
-        its author retries open_pr with pr=<number>.
+        its author retries open_pr with pr=<number>. state open also lists PRs whose merge
+        is running ("state": "merging").
         Returns a list of PRs; if you have unread inbox news it is
         {"prs": [...], "inbox": [...], "pr_budget": {...}} (the swarm's new-PR budget).
         """
@@ -1330,7 +1333,8 @@ class Chatbot4World(World):
         # review filter's git and the deep copy run outside it.
         with self.lock:
             records = [{**rec, "reviews": dict(rec["reviews"])} for rec in self.state["prs"].values()
-                       if (state == "all" or rec["state"] == state)
+                       if (state == "all" or rec["state"] == state
+                           or (state == "open" and rec["state"] == "merging"))
                        and (not author or rec["author"] == author)]
             drafts = [] if state not in ("open", "all") or needs_review else [
                 {"pr": d["pr"], "state": "open", "draft": True, "author": d["author"],

@@ -226,6 +226,13 @@ def test_isolated_env_passes_explicit_spec_env_minus_secrets(monkeypatch):
         "HF_TOKEN", "MY_SECRET", "OPS_KEY"]
 
 
+def test_env_dropped_agrees_with_isolated_env_on_allowlisted_names():
+    keys = ["FLOCK_AGENT_TOKEN", "PROVIDER_TOKEN", "MY_TOKEN", "FLOCK_TOKEN"]
+    dropped = env_dropped(keys, "PROVIDER_TOKEN")
+    assert dropped == ["FLOCK_TOKEN", "MY_TOKEN"]
+    assert dropped == isolated_env(dict.fromkeys(keys, "x"), "PROVIDER_TOKEN", keys)[1]
+
+
 PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://h:8000/v1", "api_key_env": "VLLM_KEY",
                      "self_hosted": True},
              "hf": {"type": "openai_compat", "base_url": "https://router.example/v1",

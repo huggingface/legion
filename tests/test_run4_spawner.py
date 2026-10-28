@@ -288,7 +288,7 @@ def test_waves_add_spawners_uses_their_own_cap_and_the_capacity_guard(tmp_path, 
     live = {"agent": 300, "agent-spawner": 0, "agent-child": 0}
     applied, guard = [], []
     monkeypatch.setattr(flock.cli, "load_spec", lambda _: SimpleNamespace(swarm="run4"))
-    monkeypatch.setattr(flock.cli, "update_swarm", lambda _c, path: applied.append(
+    monkeypatch.setattr(flock.cli, "update_swarm", lambda _c, path, **_: applied.append(
         yaml.safe_load(Path(path).read_text())["types"]) or ["ok"])
     monkeypatch.setattr(waves, "current", lambda _, __, names: {n: live[n] for n in names})
     monkeypatch.setitem(sys.modules, "load_guard", SimpleNamespace(
