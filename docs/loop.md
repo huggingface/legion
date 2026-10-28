@@ -33,7 +33,7 @@ types:
         counts_as_round: false   # true: a wake prompt is a round and counts toward max_rounds
       stop_when: {all_agents_done: true}   # optional: done(finished: true) takes an agent out
       while:                     # all set conditions must hold
-        until: 2h                # wall time since the loop started (type-wide)
+        until: 2h                # wall time since the loop started (type-wide); or a clock time: 2026-10-28T20:00Z
         max_rounds: 400          # loop prompts per agent
         budget_usd: 12           # the type's total cost (type-wide)
         agent_usd: 0.05          # per agent; or a map by model alias / id: {deepseek: 3.60, glm: 2.10}
@@ -128,6 +128,11 @@ budget threshold), when every agent has left it (`max_rounds`, `agent_usd`, `idl
 `errors`, `done`; the reason is theirs if they agree, else `agents_done`), on `flock loop --stop`, or
 when `loop:` is removed from the spec (no final round then). Stopping drops the type's
 undelivered loop prompts and sends `loop_stop` to worker-side loops.
+
+`until` is a duration since the loop started (`2h`) or an ISO-8601 clock time
+(`until: 2026-10-28T20:00Z`, or with an offset like `+02:00`; no zone means UTC). A clock time
+ends the loop when `now >= until` whatever the start time, so the final round can be scheduled
+for a wall-clock moment. `{wall}` is then the minutes from the loop start to that time.
 
 **Undelivered prompts.** A worker that takes a loop prompt and then defers it (draining,
 stopping) reports `prompt_deferred` with the prompt's `{kind, round}`: the controller undoes
