@@ -445,6 +445,32 @@ def _chips(counts: dict[str, int], tones: dict[str, str]) -> str:
     )
 
 
+def _health_line(store: Store, swarm: str) -> str:
+    """The newest health snapshot as one line of aggregates (the page has no auth: no agent
+    names)."""
+    rows = store.health_samples(swarm, "30s", limit=1)
+    if not rows:
+        return ""
+    e, b = html.escape, rows[0]["body"]
+    bits = []
+    if w := b.get("world"):
+        bits.append(f"world {'up' if w['up'] else '<strong>down</strong>'}"
+                    + (f" {w['manifest_ms']:.0f} ms" if w.get("manifest_ms") is not None else "")
+                    + (f", Slurm {e(w['slurm_state'])}" if w.get("slurm_state") else ""))
+    tok = b.get("tokens", {}).get("by_type", {})
+    if tok:
+        bits.append(f"tokens this hour {_fmt_count(sum(t.get('input', 0) for t in tok.values()))} in"
+                    f" / {_fmt_count(sum(t.get('output', 0) for t in tok.values()))} out")
+    stuck = sum(len(t["stuck"]) for t in b.get("types", {}).values())
+    bits.append(f"{stuck} stuck or silent")
+    near = sum(1 for wk in b.get("workers", {}).values()
+               if (wk.get("eta_limit_s") or 1e18) < 3600)
+    bits.append(f"{near} workers within 1 h of their memory limit")
+    alerts = "".join(f'<span class="badge warn"><i></i>{e(a["kind"])}</span> '
+                     for a in b.get("alerts", []))
+    return f'<p class="sub">health: {" · ".join(bits)} {alerts}</p>'
+
+
 def _status_page(store: Store, now: float) -> str:
     e = html.escape
     parts = []
@@ -511,6 +537,7 @@ def _status_page(store: Store, now: float) -> str:
             for pv in st.providers.values()
         )
         provs = f'<p class="sub">providers: {provs}</p>' if provs else ""
+        provs += _health_line(store, spec.swarm)
         parts.append(
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
             f"<h2>{e(spec.swarm)}</h2>{removing}</div>"
@@ -775,6 +802,48 @@ def create_app(
     def history(swarm: str) -> list[dict]:
         return [{"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
                  "diff_summary": r["diff"]} for r in store.spec_history(swarm)]
+
+    # ------------------------------------------------------------- health (docs/health.md)
+
+    @api.get("/swarms/{swarm}/health")
+    def health_latest(swarm: str) -> dict:
+        """The newest snapshot (ts in epoch s), the generation and the last control-plane
+        events of the swarm stream."""
+        sw = spec_or_404(swarm)
+        rows = store.health_samples(swarm, "30s", limit=1)
+        if not rows:
+            raise HTTPException(404, f"no health snapshot of {swarm!r} yet")
+        return {"swarm": swarm, "generation": sw["generation"], **rows[0],
+                "recent_events": health.recent_events(swarm)}
+
+    @api.get("/swarms/{swarm}/health/history")
+    def health_history(swarm: str, since: str = "0", res: Literal["30s", "5m"] = "30s",
+                       limit: int = 5000) -> list[dict]:
+        """Snapshots since `since` (epoch s or ISO-8601), oldest first."""
+        spec_or_404(swarm)
+        try:
+            t = float(since)
+        except ValueError:
+            try:
+                t = datetime.fromisoformat(since).timestamp()
+            except ValueError:
+                raise HTTPException(422, f"since {since!r}: epoch seconds or ISO-8601") from None
+        return store.health_samples(swarm, res, t, max(1, min(limit, 20000)))
+
+    @api.get("/swarms/{swarm}/usage")
+    def usage(swarm: str, by: Literal["type", "hour"] = "type") -> dict:
+        """Tokens by type (all hours summed) or by UTC hour and type."""
+        spec_or_404(swarm)
+        rows = store.usage(swarm)
+        if by == "type":
+            totals: dict[str, dict[str, int]] = {}
+            for r in rows:
+                acc = totals.setdefault(r["type"], {})
+                for k, v in r.items():
+                    if k not in ("hour", "type"):
+                        acc[k] = acc.get(k, 0) + v
+            rows = [{"type": t, **v} for t, v in sorted(totals.items())]
+        return {"swarm": swarm, "by": by, "rows": rows}
 
     @api.get("/swarms/{swarm}/history/{generation}")
     def history_spec(swarm: str, generation: int) -> dict:

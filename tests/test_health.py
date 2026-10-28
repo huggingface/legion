@@ -299,3 +299,88 @@ def test_run_json_rewritten_on_a_new_generation(store):
     run = json.loads((store.data_dir / "run.json").read_text())
     assert run["generation"] == store.generation("demo")
     assert run["types"]["researcher"]["replicas"] == 5
+
+
+# --------------------------------------------------------------------------- API, page, CLI
+
+def _seed_app(app, store):
+    a0, _ = _fleet(store, T, {"open_pr": {"n": 1, "err": 0, "refused": 0, "max_s": 1.0}})
+    h = app.state.health
+    h.on_events(a0, [_ev(a0["name"], "turn_ended", {"tokens": {"m": {"input": 5, "output": 1}}})],
+                T)
+    store.append_events("demo", swarm_stream("demo"), [Event(
+        type="crash", ts=datetime.fromtimestamp(T, UTC), agent="",
+        data={"target": "demo-researcher-w0000", "detail": "exit 1"})])
+    h.tick(T)
+    h.tick(T + 30)
+
+
+async def test_health_endpoints(app, store, client):
+    assert (await client.get("/swarms/demo/health")).status_code == 404
+    _seed_app(app, store)
+    r = (await client.get("/swarms/demo/health")).json()
+    assert r["ts"] == T + 30 and r["generation"] == 1
+    assert set(r["body"]) == {"world", "workers", "types", "tools", "providers", "tokens", "alerts"}
+    assert [e["type"] for e in r["recent_events"]] == ["crash"]
+    hist = (await client.get("/swarms/demo/health/history", params={"since": T + 1})).json()
+    assert [x["ts"] for x in hist] == [T + 30]
+    iso = datetime.fromtimestamp(T, UTC).isoformat()
+    assert len((await client.get("/swarms/demo/health/history",
+                                 params={"since": iso, "res": "5m"})).json()) == 1
+    assert (await client.get("/swarms/demo/health/history", params={"since": "x"})).status_code == 422
+    by_type = (await client.get("/swarms/demo/usage")).json()["rows"]
+    assert by_type == [{"type": "researcher", "input": 5, "output": 1, "cache_read": 0,
+                        "cache_write": 0, "reasoning": 0}]
+    by_hour = (await client.get("/swarms/demo/usage", params={"by": "hour"})).json()["rows"]
+    assert by_hour[0]["hour"] == "2026-09-21T14"
+    page = (await client.get("/")).text
+    assert "health:" in page and "1 workers within 1 h of their memory limit" in page
+    assert "researcher-0000" not in page.split("health:")[1].split("</p>")[0]  # no agent names
+
+
+def test_cli_status_json_watch_and_usage(app, store, monkeypatch):
+    from typer.testing import CliRunner
+
+    from flock import cli
+
+    from .test_cli import _wire
+
+    _seed_app(app, store)
+    _wire(monkeypatch, app)
+    runner = CliRunner()
+    out = runner.invoke(cli.app, ["status", "demo", "--json"])
+    assert out.exit_code == 0, out.output
+    doc = json.loads(out.output)
+    assert doc["status"]["swarm"] == "demo" and doc["health"]["body"]["tools"]["open_pr"]
+
+    def stop(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", stop)
+    out = runner.invoke(cli.app, ["status", "demo", "--watch"])
+    assert out.exit_code == 0, out.output
+    for want in ("gen 1", "no world", "workers (by time to memory limit)", "demo-researcher-w0000",
+                 "world tools:", "open_pr", "restores:", "control-plane events", "crash",
+                 "reaches its memory limit in 30 min"):
+        assert want in out.output, (want, out.output)
+    out = runner.invoke(cli.app, ["usage", "demo", "--by", "hour"])
+    assert out.exit_code == 0 and "2026-09-21T14" in out.output and "researcher" in out.output
+
+
+def test_watch_shows_world_metrics_and_provider_queues(capsys):
+    from flock import cli
+
+    m = {"loop_lag_s": 0.012, "overloaded_429_total": 7,
+         "pools": {"fast": {"queue_wait_oldest_s": 0.4}, "slow": {"queue_wait_oldest_s": 12.0}},
+         "world": {"open_prs": 41, "outbox_depth": 3}}
+    body = {"world": {"up": False, "manifest_ms": None, "slurm_state": "PENDING", "metrics": m},
+            "workers": {}, "types": {}, "tools": {}, "tokens": {"by_type": {}},
+            "providers": {"v": {"waiting": 3.0, "running": 5.0, "kv": 0.42}},
+            "alerts": [{"kind": "world_down", "msg": "world does not answer (Slurm job PENDING: "
+                        "waiting for a node, not a crash)"}]}
+    st = {"swarm": "demo", "agents_total": 0, "workers_total": 0, "cost_usd": 0.0}
+    cli._print_health(st, {"ts": T, "generation": 3, "body": body})
+    out = capsys.readouterr().out
+    for want in ("world DOWN - ms slurm PENDING", "waiting for a node", "loop lag 0.012 s",
+                 "429s 7", "slow queue 12.0 s", "open_prs 41", "provider v: waiting 3 running 5 kv 42%"):
+        assert want in out, (want, out)
