@@ -94,9 +94,10 @@ response.
   world and its tools, with the manifest's `description`.
 - **Calls.** The arguments are checked against the tool's schema before the world is called. A
   call goes to `POST <endpoint>/tools/<name>` with the secret and the agent's identity. A `429`
-  or `503` is retried twice (`Retry-After`, at most 10 s). There is a 60 s timeout and a 1 MB
-  result limit. Every failure is a tool result the model reads (`{"error": "..."}`); the turn
-  goes on.
+  or `503` is retried once, and only for a read-only tool (`annotations.readOnlyHint`;
+  `Retry-After`, at most 10 s); a write is never resent. There is a 60 s timeout and a 1 MB
+  result limit. Every failure is a tool result the model reads (`{"error": "...", "code": ...}`,
+  plus the world's `retry_after_s` when it gave one); the turn goes on.
 - **Changes reach the next turn.** A re-apply re-fetches the manifest, and the next turn sees
   the new tools. If the version changed, that turn's World section also carries a note: "the
   world changed since your last turn (version 0.1.0 -> 0.2.0)".
@@ -152,7 +153,8 @@ The manifest:
 - `name` matches `[a-z][a-z0-9-]{0,31}`. `version` is any string; change it when the tools
   change, and the agents are told.
 - Each tool is a Chat Completions function: `name`, `description`, and `parameters` (a JSON
-  schema of type object).
+  schema of type object). Optional `annotations: {"readOnlyHint": true}` marks a tool that
+  changes nothing; the worker may retry it.
 - Unknown fields are ignored. flock ignores capabilities it does not use, so a world can declare
   more.
 - A tool's error is a `200` with `ok: false`; the agent reads `message`. Use `4xx` and `5xx` for
@@ -212,8 +214,14 @@ curl -s -H 'X-World-Token: dev' -H 'X-Flock-Agent: me' -d '{"args": {"by": 2}}' 
 `flock world serve module:Class` imports the module from the current directory. It serves on
 `$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default `127.0.0.1:8765`, or `--host` / `--port`) and
 requires `$FLOCK_WORLD_TOKEN` (`--token-env NAME` for another variable; `--insecure` for none).
-Synchronous tools and hooks run one at a time, so the world needs no locks of its own;
-`async def` tools and hooks run concurrently. A tool that raises anything other than `ToolError`
+Synchronous tools and hooks run one at a time, so the world needs no locks of its own
+(`concurrent = True`: they run at once, and the world guards its own state); `async def` tools
+and hooks run concurrently. Synchronous tools run in one of two thread pools:
+`@tool(pool="slow")` for tools that block for seconds or minutes, the "fast" pool (default) for
+the rest and the hooks, so slow calls never hold up quick ones. `@tool(read_only=True)` marks a
+tool that changes nothing (`annotations.readOnlyHint`). `GET /manifest` is served from a cached
+copy on the event loop, rebuilt when the manifest's version changes, so it answers while every
+thread is busy. A tool that raises anything other than `ToolError`
 returns `{"code": "internal"}` with the exception text. Overriding `manifest()` and `call(tool,
 args, agent)` serves tools that are not methods. The server checks each call against
 `manifest()` as served at that moment, so what `GET /manifest` advertises is exactly what

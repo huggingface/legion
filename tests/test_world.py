@@ -568,7 +568,7 @@ async def test_hub_forwards_calls_with_the_agent_and_the_token(recorder):
         a = recorder.world.calls[-1]
         assert (a.name, a.type, a.swarm) == ("dev-0001", "dev", "sw") and len(a.request_id) == 32
         r = await hub.call("dev-0001", "world:refuse", {})
-        assert r.error and json.loads(r.output) == {"error": "not today"}
+        assert r.error and json.loads(r.output) == {"error": "not today", "code": "nope"}
         r = await hub.call("dev-0001", "world:crash", {})
         assert r.error and "internal error (error id " in r.output and "Division" not in r.output
         r = await hub.call("dev-0001", "world:echo", {"txt": "hi"})  # refused before the world
@@ -606,10 +606,31 @@ async def test_hub_retries_429_then_gives_the_result():
 
     hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
                    transport=httpx.MockTransport(handler))
-    m = WorldManifest(world_api="v1", name="w", version="1", tools=[{"name": "a"}])
+    m = WorldManifest(world_api="v1", name="w", version="1",
+                      tools=[{"name": "a", "annotations": {"readOnlyHint": True}}])
     hub.configure(world_block("http://w", m, "t"), ["a"])
     r = await hub.call("x", "world:a", {})
     assert (r.output, r.error, seen) == ("fine", False, ["t", "t"])
+    await hub.aclose()
+
+
+@pytest.mark.parametrize("read_only, attempts", [(True, 2), (False, 1)])
+async def test_hub_retries_only_read_only_tools_and_once(read_only, attempts):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(1)
+        return httpx.Response(429, headers={"Retry-After": "0"}, json={"ok": False, "error": {
+            "code": "overloaded", "message": "busy", "retry_after_s": 30}})
+
+    hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
+                   transport=httpx.MockTransport(handler))
+    m = WorldManifest(world_api="v1", name="w", version="1", tools=[
+        {"name": "a", "annotations": {"readOnlyHint": read_only}}])
+    hub.configure(world_block("http://w", m, "t"), ["a"])
+    r = await hub.call("x", "world:a", {})
+    assert r.error and len(seen) == attempts
+    assert json.loads(r.output) == {"error": "busy", "code": "overloaded", "retry_after_s": 30}
     await hub.aclose()
 
 
@@ -898,7 +919,7 @@ async def test_a_pinned_turn_keeps_its_world_through_the_gateway(tmp_path, recor
         new = world.toolset_for("dev-0001", base, comms)
         assert new.names() == ["refuse"]
         r = await new.call("refuse", {}, agent="dev-0001", workdir=tmp_path, env={})
-        assert json.loads(r.output) == {"error": "not today"}
+        assert json.loads(r.output) == {"error": "not today", "code": "nope"}
     finally:
         other.close()
         await comms.aclose()
