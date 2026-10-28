@@ -386,18 +386,26 @@ def extract_base_tar(src: Path, workdir: Path, exclude: list[str],
     index: dict[str, list] = {}
     bad = 0
 
-    def target(rel: str, make: bool = True) -> Path | None:
+    safe: set[str] = set()  # parent dirs checked (and made): one realpath per directory
+
+    def target(rel: str, make: bool = True) -> str | None:
         """The local path for `rel`, cleared, or None when it must not be written."""
-        p = workdir / rel
-        if rel.startswith("/") or ".." in rel.split("/") or is_excluded(rel, exclude) \
-                or not p.parent.resolve().is_relative_to(root):
+        if rel.startswith("/") or ".." in rel.split("/") or is_excluded(rel, exclude):
             return None
-        if make:
-            p.parent.mkdir(parents=True, exist_ok=True)
-        if p.is_symlink() or p.is_file():
-            p.unlink()  # also read-only files (git objects) and links
-        elif p.exists():
-            return None  # a directory in the way
+        p = os.path.join(workdir, rel)
+        parent = os.path.dirname(p)
+        if parent not in safe:
+            if not Path(parent).resolve().is_relative_to(root):
+                return None
+            if make:
+                os.makedirs(parent, exist_ok=True)
+                safe.add(parent)
+        try:
+            if stat.S_ISDIR(os.lstat(p).st_mode):
+                return None  # a directory in the way
+            os.unlink(p)  # also read-only files (git objects) and links
+        except FileNotFoundError:
+            pass
         return p
 
     with tarfile.open(src, "r:") as tf:
@@ -413,8 +421,7 @@ def extract_base_tar(src: Path, workdir: Path, exclude: list[str],
                         shutil.copyfileobj(f, out)
                     os.chmod(p, m.mode & 0o777)
                 os.utime(p, (m.mtime, m.mtime), follow_symlinks=False)
-                st = os.lstat(p)
-                index[m.name] = [st.st_mtime, st.st_size]
+                index[m.name] = [m.mtime, len(os.fsencode(m.linkname)) if m.issym() else m.size]
             except OSError as e:
                 bad += 1
                 log.debug("base member %s: %s", m.name, e)
