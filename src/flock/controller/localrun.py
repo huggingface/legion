@@ -44,6 +44,7 @@ from typing import Any, TextIO
 import httpx
 
 from flock.controller.api import create_app, swarm_status
+from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
 from flock.controller.prices import cost_usd, type_price_table
@@ -569,14 +570,20 @@ async def run_local(opts: RunOptions) -> RunResult:
     settings = Settings(public_url=url, token=token)
     reconcile_task: list[asyncio.Task] = []
 
+    health = Health(store, token=token, jobs=jobs, run=run_dir.name)
+    health_every = float(os.environ.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
+
     async def background(notifier) -> None:
         reconcile_task.append(asyncio.current_task())
+        if health_every > 0:  # cancelled with the reconciler (_stop_workers)
+            reconcile_task.append(asyncio.create_task(health.run(health_every)))
         await run_reconciler(store, jobs, settings, opts.reconcile_interval,
                              wake=lambda t: notifier.wait("reconcile:", t))
 
     worlds = WorldHost(log_dir=run_dir / "logs")  # a spec's `world.command` (docs/world.md)
     app = create_app(store, token, background=background, compute="local",
-                     stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds)
+                     stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds,
+                     health=health)
     server = _Server(app, sock)
     started = datetime.now(UTC)
     t0 = time.monotonic()
@@ -673,6 +680,10 @@ async def run_local(opts: RunOptions) -> RunResult:
         for sig in handled:
             loop.remove_signal_handler(sig)
         try:
+            try:  # controller/run.json, metrics/ and rollups/ for the viewer (docs/health.md)
+                await asyncio.to_thread(health.close, time.time())
+            except Exception:
+                log.exception("health close failed")
             spec = active_spec(store, spec)
             totals = write_bundle(run_dir, store, spec, started=started,
                                   ended=datetime.now(UTC), reason=reason, url=url,

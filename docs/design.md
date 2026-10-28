@@ -327,6 +327,8 @@ types:
     tool_choice: null          # llm harness only: auto | required | none | bash
     done_tool: null            # llm harness only: offer `done` (default: on for tool_choice required)
     persist_workdir: true
+    workdir: {soft_files: 50000, soft_mb: 2048, ephemeral: [scratch/]}  # docs/pi.md "Workdir"
+    worker: {sync_interval_s: 180, restore_threads: 4}   # live worker knobs, docs/slurm.md
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
     tools: [ws_write, run_bot] # functions from the tools folder, or `all` (docs/tools.md)
@@ -561,6 +563,8 @@ Telemetry, all optional (older workers send none; the controller stores the last
   process started; `refused` is an HTTP 429 or a busy/budget error code.
 - `knobs_rev`: a hash of the worker's own settings (drain budget, sync interval, comms rates,
   sync excludes).
+- `wants_rotation`: nonreclaimable memory passed `FLOCK_MEM_ROTATE` of the limit; the controller
+  drains the worker within its rotation budget (docs/slurm.md "Memory").
 - per agent `rev` (the type spec revision applied at its last turn boundary) and `start_rev` (the
   one its running harness process started with).
 

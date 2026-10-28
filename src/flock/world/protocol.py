@@ -35,6 +35,10 @@ TOKEN_ENV = "FLOCK_WORLD_TOKEN"
 PORT_ENV = "FLOCK_WORLD_PORT"
 HOST_ENV = "FLOCK_WORLD_HOST"
 SWARM_ENV = "FLOCK_SWARM"
+STATE_DIR_ENV = "FLOCK_WORLD_STATE_DIR"  # knobs.json (World.state_dir)
+# The /admin secret of a world (docs/world.md, "Admin API"); never derived from the world
+# secret, which every worker holds. Unset: /admin answers 403.
+ADMIN_TOKEN_ENV = "FLOCK_WORLD_ADMIN_TOKEN"
 
 # Hooks flock sends to a world that lists them in its manifest's `hooks` (POST /hooks).
 HOOK_EVENTS = ("agent_start", "agent_done", "turn")

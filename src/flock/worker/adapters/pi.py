@@ -186,7 +186,8 @@ def isolated_env(env: dict[str, str], provider_key: str | None,
     (spec.env) pass too, except `env_dropped` ones. ISOLATED_DENY and the worker's
     FLOCK_HARNESS_ENV_DROP never pass."""
     allowed = BASE_ENV | set(PI_ENV_DEFAULTS) | {"PI_CODING_AGENT_DIR", "FLOCK_TOOLS_PIN",
-              "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", provider_key}
+              "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", "BASH_ENV",
+              provider_key}
     explicit = set(explicit)
     kept = {k: v for k, v in env.items()
             if (k in explicit and not SECRET_NAME.fullmatch(k) or k in allowed
@@ -194,6 +195,22 @@ def isolated_env(env: dict[str, str], provider_key: str | None,
             and k not in ISOLATED_DENY
             and k not in set(filter(None, os.environ.get(DROP_VAR, "").split(",")))}
     return kept, sorted(set(env) - set(kept))
+
+
+def write_bash_env(path: Path, tool_memory_mb: int | None) -> Path:
+    """The flock-owned file Pi's bash tool sources (BASH_ENV: every non-interactive bash): an
+    RLIMIT_DATA cap inherited by each tool command and its children, never by Pi, and no
+    NODE_OPTIONS (Pi's heap cap is not for node tools). Read-only (0444, and a read-only
+    bind inside the sandbox)."""
+    lines = ["# written by flock at each Pi start (docs/pi.md \"Memory\")"]
+    if tool_memory_mb:
+        lines.append(f"ulimit -d {tool_memory_mb * 1024}")  # KiB; data segment, not virtual size
+    lines.append("unset NODE_OPTIONS")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o444)
+    return path
 
 
 def _usage(u: dict[str, Any] | None) -> TokenUsage:
@@ -320,14 +337,14 @@ class RpcError(RuntimeError):
     pass
 
 
-def _descendants(pid: int) -> list[tuple[int, str]]:
-    """(pid, start time) of every live descendant of `pid`, from /proc (Linux; [] elsewhere)."""
+def process_tree() -> tuple[dict[int, list[int]], dict[int, str]]:
+    """One /proc walk: parent pid -> children, and pid -> start time (Linux; empty elsewhere)."""
     children: dict[int, list[int]] = {}
     starts: dict[int, str] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return []
+        return children, starts
     for d in entries:
         if not d.isdigit():
             continue
@@ -338,6 +355,14 @@ def _descendants(pid: int) -> list[tuple[int, str]]:
         fields = stat[stat.rfind(")") + 2:].split()
         children.setdefault(int(fields[1]), []).append(int(d))
         starts[int(d)] = fields[19]
+    return children, starts
+
+
+def _descendants(pid: int, tree: tuple[dict[int, list[int]], dict[int, str]] | None = None
+                 ) -> list[tuple[int, str]]:
+    """(pid, start time) of every live descendant of `pid`, from `tree` (process_tree) or a
+    fresh /proc walk."""
+    children, starts = tree or process_tree()
     out, todo = [], [pid]
     while todo:
         for c in children.get(todo.pop(), []):
@@ -388,19 +413,20 @@ class PiAdapter:
         self._isolation_dir: tempfile.TemporaryDirectory | None = None
         self._seen: list[tuple[int, str]] = []
 
-    def update_spec(self, spec: TypeSpec) -> None:
+    def update_spec(self, spec: TypeSpec) -> bool:
         """A live `flock update` (docs/live.md): a new endpoint list (vLLM base_urls), model id
-        or reasoning level takes effect at Pi's next start (a transport error or timeout
-        restarts it), where models.json is rewritten. A change of the provider's key variable
-        waits for a worker restart, since the key is set up with the process environment."""
+        or reasoning level takes effect at Pi's next start, where models.json is rewritten.
+        True when it changed: the runtime then recycles Pi at the turn boundary, so the change
+        applies within a turn. A change of the provider's key variable waits for a worker
+        restart, since the key is set up with the process environment."""
         if self.model_config is None:
-            return
+            return False
         new = pi_model_config(spec, self.agent)
         if new is None or new.api_key_env != self.model_config.api_key_env or new == self.model_config:
-            return
-        log.info("%s: pi model config updated (endpoint %s); applies at the next pi start",
-                 self.agent, new.base_url)
+            return False
+        log.info("%s: pi model config updated (endpoint %s); recycling pi", self.agent, new.base_url)
         self.model_config = new
+        return True
 
     def scratch_env(self) -> dict[str, str]:
         """Isolated Pi's HOME, TMPDIR and tool caches: under its own agent dir (disk-backed,
@@ -537,13 +563,17 @@ class PiAdapter:
         if cfg is not None and cfg.reasoning:
             self.argv += ["--thinking", cfg.reasoning]
         self.env = harness_env(env, self.home)
+        bash_env = None
+        if spec.tool_memory_mb or spec.node_heap_mb:  # outside the agent's writable dirs
+            bash_env = write_bash_env(self.home.parent / f"{self.agent}.bash_env", spec.tool_memory_mb)
+            self.env["BASH_ENV"] = str(bash_env)
         launch = self.argv
         if isolation_enabled():
             self.env, self.env_dropped_names = isolated_env(
                 self.env, cfg.api_key_env if cfg else None, spec.env)
             # Private directories prevent a sibling from reading this agent's gateway key.
             pin = self.env.get("FLOCK_TOOLS_PIN")
-            readonly = []
+            readonly = [bash_env] if bash_env else []
             if pin:
                 pin_path = Path(pin)
                 if pin_path.parent.name != self.agent:
@@ -557,6 +587,8 @@ class PiAdapter:
             launch = isolate_command(self.argv, Path(self._isolation_dir.name), cwd=self.workdir,
                                      readonly=readonly, writable=[self.workdir, self.home], network=True,
                                      tmp=self.home / "tmp")
+        if spec.node_heap_mb:  # Pi only: the BASH_ENV file unsets it for tools
+            self.env["NODE_OPTIONS"] = f"--max-old-space-size={spec.node_heap_mb}"
         self._queue = EventQueue()
         self._mapper = PiMapper(cfg.model_ref if cfg else spec.model, max_turns=spec.max_turns,
                                 max_budget_usd=spec.max_budget_usd, prices=self.prices)

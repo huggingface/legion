@@ -4,8 +4,9 @@ Phases of the harness process: none -> starting -> running -> (stopping) -> none
 - A prompt with no process starts a burst; prompts arriving while it starts are buffered and
   forwarded in order once it is up; later prompts go straight to the running process.
 - The burst ends when the harness has been idle for `idle_grace`, when a turn exceeds its
-  timeout (process killed, agent `stuck` until the next turn), on stop/unassign, or on drain
-  once the in-flight turn ends.
+  timeout (process killed, agent `stuck` until the next turn), on stop/unassign, on drain
+  once the in-flight turn ends, or on `recycle` at the next turn boundary (a fresh process
+  resumes the same session: memory relief, a new model endpoint).
 The worker never schedules or queues beyond the startup buffer.
 """
 
@@ -48,6 +49,7 @@ from flock.worker.adapters.base import (
 )
 from flock.worker.events import Outbox, SessionLog, utcnow
 from flock.worker.loop import render
+from flock.worker.sync import WorkdirStats, reset_ephemeral
 from flock.world import hub as world_hub
 
 if TYPE_CHECKING:
@@ -76,7 +78,7 @@ def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float
     base = min(LOOP_TRANSIENT_BACKOFF_CAP, LOOP_TRANSIENT_BACKOFF * 2 ** max(0, n - 1))
     return base * (0.5 + 0.5 * rng())
 # Interruptions that are a decision (stop, drain, unassign), not a failure: no re-prompt.
-_DECIDED = ("stop", "drain", "unassign", "abandoned", "draining")
+_DECIDED = ("stop", "drain", "unassign", "abandoned", "draining", "drain_deadline")
 _UNSET: Any = object()  # set_live: "no news" for the grant (None means revoked)
 
 
@@ -144,6 +146,7 @@ class AgentRuntime:
         self.rev: str | None = None
         self.start_rev: str | None = None
         self.workdir_files: int | None = None  # files in the workdir at the last push
+        self.workdir_stats: WorkdirStats | None = None  # the same walk's counts (`{workspace}`)
         self.work_root = Path(work_root)
         self.workdir = self.work_root / name
         self.sessions_dir = self.work_root / "_sessions"
@@ -168,6 +171,13 @@ class AgentRuntime:
         self._env_dropped_rev: str | None = None
         self.allow_starts = True
         self._stop_req: str | None = None
+        # recycle(): end the burst at the next turn boundary; the next prompt starts a fresh
+        # process on the same session. Not _stop_req: the burst's finally must restart.
+        self._recycle_pending: str | None = None
+        self.pss_mb: float | None = None  # the harness's PSS, set by the worker's memory loop
+        self._burst_started = 0.0
+        self._burst_turns = 0
+        self._exit_code: int | None = None  # the harness's exit status (`exited` event)
         self._burst: asyncio.Task | None = None
         self._ready = asyncio.Event()
         # setup() got past its restore (complete, partial or failed-to-list), not cancelled:
@@ -333,8 +343,8 @@ class AgentRuntime:
             self._note(f"your grants changed: {self.grant.describe() if self.grant else 'all revoked'}")
         if self.comms is not None:
             self.comms.set_grant(self.name, self.grant.tools if self.grant else None)
-        if update := getattr(self.adapter, "update_spec", None):
-            update(self.spec)
+        if (update := getattr(self.adapter, "update_spec", None)) and update(self.spec):
+            self.recycle("endpoint")  # the new models.json needs a fresh process
 
     def _note(self, what: str) -> None:
         if self.state.turn_seq > 0:  # an agent that never had a turn starts on the new setup
@@ -364,6 +374,7 @@ class AgentRuntime:
                 except Exception as e:  # noqa: BLE001 - a failed listing means a fresh start
                     log.warning("%s: restore failed (fresh start): %s", self.name, e)
                     self.emit("error", {"error": f"restore failed: {e}"})
+            await asyncio.to_thread(reset_ephemeral, self.workdir, self.spec)
             self.setup_done = True
             self.load_state()
             if res is not None and res.failed:
@@ -407,6 +418,9 @@ class AgentRuntime:
                 # run in the harness (its turn_started not seen yet): this prompt joins it and
                 # must not repin it.
                 self._apply_live()
+                if self._recycle_pending:  # the fresh process takes it (_watch ends this one)
+                    self.buffer.append(text)
+                    return
                 self._pinned = self._pin_tools()
                 text = self._with_notes(text)
             self.awaiting = True
@@ -561,6 +575,8 @@ class AgentRuntime:
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
             self.start_rev = self.rev
+            self._recycle_pending, self._exit_code = None, None
+            self._burst_started, self._burst_turns = self._now(), 0
             self.save_state()
             self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
@@ -591,8 +607,8 @@ class AgentRuntime:
                     await asyncio.wait_for(pump, 10)
                 except (TimeoutError, asyncio.CancelledError):
                     pump.cancel()
-            if self.turn_id is not None:
-                self._interrupt("process exited")
+            if self.turn_id is not None:  # SIGKILLed: the OOM killer (or the memory watchdog)
+                self._interrupt("oom_killed" if self._exit_code in (-9, 137) else "process exited")
             self.awaiting = False
             self.phase = "none"
             self._burst = None
@@ -620,6 +636,10 @@ class AgentRuntime:
                 log.warning("%s: turn exceeded %.0fs; killing the harness", self.name, timeout)
                 self._interrupt("timeout")
                 self.stuck = True
+                return
+            if not busy and self._recycle_pending:
+                self.emit("harness_recycled", {"reason": self._recycle_pending, "pss_mb": self.pss_mb})
+                self._recycle_pending = None
                 return
             if not busy and now - self._last_activity >= self.idle_grace:
                 return
@@ -667,6 +687,8 @@ class AgentRuntime:
                     self.state.last_summary = summary
                 finished = self._turn_finished
                 self._end_turn()
+                self._burst_turns += 1
+                self._check_recycle_after()
                 lp = self.spec.loop
                 if finished and self.loop is not None and lp is not None and lp.stop_when.all_agents_done:
                     self._loop_end("done")  # no next round; the controller takes it out too
@@ -674,6 +696,8 @@ class AgentRuntime:
                                  "max_turns" if hit_max_turns(ev.data) else ev.data.get("reason"))
         elif k == "error":
             self.emit("error", {"error": ev.error, **ev.data})
+        elif k == "exited":
+            self._exit_code = ev.data.get("returncode")
         self.dirty = True
 
     def _unfinished_summary(self, data: dict[str, Any]) -> str:
@@ -801,7 +825,8 @@ class AgentRuntime:
                                   **({} if meta.counted else {"counted": False}),
                                   **({"wake": True} if meta.wake else {})})
         return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,
-                      now=utcnow())
+                      now=utcnow(), workspace=self.workdir_stats.summary()
+                      if self.workdir_stats else None)
 
     def _loop_untaken(self) -> dict[str, Any]:
         """A deferred prompt that was a loop prompt: it does not count as a round, and the
@@ -851,7 +876,7 @@ class AgentRuntime:
             return
         if status == "interrupted" and (reason is None or reason in _DECIDED):
             return  # stopped on purpose: the controller decides what comes next
-        if reason in ("timeout", "model_transport"):
+        if reason in ("timeout", "model_transport", "oom_killed"):
             self._loop_transient += 1
             if self._loop_transient <= LOOP_TRANSIENT_LIMIT:
                 self._loop_schedule(transient_backoff(self._loop_transient), f"retry after {reason}")
@@ -892,6 +917,26 @@ class AgentRuntime:
     def live(self) -> bool:
         return self.phase != "none"
 
+    def recycle(self, reason: str) -> bool:
+        """Restart the harness process at the next turn boundary, resuming the same session
+        (`harness_recycled`). Only a running process; False when there is none to recycle."""
+        if self.phase != "running" or self._recycle_pending:
+            return False
+        self._recycle_pending = reason
+        return True
+
+    def _check_recycle_after(self) -> None:
+        """`recycle_after` (TypeSpec), checked at each turn end."""
+        ra = self.spec.recycle_after
+        if ra is None:
+            return
+        if ra.turns and self._burst_turns >= ra.turns:
+            self.recycle("turns")
+        elif ra.hours and self._now() - self._burst_started >= ra.hours * 3600:
+            self.recycle("hours")
+        elif ra.pss_mb and self.pss_mb is not None and self.pss_mb >= ra.pss_mb:
+            self.recycle("pss_mb")
+
     async def stop(self, reason: str = "stop") -> None:
         """Kill the harness process if any (interrupting a turn); the agent stays assigned."""
         self._stop_req = reason
@@ -902,17 +947,29 @@ class AgentRuntime:
             self._stop_req = None
         self._defer_buffer(reason)
 
-    async def drain(self) -> None:
-        """No new starts; let the in-flight turn finish (bounded by its timeout); final sync."""
+    async def drain(self, deadline: float | None = None) -> bool:
+        """No new starts; let the in-flight turn finish (bounded by its timeout, and by
+        `deadline` s when given: then it is interrupted, `drain_deadline`); final sync. True
+        when a turn was cut."""
         self.allow_starts = False
-        if self._burst is not None:
+        cut = False
+        if (burst := self._burst) is not None:
             self._stop_req = "drain"
             try:
-                await self._burst
+                if deadline is None:
+                    await burst
+                else:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(burst), deadline)
+                    except TimeoutError:
+                        cut = self.turn_id is not None or self.awaiting
+                        self._stop_req = "drain_deadline"
+                        await burst
             finally:
                 self._stop_req = None
         self._defer_buffer("draining")
         await self.sync_now("drain")
+        return cut
 
     async def unassign(self) -> None:
         self.allow_starts = False
