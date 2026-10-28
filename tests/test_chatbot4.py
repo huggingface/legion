@@ -1703,3 +1703,46 @@ def test_old_request_cache_is_slimmed_on_load_and_expires(setup, monkeypatch):
         again.state["requests"]["k1"]["_ts"] -= 120
         again._cache_request("new", {"pr": 9, "description": "z"})
     assert list(again.state["requests"]) == ["old", "new"]
+
+
+def test_merge_has_its_own_hub_slot(setup):
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    other = submit(world, clone, author="pine", branch="other")
+    world.hub_wait = 0.2
+    assert world.hub_slots.acquire(timeout=1)  # every regular Hub write slot is held
+    try:
+        with pytest.raises(ToolError, match="the Hub is busy"):  # pushes still respect the cap
+            (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hey!"\n')
+            submit(world, clone, author="pine", branch="other", pr=other["pr"])
+        result = world.merge_pr(Agent("cedar"), rec["pr"])  # does not wait for them
+    finally:
+        world.hub_slots.release()
+    assert git(remote, "rev-parse", "main") == result["merged_sha"]
+    assert world.merge_hub_slots.acquire(timeout=0)  # released after the merge
+    world.merge_hub_slots.release()
+
+
+def test_merge_waits_for_its_own_slot_only(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    world.hub_wait = 0.2
+    assert world.merge_hub_slots.acquire(timeout=1)  # another merge in progress
+    try:
+        with pytest.raises(ToolError, match="the Hub is busy") as exc:
+            world.merge_pr(Agent("cedar"), rec["pr"])
+        assert exc.value.code == "hub_busy"
+        (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hey!"\n')
+        assert submit(world, clone, pr=rec["pr"])["head_sha"]  # pushes don't wait for merges
+    finally:
+        world.merge_hub_slots.release()
+
+
+def test_merge_hub_slots_env(setup, monkeypatch):
+    world, _, _ = setup
+    monkeypatch.setenv("CHATBOT_MERGE_HUB_SLOTS", "3")
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert all(restarted.merge_hub_slots.acquire(timeout=0) for _ in range(3))
+    assert not restarted.merge_hub_slots.acquire(timeout=0)

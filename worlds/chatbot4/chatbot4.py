@@ -133,6 +133,11 @@ class Chatbot4World(World):
         # Every Hub write (create PR, push, ready, merge, close, comment) holds a slot: one IP
         # and one token cannot push for 140 agents at once. Lock order: Hub slot, then self.lock.
         self.hub_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_HUB_WRITE_SLOTS", "1")))
+        # Merges hold their own slots instead: a merge never queues behind the rebase pushes,
+        # opens and closes, whose wait would let main or the PR move under its checks. At most
+        # CHATBOT_HUB_WRITE_SLOTS + CHATBOT_MERGE_HUB_SLOTS Hub writes run at once.
+        self.merge_hub_slots = threading.BoundedSemaphore(
+            int(os.environ.get("CHATBOT_MERGE_HUB_SLOTS", "1")))
         self.hub_wait = float(os.environ.get("CHATBOT_HUB_WAIT_S", "20"))
         self.pr_gap = float(os.environ.get("CHATBOT_PR_CREATE_GAP_S", "10"))
         self.gap_lock = threading.Lock()
@@ -504,18 +509,20 @@ class Chatbot4World(World):
         raise ToolError(BUSY, "hub_busy")
 
     @contextlib.contextmanager
-    def _hub_write(self, agent, what, pr=None, deadline=None):
-        """Hold a Hub write slot, waiting at most until deadline (default: CHATBOT_HUB_WAIT_S).
+    def _hub_write(self, agent, what, pr=None, deadline=None, slots=None):
+        """Hold a Hub write slot (from slots, default self.hub_slots), waiting at most until
+        deadline (default: CHATBOT_HUB_WAIT_S).
 
         Never acquire this with self.lock held."""
+        slots = slots or self.hub_slots
         if deadline is None:
             deadline = time.monotonic() + self.hub_wait
-        if not self.hub_slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        if not slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
             self._busy(agent, what, pr)
         try:
             yield
         finally:
-            self.hub_slots.release()
+            slots.release()
 
     def _create_gap(self, agent, deadline):
         """Reserve the next create_pull_request time, CHATBOT_PR_CREATE_GAP_S after the last
@@ -1150,8 +1157,9 @@ class Chatbot4World(World):
             if not verdict["ok"]:
                 raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
         self.repo.refresh(0)  # outside the lock; the compare-and-swap below uses local refs
-        # The Hub slot is taken before the lock (see _hub_write).
-        with self._hub_write(agent, "merge", pr), self.lock:
+        # The merge Hub slot is taken before the lock (see _hub_write); it is separate from
+        # the slots of pushes, opens and closes, so a merge never waits behind them.
+        with self._hub_write(agent, "merge", pr, slots=self.merge_hub_slots), self.lock:
             rec = self._pr(pr)
             reviewers = self._approved(rec)
             if (self.repo.sha() != main or rec["head_sha"] != head
