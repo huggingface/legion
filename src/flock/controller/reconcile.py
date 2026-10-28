@@ -394,7 +394,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
         tools_version=tools_version,
         comms=comms,
-        world=world,
+        world=world.model_copy(update={"down_pause_s": None}) if world else None,  # controller only
     )
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:

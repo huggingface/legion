@@ -675,6 +675,7 @@ def create_app(
     app = FastAPI(title="flock controller", lifespan=lifespan)
     app.state.store, app.state.notifier, app.state.loops = store, notifier, loops
     app.state.health = health
+    health.loops = loops  # world-down holds (docs/health.md)
     request_stats: dict[str, RequestStats] = {}
 
     def make_stats(app):
@@ -1551,6 +1552,8 @@ def create_app(
             ts = spec.types.get(w["type"])
             out["world"] = {**spec.world.model_dump(mode="json", exclude={"down_pause_s"}),
                             "tools": world_tools(ts, spec.world) if ts else []}
+            if (down := health.down_since.get(w["swarm"])) is not None:
+                out["world"]["down_since"] = _dt(down).isoformat()  # the hub refuses at once
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
             # docs/live.md: a changed type spec (prompts, limits, ...) and the grants in force

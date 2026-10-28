@@ -10,6 +10,16 @@ stream is tailed by byte offset.
   manifest lists the `metrics-v1` capability, `GET /metrics` is stored as-is under
   `world.metrics`. Two failed probes in a row write `world_down` to the swarm stream; the next
   success writes `world_up`.
+- **World down: refuse, then pause.** From `world_down` on, every heartbeat response carries
+  `world.down_since` (the first failed probe) and the workers' world hub refuses world calls at
+  once, read-only ones too, without uploading anything: `world <name> down since HH:MM UTC;
+  flock has paused new rounds; end your turn` (`code: world_down`, `local: true`). When the
+  world has been down for `world.down_pause_s` seconds (default `FLOCK_WORLD_DOWN_PAUSE_S`,
+  1800; `0` turns it off) the controller holds every type that has world tools (docs/loop.md
+  "Pause and resume"): `paused {reason: world_down, by: controller, auto: true}`. The first
+  successful probe lifts those automatic holds (`resumed {auto: true}`), also ones left by a
+  controller restart; operator holds stay. `down_pause_s` is controller-only and never sent
+  to workers.
 - **World Slurm job.** With `world.slurm_job_name: <name>` and `compute: slurm`, the
   controller asks `squeue -n <name>` and shows `slurm_state` (`RUNNING`, `PENDING`, ...,
   `absent` when no such job is queued, `unknown` when squeue is missing, fails or times out),

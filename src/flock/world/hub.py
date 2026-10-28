@@ -35,6 +35,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -68,6 +69,7 @@ RETRIES = 1  # extra attempts after a 429 / 503, for read-only tools only
 RETRY_CAP_S = 10.0
 HOOK_TIMEOUT_S = 5.0
 HOLDOFF_CAP_S = 600.0
+DOWN_HOLD_S = 60.0  # retry_after_s while the controller reports the world down (heartbeats refresh it)
 HOLDOFF_DEFAULT_S = 30.0  # a 429 that names no wait
 SNAPSHOTS_KEPT = 32
 # world error codes that mean "not now" rather than "wrong" (counted as `refused`); any error
@@ -112,6 +114,18 @@ class Snapshot:
         return self.manifest.get(name) if name in self.names else None
 
 
+def _down_message(since: object, raw: dict) -> str | None:
+    """The refusal for `world.down_since` (ISO time) in a heartbeat response, else None."""
+    if not isinstance(since, str):
+        return None
+    try:
+        hhmm = datetime.fromisoformat(since).astimezone(UTC).strftime("%H:%M UTC")
+    except ValueError:
+        hhmm = since
+    name = (raw.get("manifest") or {}).get("name") or "?"
+    return f"world {name} down since {hhmm}; flock has paused new rounds; end your turn"
+
+
 class WorldHub:
     def __init__(self, *, swarm: str, type_name: str = "", env: Mapping[str, str] | None = None,
                  transport: httpx.AsyncBaseTransport | None = None,
@@ -127,6 +141,7 @@ class WorldHub:
         # holdoffs: (until, world message, code); per world after a 429, per (agent, tool) after a hint
         self._world_hold: tuple[float, str, str] | None = None
         self._tool_hold: dict[tuple[str, str], tuple[float, str, str]] = {}
+        self._down: str | None = None  # the controller's `world.down_since`, as the refusal
         self.spec: WorldSpec | None = None
         self.names: list[str] = []
         self._client: httpx.AsyncClient | None = None
@@ -156,10 +171,12 @@ class WorldHub:
     def configure_raw(self, raw: object) -> None:
         """The `world` block of a heartbeat response."""
         if not isinstance(raw, dict):
+            self._down = None
             self.configure(None, [])
             return
         raw = dict(raw)
         names = raw.pop("tools", None)
+        self._down = _down_message(raw.pop("down_since", None), raw)
         try:
             spec = WorldSpec.model_validate(raw)
         except ValueError as e:
@@ -369,6 +386,8 @@ class WorldHub:
     def _held(self, agent: str, name: str, read_only: bool) -> tuple[float, str, str] | None:
         """The active holdoff for this call, if any: the world's, then the (agent, tool)'s."""
         now = self._clock()
+        if self._down is not None:  # the controller says the world is down: every call, at once
+            return (now + DOWN_HOLD_S, self._down, "world_down")
         if self._world_hold is not None and self._world_hold[0] <= now:
             self._world_hold = None
         if self._world_hold is not None and not read_only:
@@ -392,6 +411,8 @@ class WorldHub:
             until, msg, code = held
             left = max(0.0, until - self._clock())
             seen["local"] = True
+            if code == "world_down":
+                return _err(msg, t0, code=code, retry_after_s=math.ceil(left), local=True)
             return _err(f"{msg} (next slot in {max(1, math.ceil(left / 60))} min; do other work "
                         "or end your turn)", t0, code=code, retry_after_s=math.ceil(left),
                         local=True)
