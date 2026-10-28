@@ -522,6 +522,27 @@ def test_pause_flag_refuses_open_and_merge_but_not_reviews_or_run_bot(setup, tmp
     assert world.close_pr(Agent("cedar"), other["pr"], "paused")["state"] == "closed"
 
 
+def test_admin_lanes_and_knobs(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    assert world.knobs == {"save.interval_s": world.save_interval, "pr.open_floor": 20}
+    world.admin.pause(["open"], "hub 429s")
+    with pytest.raises(ToolError, match="paused by the operators"):
+        submit(world, clone, branch="second")  # a new PR: the open lane
+    assert submit(world, clone, pr=rec["pr"])["pr"] == rec["pr"]  # an update is a push only
+    world.admin.pause(["merge"])
+    with pytest.raises(ToolError, match="paused by the operators"):
+        world.merge_pr(Agent("birch"), rec["pr"])
+    world.admin.set({"pr.open_floor": 3})
+    assert world.budget_floor == 3
+    world = Chatbot4World(world.ws, world.repo)  # restart: knobs.json in the workspace
+    assert world.budget_floor == 3 and world.paused("open") and world.paused("merge")
+    world.admin.resume(["merge", "open"])
+    approve(world, rec)
+    assert world.merge_pr(Agent("birch"), rec["pr"])["merged_sha"]
+
+
 def test_hub_merge_that_fails_after_merging_is_reconciled(setup, monkeypatch):
     world, clone, remote = setup
     rec = submit(world, clone, branch="first")
