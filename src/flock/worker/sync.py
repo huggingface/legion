@@ -68,6 +68,7 @@ import os
 import re
 import shutil
 import stat
+import tarfile
 import threading
 import time
 from collections import Counter
@@ -87,6 +88,8 @@ log = logging.getLogger(__name__)
 
 UPLOAD_CHUNK = 200
 MODES_FILE = ".flock-modes.json"
+BASE_TAR = "workdir.base.tar"  # under the agent prefix (module docstring, "Base tar")
+BASE_JSON = "workdir.base.json"
 RESTORE_BATCH = 1000  # default of FLOCK_RESTORE_BATCH
 RESTORE_THREADS = 4  # default of FLOCK_RESTORE_THREADS
 # The type's `worker:` values for this module (sync_exclude, restore_batch, restore_threads),
@@ -226,19 +229,16 @@ def reset_ephemeral(workdir: Path, spec: TypeSpec) -> None:
             log.warning("ephemeral dir %s: %s", p, e)
 
 
-def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
-                  exclude: list[str] | None = None) -> dict[str, str]:
-    """{relative posix path: "0o755"} for regular files with any executable bit (symlinks and
-    the manifest itself excluded). `exclude`: paths left out of the walk (excluded directories
-    are not entered). `stats` gets the walk's counts (`WorkdirStats`)."""
-    out: dict[str, str] = {}
+def _walk(workdir: Path, exclude: list[str] | None = None):
+    """(relative posix path, lstat) of every regular file and symlink under `workdir`, sorted per
+    directory; excluded directories are not entered, symlinked directories are not followed."""
     excl = _matcher(tuple(exclude or ()))
-    per_dir: Counter[str] = Counter()
     for root, dirs, files in os.walk(workdir):
         base = Path(root).relative_to(workdir).as_posix()
         base = "" if base == "." else base + "/"
-        dirs[:] = sorted(d for d in dirs if excl(f"{base}{d}/") is None)
-        for f in files:
+        links = [d for d in dirs if os.path.islink(os.path.join(root, d))]
+        dirs[:] = sorted(d for d in dirs if d not in links and excl(f"{base}{d}/") is None)
+        for f in sorted(files + links):
             rel = base + f
             if excl(rel) is not None:
                 continue
@@ -246,15 +246,27 @@ def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
                 st = os.lstat(os.path.join(root, f))
             except OSError:
                 continue
-            if not stat.S_ISREG(st.st_mode):
-                continue
-            if stats is not None:
-                stats.files += 1
-                stats.bytes += st.st_size
-                if base:
-                    per_dir[base.split("/", 1)[0]] += 1
-            if st.st_mode & 0o111 and rel != MODES_FILE:
-                out[rel] = oct(stat.S_IMODE(st.st_mode))
+            if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                yield rel, st
+
+
+def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
+                  exclude: list[str] | None = None) -> dict[str, str]:
+    """{relative posix path: "0o755"} for regular files with any executable bit (symlinks and
+    the manifest itself excluded). `exclude`: paths left out of the walk (excluded directories
+    are not entered). `stats` gets the walk's counts (`WorkdirStats`)."""
+    out: dict[str, str] = {}
+    per_dir: Counter[str] = Counter()
+    for rel, st in _walk(workdir, exclude):
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if stats is not None:
+            stats.files += 1
+            stats.bytes += st.st_size
+            if "/" in rel:
+                per_dir[rel.split("/", 1)[0]] += 1
+        if st.st_mode & 0o111 and rel != MODES_FILE:
+            out[rel] = oct(stat.S_IMODE(st.st_mode))
     if stats is not None:
         stats.top_dirs = per_dir.most_common(5)
     return dict(sorted(out.items()))
@@ -299,6 +311,84 @@ def apply_modes(workdir: Path) -> int:
         except (OSError, ValueError, TypeError):
             continue
     return n
+
+
+class _Padded:
+    """A file that may shrink while it is read: short reads are padded with zeros, so the tar
+    stays well formed; the file's new mtime makes the next push send it as a delta."""
+
+    def __init__(self, f) -> None:
+        self.f = f
+
+    def read(self, n: int = -1) -> bytes:
+        b = self.f.read(n)
+        return b + bytes(max(0, n - len(b)))
+
+
+def write_base_tar(workdir: Path, exclude: list[str], dest: Path) -> dict[str, list]:
+    """Write an uncompressed tar of the workdir (regular files and symlinks, sorted, with modes
+    and mtimes) to `dest`; returns the index {relative path: [mtime, size]} of what it holds
+    (lstat before each read)."""
+    index: dict[str, list] = {}
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(dest, "w", format=tarfile.PAX_FORMAT) as tf:
+        for rel, st in _walk(workdir, exclude):
+            ti = tarfile.TarInfo(rel)
+            ti.mode, ti.mtime = stat.S_IMODE(st.st_mode), int(st.st_mtime)
+            ti.pax_headers = {"mtime": f"{st.st_mtime_ns / 1e9:.9f}"}  # sub-second mtimes
+            p = workdir / rel
+            try:
+                if stat.S_ISLNK(st.st_mode):
+                    ti.type, ti.linkname = tarfile.SYMTYPE, os.readlink(p)
+                    tf.addfile(ti)
+                else:
+                    with open(p, "rb") as f:
+                        ti.size = st.st_size
+                        tf.addfile(ti, _Padded(f))
+            except OSError:  # gone since the walk (open or readlink, before anything is written)
+                continue
+            index[rel] = [st.st_mtime, st.st_size]
+    return index
+
+
+def _same(a: list | None, mtime: float, size: int) -> bool:
+    return a is not None and abs(a[0] - mtime) <= 2e-3 and a[1] == size
+
+
+def workdir_delta(workdir: Path, exclude: list[str], index: dict[str, list],
+                  created_at: float) -> tuple[dict[str, float], dict[str, str], list[str]]:
+    """Against the base's index: (regular files new or changed {rel: mtime}, symlinks new or
+    changed {rel: target}, base paths gone). A changed file whose mtime is not after the base
+    (`cp -p`, `tar x`) gets its mtime set to now, since restore only takes deltas newer than the
+    base."""
+    files: dict[str, float] = {}
+    links: dict[str, str] = {}
+    seen: set[str] = set()
+    now = max(time.time(), created_at + 1.0)
+    for rel, st in _walk(workdir, exclude):
+        seen.add(rel)
+        if _same(index.get(rel), st.st_mtime, st.st_size):
+            continue
+        p = workdir / rel
+        try:
+            if stat.S_ISLNK(st.st_mode):
+                links[rel] = os.readlink(p)
+                continue
+            mt = st.st_mtime
+            if mt <= created_at + 2e-3:  # the Hub keeps milliseconds
+                os.utime(p, (now, now))
+                mt = now
+        except OSError:
+            continue
+        files[rel] = mt
+    return files, links, sorted(set(index) - seen)
+
+
+def _load_index(path: Path) -> dict[str, list]:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 @dataclass
@@ -580,6 +670,8 @@ class BucketSync:
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
         self._meta: dict[str, dict] = {}  # per agent prefix: the meta.json last pushed
         self._quota_note: dict[str, str] = {}  # per agent prefix: the quota note last queued
+        self._base: dict[str, dict] = {}  # per agent prefix: its committed workdir.base.json
+        self._building: set[str] = set()  # agent prefixes with a base tar being made
         self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
         self.restore_progress: dict[str, list] = {}
@@ -627,14 +719,16 @@ class BucketSync:
             except OSError:
                 pass
 
-    async def push(self, rt: AgentRuntime) -> int:
+    async def push(self, rt: AgentRuntime, *, rebase: bool = False) -> int:
+        """`rebase`: may make a new base tar when one is due (periodic pushes only, so drain
+        and preempt stay as cheap as a delta)."""
         try:
-            return await self._push(rt)
+            return await self._push(rt, rebase)
         except Exception:
             self.stats.add("errors", "push_failed")
             raise
 
-    async def _push(self, rt: AgentRuntime) -> int:
+    async def _push(self, rt: AgentRuntime, rebase: bool = False) -> int:
         pre = self.prefix(rt)
         if pre in self._restoring:  # never mirror a half-restored agent (module docstring)
             log.warning("%s: push skipped, its restore is still running", rt.name)
@@ -656,8 +750,15 @@ class BucketSync:
             if not delete:
                 log.info("%s: workdir push without remote deletes (last restore incomplete)",
                          rt.name)
-            await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
-                                    delete=delete, exclude=exclude)
+            w = rt.spec.workdir or WorkdirSpec()
+            if w.base and (pre in self._base or (rebase and delete)):
+                await self._push_base(rt, exclude, w, rebase and delete)
+            else:
+                await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
+                                        delete=delete, exclude=exclude)
+                if pre in self._base and delete:  # base turned off: the full mirror replaces it
+                    await asyncio.to_thread(self.store.delete, [pre + BASE_JSON, pre + BASE_TAR])
+                    self._base.pop(pre)
         files = self._changed(self.collect(rt)) + meta
         if files:
             await asyncio.to_thread(self.store.upload, files)
@@ -665,6 +766,72 @@ class BucketSync:
             if meta:
                 self._meta[pre] = stats
         return len(files)
+
+    def _index_path(self, rt: AgentRuntime) -> Path:
+        return rt.sessions_dir / f"{rt.name}.base-index.json"
+
+    async def _push_base(self, rt: AgentRuntime, exclude: list[str], w: WorkdirSpec,
+                         may_rebase: bool) -> None:
+        """Workdir push with a base tar (module docstring, "Base tar"): a new base when due,
+        then the files changed since the base, and tombstones and symlinks in the manifest."""
+        pre, dpre = self.prefix(rt), self.prefix(rt) + "workdir/"
+        base = self._base.get(pre)
+
+        def delta():
+            index = _load_index(self._index_path(rt))
+            return workdir_delta(rt.workdir, exclude, index, base["created_at"])
+
+        if base is not None:
+            files, links, deleted = await asyncio.to_thread(delta)
+        if may_rebase and (base is None or time.time() - base["created_at"] >= w.base_interval_s
+                           or len(files) + len(links) + len(deleted) > w.base_delta_files):
+            base = await self._make_base(rt, exclude)
+            files, links, deleted = await asyncio.to_thread(delta)
+        remote = {r[len(dpre):]: mt for r, mt in
+                  await asyncio.to_thread(self.store.list_info, dpre)}
+        up = [(rt.workdir / r, dpre + r) for r, mt in files.items()
+              if remote.get(r) is None or abs(remote[r] - mt) > 2e-3]
+        if up:
+            await asyncio.to_thread(self.store.upload, up)
+        # tombstones and remote deletes only from a full baseline, never during a base build
+        if not self.mirror_deletes(rt) or pre in self._building:
+            return
+        if base.get("deleted", []) != deleted or base.get("links", {}) != links:
+            await self._write_base(rt, {**base, "deleted": deleted, "links": links})
+        gone = [dpre + r for r in remote if r not in files and not is_excluded(r, exclude)]
+        if gone:  # deltas now in the base, or deleted
+            await asyncio.to_thread(self.store.delete, gone)
+
+    async def _make_base(self, rt: AgentRuntime, exclude: list[str]) -> dict:
+        """Tar the workdir, upload it, then commit `workdir.base.json` (the commit point); the
+        local index of the base replaces the old one only after the commit."""
+        pre = self.prefix(rt)
+        tar, idx = rt.sessions_dir / f"{rt.name}.base.tar", self._index_path(rt)
+        new_idx = idx.with_name(idx.name + ".new")
+        self._building.add(pre)
+        try:
+            t0 = time.time()
+            index = await asyncio.to_thread(write_base_tar, rt.workdir, exclude, tar)
+            await asyncio.to_thread(new_idx.write_text, json.dumps(index))
+            await asyncio.to_thread(self.store.upload, [(tar, pre + BASE_TAR)])
+            base = {"created_at": t0, "files": len(index),
+                    "bytes": sum(s for _, s in index.values()), "deleted": [], "links": {}}
+            await self._write_base(rt, base)
+            os.replace(new_idx, idx)
+        finally:
+            self._building.discard(pre)
+            tar.unlink(missing_ok=True)
+            new_idx.unlink(missing_ok=True)
+        log.info("%s: new workdir base: %d files, %.0f MB in %.1f s", rt.name, base["files"],
+                 base["bytes"] / 2**20, time.time() - t0)
+        return base
+
+    async def _write_base(self, rt: AgentRuntime, base: dict) -> None:
+        path = rt.sessions_dir / f"{rt.name}.base.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(base))
+        await asyncio.to_thread(self.store.upload, [(path, self.prefix(rt) + BASE_JSON)])
+        self._base[self.prefix(rt)] = base
 
     def _quota(self, rt: AgentRuntime, ws: WorkdirStats) -> None:
         """Above the soft limit: a note in front of the agent's next prompt, and above the hard

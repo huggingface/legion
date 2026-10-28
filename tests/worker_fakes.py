@@ -160,10 +160,10 @@ class RecordingSync(BucketSync):
         self.restored: list[str] = []
         self.log = log if log is not None else []
 
-    async def push(self, rt):
+    async def push(self, rt, **kw):
         self.pushed.append(rt.name)
         self.log.append(("push", rt.name))
-        return await super().push(rt)
+        return await super().push(rt, **kw)
 
     async def restore(self, rt):
         self.restored.append(rt.name)
