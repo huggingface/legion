@@ -90,6 +90,12 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   once per agent per spec revision as an `env_dropped {names}` event, and `flock update` warns
   `types.<T>.env.<KEY>: dropped by pi isolation` for the type's `env` keys that would be dropped
   (by the same function; names only the worker's `FLOCK_HARNESS_ENV_DROP` lists are not previewed).
+- **Controller calls**: Pi's `flock` CLI (`flock spawn`, `flock prompt`, ...) goes through the
+  worker gateway named in the pin file (`FLOCK_TOOLS_PIN`), not to `FLOCK_URL`: the worker
+  sends it with the agent's token to wherever the controller is now, so a controller move no
+  longer breaks a Pi that started before it (docs/spawn.md, "CLI inside an agent").
+  `FLOCK_URL` and `FLOCK_AGENT_TOKEN` are still in Pi's environment for the direct fallback;
+  they can be dropped once every worker opens the gateway.
 
 ## Memory
 

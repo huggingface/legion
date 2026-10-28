@@ -389,12 +389,15 @@ class CommsHub(ExtendedComms):
 
     # ------------------------------------------------------------------ joining
     async def on_prompt(self, agent: str, harness: str = "llm") -> None:
-        """An agent's harness is about to start for a prompt: join the board now (first time on
-        this worker), and open the gateway for a CLI harness. Never raises."""
+        """An agent's harness is about to start for a prompt: open the gateway for a CLI harness
+        and join the board now (first time on this worker). Never raises."""
+        if harness != "llm":  # also without comms: the `flock` CLI's controller calls
+            try:
+                await self.start_gateway()
+            except OSError as e:
+                log.warning("comms: cannot open the gateway: %s", e)
         if not self.active:
             return
-        if harness != "llm":
-            await self.start_gateway()
         self.members.setdefault(agent, Member(agent)).harness = harness
         with contextlib.suppress(BoardError, ValueError):
             await self._member(agent)
@@ -920,7 +923,9 @@ class CommsHub(ExtendedComms):
             else:
                 tool = str(req.get("tool"))
                 handler = self.routes.get(tool.split(":", 1)[0], self.call)
-                r = self.with_news(agent, tool, await handler(agent, tool, req.get("args") or {}))
+                r = await handler(agent, tool, req.get("args") or {})
+                if not tool.startswith("controller:"):  # the `flock` CLI has no use for news
+                    r = self.with_news(agent, tool, r)
             writer.write(json.dumps({"output": r.output, "error": r.error,
                                      "duration_s": r.duration_s}).encode() + b"\n")
             await writer.drain()
