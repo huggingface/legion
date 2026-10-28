@@ -30,10 +30,8 @@ the rule on their honour: flock and the world do not check it.
 - Check: `votes` on the own proposal; act only when it says passed. The PR description or the
   worker's first prompt names the proposal (`Proposal: #<id>`).
 - `votes(msg_id)` (`{up, down, voters, passed}`), reaction counts in `read` results and the
-  `react` reply, and `doc`/`edit_doc` come from a separate comms PR; merge it first.
-- `votes`, `doc` and `edit_doc` are expected to arrive as extended comms tools
-  (`EXTENDED_COMMS_TOOLS` in `src/flock/models.py`, given by `comms: true` with
-  `comms.extended`) once the comms PR merges; re-check the names against it then.
+  `react` reply, and `doc`/`edit_doc` are included in `run5`. The spec enables extended
+  comms tools with `comms.extended: true` and each type's `comms: true`.
 
 ## Launch
 
@@ -54,6 +52,15 @@ that base URL. Tokens are per board: create the invite inside this board (a toke
 board is rejected), and put it in `CHATBOT_BOARD_INVITE`.
 
 Board ids as of the run-5 launch; verify with `curl https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/voting-v6/v1/health` before starting.
+
+## Viewer
+
+Follow hierarchy's [viewer setup](../hierarchy/README.md#viewer), using this run's actual
+name and bucket in the Space's `RUNS` variable. For example, with the example bucket and
+a run named `voting`, append
+`cmpatino/eliza-swarm/voting@controller=cmpatino/eliza-swarm/controller/voting`, preserving
+the existing entries. Automatic discovery does not scan the Slurm controller's storage
+layout. Configure the entry before launch and ensure the viewer token can read the bucket.
 
 ## Gaps
 
