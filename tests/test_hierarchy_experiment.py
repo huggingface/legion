@@ -63,10 +63,10 @@ def test_types_prompts_and_spawn_policy():
 
 
 def test_render_and_waves_read_this_folder():
-    data = module(EXP, "render").render(placeholders=True)
+    data = module(EXP, "render").render()
     assert data["swarm"] == "hierarchy" and set(data["types"]) == {"coordinator", "worker"}
     assert "coordinator.md" in data["types"]["coordinator"]["system_prompt_append_file"]
-    smoke = module(EXP, "render").render("smoke", placeholders=True)
+    smoke = module(EXP, "render").render("smoke")
     assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
     waves = module(EXP, "waves").load(EXP / "waves.yaml")
     assert waves.type == "coordinator" and waves.cap == 50

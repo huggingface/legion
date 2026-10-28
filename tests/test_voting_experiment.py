@@ -20,9 +20,9 @@ EXP, HIER = ROOT / "voting", ROOT / "hierarchy"
 
 def test_same_spec_as_hierarchy_but_the_name():
     voting, hier = (load_spec_yaml((d / "spec.yaml").read_text()) for d in (EXP, HIER))
-    assert voting.pop("swarm") == "voting" and hier.pop("swarm") == "hierarchy"
+    assert voting.pop("swarm") == "${CHATBOT_RUN:-voting}" and hier.pop("swarm") == "${CHATBOT_RUN:-hierarchy}"
     assert voting == hier
-    data = module(EXP, "render").render(placeholders=True)
+    data = module(EXP, "render").render()
     assert data["swarm"] == "voting" and set(data["types"]) == {"coordinator", "worker"}
     assert module(EXP, "waves").load(EXP / "waves.yaml").type == "coordinator"
 

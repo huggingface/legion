@@ -1,20 +1,20 @@
 # Hierarchy (README): waves of coordinators; each coordinator may spawn up to 4 workers.
 # World, board, model and loop are run 4's (experiments/run4/spec.yaml); only the types,
 # prompts and spawn policy differ.
-swarm: hierarchy
+swarm: ${CHATBOT_RUN:-hierarchy}             # ${VAR:-default}: flock apply --env run.env (run 4 README)
 compute: local
 naming: words
 providers:
   vllm:
     type: openai_compat
-    base_url: https://your-vllm.example.invalid/v1
+    base_urls: '${OPENAI_BASE_URLS:-https://your-vllm.example.invalid/v1}'  # comma-separated
     api_key_env: OPENAI_API_KEY
     self_hosted: true
     timeout_s: 300
     max_retries: 5
     pricing: {"*": [0, 0, 0]}
 models:
-  worker-pi: {model: 'vllm:MODEL_WORKER', reasoning: high}
+  worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
 world:
   dir: ../../worlds/chatbot4
   command: ['{python}', chatbot4.py, serve]
@@ -22,9 +22,9 @@ world:
 comms:
   kind: msgboard
   extended: true
-  url: https://cmpatino-msgboard-chatbot.hf.space
+  url: ${CHATBOT_BOARD_URL:-https://cmpatino-msgboard-chatbot.hf.space}
   invite_env: CHATBOT_BOARD_INVITE
-  channel: general
+  channel: ${CHATBOT_CHANNEL:-general}
   wake: [mention, thread, dm, channel]
   rules:
     min_post_gap: 10s

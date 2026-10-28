@@ -16,6 +16,7 @@ are the same agent without the right to spawn, with a different role prompt.
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
 | `waves.yaml` | 10 coordinators every 10 min, to 50 |
 | `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
+| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for these two types |
 
 ## Mechanics
 
@@ -53,7 +54,7 @@ then `sbatch world.sbatch hierarchy` and `sbatch controller.sbatch hierarchy`. T
 renders this folder, applies it and runs `waves.py run` on `waves.yaml`. Use a fresh
 `CHATBOT_REPO` (seeded with `../run4/publish_seed.py`) if the run must start from the seed.
 
-Offline checks: `python experiments/hierarchy/render.py --committed --out /tmp/h.yaml`,
+Offline checks: `python experiments/hierarchy/render.py --out /tmp/h.yaml`,
 `python experiments/hierarchy/waves.py plan`, `pytest tests/test_hierarchy_experiment.py`.
 
 ## Gaps

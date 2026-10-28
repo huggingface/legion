@@ -15,6 +15,7 @@ the rule on their honour: flock and the world do not check it.
 | `prompts/round.md` | "Continue your work. If you have time, read #proposals and vote on what interests you." |
 | `prompts/system.md`, `prompts/final.md`, `waves.yaml` | links to hierarchy's / run 4's |
 | `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
+| `spec.slurm.yaml`, `spec.smoke.yaml` | links to run 4's and hierarchy's overlays |
 
 ## Mechanics
 
