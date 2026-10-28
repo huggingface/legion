@@ -63,3 +63,26 @@ def test_outbox_put_back_keeps_order():
     got = ob.take(2)
     ob.put_back(got)
     assert [e.data["n"] for e in ob.take()] == [1, 2, 3]
+
+
+def test_outbox_is_bounded_by_size_too():
+    from datetime import UTC, datetime
+
+    big = "x" * 1000
+    ob = Outbox(maxlen=100, max_bytes=5_000)
+    evs = [Event(type="message", ts=datetime.now(UTC), agent="a", data={"n": i, "t": big})
+           for i in range(10)]
+    for e in evs:
+        ob.add(e)
+    assert 0 < ob.bytes <= 5_000 and len(ob) == 4 and ob.dropped == 6
+    assert [e.data["n"] for e in list(ob._q)] == [6, 7, 8, 9]  # the oldest went first
+    got = ob.take(2)
+    assert ob.bytes < 5_000 and len(ob) == 2
+    ob.add(evs[0])  # a newer event came in while the batch was out
+    ob.put_back(got)  # what no longer fits is dropped from the batch's oldest end
+    assert [e.data["n"] for e in list(ob._q)] == [7, 8, 9, 0] and ob.bytes <= 5_000
+    assert sum(len(json.dumps(e.data)) for e in ob._q) == ob.bytes
+    assert ob.take(100) and ob.bytes == 0 and len(ob) == 0
+    # a single event over the byte bound still goes out (never an empty outbox forever)
+    ob.add(Event(type="message", ts=datetime.now(UTC), agent="a", data={"t": "y" * 10_000}))
+    assert len(ob) == 1

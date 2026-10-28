@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -98,32 +100,53 @@ class ScriptedAdapter:
 
 
 class MemoryStore:
-    """BucketStore over a dict of {remote path: bytes}."""
+    """BucketStore over a dict of {remote path: bytes}, with each file's mtime (seconds) as the
+    Hub keeps it. `sync_up` behaves like `sync_bucket`: uploads files whose size or mtime
+    differ, deletes remote files missing locally only with `delete`, skips `exclude` matches."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
+        self.mtimes: dict[str, float] = {}
         self.uploads: list[list[str]] = []
+        self.synced: list[list[str]] = []  # per sync_up call: the paths it uploaded
 
     def upload(self, files):
         self.uploads.append([r for _, r in files])
         for p, r in files:
             self.files[r] = Path(p).read_bytes()
+            self.mtimes[r] = Path(p).stat().st_mtime
 
     def list(self, prefix):
         return sorted(k for k in self.files if k.startswith(prefix))
+
+    def list_info(self, prefix):
+        return [(k, self.mtimes.get(k)) for k in self.list(prefix)]
 
     def download(self, files):
         for r, p in files:
             Path(p).parent.mkdir(parents=True, exist_ok=True)
             Path(p).write_bytes(self.files[r])
 
-    def sync_up(self, local, prefix):
+    def sync_up(self, local, prefix, *, delete=True, exclude=None):
         prefix = prefix.rstrip("/") + "/"
-        mine = {prefix + p.relative_to(local).as_posix(): p for p in Path(local).rglob("*") if p.is_file()}
-        for k in [k for k in self.files if k.startswith(prefix) and k not in mine]:
-            del self.files[k]
+        keep = lambda rel: not any(fnmatch.fnmatchcase(rel, pat) for pat in exclude or ())
+        mine = {prefix + p.relative_to(local).as_posix(): p for p in Path(local).rglob("*")
+                if p.is_file() and keep(p.relative_to(local).as_posix())}
+        if delete:
+            for k in [k for k in self.files if k.startswith(prefix) and k not in mine
+                      and keep(k[len(prefix):])]:
+                del self.files[k]
+                self.mtimes.pop(k, None)
+        sent = []
         for k, p in mine.items():
+            st = p.stat()
+            if (k in self.files and len(self.files[k]) == st.st_size
+                    and abs(self.mtimes.get(k, 0) - st.st_mtime) <= 1e-3):
+                continue
             self.files[k] = p.read_bytes()
+            self.mtimes[k] = st.st_mtime
+            sent.append(k)
+        self.synced.append(sent)
 
     def sync_down(self, prefix, local):
         prefix = prefix.rstrip("/") + "/"
@@ -170,3 +193,18 @@ def event_types(rt: AgentRuntime) -> list[str]:
 def copy_fixture(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(src, dst)
+
+
+class GatedStore(MemoryStore):
+    """Downloads block until `gate` is set (a long restore wave), counting the waiters."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = threading.Event()
+        self.waiting = 0
+
+    def download(self, files):
+        self.waiting += 1
+        if not self.gate.wait(10):
+            raise RuntimeError("gate never opened")
+        super().download(files)

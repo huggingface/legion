@@ -88,6 +88,22 @@ def test_config_from_env(tmp_path):
     assert cfg.deadline.year == 2026 and cfg.deadline.tzinfo is not None
     assert cfg.sync_interval == 180 and cfg.bucket == "hf://buckets/ns/b"
     assert cfg.drain_window == timedelta(minutes=10)  # default until the env says otherwise
+    assert cfg.comms_poll_cycle_s is None  # the spec's comms.poll_cycle_s (default 300 s)
+
+
+async def test_comms_poll_cycle_env_reaches_the_worker_poller():
+    base = {"FLOCK_URL": "http://c", "FLOCK_TOKEN": "t", "WORKER_ID": WID, "SWARM": "sw",
+            "TYPE": "researcher", "DEADLINE": "2026-10-15T09:12:00Z"}
+    cfg = WorkerConfig.from_env({**base, "FLOCK_COMMS_POLL_CYCLE_S": "60"})
+    assert cfg.comms_poll_cycle_s == 60.0
+    w = Worker(cfg, ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(
+        FakeController().handler)))
+    assert w.comms.poll_cycle_s == 60.0
+    await w.client.aclose()
+    w = Worker(WorkerConfig.from_env(base), ControllerClient(
+        "http://c", "t", transport=httpx.MockTransport(FakeController().handler)))
+    assert w.comms.poll_cycle_s is None  # the spec decides
+    await w.client.aclose()
 
 
 async def test_drain_window_from_env_applies_before_any_assign(tmp_path):
@@ -259,3 +275,75 @@ def test_run_and_exit_does_not_wait_for_a_stuck_executor_thread():
     t.join(5)
     release.set()
     assert exits == [0]
+
+
+async def test_periodic_sync_skips_an_agent_until_its_restore_finished(tmp_path):
+    """A restore wave outlasts several sync intervals: the half-restored workdir must never
+    be mirrored over the bucket copy (it would delete what is not downloaded yet)."""
+    from .worker_fakes import GatedStore
+
+    ctrl = FakeController()
+    store = GatedStore()
+    pre = "sw/researcher/researcher-0001/"
+    store.files = {pre + "workdir/a.txt": b"A", pre + "workdir/b.txt": b"B"}
+    before = dict(store.files)
+    sync = RecordingSync(store)
+    ctrl.batches = [[AssignCommand(agent="researcher-0001", type="researcher", spec=spec(),
+                                   restore=True),
+                     PromptCommand(agent="researcher-0001", prompt_id="p", text="go")]]
+    worker, adapters = make_worker(tmp_path, ctrl, sync=sync)
+    run = asyncio.create_task(worker.run())
+    try:
+        await until(lambda: store.waiting > 0)
+        rt = worker.agents["researcher-0001"]
+        rt.dirty = True
+        await asyncio.sleep(0.7)  # > 3 sync intervals while the restore hangs
+        assert sync.pushed == [] and store.files == before and store.synced == []
+    finally:
+        store.gate.set()
+    await until(lambda: adapters["researcher-0001"].sent == ["go"])
+    await until(lambda: "researcher-0001" in sync.pushed)  # periodic pushes resume after setup
+    assert store.files[pre + "workdir/a.txt"] == b"A" and store.files[pre + "workdir/b.txt"] == b"B"
+    await worker.drain("test")
+    assert await asyncio.wait_for(run, 5) == 0
+
+
+def test_memory_helpers_trim_and_cap_arenas_safely(monkeypatch):
+    rss = wmain.rss_mb()
+    assert rss is None or rss > 0
+    wmain.trim_heap()  # no-op off glibc
+    assert wmain.limit_malloc_arenas({"MALLOC_ARENA_MAX": "2"}) is False  # the env wins
+    calls = []
+
+    class Libc:
+        def malloc_trim(self, pad):
+            calls.append(("trim", pad))
+
+        def mallopt(self, param, value):
+            calls.append(("mallopt", param, value))
+            return 1
+
+    monkeypatch.setattr(wmain, "_glibc", Libc)
+    assert wmain.limit_malloc_arenas({}) is True
+    wmain.trim_heap()
+    assert calls == [("mallopt", -8, wmain.ARENAS), ("trim", 0)]
+
+
+async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch, caplog):
+    import logging
+
+    ctrl = FakeController()
+    w, _ = make_worker(tmp_path, ctrl)
+    trims = []
+    monkeypatch.setattr(wmain, "trim_heap", lambda: trims.append(1))
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.01")
+    caplog.set_level(logging.INFO, logger="flock.worker")
+    task = asyncio.create_task(w.memory_loop())
+    await until(lambda: len(trims) >= 2)
+    task.cancel()
+    report = w.memory_report()
+    assert report["outbox_events"] == 0 and report["outbox_bytes"] == 0 and report["agents"] == 0
+    if wmain.rss_mb() is not None:
+        assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # off
+    await asyncio.wait_for(w.memory_loop(), 1)

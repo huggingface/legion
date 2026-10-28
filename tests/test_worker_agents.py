@@ -243,3 +243,31 @@ async def test_inline_system_prompt_wins_over_file(tmp_path):
     await rt.prompt("hi")
     await until(lambda: adapter.sent == ["hi"])
     assert (rt.workdir / "CLAUDE.md").read_text() == "Keep notes.md."
+
+
+async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
+    """A drain, preemption or unassign that lands while setup() still restores leaves the
+    bucket copy as it is: nothing is pushed for that agent."""
+    from .worker_fakes import GatedStore
+
+    store = GatedStore()
+    pre = "sw/researcher/researcher-0001/"
+    store.files = {pre + "workdir/a.txt": b"A", pre + "workdir/b.txt": b"B"}
+    before = dict(store.files)
+    sync = RecordingSync(store)
+    rt, _ = runtime(tmp_path, sync=sync)
+    setup = asyncio.create_task(rt.setup(restore=True))
+    try:
+        await until(lambda: store.waiting > 0)
+        await rt.sync_now("preempt")
+        await rt.drain()
+        await rt.unassign()
+        assert sync.pushed == [] and store.files == before
+        assert await sync.push(rt) == 0 and store.files == before  # BucketSync refuses too
+    finally:
+        store.gate.set()
+    await setup
+    assert rt.setup_done
+    await rt.sync_now("after")
+    assert sync.pushed == ["researcher-0001", "researcher-0001"]
+    assert store.files[pre + "workdir/a.txt"] == b"A"

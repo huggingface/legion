@@ -3,7 +3,8 @@
 `{round}`, `{elapsed}` (minutes since the loop started), `{wall}` (minutes of `while.until`,
 or "none"), `{spend}` (the agent's cost in USD, 3 decimals), `{cap}` (its `agent_usd`, 2
 decimals, or "none"), `{why}` (what triggered the prompt) and `{last_summary}` (the text the
-agent last passed to `done`, else its last reply). Any other `{name}`, and format specs such
+agent last passed to `done`, else its last reply; after a turn that stopped without `done`, a
+line saying so). Any other `{name}`, and format specs such
 as `{cap:.2f}`, are left exactly as written.
 """
 
