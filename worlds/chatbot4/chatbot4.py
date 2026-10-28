@@ -797,7 +797,7 @@ class Chatbot4World(World):
                             f"(you may omit the agents/{agent.name}/ prefix); got \"{str(branch)[:80]}\"")
         return text
 
-    @tool
+    @tool(pool="slow")
     @logs_refusals
     def open_pr(self, agent: Agent, branch: str, title: str, description: str,
                 path: str = "chatbot-swarm", pr: int | None = None) -> dict:
@@ -1149,7 +1149,7 @@ class Chatbot4World(World):
             raise ToolError("another agent must approve the current PR head")
         return names
 
-    @tool
+    @tool(pool="slow")
     @logs_refusals
     def merge_pr(self, agent: Agent, pr: int) -> dict:
         """Merge an independently approved PR after checking its base and bot contract."""
@@ -1290,7 +1290,7 @@ class Chatbot4World(World):
             self._event("pr_closed", agent, draft=True, **event)
             return {**event, "state": "closed", "closed_by": agent.name}
 
-    @tool
+    @tool(read_only=True)
     def list_prs(self, state: str = "open", author: str = "", needs_review: bool = False,
                  offset: int = 0) -> list[dict]:
         """Find PRs, their head SHA and reviews. state is open, merged, closed or all.
@@ -1322,7 +1322,7 @@ class Chatbot4World(World):
                             if not author or d["author"] == author]
             return records[offset:offset + 100]
 
-    @tool
+    @tool(read_only=True)
     def get_pr(self, pr: int, path: str | None = None) -> dict:
         """Show a PR from the world's copy, no git fetch needed: its head and base SHAs, the
         changed files with +/- line counts and the diff against its base. With path: that
@@ -1406,7 +1406,7 @@ class Chatbot4World(World):
         out["content"] = data[:MAX_FILE_BYTES].decode(errors="replace")
         return out
 
-    @tool
+    @tool(pool="slow")
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:
         """Run main, pr:<number>, or a local clone path. 300 seconds for the whole conversation."""
         with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
