@@ -284,6 +284,59 @@ class CommsRules(BaseModel):
         return parse_duration(self.min_post_gap).total_seconds() if self.min_post_gap else 0.0
 
 
+class LocalBoardStorage(BaseModel):
+    model_config = {"extra": "forbid"}
+    kind: Literal["local"] = "local"
+
+
+class BucketBoardStorage(BaseModel):
+    """Opt-in single-owner SQLite storage on an hf-mount NFS mount."""
+
+    model_config = {"extra": "forbid"}
+    kind: Literal["hf-bucket"] = "hf-bucket"
+    bucket: str
+    mount_root: str = "/scratch/flock-boards"
+    token_env: str = "HF_TOKEN"
+    flush_debounce: str = "2s"
+    flush_max_batch_window: str = "15s"
+    flush_shutdown_timeout: str = "45s"
+
+    @field_validator("bucket")
+    @classmethod
+    def _bucket(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*", value):
+            raise ValueError("bucket must be namespace/name (an existing private bucket)")
+        return value
+
+    @field_validator("mount_root")
+    @classmethod
+    def _root(cls, value: str) -> str:
+        if not value.startswith("/") or ".." in value.split("/"):
+            raise ValueError("mount_root must be an absolute path without '..'")
+        return value
+
+    @field_validator("token_env")
+    @classmethod
+    def _token_env(cls, value: str) -> str:
+        if not ENV_NAME_RE.fullmatch(value):
+            raise ValueError("token_env must be an environment variable name")
+        return value
+
+    @field_validator("flush_debounce", "flush_max_batch_window", "flush_shutdown_timeout")
+    @classmethod
+    def _flush_duration(cls, value: str) -> str:
+        seconds = parse_duration(value).total_seconds()
+        if not 0.001 <= seconds <= 3600:
+            raise ValueError("flush durations must be between 1ms and 1h")
+        return value
+
+    @model_validator(mode="after")
+    def _window(self) -> BucketBoardStorage:
+        if parse_duration(self.flush_max_batch_window) < parse_duration(self.flush_debounce):
+            raise ValueError("flush_max_batch_window must be at least flush_debounce")
+        return self
+
+
 class CommsSpec(BaseModel):
     """Swarm-level `comms:` (docs/comms.md). A managed local run supplies `url` and
     `invite_env`; external boards require both. `channel` (default general) is resolved
@@ -298,6 +351,8 @@ class CommsSpec(BaseModel):
     # extended: each agent identity's feed is polled about once per this many seconds; the
     # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
     poll_cycle_s: float = Field(default=300.0, ge=10.0, le=3600.0)
+    storage: LocalBoardStorage | BucketBoardStorage = Field(
+        default_factory=LocalBoardStorage, discriminator="kind")
     managed: bool = False  # flock run owns a private msgboard for this run
     url: str | None = None
     invite_env: str | None = None  # secret name, populated by flock for a managed board
@@ -349,6 +404,8 @@ class CommsSpec(BaseModel):
     @model_validator(mode="after")
     def _connection(self) -> CommsSpec:
         if not self.managed:
+            if self.storage.kind != "local":
+                raise ValueError("comms.storage needs managed: true")
             if not self.url or not self.invite_env:
                 raise ValueError("external comms needs url and invite_env; or set managed: true "
                                  "with flock run")

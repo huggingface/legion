@@ -202,4 +202,7 @@ A spec with `comms: {managed: true}` gets a fresh msgboard per run, with `genera
 default channel. Install the `msgboard` extra once; no board URL or invite setup is needed.
 See [managed boards](comms.md#a-private-board-for-each-local-run) for additional channels,
 permissions, snapshots, dashboard access and `flock board <run-dir>` to reopen history.
-The live database is node-local and the retained snapshot is under the run's `board/`.
+By default, the live database is node-local and the retained snapshot is under the run's
+`board/`. Experimental `comms.storage.kind: hf-bucket` instead mounts a private bucket
+prefix under `/scratch` and delegates writeback to hf-mount; see the compatibility gate and
+requirements in [comms.md](comms.md#bucket-mounted-managed-boards-experimental).

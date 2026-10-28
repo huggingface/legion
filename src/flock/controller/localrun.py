@@ -567,8 +567,13 @@ async def run_local(opts: RunOptions) -> RunResult:
     port = sock.getsockname()[1]
     url = f"http://{opts.host}:{port}"
     store = Store(run_dir / "controller")
-    jobs = LocalJobsClient(root=run_dir, **({"command": opts.worker_command}
-                                            if opts.worker_command else {}))
+    # Storage credentials belong to the mount, not inherited worker environments.
+    storage_env = (spec.comms.storage.token_env if spec.comms is not None
+                   and spec.comms.storage.kind == "hf-bucket" else None)
+    jobs = LocalJobsClient(root=run_dir,
+                          **({"base_env": {k: v for k, v in os.environ.items() if k != storage_env}}
+                             if storage_env else {}),
+                          **({"command": opts.worker_command} if opts.worker_command else {}))
     runtime_secrets = dict(os.environ)
     settings = Settings(public_url=url, token=token, secret_source=runtime_secrets)
     board = ManagedBoard(run_dir) if spec.comms is not None and spec.comms.managed else None
@@ -619,8 +624,9 @@ async def run_local(opts: RunOptions) -> RunResult:
         if board is not None:
             await asyncio.to_thread(board.start, spec)
             runtime_secrets[INVITE_ENV] = board.invite
-            say(f"board: {board.url}; operator token: {board.archive / 'operator.token'}")
-            board_task = asyncio.create_task(snapshot_board(), name="board-snapshots")
+            say(f"board: {board.url}; operator token: {board.operator_token_path}")
+            if board.periodic_snapshots:
+                board_task = asyncio.create_task(snapshot_board(), name="board-snapshots")
         await server.start()
         write_current(data_dir, {"url": url, "token": token, "run_dir": str(run_dir),
                                  "swarm": spec.swarm, "pid": os.getpid()})
@@ -713,8 +719,9 @@ async def run_local(opts: RunOptions) -> RunResult:
                 try:
                     await asyncio.to_thread(board.stop)
                 except Exception:
-                    log.exception("Managed board shutdown/snapshot failed")
-                    reason, code = "board_snapshot_failed", 1
+                    log.exception("Managed board shutdown/persistence failed")
+                    reason = "board_persistence_failed" if board.bucket else "board_snapshot_failed"
+                    code = 1
                 bundle_path = run_dir / "run.json"
                 try:
                     if bundle_path.is_file():

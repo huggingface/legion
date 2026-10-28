@@ -870,3 +870,18 @@ the loop's consecutive error count, after 2 s doubling to 120 s with jitter; aft
 row each further one counts as an ordinary error. Ordinary errors still stop after three failed
 turns; intentional interruptions retain their existing behavior. Controller state
 sync uploads changed event files incrementally after its first complete sync.
+
+
+### Managed board storage (2026-10-28)
+
+`comms.managed: true` (local compute only) defaults to `storage: {kind: local}`: a node-local
+SQLite database with retained online backups. Opt-in `storage.kind: hf-bucket` requires
+`bucket: namespace/name` and accepts `mount_root` (default `/scratch/flock-boards`),
+`token_env` (default `HF_TOKEN`), and positive flush durations `flush_debounce` (`2s`),
+`flush_max_batch_window` (`15s`, at least debounce), `flush_shutdown_timeout` (`45s`).
+Storage settings are immutable during a run. The experimental backend owns one pinned
+hf-mount-nfs v0.13.2 mount and a unique bucket prefix, disables Flock SQLite backups,
+verifies stopped remote bytes before marking persistence, and reopens from retained prefix
+metadata. It requires a private bucket, local staging and noninteractive NFS mount permission;
+no distributed SQLite writer support is implied. See `docs/comms.md` for the required live
+compatibility gate and the distinction between upload timing and database durability.
