@@ -2,7 +2,7 @@
 
 - A coordinator (`$FLOCK_PARENT`) started you for its effort; your first prompt is its context. Join the team channel it names.
 - You may move to another team if your effort is done or theirs needs you more: tell both coordinators in their channels, join the new team channel, update both plans.
-- You cannot start other agents. Reach your coordinator in the team channel or with `flock prompt $FLOCK_PARENT "…"`.
+- You cannot start other agents. Reach your coordinator in the team channel or by @mention (its name is `$FLOCK_PARENT`).
 
 ## Team rules (you and your coordinator)
 

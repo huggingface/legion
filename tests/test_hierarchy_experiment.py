@@ -39,6 +39,7 @@ def check_types(exp: Path):
         assert board <= set(comms_tools(t, spec.comms))
     coord, worker = spec.types["coordinator"].system_prompt, spec.types["worker"].system_prompt
     assert "enforce" not in coord.lower() and "enforce" not in worker.lower()
+    assert "flock prompt" not in coord + worker  # agents talk on the board only
     assert "flock spawn worker" in coord and "flock spawn" not in worker
     assert "You cannot start other agents" in worker and "$FLOCK_PARENT" in worker
     def team(role):  # the shared rules: the same text for both roles
