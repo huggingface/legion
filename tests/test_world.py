@@ -671,7 +671,7 @@ async def test_hub_holds_off_locally_after_a_429_then_tries_again(monkeypatch, t
     assert hub.counters["up"].refused == 2
     await hub.call("x", "world:peek", {})  # read-only tools still try, once
     assert len(seen) == 2
-    now[0] = 130.0
+    now[0] = 141.0  # the read-only try at 110 got its own 429: hold until 140
     overloaded[0] = False
     assert not (await hub.call("x", "world:up", {"ref": "b"})).error and len(seen) == 3
     await hub.aclose()
