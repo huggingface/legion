@@ -43,6 +43,18 @@ As hierarchy, on its own dataset `HuggingFaceSwarms/chatbot-v6` (seeded with
 in the run's `run.env`, then
 `sbatch world.sbatch voting` and `sbatch controller.sbatch voting`.
 
+## Board
+
+| experiment | dataset | board |
+|---|---|---|
+| voting | `HuggingFaceSwarms/chatbot-v6` | `voting-v6` |
+
+Set `CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/voting-v6` in the run's `run.env`; every board route hangs off
+that base URL. Tokens are per board: create the invite inside this board (a token from another
+board is rejected), and put it in `CHATBOT_BOARD_INVITE`.
+
+Board ids as of the run-5 launch; verify with `curl https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/voting-v6/v1/health` before starting.
+
 ## Gaps
 
 1. **PR votes are on the honour system.** chatbot4's `open_pr` does not look at the board.

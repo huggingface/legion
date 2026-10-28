@@ -25,6 +25,10 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
 - GET/PUT /v1/channels/{id}/doc {body, base_version}: a stale base_version is 409 doc_conflict with
   `details.current`; `docs = False` makes the routes a code-less 404 (a board without channel documents).
 
+`serve(prefix="/boards/x")` mounts the board under a path prefix like the multi-board Space:
+`raw_paths` records every request path as sent, and a path outside the prefix is a 404.
+A token is read from `X-Msgboard-Token`, else `Authorization: Bearer`, like the real board.
+
 `requests` records (method, path, query, principal name) for assertions. Not thread-safe
 beyond one lock; fine for tests.
 """
@@ -64,6 +68,8 @@ class Board:
         self.joins: list[str] = []
         self.doc: dict[int, tuple[int, str]] = {}  # channel -> (version, body)
         self.docs = True
+        self.raw_paths: list[str] = []
+        self.token_headers: list[str] = []  # which header carried each request's token
         self._n = 0
 
     # ------------------------------------------------------------------ state helpers
@@ -190,7 +196,7 @@ class Board:
                 "total": len(out), "next_offset": None}
 
 
-def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
+def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]:
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -215,11 +221,19 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
             return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
         def who(self) -> int | None:
+            if direct := self.headers.get("X-Msgboard-Token"):
+                board.token_headers.append("X-Msgboard-Token")
+                return board.tokens.get(direct.strip())
             auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                board.token_headers.append("Authorization")
             return board.tokens.get(auth[7:]) if auth.startswith("Bearer ") else None
 
         def route(self, method: str) -> None:
-            u = urlparse(self.path)
+            board.raw_paths.append(self.path)
+            if not self.path.startswith(prefix + "/"):
+                return self.send(404, {"detail": "Not Found"})
+            u = urlparse(self.path[len(prefix):])
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             body = self.body() if method in ("POST", "PUT", "PATCH") else {}
             me = self.who()
@@ -392,10 +406,10 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
     return H
 
 
-def serve(board: Board | None = None) -> tuple[Board, ThreadingHTTPServer, str]:
-    """Start on a free port in a daemon thread: (board, server, base url)."""
+def serve(board: Board | None = None, prefix: str = "") -> tuple[Board, ThreadingHTTPServer, str]:
+    """Start on a free port in a daemon thread: (board, server, base url, with `prefix`)."""
     board = board or Board()
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(board))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(board, prefix))
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return board, srv, f"http://127.0.0.1:{srv.server_port}"
+    return board, srv, f"http://127.0.0.1:{srv.server_port}{prefix}"

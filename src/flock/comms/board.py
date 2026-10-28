@@ -161,6 +161,12 @@ def _query(params: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in params.items() if v is not None}
 
 
+def _auth(token: str) -> dict[str, str]:
+    """The board reads X-Msgboard-Token first (Authorization stays free for a proxy login in
+    front of a private Space); Bearer too, for boards that predate that header."""
+    return {"X-Msgboard-Token": token, "Authorization": f"Bearer {token}"}
+
+
 class Credential(Protocol):
     """A board token together with the board it belongs to (MsgboardIdentity)."""
 
@@ -269,7 +275,7 @@ class AsyncBoard:
             if not same_board(cred.url, self.url):
                 raise BoardError(f"board: refusing to send a token issued by {cred.url} to "
                                  f"{self.url}", code="wrong_board")
-            headers["Authorization"] = f"Bearer {cred.token}"
+            headers.update(_auth(cred.token))
         if method in ("POST", "PUT", "PATCH"):
             headers["Idempotency-Key"] = idem_key()
         for attempt in range(ATTEMPTS):
@@ -351,7 +357,7 @@ class SyncBoard:
     def request(self, route: tuple[str, str, dict], token: str | None = None, *,
                 key: str | None = None) -> dict:
         method, path, kw = route
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        headers = _auth(token) if token else {}
         if method in ("POST", "PUT", "PATCH"):
             headers["Idempotency-Key"] = key or idem_key()
         for attempt in range(ATTEMPTS):
