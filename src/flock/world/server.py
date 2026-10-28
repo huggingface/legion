@@ -376,8 +376,8 @@ def create_app(world: World, token: str | None) -> FastAPI:
             latency = metrics.clock() - t0
         if name in served()["schemas"]:
             code = json.loads(resp.body)["error"]["code"] if isinstance(resp, JSONResponse) else None
-            metrics.call(name, latency, code, int(request.headers.get("content-length") or 0),
-                         len(resp.body))
+            n_in = request.headers.get("content-length", "")
+            metrics.call(name, latency, code, int(n_in) if n_in.isdigit() else 0, len(resp.body))
         return resp
 
     async def _call(name: str, request: Request) -> Response:
