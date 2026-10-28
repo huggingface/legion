@@ -34,6 +34,7 @@ from flock.models import (
     granted_spec,
     hit_max_turns,
     parse_duration,
+    type_spec_rev,
 )
 from flock.secrets_file import secret_env
 from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
@@ -160,6 +161,7 @@ class AgentRuntime:
         self.idle_since: datetime = utcnow()
         self.last_sync: datetime | None = None
         self.dirty = False
+        self._env_dropped_rev: str | None = None
         self.allow_starts = True
         self._stop_req: str | None = None
         self._burst: asyncio.Task | None = None
@@ -278,6 +280,15 @@ class AgentRuntime:
 
     def emit(self, kind: str, data: dict[str, Any] | None = None) -> None:
         self._emit(self.log.custom(kind, data, turn_id=self.turn_id))
+
+    def _report_env_dropped(self) -> None:
+        """Names (never values) the harness isolation dropped; once per spec revision."""
+        names = getattr(self.adapter, "env_dropped_names", None)
+        rev = type_spec_rev(self.spec)
+        if names and rev != self._env_dropped_rev:
+            self._env_dropped_rev = rev
+            log.warning("%s: isolation dropped env names %s", self.name, ", ".join(names))
+            self.emit("env_dropped", {"names": names})
 
     # ------------------------------------------------------------------ live changes (docs/live.md)
     def set_live(self, *, spec: TypeSpec | None = None, grant: Any = _UNSET) -> None:
@@ -545,6 +556,7 @@ class AgentRuntime:
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
             self.save_state()
+            self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
                              "parent": self.parent})
             self.phase = "running"
