@@ -1888,3 +1888,34 @@ def test_manifest_declares_workspace_uploads_and_timeouts(setup):
     assert (run.arg, run.default, run.skip, run.skip_prefix) == ("ref_or_path", "main", ["main"], "pr:")
     assert tools["review_pr"].workspace is None
     assert {t.timeout_s for t in tools.values()} == {330}
+
+
+def test_a_slow_hub_merge_does_not_block_reads(setup, monkeypatch):
+    import threading
+
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    real, entered, release = world.repo.hub.merge, threading.Event(), threading.Event()
+
+    def slow_merge(pr, comment):  # a Hub merge sleeping through 429 retries
+        entered.set()
+        release.wait(20)
+        real(pr, comment)
+
+    monkeypatch.setattr(world.repo.hub, "merge", slow_merge)
+    result = {}
+    merging = threading.Thread(target=lambda: result.update(world.merge_pr(Agent("birch"), rec["pr"])))
+    merging.start()
+    try:
+        assert entered.wait(20)
+        started = time.monotonic()
+        assert world.get_pr(rec["pr"])["head_sha"] == rec["head_sha"]
+        world.list_prs("all")
+        assert time.monotonic() - started < 2, "reads waited for the Hub merge"
+        with pytest.raises(ToolError, match="no open PR"):  # no second merge meanwhile
+            world.merge_pr(Agent("pine"), rec["pr"])
+    finally:
+        release.set()
+        merging.join(30)
+    assert result["merged_sha"] == git(remote, "rev-parse", "main")

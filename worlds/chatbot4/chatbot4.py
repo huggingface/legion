@@ -125,7 +125,12 @@ class Chatbot4World(World):
         previous = _LIVE.get(str(self.ws.resolve()))
         if previous is not None:  # flush and stop its outbox before reading the saved state
             previous.close()
+        # Lock order: Hub write slot, then main_lock, then self.lock (the state lock).
         self.lock = threading.RLock()
+        # The compare-and-swap on main: held by merges across the Hub merge and the fetch that
+        # moves local main, and by the "did main move" check before a Hub PR is created. The
+        # state lock is taken only around record reads and updates, never across a Hub call.
+        self.main_lock = threading.Lock()
         self.db = self.ws / "prs.json"
         for stale in self.ws.glob("prs.json.*.tmp"):  # a write cut by a crash
             stale.unlink(missing_ok=True)
@@ -148,7 +153,7 @@ class Chatbot4World(World):
         self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
         # Every Hub write (create PR, push, ready, merge, close, comment) holds a slot: one IP
-        # and one token cannot push for 140 agents at once. Lock order: Hub slot, then self.lock.
+        # and one token cannot push for 140 agents at once. Lock order: see self.lock.
         self.hub_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_HUB_WRITE_SLOTS", "1")))
         # Merges hold their own slots instead: a merge never queues behind the rebase pushes,
         # opens and closes, whose wait would let main or the PR move under its checks. At most
@@ -186,7 +191,7 @@ class Chatbot4World(World):
                 self._save()
         with self.lock:  # the archive may predate merges that already landed on the Hub
             for rec in self.state["prs"].values():
-                if rec["state"] == "closing":  # interrupted close_pr: the author may retry
+                if rec["state"] in ("closing", "merging"):  # interrupted: the agent may retry
                     rec["state"] = "open"
             self._fetch_missing_heads()
             self._reconcile()
@@ -530,7 +535,7 @@ class Chatbot4World(World):
         """Hold a Hub write slot (from slots, default self.hub_slots), waiting at most until
         deadline (default: CHATBOT_HUB_WAIT_S).
 
-        Never acquire this with self.lock held."""
+        Never acquire this with main_lock or self.lock held."""
         slots = slots or self.hub_slots
         if deadline is None:
             deadline = time.monotonic() + self.hub_wait
@@ -933,7 +938,7 @@ class Chatbot4World(World):
                 with self._hub_write(agent, "open_pr", pr, deadline):
                     if pr is None:
                         self._create_gap(agent, deadline)
-                        with self.lock:  # nothing exists on the Hub yet: redo on a moved main
+                        with self.main_lock:  # nothing exists on the Hub yet: redo on a moved main
                             if self.repo.sha() != main:
                                 continue
                         pr = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
@@ -1176,41 +1181,51 @@ class Chatbot4World(World):
         self.repo.refresh(0)  # outside the lock; the compare-and-swap below uses local refs
         # The merge Hub slot is taken before the lock (see _hub_write); it is separate from
         # the slots of pushes, opens and closes, so a merge never waits behind them.
-        with self._hub_write(agent, "merge", pr, slots=self.merge_hub_slots), self.lock:
-            rec = self._pr(pr)
-            reviewers = self._approved(rec)
-            if (self.repo.sha() != main or rec["head_sha"] != head
-                    or any(p[2] == pr for p in self.pending.values())):
-                raise ToolError("main or the PR changed during checks; update and review again")
+        with self._hub_write(agent, "merge", pr, slots=self.merge_hub_slots), self.main_lock:
+            with self.lock:
+                rec = self._pr(pr)
+                reviewers = self._approved(rec)
+                if (self.repo.sha() != main or rec["head_sha"] != head
+                        or any(p[2] == pr for p in self.pending.values())):
+                    raise ToolError("main or the PR changed during checks; update and review again")
+                rec["state"] = "merging"  # no update, review, close or merge while the Hub call runs
             try:
-                self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
-            except ToolError as exc:
-                # The Hub may have merged before failing (a 5xx or timeout after commit).
                 try:
-                    self.repo.fetch()
-                except ToolError:
-                    pass
-                if self._reconcile(rec["author"]) and rec["state"] == "merged":
-                    return self._merged_event(rec)
-                if exc.code in FINAL_CODES:  # already closed or merged on the Hub
-                    raise self._mark_hub_final(pr, exc.code) from None
-                raise
-            # Local main must move before the lock is released: opens compare against it.
-            self.repo.fetch()
-            merged = self.repo.sha()
-            rec.update(state="merged", merged_sha=merged)
-            self._note_merge()
-            if rec["author"] != agent.name:
-                self._unnotify(rec["author"], pr, "mergeable")
-                self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
-            self._save()
-            event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
-                     "parent_sha": main, "head_sha": head, "merged_sha": merged}
-            self._event("merged", agent, **event)
-            # Append-only integration hook, consumed by the separate evaluation workstream.
-            with open(self.ws / "eval-queue.jsonl", "a") as out:
-                out.write(json.dumps({"ts": time.time(), **event}) + "\n")
-            return event
+                    self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
+                except ToolError as exc:
+                    # The Hub may have merged before failing (a 5xx or timeout after commit).
+                    try:
+                        self.repo.fetch()
+                    except ToolError:
+                        pass
+                    with self.lock:
+                        rec["state"] = "open"
+                        if self._reconcile(rec["author"]) and rec["state"] == "merged":
+                            return self._merged_event(rec)
+                    if exc.code in FINAL_CODES:  # already closed or merged on the Hub
+                        raise self._mark_hub_final(pr, exc.code) from None
+                    raise
+                # Local main must move before main_lock is released: opens compare against it.
+                self.repo.fetch()
+                merged = self.repo.sha()
+                with self.lock:
+                    rec.update(state="merged", merged_sha=merged)
+                    self._note_merge()
+                    if rec["author"] != agent.name:
+                        self._unnotify(rec["author"], pr, "mergeable")
+                        self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
+                    self._save()
+                    event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
+                             "parent_sha": main, "head_sha": head, "merged_sha": merged}
+                    self._event("merged", agent, **event)
+                    # Append-only integration hook, consumed by the separate evaluation workstream.
+                    with open(self.ws / "eval-queue.jsonl", "a") as out:
+                        out.write(json.dumps({"ts": time.time(), **event}) + "\n")
+                    return event
+            finally:
+                with self.lock:
+                    if rec["state"] == "merging":  # failed before the record was settled
+                        rec["state"] = "open"
 
     def _merged_event(self, rec):
         return {"pr": rec["pr"], "author": rec["author"], "head_sha": rec["head_sha"],
