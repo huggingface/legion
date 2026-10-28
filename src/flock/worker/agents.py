@@ -1004,7 +1004,7 @@ class AgentRuntime:
         self.emit("sync", {"reason": reason})
         self.save_state()
         try:
-            await self.sync.push(self)
+            await self.sync.push(self, rebase=reason == "periodic")
             self.last_sync = utcnow()
             self.dirty = False
         except Exception as e:  # noqa: BLE001
