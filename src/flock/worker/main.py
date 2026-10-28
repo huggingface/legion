@@ -36,6 +36,7 @@ import re
 import signal
 import sys
 import threading
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -72,6 +73,7 @@ from flock.models import (
 )
 from flock.secrets_file import load as load_secrets
 from flock.secrets_file import secret_env
+from flock.tools.runner import Result
 from flock.tools.toolset import Toolset
 from flock.worker import sync as sync_mod
 from flock.worker.adapters.base import HarnessAdapter
@@ -204,6 +206,7 @@ def read_host_file(path: str) -> str:
 
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+UNSENT_STATUSES = frozenset({429, 503})  # not processed: safe to resend a non-idempotent call
 RETRY_BASE = 1.0  # s, first retry delay before jitter
 RETRY_CAP = 30.0  # s, longest single wait, Retry-After included
 MAX_CONCURRENCY = 3  # requests in flight per worker: one poll, one heartbeat, one event batch
@@ -247,10 +250,11 @@ class ControllerClient:
         self._slots = asyncio.Semaphore(max(1, max_concurrency))
         self._sleep = sleep or asyncio.sleep
         self.stats: Counter[str] = Counter()
-        # re-reads where the controller is (a host file on Slurm) after a transport error
+        # re-reads where the controller is (a host file on Slurm) after a transport error, and
+        # before every heartbeat (Worker.send_heartbeat), so a move is seen within one interval
         self.resolve_url = resolve_url
 
-    def _refresh_url(self) -> None:
+    def refresh_url(self) -> None:
         if self.resolve_url is None:
             return
         try:
@@ -263,8 +267,11 @@ class ControllerClient:
             self.http.base_url = url
             self.stats["moved"] += 1
 
-    async def _send(self, method: str, path: str, *, budget: float, **kw) -> httpx.Response:
-        """`budget`: seconds this call may spend waiting between attempts."""
+    async def _send(self, method: str, path: str, *, budget: float, retry_sent: bool = True,
+                    **kw) -> httpx.Response:
+        """`budget`: seconds this call may spend waiting between attempts. `retry_sent=False`:
+        retry only what never reached the app (no connection, 429, 503); a request that may
+        have been processed (read error or timeout, other 5xx) is not sent again."""
         waited = 0.0
         attempt = 0
         while True:
@@ -277,10 +284,14 @@ class ControllerClient:
                 except httpx.TransportError as e:
                     err = e
             if err is not None:
-                self._refresh_url()
-            if r is not None and r.status_code not in RETRY_STATUSES:
+                self.refresh_url()
+            if r is not None and r.status_code not in (RETRY_STATUSES if retry_sent
+                                                       else UNSENT_STATUSES):
                 r.raise_for_status()
                 return r
+            if err is not None and not retry_sent and not isinstance(
+                    err, httpx.ConnectError | httpx.ConnectTimeout):
+                raise err
             if r is not None and r.status_code == 429:
                 self.stats["throttled"] += 1
             delay = _retry_delay(attempt, _retry_after(r) if r is not None else None)
@@ -321,8 +332,42 @@ class ControllerClient:
                          content=batch.model_dump_json(), params=self.params,
                          headers={"content-type": "application/json"})
 
+    async def forward(self, method: str, path: str, token: str, *, params: dict | None = None,
+                      body: object = None, budget: float = 60.0) -> httpx.Response:
+        """An agent's own call (the gateway's `controller` route): sent with the agent's token
+        instead of the worker's, retried and re-resolved like every route here; the answer is
+        returned whatever its status. Only a GET is retried after the request may have reached
+        the controller, so a prompt is never delivered twice.
+        shortcut: 503 counts as never processed (the Space edge's answer); an app 503 after a
+        side effect would be resent, revisit if the controller starts returning 503 itself."""
+        try:
+            return await self._send(method, path, budget=budget, retry_sent=method == "GET",
+                                    params=params, json=body,
+                                    headers={"Authorization": f"Bearer {token}"})
+        except httpx.HTTPStatusError as e:
+            return e.response
+
     async def aclose(self) -> None:
         await self.http.aclose()
+
+
+_SEG = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
+# What an agent's `flock` CLI may call through the gateway: the routes an agent token may use
+# (flock.controller.spawn.agent_may, which still checks the subtree on the controller).
+AGENT_ROUTES = tuple((m, re.compile(p)) for m, p in (
+    ("GET", r"/whoami"),
+    ("GET", rf"/agents/{_SEG}"),
+    ("GET", rf"/agents/{_SEG}/events"),
+    ("POST", rf"/agents/{_SEG}/spawn"),
+    ("POST", rf"/agents/{_SEG}/prompt"),
+    ("POST", rf"/agents/{_SEG}/children/prompts"),
+    ("DELETE", rf"/agents/{_SEG}"),
+    ("GET", rf"/swarms/{_SEG}/agents"),
+))
+
+
+def agent_route_allowed(method: str, path: str) -> bool:
+    return any(m == method and p.fullmatch(path) for m, p in AGENT_ROUTES)
 
 
 MEMORY_INTERVAL = 600.0  # s, FLOCK_MEMORY_LOG_S: heap trim and the memory lines in the log
@@ -472,6 +517,7 @@ class Worker:
         self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
                                        runtime=self.agents.get)
         self.comms.routes["world"] = self.world.call
+        self.comms.routes["controller"] = self.controller_call
         self.draining = False
         self.drain_window = cfg.drain_window
         self._drained = asyncio.Event()
@@ -536,6 +582,42 @@ class Worker:
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
 
+    async def controller_call(self, agent: str, entry: str, args: dict) -> Result:
+        """`controller:request {method, path, params?, json?}` from the agent's `flock` CLI
+        through the gateway (docs/spawn.md): an allowlisted route, sent with the agent's own
+        token by this worker's client, which follows the controller when it moves. The result
+        is `{status, body}`; a call that still fails after retries emits
+        `controller_call_failed {path, error}` on the agent's stream."""
+        t0 = time.monotonic()
+        method, path = str(args.get("method") or "").upper(), str(args.get("path") or "")
+        rt = self.agents.get(agent)
+        token = rt.flock_env.get("FLOCK_AGENT_TOKEN") if rt is not None else None
+
+        def fail(error: str) -> Result:
+            return Result(json.dumps({"error": error}), True, time.monotonic() - t0)
+
+        if entry != "controller:request" or not agent_route_allowed(method, path):
+            return fail(f"controller: {method} {path} is not allowed through the gateway")
+        if rt is None or not token:
+            return fail("controller: this agent has no flock token on this worker")
+        params, body = args.get("params"), args.get("json")
+        try:
+            r = await self.client.forward(method, path, token,
+                                          params=params if isinstance(params, dict) else None,
+                                          body=body)
+        except httpx.HTTPError as e:
+            error = f"{type(e).__name__}: {e}"
+            rt.emit("controller_call_failed", {"path": path, "error": error})
+            return fail(f"controller unreachable: {error}")
+        if r.status_code >= 500:
+            rt.emit("controller_call_failed", {"path": path, "error": f"HTTP {r.status_code}"})
+        try:
+            out = r.json() if r.content else None
+        except ValueError:
+            out = r.text
+        return Result(json.dumps({"status": r.status_code, "body": out}), r.status_code >= 400,
+                      time.monotonic() - t0)
+
     def _toolbox(self, agent: str) -> Callable[[], Toolset]:
         """What a turn of `agent` may call: the folder tools of the current version plus the
         agent's built-in comms and world tools, with the agent's grant applied (docs/live.md)."""
@@ -543,8 +625,12 @@ class Worker:
         def toolset() -> Toolset:
             rt = self.agents.get(agent)
             grant = rt.grant.tools if rt is not None and rt.grant is not None else None
-            return self.world.toolset_for(
+            ts = self.world.toolset_for(
                 agent, self.comms.toolset_for(agent, self.tools.current(grant)), self.comms)
+            if ts.gateway is None and self.comms.address is not None:  # `flock` CLI calls
+                ts = dataclasses.replace(ts, gateway=self.comms.address,
+                                         gateway_key=self.comms.key(agent))
+            return ts
 
         return toolset
 
@@ -711,6 +797,8 @@ class Worker:
                                started=min(p[2] for p in prog))
 
     async def send_heartbeat(self) -> bool:
+        if (refresh := getattr(self.client, "refresh_url", None)) is not None:
+            refresh()  # a controller move is picked up here even before any call fails
         try:  # retried inside the client for most of an interval: the controller declares a
             # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
             resp = await self.client.heartbeat(self.heartbeat_payload(),

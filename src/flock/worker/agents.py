@@ -244,11 +244,12 @@ class AgentRuntime:
         """The current Toolset, written to the pin file `flock-tool` reads. The harness has the
         pin's path from its start (PIN_ENV), so a version, an enable or a disable reaches a
         running harness at the next turn boundary: with no tools the pin holds an empty
-        toolset (written once a pin exists; an agent that never had tools gets none)."""
+        toolset (written once a pin exists, or when the worker gateway is open: the `flock`
+        CLI reaches the controller through it, docs/spawn.md)."""
         if self.toolbox is None:
             return None
         ts = self.toolbox()
-        if ts.version is not None or ts.tools or self.pin_path.exists():
+        if ts.version is not None or ts.tools or ts.gateway or self.pin_path.exists():
             deny = credential_env_names(self.spec)  # the key under every name the harness has it
             if self.comms is not None:  # and the board's credentials (docs/comms.md)
                 deny += self.comms.deny_env()

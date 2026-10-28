@@ -3,7 +3,8 @@
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
 FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
 a live `flock run` in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
-agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
+agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; when the
+agent's pin file (FLOCK_TOOLS_PIN) names a worker gateway, calls go through it instead. See
 docs/spawn.md for what an agent may call.
 """
 
@@ -131,7 +132,50 @@ def _request(c: httpx.Client, method: str, path: str, **kw) -> httpx.Response:
     raise AssertionError("unreachable")
 
 
+def _gateway(env=os.environ) -> tuple[str, str, str] | None:
+    """(address, key, agent) of the worker gateway named in the agent's pin file
+    (FLOCK_TOOLS_PIN), or None outside an agent or on a worker without one."""
+    from flock.tools.toolset import PIN_ENV, read_pin
+
+    if not (pin := env.get(PIN_ENV)):
+        return None
+    try:
+        ts, agent, _ = read_pin(pin)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return (ts.gateway, ts.gateway_key or "", agent) if ts.gateway else None
+
+
+def _call_gateway(gw: tuple[str, str, str], method: str, path: str, timeout: float | None,
+                  **kw) -> Any:
+    """One controller call through the worker (`controller:request`): the worker sends it with
+    this agent's token to wherever the controller is now, retrying there."""
+    import asyncio
+
+    from flock.tools.toolset import gateway_call
+
+    address, key, agent = gw
+    args = {"method": method, "path": path, "params": kw.get("params"), "json": kw.get("json")}
+    r = asyncio.run(gateway_call(address, key, agent, "controller:request", args,
+                                 timeout=(timeout or 60) + 120))
+    try:
+        out = json.loads(r.output)
+    except ValueError:
+        out = {}
+    if not isinstance(out, dict) or "status" not in out:
+        err = out.get("error") if isinstance(out, dict) else None
+        typer.echo(f"error: {err or r.output}", err=True)
+        raise typer.Exit(1)
+    if out["status"] >= 400:
+        body = out["body"] if isinstance(out["body"], str) else json.dumps(out["body"])
+        typer.echo(f"error {out['status']}: {body}", err=True)
+        raise typer.Exit(1)
+    return out["body"]
+
+
 def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
+    if (gw := _gateway()) is not None:  # inside an agent: through its worker (docs/spawn.md)
+        return _call_gateway(gw, method, path, timeout, **kw)
     if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
         kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
     with client() as c:
@@ -143,8 +187,9 @@ def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
 
 
 def _as_agent() -> bool:
-    """Running inside an agent with its scoped token: names are agents, never swarms."""
-    return bool(os.environ.get("FLOCK_AGENT_TOKEN"))
+    """Running inside an agent (its scoped token or its worker's gateway): names are agents,
+    never swarms."""
+    return bool(os.environ.get("FLOCK_AGENT_TOKEN") or _gateway())
 
 
 def _is_swarm(name: str) -> bool:
