@@ -1888,3 +1888,55 @@ def test_manifest_declares_workspace_uploads_and_timeouts(setup):
     assert (run.arg, run.default, run.skip, run.skip_prefix) == ("ref_or_path", "main", ["main"], "pr:")
     assert tools["review_pr"].workspace is None
     assert {t.timeout_s for t in tools.values()} == {330}
+
+
+def test_a_slow_hub_merge_does_not_block_reads(setup, monkeypatch):
+    import threading
+
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    real, entered, release = world.repo.hub.merge, threading.Event(), threading.Event()
+
+    def slow_merge(pr, comment):  # a Hub merge sleeping through 429 retries
+        entered.set()
+        release.wait(20)
+        real(pr, comment)
+
+    monkeypatch.setattr(world.repo.hub, "merge", slow_merge)
+    result = {}
+    merging = threading.Thread(target=lambda: result.update(world.merge_pr(Agent("birch"), rec["pr"])))
+    merging.start()
+    try:
+        assert entered.wait(20)
+        started = time.monotonic()
+        assert world.get_pr(rec["pr"])["head_sha"] == rec["head_sha"]
+        world.list_prs("all")
+        assert time.monotonic() - started < 2, "reads waited for the Hub merge"
+        with pytest.raises(ToolError, match="no open PR"):  # no second merge meanwhile
+            world.merge_pr(Agent("pine"), rec["pr"])
+    finally:
+        release.set()
+        merging.join(30)
+    assert result["merged_sha"] == git(remote, "rev-parse", "main")
+
+
+def test_reconcile_runs_git_only_when_main_moved(setup, monkeypatch):
+    world, clone, _ = setup
+    one = submit(world, clone, branch="one")
+    (clone / "bot/modules/two.py").write_text('def respond(text, memory):\n    return None\n')
+    submit(world, clone, "birch", "two")
+    real, calls = world.repo.ancestor, []
+    monkeypatch.setattr(world.repo, "ancestor", lambda *a: (calls.append(a), real(*a))[1])
+    with world.lock:
+        world._reconcile()  # fills the cache for any PR not seen on this main yet
+    calls.clear()
+    with world.lock:
+        assert not world._reconcile()
+    assert not calls  # main unchanged: no git
+    approve(world, one)
+    world.merge_pr(Agent("birch"), one["pr"])  # main moved: the other PR is checked again
+    calls.clear()
+    with world.lock:
+        world._reconcile()
+    assert len(calls) == 1
