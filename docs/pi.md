@@ -91,6 +91,37 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   `types.<T>.env.<KEY>: dropped by pi isolation` for the type's `env` keys that would be dropped
   (by the same function; names only the worker's `FLOCK_HARNESS_ENV_DROP` lists are not previewed).
 
+## Memory
+
+A Pi process otherwise lives as long as the agent stays on the worker (a loop's next prompt
+arrives before `idle_grace`), so its heap, session and sandbox root grow for the whole job.
+
+- **Recycle**: the runtime restarts Pi at a turn boundary, resuming the same session
+  (`--session-id`): the next prompt goes to a fresh process, the event is
+  `harness_recycled {reason, pss_mb}`, and no turn is interrupted. Reasons: `turns`, `hours`,
+  `pss_mb` from the type's `recycle_after: {turns, hours, pss_mb}` (counted from the process
+  start, checked at each turn end; Pi's PSS is sampled every 15 s), `memory` from the worker's
+  relief ladder (docs/slurm.md "Memory"), and `endpoint`: a live change of the model endpoint,
+  model id or reasoning level (`PiAdapter.update_spec`) applies within one turn.
+- **OOM**: a Pi SIGKILLed mid-turn (exit -9/137: the OOM killer) ends the turn
+  `turn_interrupted {reason: oom_killed}`; a loop retries it as a transient failure (backoff,
+  not counted toward the three failed turns).
+- **Tool limits**: with `tool_memory_mb` (or `node_heap_mb`) set, the adapter writes a
+  read-only file `<pi home>/../<agent>.bash_env` (bound read-only inside the sandbox) and
+  passes it as `BASH_ENV`, which every non-interactive bash (Pi's bash tool) sources:
+  `ulimit -d <tool_memory_mb × 1024>` (RLIMIT_DATA: V8 and Python reserve far more virtual
+  memory than they use, so not `-v`) and `unset NODE_OPTIONS`. Every tool command and its
+  children (git, pytest, node) inherit the limit; Pi does not. `BASH_ENV` passes the isolation
+  allow-list.
+- **Pi's heap**: `node_heap_mb` sets `NODE_OPTIONS=--max-old-space-size=<MB>` for Pi only.
+- **OOM order**: the sandbox writes 800 to `/proc/self/oom_score_adj` before exec (raising
+  needs no privilege; the worker keeps its own score), so the kernel kills a tool or a Pi
+  before the worker. Under `memory.oom.group=1` the kernel kills the whole cgroup anyway.
+- **Per-agent cgroups**: only when the worker's cgroup is delegated (writable, `memory` in
+  `cgroup.subtree_control`) each Pi and its tools go to `agent-<name>/` with `memory.max` =
+  `FLOCK_MEM_AGENT` (0.5) of the worker's limit. The worker logs the probe at start; Slurm step
+  cgroups are usually not delegated, and then nothing is done.
+
 ## Event mapping
 
 | Pi record | AdapterEvent |
