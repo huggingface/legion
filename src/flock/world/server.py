@@ -147,12 +147,12 @@ def create_app(world: World, token: str | None) -> FastAPI:
     cache: dict[str, Any] = {"version": None}
 
     def served() -> dict[str, Any]:
-        """The manifest as served now, serialized once per `world.version` (on the event loop:
-        a health check never waits for a thread): what GET /manifest advertises is what is
-        called."""
-        if cache["version"] != world.version:
-            version, m = world.version, world.manifest()
-            cache.update(version=version, body=json.dumps(m).encode(), schemas={
+        """The manifest as served now, serialized once per manifest version (on the event
+        loop: a health check never waits for a thread): what GET /manifest advertises is what
+        is called. Building the dict is cheap; serializing it is not."""
+        m = world.manifest()
+        if cache["version"] != m.get("version"):
+            cache.update(version=m.get("version"), body=json.dumps(m).encode(), schemas={
                 t["name"]: t.get("parameters") or {"type": "object", "properties": {}}
                 for t in m.get("tools") or []})
         return cache
