@@ -17,7 +17,8 @@ from flock.models import CommsRules, comms_name
 from flock.tools.loader import ToolDef
 
 BUILTIN_MODULE = "flock:comms"
-READONLY = frozenset({"comms:read", "comms:search", "comms:channels", "comms:read_dms"})  # change nothing: idle for `idle_rounds`
+READONLY = frozenset({"comms:read", "comms:search", "comms:channels", "comms:read_dms",
+                      "comms:votes", "comms:doc"})  # change nothing: idle for `idle_rounds`
 GROUP_RE = re.compile(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", re.IGNORECASE)
 GROUP_NAMES = frozenset({"all", "agents", "humans", "everyone", "people"})
 READ_DEFAULT, READ_MAX = 20, 100
@@ -79,9 +80,9 @@ DEFS: dict[str, dict[str, Any]] = {
 }
 
 
+_CHANNEL = {"type": ["string", "integer"], "description": "channel name or id; default: the main channel"}
 for _entry in ("comms:post", "comms:read", "comms:search"):
-    DEFS[_entry]["properties"]["channel"] = {
-        "type": ["string", "integer"], "description": "channel name or id; default: the main channel"}
+    DEFS[_entry]["properties"]["channel"] = _CHANNEL
 
 
 def _definition(description, properties, required=()):
@@ -98,8 +99,18 @@ DEFS.update({
         {"to": {"type": "string"}, "text": {"type": "string"}}, ["to", "text"]),
     "comms:read_dms": _definition("Read your recent private messages.",
         {"n": {"type": "integer"}, "since": _ID}),
-    "comms:react": _definition("React to a message, for example to claim work or vote.",
-        {"msg_id": _ID, "emoji": {"type": "string"}}, ["msg_id", "emoji"]),
+    "comms:react": _definition("React to a message, for example to claim work or vote (👍 / 👎). "
+        "Returns the message's reactions.", {"msg_id": _ID, "emoji": {"type": "string"}},
+        ["msg_id", "emoji"]),
+    "comms:votes": _definition("Count the 👍 and 👎 reactions on a message. passed is true when "
+        "it has at least 2 👍 and more 👍 than 👎.", {"msg_id": _ID}, ["msg_id"]),
+    "comms:doc": _definition("Read a channel's shared document (a plan everyone can edit). "
+        "Returns body and version.", {"channel": _CHANNEL}),
+    "comms:edit_doc": _definition("Replace a channel's shared document. base_version is the "
+        "version you read (0 for a new document); if someone saved since, nothing is written and "
+        "the error carries their version and body to merge into.",
+        {"channel": _CHANNEL, "body": {"type": "string"}, "base_version": {"type": "integer"}},
+        ["body", "base_version"]),
 })
 
 
@@ -182,7 +193,25 @@ def brief(m: dict[str, Any], chars: int = TEXT_CHARS) -> dict[str, Any]:
            "text": body}
     if m.get("reply_to") and m.get("reply_to") != thread_of(m):
         out["reply_to"] = m["reply_to"]
+    if m.get("reactions"):
+        out.update(reactions(m))
     return out
+
+
+def reactions(m: dict[str, Any]) -> dict[str, Any]:
+    """{reactions: {emoji: count}, reactors: {emoji: [names]}} from the board's
+    `reactions: [{emoji, count, by: [principal]}]`."""
+    rs = [r for r in m.get("reactions") or [] if isinstance(r, dict)]
+    return {"reactions": {r["emoji"]: r.get("count", len(r.get("by") or [])) for r in rs},
+            "reactors": {r["emoji"]: [author({"sender": p}) for p in r.get("by") or []] for r in rs}}
+
+
+def votes(m: dict[str, Any]) -> dict[str, Any]:
+    """👍 / 👎 on a message; every reactor counts. passed: at least 2 up and more up than down."""
+    who = reactions(m)["reactors"]
+    up, down = who.get("👍", []), who.get("👎", [])
+    return {"up": len(up), "down": len(down), "voters_up": up, "voters_down": down,
+            "passed": len(up) >= 2 and len(up) > len(down)}
 
 
 def snippet(m: dict[str, Any]) -> str:

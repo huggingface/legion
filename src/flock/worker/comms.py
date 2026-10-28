@@ -62,7 +62,7 @@ from flock.models import CommsSpec, comms_name, normalize_board_url
 from flock.secrets_file import secret_env
 from flock.tools.runner import Result, check_args
 from flock.tools.toolset import GATEWAY_LINE_MAX, Toolset
-from flock.worker.comms_extended import ExtendedComms
+from flock.worker.comms_extended import DocConflict, ExtendedComms
 from flock.worker.identity import Identities, MsgboardIdentity
 
 if TYPE_CHECKING:
@@ -163,8 +163,8 @@ def _ok(out: Any, t0: float) -> Result:
     return Result(json.dumps(out, ensure_ascii=False), False, time.monotonic() - t0)
 
 
-def _err(msg: str, t0: float) -> Result:
-    return Result(json.dumps({"error": msg}, ensure_ascii=False), True, time.monotonic() - t0)
+def _err(msg: str, t0: float, **extra: Any) -> Result:
+    return Result(json.dumps({"error": msg, **extra}, ensure_ascii=False), True, time.monotonic() - t0)
 
 
 class CommsHub(ExtendedComms):
@@ -752,6 +752,8 @@ class CommsHub(ExtendedComms):
                 self.stats["refused"] += 1
                 self._emit(agent, "comms_refused", {"rule": e.rule, "error": str(e)})
                 return _err(str(e), t0)
+            except DocConflict as e:
+                return _err(str(e), t0, version=e.version, body=e.body)
             except BoardError as e:
                 if e.status == 401 and attempt == 0 and agent in self.members:
                     self._refused_token(self.members[agent])

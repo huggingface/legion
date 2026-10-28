@@ -40,9 +40,9 @@ class BoardError(RuntimeError):
     """`retry_after`: seconds from the response's Retry-After header, when it had one."""
 
     def __init__(self, message: str, status: int | None = None, code: str | None = None,
-                 retry_after: float | None = None) -> None:
+                 retry_after: float | None = None, details: dict | None = None) -> None:
         super().__init__(message)
-        self.status, self.code, self.retry_after = status, code, retry_after
+        self.status, self.code, self.retry_after, self.details = status, code, retry_after, details
 
 
 def parse_retry_after(value: str | None, now: datetime | None = None) -> float | None:
@@ -142,7 +142,8 @@ def _error(r: httpx.Response, method: str, path: str) -> BoardError:
     code = err.get("code") if isinstance(err, dict) else None
     return BoardError(f"board: {method} {path.split('?')[0]}: HTTP {r.status_code}"
                       + (f" {code}: {msg}" if msg else ""), r.status_code, code,
-                      parse_retry_after(r.headers.get("retry-after")))
+                      parse_retry_after(r.headers.get("retry-after")),
+                      err.get("details") if isinstance(err, dict) else None)
 
 
 def _delay(attempt: int, r: httpx.Response | None, base: float) -> float:

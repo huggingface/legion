@@ -17,7 +17,17 @@ from dataclasses import replace
 from time import monotonic
 
 from flock.comms.board import BoardError
-from flock.comms.tools import Refused, as_id, author, brief, check_content, check_rate, thread_of
+from flock.comms.tools import (
+    Refused,
+    as_id,
+    author,
+    brief,
+    check_content,
+    check_rate,
+    reactions,
+    thread_of,
+    votes,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +42,14 @@ def poll_backoff(failures: int, base: float, retry_after: float | None = None,
     """Full jitter: uniform(0, min(cap, base * 2^failures)), never shorter than Retry-After."""
     d = rng(0.0, min(POLL_BACKOFF_MAX_S, base * 2 ** min(failures, 16)))
     return max(d, retry_after or 0.0)
+
+
+class DocConflict(Exception):
+    """edit_doc lost a race: the error result carries the current version and body."""
+
+    def __init__(self, message, version, body):
+        super().__init__(message)
+        self.version, self.body = version, body
 
 
 class ExtendedComms:
@@ -160,8 +178,27 @@ class ExtendedComms:
             return {"messages": sorted(messages, key=lambda x: x["id"])[-n:]}
         if entry == "comms:react":
             msg = await board.message(ident, as_id(args["msg_id"], "msg_id"))
-            await board.react(ident, msg["channel_id"], msg["id"], args["emoji"])
-            return {"reacted": msg["id"], "emoji": args["emoji"]}
+            after = await board.react(ident, msg["channel_id"], msg["id"], args["emoji"])
+            return {"reacted": msg["id"], "emoji": args["emoji"], **reactions(after)}
+        if entry == "comms:votes":
+            msg = await board.message(ident, as_id(args["msg_id"], "msg_id"))
+            return {"msg_id": msg["id"], **votes(msg)}
+        if entry in ("comms:doc", "comms:edit_doc"):
+            cid = (await self._channel_op(op, args.get("channel"))).c.channel_id
+            try:
+                if entry == "comms:doc":
+                    doc = await board.request(("GET", f"/v1/channels/{cid}/doc", {}), ident)
+                    return {"body": doc["body"], "version": doc["version"]}
+                doc = await board.request(("PUT", f"/v1/channels/{cid}/doc", {"json": {
+                    "body": args["body"], "base_version": args["base_version"]}}), ident)
+                return {"version": doc["version"]}
+            except BoardError as e:
+                if e.status == 404:  # the channel resolved, so the route is missing (older board)
+                    raise ValueError("board has no channel documents") from None
+                if e.code == "doc_conflict":
+                    current = (e.details or {}).get("current") or {}
+                    raise DocConflict(str(e), current.get("version"), current.get("body")) from None
+                raise
         raise ValueError("unknown board tool")
 
     def _extended_deliver(self, m, msg):
