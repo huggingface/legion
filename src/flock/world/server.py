@@ -60,6 +60,11 @@ log = logging.getLogger("flock.world")
 DEFAULT_PORT = 8765
 FAST_THREADS = 40  # tools that answer in well under a second, and hooks
 SLOW_THREADS = 64  # tools that block for seconds or minutes (`@tool(pool="slow")`)
+# Admission control (docs/world.md): a tool call is refused with 429 when the fast pool's oldest
+# queued call waited longer than this, or the slow pool holds its threads plus this many queued.
+FAST_MAX_WAIT_ENV, FAST_MAX_WAIT_S = "FLOCK_WORLD_FAST_MAX_WAIT_S", 2.0
+SLOW_QUEUE_ENV, SLOW_QUEUE = "FLOCK_WORLD_SLOW_QUEUE", 8
+RETRY_AFTER_ENV, RETRY_AFTER_S = "FLOCK_WORLD_RETRY_AFTER_S", 30.0
 
 
 WINDOW_S = 300.0  # /metrics: calls, latencies, bytes and queue waits over the last 5 minutes
@@ -287,6 +292,19 @@ def create_app(world: World, token: str | None) -> FastAPI:
             with queued_lock:
                 queued[pool].pop(key, None)
 
+    fast_max_wait = float(os.environ.get(FAST_MAX_WAIT_ENV) or FAST_MAX_WAIT_S)
+    slow_queue = int(os.environ.get(SLOW_QUEUE_ENV) or SLOW_QUEUE)
+    retry_after = float(os.environ.get(RETRY_AFTER_ENV) or RETRY_AFTER_S)
+
+    def overloaded(pool: str) -> str | None:
+        """Why a new call to `pool` is refused now, or None."""
+        stats = pool_stats()[pool]
+        if pool == "slow" and stats["in_flight"] >= stats["limit"] + slow_queue:
+            return f"{stats['in_flight']:.0f} slow calls running or queued"
+        if pool == "fast" and stats["queue_wait_oldest_s"] > fast_max_wait:
+            return f"calls wait {stats['queue_wait_oldest_s']:.1f} s for a thread"
+        return None
+
     def pool_stats() -> dict[str, dict[str, float]]:
         now = metrics.clock()
         with queued_lock:
@@ -340,11 +358,26 @@ def create_app(world: World, token: str | None) -> FastAPI:
     @app.post("/tools/{name}")
     async def call(name: str, request: Request) -> Response:
         t0 = metrics.clock()
-        resp = await _call(name, request)
+        pool = getattr(world, "pool", lambda _: "fast")(name)
+        # Decided from the path alone, before the body (an upload can be 100+ MB) is read.
+        if why := overloaded(pool if pool in limiters else "fast"):
+            metrics.overloaded += 1
+            n = 0
+            async for chunk in request.stream():  # drained unparsed: the client reads the 429
+                n += len(chunk)
+                if n > MAX_BYTES * 2:
+                    break
+            resp = _error("overloaded", f"world {world.name} is overloaded ({why}); retry in "
+                          f"{retry_after:g} s", 429, retry_after_s=retry_after)
+            resp.headers["Retry-After"] = str(math.ceil(retry_after))
+            latency = None
+        else:
+            resp = await _call(name, request)
+            latency = metrics.clock() - t0
         if name in served()["schemas"]:
             code = json.loads(resp.body)["error"]["code"] if isinstance(resp, JSONResponse) else None
-            metrics.call(name, metrics.clock() - t0, code,
-                         int(request.headers.get("content-length") or 0), len(resp.body))
+            metrics.call(name, latency, code, int(request.headers.get("content-length") or 0),
+                         len(resp.body))
         return resp
 
     async def _call(name: str, request: Request) -> Response:

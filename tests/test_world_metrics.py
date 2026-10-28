@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+from typing import ClassVar
+
+import httpx
 from fastapi.testclient import TestClient
 
-from flock.world import ToolError, World, tool
+from flock.world import ToolError, World, server, tool
 from flock.world.server import WINDOW_S, _Metrics, create_app
 
-from .test_world import SECRET
+from .test_world import SECRET, Served
 
 H = {"X-World-Token": SECRET, "X-Flock-Agent": "dev-0001"}
 
@@ -86,3 +91,82 @@ def test_metrics_window_and_percentiles_with_a_fake_clock():
     t = snap["tools"]["t"]
     assert (t["calls"], t["latency_p95_s"], t["calls_total"], t["errors_total"]) == (1, 2.0, 102, 11)
     assert snap["pools"]["slow"]["queue_wait_max_s"] == 0.5 and snap["uptime_s"] == 60 + WINDOW_S
+
+
+class Crowded(World):
+    name, version = "crowded", "1"
+    concurrent = True
+    capabilities: ClassVar[list[str]] = ["workspace-upload-v1"]
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.uploads = 0
+
+    @tool(pool="slow")
+    def slow(self) -> str:
+        """Blocks for up to 30 s."""
+        self.release.wait(30)
+        return "slow done"
+
+    @tool(pool="slow")
+    def push(self, path: str) -> str:
+        """An upload tool."""
+        return "pushed"
+
+    @tool
+    def quick(self) -> str:
+        """Blocks a fast thread for up to 30 s."""
+        self.release.wait(30)
+        return "quick done"
+
+    def manifest(self) -> dict:
+        m = super().manifest()
+        m["tools"][1]["x-flock-workspace"] = {"arg": "path"}
+        return m
+
+    def call_workspace(self, name, args, agent, snapshot):
+        self.uploads += 1
+        return "pushed"
+
+
+async def test_admission_refuses_a_full_pool_with_retry_after(monkeypatch):
+    monkeypatch.setattr(server, "SLOW_THREADS", 2)
+    monkeypatch.setattr(server, "FAST_THREADS", 1)
+    monkeypatch.setenv("FLOCK_WORLD_SLOW_QUEUE", "1")
+    monkeypatch.setenv("FLOCK_WORLD_FAST_MAX_WAIT_S", "0.3")
+    served = Served(Crowded())
+    try:
+        async with httpx.AsyncClient(base_url=served.url, headers=H, timeout=60) as c:
+            slow = [asyncio.create_task(c.post("/tools/slow", json={"args": {}})) for _ in range(3)]
+            for _ in range(100):  # 2 running + 1 queued: the slow pool is full
+                if (await c.get("/metrics")).json()["pools"]["slow"]["in_flight"] == 3:
+                    break
+                await asyncio.sleep(0.05)
+            r = await c.post("/tools/slow", json={"args": {}})
+            assert r.status_code == 429 and r.headers["Retry-After"] == "30"
+            assert r.json()["error"]["code"] == "overloaded"
+            assert r.json()["error"]["retry_after_s"] == 30
+            assert (await c.get("/manifest")).status_code == 200
+
+            async def garbage():  # not JSON: a 400 would mean the body was parsed
+                for _ in range(64):
+                    yield b"x" * 65536
+
+            r = await c.post("/tools/push", content=garbage())
+            assert r.status_code == 429 and served.world.uploads == 0
+            # The fast pool: one thread, busy; a queued call waits past 0.3 s.
+            quick = [asyncio.create_task(c.post("/tools/quick", json={"args": {}})) for _ in range(2)]
+            await asyncio.sleep(0.6)
+            r = await c.post("/tools/quick", json={"args": {}})
+            assert r.status_code == 429 and "wait" in r.json()["error"]["message"]
+            m = (await c.get("/metrics")).json()
+            assert m["overloaded_429_total"] == 3
+            assert m["tools"]["slow"]["errors_by_code"] == {"overloaded": 1}
+            assert m["pools"]["fast"]["queue_wait_oldest_s"] > 0.3
+            served.world.release.set()
+            assert all(r.status_code == 200 for r in await asyncio.gather(*slow, *quick))
+            r = await c.post("/tools/slow", json={"args": {}})  # admitted again
+            assert r.json() == {"ok": True, "result": "slow done"}
+    finally:
+        served.world.release.set()
+        served.close()
