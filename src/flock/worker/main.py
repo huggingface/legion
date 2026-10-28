@@ -247,10 +247,11 @@ class ControllerClient:
         self._slots = asyncio.Semaphore(max(1, max_concurrency))
         self._sleep = sleep or asyncio.sleep
         self.stats: Counter[str] = Counter()
-        # re-reads where the controller is (a host file on Slurm) after a transport error
+        # re-reads where the controller is (a host file on Slurm) after a transport error, and
+        # before every heartbeat (Worker.send_heartbeat), so a move is seen within one interval
         self.resolve_url = resolve_url
 
-    def _refresh_url(self) -> None:
+    def refresh_url(self) -> None:
         if self.resolve_url is None:
             return
         try:
@@ -277,7 +278,7 @@ class ControllerClient:
                 except httpx.TransportError as e:
                     err = e
             if err is not None:
-                self._refresh_url()
+                self.refresh_url()
             if r is not None and r.status_code not in RETRY_STATUSES:
                 r.raise_for_status()
                 return r
@@ -711,6 +712,8 @@ class Worker:
                                started=min(p[2] for p in prog))
 
     async def send_heartbeat(self) -> bool:
+        if (refresh := getattr(self.client, "refresh_url", None)) is not None:
+            refresh()  # a controller move is picked up here even before any call fails
         try:  # retried inside the client for most of an interval: the controller declares a
             # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
             resp = await self.client.heartbeat(self.heartbeat_payload(),
