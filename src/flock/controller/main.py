@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from starlette.responses import PlainTextResponse
 
 from flock.controller.api import Notifier, create_app
+from flock.controller.health import SAMPLE_S, Health
 from flock.controller.jobs import FakeJobsClient, HubJobsClient, JobsClient
 from flock.controller.reconcile import Settings, run_reconciler
 from flock.controller.state import DEFAULT_INTERVAL, StateSync, state_sync_from_env
@@ -138,6 +139,7 @@ class Built:
     state: StateSync | None
     settings: Settings
     halt: object = None  # () -> None: cancel the reconcile and sync loops (shutdown)
+    health: Health | None = None
     final_push_timeout: float = FINAL_PUSH_TIMEOUT
 
 
@@ -240,11 +242,17 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             except Exception:
                 log.exception("state push failed")
 
+    # World/provider probes and health snapshots (docs/health.md), next to follow_worlds
+    health = Health(store, token=token, secrets=env, jobs=jobs)
+    health_every = float(env.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
+
     loops: list[asyncio.Task] = []  # cancelled by `halt` on shutdown, before the final push
 
     async def background(notifier: Notifier) -> None:
         loops.append(asyncio.current_task())
         tasks = [asyncio.create_task(log_stats())]
+        if health_every > 0:
+            tasks.append(asyncio.create_task(health.run(health_every)))
         if env.get("FLOCK_WORLD_HOST_FILE"):
             tasks.append(asyncio.create_task(follow_worlds()))
         if state is not None:
@@ -265,7 +273,7 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
                      compute=compute)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
-    return Built(app, store, dep, jobs, state, settings, halt, timeout)
+    return Built(app, store, dep, jobs, state, settings, halt, timeout, health)
 
 
 def build_app():

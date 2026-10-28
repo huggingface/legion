@@ -358,6 +358,13 @@ class SlurmJobsClient:
                 return parts[0], parts[1] if len(parts) > 1 else ""
         return None
 
+    def state_by_name(self, name: str) -> str | None:
+        """squeue state of the job(s) named `name` (`world.slurm_job_name`): RUNNING when one
+        runs, else the first one's (PENDING, ...); None when none is queued."""
+        r = self._call("squeue", ["squeue", "-h", "-n", name, "-o", "%T"])
+        states = (r.stdout or "").split() if r.returncode == 0 else []
+        return "RUNNING" if "RUNNING" in states else (states[0] if states else None)
+
     def map_state(self, job_id: str, state: str, exit_code: str = "") -> JobState:
         word = state.split()[0].rstrip("+") if state else ""
         code = exit_code.split(":")[0] if exit_code else ""

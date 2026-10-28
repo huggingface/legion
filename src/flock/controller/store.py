@@ -164,6 +164,20 @@ CREATE TABLE IF NOT EXISTS agent_names (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agent_names_by_type ON agent_names (swarm, type, slot);
+CREATE TABLE IF NOT EXISTS health_samples (
+  swarm TEXT NOT NULL,
+  ts REAL NOT NULL,
+  res TEXT NOT NULL,
+  body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS health_by_swarm ON health_samples (swarm, res, ts);
+CREATE TABLE IF NOT EXISTS usage (
+  swarm TEXT NOT NULL,
+  hour TEXT NOT NULL,
+  type TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (swarm, hour, type)
+);
 """
 
 Row = dict[str, Any]
@@ -401,6 +415,8 @@ class Store:
             self._x("DELETE FROM grants WHERE swarm = ?", [name])
             self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
             self._x("DELETE FROM spec_history WHERE swarm = ?", [name])
+            self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
+            self._x("DELETE FROM usage WHERE swarm = ?", [name])
 
     # ----------------------------------------------------------------- grants (docs/live.md)
 
@@ -912,6 +928,40 @@ class Store:
     def launches_since(self, since: float) -> int:
         self._x("DELETE FROM launches WHERE ts < ?", [since])
         return self._one("SELECT COUNT(*) AS n FROM launches WHERE ts >= ?", [since])["n"]
+
+    # ----------------------------------------------------------------- health (docs/health.md)
+
+    def add_health_sample(self, swarm: str, ts: float, res: str, body: dict[str, Any],
+                          keep_s: float) -> None:
+        """Insert one snapshot and prune this resolution's samples older than `keep_s`."""
+        with self.transaction():
+            self._x("INSERT INTO health_samples (swarm, ts, res, body) VALUES (?, ?, ?, ?)",
+                    [swarm, ts, res, json.dumps(body, sort_keys=True)])
+            self._x("DELETE FROM health_samples WHERE res = ? AND ts < ?", [res, ts - keep_s])
+
+    def health_samples(self, swarm: str, res: str = "30s", since: float = 0.0,
+                       limit: int = 5000) -> list[Row]:
+        rows = self._q("SELECT ts, body FROM health_samples WHERE swarm = ? AND res = ? AND ts >= ? "
+                       "ORDER BY ts DESC LIMIT ?", [swarm, res, since, limit])
+        return [{"ts": r["ts"], "body": json.loads(r["body"])} for r in reversed(rows)]
+
+    def add_usage(self, swarm: str, hour: str, type_name: str, delta: dict[str, int]) -> None:
+        """Add token counts to the (swarm, UTC hour, type) total."""
+        with self.transaction():
+            row = self._one("SELECT body FROM usage WHERE swarm = ? AND hour = ? AND type = ?",
+                            [swarm, hour, type_name])
+            body = json.loads(row["body"]) if row else {}
+            for k, v in delta.items():
+                body[k] = body.get(k, 0) + v
+            self._x("INSERT INTO usage (swarm, hour, type, body) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(swarm, hour, type) DO UPDATE SET body = excluded.body",
+                    [swarm, hour, type_name, json.dumps(body, sort_keys=True)])
+
+    def usage(self, swarm: str, hour: str | None = None) -> list[Row]:
+        """Token totals per (hour, type), oldest first; one hour when given."""
+        rows = self._q("SELECT hour, type, body FROM usage WHERE swarm = ? AND (? IS NULL OR "
+                       "hour = ?) ORDER BY hour, type", [swarm, hour, hour])
+        return [{"hour": r["hour"], "type": r["type"], **json.loads(r["body"])} for r in rows]
 
     # ----------------------------------------------------------------- events
 
