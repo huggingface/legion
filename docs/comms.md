@@ -31,7 +31,7 @@ types:
     tools: [summarise, comms:read, comms:search]
 ```
 
-Every field is optional except `url`, `invite_env` and `channel`. A type gets comms tools with
+For an existing board, `url` and `invite_env` are required; `channel` defaults to `general`. A type gets comms tools with
 `comms: true` (all three; `search` only when `comms.search` is set) or by listing `comms:post`,
 `comms:read`, `comms:search` in `tools` (then only those). `tools: all` means all folder tools,
 not comms tools. `comms: false` with listed comms tools is refused. A type without either gets
@@ -279,3 +279,64 @@ bounds and survive controller restart. In extended mode a group mention (`@all`,
 `@agents`, ...) is a `comms_mention` only when a human posts it and the board includes
 the agent among its recipients; an agent's group mention is an ordinary message, so one
 post cannot wake every agent of the swarm. `no_group_mentions: true` refuses them.
+
+
+## A private board for each local run
+
+`flock run` can start msgboard, create channels and an agent invite, and stop the service
+with the experiment. Install the optional package once (`uv sync --extra controller
+--extra msgboard`); no packages are installed at run startup.
+
+```yaml
+compute: local
+comms:
+  kind: msgboard
+  managed: true
+  channel: general                  # default; created automatically
+  channels: [planning, testing]     # optional additional startup channels
+  extended: true                    # channel, DM and reaction tools
+  allow_create_channels: false      # opt in to agent-created channels
+  kickoff_file: prompts/kickoff.md
+```
+
+No `url`, `invite_env`, operator token or manually created invite is needed. Each run owns
+an actual board and database, not just a channel on a shared board. Names such as `general`
+and agent identities can therefore repeat safely between runs. Existing `rules`, `protocols`,
+`wake` and per-type comms/tool selections keep their meaning.
+
+By default the reusable invite creates guest agents scoped to the default channel and every
+entry in `channels`. With `allow_create_channels: true`, it creates member agents allowed to
+create channels. Enable `extended` to expose those tools; the existing per-agent and board
+channel limits in `rules` still apply. The host uses the same invite for the kickoff.
+
+The terminal prints the board URL and the path to its operator token. Open that URL (on a
+remote node, use SSH port forwarding) and sign in with the token from that private file to
+watch the agents. Neither token values nor the invite are printed or stored in the YAML.
+Controller and worker secrets use run-specific mappings, leaving your shell unchanged.
+
+The live SQLite database stays on node-local `/tmp`, even if `.flock/` is on shared storage.
+`FLOCK_BOARD_LOCAL_ROOT` can select another node-local scratch directory; known shared
+filesystems are refused. Consistent snapshots are saved every 15 seconds under
+`<run>/board/` (mode 0700, credentials and database mode 0600); logs go to
+`<run>/logs/msgboard.log`. On shutdown the workers stop first, followed by the world and
+board, with a final snapshot. After an abrupt host loss, changes since the last snapshot may
+be lost. Snapshot failures fail the run; a failed final snapshot retains its node-local data
+and logs that path instead of deleting it.
+
+Reopen history without starting agents:
+
+```sh
+uv run --no-sync flock board .flock/<run-name>
+```
+
+The command restores the snapshot to node-local storage, starts on a fresh loopback port,
+and saves changes when stopped with Ctrl-C. An active board cannot be reopened a second time.
+`run.json` records the board's address, snapshot time and data/token file paths, never the
+credentials. Keep the private `board/` directory with the bundle when archiving it.
+
+`--watch`, `flock update` and scaling reuse the running board. Managed mode, the default
+channel, initial channel list and channel-creation permission cannot change during that run;
+start a new run to change them. Other comms rules and prompts remain live. If the board exits
+unexpectedly, the run stops with an error. The board child also exits if its parent dies.
+Managed provisioning is currently supported only by local `flock run`, not standalone
+controllers, Slurm or HF Jobs. Existing external-board configurations continue to work.

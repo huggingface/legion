@@ -194,3 +194,12 @@ Known gaps: a worker that crashes is noticed by the reconcile loop's usual rules
 worker that never heartbeats, 90 s after its last heartbeat), not at once; `limits.budget_usd`
 is the only spec limit that stops a run (`alive` and `spawned_total` limit spawning, as on jobs);
 tested on Linux, not yet on macOS; Windows is not supported (process groups).
+
+
+## Automatic experiment boards
+
+A spec with `comms: {managed: true}` gets a fresh msgboard per run, with `general` as its
+default channel. Install the `msgboard` extra once; no board URL or invite setup is needed.
+See [managed boards](comms.md#a-private-board-for-each-local-run) for additional channels,
+permissions, snapshots, dashboard access and `flock board <run-dir>` to reopen history.
+The live database is node-local and the retained snapshot is under the run's `board/`.
