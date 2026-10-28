@@ -16,12 +16,14 @@ import contextlib
 import logging
 import os
 import signal
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from starlette.responses import PlainTextResponse
 
 from flock.controller.api import Notifier, create_app
+from flock.controller.health import SAMPLE_S, Health
 from flock.controller.jobs import FakeJobsClient, HubJobsClient, JobsClient
 from flock.controller.reconcile import Settings, run_reconciler
 from flock.controller.state import DEFAULT_INTERVAL, StateSync, state_sync_from_env
@@ -139,6 +141,7 @@ class Built:
     settings: Settings
     halt: object = None  # () -> None: cancel the reconcile and sync loops (shutdown)
     final_push_timeout: float = FINAL_PUSH_TIMEOUT
+    health: Health | None = None
 
 
 WORLD_FOLLOW_INTERVAL = 15.0  # s between reads of FLOCK_WORLD_HOST_FILE
@@ -241,11 +244,18 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             except Exception:
                 log.exception("state push failed")
 
+    # World/provider probes and health snapshots (docs/health.md), next to follow_worlds
+    run = env.get("FLOCK_RUN") or env.get("FLOCK_STATE_URL", "").rstrip("/").rsplit("/", 1)[-1]
+    health = Health(store, token=token, secrets=env, jobs=jobs, run=run or None)
+    health_every = float(env.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
+
     loops: list[asyncio.Task] = []  # cancelled by `halt` on shutdown, before the final push
 
     async def background(notifier: Notifier) -> None:
         loops.append(asyncio.current_task())
         tasks = [asyncio.create_task(log_stats())]
+        if health_every > 0:
+            tasks.append(asyncio.create_task(health.run(health_every)))
         if env.get("FLOCK_WORLD_HOST_FILE"):
             tasks.append(asyncio.create_task(follow_worlds()))
         if state is not None:
@@ -264,9 +274,9 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             t.cancel()
 
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
-                     compute=compute)
+                     compute=compute, health=health)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
-    return Built(app, store, dep, jobs, state, settings, halt, timeout)
+    return Built(app, store, dep, jobs, state, settings, halt, timeout, health=health)
 
 
 def build_app():
@@ -346,6 +356,11 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
             s.should_exit = True
         if b.halt is not None:
             b.halt()
+        if b.health is not None:  # last snapshot, the open hour's rollups, run.json ended
+            try:
+                await asyncio.to_thread(b.health.close, time.time())
+            except Exception:
+                log.exception("health close failed")
         await final_push(b)
         _, pending = await asyncio.wait(tasks, timeout=GRACEFUL_SHUTDOWN + 5)
         for t in pending:

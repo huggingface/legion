@@ -101,6 +101,17 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
         assert "drained; exiting" in log.read_text()  # drained, not killed
     assert not (tmp_path / ".flock" / "current").exists()
     assert "Authorization" not in (run / "run.json").read_text()
+    # health (docs/health.md): the last snapshot, the hour's rollups and the viewer's run.json
+    ctl = run / "controller"
+    latest = json.loads((ctl / "metrics" / "hello" / "latest.json").read_text())
+    assert latest["body"]["types"]["writer"]["by_state"], latest
+    assert sum(t["input"] for t in latest["body"]["tokens"]["by_type"].values()) > 0
+    turns: dict[str, int] = {}  # summed: the run may straddle an hour
+    for hour in (ctl / "rollups" / "hello").glob("*.jsonl"):
+        for x in map(json.loads, hour.read_text().splitlines()):
+            turns[x["agent"]] = turns.get(x["agent"], 0) + x["turns"]
+    assert turns == dict.fromkeys(AGENTS, 1)
+    assert json.loads((ctl / "run.json").read_text())["status"] == "ended"
 
 
 def test_flock_run_second_terminal_and_ctrl_c(tmp_path, fake_server):

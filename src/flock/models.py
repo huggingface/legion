@@ -152,6 +152,9 @@ class ProviderSpec(BaseModel):
     # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
     # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
     auth: Literal["x-api-key", "bearer"] | None = None
+    # Scrape `<server root>/metrics` (vLLM Prometheus text) of each base URL into the swarm's
+    # health snapshots: num_requests_waiting / running, KV cache usage (docs/health.md).
+    metrics: bool = False
 
     @field_validator("api_key_env")
     @classmethod
@@ -398,6 +401,9 @@ class WorldSpec(BaseModel):
     # HMAC(secret, origin). A worker sends its secret only when its own HMAC matches.
     credential_origin: str | None = None
     credential_id: str | None = None
+    # The world's Slurm job name, when it runs as one: health shows its squeue state, so a
+    # world waiting for a node (PENDING) is told apart from a crashed one (docs/health.md).
+    slurm_job_name: str | None = None
 
     @field_validator("command", mode="before")
     @classmethod
