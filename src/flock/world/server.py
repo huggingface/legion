@@ -77,6 +77,12 @@ def redact(value: Any, secrets: list[str] | None = None) -> Any:
     return json.loads(text)
 
 
+def _ok_body(result: Any) -> bytes:
+    """The success envelope for `result`, serialized and redacted (in a worker thread)."""
+    return json.dumps({"ok": True, "result": redact(json.loads(json.dumps(result, default=str)))}
+                      ).encode()
+
+
 def _error(code: str, message: str, status: int = 200) -> JSONResponse:
     return JSONResponse({"ok": False, "error": {"code": code, "message": message}},
                         status_code=status)
@@ -173,7 +179,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
                 data.extend(chunk)
                 if len(data) > limit:
                     return _error("bad_request", "tool request is too large", 413)
-            body = json.loads(data)
+            body = await asyncio.to_thread(json.loads, data)  # MBs for an upload: off the loop
         except ValueError:
             return _error("bad_request", "the body must be JSON: {\"args\": {...}}", 400)
         args = body.get("args") if isinstance(body, dict) else None
@@ -205,7 +211,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
                         return _error("cancelled", "the caller disconnected", 499)
                 else:
                     result = await result
-            result = redact(json.loads(json.dumps(result, default=str)))
+            out = await asyncio.to_thread(_ok_body, result)
         except ToolError as e:
             return _error(e.code, redact(e.message))
         except Exception:
@@ -214,7 +220,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
             ref = uuid.uuid4().hex[:8]
             log.exception("tool %s failed for %s (error id %s)", name, agent.name, ref)
             return _error("internal", f"the tool failed with an internal error (error id {ref})")
-        return {"ok": True, "result": result}
+        return Response(out, media_type="application/json")
 
     @app.post("/hooks")
     async def hooks(request: Request) -> dict:
