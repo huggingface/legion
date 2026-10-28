@@ -300,24 +300,28 @@ lanes.outbox("comment", drain=post).put(key=pr, payload=text)   # post(key, payl
   are `transient` (the service is overloaded) and which `final` (retrying cannot help).
 - Breaker: 3 transient failures within 15 minutes trip the lane to one slot and at least 5 s
   between writes; after 10 minutes without one it returns to its settings
-  (`Lane(trip_after=, trip_window_s=, trip_gap_s=, quiet_s=)`).
+  (`Lane(trip_after=, trip_window_s=, trip_gap_s=, quiet_s=)`). `Lanes(breaker_groups=[("push",
+  "merge")])` gives lanes one shared breaker: a failure in either trips both.
 - Pause: `lane.paused = True` or the `paused(lane)` callback; `hold()` then waits until its
   deadline and raises `LaneBusy` (`pausable=False` ignores the pause).
 - `lane.slots`, `lane.gap_s` and `lane.paused` are plain attributes; `lane.configure(slots=,
   gap_s=)` changes them and wakes waiters.
 - Outbox: writes that must happen eventually. Stored in `<dir>/outbox-<lane>.jsonl` (archive it
   with the world state), drained by a background thread holding the lane's slots; payloads
-  queued for the same key while it waits go out as one write (`drain` gets the list).
-  Transient failures retry forever with doubling backoff (5 s to 10 min); only "ok" and
-  "final" remove payloads. `lanes.close()` stops the thread; the file keeps the rest.
+  queued for the same key while it waits go out as one write (`drain` gets the list, up to
+  `max_batch` payloads and `max_chars` characters). Transient failures retry forever with
+  doubling backoff (5 s to 10 min); only "ok" and "final" remove payloads; "split" retries
+  that key's payloads one per write. `lanes.close()` stops the thread; the file keeps the rest.
 - `lanes.metrics()` per lane: `slots`, `effective_slots`, `in_flight`, `waits_total`,
   `wait_s_total`, `ok`, `transient`, `final`, `tripped`, `paused`, `outbox_depth`,
   `outbox_oldest_age_s`.
 
 chatbot4 uses `push` (create, push, ready and close PRs; `CHATBOT_HUB_WRITE_SLOTS`), `merge`
 (`CHATBOT_MERGE_HUB_SLOTS`) and `comment` (review comments through the outbox,
-`CHATBOT_HUB_OUTBOX_GAP_S`); `git_error`/`hub_error` (where "vote failed: transaction was
-aborted" lands) count as transient, `pr_closed`/`pr_merged` as final; the pause file pauses
+`CHATBOT_HUB_OUTBOX_GAP_S`); `push` and `merge` share one breaker. `git_error`/`hub_error`
+(where "vote failed: transaction was aborted" lands) count as transient, `pr_closed`/`pr_merged`
+as final, and so does a single comment the Hub refuses with a 4xx other than 429 (counted in
+`hub_comments_rejected_total`); joined comments it refuses are split. The pause file pauses
 `push` and `merge` (closes still go through).
 
 **Parked mode.** `flock world serve` binds its port first and builds the world in a background

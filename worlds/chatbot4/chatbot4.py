@@ -155,7 +155,7 @@ class Chatbot4World(World):
         self.save_s, self.saved_at = 0.0, self.db.stat().st_mtime if self.db.exists() else time.time()
         self.state_bytes = self.db.stat().st_size if self.db.exists() else 0
         self.budget_refusals = []  # unix times of open_budget refusals (last WINDOW seconds)
-        self.stale_adoptions = self.hub_busy_total = 0
+        self.stale_adoptions = self.hub_busy_total = self.comments_rejected = 0
         self.counts_lock = threading.Lock()  # a leaf lock: the counters above, from tool threads
         self.repo_id = repo_id = os.environ.get("CHATBOT_REPO", "cmpatino/chatbot-swarm")
         self.repo = repository or Repository(self.ws / "repo.git",
@@ -177,7 +177,8 @@ class Chatbot4World(World):
         # Admin pauses (POST /admin/pause) apply per lane; the pause flag pauses push and merge.
         self.lanes = Lanes({"push": Lane(), "merge": Lane(), "comment": Lane()}, dir=self.ws,
                            paused=lambda lane: self.paused(lane) or (
-                               lane in ("push", "merge") and self._prs_paused()))
+                               lane in ("push", "merge") and self._prs_paused()),
+                           breaker_groups=[("push", "merge")])  # both move refs: "vote failed" hits both
         for lane, env, default in (("push", "CHATBOT_HUB_WRITE_SLOTS", "1"),
                                    ("merge", "CHATBOT_MERGE_HUB_SLOTS", "1"), ("comment", None, "1")):
             self.lanes[lane].configure(slots=self.knob(
@@ -244,16 +245,28 @@ class Chatbot4World(World):
 
     def _post(self, pr, texts):
         """Outbox drain: post the queued comments of PR pr as one Hub comment (the caller holds
-        a comment lane slot). Returns "ok", "transient" or "final" (closed or merged)."""
+        a comment lane slot). Returns "ok", "transient", "final" (closed or merged, or the Hub
+        refused a single comment with a 4xx other than 429) or "split" (it refused the joined
+        comments: post them one by one)."""
         try:
             self.repo.hub.comment(pr, COMMENT_SEPARATOR.join(texts))
             return "ok"
         except Exception as exc:  # noqa: BLE001 -- retried later, never raised to a tool call
             failure = getattr(exc, "code", type(exc).__name__)
+            status = getattr(exc, "status", None)
         if failure in FINAL_CODES:  # the PR is closed or merged: no point retrying
             self._mark_hub_final(pr, failure)
             log.warning("hub_outbox: dropped %d comment(s) on PR #%s: already %s on the Hub",
                         len(texts), pr, failure[3:])
+            return "final"
+        if isinstance(status, int) and 400 <= status < 500 and status != 429:
+            if len(texts) > 1:
+                log.warning("hub_outbox: Hub refused %d joined comments on PR #%s (HTTP %s); "
+                            "posting them one by one", len(texts), pr, status)
+                return "split"
+            self._count("comments_rejected")
+            log.warning("hub_outbox: dropped a comment on PR #%s: the Hub refused it (HTTP %s, "
+                        "%d chars)", pr, status, len(texts[0]))
             return "final"
         log.warning("hub_outbox: comment on PR #%s failed (%s)", pr, failure)
         return "transient"
@@ -343,6 +356,7 @@ class Chatbot4World(World):
         lanes = {f"lane_{lane}_{k}": v for lane, m in self.lanes.metrics().items() for k, v in m.items()}
         return {**out, **lanes, "stale_lease_adoptions_total": self.stale_adoptions,
                 "hub_busy_total": self.hub_busy_total,
+                "hub_comments_rejected_total": self.comments_rejected,
                 "save_duration_s": self.save_s, "save_age_s": now - self.saved_at,
                 "state_bytes": self.state_bytes}
 
@@ -531,10 +545,10 @@ class Chatbot4World(World):
         if self._prs_paused() or any(map(self.paused, lanes)):
             raise ToolError(PAUSED, "paused")
 
-    def _busy(self, agent, what, pr=None, reason="slot_wait"):
+    def _busy(self, agent, what, pr=None, reason="slot_wait", retry_after_s=60):
         log.warning("hub_busy: refused %s for agent=%s pr=%s reason=%s", what, agent.name, pr, reason)
         self._count("hub_busy_total")
-        raise ToolError(BUSY, "hub_busy", retry_after_s=60)
+        raise ToolError(BUSY, "hub_busy", retry_after_s=retry_after_s)
 
     @staticmethod
     def _outcome(exc):
@@ -565,7 +579,7 @@ class Chatbot4World(World):
                     raise
                 slot.ok()
         except LaneBusy as busy:
-            self._busy(agent, what, pr, reason=busy.reason)
+            self._busy(agent, what, pr, reason=busy.reason, retry_after_s=busy.retry_after_s)
 
     def _create_gap(self, agent, deadline):
         """Reserve the next create_pull_request time, CHATBOT_PR_CREATE_GAP_S after the last

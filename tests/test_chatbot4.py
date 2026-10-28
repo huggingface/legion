@@ -1997,7 +1997,8 @@ def test_metrics_report_prs_budget_outbox_and_saves(setup):
                        "outbox_oldest_age_s")}
     assert set(m) == {"open_prs", "opens_last_hour", "merges_last_hour", "open_budget_limit",
                       "budget_refusals_last_hour", "parked_drafts", "stale_lease_adoptions_total",
-                      "hub_busy_total", "save_duration_s", "save_age_s", "state_bytes", *lanes}
+                      "hub_busy_total", "hub_comments_rejected_total", "save_duration_s",
+                      "save_age_s", "state_bytes", *lanes}
     assert all(isinstance(v, int | float) for v in m.values())
     assert (m["open_prs"], m["opens_last_hour"], m["parked_drafts"]) == (1, 1, 0)
     assert m["state_bytes"] == (world.ws / "prs.json").stat().st_size and m["save_age_s"] < 60
@@ -2014,6 +2015,8 @@ def test_vote_failures_trip_the_push_lane_and_comments_survive_a_restart(setup, 
     assert exc.value.code == "hub_busy" and exc.value.retry_after_s == 60
     m = world.lanes.metrics()["push"]
     assert (m["transient"], m["tripped"], m["slots"], m["effective_slots"]) == (3, 1, 2, 1)
+    assert world.lanes.metrics()["merge"]["tripped"] == 1  # push and merge share one breaker
+    assert world.lanes.metrics()["comment"]["tripped"] == 0
     rec = submit(world, clone, pr=1)  # the parked draft lands on the tripped lane
     assert world.lanes.metrics()["push"]["ok"] == 1  # the parked attempt counts no outcome
 
@@ -2040,3 +2043,26 @@ def test_vote_failures_trip_the_push_lane_and_comments_survive_a_restart(setup, 
     lane.clock = lambda: time.monotonic() + 601
     m = world.lanes.metrics()["push"]
     assert (m["tripped"], m["effective_slots"]) == (0, 2)
+
+
+def test_a_comment_the_hub_refuses_is_dropped_and_joined_ones_are_split(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    hub = world.repo.hub
+    real = hub.comment
+
+    def picky(pr, text):
+        if chatbot4.COMMENT_SEPARATOR in text or "spam" in text:
+            error = ToolError("Hub request failed; retry later", "hub_error")
+            error.status = 400
+            raise error
+        real(pr, text)
+
+    monkeypatch.setattr(hub, "comment", picky)
+    with world.lanes.hold("comment"):  # three comments pile up and are joined
+        for who, text in (("birch", "fine"), ("pine", "spam"), ("oak", "good")):
+            world.review_pr(Agent(who), rec["pr"], rec["head_sha"], "approve", text)
+    assert _wait(lambda: world.outbox.depth()[0] == 0)
+    assert [text.split("\n\n")[1] for _, text in hub.comments] == ["fine", "good"]
+    assert world.metrics()["hub_comments_rejected_total"] == 1
+    assert world.lanes.metrics()["comment"]["final"] == 1

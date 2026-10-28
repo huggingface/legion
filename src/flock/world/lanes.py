@@ -37,24 +37,54 @@ class LaneBusy(Exception):
         self.lane, self.reason, self.retry_after_s = lane, reason, retry_after_s
 
 
+class Breaker:
+    """Transient failures of one lane, or of a group of lanes that trip together."""
+
+    def __init__(self, trip_after: int, trip_window_s: float, quiet_s: float) -> None:
+        self.trip_after, self.trip_window_s, self.quiet_s = trip_after, trip_window_s, quiet_s
+        self.name = ""
+        self.lock = threading.Lock()  # a leaf lock: taken with a lane's cond held
+        self.failures = collections.deque()  # clock times of recent transient failures
+        self.tripped = False
+
+    def failure(self, now: float) -> None:
+        with self.lock:
+            self.failures.append(now)
+            while self.failures and self.failures[0] < now - self.trip_window_s:
+                self.failures.popleft()
+            if not self.tripped and len(self.failures) >= self.trip_after:
+                self.tripped = True
+                log.warning("lanes %s: tripped after %d transient failures in %.0f s; 1 slot and "
+                            "a gap until %.0f quiet s", self.name, len(self.failures),
+                            self.trip_window_s, self.quiet_s)
+
+    def is_tripped(self, now: float) -> bool:
+        """Ends a trip after quiet_s without a transient failure."""
+        with self.lock:
+            if self.tripped and now - self.failures[-1] >= self.quiet_s:
+                self.tripped = False
+                self.failures.clear()
+                log.warning("lanes %s: recovered after %.0f quiet s", self.name, self.quiet_s)
+            return self.tripped
+
+
 class Lane:
     """One kind of external write.
 
     Breaker: `trip_after` transient failures within `trip_window_s` trip the lane to
     min(slots, 1) slot and at least `trip_gap_s` between writes; after `quiet_s` without a
-    transient failure it returns to `slots` and `gap_s`."""
+    transient failure it returns to `slots` and `gap_s`. `Lanes(breaker_groups=)` makes lanes
+    share one breaker (the first lane's trip_after, trip_window_s and quiet_s)."""
 
     def __init__(self, slots: int = 1, gap_s: float = 0.0, *, trip_after: int = 3,
                  trip_window_s: float = 900.0, trip_gap_s: float = 5.0, quiet_s: float = 600.0,
                  retry_after_s: float = 60.0) -> None:
         self.slots, self.gap_s, self.paused = slots, gap_s, False
-        self.trip_after, self.trip_window_s = trip_after, trip_window_s
-        self.trip_gap_s, self.quiet_s, self.retry_after_s = trip_gap_s, quiet_s, retry_after_s
+        self.breaker = Breaker(trip_after, trip_window_s, quiet_s)
+        self.trip_gap_s, self.retry_after_s = trip_gap_s, retry_after_s
         self.name, self.clock, self.paused_fn = "", time.monotonic, None  # set by Lanes
         self.cond = threading.Condition()
         self.in_flight, self.last_at = 0, float("-inf")
-        self.failures = collections.deque()  # clock times of recent transient failures
-        self.tripped = False
         self.stats = {"waits_total": 0, "wait_s_total": 0.0, "ok": 0, "transient": 0, "final": 0}
 
     def configure(self, slots: int | None = None, gap_s: float | None = None) -> None:
@@ -69,13 +99,8 @@ class Lane:
         return self.paused or bool(self.paused_fn and self.paused_fn(self.name))
 
     def _effective(self, now):
-        """(slots, gap_s) in force now (cond held); ends a trip after quiet_s."""
-        if self.tripped and now - self.failures[-1] >= self.quiet_s:
-            self.tripped = False
-            self.failures.clear()
-            log.warning("lane %s: recovered after %.0f quiet s; slots=%s gap_s=%s",
-                        self.name, self.quiet_s, self.slots, self.gap_s)
-        if self.tripped:
+        """(slots, gap_s) in force now (cond held)."""
+        if self.breaker.is_tripped(now):
             return min(self.slots, 1), max(self.gap_s, self.trip_gap_s)
         return self.slots, self.gap_s
 
@@ -111,23 +136,16 @@ class Lane:
         """Count an outcome: "ok", "transient" (feeds the breaker) or "final"."""
         with self.cond:
             self.stats[kind] += 1
-            if kind != "transient":
-                return
-            now = self.clock()
-            self.failures.append(now)
-            while self.failures and self.failures[0] < now - self.trip_window_s:
-                self.failures.popleft()
-            if not self.tripped and len(self.failures) >= self.trip_after:
-                self.tripped = True
-                log.warning("lane %s: tripped after %d transient failures in %.0f s; 1 slot, "
-                            "%.0f s gap until %.0f quiet s", self.name, len(self.failures),
-                            self.trip_window_s, max(self.gap_s, self.trip_gap_s), self.quiet_s)
+            if kind == "transient":
+                self.breaker.failure(self.clock())
 
     def metrics(self) -> dict:
         with self.cond:
-            slots, _ = self._effective(self.clock())
+            now = self.clock()
+            slots, _ = self._effective(now)
             return {"slots": self.slots, "effective_slots": slots, "in_flight": self.in_flight,
-                    **self.stats, "tripped": int(self.tripped), "paused": int(self.is_paused())}
+                    **self.stats, "tripped": int(self.breaker.is_tripped(now)),
+                    "paused": int(self.is_paused())}
 
 
 class Slot:
@@ -149,15 +167,16 @@ class Outbox:
     """Writes for one lane that must happen eventually, drained by a background thread.
 
     `drain(key, payloads)` makes one write of the queued payloads of `key` (more than one when
-    they piled up: the world joins them) and returns "ok", "transient" or "final" (an exception
-    counts as transient). Transient failures retry forever with capped doubling backoff; only
+    they piled up: the world joins them; at most max_batch of them and max_chars characters,
+    or one) and returns "ok", "transient" or "final" (an exception counts as transient), or
+    "split": retry the key's payloads one per write (e.g. the service refused a joined write). Transient failures retry forever with capped doubling backoff; only
     ok and final remove payloads. Stored as JSON lines in `path` (keys: str or int), compacted
     on load and when mostly settled."""
 
     def __init__(self, lanes: Lanes, name: str, path: Path, drain, backoff=(5.0, 600.0),
-                 max_batch: int = 10) -> None:
+                 max_batch: int = 10, max_chars: int = 60_000) -> None:
         self.lanes, self.name, self.path, self.drain = lanes, name, path, drain
-        self.backoff, self.max_batch = backoff, max_batch
+        self.backoff, self.max_batch, self.max_chars = backoff, max_batch, max_chars
         self.lock = threading.Lock()
         self.entries = {}  # key -> {"payloads", "queued_at", "tries", "next_at"} in put order
         self.lines = 0  # lines in the file
@@ -168,7 +187,8 @@ class Outbox:
             self.thread.start()
 
     def _entry(self, key, ts):
-        return self.entries.setdefault(key, {"payloads": [], "queued_at": ts, "tries": 0, "next_at": 0.0})
+        return self.entries.setdefault(key, {"payloads": [], "queued_at": ts, "tries": 0,
+                                             "next_at": 0.0, "batch": self.max_batch})
 
     def _load(self):
         if self.path.exists():
@@ -221,6 +241,9 @@ class Outbox:
             entry = self.entries.get(key)
             if entry is None:
                 return
+            if kind == "split":
+                entry["batch"] = 1
+                return
             if kind == "transient":
                 entry["tries"] += 1
                 delay = min(self.backoff[1], self.backoff[0] * 2 ** (entry["tries"] - 1))
@@ -232,6 +255,8 @@ class Outbox:
                 log.warning("lane %s outbox: dropped %d payload(s) for %r: final", self.name, n, key)
             del entry["payloads"][:n]
             entry["tries"], entry["next_at"] = 0, 0.0
+            if kind != "ok":
+                entry["batch"] = 1  # the rest of a refused batch goes one by one
             if not entry["payloads"]:
                 del self.entries[key]
             self._append({"done": key, "n": n})
@@ -239,33 +264,61 @@ class Outbox:
             if self.lines > 2 * pending + 1000:
                 self._compact()
 
+    def _batch(self, key):
+        """The payloads of key for the next write (lock held): oldest first, within the
+        entry's batch size and max_chars, at least one."""
+        entry = self.entries.get(key)
+        if entry is None:
+            return []
+        out, chars = [], 0
+        for payload in entry["payloads"][:entry["batch"]]:
+            chars += len(payload if isinstance(payload, str) else json.dumps(payload))
+            if out and chars > self.max_chars:
+                break
+            out.append(payload)
+        return out
+
     def _run(self):
         while not self.stop.is_set():
-            with self.lock:
-                now = self.lanes.wall()
-                due = [(e["queued_at"], i, k) for i, (k, e) in enumerate(self.entries.items())
-                       if e["next_at"] <= now]
-                key = min(due)[2] if due else None
-            if key is None:
-                self.wake.wait(POLL_S)
-                self.wake.clear()
-                continue
             try:
-                with self.lanes.hold(self.name, deadline=self.lanes.clock() + 1.0) as slot:
-                    with self.lock:  # taken with the slot held: joins what piled up meanwhile
-                        payloads = list(self.entries.get(key, {"payloads": []})["payloads"][:self.max_batch])
-                    if not payloads:
-                        continue
-                    try:
-                        kind = self.drain(key, payloads) or "ok"
-                    except Exception:
-                        log.exception("lane %s outbox: drain failed", self.name)
-                        kind = "transient"
-                    slot.ok() if kind == "ok" else slot.fail(kind)
-            except LaneBusy:
+                self._step()
+            except Exception:  # keep the thread alive: a disk error, a bad drain result
+                log.exception("lane %s outbox: drain loop failed", self.name)
                 self.stop.wait(POLL_S)
-                continue
-            self._settle(key, len(payloads), kind)
+
+    def _step(self):
+        with self.lock:
+            now = self.lanes.wall()
+            due = [(e["queued_at"], i, k) for i, (k, e) in enumerate(self.entries.items())
+                   if e["next_at"] <= now]
+            key = min(due)[2] if due else None
+        if key is None:
+            self.wake.wait(POLL_S)
+            self.wake.clear()
+            return
+        try:
+            with self.lanes.hold(self.name, deadline=self.lanes.clock() + 1.0) as slot:
+                with self.lock:  # taken with the slot held: joins what piled up meanwhile
+                    payloads = self._batch(key)
+                if not payloads:
+                    return
+                try:
+                    kind = self.drain(key, payloads) or "ok"
+                except Exception:
+                    log.exception("lane %s outbox: drain failed", self.name)
+                    kind = "transient"
+                if kind not in ("ok", "transient", "final", "split"):
+                    raise ValueError(f"drain returned {kind!r}")
+                if kind == "split" and len(payloads) == 1:
+                    kind = "transient"
+                if kind == "ok":
+                    slot.ok()
+                elif kind != "split":
+                    slot.fail(kind)
+        except LaneBusy:
+            self.stop.wait(POLL_S)
+            return
+        self._settle(key, len(payloads), kind)
 
     def close(self, timeout: float = 5.0) -> None:
         self.stop.set()
@@ -276,14 +329,22 @@ class Outbox:
 
 class Lanes:
     """Named lanes sharing a clock, an optional `paused(name)` callback and a state dir for
-    outboxes (`<dir>/outbox-<name>.jsonl`)."""
+    outboxes (`<dir>/outbox-<name>.jsonl`). `breaker_groups`: tuples of lane names that share
+    one breaker (writes that fail together, e.g. two kinds that move the same refs)."""
 
     def __init__(self, lanes: dict[str, Lane], dir: str | Path | None = None,
-                 clock=time.monotonic, wall=time.time, paused=None) -> None:
+                 clock=time.monotonic, wall=time.time, paused=None,
+                 breaker_groups: list[tuple[str, ...]] = ()) -> None:
         self.lanes, self.dir, self.clock, self.wall = lanes, Path(dir) if dir else None, clock, wall
         self.outboxes: dict[str, Outbox] = {}
         for name, lane in lanes.items():
             lane.name, lane.clock, lane.paused_fn = name, clock, paused
+            lane.breaker.name = name
+        for group in breaker_groups:  # a transient failure in any of them trips them all
+            shared = lanes[group[0]].breaker
+            shared.name = "+".join(group)
+            for name in group[1:]:
+                lanes[name].breaker = shared
 
     def __getitem__(self, name: str) -> Lane:
         return self.lanes[name]

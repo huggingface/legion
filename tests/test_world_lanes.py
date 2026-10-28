@@ -159,3 +159,51 @@ def test_outbox_put_while_draining_keeps_the_new_payload(tmp_path):
     assert _wait(lambda: box.depth()[0] == 0)
     assert calls == [["first"], ["second"]]
     lanes.close()
+
+
+def test_breaker_group_trips_all_its_lanes():
+    clock = Clock()
+    lanes = Lanes({"push": Lane(slots=2), "merge": Lane(slots=2), "comment": Lane(slots=2)},
+                  clock=clock, wall=clock, breaker_groups=[("push", "merge")])
+    for name in ("push", "merge", "push"):
+        with lanes.hold(name) as slot:
+            slot.fail("transient")
+    m = lanes.metrics()
+    assert [m[n]["tripped"] for n in ("push", "merge", "comment")] == [1, 1, 0]
+    assert m["merge"]["effective_slots"] == 1 and m["comment"]["effective_slots"] == 2
+    clock.t += 600
+    assert lanes.metrics()["merge"]["tripped"] == 0
+
+
+def test_outbox_load_skips_a_truncated_last_line(tmp_path):
+    lanes = Lanes({"comment": Lane()}, dir=tmp_path)
+    lanes.outbox("comment").put(1, "kept")
+    with open(tmp_path / "outbox-comment.jsonl", "a") as out:
+        out.write('{"put": 2, "payl')  # cut by a crash
+    restarted = Lanes({"comment": Lane()}, dir=tmp_path)
+    box = restarted.outbox("comment")
+    assert {k: e["payloads"] for k, e in box.entries.items()} == {1: ["kept"]}
+    box.put(3, "after")  # the rewritten file has no cut line left
+    again = Lanes({"comment": Lane()}, dir=tmp_path).outbox("comment")
+    assert {k: e["payloads"] for k, e in again.entries.items()} == {1: ["kept"], 3: ["after"]}
+
+
+def test_drainer_survives_bad_results_and_batches_respect_max_chars(tmp_path):
+    lanes = Lanes({"comment": Lane()}, dir=tmp_path)
+    box = lanes.outbox("comment", max_chars=10)
+    for text in ("aaaaaa", "bbbbbb", "cc"):
+        box.put(1, text)
+    lanes.close()
+    calls, results = [], ["weird", "ok", "split", "ok", "ok"]
+
+    def drain(key, payloads):
+        calls.append(payloads)
+        return results.pop(0)
+
+    lanes = Lanes({"comment": Lane()}, dir=tmp_path)
+    box = lanes.outbox("comment", drain=drain, max_chars=10)
+    assert _wait(lambda: box.depth()[0] == 0)
+    assert box.thread.is_alive()
+    # max_chars keeps "bbbbbb" out of the first write; "split" sends the rest one by one
+    assert calls == [["aaaaaa"], ["aaaaaa"], ["bbbbbb", "cc"], ["bbbbbb"], ["cc"]]
+    lanes.close()
