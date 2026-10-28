@@ -150,6 +150,7 @@ class Chatbot4World(World):
         self.budget_refusals = []  # unix times of open_budget refusals (last WINDOW seconds)
         self.stale_adoptions = self.hub_busy_total = 0
         self.hub_slot_wait_s = 0.0
+        self.counts_lock = threading.Lock()  # a leaf lock: the counters above, from tool threads
         self.repo_id = repo_id = os.environ.get("CHATBOT_REPO", "cmpatino/chatbot-swarm")
         self.repo = repository or Repository(self.ws / "repo.git",
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
@@ -357,12 +358,16 @@ class Chatbot4World(World):
         raise ToolError(f"the swarm opened {n} PRs in the last hour and merged {m}; new PRs wait "
                         f"until more merge (next slot in ~{k} min). Meanwhile review others' PRs "
                         "(list_prs needs_review=true) or improve your open PR with pr=<n>.",
-                        "open_budget", retry_after_s=k * 60)
+                        "open_budget", retry_after_s=max(1, k) * 60)
 
     def _note_merge(self):
         """Count a merge for the new-PR budget (call with the lock held; the caller saves)."""
         now = time.time()
         self._recent(self.state["pr_merges"], now).append(now)
+
+    def _count(self, name, n=1):
+        with self.counts_lock:
+            setattr(self, name, getattr(self, name) + n)
 
     def metrics(self):
         """World numbers for GET /metrics (docs/world.md)."""
@@ -560,7 +565,7 @@ class Chatbot4World(World):
 
     def _busy(self, agent, what, pr=None, reason="slot_wait"):
         log.warning("hub_busy: refused %s for agent=%s pr=%s reason=%s", what, agent.name, pr, reason)
-        self.hub_busy_total += 1
+        self._count("hub_busy_total")
         raise ToolError(BUSY, "hub_busy", retry_after_s=60)
 
     @contextlib.contextmanager
@@ -574,7 +579,7 @@ class Chatbot4World(World):
             deadline = time.monotonic() + self.hub_wait
         started = time.monotonic()
         acquired = slots.acquire(timeout=max(0.0, deadline - started))
-        self.hub_slot_wait_s += time.monotonic() - started
+        self._count("hub_slot_wait_s", time.monotonic() - started)
         if not acquired:
             self._busy(agent, what, pr)
         try:
@@ -1050,7 +1055,7 @@ class Chatbot4World(World):
                         pr, via, expected[:12], hub[:12])
         else:
             log.warning("adopted Hub value of %s for PR #%s after a stale lease%s", ref, pr, via)
-        self.stale_adoptions += 1
+        self._count("stale_adoptions")
         if time.monotonic() + PUSH_ESTIMATE_S > started + CALL_BUDGET:
             raise refusal
         try:
@@ -1103,6 +1108,7 @@ class Chatbot4World(World):
         if code == "stale_base":
             raise ToolError(f"{failure.message}; your PR #{number} is kept: retry open_pr with "
                             f"pr={number}", "stale_base")
+        self._count("hub_busy_total")
         raise ToolError(f"the Hub did not accept the push for your PR #{number}; retry open_pr "
                         f"with pr={number} in a minute", "hub_busy", retry_after_s=60)
 

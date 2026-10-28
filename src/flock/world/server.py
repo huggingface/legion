@@ -68,6 +68,7 @@ RETRY_AFTER_ENV, RETRY_AFTER_S = "FLOCK_WORLD_RETRY_AFTER_S", 30.0
 
 
 WINDOW_S = 300.0  # /metrics: calls, latencies, bytes and queue waits over the last 5 minutes
+MAX_SAMPLES = 20_000  # per log, besides the window: bounded when nobody scrapes /metrics
 
 
 class _Metrics:
@@ -79,8 +80,8 @@ class _Metrics:
         self.started = clock()
         self.calls: dict[str, deque] = {}  # tool -> (t, latency_s or None if refused, code, in, out)
         self.totals: dict[str, list[int]] = {}  # tool -> [calls, errors] since start
-        self.waits: dict[str, deque] = {"fast": deque(), "slow": deque()}  # pool -> (t, wait_s)
-        self.lags: deque = deque()  # (t, event-loop lag in s)
+        self.waits: dict[str, deque] = {p: deque(maxlen=MAX_SAMPLES) for p in ("fast", "slow")}  # pool -> (t, wait_s)
+        self.lags: deque = deque(maxlen=MAX_SAMPLES)  # (t, event-loop lag in s)
         self.overloaded = 0
         self.cpu_mark = (time.monotonic(), sum(os.times()[:2]))
 
@@ -91,7 +92,7 @@ class _Metrics:
 
     def call(self, tool: str, latency: float | None, code: str | None, n_in: int, n_out: int) -> None:
         now = self.clock()
-        self._trim(self.calls.setdefault(tool, deque()), now).append((now, latency, code, n_in, n_out))
+        self._trim(self.calls.setdefault(tool, deque(maxlen=MAX_SAMPLES)), now).append((now, latency, code, n_in, n_out))
         totals = self.totals.setdefault(tool, [0, 0])
         totals[0] += 1
         totals[1] += code is not None
@@ -135,6 +136,11 @@ class _Metrics:
                 "loop_lag_s": lags[-1] if lags else 0.0, "loop_lag_max_s": max(lags, default=0.0),
                 "overloaded_429_total": self.overloaded, "window_s": WINDOW_S,
                 "tools": tools, "pools": pools}
+
+
+def _finite(v: Any) -> bool:
+    """A number JSON and Prometheus text can carry (no bool, NaN or inf)."""
+    return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _pct(values: list[float], q: float) -> float:
@@ -350,7 +356,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
             log.exception("world.metrics() failed")
             custom = {}
         m = {**metrics.snapshot(pool_stats()),
-             "world": {k: v for k, v in (custom or {}).items() if isinstance(v, int | float)}}
+             "world": {k: v for k, v in (custom or {}).items() if _finite(v)}}
         if "text/plain" in request.headers.get("accept", ""):
             return PlainTextResponse(_prometheus(m), media_type="text/plain; version=0.0.4")
         return JSONResponse(m)

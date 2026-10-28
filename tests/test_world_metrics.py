@@ -41,7 +41,8 @@ class Gauged(Hinted):
         return text
 
     def metrics(self) -> dict[str, float]:
-        return {"open_prs": 3, "note": "not a number"}
+        return {"open_prs": 3, "note": "not a number", "flag": True, "bad": float("nan"),
+                "huge": float("inf")}
 
 
 def test_metrics_json_and_prometheus_text():
@@ -79,6 +80,7 @@ def test_metrics_window_and_percentiles_with_a_fake_clock():
         m.call("t", i / 100, "busy" if i % 10 == 0 else None, 10, 20)
     m.call("t", None, "overloaded", 5, 0)  # a refusal: counted, no latency
     m.waited("slow", 4.0)
+    assert m.waits["fast"].maxlen == m.lags.maxlen == m.calls["t"].maxlen == 20_000
     now[0] += 60
     pools = {"slow": {"queue_wait_oldest_s": 0.0}}
     t = m.snapshot(pools)["tools"]["t"]
