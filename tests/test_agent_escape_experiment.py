@@ -160,3 +160,112 @@ def test_stop_reports_forced_shutdown(monkeypatch):
     with pytest.raises(RuntimeError, match="did not shut down gracefully"):
         runner.stop(process, grace=1)
     kill.assert_called_once_with(12345, signal.SIGKILL)
+
+
+@pytest.fixture
+def runner():
+    source = MODULE.with_name("run.py")
+    spec = importlib.util.spec_from_file_location("escape_selection_run", source)
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+@pytest.mark.parametrize("difficulty", [5, 10, 15, 20, 25])
+def test_selection_sorts_files_within_difficulty(runner, tmp_path, difficulty):
+    folder = tmp_path / "questions" / str(difficulty) / "narrative"
+    folder.mkdir(parents=True)
+    for name in ("z.json", "a.json", "m.json"):
+        (folder / name).write_text("{}")
+    (folder / "ignore.txt").write_text("ignored")
+    (folder / "directory.json").mkdir()
+    assert runner.select_case(tmp_path, difficulty, 0).name == "a.json"
+    assert runner.select_case(tmp_path, difficulty, 1).name == "m.json"
+    assert runner.select_case(tmp_path, difficulty, 2).name == "z.json"
+
+
+def test_selection_errors(runner, tmp_path):
+    with pytest.raises(ValueError, match="Unsupported difficulty"):
+        runner.select_case(tmp_path, 11, 0)
+    with pytest.raises(ValueError, match="directory is missing"):
+        runner.select_case(tmp_path, 10, 0)
+    folder = tmp_path / "questions/10/narrative"
+    folder.mkdir(parents=True)
+    with pytest.raises(ValueError, match="No scenario JSON"):
+        runner.select_case(tmp_path, 10, 0)
+    (folder / "a.json").write_text("{}")
+    for index in (-1, 1, 60):
+        with pytest.raises(ValueError, match="valid range is 0–0"):
+            runner.select_case(tmp_path, 10, index)
+
+
+@pytest.mark.parametrize("flags", [[], ["--difficulty", "20", "--scenario-index", "1"]])
+def test_launcher_passes_selection_and_records_metadata(runner, tmp_path, monkeypatch, flags):
+    import hashlib
+    from unittest.mock import Mock
+
+    source = tmp_path / ".flock/deps/agent-escape"
+    default = "skeleton_091c541b_narrative.json"
+    for difficulty in (10, 20):
+        folder = source / "questions" / str(difficulty) / "narrative"
+        folder.mkdir(parents=True)
+        (folder / default).write_text('{"puzzle": "first"}')
+        (folder / "z.json").write_text('{"puzzle": "second"}')
+    python = tmp_path / ".flock/deps/agent-escape-venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner.sys, "argv", ["run.py", *flags])
+    monkeypatch.setattr(runner.signal, "signal", Mock())
+    monkeypatch.setattr(runner.subprocess, "check_output", Mock(side_effect=[runner.REVISION, ""]))
+    backend = Mock()
+    backend.poll.return_value = None
+    flock = Mock(returncode=0)
+    flock.poll.return_value = 0
+    launch = Mock(side_effect=[backend, flock])
+    monkeypatch.setattr(runner.subprocess, "Popen", launch)
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=False)
+    client.get.return_value.is_success = True
+    monkeypatch.setattr(runner.httpx, "Client", Mock(return_value=client))
+    assert runner.main() == 1  # Idle without a verified solution is not success.
+    difficulty, index = (20, 1) if flags else (10, 0)
+    selected = source / "questions" / str(difficulty) / "narrative" / (
+        "z.json" if flags else default
+    )
+    assert launch.call_args_list[1].kwargs["env"]["ESCAPE_CASE_FILE"] == str(selected)
+    output = next((tmp_path / ".flock/agent-escape-attempts").iterdir())
+    for name in ("metadata.json", "result.json"):
+        record = json.loads((output / name).read_text())
+        assert record["difficulty"] == difficulty
+        assert record["scenario_index"] == index
+        assert record["case"] == selected.relative_to(source).as_posix()
+        assert record["case_sha256"] == hashlib.sha256(selected.read_bytes()).hexdigest()
+        assert record["benchmark_revision"] == runner.REVISION
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--difficulty", "12"], "invalid choice"),
+    (["--scenario-index", "-1"], "valid range"),
+    (["--scenario-index", "1"], "valid range"),
+])
+def test_invalid_selection_exits_before_artifacts_or_processes(
+    runner, tmp_path, monkeypatch, capsys, flags, message
+):
+    from unittest.mock import Mock
+
+    folder = tmp_path / ".flock/deps/agent-escape/questions/10/narrative"
+    folder.mkdir(parents=True)
+    (folder / "a.json").write_text("{}")
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner.sys, "argv", ["run.py", *flags])
+    monkeypatch.setattr(runner.signal, "signal", Mock())
+    launch = Mock()
+    monkeypatch.setattr(runner.subprocess, "Popen", launch)
+    with pytest.raises(SystemExit) as exc:
+        runner.main()
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+    assert not (tmp_path / ".flock/agent-escape-attempts").exists()
+    launch.assert_not_called()

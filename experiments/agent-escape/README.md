@@ -34,6 +34,26 @@ plus graceful cleanup. The adapter expects exactly `worker-0000` through
 `worker-0003`; retain four replicas and one agent per worker. The launcher adds
 local tool paths and supplies `LOCAL_KEY=unused` unless already configured.
 
+## Puzzle selection
+
+Use `--difficulty {5,10,15,20,25}` and `--scenario-index N` to select one puzzle.
+Difficulty is the puzzle node count, not a guaranteed success rate. Indices are
+zero-based within narrative JSON filenames sorted lexicographically at the pinned
+benchmark revision. Difficulties 5, 10, 15, and 20 have 60 scenarios (indices 0–59);
+difficulty 25 has 30 (indices 0–29).
+
+Defaults are `--difficulty 10 --scenario-index 0`, preserving the original puzzle.
+All four workers receive independent sessions of the selected scenario. Invalid
+selections fail before creating artifacts or starting services. Startup prints the
+selection; `metadata.json` and `result.json` record its difficulty, index, path,
+SHA-256 hash, and benchmark revision.
+
+For example, run difficulty 20, scenario index 7 with Cerebras:
+
+```bash
+uv run --no-sync python experiments/agent-escape/run.py --spec experiments/agent-escape/spec-hf-endpoint.yaml --difficulty 20 --scenario-index 7
+```
+
 ## HF Inference Providers configuration
 
 `spec-hf-endpoint.yaml` uses `Qwen/Qwen3.8-27B:cerebras` through
@@ -53,15 +73,15 @@ Run from `flock/`:
 uv run --no-sync python experiments/agent-escape/run.py --spec experiments/agent-escape/spec-hf-endpoint.yaml
 ```
 
-This variant has been validated offline; an experiment has not been launched on
-Cerebras. Pricing from the HF router catalog on 2026-10-28 is $0.99 per million
+A Cerebras low-reasoning run solved the default puzzle in about 68 seconds, with
+verified success and board persistence. Pricing from the HF router catalog on 2026-10-28 is $0.99 per million
 input tokens and $1.49 per million output tokens. Cached input is conservatively
 priced at the full input rate. These rates are recorded in the YAML for Flock's
 cost estimates; actual charges follow the provider's current billing.
 
 ## Environment and collaboration
 
-The benchmark is pinned to `03742c79f48646e0130886e18e3e79798cf8edd7`, with scenario
+The benchmark is pinned to `03742c79f48646e0130886e18e3e79798cf8edd7`, with default scenario
 `questions/10/narrative/skeleton_091c541b_narrative.json`. Setup does not regenerate
 puzzles or modify Flock's environment. The upstream MIT-licensed implementation
 lives in ignored `.flock/deps/agent-escape/`.

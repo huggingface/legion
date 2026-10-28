@@ -22,7 +22,25 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 REVISION = "03742c79f48646e0130886e18e3e79798cf8edd7"
-CASE = "questions/10/narrative/skeleton_091c541b_narrative.json"
+DIFFICULTIES = (5, 10, 15, 20, 25)
+
+
+def select_case(source: Path, difficulty: int, scenario_index: int) -> Path:
+    """Resolve a zero-based index in the pinned benchmark's sorted narrative files."""
+    if difficulty not in DIFFICULTIES:
+        raise ValueError(f"Unsupported difficulty {difficulty}; choose from {DIFFICULTIES}")
+    directory = source / "questions" / str(difficulty) / "narrative"
+    if not directory.is_dir():
+        raise ValueError(f"Scenario directory is missing: {directory}; run setup.sh first")
+    cases = sorted(path for path in directory.glob("*.json") if path.is_file())
+    if not cases:
+        raise ValueError(f"No scenario JSON files found in {directory}")
+    if not 0 <= scenario_index < len(cases):
+        raise ValueError(
+            f"Scenario index {scenario_index} is invalid for difficulty {difficulty}; "
+            f"valid range is 0–{len(cases) - 1} ({len(cases)} scenarios)"
+        )
+    return cases[scenario_index]
 
 
 def stop(process, grace=120):
@@ -45,10 +63,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, default=HERE / "spec.yaml")
     parser.add_argument("--timeout", type=float, default=1800, help="Attempt limit in seconds")
+    parser.add_argument("--difficulty", type=int, choices=DIFFICULTIES, default=10,
+                        help="Puzzle node count (default: 10)")
+    parser.add_argument("--scenario-index", type=int, default=0,
+                        help="Zero-based index in sorted scenario filenames (default: 0)")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     source = ROOT / ".flock/deps/agent-escape"
+    try:
+        case_file = select_case(source, args.difficulty, args.scenario_index)
+    except ValueError as exc:
+        parser.error(str(exc))
+    selection = {
+        "difficulty": args.difficulty,
+        "scenario_index": args.scenario_index,
+        "case": case_file.relative_to(source).as_posix(),
+        "case_sha256": hashlib.sha256(case_file.read_bytes()).hexdigest(),
+        "benchmark_revision": REVISION,
+    }
     python = ROOT / ".flock/deps/agent-escape-venv/bin/python"
     if not python.exists():
         parser.error("Run bash experiments/agent-escape/setup.sh first")
@@ -90,22 +123,22 @@ def main():
     url = f"http://127.0.0.1:{port}"
     env.update(
         ESCAPE_SERVER_URL=url,
-        ESCAPE_CASE_FILE=str(source / CASE),
+        ESCAPE_CASE_FILE=str(case_file),
         ESCAPE_OUTPUT=str(output),
         ESCAPE_RUN_ID=run_id,
     )
     metadata = {
         "run_id": run_id,
-        "benchmark_revision": revision,
+        **selection,
         "world_sha256": hashlib.sha256((output / "world.py").read_bytes()).hexdigest(),
         "launcher_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "case": CASE,
-        "case_sha256": hashlib.sha256((source / CASE).read_bytes()).hexdigest(),
         "started": time.time(),
         "timeout": args.timeout,
         "spec": spec,
     }
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    print(f"Selected difficulty {args.difficulty}, scenario index {args.scenario_index}: "
+          f"{case_file.name}", flush=True)
     print(f"Attempt artifacts: {output}", flush=True)
     backend = flock = None
     reason = "error"
@@ -200,6 +233,7 @@ def main():
             events = [json.loads(line) for line in trajectory.read_text().splitlines()]
         success = output / "success.json"
         report = {
+            **selection,
             "reason": reason,
             "success": json.loads(success.read_text()) if success.exists() else None,
             "error": failure,
