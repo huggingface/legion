@@ -192,9 +192,11 @@ def main():
                     "--prompt",
                     (
                         "First post a short introduction on general in thread 1 and read(n=12). "
-                        "Then get_observation and solve your room. After every three puzzle actions, "
-                        "post a concise new finding in thread 1 and read(n=12) before continuing. "
-                        "Use teammates' findings in your independent copy. Submit the victory "
+                        "Remember the highest message ID read. Then get_observation and claim an "
+                        "unclaimed branch. Every three puzzle actions, read(n=12, since=LAST_READ_ID) "
+                        "and update the cursor from returned messages only. Share only new verified "
+                        "findings, failed inputs, or requests in thread 1, at most 500 characters. "
+                        "Acknowledge teammate message IDs when reusing findings. Submit the victory "
                         "string with submit_answer; do not stop before verified success or limits."
                     ),
                 ],

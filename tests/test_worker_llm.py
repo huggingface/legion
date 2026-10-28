@@ -838,3 +838,65 @@ async def test_loop_turn_at_max_turns_sets_an_unfinished_summary(tmp_path, fake_
     assert prompts[0] == "bash: echo r1\nlast: stale summary from hours ago"
     assert prompts[-1] == ("bash: echo r2\nlast: previous turn ended (max_turns) after 2 tool call(s) "
                            "without finishing (last calls: bash, bash)")
+
+
+@pytest.mark.parametrize(("name", "entry", "executed"), [
+    ("read", "comms:read", 7),
+    ("poll_board", "comms:read", 7),
+    ("read_dms", "comms:read_dms", 7),
+    ("read", "comms:search", 5),  # The name alone must not bypass the guard.
+    ("post", "comms:post", 5),
+])
+@pytest.mark.parametrize("max_turns", [6, 8])
+async def test_message_polls_return_fresh_results_beyond_repeat_limit(
+    tmp_path, name, entry, executed, max_turns
+):
+    import httpx
+
+    from flock.tools.loader import ToolDef
+    from flock.tools.runner import Result
+    from flock.tools.toolset import Toolset
+
+    received = []
+    executed_calls = []
+
+    async def builtin(tool, args):
+        executed_calls.append(tool)
+        return Result(json.dumps({"messages": [{"id": len(executed_calls), "text": "new"}]}), False)
+
+    def handler(request):
+        body = json.loads(request.content)
+        received.append(body)
+        index = len(received)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": f"call-{index}", "type": "function", "function": {
+                    "name": name if index <= 7 else "done", "arguments": "{}",
+                },
+            }],
+        }}]})
+
+    tools = Toolset(version=None, dir=None, swarm="s", type="a", data_dir=tmp_path,
+                    tools=(ToolDef(name, "Poll", {"type": "object", "properties": {}},
+                                   "", "", builtin=entry, readonly=True),), builtin_call=builtin)
+    a = LLMAdapter(tmp_path / "wd", home=tmp_path / "llm", toolbox=lambda: tools,
+                   transport=httpx.MockTransport(handler))
+    await a.start(tmp_path / "wd", None, llm_spec("http://fake/v1", tool_choice="required",
+                                                 max_turns=max_turns), env={})
+    try:
+        await a.send("Poll seven times, then finish")
+        events = await turn(a)
+        assert events[-1].status == ("completed" if max_turns == 8 else "error")
+        if max_turns == 6:
+            assert events[-1].data["reason"] == "max_turns"
+        assert len(executed_calls) == min(executed, max_turns)
+        if executed == 7:
+            assert "repeated_calls" not in events[-1].data
+            results = [x for x in received[-1]["messages"] if x["role"] == "tool"]
+            assert [json.loads(x["content"])["messages"][0]["id"] for x in results] == list(
+                range(1, min(8, max_turns))
+            )
+        else:
+            assert events[-1].data["repeated_calls"] == min(7, max_turns) - 2
+    finally:
+        await a.stop()

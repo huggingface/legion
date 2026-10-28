@@ -2,20 +2,27 @@ Solve this escape-room puzzle with your teammates. Each worker has an independen
 copy: discoveries can be shared, but actions only change your own room.
 
 1. Call get_observation to see the initial room, clues, and win_node_id target. Introduce yourself using
-   post(text=..., thread=1), and read the board.
-2. Divide exploration of the visible entities with teammates. Investigate entities
+   post(text=..., thread=1), and read(n=12). Remember the highest message ID read.
+2. Claim an unclaimed branch or node in one short post; avoid duplicating teammates'
+   exploration unless needed to reproduce prerequisites in your own room. Investigate entities
    to learn exact input names and expected types before using them. Tools and Items
    use different actions: tool_call and use_item respectively.
-3. Share useful node IDs, parameter names, exact input/output values, and discoveries.
-   Read the whole channel with read(n=12) without a thread filter every 3–5 puzzle actions.
-   Batch findings in concise posts; do not post after every action or immediately retry
-   a rate-limited board call. Reproduce necessary
-   prerequisite actions in your own room; teammates cannot unlock it for you.
+3. Every three puzzle actions, read(n=12, since=LAST_READ_ID), without a thread filter.
+   Advance LAST_READ_ID only from messages returned by read, never from your own post ID.
+   Keep the cursor unchanged on an empty, failed, or character-clipped response.
+   If the board reports older unread messages, increase n with the same cursor before
+   advancing it. Do not busy-poll an empty board or immediately retry rate-limited calls.
+   Share only NEW verified findings, failed inputs, or a specific request for help.
+   Each post must fit 500 characters: one node or dependency, exact arguments, result,
+   and whether feedback confirmed correctness. Preserve newlines and exact values.
+   Do not repost inventories, initial clues, full solution chains, or long status summaries.
+   When using a teammate's result, acknowledge its message ID in your next useful update.
+   Reproduce necessary prerequisite actions in your own room; teammates cannot unlock it for you.
 4. Follow revealed clues and propagate real outputs into downstream inputs. Avoid
    repeating unchanged failing calls. Never invent missing values.
 5. Submit the victory string with submit_answer. Only is_win=true proves success.
-   Announce verified success on the board and call done. If told swarm_solved, call
-   done. Do not stop just because an attempt failed: explore remaining visible entities,
+   Announce verified success briefly (winner, answer, and is_win=true), then call done.
+   If told swarm_solved, call done. Do not stop just because an attempt failed: explore remaining visible entities,
    read teammates’ findings, and revise the dependency chain until solved or out of calls.
 
 You have at most 100 model calls, including communication. Use them purposefully.
@@ -37,6 +44,6 @@ Working method:
   vary only the incorrect one. Test relevant unused initial values before guessing.
 - Supply all needed parameters together; a successful partial invocation may not
   trigger the same discoveries as a complete invocation.
-- Post only new useful findings, not intentions or repeated failures. Keep each
-  update short. Sharing and reading findings is a required part of this swarm task;
+- Apart from an initial branch claim, post only new useful findings or specific
+  requests, not intentions or repeated failures. Keep each update short. Sharing and reading findings is a required part of this swarm task;
   do not solve silently. Use kickoff thread 1 so teammates can find your work.

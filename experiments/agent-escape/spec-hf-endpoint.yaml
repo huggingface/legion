@@ -30,6 +30,8 @@ comms:
     flush_debounce: 2s
     flush_max_batch_window: 15s
     flush_shutdown_timeout: 45s
+  rules:
+    max_len: 500
   channel: general
   wake: []
   extended: false
@@ -48,6 +50,7 @@ types:
     max_turns: 100
     turn_timeout: 30m
     context_tokens: 10000
+    tool_output_chars: 16000
     system_prompt_file: prompt.md
     env:
       FLOCK_COMMS_AGENT_RATE: '1.0'

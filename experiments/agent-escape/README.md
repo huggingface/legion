@@ -88,8 +88,14 @@ lives in ignored `.flock/deps/agent-escape/`.
 
 The adapter creates independent scenario/simulator sessions and routes actions by
 Flock identity. `get_observation` returns the initial public clues, including the
-victory-node ID, without resetting progress. Every three puzzle actions, the adapter adds a generic reminder
-to post a useful finding and read the board; it supplies no puzzle-specific hints.
+victory-node ID, without resetting progress. Every three puzzle actions, the adapter
+reminds workers to read incrementally using `since=<last message ID read>` and share
+only new findings; it supplies no puzzle-specific hints. Workers claim branches and
+acknowledge teammate message IDs when reusing results. Both configs enforce a
+500-character post limit and allow 16,000 characters per tool response to give
+12-message board pages headroom. Agents must not advance their read cursor from
+their own post IDs or clipped responses. Built-in board/DM reads are exempt from
+the LLM harness's identical-call guard; rate, call, and time limits still apply.
 Agents cannot choose session IDs,
 reset the environment, read files, or execute shell commands. They can exchange
 values freely but must unlock their own copies. This is tool-interface isolation,

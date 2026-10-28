@@ -37,6 +37,7 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
 - Repeated calls: from the third call in a turn identical to an earlier one (same tool, same
   arguments), its result starts with a nudge (REPEAT_NUDGE); after the fifth such call it is not
   run and the nudge is the whole result. `turn_ended` counts them in `repeated_calls`.
+  Built-in board/DM reads are exempt: identical polls can return new messages.
 - Tool calls: native `tool_calls`, or, for small models that write the call as text, a reply
   that is only `{"tool": "bash", "command": ...}` (optionally fenced) or a pythonic
   `[bash(command="...")]`. Such a reply is stored as a proper tool call (`flock_from_text`), so
@@ -817,6 +818,12 @@ class LLMAdapter:
                         done = call
                         self._tool_result(call, "ok", False)
                     else:
+                        tool = self.folder_tools.get(call["name"]) if self.folder_tools else None
+                        if tool is not None and tool.builtin in {"comms:read", "comms:read_dms"}:
+                            # The board changes independently of this agent's arguments.
+                            # Rate limits and the turn's call/time budgets still apply.
+                            await self._run_tool(call)
+                            continue
                         key = json.dumps([call["name"], call["arguments"]], sort_keys=True, default=str)
                         seen[key] = k = seen.get(key, 0) + 1
                         if k < REPEAT_NUDGE_AT:

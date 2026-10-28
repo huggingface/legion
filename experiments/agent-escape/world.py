@@ -100,9 +100,10 @@ class EscapeWorld(World):
             result = {
                 **result,
                 "collaboration_reminder": (
-                    "Collaboration checkpoint: before your next puzzle action, use post to share "
-                    "one useful finding (exact node IDs and values) in thread 1, then read(n=12). "
-                    "Use teammate discoveries in your own independent session."
+                    "Collaboration checkpoint: read(n=12, since=LAST_READ_ID), updating your cursor "
+                    "only from returned messages. Post only NEW verified findings, failed inputs, "
+                    "or a specific request in thread 1 (max 500 characters). Preserve exact values "
+                    "and acknowledge message IDs when reusing teammate findings."
                 ),
             }
         self._record(agent, action, args, result)

@@ -157,8 +157,12 @@ counts calls by tool name and arguments, per turn (`done` is not counted):
   `[not run: the same call was made N times already this turn]` (`isError`).
 
 `turn_ended` carries `data.repeated_calls` (calls from the 3rd identical one on) when there were
-any. A command whose effect changes between runs (a counter, a poll) is still "identical"; vary
-it (e.g. add a `sleep`) or end the turn.
+any. Built-in `comms:read` and `comms:read_dms` calls are exempt: identical polls may
+receive new teammate messages. The exception uses the tool's built-in identity, not its
+exposed name; other tools named `read` remain guarded. Board rate limits and model-call,
+budget, and timeout limits still apply. Use `since=<last message ID read>` for incremental
+board reads, and do useful work between polls rather than busy-polling an empty board.
+Other repeated calls, including shell commands that poll changing state, remain guarded.
 
 Small models often write the call as text instead of `tool_calls`. The loop accepts a reply
 that is only (after stripping a code fence or `<tool_call>` / `<|tool_call_start|>` tags):
