@@ -15,6 +15,9 @@ from flock.models import Grant, GrantLimits, SwarmSpec
 PROMPT_KEYS = ("system_prompt", "prompt", "first", "kickoff", "protocols_text")
 # Written by apply or the controller, or reported on their own line (tools).
 SKIP_KEYS = ("resolved_model", "channel_id", "kickoff_id", "tools_version")
+# `world.*` keys the controller blanks and refills on every apply (host.resolve): always
+# different between the folder's spec and the stored one. Manifest tools are reported apart.
+WORLD_DERIVED = ("endpoint", "manifest", "credential_origin", "credential_id")
 
 
 def _flat(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
@@ -38,9 +41,41 @@ def _show(v: Any) -> str:
     return text if len(text) <= 60 else text[:59] + "…"
 
 
+def _items(v: Any) -> str:
+    return v if isinstance(v, str) else json.dumps(v)
+
+
+def _delta(a: Any, b: Any) -> str:
+    """`old -> new`; two lists as `+added -removed` element by element (never truncated)."""
+    if isinstance(a, list) and isinstance(b, list):
+        add = [f"+{_items(x)}" for x in b if x not in a]
+        gone = [f"-{_items(x)}" for x in a if x not in b]
+        return " ".join(add + gone) or "reordered"
+    return f"{_show(a)} -> {_show(b)}"
+
+
 def _changes(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, Any, Any]]:
     a, b = _flat(old), _flat(new)
     return [(k, a.get(k), b.get(k)) for k in sorted(a.keys() | b.keys()) if a.get(k) != b.get(k)]
+
+
+def keep_replicas(old: SwarmSpec, new: SwarmSpec) -> list[str]:
+    """Copy the live replica count of every type `old` already has into `new`; returns one
+    line per type whose spec value differed (`agent: replicas kept (spec 20, live 300)`)."""
+    lines = []
+    for name, ts in new.types.items():
+        live = old.types[name].replicas if name in old.types else None
+        if live is not None and live != ts.replicas:
+            lines.append(f"{name}: replicas kept (spec {ts.replicas}, live {live})")
+            ts.replicas = live
+    return lines
+
+
+def world_tool_changes(old: SwarmSpec, new: SwarmSpec) -> str | None:
+    """`world tools: +a -b` between the two manifests, or None when the tools are the same."""
+    a = old.world.manifest.names() if old.world and old.world.manifest else []
+    b = new.world.manifest.names() if new.world and new.world.manifest else []
+    return "world tools: " + _delta(a, b) if a != b else None
 
 
 def diff_specs(old: SwarmSpec, new: SwarmSpec, tools: tuple[list[str], list[str]] | None = None
@@ -72,7 +107,7 @@ def diff_specs(old: SwarmSpec, new: SwarmSpec, tools: tuple[list[str], list[str]
             if path.rsplit(".", 1)[-1] in PROMPT_KEYS:
                 prompts.setdefault(name, []).append(path)
             else:
-                keys.append(f"types.{name}.{path}: {_show(a)} -> {_show(b)}")
+                keys.append(f"types.{name}.{path}: {_delta(a, b)}")
     for top in sorted((o.keys() | n.keys()) - {"types"}):
         a, b = o.get(top), n.get(top)
         if a == b:
@@ -81,12 +116,14 @@ def diff_specs(old: SwarmSpec, new: SwarmSpec, tools: tuple[list[str], list[str]
             if top not in SKIP_KEYS:
                 keys.append(f"{top}: {_show(a)} -> {_show(b)}")
             continue
+        if top == "world":
+            a, b = ({k: v for k, v in d.items() if k not in WORLD_DERIVED} for d in (a, b))
         for path, x, y in _changes(a, b):
             if path.rsplit(".", 1)[-1] in PROMPT_KEYS:
                 note = " (posted once per channel: not posted again)" if path == "kickoff" else ""
                 prompts.setdefault(top, []).append(path + note)
             else:
-                keys.append(f"{top}.{path}: {_show(x)} -> {_show(y)}")
+                keys.append(f"{top}.{path}: {_delta(x, y)}")
     if prompts:
         lines.append("prompts changed: " + "; ".join(f"{t} ({', '.join(p)})"
                                                      for t, p in prompts.items()))

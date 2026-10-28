@@ -138,7 +138,7 @@ async def test_update_and_grants_reach_running_agents(tmp_path, monkeypatch):
 
         # 3. `flock update` keeps grants: a replica change applies, the grant stays
         spec_file.write_text(yaml.safe_dump(spec_raw(url, "all", replicas=3)))
-        out = await cli_run("update", str(spec_file))
+        out = await cli_run("update", str(spec_file), "--replicas", "spec")
         assert out.strip() == "types.calc.replicas: 2 -> 3"
         assert (await admin.get("/agents/calc-0001")).json()["grants"] == st["grants"]
         sw.tick()
