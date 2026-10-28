@@ -39,7 +39,7 @@ types:
     agents_per_worker: 12
     system_prompt_file: prompts/system.md
     comms: true
-    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr']
+    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr', 'world:get_pr']
     persist_workdir: true
     secrets: [OPENAI_API_KEY]
     env:                                    # git memory caps for agent clones (git -c via env)

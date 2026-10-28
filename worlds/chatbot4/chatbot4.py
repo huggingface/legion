@@ -56,7 +56,10 @@ WINDOW_MAX = 10000  # timestamps kept per list (oldest dropped)
 OUTBOX_TRIES = 12  # attempts per queued Hub comment before it is dropped
 OUTBOX_BACKOFF = (5.0, 600.0)  # first retry delay, longest retry delay (doubling)
 HUB_SYNC_EVERY = float(os.environ.get("CHATBOT_HUB_STATES_EVERY_S", "600"))  # PR state check
-FINAL_CODES = ("pr_closed", "pr_merged")  # Hub 400: the PR is already closed / merged
+FINAL_CODES = ("pr_closed", "pr_merged")
+# get_pr: diff bytes returned (cut at a line end, with truncated: true beyond this).
+MAX_DIFF_BYTES = int(os.environ.get("CHATBOT_GET_PR_DIFF_BYTES", str(200 << 10)))
+DESCRIPTION_CHARS = 4000  # PR description characters returned by get_pr  # Hub 400: the PR is already closed / merged
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
 
@@ -1304,6 +1307,90 @@ class Chatbot4World(World):
                             for d in self.state["drafts"].values()
                             if not author or d["author"] == author]
             return records[offset:offset + 100]
+
+    @tool
+    def get_pr(self, pr: int, path: str | None = None) -> dict:
+        """Show a PR from the world's copy, no git fetch needed: its head and base SHAs, the
+        changed files with +/- line counts and the diff against its base. With path: that
+        file's full content at the PR head and its diff only."""
+        if path is not None:
+            rel = PurePosixPath(path) if isinstance(path, str) else None
+            if (not path or rel is None or rel.is_absolute() or ".." in rel.parts
+                    or "\\" in path or "\0" in path):
+                raise ToolError("path must be a relative file path inside the repository")
+            path = rel.as_posix()
+        with self.lock:  # a quick state read; git runs below without the lock
+            rec = self.state["prs"].get(str(pr))
+            if rec is None:
+                if self._draft(pr):
+                    raise ToolError(f"PR #{pr} is a draft whose head is not on the Hub yet; "
+                                    "there is nothing to show")
+                raise ToolError("no PR with that number")
+            rec = {k: rec.get(k) for k in ("pr", "title", "author", "state", "branch", "url",
+                                           "description", "head_sha", "base_sha")}
+        head, base = rec["head_sha"], rec["base_sha"]
+        with contextlib.suppress(ToolError):  # main moves rarely without the world: cheap
+            self.repo.refresh(FETCH_TTL)
+        if not (self.repo.has_commit(head) and self.repo.has_commit(base)):
+            self.repo.fetch_pr_refs([pr], delays=(1,))  # once, from the Hub
+            if not (self.repo.has_commit(head) and self.repo.has_commit(base)):
+                raise ToolError(f"PR #{pr}'s head {str(head)[:12]} is not in the world's "
+                                "repository (the Hub did not return it); retry later or fetch "
+                                "it with git", "missing_head")
+        try:
+            main = self.repo.sha()
+        except ToolError:
+            main = None
+        description = rec["description"] or ""
+        if len(description) > DESCRIPTION_CHARS:
+            description = description[:DESCRIPTION_CHARS - 3] + "..."
+        result = {**rec, "description": description, "base_is_main": base == main,
+                  "main_sha": main}
+        spec = ("--", path) if path else ()
+        files = []
+        stat = self.repo.git_bytes("diff", "--numstat", "-z", "--no-renames", base, head, *spec)
+        for entry in stat.decode(errors="replace").split("\0"):
+            if not entry:
+                continue
+            added, deleted, name = entry.split("\t", 2)
+            binary = added == "-"
+            files.append({"path": name, "added": None if binary else int(added),
+                          "deleted": None if binary else int(deleted)}
+                         | ({"binary": True} if binary else {}))
+        result["files"] = files
+        diff = self.repo.git_bytes("diff", "--no-color", "--no-ext-diff", "--no-renames", base,
+                                   head, *spec)
+        result["diff_bytes"] = len(diff)
+        result["truncated"] = len(diff) > MAX_DIFF_BYTES
+        if result["truncated"]:
+            cut = diff[:MAX_DIFF_BYTES]
+            diff = cut[:cut.rfind(b"\n") + 1] or cut
+            result["hint"] = (f"the diff is {result['diff_bytes']} bytes; showing the first "
+                              f"{len(diff)}. Pass path=<file> for one file's diff and content")
+        result["diff"] = diff.decode(errors="replace")
+        if path:
+            result.update(self._file_at(head, path))
+            if not files and result["content"] is None:
+                raise ToolError(f"{path[:200]} is neither in PR #{pr}'s head nor in its diff")
+        return result
+
+    def _file_at(self, sha, path):
+        """{"content", "size", ...} of path at commit sha (content None when absent)."""
+        listing = self.repo.git_bytes("ls-tree", "-z", "--long", sha, "--", path)
+        entry = listing.split(b"\0", 1)[0].decode(errors="replace")
+        if not entry:
+            return {"content": None, "note": "the file does not exist at the PR head"}
+        meta, _, _ = entry.partition("\t")
+        kind, size = meta.split()[1], meta.split()[3]
+        if kind != "blob":
+            return {"content": None, "note": f"{path[:200]} is a {kind}, not a file"}
+        data = self.repo.git_bytes("cat-file", "blob", f"{sha}:{path}")
+        out = {"size": int(size)}
+        if b"\0" in data[:8192]:
+            return {**out, "content": None, "binary": True}
+        out["content_truncated"] = len(data) > MAX_FILE_BYTES
+        out["content"] = data[:MAX_FILE_BYTES].decode(errors="replace")
+        return out
 
     @tool
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:

@@ -1746,3 +1746,134 @@ def test_merge_hub_slots_env(setup, monkeypatch):
     restarted = Chatbot4World(world.ws, world.repo)
     assert all(restarted.merge_hub_slots.acquire(timeout=0) for _ in range(3))
     assert not restarted.merge_hub_slots.acquire(timeout=0)
+
+
+def _pr_with_changes(world, clone, author="cedar", branch="greeting"):
+    (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hi!"\n')
+    (clone / "bot/modules/weather.py").write_text(
+        'PRIORITY = 5\n\n\ndef respond(text, memory):\n    return None\n')
+    return submit(world, clone, author=author, branch=branch)
+
+
+def test_get_pr_shows_files_and_diff_from_the_world_copy(setup):
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    got = world.get_pr(rec["pr"])
+    assert (got["pr"], got["author"], got["state"], got["title"]) == (
+        rec["pr"], "cedar", "open", "Improve greetings")
+    assert (got["head_sha"], got["base_sha"]) == (rec["head_sha"], rec["base_sha"])
+    assert got["base_is_main"] and got["truncated"] is False
+    files = {f["path"]: f for f in got["files"]}
+    assert set(files) == {"bot/modules/greeting.py", "bot/modules/weather.py"}
+    assert (files["bot/modules/weather.py"]["added"], files["bot/modules/weather.py"]["deleted"]) == (5, 0)
+    assert files["bot/modules/greeting.py"]["added"] >= 1
+    assert '+    return "Hi!"' in got["diff"] and "+++ b/bot/modules/weather.py" in got["diff"]
+    assert got["diff"] == git(world.repo.root, "diff", rec["base_sha"], rec["head_sha"]) + "\n"
+    # Another merge moves main: the PR's base is no longer current; merged PRs stay readable.
+    approve(world, rec)
+    world.merge_pr(Agent("cedar"), rec["pr"])
+    merged = world.get_pr(rec["pr"])
+    assert merged["state"] == "merged" and merged["diff"] == got["diff"]
+    git(clone, "fetch", "origin")
+    git(clone, "reset", "--hard", "origin/main")
+    (clone / "bot/modules/other.py").write_text("X = 1\n")
+    other = submit(world, clone, author="pine", branch="other")
+    (clone / "bot/modules/more.py").write_text("Y = 1\n")
+    third = submit(world, clone, author="oak", branch="third")
+    approve(world, other)
+    world.merge_pr(Agent("pine"), other["pr"])
+    assert not world.get_pr(third["pr"])["base_is_main"]
+
+
+def test_get_pr_path_mode(setup):
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    got = world.get_pr(rec["pr"], "bot/modules/weather.py")
+    assert got["content"] == (clone / "bot/modules/weather.py").read_text()
+    assert got["content_truncated"] is False and got["size"] == len(got["content"])
+    assert [f["path"] for f in got["files"]] == ["bot/modules/weather.py"]
+    assert "weather.py" in got["diff"] and "greeting.py" not in got["diff"]
+    unchanged = world.get_pr(rec["pr"], "bot/runtime.py")  # in the head, not in the diff
+    assert unchanged["files"] == [] and unchanged["diff"] == ""
+    assert unchanged["content"] == (clone / "bot/runtime.py").read_text()
+    with pytest.raises(ToolError, match="neither"):
+        world.get_pr(rec["pr"], "bot/modules/nope.py")
+    for bad in ("../etc/passwd", "/etc/passwd", ""):
+        with pytest.raises(ToolError, match="relative file path"):
+            world.get_pr(rec["pr"], bad)
+
+
+def test_get_pr_truncates_large_diffs(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    monkeypatch.setattr("chatbot4.MAX_DIFF_BYTES", 120)
+    got = world.get_pr(rec["pr"])
+    assert got["truncated"] is True and got["diff_bytes"] > 120
+    assert 0 < len(got["diff"].encode()) <= 120 and got["diff"].endswith("\n")
+    assert "path=" in got["hint"] and len(got["files"]) == 2  # the file list is complete
+    monkeypatch.setattr("chatbot4.MAX_FILE_BYTES", 10)
+    one = world.get_pr(rec["pr"], "bot/modules/weather.py")
+    assert one["content_truncated"] is True and one["content"] == "PRIORITY ="
+
+
+def test_get_pr_unknown_and_missing_head(setup, monkeypatch):
+    world, clone, _ = setup
+    with pytest.raises(ToolError, match="no PR with that number"):
+        world.get_pr(999)
+    rec = _pr_with_changes(world, clone)
+    world.state["prs"][str(rec["pr"])]["head_sha"] = "f" * 40
+    calls = []
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda numbers, **kw: calls.append(numbers) or numbers)
+    with pytest.raises(ToolError, match="not in the world's repository") as exc:
+        world.get_pr(rec["pr"])
+    assert exc.value.code == "missing_head" and calls == [[rec["pr"]]]
+
+
+def test_get_pr_fetches_a_missing_head_once(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    real_has = world.repo.has_commit
+    fetched = []
+    monkeypatch.setattr(world.repo, "has_commit",
+                        lambda sha: bool(fetched) and real_has(sha))
+    monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda numbers, **kw: fetched.append(numbers) or [])
+    assert world.get_pr(rec["pr"])["head_sha"] == rec["head_sha"] and fetched == [[rec["pr"]]]
+
+
+def test_get_pr_runs_git_without_the_world_lock(setup, monkeypatch):
+    import threading
+
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    real, free = world.repo.git_bytes, []
+
+    def probe(*args, **kwargs):
+        def other():  # another tool call needing the lock while get_pr runs git
+            free.append(world.lock.acquire(timeout=2))
+            if free[-1]:
+                world.lock.release()
+        t = threading.Thread(target=other)
+        t.start()
+        t.join()
+        return real(*args, **kwargs)
+    monkeypatch.setattr(world.repo, "git_bytes", probe)
+    world.get_pr(rec["pr"], "bot/modules/weather.py")
+    assert free and all(free)
+
+
+def test_get_pr_is_read_only(setup, monkeypatch):
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    saves = []
+    monkeypatch.setattr(world, "_save", lambda: saves.append(1))
+    world.get_pr(rec["pr"])
+    assert saves == []
+
+
+def test_get_pr_is_a_registered_tool(setup):
+    world, clone, _ = setup
+    rec = _pr_with_changes(world, clone)
+    schema = next(t for t in world.manifest()["tools"] if t["name"] == "get_pr")
+    assert "pr" in json.dumps(schema) and "path" in json.dumps(schema)
+    got = world.call("get_pr", {"pr": rec["pr"], "path": "bot/modules/weather.py"}, Agent("birch"))
+    assert got["content"].startswith("PRIORITY")

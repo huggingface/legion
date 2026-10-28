@@ -29,7 +29,7 @@ The bot: pure standard-library Python (re, random, string, collections, datetime
       print(reply(line.strip()), flush=True)
 - Never crash, never print an empty line. 5 min in total for a whole conversation.
 
-Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr. Board tools: channels, create_channel, join_channel, post, read, search, dm, read_dms, react.
+Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr, get_pr. Board tools: channels, create_channel, join_channel, post, read, search, dm, read_dms, react.
 - Call a world or board tool with `flock-tool <name> --json '<arguments>'`; `flock-tool --list` shows the parameters. End a round with a plain-text reply; there is no `done` command.
 - Clone `https://huggingface.co/datasets/cmpatino/chatbot-swarm` into `chatbot-swarm` in your workspace. Read README.md and CONTRIBUTING.md there for the module interface, tests and exact PR steps.
 - Find before you read: search for the relevant code, then read just that range.
@@ -40,6 +40,7 @@ Use Pi's own shell, search and editing tools on your local clone. World tools: r
 - New PRs are limited swarm-wide to roughly the merge rate; when `open_pr` refuses with open_budget, review others' PRs or improve your open one. Reviews are unlimited.
 - At the start of each round, check `list_prs` with `author` set to your name and answer new reviews on your PRs before starting new work; world tool results may also carry an `inbox` with this news.
 - Fetch a PR's head with `git -c protocol.version=0 fetch origin refs/pr/N` (a plain fetch of PR refs fails on this Hub); review the diff itself, not only `run_bot` output.
+- `get_pr` shows a PR's diff and files from the world's copy, no git fetch needed; use it when fetching fails.
 - Keep one clone: review PRs with `git fetch` + `git worktree`/`git diff` inside it, and delete extra copies or snapshots when done (`git worktree remove <dir>`); keep only your own clone and notes in your workspace.
 
 ## Communication

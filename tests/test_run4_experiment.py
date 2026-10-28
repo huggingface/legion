@@ -36,7 +36,8 @@ def test_spec_fixed_prompt_and_waves():
     assert "5 min in total" in agent.system_prompt
     assert not spec.comms.protocols
     assert set(agent.tools) == {"world:run_bot", "world:open_pr", "world:review_pr",
-                                "world:merge_pr", "world:list_prs", "world:close_pr"}
+                                "world:merge_pr", "world:list_prs", "world:close_pr",
+                                "world:get_pr"}
     waves = module("waves").load(EXP / "waves.yaml")
     assert waves.cap == 300 and waves.split(300) == {"agent": 300}
     assert waves.events[:5] == [(0, 20), (300, 40), (600, 60), (900, 80), (1200, 100)]

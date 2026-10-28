@@ -73,6 +73,11 @@ class Repository:
         self.fetch()
 
     def git(self, *args, at=None, data=None, env=None):
+        return self.git_bytes(*args, at=at, data=data, env=env).decode().strip()
+
+    def git_bytes(self, *args, at=None, data=None, env=None):
+        """Run git and return its raw stdout (for diffs and file contents, which need not be
+        UTF-8). Failures raise like git()."""
         p = subprocess.run(["git", "-C", str(at or self.root), *args], input=data,
                            capture_output=True, env=env or self.env, timeout=120, check=False)
         if p.returncode:
@@ -85,7 +90,7 @@ class Repository:
             # A --force-with-lease push whose expected value no longer matches the remote ref.
             code = "stale_lease" if command == "push" and "stale info" in stderr else "git_error"
             raise ToolError("repository operation failed; refresh your clone and retry", code)
-        return p.stdout.decode().strip()
+        return p.stdout
 
     def negotiation(self):
         """Offer only main's history as haves: with ~2,000 local refs the default negotiation
