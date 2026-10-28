@@ -179,6 +179,31 @@ async def test_heartbeat_carries_memory_restores_tools_and_knobs(tmp_path, monke
     await worker.client.aclose()
 
 
+async def test_memory_loop_samples_the_cgroup_and_logs_each_agent(tmp_path, monkeypatch):
+    from flock.worker.cgroup import CgroupMem
+
+    from .test_worker_cgroup import v2
+
+    v2(tmp_path / "fs")
+    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.02")
+    worker, _ = make_worker(tmp_path, FakeController())
+    worker.cgroup = CgroupMem(tmp_path / "fs", env={})
+    await worker.dispatch(AssignCommand(agent="researcher-0001", type="researcher", spec=spec(),
+                                        restore=False))
+    rt = worker.agents["researcher-0001"]
+    await until(lambda: rt.setup_done)
+    rt.workdir_files = 7
+    task = asyncio.create_task(worker.memory_loop())
+    try:
+        await until(lambda: any(e.type == "agent_memory" for e in worker.outbox.take()))
+    finally:
+        task.cancel()
+    assert worker.mem.limit_mb == 11264 and worker.mem.nonreclaim_mb == 1300
+    assert worker.heartbeat_payload().mem == worker.mem and not rt.dirty
+    await worker.client.aclose()
+
+
 async def test_drain_sequence_at_deadline(tmp_path):
     ctrl = FakeController()
     sync = RecordingSync(MemoryStore())
@@ -362,6 +387,7 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     trims = []
     monkeypatch.setattr(wmain, "trim_heap", lambda: trims.append(1))
     monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.01")
+    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
     caplog.set_level(logging.INFO, logger="flock.worker")
     task = asyncio.create_task(w.memory_loop())
     await until(lambda: len(trims) >= 2)
@@ -370,5 +396,11 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     assert report["outbox_events"] == 0 and report["outbox_bytes"] == 0 and report["agents"] == 0
     if wmain.rss_mb() is not None:
         assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
-    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # off
-    await asyncio.wait_for(w.memory_loop(), 1)
+    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # log off; the cgroup is still sampled
+    trims.clear()
+    w.mem = None
+    task = asyncio.create_task(w.memory_loop())
+    await until(lambda: w.mem is not None)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert trims == []

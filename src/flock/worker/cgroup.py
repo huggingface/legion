@@ -181,11 +181,18 @@ def du_mb(path: Path) -> float:
     return total / MB
 
 
-def agent_memory(pid: int, descendants: Callable[[int], list[tuple[int, str]]],
+def agent_memory(pid: int | None, descendants: Callable[[int], list[tuple[int, str]]],
                  tmp_dir: Path | None = None) -> dict:
     """PSS of an agent's harness process and its tools (by `comm`), its sandbox's tmpfs root
-    and its tmp dir, in MB. `pid` is the process the adapter started; under isolation that is
-    `unshare`, and the harness is its first descendant."""
+    and its tmp dir, in MB. `pid` is the process the adapter started (None: none running);
+    under isolation that is `unshare`, and the harness is its first descendant."""
+    out = {} if pid is None else _process_memory(pid, descendants)
+    if tmp_dir is not None and tmp_dir.is_dir():
+        out["tmp_mb"] = round(du_mb(tmp_dir), 1)
+    return out
+
+
+def _process_memory(pid: int, descendants: Callable[[int], list[tuple[int, str]]]) -> dict:
     kids = [p for p, _ in descendants(pid)]
     harness = kids.pop(0) if _comm(pid) == "unshare" and kids else pid
     roll = _rollup(harness)
@@ -200,13 +207,10 @@ def agent_memory(pid: int, descendants: Callable[[int], list[tuple[int, str]]],
         tmpfs = roll.get("Pss_Shmem", 0) / 1024
     except OSError:
         tmpfs = None
-    out = {"pi_pss_mb": round(roll.get("Pss", 0) / 1024, 1),
-           "tools_pss_mb": round(sum(tools.values()) / 1024, 1),
-           "tools_by_comm": {c: round(kb / 1024, 1) for c, kb in tools.most_common(5)},
-           "tmpfs_root_mb": None if tmpfs is None else round(tmpfs, 1)}
-    if tmp_dir is not None and tmp_dir.is_dir():
-        out["tmp_mb"] = round(du_mb(tmp_dir), 1)
-    return out
+    return {"pi_pss_mb": round(roll.get("Pss", 0) / 1024, 1),
+            "tools_pss_mb": round(sum(tools.values()) / 1024, 1),
+            "tools_by_comm": {c: round(kb / 1024, 1) for c, kb in tools.most_common(5)},
+            "tmpfs_root_mb": None if tmpfs is None else round(tmpfs, 1)}
 
 
 TMPFS_TYPES = ("tmpfs", "ramfs")
