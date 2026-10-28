@@ -110,7 +110,7 @@ container_srun_args() { CTR_SRUN=(); }
         assert result.returncode == 0
         assert (tmp_path / "run/world/crash-requeues").read_text().strip() == str(count)
     sleep_log = tmp_path / "sleeps"
-    assert (sleep_log.read_text().splitlines() if sleep_log.exists() else []) == sleeps
+    assert ([x for x in sleep_log.read_text().split() if int(x) >= 300] if sleep_log.exists() else []) == sleeps
 
 
 @pytest.mark.parametrize("cycle", [None, 60.0])
@@ -189,7 +189,8 @@ container_srun_args() { CTR_SRUN=(); }
     executable(tmp_path / "slurm/world-inner.sh", '#!/bin/bash\nexit 37\n')
     for _ in range(5):
         assert run_script(tmp_path, "world.sbatch", env).returncode == 0
-    assert (tmp_path / "sleeps").read_text().split() == ["300", "600", "1200", "1800", "1800"]
+    backoffs = [x for x in (tmp_path / "sleeps").read_text().split() if int(x) >= 300]  # not the 2 s manifest poll
+    assert backoffs == ["300", "600", "1200", "1800", "1800"]
 
 
 @pytest.mark.parametrize(("swarm_code", "waited", "calls"), [(200, False, ["pin", "run"]), (404, True, [])])
