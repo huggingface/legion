@@ -471,11 +471,13 @@ instead of 3.8 MB. A patch over 20 MiB, or a clone v2 cannot capture, goes as v1
 The world applies it with `flock.world.workspace.apply_patch(snapshot, tree)` on
 its own checkout of `base_sha` (worktree only, so its excludes apply when it
 stages the tree); it refuses symlinks, submodules, paths outside the tree or in
-`.git`, and more than 10,000 files or 128 MiB declared. A world that lacks the
-base answers the error code `need_full` before doing anything; the worker then
-resends the call once as v1. `GET /metrics` counts `upload_v1_total` and
-`upload_v2_total`. chatbot4 advertises both and checks the PR budget before any
-apply.
+`.git`, and more than 10,000 files or 128 MiB declared (`git apply` runs under
+`prlimit`: 128 MiB per file, 2 GiB of memory). A world that cannot use a patch
+but could use the full tree answers the error code `need_full` before doing
+anything; the worker then resends the call once as v1. `GET /metrics` counts
+`upload_v1_total` and `upload_v2_total`. chatbot4 advertises both, checks the PR
+budget before any apply, and answers `need_full` only from `run_bot` (whose v1
+path takes any base); `open_pr` refuses a base that is not on main either way.
 
 A tool's optional
 `x-flock-timeout_s` raises the worker's HTTP read timeout for its calls; chatbot4

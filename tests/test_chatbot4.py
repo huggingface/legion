@@ -2102,9 +2102,8 @@ def test_v2_with_an_unknown_base_asks_for_the_full_tree(setup, monkeypatch):
     from flock.world.workspace import capture_v2
     v2 = {**capture_v2(clone.parent, clone.name), "base_sha": "1" * 40}
     args = {"branch": "topic", "title": "Topic module", "description": "tested"}
-    with pytest.raises(ToolError) as e:
+    with pytest.raises(ToolError, match="base is not a main commit"):  # a v1 resend can't help
         world.call_workspace("open_pr", args, Agent("cedar"), v2)
-    assert e.value.code == "need_full"
     with pytest.raises(ToolError) as e:
         world.call_workspace("run_bot", {"ref_or_path": "chatbot-swarm", "lines": ["hi"]},
                              Agent("cedar"), v2)

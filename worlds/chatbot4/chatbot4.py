@@ -895,8 +895,6 @@ class Chatbot4World(World):
             if key and key in self.state["requests"]:
                 return self._replay(key, description)
             if not self.repo.ancestor(base, "main"):
-                if "patch" in snapshot and not self.repo.has_commit(base):
-                    raise ToolError("unknown base; send the full tree", "need_full")
                 raise ToolError("base is not a main commit; fetch main and rebase your branch")
             # A parked draft (its Hub PR exists, its head never landed) is reused, never recreated.
             draft = self._draft(pr) if pr is not None else self.state["drafts"].get(branch_ref)

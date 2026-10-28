@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import os
 import re
-import resource
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -19,6 +18,7 @@ from pathlib import Path, PurePosixPath
 MAX_BYTES = 128 << 20
 MAX_FILES = 10000
 PATCH_MAX_BYTES = 20 << 20  # a larger v2 patch is sent as a v1 snapshot instead
+APPLY_MAX_MEMORY = 2 << 30  # address space of `git apply`: a binary delta can expand a lot
 # The agent owns its clone's config: never run a command it configured (fsmonitor, filters,
 # external diff, textconv) or let its diff settings change the patch format.
 SAFE = ("-c", "core.fsmonitor=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
@@ -82,13 +82,18 @@ def capture_v2(workdir: Path, path: str, cap: int = PATCH_MAX_BYTES) -> dict | N
     root, base, names = _clone(workdir, path)
     if any("\n" in n for n in names):
         return None  # hash-object --stdin-paths reads lines
-    # hash-object --no-filters instead of `git add`: add would run the clone's clean filters.
-    shas = git(root, "hash-object", "-w", "--no-filters", "--stdin-paths",
-               data="".join(n + "\n" for n in names).encode()).split()
-    info = "".join(f"{'100755' if (root / n).stat().st_mode & 0o100 else '100644'} {sha}\t{n}\0"
-                   for n, sha in zip(names, shas, strict=True))
+    objects = (root / git(root, "rev-parse", "--git-path", "objects")).resolve()
     with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        (Path(tmp) / "objects").mkdir()
+        # New blobs go to a temporary object store (the clone's is borrowed), never the clone.
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index"),
+               "GIT_OBJECT_DIRECTORY": str(Path(tmp) / "objects"),
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(objects)}
+        # hash-object --no-filters instead of `git add`: add would run the clone's clean filters.
+        shas = git(root, "hash-object", "-w", "--no-filters", "--stdin-paths",
+                   data="".join(n + "\n" for n in names).encode(), env=env).split()
+        info = "".join(f"{'100755' if (root / n).stat().st_mode & 0o100 else '100644'} {sha}\t{n}\0"
+                       for n, sha in zip(names, shas, strict=True))
         git(root, "update-index", "-z", "--index-info", data=info.encode(), env=env)
         patch = git_bytes(root, "diff", "--cached", "--binary", "--full-index", "--find-renames",
                           "--no-ext-diff", "--no-textconv", "--no-color", base, env=env)
@@ -97,7 +102,9 @@ def capture_v2(workdir: Path, path: str, cap: int = PATCH_MAX_BYTES) -> dict | N
     return {"base_sha": base, "patch": base64.b64encode(patch).decode("ascii")}
 
 
-_LINK = re.compile(rb"^(?:new file mode|new mode|index \S+) 1[26]0000$", re.MULTILINE)
+# git reads modes as octal and keeps only the type bits (0120000, 120755 are symlinks): any
+# new mode that is not exactly a regular file's is refused.
+_MODES = re.compile(rb"^(?:new file mode |new mode |index \S+ )(.*)$", re.MULTILINE)
 _SIZES = re.compile(rb"^(?:literal|delta) (\d+)$", re.MULTILINE)
 
 
@@ -112,23 +119,24 @@ def apply_patch(snapshot: dict, tree: Path) -> list[str]:
         raise ValueError("invalid workspace patch") from exc
     if git(tree, "rev-parse", "HEAD") != snapshot.get("base_sha"):
         raise ValueError("the tree is not a checkout of the patch's base")
-    if _LINK.search(patch):
+    if any(m not in (b"100644", b"100755") for m in _MODES.findall(patch)):
         raise ValueError("symlinks are not supported")
-    # shortcut: a binary delta can expand past its declared size, up to RLIMIT_FSIZE per file;
-    # decode delta headers if a world ever has to take uploads from untrusted callers.
+    # shortcut: a binary delta can expand past its declared size, up to the file-size and
+    # memory limits below; decode delta headers if a world takes uploads from untrusted callers.
     if (patch.count(b"\ndiff --git ") + patch.startswith(b"diff --git ") > MAX_FILES
             or sum(int(n) for n in _SIZES.findall(patch)) > MAX_BYTES):
         raise ValueError("workspace snapshot exceeds 128 MiB or 10,000 files")
-
-    def limit() -> None:  # in the child: no file git apply writes exceeds the snapshot cap
-        resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_BYTES, MAX_BYTES))
-
-    if patch:
-        p = subprocess.run(["git", "-C", str(tree), "apply", "--binary", "--whitespace=nowarn", "-"],
-                           input=patch, capture_output=True, timeout=120, check=False,
-                           preexec_fn=limit)
+    if patch:  # prlimit, not preexec_fn: the world's server is threaded
+        p = subprocess.run(["prlimit", f"--fsize={MAX_BYTES}", f"--as={APPLY_MAX_MEMORY}", "git",
+                            "-C", str(tree), "apply", "--binary", "--whitespace=nowarn", "-"],
+                           input=patch, capture_output=True, timeout=120, check=False)
         if p.returncode:
             raise ValueError("the workspace patch does not apply to its base")
+    for top, dirs, files in os.walk(tree):
+        if top == str(tree) and ".git" in dirs:
+            dirs.remove(".git")
+        if any(os.path.islink(os.path.join(top, n)) for n in dirs + files):
+            raise ValueError("symlinks are not supported")
     names = git(tree, "ls-files", "-z", "--modified", "--deleted", "--others", "--exclude-standard")
     return sorted({n for n in names.split("\0") if n})
 

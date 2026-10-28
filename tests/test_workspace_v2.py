@@ -109,12 +109,18 @@ def test_world_refuses_bad_patches(repos, tmp_path):
     escape = (b"diff --git a/../x b/../x\nnew file mode 100644\n--- /dev/null\n+++ b/../x\n"
               b"@@ -0,0 +1 @@\n+x\n")
     dotgit = escape.replace(b"../x", b".git/hooks/post-commit")
-    for patch in (escape, dotgit, b"not a patch\n"):
+    link = (b"diff --git a/l b/l\nnew file mode %s\n--- /dev/null\n+++ b/l\n@@ -0,0 +1 @@\n"
+            b"+/etc/passwd\n\\ No newline at end of file\n")
+    sub = (b"diff --git a/sub b/sub\nnew file mode 0160000\n--- /dev/null\n+++ b/sub\n@@ -0,0 +1 @@\n"
+           b"+Subproject commit " + b"1" * 40 + b"\n")
+    links = [link % m for m in (b"0120000", b"120755", b"120000\r")]
+    for patch in (escape, dotgit, b"not a patch\n", *links, sub):
         with pytest.raises(ValueError):
             apply_patch({**snap, "patch": base64.b64encode(patch).decode()}, tree)
     with pytest.raises(ValueError, match="base"):
         apply_patch({**snap, "base_sha": "0" * 40}, tree)
     assert not (tmp_path / "x").exists() and not (tree / ".git/hooks/post-commit").exists()
+    assert not (tree / "l").is_symlink() and not (tree / "sub").exists()
 
 
 def test_size_cap_falls_back(repos):
@@ -130,8 +136,10 @@ def test_clone_filters_never_run(repos, tmp_path):
     git(clone, "config", "filter.x.clean", f"touch {marker}; cat")
     (clone / ".gitattributes").write_text("* filter=x\n")
     (clone / "src/a.py").write_text("a = 2\n")
+    loose = len(list((clone / ".git/objects").rglob("*")))
     assert capture_v2(work, "clone") is not None
     assert not marker.exists()
+    assert len(list((clone / ".git/objects").rglob("*"))) == loose  # no objects left in the clone
 
 
 def test_payload_size_5k_files(tmp_path, capsys):
