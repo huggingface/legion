@@ -98,6 +98,13 @@ response.
   `Retry-After`, at most 10 s); a write is never resent. There is a 60 s timeout and a 1 MB
   result limit. Every failure is a tool result the model reads (`{"error": "...", "code": ...}`,
   plus the world's `retry_after_s` when it gave one); the turn goes on.
+- **Holdoff.** After a `429` (`Retry-After` header or body `retry_after_s`; 30 s if neither,
+  capped at 10 min) the worker refuses every non-read-only call to that world locally until
+  the time is up; after a tool error carrying `retry_after_s` it refuses that agent's calls to
+  that tool only. A held-off call sends no request and captures no workspace: the result is the
+  world's message plus "next slot in N min; do other work or end your turn", with `code`,
+  `retry_after_s` (remaining) and `local: true`, and counts as `refused`. Read-only tools are
+  never held off by a tool hint, and try once during a world holdoff. The turn is never slept.
 - **Changes reach the next turn.** A re-apply re-fetches the manifest, and the next turn sees
   the new tools. If the version changed, that turn's World section also carries a note: "the
   world changed since your last turn (version 0.1.0 -> 0.2.0)".
