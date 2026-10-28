@@ -1078,12 +1078,13 @@ def workers(swarm: str) -> None:
             w["crashes"],
             w["deadline"],
             w["last_heartbeat"],
+            w.get("knobs_rev") or "",
             w.get("last_error") or "",
         ]
         for w in found
     ]
     _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
-                  "last_error"])
+                  "knobs", "last_error"])
     if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
         typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
     elif any(str(w["job_id"] or "").startswith("external-") for w in found):

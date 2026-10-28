@@ -86,15 +86,30 @@ log = logging.getLogger(__name__)
 UPLOAD_CHUNK = 200
 MODES_FILE = ".flock-modes.json"
 RESTORE_BATCH = 1000  # default of FLOCK_RESTORE_BATCH
+RESTORE_THREADS = 4  # default of FLOCK_RESTORE_THREADS
+# The type's `worker:` values for this module (sync_exclude, restore_batch, restore_threads),
+# set live by `Worker.apply_knobs`; each one present wins over its env variable.
+SPEC_KNOBS: dict[str, object] = {}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        n = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return n if n >= 1 else default
 
 
 def restore_batch() -> int:
-    """Files per restore download batch: env FLOCK_RESTORE_BATCH (>= 1), else RESTORE_BATCH."""
-    try:
-        n = int(os.environ.get("FLOCK_RESTORE_BATCH", ""))
-    except ValueError:
-        return RESTORE_BATCH
-    return n if n >= 1 else RESTORE_BATCH
+    """Files per restore download batch: the spec's, else env FLOCK_RESTORE_BATCH (>= 1), else
+    RESTORE_BATCH."""
+    return SPEC_KNOBS.get("restore_batch") or _env_int("FLOCK_RESTORE_BATCH", RESTORE_BATCH)
+
+
+def restore_threads() -> int:
+    """Batches of one agent's restore downloaded in parallel: the spec's, else env
+    FLOCK_RESTORE_THREADS (>= 1), else RESTORE_THREADS."""
+    return SPEC_KNOBS.get("restore_threads") or _env_int("FLOCK_RESTORE_THREADS", RESTORE_THREADS)
 
 
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
@@ -121,12 +136,15 @@ def _expand(pattern: str) -> list[str]:
 
 def workdir_excludes() -> list[str]:
     """Globs for the workdir mirror, relative to the workdir, always including `*.flock-part`:
-    the defaults (unless env FLOCK_SYNC_EXCLUDE_DEFAULTS=0) plus the comma-separated
-    FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults."""
+    the defaults (unless env FLOCK_SYNC_EXCLUDE_DEFAULTS=0) plus the spec's `sync_exclude`, else
+    the comma-separated FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults."""
     pats = list(PUSH_EXCLUDE)
     if os.environ.get("FLOCK_SYNC_EXCLUDE_DEFAULTS", "1").strip() != "0":
         pats += [x for d in DEFAULT_WORKDIR_EXCLUDE for x in _expand(d)]
-    for item in os.environ.get("FLOCK_SYNC_EXCLUDE", "").split(","):
+    extra = SPEC_KNOBS.get("sync_exclude")
+    if extra is None:
+        extra = os.environ.get("FLOCK_SYNC_EXCLUDE", "").split(",")
+    for item in extra:
         if item.strip():
             pats += _expand(item.strip())
     return pats
