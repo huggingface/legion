@@ -188,9 +188,10 @@ class Policies:
                     if not muted:
                         out.append(self._emit(swarm, now, "alert_cleared", {
                             "rule": rule.name, "target": target, "value": v}))
-                        if st["acted"]:
-                            out += self._run(spec, rule, mode, target, rule.clear_do, now,
-                                             clearing=True)
+                        if st["acted"]:  # enforced only after an enforced `do`
+                            out += self._run(spec, rule, (rule.mode or mode) if st.get(
+                                "enforced") else "alert", target, rule.clear_do, now,
+                                clearing=True)
                     continue
                 st["value"] = v
                 if st["firing"] and not st["acted"] and not muted:
@@ -226,7 +227,7 @@ class Policies:
             if len(budget) >= self.max_actions:
                 enforce = False  # alert-only until the hour frees a slot
                 out = []
-                if now - self._exhausted.get(swarm, 0.0) >= 3600:
+                if swarm not in self._exhausted or now - self._exhausted[swarm] >= 3600:
                     self._exhausted[swarm] = now
                     out.append(self._emit(swarm, now, "policy_budget_exhausted", {
                         "rule": rule.name, "max_actions_per_hour": self.max_actions}))
