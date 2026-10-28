@@ -271,7 +271,7 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             t.cancel()
 
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
-                     compute=compute)
+                     compute=compute, health=health)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
     return Built(app, store, dep, jobs, state, settings, halt, timeout, health)
 

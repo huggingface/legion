@@ -27,6 +27,7 @@ from starlette.requests import Request
 
 from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
+from flock.controller.health import Health
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
@@ -553,6 +554,7 @@ def create_app(
     on_comms: Callable[[str, str, dict], None] | None = None,
     worlds: WorldHost | None = None,
     world_transport: httpx.BaseTransport | None = None,
+    health: Health | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -569,9 +571,12 @@ def create_app(
     `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
     `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
     WorldHost logging to the controller's output); they stop with the app or `remove`.
-    `world_transport` lets tests fake a `url` world."""
+    `world_transport` lets tests fake a `url` world.
+    `health` (docs/health.md) gets every posted event batch; its probe/snapshot loop is run by
+    the caller (main, localrun). Default: one that only counts."""
     secret_source = os.environ if secret_source is None else secret_source
     worlds = WorldHost() if worlds is None else worlds
+    health = Health(store, token=token, secrets=secret_source) if health is None else health
     if loop_interval is None:
         loop_interval = float(os.environ.get("FLOCK_LOOP_INTERVAL", "1"))
     if enforce_max_working is None:
@@ -633,6 +638,7 @@ def create_app(
 
     app = FastAPI(title="flock controller", lifespan=lifespan)
     app.state.store, app.state.notifier, app.state.loops = store, notifier, loops
+    app.state.health = health
     request_stats: dict[str, RequestStats] = {}
 
     def make_stats(app):
@@ -1496,6 +1502,10 @@ def create_app(
                 released |= turn_seen(a, evs, now)
             if a is not None:
                 loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
+                try:
+                    health.on_events(a, evs, now)
+                except Exception:  # counters never break event ingestion
+                    log.exception("health counters failed for %s", agent)
         if released and cap is not None:  # slots freed now, not at the next heartbeat (run-1k finding 1)
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
