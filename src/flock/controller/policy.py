@@ -26,6 +26,7 @@ import math
 import operator
 from collections import deque
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -367,10 +368,21 @@ class Policies:
         return kind, data
 
 
+_SINKS = ThreadPoolExecutor(2, thread_name_prefix="sink")
+
+
+def _post(sink: str, url: str, doc: dict[str, Any], transport: httpx.BaseTransport | None) -> None:
+    try:
+        with httpx.Client(transport=transport, timeout=5) as http:
+            http.post(url, json=doc).raise_for_status()
+    except Exception as e:  # noqa: BLE001 - a sink never stops the controller
+        log.warning("sink %s: %s: %s", sink, type(e).__name__, e)
+
+
 def send(store: Store, sinks: list[str], doc: dict[str, Any], line: str,
          transport: httpx.BaseTransport | None = None) -> None:
     """`file:<path>` appends `line` under the state dir (mirrored by the state sync);
-    `webhook:<url>` POSTs `doc` as JSON (5 s timeout). A failing sink is logged and skipped."""
+    `webhook:<url>` POSTs `doc` as JSON from a worker thread (5 s timeout). A failing sink is logged and skipped."""
     for s in sinks:
         kind, _, where = s.partition(":")
         try:
@@ -382,8 +394,7 @@ def send(store: Store, sinks: list[str], doc: dict[str, Any], line: str,
                 with path.open("a", encoding="utf-8") as f:
                     f.write(line.rstrip("\n") + "\n")
             else:
-                with httpx.Client(transport=transport, timeout=5) as http:
-                    http.post(where, json=doc).raise_for_status()
+                _SINKS.submit(_post, s, where, doc, transport)  # off the health tick
         except Exception as e:  # noqa: BLE001 - a sink never stops the controller
             log.warning("sink %s: %s: %s", s, type(e).__name__, e)
 

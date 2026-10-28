@@ -672,7 +672,8 @@ class Chatbot4World(World):
                     if kind := self._outcome(exc):
                         slot.fail(kind)
                     raise
-                slot.ok()
+                if not getattr(slot, "idle", False):  # a slot that wrote nothing reports nothing
+                    slot.ok()
         except LaneBusy as busy:
             self._busy(agent, what, pr, reason=busy.reason, retry_after_s=busy.retry_after_s)
 
@@ -1096,6 +1097,7 @@ class Chatbot4World(World):
                         self._create_gap(agent, deadline)
                         with self.main_lock:  # nothing exists on the Hub yet: redo on a moved main
                             if self.repo.sha() != main:
+                                slot.idle = True
                                 continue
                         pr = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
                         with self.lock:  # the reservation becomes a counted open

@@ -296,6 +296,13 @@ def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
     return dict(sorted(out.items()))
 
 
+def _write_synced(path: Path, text: str) -> None:  # fsync before a later os.replace
+    with path.open("w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def write_modes(workdir: Path, stats: WorkdirStats | None = None,
                 exclude: list[str] | None = None) -> bool:
     """(Re)write the manifest if its content changed, remove it when nothing is executable.
@@ -953,7 +960,7 @@ class BucketSync:
             if index is None or self.stop_rebase:
                 log.info("%s: workdir base build stopped (drain or preempt)", rt.name)
                 return None
-            await asyncio.to_thread(new_idx.write_text, json.dumps(index))
+            await asyncio.to_thread(_write_synced, new_idx, json.dumps(index))
             await asyncio.to_thread(self.store.upload, [(tar, pre + BASE_TAR)])
             base = {"created_at": t0, "files": len(index),
                     "bytes": sum(s for _, s in index.values()), "deleted": [], "links": {}}
