@@ -605,10 +605,10 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
     }
     if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
         fields["preempted"] = 1
-        for name in hb.interrupted:  # their turn was cut: resume after the restore
-            a = store.get_agent(name)
-            if a is not None and a["worker"] == worker_id:
-                store.update_agent(name, resume_pending=1)
+    for name in hb.interrupted:  # cut by a preemption or a drain deadline: resume after the restore
+        a = store.get_agent(name)
+        if a is not None and a["worker"] == worker_id:
+            store.update_agent(name, resume_pending=1)
     if w["consecutive_crashes"] and t - (w["launched_at"] or t) >= STABLE_AFTER:
         fields["consecutive_crashes"] = 0
     store.update_worker(worker_id, **fields)

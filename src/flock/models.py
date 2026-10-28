@@ -1512,7 +1512,7 @@ class WorkerHeartbeat(BaseModel):
     # the worker's last heartbeat after a preemption notice (SIGUSR1): it synced and exits;
     # the controller relaunches the slot at once, as a planned restart (docs/slurm.md)
     preempted: bool = False
-    # with `preempted`: agents whose turn the preemption cut; they get the type's
+    # agents whose turn a preemption or a bounded drain cut; they get the type's
     # resume_prompt after the restore
     interrupted: list[str] = Field(default_factory=list)
     # telemetry (docs/design.md "Heartbeat"); None from workers that do not send it

@@ -77,7 +77,7 @@ def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float
     base = min(LOOP_TRANSIENT_BACKOFF_CAP, LOOP_TRANSIENT_BACKOFF * 2 ** max(0, n - 1))
     return base * (0.5 + 0.5 * rng())
 # Interruptions that are a decision (stop, drain, unassign), not a failure: no re-prompt.
-_DECIDED = ("stop", "drain", "unassign", "abandoned", "draining")
+_DECIDED = ("stop", "drain", "unassign", "abandoned", "draining", "drain_deadline")
 _UNSET: Any = object()  # set_live: "no news" for the grant (None means revoked)
 
 
@@ -943,17 +943,29 @@ class AgentRuntime:
             self._stop_req = None
         self._defer_buffer(reason)
 
-    async def drain(self) -> None:
-        """No new starts; let the in-flight turn finish (bounded by its timeout); final sync."""
+    async def drain(self, deadline: float | None = None) -> bool:
+        """No new starts; let the in-flight turn finish (bounded by its timeout, and by
+        `deadline` s when given: then it is interrupted, `drain_deadline`); final sync. True
+        when a turn was cut."""
         self.allow_starts = False
-        if self._burst is not None:
+        cut = False
+        if (burst := self._burst) is not None:
             self._stop_req = "drain"
             try:
-                await self._burst
+                if deadline is None:
+                    await burst
+                else:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(burst), deadline)
+                    except TimeoutError:
+                        cut = self.turn_id is not None or self.awaiting
+                        self._stop_req = "drain_deadline"
+                        await burst
             finally:
                 self._stop_req = None
         self._defer_buffer("draining")
         await self.sync_now("drain")
+        return cut
 
     async def unassign(self) -> None:
         self.allow_starts = False

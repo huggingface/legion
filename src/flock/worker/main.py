@@ -16,6 +16,11 @@ running turn at once (`turn_interrupted`), sync every agent to the bucket in par
 `<swarm>/_workers/<worker>/preempted.json` in the bucket, flush events, send a last heartbeat
 with `preempted: true`, exit PREEMPT_EXIT (75). The controller relaunches the slot at once (a
 planned restart, no crash backoff) and the new job restores every agent from the bucket.
+
+Memory relief ladder (docs/slurm.md "Memory"), every MEMORY_SAMPLE s on the cgroup's
+nonreclaimable memory against its limit (`MemThresholds`, FLOCK_MEM_*): `wants_rotation` in the
+heartbeat and a recycle of the largest harness, then a drain bounded by a deadline (exit 0),
+then `preempt("memory")` (exit 75). A tool tree above the spike size is SIGKILLed on its own.
 """
 
 from __future__ import annotations
@@ -68,7 +73,14 @@ from flock.secrets_file import secret_env
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
-from flock.worker.cgroup import TMPFS_TYPES, CgroupMem, agent_memory, fs_type
+from flock.worker.cgroup import (
+    TMPFS_TYPES,
+    CgroupMem,
+    MemThresholds,
+    agent_memory,
+    fs_type,
+    harness_and_tools,
+)
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
@@ -388,6 +400,21 @@ def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], Harn
     return make
 
 
+def _harness_pid(rt: AgentRuntime) -> int | None:
+    """The process the agent's adapter started, if it is running."""
+    proc = getattr(rt.adapter, "_proc", None)
+    return proc.pid if proc is not None and proc.returncode is None else None
+
+
+def _kill_tools(rt: AgentRuntime) -> int:
+    """SIGKILL the agent's tool processes, not its harness (the spike guard)."""
+    from flock.worker.adapters.pi import _descendants, _kill_all
+
+    if (pid := _harness_pid(rt)) is None:
+        return 0
+    return _kill_all(harness_and_tools(pid, _descendants)[1])
+
+
 STALE_STATUSES = (404, 409)
 
 
@@ -451,6 +478,11 @@ class Worker:
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
         self.cgroup = cgroup or CgroupMem()
         self.mem: WorkerMem | None = None  # the last cgroup sample (memory_loop)
+        self.mem_thresholds = MemThresholds.from_env()
+        self.wants_rotation = False  # heartbeat: the controller may drain us (rotation budget)
+        self._rung = 0  # highest ladder rung logged in this episode (0: below `rotate`)
+        self._oom_kills: int | None = None
+        self._last_recycle = float("-inf")  # loop time of the last memory recycle
         self.knobs_rev = knobs_rev(cfg)
 
     async def _fetch_tools(self, version: str) -> bytes:
@@ -617,7 +649,8 @@ class Worker:
                                interrupted=sorted(self._interrupted),
                                agents=[a.heartbeat() for a in self.agents.values()],
                                mem=self.mem, restore=self.restore_progress(),
-                               tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev)
+                               tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev,
+                               wants_rotation=self.wants_rotation)
 
     def restore_progress(self) -> RestoreProgress | None:
         """Restores in flight, summed over agents (BucketSync.restore_progress)."""
@@ -752,19 +785,18 @@ class Worker:
             log.warning("work root %s is on %s: every workdir file counts as memory",
                         self.cfg.work_root, kind)
 
-    def agent_memory(self) -> list[tuple[AgentRuntime, dict]]:
-        """Per agent: harness and tool PSS, tmpfs root, tmp dir, workdir files (blocking:
-        /proc and directory walks; run in a thread)."""
+    def agent_memory(self, tmp: bool = True) -> list[tuple[AgentRuntime, dict]]:
+        """Per agent: harness and tool PSS, tmpfs root, tmp dir (`tmp`), workdir files
+        (blocking: /proc and directory walks; run in a thread)."""
         from flock.worker.adapters.pi import _descendants
 
         out = []
         for rt in list(self.agents.values()):
             if not rt.setup_done:  # its session log may still be downloading
                 continue
-            proc = getattr(rt.adapter, "_proc", None)
-            pid = proc.pid if proc is not None and proc.returncode is None else None
+            pid = _harness_pid(rt)
             home = getattr(rt.adapter, "home", None)
-            data = agent_memory(pid, _descendants, Path(home) / "tmp" if home else None)
+            data = agent_memory(pid, _descendants, Path(home) / "tmp" if home and tmp else None)
             data["workdir_files"] = rt.workdir_files
             out.append((rt, data))
         return out
@@ -781,6 +813,7 @@ class Worker:
         while True:
             try:
                 self.mem = WorkerMem(**await asyncio.to_thread(self.cgroup.sample))
+                await self.relieve()
                 if interval > 0 and loop.time() >= next_log:
                     next_log = loop.time() + interval
                     before = rss_mb()
@@ -799,6 +832,47 @@ class Worker:
                 log.exception("memory sample failed")
                 self.mem = None  # no stale reading in later heartbeats
             await asyncio.sleep(MEMORY_SAMPLE)
+
+    async def relieve(self) -> None:
+        """One step of the memory relief ladder on the last sample (see the module doc), and
+        the spike guard. Each rung is logged once per episode (until memory falls below
+        `rotate`). `worker_lifetime` stays the backstop."""
+        th, mem = self.mem_thresholds, self.mem
+        if any(rt.live for rt in self.agents.values()):
+            for rt, data in await asyncio.to_thread(self.agent_memory, False):
+                rt.pss_mb = data.get("pi_pss_mb")
+                tools = data.get("tools_pss_mb") or 0
+                if th.spike_mb > 0 and tools > th.spike_mb:
+                    n = await asyncio.to_thread(_kill_tools, rt)
+                    log.warning("memory: %s's tools use %.0f MB (> %.0f): killed %d process(es)",
+                                rt.name, tools, th.spike_mb, n)
+                    rt.emit("tool_tree_killed", {"agent": rt.name, "mb": tools})
+        if not self.cgroup.armed or mem is None or not mem.limit_mb or mem.nonreclaim_mb is None:
+            return
+        frac = mem.nonreclaim_mb / mem.limit_mb
+        oom = None not in (mem.oom_kills, self._oom_kills) and mem.oom_kills > self._oom_kills
+        if mem.oom_kills is not None:
+            self._oom_kills = mem.oom_kills
+        rung = (3 if oom or frac >= th.preempt else 2 if frac >= th.drain
+                else 1 if frac >= th.rotate else 0)
+        if rung > self._rung:
+            what = ("", "rotation wanted, recycling the largest harness",
+                    f"draining (turns cut after {th.drain_deadline_s:.0f} s)",
+                    "oom_kill: preempting" if oom else "preempting")[rung]
+            log.warning("memory: nonreclaim %.0f of %.0f MB (%.0f%%): %s", mem.nonreclaim_mb,
+                        mem.limit_mb, frac * 100, what)
+        self._rung = max(self._rung, rung) if rung else 0
+        self.wants_rotation = rung >= 1
+        if rung == 3:
+            self._spawn(self.preempt("memory"))
+        elif rung == 2 and not self.draining:
+            self._spawn(self.drain("memory", deadline=th.drain_deadline_s))
+        elif rung == 1 and not self.draining:
+            now = asyncio.get_running_loop().time()
+            running = [rt for rt in self.agents.values() if rt.phase == "running"]
+            if (running and now - self._last_recycle >= th.recycle_gap_s
+                    and max(running, key=lambda rt: rt.pss_mb or 0).recycle("memory")):
+                self._last_recycle = now
 
     async def deadline_loop(self) -> None:
         while True:
@@ -895,7 +969,9 @@ class Worker:
         finally:
             path.unlink(missing_ok=True)
 
-    async def drain(self, reason: str) -> None:
+    async def drain(self, reason: str, deadline: float | None = None) -> None:
+        """Finish the turns in flight, sync, exit 0. With `deadline` (s), turns still running
+        then are interrupted; they resume after the restart (heartbeat `interrupted`)."""
         if self.draining:
             return
         log.info("draining (%s)", reason)
@@ -903,7 +979,9 @@ class Worker:
         self._wake_heartbeat.set()
         loop = asyncio.get_running_loop()
         t0, snap = loop.time(), (self.sync.stats.snapshot() if self.sync else {})
-        await asyncio.gather(*(rt.drain() for rt in list(self.agents.values())), return_exceptions=True)
+        agents = list(self.agents.values())
+        cut = await asyncio.gather(*(rt.drain(deadline) for rt in agents), return_exceptions=True)
+        self._interrupted.update(rt.name for rt, c in zip(agents, cut, strict=True) if c is True)
         log.info("drain: %d agents finished and synced in %.1f s; bucket %s", len(self.agents),
                  loop.time() - t0, self.sync.stats.since(snap) if self.sync else {})
         self._drained.set()

@@ -1,5 +1,6 @@
-"""The worker's memory as its cgroup sees it, and per-agent process memory, for the heartbeat
-and the periodic memory line (telemetry only; nothing here acts on it).
+"""The worker's memory as its cgroup sees it, and per-agent process memory, for the heartbeat,
+the periodic memory line and the worker's relief ladder (`MemThresholds`, docs/slurm.md
+"Memory"; the worker acts on these readings, nothing here does).
 
 `CgroupMem` finds the worker's cgroup from `/proc/self/cgroup` and reads v2
 `memory.{current,stat,events,pressure}` (v1 `memory.{usage_in_bytes,stat,oom_control}` as a
@@ -19,6 +20,7 @@ import os
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,31 @@ SLOPE_WINDOW_S = 3600.0
 SLOPE_MIN_SPAN_S = 300.0  # no slope from less than 5 min of samples
 NONRECLAIM = ("anon", "shmem", "slab_unreclaimable", "kernel_stack", "pagetables")
 NONRECLAIM_V1 = ("total_rss", "total_shmem")  # v1 has no slab split
+
+
+@dataclass
+class MemThresholds:
+    """The worker's memory relief ladder, as fractions of the cgroup limit on nonreclaimable
+    memory, from FLOCK_MEM_* (docs/slurm.md "Memory")."""
+
+    rotate: float = 0.75  # FLOCK_MEM_ROTATE: wants_rotation, recycle the largest harness
+    drain: float = 0.85  # FLOCK_MEM_DRAIN: bounded drain, exit 0 (planned restart)
+    preempt: float = 0.93  # FLOCK_MEM_PREEMPT: preempt("memory"), exit 75
+    recycle_gap_s: float = 600.0  # FLOCK_MEM_RECYCLE_GAP_S: at most one recycle per this
+    drain_deadline_s: float = 300.0  # FLOCK_MEM_DRAIN_DEADLINE_S: turns still running are cut
+    spike_mb: float = 3072.0  # FLOCK_MEM_SPIKE_MB: one agent's tools above this get SIGKILL; 0 off
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] = os.environ) -> MemThresholds:
+        kw = {}
+        for f in fields(cls):
+            name = f"FLOCK_MEM_{f.name.upper()}"
+            if env.get(name):
+                try:
+                    kw[f.name] = float(env[name])
+                except ValueError:
+                    log.warning("%s=%r is not a number; using %s", name, env[name], f.default)
+        return cls(**kw)
 
 
 def _read(p: Path) -> str | None:
@@ -195,9 +222,19 @@ def agent_memory(pid: int | None, descendants: Callable[[int], list[tuple[int, s
     return out
 
 
+def harness_and_tools(pid: int, descendants: Callable[[int], list[tuple[int, str]]]
+                      ) -> tuple[int, list[tuple[int, str]]]:
+    """(the harness pid, its tool processes as (pid, start time)) under the adapter's process:
+    under isolation that is `unshare`, and the harness is its first descendant."""
+    kids = descendants(pid)
+    if _comm(pid) == "unshare" and kids:
+        return kids[0][0], kids[1:]
+    return pid, kids
+
+
 def _process_memory(pid: int, descendants: Callable[[int], list[tuple[int, str]]]) -> dict:
-    kids = [p for p, _ in descendants(pid)]
-    harness = kids.pop(0) if _comm(pid) == "unshare" and kids else pid
+    harness, procs = harness_and_tools(pid, descendants)
+    kids = [p for p, _ in procs]
     roll = _rollup(harness)
     tools: Counter[str] = Counter()
     for p in kids:

@@ -285,3 +285,97 @@ async def test_repeated_signals_drain_once(tmp_path, signals, caplog):
     assert caplog.text.count("preempted (") == 1
     assert len([u for u in store.uploads if any("preempted.json" in r for r in u)]) == 1
     assert [hb.preempted for hb in ctrl.heartbeats].count(True) == 1
+
+
+# ---------------------------------------------------------------------- memory relief ladder
+
+
+def _nonreclaim(leaf: Path, mb: float, oom_kill: int = 2) -> None:
+    from flock.worker.cgroup import MB
+
+    (leaf / "memory.stat").write_text(f"anon {int(mb * MB)}\nfile {3000 * MB}\n")
+    (leaf / "memory.events").write_text(f"oom 0\noom_kill {oom_kill}\n")
+
+
+async def _ladder_worker(tmp_path, n=2):
+    from flock.worker.cgroup import CgroupMem, MemThresholds
+
+    from .test_worker_cgroup import v2
+
+    leaf = v2(tmp_path / "fs", parent_max=str(10000 * 1024 * 1024))  # 10000 MB
+    worker, _, _ = make(tmp_path, FakeController(), MemoryStore(), turn_time=600)
+    worker.cgroup = CgroupMem(tmp_path / "fs", env={})
+    worker.mem_thresholds = MemThresholds(drain_deadline_s=0.2)
+    s = spec(idle_grace="30s", turn_timeout="10m")
+    for name in names(n):
+        await worker.dispatch(AssignCommand(agent=name, type="researcher", spec=s, restore=False))
+        await worker.dispatch(PromptCommand(agent=name, prompt_id=name, text="work"))
+    await until(lambda: all(rt.turn_id for rt in worker.agents.values()) and len(worker.agents) == n)
+    pss = {name: 100.0 * (i + 1) for i, name in enumerate(names(n))}  # the last is the largest
+    worker.agent_memory = lambda tmp=True: [(rt, {"pi_pss_mb": pss[rt.name]})
+                                            for rt in worker.agents.values()]
+    return worker, leaf
+
+
+async def _step(worker, leaf, mb, **kw):
+    from flock.models import WorkerMem
+
+    _nonreclaim(leaf, mb, **kw)
+    worker.mem = WorkerMem(**worker.cgroup.sample())
+    await worker.relieve()
+
+
+async def test_memory_ladder_recycles_then_drains_then_preempts(tmp_path, caplog):
+    worker, leaf = await _ladder_worker(tmp_path)
+    big, small = worker.agents["researcher-0001"], worker.agents["researcher-0000"]
+    await _step(worker, leaf, 5000)  # 50%: nothing
+    assert not worker.wants_rotation and not big._recycle_pending
+
+    await _step(worker, leaf, 7600)  # >= 75%: rotation wanted, the largest harness recycled
+    assert worker.heartbeat_payload().wants_rotation
+    assert big._recycle_pending == "memory" and not small._recycle_pending
+    big._recycle_pending = None
+    await _step(worker, leaf, 7700)  # one recycle per FLOCK_MEM_RECYCLE_GAP_S
+    assert not big._recycle_pending and not small._recycle_pending
+
+    await _step(worker, leaf, 8600)  # >= 85%: a drain whose deadline cuts the running turns
+    await asyncio.wait_for(worker._drained.wait(), 5)
+    assert worker.draining and not worker.preempted
+    assert worker._interrupted == {"researcher-0000", "researcher-0001"}
+    cut = [e.data["data"]["reason"] for e in worker.outbox.take() if e.type == "turn_interrupted"]
+    assert cut == ["drain_deadline", "drain_deadline"]
+
+    await _step(worker, leaf, 9400)  # >= 93%: preempt
+    await until(lambda: worker.preempted)
+    rungs = [r.message for r in caplog.records if r.message.startswith("memory: nonreclaim")]
+    assert len(rungs) == 3  # each rung logged once
+
+
+async def test_oom_kill_delta_preempts(tmp_path):
+    worker, leaf = await _ladder_worker(tmp_path, n=1)
+    await _step(worker, leaf, 2000, oom_kill=2)
+    assert not worker.preempted
+    await _step(worker, leaf, 2000, oom_kill=3)  # a kill in our cgroup, whatever the level
+    await until(lambda: worker.preempted)
+
+
+async def test_spike_guard_kills_the_tool_tree_only(tmp_path, monkeypatch):
+    worker, _ = await _ladder_worker(tmp_path, n=1)
+    rt = worker.agents["researcher-0000"]
+    worker.agent_memory = lambda tmp=True: [(rt, {"pi_pss_mb": 300.0, "tools_pss_mb": 3500.0})]
+    killed = []
+    monkeypatch.setattr(wmain, "_kill_tools", lambda r: killed.append(r.name) or 4)
+    await worker.relieve()
+    assert killed == ["researcher-0000"] and rt.pss_mb == 300.0
+    ev = [e.data["data"] for e in worker.outbox.take() if e.type == "tool_tree_killed"]
+    assert ev == [{"agent": "researcher-0000", "mb": 3500.0}]
+    assert not worker.draining and rt.turn_id  # the turn goes on
+
+
+def test_mem_thresholds_from_env():
+    from flock.worker.cgroup import MemThresholds
+
+    th = MemThresholds.from_env({"FLOCK_MEM_ROTATE": "0.6", "FLOCK_MEM_SPIKE_MB": "0",
+                                 "FLOCK_MEM_DRAIN_DEADLINE_S": "x"})
+    assert th.rotate == 0.6 and th.spike_mb == 0 and th.drain_deadline_s == 300
+    assert MemThresholds.from_env({}) == MemThresholds()
