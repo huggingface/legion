@@ -1972,3 +1972,42 @@ def test_metrics_report_prs_budget_outbox_and_saves(setup):
     assert all(isinstance(v, int | float) for v in m.values())
     assert (m["open_prs"], m["opens_last_hour"], m["parked_drafts"]) == (1, 1, 0)
     assert m["state_bytes"] == (world.ws / "prs.json").stat().st_size and m["save_age_s"] < 60
+
+
+def test_vote_failures_trip_the_push_lane_and_comments_survive_a_restart(setup, monkeypatch):
+    world, clone, _ = setup
+    monkeypatch.setenv("CHATBOT_HUB_WRITE_SLOTS", "2")
+    world = Chatbot4World(world.ws, world.repo)
+    world.lanes["push"].trip_gap_s = 0.2  # tripped: one push at a time, 0.2 s apart
+    failing_pr_push(world, monkeypatch, [3])  # "vote failed: transaction was aborted", 3 times
+    with pytest.raises(ToolError) as exc:
+        submit(world, clone)
+    assert exc.value.code == "hub_busy" and exc.value.retry_after_s == 60
+    m = world.lanes.metrics()["push"]
+    assert (m["transient"], m["tripped"], m["slots"], m["effective_slots"]) == (3, 1, 2, 1)
+    rec = submit(world, clone, pr=1)  # the parked draft lands on the tripped lane
+    assert world.lanes.metrics()["push"]["ok"] == 1  # the parked attempt counts no outcome
+
+    hub, fail = world.repo.hub, [True]
+    real = hub.comment
+
+    def flaky(pr, text):
+        if fail[0]:
+            raise ToolError("Hub request failed; retry later", "hub_error")
+        real(pr, text)
+
+    monkeypatch.setattr(hub, "comment", flaky)
+    approve(world, rec)
+    assert _wait(lambda: world.lanes.metrics()["comment"]["transient"] >= 1)
+    assert world.metrics()["lane_comment_outbox_depth"] == 1
+    monkeypatch.setattr(chatbot4, "OUTBOX_BACKOFF", (0.05, 0.1))
+    restarted = Chatbot4World(world.ws, world.repo)  # the breaker resets, the outbox does not
+    assert not restarted.lanes.metrics()["push"]["tripped"]
+    fail[0] = False
+    assert _wait(lambda: restarted.outbox.depth()[0] == 0)
+    assert hub.comments == [(rec["pr"], f"approve by birch on {rec['head_sha']}\n\nChecked the code and bot")]
+
+    lane = world.lanes["push"]  # the first world's lane recovers after 10 quiet minutes
+    lane.clock = lambda: time.monotonic() + 601
+    m = world.lanes.metrics()["push"]
+    assert (m["tripped"], m["effective_slots"]) == (0, 2)
