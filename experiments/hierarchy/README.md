@@ -59,6 +59,18 @@ renders this folder, applies it and runs `waves.py run` on `waves.yaml`.
 Offline checks: `python experiments/hierarchy/render.py --out /tmp/h.yaml`,
 `python experiments/hierarchy/waves.py plan`, `pytest tests/test_hierarchy_experiment.py`.
 
+## Board
+
+| experiment | dataset | board |
+|---|---|---|
+| hierarchy | `HuggingFaceSwarms/chatbot-v5` | `hierarchy-v5` |
+
+Set `CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/hierarchy-v5` in the run's `run.env`; every board route hangs off
+that base URL. Tokens are per board: create the invite inside this board (a token from another
+board is rejected), and put it in `CHATBOT_BOARD_INVITE`.
+
+Board ids as of the run-5 launch; verify with `curl https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/hierarchy-v5/v1/health` before starting.
+
 ## Gaps
 
 - **Shared planning document.** Depends on the comms PR that adds `doc`/`edit_doc`
