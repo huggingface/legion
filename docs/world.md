@@ -276,8 +276,53 @@ queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is t
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
 concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
 `merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
-`outbox_depth`, `outbox_oldest_age_s`, `stale_lease_adoptions_total`, `hub_busy_total`,
-`hub_slot_wait_s_total`, `save_duration_s`, `save_age_s` and `state_bytes`.
+`stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s`, `save_age_s`,
+`state_bytes`, and its lanes' numbers as `lane_<lane>_<key>` (below).
+
+**Lanes for external writes.** A world that writes to an outside service with one token (a
+Git host, an API) can give each kind of write its own lane, from `flock.world.lanes`:
+
+```python
+from flock.world.lanes import Lane, LaneBusy, Lanes
+
+lanes = Lanes({"push": Lane(slots=1), "merge": Lane(slots=1),
+               "comment": Lane(slots=1, gap_s=1.0)}, dir=state_dir, paused=lambda lane: ...)
+try:
+    with lanes.hold("push", deadline=time.monotonic() + 20) as slot:
+        ...                                  # the write
+        slot.ok()                            # or slot.fail("transient") / slot.fail("final")
+except LaneBusy as busy:                     # no slot by the deadline: busy.reason, busy.retry_after_s
+    raise ToolError("busy; retry later", "busy", retry_after_s=busy.retry_after_s)
+lanes.outbox("comment", drain=post).put(key=pr, payload=text)   # post(key, payloads) -> "ok"|"transient"|"final"
+```
+
+- A lane runs at most `slots` writes at once, `gap_s` apart. The world decides which failures
+  are `transient` (the service is overloaded) and which `final` (retrying cannot help).
+- Breaker: 3 transient failures within 15 minutes trip the lane to one slot and at least 5 s
+  between writes; after 10 minutes without one it returns to its settings
+  (`Lane(trip_after=, trip_window_s=, trip_gap_s=, quiet_s=)`). `Lanes(breaker_groups=[("push",
+  "merge")])` gives lanes one shared breaker: a failure in either trips both.
+- Pause: `lane.paused = True` or the `paused(lane)` callback; `hold()` then waits until its
+  deadline and raises `LaneBusy` (`pausable=False` ignores the pause).
+- `lane.slots`, `lane.gap_s` and `lane.paused` are plain attributes; `lane.configure(slots=,
+  gap_s=)` changes them and wakes waiters.
+- Outbox: writes that must happen eventually. Stored in `<dir>/outbox-<lane>.jsonl` (archive it
+  with the world state), drained by a background thread holding the lane's slots; payloads
+  queued for the same key while it waits go out as one write (`drain` gets the list, up to
+  `max_batch` payloads and `max_chars` characters). Transient failures retry forever with
+  doubling backoff (5 s to 10 min); only "ok" and "final" remove payloads; "split" retries
+  that key's payloads one per write. `lanes.close()` stops the thread; the file keeps the rest.
+- `lanes.metrics()` per lane: `slots`, `effective_slots`, `in_flight`, `waits_total`,
+  `wait_s_total`, `ok`, `transient`, `final`, `tripped`, `paused`, `outbox_depth`,
+  `outbox_oldest_age_s`.
+
+chatbot4 uses `push` (create, push, ready and close PRs; `CHATBOT_HUB_WRITE_SLOTS`), `merge`
+(`CHATBOT_MERGE_HUB_SLOTS`) and `comment` (review comments through the outbox,
+`CHATBOT_HUB_OUTBOX_GAP_S`); `push` and `merge` share one breaker. `git_error`/`hub_error`
+(where "vote failed: transaction was aborted" lands) count as transient, `pr_closed`/`pr_merged`
+as final, and so does a single comment the Hub refuses with a 4xx other than 429 (counted in
+`hub_comments_rejected_total`); joined comments it refuses are split. The pause file pauses
+`push` and `merge` (closes still go through).
 
 **Parked mode.** `flock world serve` binds its port first and builds the world in a background
 thread. While that raises (a failed restore, the Hub unreachable, a bad config), it is
@@ -350,9 +395,11 @@ flock world pause <swarm> open push --reason "hub outage"
 flock world resume <swarm> open push
 ```
 
-chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`) and `pr.open_floor`
-(`CHATBOT_PR_OPEN_FLOOR`). `open_pr` honours the `open` lane (new PRs) and `push`, `merge_pr`
-the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file.
+chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `pr.open_floor`
+(`CHATBOT_PR_OPEN_FLOOR`), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
+`hub.comment.gap_s` (its Hub write lanes, below). `open_pr` honours the `open` lane (new PRs)
+and `push`, `merge_pr` the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file;
+pausing `comment` holds the review comment outbox.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
