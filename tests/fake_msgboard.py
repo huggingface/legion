@@ -23,7 +23,7 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
 - PUT /v1/channels/{id}/messages/{mid}/reactions/{emoji}: idempotent per principal; messages carry
   `reactions: [{emoji, count, by: [principal]}]` like the real board.
 - GET/PUT /v1/channels/{id}/doc {body, base_version}: a stale base_version is 409 doc_conflict with
-  `details.current`; `docs = False` makes the routes 404 (a board without channel documents).
+  `details.current`; `docs = False` makes the routes a code-less 404 (a board without channel documents).
 
 `requests` records (method, path, query, principal name) for assertions. Not thread-safe
 beyond one lock; fine for tests.
@@ -373,6 +373,8 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                             version, text = version + 1, body["body"]
                             board.doc[ch] = (version, text)
                 return self.send(200, {"channel_id": ch, "version": version, "body": text})
+            if u.path.endswith("/doc"):  # board.docs is False: the route does not exist
+                return self.send(404, {"detail": "Not Found"})
             return self.fail(404, "not_found")
 
         def do_GET(self) -> None:

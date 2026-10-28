@@ -1259,7 +1259,7 @@ class Chatbot4World(World):
                     if rec["author"] != agent.name:
                         self._unnotify(rec["author"], pr, "mergeable")
                         self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
-                    for name in set(reviewers) - {agent.name}:
+                    for name in sorted(set(reviewers) - {agent.name}):
                         self._notify(name, pr, "merged", f"PR #{pr} you approved was merged by {agent.name}")
                     self._save()
                     event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,

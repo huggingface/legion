@@ -469,6 +469,13 @@ def test_votes_rule(up, down, passed):
     assert v["voters_up"] == [f"u{i}" for i in range(up)]
 
 
+def test_votes_merge_emoji_variants():
+    from flock.comms.tools import votes
+    v = votes(_reacted(**{"👍": ["a"], "👍️": ["a", "b"], "👍🏽": ["c"], "👎🏿": ["d"]}))
+    assert (v["up"], v["down"], v["voters_up"], v["voters_down"], v["passed"]) == (
+        3, 1, ["a", "b", "c"], ["d"], True)
+
+
 async def test_reactions_votes_and_channel_doc(tmp_path, board):
     team = Team(tmp_path, board, ["cedar", "birch", "pine"])
     team.spec.extended = True
@@ -495,6 +502,8 @@ async def test_reactions_votes_and_channel_doc(tmp_path, board):
         assert not error and out == {"version": 1}
         out, error = await team.call("birch", "edit_doc", body="stale edit", base_version=0)
         assert error and out["version"] == 1 and out["body"] == "plan v1", out
+        out, error = await team.call("birch", "edit_doc", body="plan v1", base_version=0)
+        assert not error and out == {"version": 1}  # a retry of a save that already landed
         doc, _ = await team.call("birch", "doc")
         assert doc == {"body": "plan v1", "version": 1}
         board.docs = False

@@ -20,6 +20,7 @@ BUILTIN_MODULE = "flock:comms"
 READONLY = frozenset({"comms:read", "comms:search", "comms:channels", "comms:read_dms",
                       "comms:votes", "comms:doc"})  # change nothing: idle for `idle_rounds`
 GROUP_RE = re.compile(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", re.IGNORECASE)
+VARIANT_RE = re.compile("[\ufe0f\U0001F3FB-\U0001F3FF]")  # emoji presentation selector, skin tones
 GROUP_NAMES = frozenset({"all", "agents", "humans", "everyone", "people"})
 READ_DEFAULT, READ_MAX = 20, 100
 SEARCH_DEFAULT, SEARCH_MAX = 10, 50
@@ -208,8 +209,12 @@ def reactions(m: dict[str, Any]) -> dict[str, Any]:
 
 def votes(m: dict[str, Any]) -> dict[str, Any]:
     """👍 / 👎 on a message; every reactor counts. passed: at least 2 up and more up than down."""
-    who = reactions(m)["reactors"]
-    up, down = who.get("👍", []), who.get("👎", [])
+    side: dict[str, list[str]] = {"👍": [], "👎": []}
+    for emoji, names in reactions(m)["reactors"].items():
+        base = VARIANT_RE.sub("", emoji)  # the board keeps 👍️ and 👍🏽 apart from 👍
+        if base in side:
+            side[base] += [n for n in names if n not in side[base]]
+    up, down = side["👍"], side["👎"]
     return {"up": len(up), "down": len(down), "voters_up": up, "voters_down": down,
             "passed": len(up) >= 2 and len(up) > len(down)}
 

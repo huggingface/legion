@@ -193,10 +193,14 @@ class ExtendedComms:
                     "body": args["body"], "base_version": args["base_version"]}}), ident)
                 return {"version": doc["version"]}
             except BoardError as e:
-                if e.status == 404:  # the channel resolved, so the route is missing (older board)
+                if e.status == 404 and e.code is None:  # a framework 404: the route is missing
                     raise ValueError("board has no channel documents") from None
+                if e.status == 404:
+                    raise ValueError("channel is not visible; use channels to find it") from None
                 if e.code == "doc_conflict":
                     current = (e.details or {}).get("current") or {}
+                    if current.get("body") == args["body"]:  # a retried PUT that had already saved
+                        return {"version": current["version"]}
                     raise DocConflict(str(e), current.get("version"), current.get("body")) from None
                 raise
         raise ValueError("unknown board tool")
