@@ -352,3 +352,21 @@ async def test_policy_routes_and_mute(sim):
     out = (await sim.c.post("/swarms/demo/policies/worker-mem/unmute", json={})).json()
     assert not out["rules"][0]["muted"]
     assert (await sim.c.post("/swarms/demo/policies/nope/mute", json={})).status_code == 404
+
+
+async def test_pause_type_uses_automatic_holds(store, clock):
+    app = create_app(store, TOKEN, clock=clock, loop_interval=0)
+    rule = {"name": "busy", "metric": "types.researcher.idle", "op": ">=", "value": 1,
+            "do": {"pause_type": "researcher"}, "clear_do": {"resume_type": "researcher"}}
+    spec = spec_with({"mode": "enforce", "rules": [rule]})
+    store.put_swarm(spec, 0)
+    p = app.state.health.policies
+    assert p.loops is app.state.loops
+    t = clock().timestamp()
+    by_state = lambda n: {"types": {"researcher": {"by_state": {"idle": n}}}}
+    p.evaluate(spec, by_state(2), t, 30)
+    held = store.swarm_flags("demo")["holds"]["types"]["researcher"]
+    assert held["auto"] and held["reason"] == "busy" and held["by"] == "policy"
+    app.state.loops.pause("demo", types=["researcher"], reason="operator", by="me")
+    p.evaluate(spec, by_state(0), t + 30, 30)  # clear_do: an operator's hold stays
+    assert store.swarm_flags("demo")["holds"]["types"]["researcher"]["by"] == "me"
