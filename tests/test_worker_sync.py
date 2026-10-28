@@ -363,6 +363,22 @@ async def test_first_push_after_full_restore_uploads_nothing_unchanged(tmp_path)
     assert (meta["files"], meta["bytes"]) == (4, 4 * 5 + 3) and rt2.workdir_files == 4
 
 
+def test_workdir_stats_skip_excluded_paths_and_rank_top_dirs(tmp_path):
+    from flock.worker.sync import WorkdirStats, workdir_excludes
+    wd = tmp_path / "wd"
+    for rel, data in [("a.txt", "12"), ("snaps/1/x", "1"), ("snaps/2/y", "1"), ("snaps/z", "1"),
+                      ("src/m.py", "123"), ("src/node_modules/p/i.js", "big" * 100),
+                      ("src/m.o", "bin"), (".venv/bin/python", "b")]:
+        (wd / rel).parent.mkdir(parents=True, exist_ok=True)
+        (wd / rel).write_text(data)
+    os.chmod(wd / "src/m.py", 0o755)
+    (wd / ".venv/bin/python").chmod(0o755)
+    ws = WorkdirStats()
+    assert collect_modes(wd, ws, workdir_excludes()) == {"src/m.py": "0o755"}
+    assert (ws.files, ws.bytes) == (5, 2 + 3 + 3)
+    assert ws.top_dirs == [("snaps", 3), ("src", 1)]
+
+
 def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog):
     from flock.worker.sync import download_resilient
 

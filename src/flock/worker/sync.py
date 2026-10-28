@@ -1,7 +1,7 @@
 """Bucket sync: per agent, `<BUCKET>/<swarm>/<type>/<agent>/` holds
 
     workdir/<path relative to the workdir>        (if persist_workdir)
-    meta.json                                     ({files, bytes, ts} of the workdir when it last changed)
+    meta.json                                     ({files, bytes, ts} of the mirrored workdir when it last changed)
     sessions/<agent>.jsonl, <agent>.state.json    (pi session log + worker state)
     harness/<path relative to the harness home>   (CLAUDE_CONFIG_DIR, CODEX_HOME or PI_CODING_AGENT_DIR)
 
@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import functools
 import json
 import logging
 import os
@@ -122,38 +123,69 @@ def workdir_excludes() -> list[str]:
     return pats
 
 
+@functools.lru_cache(maxsize=64)
+def _matcher(patterns: tuple[str, ...]):
+    """One compiled regex for a pattern list (a walk tests every file of a workdir)."""
+    if not patterns:
+        return lambda rel: None
+    return re.compile("|".join(fnmatch.translate(p.replace("\\", "/")) for p in patterns)).match
+
+
 def is_excluded(rel: str, patterns: list[str]) -> bool:
     """Does the workdir-relative posix path match one of the patterns (as `sync_bucket` does)?"""
-    return any(fnmatch.fnmatchcase(rel, pat.replace("\\", "/")) for pat in patterns)
+    return _matcher(tuple(patterns))(rel) is not None
 
 
-def collect_modes(workdir: Path, stats: dict[str, int] | None = None) -> dict[str, str]:
+@dataclass
+class WorkdirStats:
+    """What a push mirrors: regular files and their bytes, excluded paths left out, and the
+    top-level directories with the most files ((name, files), largest first, up to 5)."""
+
+    files: int = 0
+    bytes: int = 0
+    top_dirs: list[tuple[str, int]] = field(default_factory=list)
+
+
+def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
+                  exclude: list[str] | None = None) -> dict[str, str]:
     """{relative posix path: "0o755"} for regular files with any executable bit (symlinks and
-    the manifest itself excluded). `stats` gets the walk's regular file count and bytes."""
+    the manifest itself excluded). `exclude`: paths left out of the walk (excluded directories
+    are not entered). `stats` gets the walk's counts (`WorkdirStats`)."""
     out: dict[str, str] = {}
+    excl = _matcher(tuple(exclude or ()))
+    per_dir: Counter[str] = Counter()
     for root, dirs, files in os.walk(workdir):
-        dirs.sort()
+        base = Path(root).relative_to(workdir).as_posix()
+        base = "" if base == "." else base + "/"
+        dirs[:] = sorted(d for d in dirs if excl(f"{base}{d}/") is None)
         for f in files:
-            p = Path(root) / f
+            rel = base + f
+            if excl(rel) is not None:
+                continue
             try:
-                st = p.lstat()
+                st = os.lstat(os.path.join(root, f))
             except OSError:
                 continue
-            if stats is not None and stat.S_ISREG(st.st_mode):
-                stats["files"] = stats.get("files", 0) + 1
-                stats["bytes"] = stats.get("bytes", 0) + st.st_size
-            if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
-                rel = p.relative_to(workdir).as_posix()
-                if rel != MODES_FILE:
-                    out[rel] = oct(stat.S_IMODE(st.st_mode))
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if stats is not None:
+                stats.files += 1
+                stats.bytes += st.st_size
+                if base:
+                    per_dir[base.split("/", 1)[0]] += 1
+            if st.st_mode & 0o111 and rel != MODES_FILE:
+                out[rel] = oct(stat.S_IMODE(st.st_mode))
+    if stats is not None:
+        stats.top_dirs = per_dir.most_common(5)
     return dict(sorted(out.items()))
 
 
-def write_modes(workdir: Path, stats: dict[str, int] | None = None) -> bool:
+def write_modes(workdir: Path, stats: WorkdirStats | None = None,
+                exclude: list[str] | None = None) -> bool:
     """(Re)write the manifest if its content changed, remove it when nothing is executable.
     Returns whether the file changed."""
     path = workdir / MODES_FILE
-    modes = collect_modes(workdir, stats)
+    modes = collect_modes(workdir, stats, exclude)
     old = path.read_text() if path.is_file() else None
     if not modes:
         if old is not None:
@@ -521,10 +553,11 @@ class BucketSync:
             return 0
         meta: list[tuple[Path, str]] = []
         if rt.spec.persist_workdir and rt.workdir.is_dir():
-            # shortcut: counts excluded caches too; good enough to predict a restore's size
-            stats = {"files": 0, "bytes": 0}
-            await asyncio.to_thread(write_modes, rt.workdir, stats)
-            rt.workdir_files = stats["files"]
+            exclude = workdir_excludes()
+            ws = WorkdirStats()
+            await asyncio.to_thread(write_modes, rt.workdir, ws, exclude)
+            rt.workdir_files = ws.files
+            stats = {"files": ws.files, "bytes": ws.bytes}
             if self._meta.get(pre) != stats:  # the workdir's size: predicts a restore's time
                 path = rt.sessions_dir / f"{rt.name}.meta.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -535,7 +568,7 @@ class BucketSync:
                 log.info("%s: workdir push without remote deletes (last restore incomplete)",
                          rt.name)
             await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
-                                    delete=delete, exclude=workdir_excludes())
+                                    delete=delete, exclude=exclude)
         files = self._changed(self.collect(rt)) + meta
         if files:
             await asyncio.to_thread(self.store.upload, files)
