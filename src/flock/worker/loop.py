@@ -4,7 +4,8 @@
 or "none"), `{spend}` (the agent's cost in USD, 3 decimals), `{cap}` (its `agent_usd`, 2
 decimals, or "none"), `{why}` (what triggered the prompt) and `{last_summary}` (the text the
 agent last passed to `done`, else its last reply; after a turn that stopped without `done`, a
-line saying so). Any other `{name}`, and format specs such
+line saying so) and `{workspace}` (the workdir's files, MB and largest dirs at the last push,
+or "not measured yet"). Any other `{name}`, and format specs such
 as `{cap:.2f}`, are left exactly as written.
 """
 
@@ -20,7 +21,7 @@ NO_SUMMARY = "(none yet)"
 
 
 def render(template: str, meta: LoopMeta, *, spend: float, last_summary: str | None,
-           now: datetime) -> str:
+           now: datetime, workspace: str | None = None) -> str:
     elapsed = (now - meta.started_at).total_seconds() / 60 if meta.started_at else 0.0
     values = {
         "round": "" if meta.round is None else str(meta.round),
@@ -30,5 +31,6 @@ def render(template: str, meta: LoopMeta, *, spend: float, last_summary: str | N
         "cap": "none" if meta.cap_usd is None else f"{meta.cap_usd:.2f}",
         "why": meta.why,
         "last_summary": last_summary or NO_SUMMARY,
+        "workspace": workspace or "not measured yet",
     }
     return _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), template)

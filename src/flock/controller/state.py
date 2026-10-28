@@ -17,6 +17,11 @@ tails to their file (in offset order, stopping at a gap), and the next periodic 
 whole file again and deletes them. After a restore the restored files count as uploaded, so the
 first push after a restart is incremental too.
 
+Health files (docs/health.md) are mirrored too: `metrics/<swarm>/latest.json` and the 6-hour
+`<date>T<HH>.jsonl`, `rollups/<swarm>/<hour>.jsonl` and `run.json`, each uploaded whole when it
+changed (also when the DB did not), and restored with the snapshot so a restarted controller
+keeps adding to them.
+
 A snapshot with no swarms is never restored: once the last swarm is removed, the next push
 writes an empty snapshot, so a later controller in the same group starts clean.
 `scripts/deploy-job.sh --down` also deletes the whole prefix (`clear`).
@@ -41,6 +46,7 @@ STATE_DB = "state.db"
 EVENTS = "events"
 DEFAULT_INTERVAL = 60.0
 TAIL = ".tail"  # events/<swarm>/<agent>.jsonl.tail/<offset>: bytes appended after <offset>
+MIRRORED = ("metrics", "rollups", "run.json")  # health files, uploaded whole when changed
 _CHECK = 4096  # bytes before the uploaded end that must still match for a tail upload
 
 
@@ -97,6 +103,7 @@ class StateSync:
         # None until the first push (or a restore) establishes it.
         self._uploaded: dict[str, tuple[int, int, str]] | None = None
         self._remote_tails: dict[str, list[str]] = {}  # tail parts in the bucket, per file
+        self._mirrored: dict[str, tuple[int, int]] = {}  # health file -> (bytes, mtime_ns) sent
 
     def restore(self) -> bool:
         """Before the Store opens: replace the local DB (and event files) with the bucket's copy.
@@ -124,6 +131,13 @@ class StateSync:
             # The restored files are what the bucket holds: the next push sends changes only.
             self._uploaded = {rel: rec for rel, (path, rec) in self._scan(events_dir).items()
                               if rel not in gaps}
+        for name in MIRRORED:
+            if name.endswith(".json"):
+                if name in self.bucket.list(name):
+                    self.bucket.download([(name, self.data_dir / name)])
+            else:
+                self.bucket.sync_down(name, self.data_dir / name)
+        self._mirrored = dict(self._scan_mirrored())
         log.info("state: restored %d swarms (%s), %d agents, %d workers from the bucket",
                  len(summary["swarms"]), ", ".join(summary["swarms"]), summary["agents"],
                  summary["workers"])
@@ -135,6 +149,17 @@ class StateSync:
         if files:
             self.bucket.delete(files)
         return len(files)
+
+    def _scan_mirrored(self) -> list[tuple[str, tuple[int, int]]]:
+        out = []
+        for name in MIRRORED:
+            root = self.data_dir / name
+            for path in [root] if root.is_file() else root.rglob("*") if root.is_dir() else []:
+                if path.is_file() and not path.name.endswith(".tmp"):
+                    st = path.stat()
+                    out.append((path.relative_to(self.data_dir).as_posix(),
+                                (st.st_size, st.st_mtime_ns)))
+        return out
 
     @staticmethod
     def _scan(events_dir: Path) -> dict[str, tuple[Path, tuple[int, int, str]]]:
@@ -152,15 +177,23 @@ class StateSync:
         `final` (the shutdown push): upload only the bytes appended to each event file."""
         with self._lock:
             changes = store.changes()
+            files = 0
+            # health files change without the DB (in-memory samples): sent on their own
+            changed = [(rel, rec) for rel, rec in self._scan_mirrored()
+                       if self._mirrored.get(rel) != rec]
+            if changed:
+                self.bucket.upload([(self.data_dir / rel, rel) for rel, _ in changed])
+                self._mirrored.update(changed)
+                files += len(changed)
             if not force and changes == self._pushed_at_change:
-                return 0
+                return files
             snap = self.data_dir / (STATE_DB + ".snapshot")
             store.backup_to(snap)
             try:
                 self.bucket.upload([(snap, STATE_DB)])
             finally:
                 snap.unlink(missing_ok=True)
-            files = 1
+            files += 1
             events_dir = self.data_dir / EVENTS
             if self.events and events_dir.is_dir():
                 files += self._push_events(events_dir, final)

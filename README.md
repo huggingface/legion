@@ -215,6 +215,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
 | `GET/POST /swarms/{swarm}/loop`, `GET /swarms/{swarm}/events` | loop state per type and agent, `{type, action: start\|stop, final}`, the swarm-level event stream ([docs/loop.md](docs/loop.md)) |
 | `GET /swarms/{swarm}/grants`, `PUT/DELETE /swarms/{swarm}/grants/{target}` | live grants for a type or an agent: tools, `bash`, `limits.max_turns`, `limits.budget_usd` ([docs/live.md](docs/live.md)) |
+| `GET /swarms/{swarm}/health`, `/health/history?since=&res=`, `/usage?by=type\|hour` | health snapshots, token usage ([docs/health.md](docs/health.md)) |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests

@@ -27,6 +27,7 @@ from starlette.requests import Request
 
 from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
+from flock.controller.health import Health
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
@@ -81,8 +82,9 @@ from flock.models import (
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
 from flock.tools.spec import comms_clashes
-from flock.world.host import WorldError, WorldHost
+from flock.world.host import WorldError, WorldHost, world_admin_token
 from flock.world.host import resolve as world_resolve
+from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER
 
 log = logging.getLogger(__name__)
 # Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
@@ -444,7 +446,33 @@ def _chips(counts: dict[str, int], tones: dict[str, str]) -> str:
     )
 
 
-def _status_page(store: Store, now: float) -> str:
+def _health_line(health: Health | None, swarm: str) -> str:
+    """The newest 30 s health snapshot as one line of aggregates (the page has no auth: no
+    agent names)."""
+    rows = health.history(swarm, 0)[-1:] if health is not None else []
+    if not rows:
+        return ""
+    e, b = html.escape, rows[0]["body"]
+    bits = []
+    if w := b.get("world"):
+        bits.append(f"world {'up' if w['up'] else '<strong>down</strong>'}"
+                    + (f" {w['manifest_ms']:.0f} ms" if w.get("manifest_ms") is not None else "")
+                    + (f", Slurm {e(w['slurm_state'])}" if w.get("slurm_state") else ""))
+    tok = b.get("tokens", {}).get("by_type", {})
+    if tok:
+        bits.append(f"tokens this hour {_fmt_count(sum(t.get('input', 0) for t in tok.values()))} in"
+                    f" / {_fmt_count(sum(t.get('output', 0) for t in tok.values()))} out")
+    stuck = sum(len(t["stuck"]) for t in b.get("types", {}).values())
+    bits.append(f"{stuck} stuck or silent")
+    near = sum(1 for wk in b.get("workers", {}).values()
+               if (wk.get("eta_limit_s") or 1e18) < 3600)
+    bits.append(f"{near} workers within 1 h of their memory limit")
+    alerts = "".join(f'<span class="badge warn"><i></i>{e(a["kind"])}</span> '
+                     for a in b.get("alerts", []))
+    return f'<p class="sub">health: {" · ".join(bits)} {alerts}</p>'
+
+
+def _status_page(store: Store, now: float, sampler: Health | None = None) -> str:
     e = html.escape
     parts = []
     for sw in store.list_swarms():
@@ -510,6 +538,7 @@ def _status_page(store: Store, now: float) -> str:
             for pv in st.providers.values()
         )
         provs = f'<p class="sub">providers: {provs}</p>' if provs else ""
+        provs += _health_line(sampler, spec.swarm)
         parts.append(
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
             f"<h2>{e(spec.swarm)}</h2>{removing}</div>"
@@ -537,6 +566,74 @@ def _status_page(store: Store, now: float) -> str:
 # --------------------------------------------------------------------------- app
 
 
+def add_world_admin_routes(api: APIRouter, store: Store, token: str,
+                           secret_source: Mapping[str, str],
+                           transport: httpx.BaseTransport | None,
+                           clock: Callable[[], datetime]) -> None:
+    """`/swarms/{swarm}/world/...`: the world's admin API (knobs, lane pauses; docs/world.md)
+    through the controller with the world's admin secret (`world_admin_token`). Every change
+    is a swarm event."""
+
+    def world_admin(swarm: str, method: str, path: str, body: Any = None) -> Any:
+        row = store.get_swarm(swarm)
+        if row is None:
+            raise HTTPException(404, f"no swarm {swarm!r}")
+        spec = row["spec"]
+        if spec.world is None or not spec.world.endpoint:
+            raise HTTPException(404, f"swarm {swarm!r} has no world")
+        secret = world_admin_token(spec, token, secret_source)
+        if not secret:
+            raise HTTPException(409, f"no admin secret for the world of {swarm!r}: set "
+                                     f"{ADMIN_TOKEN_ENV} on the controller and the world")
+        try:
+            with httpx.Client(transport=transport, timeout=30) as http:
+                r = http.request(method, f"{spec.world.endpoint}{path}", json=body,
+                                 headers={TOKEN_HEADER: secret})
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"world unreachable: {type(e).__name__}") from None
+        try:
+            out = r.json()
+        except ValueError:
+            out = None
+        if r.status_code != 200 or out is None:
+            err = out.get("error") if isinstance(out, dict) else None
+            msg = err.get("message") if isinstance(err, dict) else err or r.text[:300]
+            raise HTTPException(400 if r.status_code in (400, 404) else 502,
+                                f"world answered {r.status_code}: {msg}")
+        return out
+
+    def audit(swarm: str, kind: str, data: dict) -> None:
+        store.append_events(swarm, swarm_stream(swarm), [Event(type=kind, ts=clock(), agent="",
+                                                               data=data)])
+
+    def by(x_flock_source: str | None) -> str:
+        return spec_source(x_flock_source).get("by") or "operator"
+
+    @api.get("/swarms/{swarm}/world/knobs")
+    def world_knobs(swarm: str) -> dict:
+        return {"knobs": world_admin(swarm, "GET", "/admin/knobs"),
+                **world_admin(swarm, "GET", "/admin/paused")}
+
+    @api.patch("/swarms/{swarm}/world/knobs")
+    def set_world_knobs(swarm: str, values: Annotated[dict[str, Any], Body()], reason: str = "",
+                        x_flock_source: Annotated[str | None, Header()] = None) -> dict:
+        out = world_admin(swarm, "PATCH", "/admin/knobs", values)
+        for c in out.get("changes") or []:
+            audit(swarm, "world_knob", {**c, "by": by(x_flock_source), "reason": reason})
+        return out
+
+    @api.post("/swarms/{swarm}/world/{action}")
+    def world_pause(swarm: str, action: Literal["pause", "resume"],
+                    body: Annotated[dict[str, Any], Body()],
+                    x_flock_source: Annotated[str | None, Header()] = None) -> dict:
+        lanes, reason = body.get("lanes"), str(body.get("reason") or "")
+        out = world_admin(swarm, "POST", f"/admin/{action}",
+                          {"lanes": lanes, **({"reason": reason} if action == "pause" else {})})
+        audit(swarm, f"world_{action}", {"lanes": lanes, "by": by(x_flock_source),
+                                         **({"reason": reason} if action == "pause" else {})})
+        return out
+
+
 def create_app(
     store: Store,
     token: str,
@@ -553,6 +650,7 @@ def create_app(
     on_comms: Callable[[str, str, dict], None] | None = None,
     worlds: WorldHost | None = None,
     world_transport: httpx.BaseTransport | None = None,
+    health: Health | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -569,9 +667,12 @@ def create_app(
     `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
     `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
     WorldHost logging to the controller's output); they stop with the app or `remove`.
-    `world_transport` lets tests fake a `url` world."""
+    `world_transport` lets tests fake a `url` world.
+    `health` (docs/health.md) gets every posted event batch; its probe/snapshot loop is run by
+    the caller (main, localrun). Default: one that only counts."""
     secret_source = os.environ if secret_source is None else secret_source
     worlds = WorldHost() if worlds is None else worlds
+    health = Health(store, token=token, secrets=secret_source) if health is None else health
     if loop_interval is None:
         loop_interval = float(os.environ.get("FLOCK_LOOP_INTERVAL", "1"))
     if enforce_max_working is None:
@@ -633,6 +734,7 @@ def create_app(
 
     app = FastAPI(title="flock controller", lifespan=lifespan)
     app.state.store, app.state.notifier, app.state.loops = store, notifier, loops
+    app.state.health = health
     request_stats: dict[str, RequestStats] = {}
 
     def make_stats(app):
@@ -687,7 +789,7 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return _status_page(store, clock().timestamp())
+        return _status_page(store, clock().timestamp(), health)
 
     # ------------------------------------------------------------- swarms
 
@@ -746,7 +848,8 @@ def create_app(
         try:  # start or reach the world, fetch and check its manifest (docs/world.md)
             world_resolve(spec, host=worlds, controller_token=token, secrets=secret_source,
                           folder=lambda t: folder_names(swarm, spec, t),
-                          transport=world_transport)
+                          transport=world_transport,
+                          previous=prev["spec"].world if prev else None)
         except WorldError as e:
             raise HTTPException(400, str(e)) from None
         if dry_run:
@@ -769,6 +872,51 @@ def create_app(
     def history(swarm: str) -> list[dict]:
         return [{"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
                  "diff_summary": r["diff"]} for r in store.spec_history(swarm)]
+
+    # ------------------------------------------------------------- health (docs/health.md)
+
+    @api.get("/swarms/{swarm}/health")
+    def health_latest(swarm: str) -> dict:
+        """The newest snapshot (ts in epoch s), the generation and the last control-plane
+        events of the swarm stream."""
+        sw = spec_or_404(swarm)
+        latest = health.latest(swarm)
+        if latest is None:
+            raise HTTPException(404, f"no health snapshot of {swarm!r} yet")
+        return {"swarm": swarm, "generation": sw["generation"], **latest,
+                "recent_events": health.recent_events(swarm)}
+
+    @api.get("/swarms/{swarm}/health/history")
+    def health_history(swarm: str, since: str = "0", res: Literal["30s", "5m"] = "30s",
+                       limit: int = 5000) -> list[dict]:
+        """Snapshots since `since` (epoch s or ISO-8601), oldest first: 30 s ones from memory
+        (6 h, none from before a controller restart), 5-min ones slim from the store (48 h)."""
+        spec_or_404(swarm)
+        try:
+            t = float(since)
+        except ValueError:
+            try:
+                t = datetime.fromisoformat(since).timestamp()
+            except ValueError:
+                raise HTTPException(422, f"since {since!r}: epoch seconds or ISO-8601") from None
+        limit = max(1, min(limit, 20000))
+        return health.history(swarm, t)[-limit:] if res == "30s" else store.health_samples(
+            swarm, res, t, limit)
+
+    @api.get("/swarms/{swarm}/usage")
+    def usage(swarm: str, by: Literal["type", "hour"] = "type") -> dict:
+        """Tokens by type (all hours summed) or by UTC hour and type."""
+        spec_or_404(swarm)
+        rows = store.usage(swarm)
+        if by == "type":
+            totals: dict[str, dict[str, int]] = {}
+            for r in rows:
+                acc = totals.setdefault(r["type"], {})
+                for k, v in r.items():
+                    if k not in ("hour", "type"):
+                        acc[k] = acc.get(k, 0) + v
+            rows = [{"type": t, **v} for t, v in sorted(totals.items())]
+        return {"swarm": swarm, "by": by, "rows": rows}
 
     @api.get("/swarms/{swarm}/history/{generation}")
     def history_spec(swarm: str, generation: int) -> dict:
@@ -1496,9 +1644,14 @@ def create_app(
                 released |= turn_seen(a, evs, now)
             if a is not None:
                 loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
+                try:
+                    health.on_events(a, evs, now)
+                except Exception:  # counters never break event ingestion
+                    log.exception("health counters failed for %s", agent)
         if released and cap is not None:  # slots freed now, not at the next heartbeat (run-1k finding 1)
             wake_window(w["swarm"], {cap[0]})
         return {"ok": True, "accepted": len(batch.events)}
 
+    add_world_admin_routes(api, store, token, secret_source, world_transport, clock)
     app.include_router(api)
     return app

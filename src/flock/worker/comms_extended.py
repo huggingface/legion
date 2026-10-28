@@ -216,7 +216,7 @@ class ExtendedComms:
             ident, c, gen = m.ident, self.spec, self._gen
             # A failed poll sleeps its backoff first; the next start still waits for the
             # spacing, so a backoff can only slow polling down, never speed it up.
-            cycle = self.poll_cycle_s or c.poll_cycle_s
+            cycle = self._poll_cycle(c)
             spacing = max(self.poll_min_interval, cycle / len(members))
             try:
                 self.stats["polls"] += 1
@@ -256,6 +256,11 @@ class ExtendedComms:
                             type(exc).__name__, exc, delay)
                 await asyncio.sleep(delay)
             await asyncio.sleep(max(0, spacing - (monotonic() - started)))
+
+    def _poll_cycle(self, c) -> float:
+        """worker.comms_poll_cycle_s (spec) > comms.poll_cycle_s > FLOCK_COMMS_POLL_CYCLE_S."""
+        return (self.poll_cycle_s or c.poll_cycle_s or getattr(self, "poll_cycle_env", None)
+                or 300.0)
 
     def _init_extended(self):
         self._channel_lock = asyncio.Lock()

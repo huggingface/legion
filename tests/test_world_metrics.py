@@ -53,7 +53,8 @@ def test_metrics_json_and_prometheus_text():
     c.post("/tools/later", json={"args": {}}, headers=H)
     m = c.get("/metrics", headers=H).json()
     assert set(m) == {"uptime_s", "rss_mb", "cpu_pct", "loop_lag_s", "loop_lag_max_s",
-                      "overloaded_429_total", "window_s", "tools", "pools", "world"}
+                      "overloaded_429_total", "window_s", "tools", "pools", "world", "parked",
+                      "attempt", "paused"}
     assert m["world"] == {"open_prs": 3} and m["overloaded_429_total"] == 0 and m["rss_mb"] > 0
     echo, later = m["tools"]["echo"], m["tools"]["later"]
     assert set(echo) == {"calls", "errors_by_code", "latency_p50_s", "latency_p95_s",

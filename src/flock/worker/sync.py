@@ -1,7 +1,7 @@
 """Bucket sync: per agent, `<BUCKET>/<swarm>/<type>/<agent>/` holds
 
     workdir/<path relative to the workdir>        (if persist_workdir)
-    meta.json                                     ({files, bytes, ts} of the workdir when it last changed)
+    meta.json                                     ({files, bytes, ts} of the mirrored workdir when it last changed)
     sessions/<agent>.jsonl, <agent>.state.json    (pi session log + worker state)
     harness/<path relative to the harness home>   (CLAUDE_CONFIG_DIR, CODEX_HOME or PI_CODING_AGENT_DIR)
 
@@ -14,7 +14,8 @@ before the first resume.
 
 Restore lists the agent's prefix once, then downloads every file it found in batches
 (`restore_batch()`: env `FLOCK_RESTORE_BATCH`, default 1000, minimum 1, an invalid value
-means the default), each to a `.flock-part` sibling renamed into place on success. A batch that
+means the default), `restore_threads()` batches at a time (env `FLOCK_RESTORE_THREADS`,
+default 4; the type's `worker:` block overrides both), each to a `.flock-part` sibling renamed into place on success. A batch that
 fails is retried file by file, with backoff (`RESTORE_BACKOFF`) between rounds: one unreadable
 file is skipped and reported in `RestoreResult.failed` instead of aborting the whole restore. A
 permanent "not found" (HTTP 404, e.g. xet "CAS Client Error: ... 404 Not Found" on the
@@ -42,10 +43,15 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   not fetch stays in the bucket for the next restore.
 - `*.flock-part` (restore temporaries) is never uploaded nor deleted by a push; restore removes
   stray ones left by a crash.
-- Regenerable caches (`workdir_excludes`: `__pycache__/`, `*.pyc`, `.pytest_cache/`, ...; env
+- Regenerable caches (`workdir_excludes`: `__pycache__/`, `*.pyc`, `node_modules/`, `.venv/`, ...; env
   FLOCK_SYNC_EXCLUDE adds globs, FLOCK_SYNC_EXCLUDE_DEFAULTS=0 drops the defaults) are neither
   uploaded nor deleted by the mirror, and restore skips them, also those already in the bucket.
   `.git/` and worktrees are never excluded by default.
+- The type's `workdir.ephemeral` dirs (root-relative) are excluded like the caches; the agent's
+  setup empties them (`reset_ephemeral`), so they never come back after a move.
+- Each push's modes walk also measures what is mirrored (`WorkdirStats`): above the type's
+  `workdir.soft_*` the agent gets a note, above `max_*` a `workdir_over_quota` event (each at
+  most hourly, `BucketSync._quota`). A push is never refused for size.
 - Restore sets each workdir file's mtime to the bucket's (the listing carries it), so the first
   push after a restore uploads only real changes; session and harness files are marked as
   pushed (`_mark`).
@@ -55,20 +61,26 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import functools
 import json
 import logging
 import os
 import re
+import shutil
 import stat
 import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from flock.models import WorkdirSpec
+
 if TYPE_CHECKING:
+    from flock.models import TypeSpec
     from flock.worker.agents import AgentRuntime
 
 log = logging.getLogger(__name__)
@@ -76,15 +88,30 @@ log = logging.getLogger(__name__)
 UPLOAD_CHUNK = 200
 MODES_FILE = ".flock-modes.json"
 RESTORE_BATCH = 1000  # default of FLOCK_RESTORE_BATCH
+RESTORE_THREADS = 4  # default of FLOCK_RESTORE_THREADS
+# The type's `worker:` values for this module (sync_exclude, restore_batch, restore_threads),
+# set live by `Worker.apply_knobs`; each one present wins over its env variable.
+SPEC_KNOBS: dict[str, object] = {}
+
+
+def _env_int(name: str, default: int, cap: int | None = None) -> int:
+    try:
+        n = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return min(n, cap or n) if n >= 1 else default
 
 
 def restore_batch() -> int:
-    """Files per restore download batch: env FLOCK_RESTORE_BATCH (>= 1), else RESTORE_BATCH."""
-    try:
-        n = int(os.environ.get("FLOCK_RESTORE_BATCH", ""))
-    except ValueError:
-        return RESTORE_BATCH
-    return n if n >= 1 else RESTORE_BATCH
+    """Files per restore download batch: the spec's, else env FLOCK_RESTORE_BATCH (>= 1), else
+    RESTORE_BATCH."""
+    return SPEC_KNOBS.get("restore_batch") or _env_int("FLOCK_RESTORE_BATCH", RESTORE_BATCH)
+
+
+def restore_threads() -> int:
+    """Batches of one agent's restore downloaded in parallel: the spec's, else env
+    FLOCK_RESTORE_THREADS (>= 1), else RESTORE_THREADS."""
+    return SPEC_KNOBS.get("restore_threads") or _env_int("FLOCK_RESTORE_THREADS", RESTORE_THREADS, 32)
 
 
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
@@ -92,8 +119,11 @@ PART_SUFFIX = ".flock-part"
 PUSH_EXCLUDE = ["*" + PART_SUFFIX]  # sync_bucket patterns, matched on relative paths
 # Regenerable caches left out of the workdir mirror and of restore (module docstring). A trailing
 # "/" names a directory at any depth (`workdir_excludes`); other entries are plain globs.
+# Not build/, dist/ or target/: sometimes source.
 DEFAULT_WORKDIR_EXCLUDE = ["__pycache__/", "*.pyc", ".pytest_cache/", ".mypy_cache/",
-                           ".ruff_cache/", ".hypothesis/", "*.egg-info/"]
+                           ".ruff_cache/", ".hypothesis/", "*.egg-info/", ".cache/",
+                           "node_modules/", ".venv/", "venv/", ".tox/", ".nox/",
+                           ".ipynb_checkpoints/", ".gradle/", ".next/", "*.o"]
 
 
 def _expand(pattern: str) -> list[str]:
@@ -108,49 +138,134 @@ def _expand(pattern: str) -> list[str]:
 
 def workdir_excludes() -> list[str]:
     """Globs for the workdir mirror, relative to the workdir, always including `*.flock-part`:
-    the defaults (unless env FLOCK_SYNC_EXCLUDE_DEFAULTS=0) plus the comma-separated
-    FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults."""
+    the defaults (unless env FLOCK_SYNC_EXCLUDE_DEFAULTS=0) plus the spec's `sync_exclude`, else
+    the comma-separated FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults."""
     pats = list(PUSH_EXCLUDE)
     if os.environ.get("FLOCK_SYNC_EXCLUDE_DEFAULTS", "1").strip() != "0":
         pats += [x for d in DEFAULT_WORKDIR_EXCLUDE for x in _expand(d)]
-    for item in os.environ.get("FLOCK_SYNC_EXCLUDE", "").split(","):
+    extra = SPEC_KNOBS.get("sync_exclude")
+    if extra is None:
+        extra = os.environ.get("FLOCK_SYNC_EXCLUDE", "").split(",")
+    for item in extra:
         if item.strip():
             pats += _expand(item.strip())
     return pats
 
 
+@functools.lru_cache(maxsize=64)
+def _matcher(patterns: tuple[str, ...]):
+    """One compiled regex for a pattern list (a walk tests every file of a workdir)."""
+    if not patterns:
+        return lambda rel: None
+    return re.compile("|".join(fnmatch.translate(p.replace("\\", "/")) for p in patterns)).match
+
+
 def is_excluded(rel: str, patterns: list[str]) -> bool:
     """Does the workdir-relative posix path match one of the patterns (as `sync_bucket` does)?"""
-    return any(fnmatch.fnmatchcase(rel, pat.replace("\\", "/")) for pat in patterns)
+    return _matcher(tuple(patterns))(rel) is not None
 
 
-def collect_modes(workdir: Path, stats: dict[str, int] | None = None) -> dict[str, str]:
+@dataclass
+class WorkdirStats:
+    """What a push mirrors: regular files and their bytes, excluded paths left out, and the
+    top-level directories with the most files ((name, files), largest first, up to 5)."""
+
+    files: int = 0
+    bytes: int = 0
+    top_dirs: list[tuple[str, int]] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """'182k files, 3100 MB; largest: snaps/ 140k, src/ 2k' (`{workspace}` in loop prompts)."""
+        top = ", ".join(f"{d}/ {_k(n)}" for d, n in self.top_dirs[:3])
+        return (f"{_k(self.files)} files, {self.bytes / 2**20:.0f} MB"
+                + (f"; largest: {top}" if top else ""))
+
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+
+QUOTA_NOTE_EVERY = 3600.0  # s, per agent: the over-soft-limit note and workdir_over_quota
+
+
+def quota_note(ws: WorkdirStats, w: WorkdirSpec) -> str | None:
+    """The note for an agent whose workdir is above its soft limit, else None."""
+    if ws.files <= w.soft_files and ws.bytes / 2**20 <= w.soft_mb:
+        return None
+    where = f", or keep throwaway clones in {w.ephemeral[0]}" if w.ephemeral else ""
+    return (f"your workspace has {ws.summary()} (soft limit {_k(w.soft_files)} files, "
+            f"{w.soft_mb:.0f} MB); delete clones you no longer need{where}")
+
+
+def over_hard_limit(ws: WorkdirStats, w: WorkdirSpec) -> bool:
+    return (ws.files > (w.max_files or 5 * w.soft_files)
+            or ws.bytes / 2**20 > (w.max_mb or 5 * w.soft_mb))
+
+
+def ephemeral_excludes(spec: TypeSpec) -> list[str]:
+    """The type's `workdir.ephemeral` dirs as root-anchored globs (never synced nor restored)."""
+    return [d + "*" for d in (spec.workdir.ephemeral if spec.workdir else [])]
+
+
+def reset_ephemeral(workdir: Path, spec: TypeSpec) -> None:
+    """Empty (or create) the type's ephemeral dirs: run at every agent setup, so a move or a
+    restart never brings back their content. Blocking."""
+    root = workdir.resolve()
+    for d in spec.workdir.ephemeral if spec.workdir else []:
+        p = workdir / d
+        try:
+            if not p.parent.resolve().is_relative_to(root):  # a symlinked parent: leave it
+                log.warning("ephemeral dir %s is outside %s; not touched", p, root)
+                continue
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning("ephemeral dir %s: %s", p, e)
+
+
+def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
+                  exclude: list[str] | None = None) -> dict[str, str]:
     """{relative posix path: "0o755"} for regular files with any executable bit (symlinks and
-    the manifest itself excluded). `stats` gets the walk's regular file count and bytes."""
+    the manifest itself excluded). `exclude`: paths left out of the walk (excluded directories
+    are not entered). `stats` gets the walk's counts (`WorkdirStats`)."""
     out: dict[str, str] = {}
+    excl = _matcher(tuple(exclude or ()))
+    per_dir: Counter[str] = Counter()
     for root, dirs, files in os.walk(workdir):
-        dirs.sort()
+        base = Path(root).relative_to(workdir).as_posix()
+        base = "" if base == "." else base + "/"
+        dirs[:] = sorted(d for d in dirs if excl(f"{base}{d}/") is None)
         for f in files:
-            p = Path(root) / f
+            rel = base + f
+            if excl(rel) is not None:
+                continue
             try:
-                st = p.lstat()
+                st = os.lstat(os.path.join(root, f))
             except OSError:
                 continue
-            if stats is not None and stat.S_ISREG(st.st_mode):
-                stats["files"] = stats.get("files", 0) + 1
-                stats["bytes"] = stats.get("bytes", 0) + st.st_size
-            if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
-                rel = p.relative_to(workdir).as_posix()
-                if rel != MODES_FILE:
-                    out[rel] = oct(stat.S_IMODE(st.st_mode))
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if stats is not None:
+                stats.files += 1
+                stats.bytes += st.st_size
+                if base:
+                    per_dir[base.split("/", 1)[0]] += 1
+            if st.st_mode & 0o111 and rel != MODES_FILE:
+                out[rel] = oct(stat.S_IMODE(st.st_mode))
+    if stats is not None:
+        stats.top_dirs = per_dir.most_common(5)
     return dict(sorted(out.items()))
 
 
-def write_modes(workdir: Path, stats: dict[str, int] | None = None) -> bool:
+def write_modes(workdir: Path, stats: WorkdirStats | None = None,
+                exclude: list[str] | None = None) -> bool:
     """(Re)write the manifest if its content changed, remove it when nothing is executable.
     Returns whether the file changed."""
     path = workdir / MODES_FILE
-    modes = collect_modes(workdir, stats)
+    modes = collect_modes(workdir, stats, exclude)
     old = path.read_text() if path.is_file() else None
     if not modes:
         if old is not None:
@@ -368,9 +483,11 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
     for a file: batches first, then the files of a failed batch one by one, retried after each
     delay in `backoff` unless the error is a permanent "not found" (`_permanent`). Each file lands in a `.flock-part` sibling, renamed into place only
     when it arrived, so a failed file never leaves a truncated copy at its real path.
-    `progress(n)` is called with the number of files each attempt brought in."""
+    `progress(n)` is called with the number of files each attempt brought in (serialized: the
+    first pass runs `restore_threads()` batches in parallel threads)."""
 
     gone: list[str] = []  # permanent "not found": skipped, never retried
+    lock = threading.Lock()  # first-pass batches run in threads
 
     def attempt(batch: list[tuple[str, Path]]) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]]]:
         ok, bad = [], []
@@ -392,7 +509,8 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
             part.unlink(missing_ok=True)
             bad.append((r, p))
         if ok and progress is not None:
-            progress(len(ok))
+            with lock:
+                progress(len(ok))
         if err is not None and len(batch) == 1:
             log.debug("download of %s failed: %s", batch[0][0], _short(err))
             if bad and _permanent(err):
@@ -405,10 +523,13 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
     done: list[tuple[str, Path]] = []
     pending: list[tuple[str, Path]] = []
     size = restore_batch()
-    for i in range(0, len(files), size):
-        ok, bad = attempt(files[i : i + size])
-        done += ok
-        pending += bad
+    batches = [files[i : i + size] for i in range(0, len(files), size)]
+    # the first pass runs `restore_threads()` batches at once (per-request latency, not
+    # bandwidth, bounds a restore); the per-file retry rounds below stay sequential
+    with ThreadPoolExecutor(max(1, min(restore_threads(), len(batches)))) as pool:
+        for ok, bad in pool.map(attempt, batches):
+            done += ok
+            pending += bad
     if pending:  # each file alone, so one bad file costs only itself
         retry, pending = pending, []
         for f in retry:
@@ -458,6 +579,8 @@ class BucketSync:
         self._mirror: dict[str, bool] = {}
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
         self._meta: dict[str, dict] = {}  # per agent prefix: the meta.json last pushed
+        self._quota_note: dict[str, str] = {}  # per agent prefix: the quota note last queued
+        self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
         self.restore_progress: dict[str, list] = {}
 
@@ -518,10 +641,12 @@ class BucketSync:
             return 0
         meta: list[tuple[Path, str]] = []
         if rt.spec.persist_workdir and rt.workdir.is_dir():
-            # shortcut: counts excluded caches too; good enough to predict a restore's size
-            stats = {"files": 0, "bytes": 0}
-            await asyncio.to_thread(write_modes, rt.workdir, stats)
-            rt.workdir_files = stats["files"]
+            exclude = workdir_excludes() + ephemeral_excludes(rt.spec)
+            ws = WorkdirStats()
+            await asyncio.to_thread(write_modes, rt.workdir, ws, exclude)
+            rt.workdir_files, rt.workdir_stats = ws.files, ws
+            self._quota(rt, ws)
+            stats = {"files": ws.files, "bytes": ws.bytes}
             if self._meta.get(pre) != stats:  # the workdir's size: predicts a restore's time
                 path = rt.sessions_dir / f"{rt.name}.meta.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -532,7 +657,7 @@ class BucketSync:
                 log.info("%s: workdir push without remote deletes (last restore incomplete)",
                          rt.name)
             await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
-                                    delete=delete, exclude=workdir_excludes())
+                                    delete=delete, exclude=exclude)
         files = self._changed(self.collect(rt)) + meta
         if files:
             await asyncio.to_thread(self.store.upload, files)
@@ -540,6 +665,23 @@ class BucketSync:
             if meta:
                 self._meta[pre] = stats
         return len(files)
+
+    def _quota(self, rt: AgentRuntime, ws: WorkdirStats) -> None:
+        """Above the soft limit: a note in front of the agent's next prompt, and above the hard
+        one a `workdir_over_quota` event, each at most hourly. The push itself goes on."""
+        w = rt.spec.workdir or WorkdirSpec()
+        note, pre, now = quota_note(ws, w), self.prefix(rt), time.monotonic()
+        if note is None or now - self._quota_at.get(pre, -QUOTA_NOTE_EVERY) < QUOTA_NOTE_EVERY:
+            return
+        rt._notes.pop(self._quota_note.pop(pre, None), None)  # replace, do not stack
+        rt._note(note)
+        if note not in rt._notes:  # dropped (no turn yet): try again at the next push
+            return
+        self._quota_at[pre] = now
+        self._quota_note[pre] = note
+        if over_hard_limit(ws, w):
+            rt.emit("workdir_over_quota", {"files": ws.files, "bytes": ws.bytes,
+                                           "top_dirs": [list(t) for t in ws.top_dirs]})
 
     async def restore(self, rt: AgentRuntime) -> RestoreResult:
         try:
@@ -575,7 +717,7 @@ class BucketSync:
         n = sum([await asyncio.to_thread(_clean_parts, d) for d in (rt.workdir, rt.sessions_dir)])
         if n:
             log.info("%s: removed %d stray %s file(s)", rt.name, n, PART_SUFFIX)
-        skip = workdir_excludes()
+        skip = workdir_excludes() + ephemeral_excludes(rt.spec)
         for r, _ in listed:
             rel = r[len(pre):]
             area, _, sub = rel.partition("/")

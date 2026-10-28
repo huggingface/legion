@@ -176,7 +176,7 @@ class CommsHub(ExtendedComms):
                  backoff_s: float = 1.0, poll_min_interval: float = 2.0,
                  poll_cycle_s: float | None = None, rate: float | None = None,
                  burst: float = 5.0, agent_rate: float | None = None,
-                 agent_burst: float = 10.0) -> None:
+                 agent_burst: float = 10.0, poll_cycle_env: float | None = None) -> None:
         self.swarm = swarm
         self._init_extended()
         self.identities = identities or Identities(client=httpx.AsyncClient(transport=transport,
@@ -187,7 +187,11 @@ class CommsHub(ExtendedComms):
         self._clock = clock
         self.poll_wait = poll_wait
         self.poll_min_interval = poll_min_interval
-        self.poll_cycle_s = poll_cycle_s  # overrides the spec's comms.poll_cycle_s (tests)
+        # poll cycle (comms_extended): `poll_cycle_s` (the type's worker.comms_poll_cycle_s, or
+        # tests) wins over comms.poll_cycle_s, which wins over `poll_cycle_env`
+        # (FLOCK_COMMS_POLL_CYCLE_S) unless left at its default
+        self.poll_cycle_s = poll_cycle_s
+        self.poll_cycle_env = poll_cycle_env
         # the worker's board request budget (requests/s), shared by the poller and all tools
         self.limiter = RateLimiter(rate, burst) if rate else None
         # per agent: comms tool calls beyond this rate are refused locally, before any request
@@ -218,6 +222,24 @@ class CommsHub(ExtendedComms):
         self.routes: dict[str, Callable[[str, str, dict[str, Any]], Any]] = {}
 
     # ------------------------------------------------------------------ configuration
+    def set_rate(self, rate: float | None, burst: float, agent_rate: float | None,
+                 agent_burst: float) -> None:
+        """New request budgets (live worker knobs): the shared bucket keeps its tokens (capped
+        at the new burst); per-agent buckets start over when their settings changed."""
+        if not rate:
+            self.limiter = None
+        elif self.limiter is None:
+            self.limiter = RateLimiter(rate, burst)
+        else:
+            self.limiter._refill()
+            self.limiter.rate, self.limiter.burst = rate, max(1.0, burst)
+            self.limiter.tokens = min(self.limiter.tokens, self.limiter.burst)
+        for board in self._boards.values():
+            board.limiter = self.limiter
+        if (agent_rate, agent_burst) != (self.agent_rate, self.agent_burst):
+            self.agent_rate, self.agent_burst = agent_rate, agent_burst
+            self._agent_limits.clear()
+
     @property
     def active(self) -> bool:
         return self.spec is not None and self.spec.channel_id is not None and bool(self.entries)

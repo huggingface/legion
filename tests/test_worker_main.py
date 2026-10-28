@@ -12,6 +12,7 @@ import pytest
 from flock.models import (
     AssignCommand,
     CommandBatch,
+    CommsSpec,
     DrainCommand,
     EventBatch,
     PromptCommand,
@@ -23,6 +24,7 @@ from flock.models import (
     type_spec_rev,
 )
 from flock.worker import main as wmain
+from flock.worker.comms import CommsHub
 from flock.worker.events import utcnow
 from flock.worker.main import ControllerClient, Worker, WorkerConfig
 
@@ -101,12 +103,19 @@ async def test_comms_poll_cycle_env_reaches_the_worker_poller():
     assert cfg.comms_poll_cycle_s == 60.0
     w = Worker(cfg, ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(
         FakeController().handler)))
-    assert w.comms.poll_cycle_s == 60.0
+    assert w.comms.poll_cycle_env == 60.0 and w.comms.poll_cycle_s is None
     await w.client.aclose()
     w = Worker(WorkerConfig.from_env(base), ControllerClient(
         "http://c", "t", transport=httpx.MockTransport(FakeController().handler)))
-    assert w.comms.poll_cycle_s is None  # the spec decides
+    assert w.comms.poll_cycle_env is None and w.comms.poll_cycle_s is None  # the spec decides
     await w.client.aclose()
+    hub = CommsHub(swarm="sw", poll_cycle_env=60.0)
+    c = CommsSpec(url="http://b", channel="c", invite_env="INV")
+    assert hub._poll_cycle(c) == 60.0  # env over the spec default
+    assert hub._poll_cycle(c.model_copy(update={"poll_cycle_s": 120.0})) == 120.0  # live spec
+    assert hub._poll_cycle(c.model_copy(update={"poll_cycle_s": 300.0})) == 300.0  # explicit 300
+    hub.poll_cycle_s = 30.0  # worker.comms_poll_cycle_s
+    assert hub._poll_cycle(c.model_copy(update={"poll_cycle_s": 120.0})) == 30.0
 
 
 async def test_drain_window_from_env_applies_before_any_assign(tmp_path):
@@ -176,6 +185,36 @@ async def test_heartbeat_carries_memory_restores_tools_and_knobs(tmp_path, monke
     assert hb.mem.limit_mb == 2 and hb.tools["open_pr"].n == 1 and len(hb.knobs_rev) == 12
     monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "big/")  # any knob changes the hash
     assert wmain.knobs_rev(worker.cfg) != hb.knobs_rev
+    await worker.client.aclose()
+
+
+async def test_live_worker_knobs_beat_env_and_bump_knobs_rev(tmp_path, monkeypatch):
+    from flock.worker import sync as sync_mod
+    from flock.worker.sync import is_excluded, restore_threads, workdir_excludes
+
+    monkeypatch.setattr(sync_mod, "SPEC_KNOBS", {})
+    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "envonly/")
+    monkeypatch.setenv("FLOCK_MEM_DRAIN", "0.8")
+    worker, _ = make_worker(tmp_path, FakeController())
+    rev0 = worker.knobs_rev
+    knobs = {"comms_rate": 2.0, "comms_burst": 8, "comms_agent_rate": 1.0, "sync_interval_s": 30,
+             "drain_budget_s": 9, "comms_poll_cycle_s": 60, "sync_exclude": ["big/"],
+             "restore_threads": 2, "memory": {"drain": 0.9, "spike_mb": 4000}}
+    worker._live_from({"type_spec": spec(worker=knobs).model_dump(mode="json")})
+    lim = worker.comms.limiter
+    assert (lim.rate, lim.burst, worker.comms.agent_rate) == (2.0, 8.0, 1.0)
+    assert (worker.cfg.sync_interval, worker.cfg.drain_budget) == (30, 9)
+    assert worker.comms.poll_cycle_s == 60 and restore_threads() == 2
+    pats = workdir_excludes()  # the spec's list replaces the env's, the defaults stay
+    assert is_excluded("big/x", pats) and not is_excluded("envonly/x", pats)
+    assert is_excluded("node_modules/x", pats)
+    assert worker.mem_knob("FLOCK_MEM_DRAIN", 0.85) == 0.9
+    assert worker.mem_knob("FLOCK_MEM_PREEMPT", 0.93) == 0.93
+    assert worker.knobs_rev != rev0 and worker.heartbeat_payload().knobs_rev == worker.knobs_rev
+    worker._live_from({"type_spec": spec().model_dump(mode="json")})  # back to env, defaults
+    assert worker.comms.limiter.rate == 0.5 and worker.cfg.sync_interval == 0.2
+    assert is_excluded("envonly/x", workdir_excludes()) and worker.knobs_rev == rev0
+    assert worker.mem_knob("FLOCK_MEM_DRAIN", 0.85) == 0.8
     await worker.client.aclose()
 
 
@@ -424,3 +463,19 @@ async def test_memory_loop_survives_a_failed_sample(tmp_path, monkeypatch):
     await until(lambda: len(calls) >= 3 and worker.mem is not None)
     task.cancel()
     await worker.client.aclose()
+
+
+def test_restore_threads_env_is_capped_and_spec_knobs_rebind(monkeypatch):
+    from flock.worker import sync as sync_mod
+    monkeypatch.setenv("FLOCK_RESTORE_THREADS", "500")
+    assert sync_mod.restore_threads() == 32
+    monkeypatch.setenv("FLOCK_RESTORE_THREADS", "0")
+    assert sync_mod.restore_threads() == sync_mod.RESTORE_THREADS
+
+
+@pytest.mark.parametrize("bad", ["../x", "/x", "a/..", "."])
+def test_workdir_ephemeral_rejects_escapes(bad):
+    from flock.models import WorkdirSpec
+    with pytest.raises(ValueError):
+        WorkdirSpec(ephemeral=[bad])
+    assert WorkdirSpec(ephemeral=["scratch"]).ephemeral == ["scratch/"]
