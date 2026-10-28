@@ -12,7 +12,7 @@ from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "hierarchy"
-SHARED = "You are one of several agents improving the Python chatbot"
+SHARED = "You are one of several agents improving [PROJECT: to be provided]"
 
 
 def module(exp: Path, name: str):

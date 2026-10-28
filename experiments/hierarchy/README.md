@@ -36,6 +36,10 @@ are the same agent without the right to spawn, with a different role prompt.
 
 ## Launch
 
+Placeholders to fill before launch: `[PROJECT: to be provided]` in `prompts/system.md` (the repo
+id and the clone line) and in the team rules of `prompts/coordinator.md` and `prompts/worker.md`
+(and of `../voting/prompts/`). Point `CHATBOT_REPO` in `run.env` at the same repo.
+
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
 `slurm/` scripts, in a new run directory (`runs/hierarchy/run.env`, from
 `../run4/slurm/run.env.example`) with:
@@ -64,6 +68,8 @@ Offline checks: `python experiments/hierarchy/render.py --committed --out /tmp/h
   the author to post each merge in the team channel. Needed for a reliable trigger: a
   world-side notice to a list of names (a team field on `open_pr`), or flock relaying the
   world's `merged` events to the author's parent and siblings as loop notices.
-- **Teams are fixed at spawn.** A worker belongs to the coordinator that spawned it; there is
-  no re-parenting. A coordinator that moves to another effort brings its workers or removes
-  them (unpushed work in a removed worker is lost).
+- **Team moves are prompt-level only.** A worker may move to another team (it tells both
+  coordinators and updates both plans), but its spawn parent stays fixed in flock: it still
+  counts toward the old coordinator's cap of 4, only that coordinator can `flock remove` it,
+  and `$FLOCK_PARENT` still names it. Re-parenting would need a controller call
+  (`src/flock/controller/spawn.py`) that moves the child and its cap slot.
