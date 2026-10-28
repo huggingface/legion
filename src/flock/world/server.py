@@ -27,7 +27,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.datastructures import Headers
 
 from flock.tools.runner import check_args
@@ -130,10 +130,18 @@ def create_app(world: World, token: str | None) -> FastAPI:
     app = FastAPI(title=f"world {world.name}", docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
 
-    def schemas() -> dict[str, dict]:
-        """From the manifest as served now: what GET /manifest advertises is what is called."""
-        return {t["name"]: t.get("parameters") or {"type": "object", "properties": {}}
-                for t in world.manifest().get("tools") or []}
+    cache: dict[str, Any] = {"version": None}
+
+    def served() -> dict[str, Any]:
+        """The manifest as served now, serialized once per `world.version` (on the event loop:
+        a health check never waits for a thread): what GET /manifest advertises is what is
+        called."""
+        if cache["version"] != world.version:
+            version, m = world.version, world.manifest()
+            cache.update(version=version, body=json.dumps(m).encode(), schemas={
+                t["name"]: t.get("parameters") or {"type": "object", "properties": {}}
+                for t in m.get("tools") or []})
+        return cache
 
     def locked(fn, *args: Any) -> Any:
         if getattr(world, "concurrent", False):  # the world guards its own state
@@ -145,8 +153,8 @@ def create_app(world: World, token: str | None) -> FastAPI:
         app.add_middleware(_Auth, token=token)
 
     @app.get("/manifest")
-    async def manifest() -> dict:
-        return await run_in_threadpool(locked, world.manifest)
+    async def manifest() -> Response:
+        return Response(served()["body"], media_type="application/json")
 
     @app.post("/tools/{name}")
     async def call(name: str, request: Request):
@@ -165,7 +173,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
         agent = _agent(request.headers)
         if not agent.name:
             return _error("no_agent", f"{AGENT_HEADER} is required", 400)
-        tools = await run_in_threadpool(locked, schemas)
+        tools = served()["schemas"]
         if name not in tools:
             return _error("unknown_tool", f"no tool {name!r}; tools: {', '.join(tools) or 'none'}",
                           404)
