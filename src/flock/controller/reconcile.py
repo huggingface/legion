@@ -634,7 +634,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         "last_heartbeat": t,
         "last_seen": t,
         "deadline": hb.deadline.timestamp(),
-        "draining": int(hb.draining),
+        "draining": int(hb.draining or w["draining"]),  # a drain we sent stays until the job ends
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,
         "telemetry": hb.model_dump_json(include={"mem", "restore", "tools", "knobs_rev",
                                                  "wants_rotation"}),

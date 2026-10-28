@@ -117,10 +117,8 @@ arrives before `idle_grace`), so its heap, session and sandbox root grow for the
 - **OOM order**: the sandbox writes 800 to `/proc/self/oom_score_adj` before exec (raising
   needs no privilege; the worker keeps its own score), so the kernel kills a tool or a Pi
   before the worker. Under `memory.oom.group=1` the kernel kills the whole cgroup anyway.
-- **Per-agent cgroups**: only when the worker's cgroup is delegated (writable, `memory` in
-  `cgroup.subtree_control`) each Pi and its tools go to `agent-<name>/` with `memory.max` =
-  `FLOCK_MEM_AGENT` (0.5) of the worker's limit. The worker logs the probe at start; Slurm step
-  cgroups are usually not delegated, and then nothing is done.
+- **Per-agent cgroups**: not used. Under cgroup v2 they need the worker to move itself into a
+  leaf cgroup first.
 
 ## Workdir
 

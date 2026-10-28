@@ -201,7 +201,7 @@ restoring or draining, and writes `memory_rotation {worker, nonreclaim_mb, eta_l
 the swarm stream. A worker's own drain or preemption at 85% / 93% does not wait for this budget.
 
 `memory.oom.group` (logged at start): when it is 1 on the job's cgroup, one OOM kill ends every
-process in it, so `oom_score_adj` and per-agent cgroups do not help; only this ladder and the
+process in it, so `oom_score_adj` does not help; only this ladder and the
 tool limits (`tool_memory_mb`) do.
 
 ## The world on a moving host

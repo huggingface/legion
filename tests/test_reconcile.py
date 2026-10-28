@@ -564,3 +564,21 @@ def test_memory_rotation_drains_smallest_eta_within_budget(store, jobs, settings
     settings.max_rotating = 2
     tick()
     assert drains(W1) == [DrainCommand()]
+
+
+def test_a_stale_heartbeat_does_not_undo_a_rotation_drain(store, jobs, settings, clock, tick):
+    from flock.controller.reconcile import swarm_stream
+    from flock.models import DrainCommand, WorkerMem
+
+    store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 2}), 0)
+    tick()
+    hb = WorkerHeartbeat(worker=W0, deadline=clock() + timedelta(hours=24), wants_rotation=True,
+                         agents=[AgentHeartbeat(name=f"researcher-000{j}", state="idle") for j in (0, 1)],
+                         mem=WorkerMem(limit_mb=10000, nonreclaim_mb=8000, eta_limit_s=600))
+    assert record_heartbeat(store, W0, hb, clock())
+    tick()
+    assert record_heartbeat(store, W0, hb, clock())  # sent before the worker polled the drain
+    tick()
+    drains = [c for c in queued(store, W0) if isinstance(c, DrainCommand)]
+    rotations = [e for e in store.read_events(swarm_stream("demo"), 0) if e["type"] == "memory_rotation"]
+    assert len(drains) == 1 and len(rotations) == 1

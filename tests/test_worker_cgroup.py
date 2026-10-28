@@ -137,16 +137,3 @@ def test_oom_score_adj_is_raised_for_the_sandbox(tmp_path):
     from flock.isolation import set_oom_score_adj
 
     assert not set_oom_score_adj(path=str(tmp_path / "missing" / "oom_score_adj"))
-
-
-def test_delegation_probe_and_agent_placement(tmp_path):
-    leaf = v2(tmp_path)
-    cg = CgroupMem(tmp_path, env={})
-    assert not cg.delegated() and cg.oom_group() is None
-    _w(leaf / "cgroup.subtree_control", "cpu memory\n")
-    _w(leaf / "memory.oom.group", "1\n")
-    assert cg.delegated() and cg.oom_group() == "1"
-    cg.place("a-1", [11, 12], 1024)
-    d = leaf / "agent-a-1"
-    assert (d / "memory.max").read_text() == str(1024 * MB)
-    assert (d / "cgroup.procs").read_text() == "12"  # one write per pid (the fake keeps the last)

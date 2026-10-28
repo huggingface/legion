@@ -337,14 +337,14 @@ class RpcError(RuntimeError):
     pass
 
 
-def _descendants(pid: int) -> list[tuple[int, str]]:
-    """(pid, start time) of every live descendant of `pid`, from /proc (Linux; [] elsewhere)."""
+def process_tree() -> tuple[dict[int, list[int]], dict[int, str]]:
+    """One /proc walk: parent pid -> children, and pid -> start time (Linux; empty elsewhere)."""
     children: dict[int, list[int]] = {}
     starts: dict[int, str] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return []
+        return children, starts
     for d in entries:
         if not d.isdigit():
             continue
@@ -355,6 +355,14 @@ def _descendants(pid: int) -> list[tuple[int, str]]:
         fields = stat[stat.rfind(")") + 2:].split()
         children.setdefault(int(fields[1]), []).append(int(d))
         starts[int(d)] = fields[19]
+    return children, starts
+
+
+def _descendants(pid: int, tree: tuple[dict[int, list[int]], dict[int, str]] | None = None
+                 ) -> list[tuple[int, str]]:
+    """(pid, start time) of every live descendant of `pid`, from `tree` (process_tree) or a
+    fresh /proc walk."""
+    children, starts = tree or process_tree()
     out, todo = [], [pid]
     while todo:
         for c in children.get(todo.pop(), []):

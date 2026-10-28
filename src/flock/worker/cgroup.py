@@ -44,7 +44,6 @@ class MemThresholds:
     recycle_gap_s: float = 600.0  # FLOCK_MEM_RECYCLE_GAP_S: at most one recycle per this
     drain_deadline_s: float = 300.0  # FLOCK_MEM_DRAIN_DEADLINE_S: turns still running are cut
     spike_mb: float = 3072.0  # FLOCK_MEM_SPIKE_MB: one agent's tools above this get SIGKILL; 0 off
-    agent: float = 0.5  # FLOCK_MEM_AGENT: memory.max of an agent's own cgroup (if delegated)
 
     @classmethod
     def read(cls, knob: Callable[[str, float], float]) -> MemThresholds:
@@ -166,29 +165,11 @@ class CgroupMem:
                 "eta_limit_s": None if eta is None else round(eta), "psi_some_avg10": psi,
                 "oom_kills": oom}
 
-    def delegated(self) -> bool:
-        """Per-agent child cgroups can be made: v2, the worker's cgroup directory is writable
-        and `memory` is in its cgroup.subtree_control (Slurm step cgroups usually are not)."""
-        d = self.path
-        return (self.version == 2 and d is not None and os.access(d, os.W_OK)
-                and "memory" in (_read(d / "cgroup.subtree_control") or "").split())
-
     def oom_group(self) -> str | None:
         """memory.oom.group of the worker's cgroup: "1" means an OOM kill takes every process
         in it (the whole job step), whatever their oom_score_adj."""
         s = _read(self.path / "memory.oom.group") if self.path is not None else None
         return s.strip() if s else None
-
-    def place(self, agent: str, pids: list[int], max_mb: float) -> None:
-        """Move `pids` into `agent-<agent>/` under the worker's cgroup, created with
-        memory.max = `max_mb` (a delegated cgroup only; raises OSError)."""
-        assert self.path is not None
-        d = self.path / f"agent-{agent}"
-        if not d.is_dir():
-            d.mkdir()
-            (d / "memory.max").write_text(str(int(max_mb * MB)))
-        for pid in pids:
-            (d / "cgroup.procs").write_text(str(pid))
 
     def slope_mb_h(self) -> float | None:
         s = self.samples

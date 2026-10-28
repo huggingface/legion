@@ -360,12 +360,14 @@ async def test_oom_kill_delta_preempts(tmp_path):
 
 
 async def test_spike_guard_kills_the_tool_tree_only(tmp_path, monkeypatch):
-    worker, _ = await _ladder_worker(tmp_path, n=1)
+    worker, leaf = await _ladder_worker(tmp_path, n=1)
     rt = worker.agents["researcher-0000"]
     worker.agent_memory = lambda tmp=True: [(rt, {"pi_pss_mb": 300.0, "tools_pss_mb": 3500.0})]
     killed = []
     monkeypatch.setattr(wmain, "_kill_tools", lambda r: killed.append(r.name) or 4)
-    await worker.relieve()
+    await _step(worker, leaf, 2000)  # below rotate and below spike_mb: no per-agent scan
+    assert killed == [] and rt.pss_mb is None
+    await _step(worker, leaf, 3500)  # the worker as a whole holds more than one spike
     assert killed == ["researcher-0000"] and rt.pss_mb == 300.0
     ev = [e.data["data"] for e in worker.outbox.take() if e.type == "tool_tree_killed"]
     assert ev == [{"agent": "researcher-0000", "mb": 3500.0}]
