@@ -1,0 +1,233 @@
+"""Run one bounded attempt, retaining trajectories and a normal Flock run bundle."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+from collections import Counter
+from pathlib import Path
+
+import httpx
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
+REVISION = "03742c79f48646e0130886e18e3e79798cf8edd7"
+CASE = "questions/10/narrative/skeleton_091c541b_narrative.json"
+
+
+def stop(process, grace=120):
+    if process is None or process.poll() is not None:
+        return
+    process.send_signal(signal.SIGINT)
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        raise RuntimeError("Process did not shut down gracefully; inspect logs and mount state")
+
+
+def main():
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--spec", type=Path, default=HERE / "spec.yaml")
+    parser.add_argument("--timeout", type=float, default=1800, help="Attempt limit in seconds")
+    args = parser.parse_args()
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
+    source = ROOT / ".flock/deps/agent-escape"
+    python = ROOT / ".flock/deps/agent-escape-venv/bin/python"
+    if not python.exists():
+        parser.error("Run bash experiments/agent-escape/setup.sh first")
+    revision = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    dirty = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD"], text=True)
+    if revision != REVISION or dirty:
+        parser.error("Benchmark checkout must be clean and pinned to " + REVISION)
+    run_id = uuid.uuid4().hex
+    output = ROOT / ".flock/agent-escape-attempts" / run_id
+    output.mkdir(parents=True, mode=0o700)
+    spec_path = args.spec.resolve()
+    spec = yaml.safe_load(spec_path.read_text())
+    workers = spec.get("types", {}).get("worker", {})
+    if (
+        set(spec.get("types", {})) != {"worker"}
+        or workers.get("replicas") != 4
+        or workers.get("agents_per_worker") != 1
+    ):
+        parser.error("This experiment requires four replicas of worker, one agent per worker")
+    shutil.copyfile(HERE / "world.py", output / "world.py")
+    spec["world"]["dir"] = str(output)
+    for name, definition in spec["types"].items():
+        prompt = (spec_path.parent / definition["system_prompt_file"]).resolve()
+        copy = output / f"{name}-prompt.md"
+        shutil.copyfile(prompt, copy)
+        definition["system_prompt_file"] = str(copy)
+    snapshot = output / "spec.yaml"
+    snapshot.write_text(yaml.safe_dump(spec, sort_keys=False))
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join(
+        [str(ROOT / ".flock/tools"), str(ROOT / ".venv/bin"), env.get("PATH", "")]
+    )
+    env.setdefault("LOCAL_KEY", "unused")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    env.update(
+        ESCAPE_SERVER_URL=url,
+        ESCAPE_CASE_FILE=str(source / CASE),
+        ESCAPE_OUTPUT=str(output),
+        ESCAPE_RUN_ID=run_id,
+    )
+    metadata = {
+        "run_id": run_id,
+        "benchmark_revision": revision,
+        "world_sha256": hashlib.sha256((output / "world.py").read_bytes()).hexdigest(),
+        "launcher_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "case": CASE,
+        "case_sha256": hashlib.sha256((source / CASE).read_bytes()).hexdigest(),
+        "started": time.time(),
+        "timeout": args.timeout,
+        "spec": spec,
+    }
+    (output / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    print(f"Attempt artifacts: {output}", flush=True)
+    backend = flock = None
+    reason = "error"
+    failure = None
+    started = time.monotonic()
+    try:
+        # The benchmark needs no model or bucket credentials.
+        backend_env = {key: env[key] for key in ("PATH", "HOME", "LANG") if key in env}
+        with (output / "benchmark.log").open("w") as log:
+            backend = subprocess.Popen(
+                [
+                    str(python),
+                    "-m",
+                    "uvicorn",
+                    "server:app",
+                    "--app-dir",
+                    str(source),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=output,
+                env=backend_env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        with httpx.Client(timeout=2) as client:
+            for _ in range(100):
+                if backend.poll() is not None:
+                    raise RuntimeError("Benchmark failed to start; see benchmark.log")
+                try:
+                    if client.get(url + "/health").is_success:
+                        break
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Benchmark startup timed out")
+        with (output / "flock.log").open("w") as log:
+            flock = subprocess.Popen(
+                [
+                    str(ROOT / ".venv/bin/flock"),
+                    "run",
+                    str(snapshot),
+                    "--data-dir",
+                    str(output / "flock"),
+                    "--until",
+                    "idle",
+                    "--prompt",
+                    (
+                        "First post a short introduction on general in thread 1 and read(n=12). "
+                        "Then get_observation and solve your room. After every three puzzle actions, "
+                        "post a concise new finding in thread 1 and read(n=12) before continuing. "
+                        "Use teammates' findings in your independent copy. Submit the victory "
+                        "string with submit_answer; do not stop before verified success or limits."
+                    ),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        while True:
+            if (output / "success.json").exists():
+                reason = "verified_success"
+                break
+            if backend.poll() is not None:
+                raise RuntimeError("Benchmark exited during attempt")
+            if flock.poll() is not None:
+                reason = "idle" if flock.returncode == 0 else "flock_error"
+                break
+            if time.monotonic() - started >= args.timeout:
+                reason = "timeout"
+                break
+            time.sleep(1)
+    except KeyboardInterrupt:
+        reason = "interrupted"
+    except (OSError, RuntimeError, httpx.HTTPError) as exc:
+        failure = str(exc)
+    finally:
+        for process in (flock, backend):
+            try:
+                stop(process)
+            except (OSError, RuntimeError, httpx.HTTPError) as exc:
+                failure = str(exc)
+        events = []
+        trajectory = output / "trajectory.jsonl"
+        if trajectory.exists():
+            events = [json.loads(line) for line in trajectory.read_text().splitlines()]
+        success = output / "success.json"
+        report = {
+            "reason": reason,
+            "success": json.loads(success.read_text()) if success.exists() else None,
+            "error": failure,
+            "elapsed_seconds": time.monotonic() - started,
+            "flock_exit_code": flock.returncode if flock else None,
+            "actions_by_agent": dict(
+                Counter(e["agent"] for e in events if e["action"] != "initialize")
+            ),
+            "actions_by_type": dict(Counter(e["action"] for e in events)),
+        }
+        bundles = list((output / "flock").glob("*/run.json"))
+        if len(bundles) == 1:
+            bundle = json.loads(bundles[0].read_text())
+            report["flock_bundle"] = str(bundles[0].relative_to(output))
+            report["totals"] = bundle.get("totals", {})
+            board_path = bundles[0].parent / "board/metadata.json"
+            if board_path.exists():
+                board = json.loads(board_path.read_text())
+                report["board"] = {
+                    "location": board.get("data_dir"),
+                    "verified_at": board.get("storage", {}).get("verified_at"),
+                }
+        if report["success"]:
+            report["time_to_success_seconds"] = report["success"]["time"] - metadata["started"]
+        (output / "result.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2), flush=True)
+    return 0 if report["success"] and not failure and report["flock_exit_code"] == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

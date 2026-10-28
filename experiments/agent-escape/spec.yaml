@@ -1,0 +1,52 @@
+swarm: agent-escape
+compute: local
+providers:
+  local:
+    type: openai_compat
+    base_url: http://127.0.0.1:8000/v1
+    api_key_env: LOCAL_KEY
+    self_hosted: true
+models:
+  qwen:
+    model: local:Qwen/Qwen3-14B
+    extra:
+      max_tokens: 4096
+      chat_template_kwargs:
+        enable_thinking: true
+comms:
+  managed: true
+  storage:
+    kind: hf-bucket
+    bucket: HuggingFaceSwarms/Experiments
+    mount_root: /scratch/flock-boards
+    flush_debounce: 2s
+    flush_max_batch_window: 15s
+    flush_shutdown_timeout: 45s
+  channel: general
+  wake: []
+  extended: false
+  kickoff: Four workers have independent copies of the same puzzle. Share exact discoveries
+    and inputs in general.
+types:
+  worker:
+    harness: llm
+    model: qwen
+    replicas: 4
+    agents_per_worker: 1
+    max_working_per_worker: 1
+    comms: true
+    bash: false
+    tool_choice: required
+    max_turns: 100
+    turn_timeout: 30m
+    context_tokens: 10000
+    system_prompt_file: prompt.md
+    env:
+      FLOCK_COMMS_AGENT_RATE: '1.0'
+world:
+  dir: .
+  command:
+  - flock
+  - world
+  - serve
+  - world:EscapeWorld
