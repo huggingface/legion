@@ -310,6 +310,10 @@ def main(argv: list[str] | None = None) -> int:
                         lower=a.cmd == "set", stagger=a.stagger, only=a.only)
             _say(rec)
             return 1 if "error" in rec else 0
+        if a.cmd == "run":
+            print("waves.py run is deprecated: put `replicas_ramp: {start, add, every, max}` "
+                  "under the type in the spec; the controller runs the schedule (docs/live.md, "
+                  "\"Ramp\")", file=sys.stderr, flush=True)
         if a.cmd == "run" and a.start is None and not _has_state(spec):
             # the clock starts at the first answer from the controller, not at our own start:
             # on a cold node the controller can come up after the second wave is due, and the

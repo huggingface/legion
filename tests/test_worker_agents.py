@@ -271,3 +271,19 @@ async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
     await rt.sync_now("after")
     assert sync.pushed == ["researcher-0001", "researcher-0001"]
     assert store.files[pre + "workdir/a.txt"] == b"A"
+
+
+async def test_turn_events_carry_prompt_ids(tmp_path):
+    """Tracked broadcasts (docs/live.md): the turn a prompt started or joined names it."""
+    adapter = ScriptedAdapter(tmp_path / "home", start_delay=0.05, turn_time=0.3)
+    rt, _ = runtime(tmp_path, adapter=adapter)
+    await rt.setup(restore=False)
+    await rt.prompt("a", prompt_id="b-1")
+    await until(lambda: rt.turn_id == "t-1")
+    await rt.prompt("b", prompt_id="b-2")  # joins the turn in flight
+    await until(lambda: rt.state.turns == 1)
+    evs = {e.type: e.data.get("data", e.data) for e in rt.outbox._q
+           if e.type in ("turn_started", "turn_ended")}
+    assert evs["turn_started"]["prompt_id"] == "b-1"
+    assert evs["turn_ended"]["prompt_id"] == "b-2"
+    assert evs["turn_ended"]["prompt_ids"] == ["b-1", "b-2"]

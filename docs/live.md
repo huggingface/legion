@@ -124,6 +124,44 @@ World admin changes made through the controller (`flock world set`, `flock world
 new, by, reason}`, `world_pause {lanes, reason, by}` and `world_resume {lanes, by}`. They
 take effect in the world at once and survive its restarts; they are not part of the spec.
 
+Policies ([policies.md](policies.md)) add `alert`, `alert_cleared`, `policy_action`,
+`policy_budget_exhausted` and `digest`; the ramp adds `ramp_step`.
+
+## Ramp (`replicas_ramp`)
+
+```yaml
+types:
+  agent:
+    replicas: 0
+    replicas_ramp: {start: 20, add: 20, every: 10m, max: 300}
+```
+
+The reconciler raises the type's replicas to `start` on the first pass that sees the ramp.
+It then adds `add` every `every`, up to `max`. Replicas change only when a new step is due,
+and never go down. An operator's `flock scale` between steps, up or down, stays until the
+next step asks for more. Each raise rewrites the stored spec and writes `ramp_step {type,
+from, replicas, step, max}`. The start time and the last step are stored, so a controller
+restart keeps the schedule. `flock update` keeps the live replicas by default. This replaces
+`experiments/run4/waves.py run` (fixed schedule only; there is no load guard).
+
+## Per-type concurrency (`max_working`)
+
+`types.T.max_working: N` admits at most N turns of the type at once, swarm-wide. Paused agents
+never take a slot. It uses the
+same admission as a provider's `max_working`: prompts wait in the controller, and free slots
+go to the oldest pending prompt first. When both caps are set, a prompt needs a slot in both.
+A type with it runs its `turn_end` loop on the controller (docs/loop.md).
+
+## Broadcasts (`flock prompt --track`)
+
+`flock prompt --swarm S --type T --track "text"` sends every matching agent the same prompt
+with one id (`b-...`, returned as `prompt_id` in the counts). Workers put `prompt_id` on
+`turn_started` and `turn_ended`, the id of the turn's last prompt. When a turn took several
+prompts, the events also carry `prompt_ids` with all of them. The controller counts the
+agents that started and finished a turn with it. `flock broadcasts <swarm>`
+(`GET /swarms/{s}/broadcasts`) shows `312/359 acted`: finished out of targeted, plus how many
+were delivered (left the queue) and started. Agents do nothing extra.
+
 ## `flock run --watch`
 
 `flock run spec.yaml --watch` polls the files the spec references and the tools folder every
