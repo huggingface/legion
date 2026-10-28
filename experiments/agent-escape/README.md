@@ -34,6 +34,30 @@ plus graceful cleanup. The adapter expects exactly `worker-0000` through
 `worker-0003`; retain four replicas and one agent per worker. The launcher adds
 local tool paths and supplies `LOCAL_KEY=unused` unless already configured.
 
+## HF endpoint configuration
+
+`spec-hf-endpoint.yaml` is a review variant for a dedicated HF endpoint serving
+`Qwen/Qwen3.8-27B`. It keeps four local workers, independent copies of the same
+puzzle, and the existing bucket-backed board; only inference moves to the endpoint.
+
+Replace `providers.hf_endpoint.base_url` with the endpoint URL ending in `/v1`,
+and confirm that `models.qwen-27b.model` uses its exact served model ID. The current
+`.invalid` URL is an intentional placeholder. Supply `HF_ENDPOINT_TOKEN` with
+permission to call the endpoint; `HF_TOKEN` remains the board-storage credential.
+If the same token has both permissions, set `HF_ENDPOINT_TOKEN="$HF_TOKEN"` in your
+shell. The configuration assumes a vLLM-compatible endpoint with tool calling and
+Qwen reasoning support, and retains 4,096 output / 10,000 context tokens.
+
+After reviewing and filling in the endpoint settings, run:
+
+```bash
+uv run --no-sync python experiments/agent-escape/run.py --spec experiments/agent-escape/spec-hf-endpoint.yaml
+```
+
+The endpoint variant has been validated offline, not run against an endpoint.
+Dedicated endpoint compute charges are outside Flock's token-cost accounting
+(`self_hosted: true`); a reported token cost of zero does not mean free inference.
+
 ## Environment and collaboration
 
 The benchmark is pinned to `03742c79f48646e0130886e18e3e79798cf8edd7`, with scenario

@@ -1,0 +1,62 @@
+# Review configuration: replace the endpoint URL before launching.
+# Use the endpoint's OpenAI-compatible base URL ending in /v1.
+# Confirm the served model ID; Qwen/Qwen3.8-27B is the requested default.
+# Assumes a vLLM-compatible endpoint supporting tools and enable_thinking.
+# HF_ENDPOINT_TOKEN authenticates inference; HF_TOKEN authenticates board storage.
+# self_hosted means endpoint compute billing is outside Flock's token-cost totals.
+# Workers and the puzzle server run locally; inference runs on the HF endpoint.
+swarm: agent-escape-hf-qwen27b
+compute: local
+providers:
+  hf_endpoint:
+    type: openai_compat
+    base_url: https://REPLACE-WITH-ENDPOINT.invalid/v1
+    api_key_env: HF_ENDPOINT_TOKEN
+    self_hosted: true
+    max_working: 4
+    timeout_s: 120
+    max_retries: 2
+models:
+  qwen-27b:
+    model: hf_endpoint:Qwen/Qwen3.8-27B
+    extra:
+      max_tokens: 4096
+      chat_template_kwargs:
+        enable_thinking: true
+comms:
+  managed: true
+  storage:
+    kind: hf-bucket
+    bucket: HuggingFaceSwarms/Experiments
+    mount_root: /scratch/flock-boards
+    flush_debounce: 2s
+    flush_max_batch_window: 15s
+    flush_shutdown_timeout: 45s
+  channel: general
+  wake: []
+  extended: false
+  kickoff: Four workers have independent copies of the same puzzle. Share exact discoveries
+    and inputs in general.
+types:
+  worker:
+    harness: llm
+    model: qwen-27b
+    replicas: 4
+    agents_per_worker: 1
+    max_working_per_worker: 1
+    comms: true
+    bash: false
+    tool_choice: required
+    max_turns: 100
+    turn_timeout: 30m
+    context_tokens: 10000
+    system_prompt_file: prompt.md
+    env:
+      FLOCK_COMMS_AGENT_RATE: '1.0'
+world:
+  dir: .
+  command:
+  - flock
+  - world
+  - serve
+  - world:EscapeWorld
