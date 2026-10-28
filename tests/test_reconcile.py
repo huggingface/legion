@@ -211,6 +211,7 @@ def test_job_timeout_is_planned_restart(store, jobs, clock, tick):
     clock.advance(100)
     actions = tick()
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
+    assert "planned_restart" in [e["type"] for e in store.read_events("_swarm.demo", 0)]
     w = store.get_worker(W0)
     assert w["consecutive_crashes"] == 0 and w["crashes"] == 0
     (cmd,) = queued(store, W0)
@@ -250,6 +251,12 @@ def test_repeated_crashes_back_off_then_crashloop(store, jobs, clock, tick):
         tick()
     assert backoffs == [30, 60, 120, 240, 480]
     assert store.type_health("demo", "researcher") == "crashlooping"
+    evs = store.read_events("_swarm.demo", 0)
+    types = [e["type"] for e in evs]
+    assert types.count("crash") == CRASHLOOP_THRESHOLD and types[-1] == "crashloop"
+    assert "launch" in types and "assign" not in types
+    crash = next(e for e in evs if e["type"] == "crash")
+    assert crash["data"] == {"target": W0, "detail": "ERROR: boom; backoff 30s"}
     n = len(jobs.launches)
     assert n == CRASHLOOP_THRESHOLD  # first launch + 4 relaunches; the 5th crash stops it
     clock.advance(3600)

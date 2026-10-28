@@ -61,6 +61,8 @@ LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_job
 LAUNCH_TIMEOUT = 900.0  # s, a RUNNING job that never heartbeats in this long is a crash
 RETIRE_GRACE = 120.0  # s, an emptied worker gets this long to drain before it is cancelled
 STABLE_AFTER = 600.0  # s, a heartbeat this long after launch resets the crash streak
+# Not written to the swarm stream: per agent, or repeated every pass while the condition holds.
+QUIET_ACTIONS = ("assign", "unassign", "budget_exhausted", "workers_full")
 _UNKNOWN = UNKNOWN_AFTER.total_seconds()
 _DEAD = DEAD_AFTER.total_seconds()
 
@@ -93,6 +95,11 @@ def launch_refused(exc: BaseException) -> bool:
     if isinstance(status, int):
         return 400 <= status < 500 and status not in (408, 429)
     return type(exc).__name__ in ("HFValidationError", "BadRequestError")
+
+
+def swarm_stream(swarm: str) -> str:
+    """Event stream key for swarm-level events (agent names never contain a dot)."""
+    return f"_swarm.{swarm}"
 
 
 def worker_id_for(swarm: str, type_name: str, idx: int) -> str:
@@ -207,6 +214,7 @@ def reconcile(
     for sw in store.list_swarms():
         spec: SwarmSpec = sw["spec"]
         p.listed = None
+        first = len(p.actions)
         if sum(_needs_check(w, t) for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
             try:
                 listing = jobs.list({"swarm": spec.swarm}, namespace=spec.namespace)
@@ -217,11 +225,22 @@ def reconcile(
         for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
             ts = None if sw["removing"] else spec.types.get(type_name)
             _reconcile_type(p, spec, type_name, ts)
+        _record(p, spec.swarm, p.actions[first:])
         gone = not store.list_workers(spec.swarm) and not store.list_agents(spec.swarm)
         if sw["removing"] and gone:
             store.delete_swarm(spec.swarm)
             p.act("remove_swarm", spec.swarm)
     return p.actions
+
+
+def _record(p: _Pass, swarm: str, actions: list[Action]) -> None:
+    """The pass's actions on the swarm event stream (docs/live.md): crash, planned_restart,
+    crashloop, launch, cancel, retire, ..."""
+    ts = datetime.fromtimestamp(p.now, UTC)
+    evs = [Event(type=a.kind, ts=ts, agent="", data={"target": a.target, "detail": a.detail[:300]})
+           for a in actions if a.kind not in QUIET_ACTIONS]
+    if evs:
+        p.store.append_events(swarm, swarm_stream(swarm), evs)
 
 
 def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:

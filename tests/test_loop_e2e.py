@@ -128,7 +128,8 @@ async def test_loop_end_to_end(tmp_path, fake_server, monkeypatch, capped):
             assert all(e["data"]["data"]["status"] == "completed" for e in evs if e["type"] == "turn_ended")
 
         swarm = (await admin.get("/swarms/e2e/events")).json()["events"]
-        kinds = [e["type"] for e in swarm if e["type"] != "loop_tick"]
+        kinds = [e["type"] for e in swarm if e["type"] != "loop_tick"
+                 and e["type"].startswith(("loop_", "final_", "budget_"))]
         assert kinds == ["loop_started", "loop_stopped", "final_round", "final_round", "final_round",
                          "final_done"]
         assert next(e for e in swarm if e["type"] == "loop_stopped")["data"]["reason"] == "max_rounds"
