@@ -92,6 +92,7 @@ class _Metrics:
         self.waits: dict[str, deque] = {p: deque(maxlen=MAX_SAMPLES) for p in ("fast", "slow")}  # pool -> (t, wait_s)
         self.lags: deque = deque(maxlen=MAX_SAMPLES)  # (t, event-loop lag in s)
         self.overloaded = 0
+        self.uploads = {"v1": 0, "v2": 0}  # workspace uploads received, by format
         self.cpu_mark = (time.monotonic(), sum(os.times()[:2]))
 
     def _trim(self, q: deque, now: float) -> deque:
@@ -143,7 +144,8 @@ class _Metrics:
         self.cpu_mark = (wall, cpu)
         return {"uptime_s": now - self.started, "rss_mb": _rss_mb(), "cpu_pct": cpu_pct,
                 "loop_lag_s": lags[-1] if lags else 0.0, "loop_lag_max_s": max(lags, default=0.0),
-                "overloaded_429_total": self.overloaded, "window_s": WINDOW_S,
+                "overloaded_429_total": self.overloaded, "upload_v1_total": self.uploads["v1"],
+                "upload_v2_total": self.uploads["v2"], "window_s": WINDOW_S,
                 "tools": tools, "pools": pools}
 
 
@@ -534,6 +536,10 @@ def create_app(world: World | Callable[[Admin], World], token: str | None) -> Fa
                 handler = getattr(world, "call_workspace", None)
                 if "workspace-upload-v1" not in world.capabilities or handler is None:
                     return _error("bad_request", "this world does not accept workspace uploads", 400)
+                v2 = isinstance(body["workspace"], dict) and "patch" in body["workspace"]
+                if v2 and "workspace-upload-v2" not in world.capabilities:
+                    return _error("need_full", "this world takes full-tree uploads (v1) only")
+                metrics.uploads["v2" if v2 else "v1"] += 1
                 result = await run(pool, handler, name, args, agent, body["workspace"])
             else:
                 result = await run(pool, world.call, name, args, agent)

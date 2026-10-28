@@ -258,7 +258,8 @@ cover the last `window_s` (300 s):
 
 ```json
 {"uptime_s": 812.4, "rss_mb": 412.0, "cpu_pct": 37.5,
- "loop_lag_s": 0.002, "loop_lag_max_s": 0.08, "overloaded_429_total": 3, "window_s": 300.0,
+ "loop_lag_s": 0.002, "loop_lag_max_s": 0.08, "overloaded_429_total": 3,
+ "upload_v1_total": 2, "upload_v2_total": 408, "window_s": 300.0,
  "tools": {"open_pr": {"calls": 41, "errors_by_code": {"open_budget": 6}, "latency_p50_s": 9.1,
                        "latency_p95_s": 31.0, "latency_max_s": 48.2, "bytes_in": 120000000,
                        "bytes_out": 52000, "calls_total": 310, "errors_total": 44}},
@@ -271,7 +272,8 @@ cover the last `window_s` (300 s):
 
 `tools` lists the tools called since start: `calls`, `errors_by_code` (refusals included as
 `overloaded`), latencies (admitted calls only, queue wait included) and bytes are over the
-window; `calls_total` and `errors_total` since start. `pools.*.in_flight` counts running and
+window; `calls_total` and `errors_total` since start, as are `upload_v1_total` and `upload_v2_total`
+(workspace uploads by format). `pools.*.in_flight` counts running and
 queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
 concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
@@ -465,7 +467,7 @@ Space is public, so the secret is its only protection.
   retries.
 - Batching and delivery guarantees for hooks.
 
-## Local clone uploads (workspace-upload-v1)
+## Local clone uploads (workspace-upload-v1, -v2)
 
 A world can advertise `workspace-upload-v1` and implement
 `call_workspace(name, args, agent, snapshot)`. A tool opts in with
@@ -483,7 +485,28 @@ Only tracked and nonignored files are captured; missing tracked files represent
 deletions. Symlinks, paths outside the agent workspace, git metadata, more than
 10,000 files or more than 128 MiB are refused. The base is the merge base of local
 HEAD and origin/main; the world validates it against its own history. Commit
-local edits and fetch/rebase before refreshing a stale PR. A tool's optional
+local edits and fetch/rebase before refreshing a stale PR.
+
+**Patch uploads (workspace-upload-v2).** A world that also advertises
+`workspace-upload-v2` gets the same files as a patch instead: the worker hashes
+them into a temporary index (`GIT_INDEX_FILE`, no clean filters or other
+commands from the clone's config) and sends
+`workspace: {base_sha, patch}`, where `patch` is the base64 of
+`git diff --cached --binary --find-renames <base_sha>` (binary files, deletions,
+renames and mode changes). A 3-file change in a 5,000-file clone is about 1 KB
+instead of 3.8 MB. A patch over 20 MiB, or a clone v2 cannot capture, goes as v1.
+The world applies it with `flock.world.workspace.apply_patch(snapshot, tree)` on
+its own checkout of `base_sha` (worktree only, so its excludes apply when it
+stages the tree); it refuses symlinks, submodules, paths outside the tree or in
+`.git`, and more than 10,000 files or 128 MiB declared (`git apply` runs under
+`prlimit`: 128 MiB per file, 2 GiB of memory). A world that cannot use a patch
+but could use the full tree answers the error code `need_full` before doing
+anything; the worker then resends the call once as v1. `GET /metrics` counts
+`upload_v1_total` and `upload_v2_total`. chatbot4 advertises both, checks the PR
+budget before any apply, and answers `need_full` only from `run_bot` (whose v1
+path takes any base); `open_pr` refuses a base that is not on main either way.
+
+A tool's optional
 `x-flock-timeout_s` raises the worker's HTTP read timeout for its calls; chatbot4
 sets 330 seconds on every tool so a 300-second conversation can finish.
 

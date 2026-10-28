@@ -28,7 +28,7 @@ from flock.isolation import protect_supervisor
 from flock.world import Agent, ToolError, World, tool
 from flock.world.lanes import Lane, LaneBusy, Lanes
 from flock.world.store import Store
-from flock.world.workspace import unpack
+from flock.world.workspace import apply_patch, unpack
 
 HERE = Path(__file__).resolve().parent
 UPLOAD = contextvars.ContextVar("workspace", default=None)
@@ -106,7 +106,7 @@ def logs_refusals(fn):
 class Chatbot4World(World):
     name, version = "chatbot4", "0.4.0"
     concurrent = True
-    capabilities: ClassVar[list[str]] = ["workspace-upload-v1"]
+    capabilities: ClassVar[list[str]] = ["workspace-upload-v1", "workspace-upload-v2"]
     description = ("Edit your local git clone, then submit with open_pr. Another agent must "
                    "approve the PR's current change (a clean rebase keeps the approval) before merge. Bot input/output and module loading "
                    "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation. "
@@ -863,7 +863,23 @@ class Chatbot4World(World):
 
         Byte-identical files are not rewritten; tracked files missing from the upload are
         deleted. Returns the paths that differ from the tree, for the compile check.
+        A v2 upload (a patch) applies only on a checkout of its base.
         """
+        if (tree / ".git").is_dir():
+            # Default excludes even if an agent drops .gitignore: caches are never committed.
+            (tree / ".git/info").mkdir(exist_ok=True)
+            (tree / ".git/info/exclude").write_text("\n".join(EXCLUDE) + "\n")
+        if "patch" in snapshot:
+            try:
+                names = apply_patch(snapshot, tree)
+            except (ValueError, OSError) as exc:
+                raise ToolError(f"invalid workspace upload: {exc}"[:300], "bad_workspace") from exc
+            for name in names:
+                f = tree / name
+                if f.is_file() and f.stat().st_size > MAX_FILE_BYTES:
+                    raise ToolError(f"file too large: {name[:200]} is over {MAX_FILE_BYTES} bytes; "
+                                    "remove it from the clone or add it to .gitignore", "file_too_large")
+            return names
         files = snapshot.get("files")
         if not isinstance(files, dict):
             raise ToolError("invalid workspace upload", "bad_workspace")
@@ -888,9 +904,6 @@ class Chatbot4World(World):
                 continue
             changed[name] = encoded
         if (tree / ".git").is_dir():
-            # Default excludes even if an agent drops .gitignore: caches are never committed.
-            (tree / ".git/info").mkdir(exist_ok=True)
-            (tree / ".git/info/exclude").write_text("\n".join(EXCLUDE) + "\n")
             tracked = self.repo.git("ls-files", "-z", at=tree).split("\0")
             for name in tracked:
                 if name and name not in files:
@@ -1595,6 +1608,8 @@ class Chatbot4World(World):
                 if isinstance(sha, str) and self.repo.ancestor(sha, "main"):
                     self.repo.checkout(sha, tree)  # then only changed files are written/compiled
                     self._contract(tree, self._files(snapshot, tree))
+                elif "patch" in snapshot:
+                    raise ToolError("unknown base; send the full tree", "need_full")
                 else:
                     tree.mkdir()
                     self._files(snapshot, tree)

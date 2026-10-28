@@ -499,6 +499,11 @@ class WorkdirSpec(BaseModel):
     max_mb: float | None = Field(default=None, gt=0)  # None: 5 x soft_mb
     # dirs relative to the workdir: never synced, created at setup, wiped when the agent moves
     ephemeral: list[str] = Field(default_factory=list)
+    # bucket layout (worker.sync "Base tar"): a tar of the workdir plus per-file deltas, rebuilt
+    # every base_interval_s or when the delta passes base_delta_files (changed + deleted)
+    base: bool = False
+    base_interval_s: float = Field(default=3600.0, gt=0)
+    base_delta_files: int = Field(default=5000, ge=1)
 
     @field_validator("ephemeral")
     @classmethod

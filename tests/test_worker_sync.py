@@ -641,3 +641,308 @@ async def test_parallel_restore_gives_the_same_tree_as_sequential(tmp_path, monk
                           for p in rt.workdir.rglob("*") if p.is_file()}
         assert not sync.mirror_deletes(rt)  # incomplete: pushes never delete
     assert trees[1] == trees[4] and len(trees[4]) == 40
+
+
+# --- base tar plus per-file delta (workdir.base) -----------------------------------------------
+
+BASE = {"workdir": {"base": True, "base_interval_s": 3600, "ephemeral": ["scratch"]}}
+PRE = "sw/researcher/researcher-0001/"
+
+
+def _tree(d):
+    """{rel: ("link", target) | (bytes, mode, mtime)} of a workdir, symlinks not followed."""
+    out = {}
+    for root, dirs, files in os.walk(d):
+        for f in files + [x for x in dirs if os.path.islink(os.path.join(root, x))]:
+            p = os.path.join(root, f)
+            rel = os.path.relpath(p, d)
+            if os.path.islink(p):
+                out[rel] = ("link", os.readlink(p))
+            else:
+                st = os.stat(p)
+                with open(p, "rb") as f:
+                    out[rel] = (f.read(), st.st_mode & 0o777, round(st.st_mtime, 2))
+    return out
+
+
+def _bytes(tree):
+    """Regular files' bytes only: what the plain per-file mirror keeps (no modes, no links)."""
+    return {k: v[0] for k, v in tree.items() if v[0] != "link"}
+
+
+def _kept(tree):
+    """What the bucket must keep: excluded caches and the ephemeral dir left out."""
+    return {k: v for k, v in tree.items()
+            if not k.startswith(("scratch/", "node_modules/")) and not k.endswith(".pyc")}
+
+
+def _fill(wd):
+    (wd / "src" / "pkg").mkdir(parents=True)
+    (wd / "src" / "pkg" / "a.py").write_text("a")
+    (wd / "src" / "pkg" / "a.pyc").write_text("cache")
+    (wd / "run.sh").write_text("#!/bin/sh\n")
+    os.chmod(wd / "run.sh", 0o755)
+    (wd / "ro").write_text("read-only, like a git object")
+    os.chmod(wd / "ro", 0o444)
+    (wd / "link").symlink_to("src/pkg/a.py")
+    (wd / "dirlink").symlink_to("src")
+    (wd / "dangling").symlink_to("/nonexistent/x")
+    (wd / "node_modules").mkdir()
+    (wd / "node_modules" / "m.js").write_text("m")
+    (wd / "scratch").mkdir(exist_ok=True)
+    (wd / "scratch" / "clone").write_text("throwaway")
+    os.utime(wd / "src" / "pkg" / "a.py", (1_600_000_000.25, 1_600_000_000.25))
+
+
+async def _agent(path, store, **kw):
+    rt, _ = runtime(path, sync=BucketSync(store, "sw"), **{**BASE, **kw})
+    await rt.setup(restore=False)
+    rt.workdir.mkdir(parents=True, exist_ok=True)
+    return rt
+
+
+async def _restored(path, store, **kw):
+    rt, _ = runtime(path, sync=BucketSync(store, "sw"), **{**BASE, **kw})
+    res = await rt.sync.restore(rt)
+    return rt, res
+
+
+@pytest.fixture
+def umask022():
+    old = os.umask(0o022)
+    yield
+    os.umask(old)
+
+
+async def test_base_tar_round_trip_keeps_modes_links_mtimes_and_skips_excludes(tmp_path, umask022):
+    from flock.worker.sync import BASE_JSON, BASE_TAR
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    assert {PRE + BASE_TAR, PRE + BASE_JSON} <= set(store.files)
+    assert not [k for k in store.files if k.startswith(PRE + "workdir/")]  # all in the base
+    base = json.loads(store.files[PRE + BASE_JSON])
+    assert base["files"] == 7 and base["deleted"] == [] and base["links"] == {}
+    import io
+    import tarfile
+    with tarfile.open(fileobj=io.BytesIO(store.files[PRE + BASE_TAR])) as tf:
+        names = tf.getnames()
+    assert names == sorted(names) and not [n for n in names if "scratch" in n or "node_mod" in n]
+
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert _tree(rt2.workdir) == _kept(_tree(rt.workdir)) and res.failed == []
+    assert rt2.sync.mirror_deletes(rt2)
+    await rt2.sync.push(rt2)  # nothing changed: no delta, no manifest rewrite
+    assert not [k for k in store.files if k.startswith(PRE + "workdir/")]
+
+
+async def test_delta_after_base_sends_only_changes_and_tombstones_delete(tmp_path, umask022):
+    from flock.worker.sync import BASE_JSON
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    wd = rt.workdir
+    (wd / "run.sh").write_text("#!/bin/sh\necho 2\n")  # changed
+    (wd / "new.txt").write_text("new")  # added
+    (wd / "ro").unlink()  # deleted: a tombstone
+    (wd / "old.txt").write_text("copied with cp -p")  # an mtime older than the base
+    os.utime(wd / "old.txt", (1_500_000_000, 1_500_000_000))
+    (wd / "link").unlink()
+    (wd / "link").symlink_to("new.txt")  # a changed symlink: in the manifest
+    store.uploads.clear()
+    await rt.sync.push(rt)  # a drain/preempt push: never a new base
+    deltas = {k for k in store.files if k.startswith(PRE + "workdir/")}
+    assert deltas == {PRE + "workdir/" + f for f in ("run.sh", "new.txt", "old.txt")}
+    base = json.loads(store.files[PRE + BASE_JSON])
+    assert base["deleted"] == ["ro"] and base["links"] == {"link": "new.txt"}
+    assert sum(len(u) for u in store.uploads) <= 5  # 3 deltas + manifest (+ session files)
+    store.uploads.clear()
+    await rt.sync.push(rt)
+    assert not [r for u in store.uploads for r in u if "/workdir" in r]  # nothing new
+
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert _tree(rt2.workdir) == _kept(_tree(wd)) and res.failed == []
+    # deleting a delta file: the delta entry goes, a tombstone is not needed
+    (wd / "new.txt").unlink()
+    await rt.sync.push(rt)
+    assert PRE + "workdir/new.txt" not in store.files
+    rt3, _ = await _restored(tmp_path / "c", store)
+    assert _tree(rt3.workdir) == _kept(_tree(wd))
+
+
+class CrashStore(MemoryStore):
+    """Raises on the upload of a path ending in `crash`, or on any delete when crash="delete"."""
+
+    crash = ""
+
+    def upload(self, files):
+        if self.crash and any(r.endswith(self.crash) for _, r in files):
+            raise RuntimeError("crash")
+        super().upload(files)
+
+    def delete(self, paths):
+        if self.crash == "delete":
+            raise RuntimeError("crash")
+        super().delete(paths)
+
+
+@pytest.mark.parametrize("crash", ["workdir.base.tar", "workdir.base.json", "delete"])
+@pytest.mark.parametrize("first", [True, False], ids=["first-base", "next-base"])
+async def test_restore_after_a_crash_while_making_a_base_equals_the_source(
+        tmp_path, umask022, crash, first):
+    store = CrashStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    wd = rt.workdir
+    if first:  # a run-4 bucket: the plain per-file mirror, no base yet
+        await rt.sync.push(rt)
+    else:
+        await rt.sync.push(rt, rebase=True)
+        (wd / "ro").unlink()
+        (wd / "run.sh").write_text("#!/bin/sh\necho 2\n")
+        (wd / "link").unlink()
+        (wd / "link").symlink_to("run.sh")
+        await rt.sync.push(rt)
+    (wd / "late.txt").write_text("written before the base")
+    os.utime(wd / "late.txt", (1_600_000_000, 1_600_000_000))
+    (wd / "src" / "pkg" / "a.py").unlink()  # deleted before the base
+    await rt.sync.push(rt)
+    store.crash = crash
+    rt.spec.workdir.base_interval_s = 0.001  # the base is due
+    with pytest.raises(RuntimeError):
+        await rt.sync.push(rt, rebase=True)
+    rt2, res = await _restored(tmp_path / "b", store)
+    if first and crash != "delete":  # no base committed: the plain mirror, file bytes only
+        assert _bytes(_tree(rt2.workdir)) == _bytes(_kept(_tree(wd))) and res.failed == []
+    else:
+        assert _tree(rt2.workdir) == _kept(_tree(wd)) and res.failed == []
+    # the next push heals a partial commit: stale deltas go, a restore still matches
+    store.crash = ""
+    await rt.sync.push(rt, rebase=True)
+    rt3, _ = await _restored(tmp_path / "c", store)
+    assert _tree(rt3.workdir) == _kept(_tree(wd))
+    assert not [k for k in store.files if k.startswith(PRE + "workdir/")]
+
+
+async def test_run4_bucket_restores_as_before_then_gets_a_base_and_can_go_back(tmp_path, umask022):
+    from flock.worker.sync import BASE_JSON, BASE_TAR
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store, workdir={"ephemeral": ["scratch"]})  # base off
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON not in store.files and PRE + "workdir/run.sh" in store.files
+
+    rt2, _ = await _restored(tmp_path / "b", store)  # base on, a bucket without one
+    # the plain mirror brings symlinked files back as copies
+    assert _bytes(_kept(_tree(rt.workdir))).items() <= _bytes(_tree(rt2.workdir)).items()
+    await rt2.sync.push(rt2)  # not periodic: still the plain mirror
+    assert PRE + BASE_JSON not in store.files
+    await rt2.sync.push(rt2, rebase=True)  # the first periodic push makes the base
+    assert PRE + BASE_JSON in store.files
+    assert not [k for k in store.files if k.startswith(PRE + "workdir/")]
+
+    rt2.spec.workdir.base = False  # turned off: the full mirror again, the base removed
+    await rt2.sync.push(rt2)
+    assert PRE + BASE_JSON not in store.files and PRE + BASE_TAR not in store.files
+    rt3, _ = await _restored(tmp_path / "c", store, workdir={"ephemeral": ["scratch"]})
+    assert _bytes(_tree(rt3.workdir)) == _bytes(_tree(rt2.workdir))
+
+
+async def test_unreadable_base_is_an_incomplete_restore_and_blocks_deletes(tmp_path):
+    from flock.worker.sync import BASE_TAR
+
+    store = FlakyStore(bad=[PRE + BASE_TAR])
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert res.failed == [PRE + BASE_TAR] and not rt2.sync.mirror_deletes(rt2)
+    rt2.workdir.mkdir(parents=True, exist_ok=True)
+    (rt2.workdir / "x.txt").write_text("x")
+    before = dict(store.files)
+    await rt2.sync.push(rt2, rebase=True)  # uploads, but no new base and no deletes
+    assert set(before) <= set(store.files) and store.files[PRE + BASE_TAR] == before[PRE + BASE_TAR]
+    assert PRE + "workdir/x.txt" in store.files
+
+
+async def test_a_push_during_a_push_keeps_the_delta_it_uploaded(tmp_path, umask022):
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+
+    class Interleaved(MemoryStore):
+        """On the first workdir listing, another push (a preempt) runs with a new file."""
+        hook = False
+
+        def list_info(self, prefix):
+            if self.hook and prefix.endswith("workdir/"):
+                self.hook = False
+                (rt.workdir / "x.txt").write_text("written after the periodic walk")
+                asyncio.run_coroutine_threadsafe(rt.sync.push(rt), loop).result()
+            return super().list_info(prefix)
+
+    store = Interleaved()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    (rt.workdir / "run.sh").write_text("#!/bin/sh\necho 2\n")
+    store.hook = True
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + "workdir/x.txt" in store.files
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert _tree(rt2.workdir) == _kept(_tree(rt.workdir)) and res.failed == []
+
+
+async def test_a_delta_replacing_a_base_symlink_is_not_written_through_it(tmp_path, umask022):
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    await rt.sync.push(rt, rebase=True)
+    (rt.workdir / "link").unlink()  # in the tar: link -> src/pkg/a.py
+    (rt.workdir / "link").write_text("now a regular file")
+    (rt.workdir / "dirlink").unlink()  # in the tar: dirlink -> src
+    (rt.workdir / "dirlink" / "pkg").mkdir(parents=True)
+    (rt.workdir / "dirlink" / "pkg" / "a.py").write_text("not src/pkg/a.py")
+    rt.sync._mirror[PRE] = False  # as after an incomplete restore: deltas, no tombstones
+    await rt.sync.push(rt)
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert not (rt2.workdir / "link").is_symlink() and not (rt2.workdir / "dirlink").is_symlink()
+    assert _tree(rt2.workdir) == _kept(_tree(rt.workdir)) and res.failed == []
+
+
+async def test_drain_stops_a_base_build_and_nothing_is_committed(tmp_path, umask022):
+    from flock.worker.sync import BASE_JSON, BASE_TAR
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    rt.sync.stop_rebase = True
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON not in store.files and PRE + BASE_TAR not in store.files
+    assert PRE + "workdir/run.sh" in store.files  # the plain mirror instead
+    assert not list(rt.sessions_dir.glob("*.base*"))
+
+
+async def test_no_base_and_no_restore_without_free_disk(tmp_path, umask022, monkeypatch):
+    import shutil
+
+    from flock.worker.sync import BASE_JSON, BASE_TAR
+
+    store = MemoryStore()
+    rt = await _agent(tmp_path / "a", store)
+    _fill(rt.workdir)
+    full = shutil.disk_usage(tmp_path)._replace(free=0)
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: full)
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON not in store.files and PRE + "workdir/run.sh" in store.files
+    monkeypatch.undo()
+    await rt.sync.push(rt, rebase=True)
+    assert PRE + BASE_JSON in store.files
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: full)
+    rt2, res = await _restored(tmp_path / "b", store)
+    assert res.failed == [PRE + BASE_TAR] and not rt2.sync.mirror_deletes(rt2)

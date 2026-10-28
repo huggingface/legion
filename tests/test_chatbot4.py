@@ -2211,3 +2211,54 @@ def test_old_merged_and_closed_prs_move_to_the_cold_table(setup):
         assert w.get_pr(two["pr"])["state"] == "merged"
         with pytest.raises(ToolError, match="slug already used"):
             submit(w, clone, branch="one")
+
+
+def submit_v2(world, clone, author="cedar", branch="greeting", pr=None):
+    from flock.world.workspace import capture_v2
+    snapshot = capture_v2(clone.parent, clone.name)
+    assert "patch" in snapshot
+    return world.call_workspace("open_pr", {"branch": branch, "title": "Improve greetings",
+        "description": "Tested a conversation and the interface.", "pr": pr}, Agent(author), snapshot)
+
+
+def test_open_pr_and_run_bot_through_a_v2_patch(setup):
+    world, clone, remote = setup
+    assert "workspace-upload-v2" in world.manifest()["capabilities"]
+    (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hey!"\n')
+    (clone / "bot/modules/topic.py").write_text('def respond(text, memory):\n    return None\n')
+    (clone / "bot/__pycache__").mkdir(exist_ok=True)
+    (clone / "bot/__pycache__/x.pyc").write_bytes(b"\0junk")
+    rec = submit_v2(world, clone)
+    committed = git(remote, "ls-tree", "-r", "--name-only", rec["head_sha"]).splitlines()
+    assert "bot/modules/topic.py" in committed and not [n for n in committed if "__pycache__" in n]
+    assert git(remote, "show", f"{rec['head_sha']}:bot/modules/greeting.py").endswith('"Hey!"')
+    from flock.world.workspace import capture_v2
+    out = world.call_workspace("run_bot", {"ref_or_path": "chatbot-swarm", "lines": ["hi"]},
+                               Agent("cedar"), capture_v2(clone.parent, clone.name))
+    assert out["replies"] == ["Hey!"]
+    (clone / "bot/modules/data.py").write_text("X = 1\n" + "#" * (2 << 20))
+    with pytest.raises(ToolError, match="file too large"):
+        submit_v2(world, clone, branch="big")
+
+
+def test_v2_with_an_unknown_base_asks_for_the_full_tree(setup, monkeypatch):
+    world, clone, _ = setup
+    (clone / "bot/modules/topic.py").write_text('def respond(text, memory):\n    return None\n')
+    from flock.world.workspace import capture_v2
+    v2 = {**capture_v2(clone.parent, clone.name), "base_sha": "1" * 40}
+    args = {"branch": "topic", "title": "Topic module", "description": "tested"}
+    with pytest.raises(ToolError, match="base is not a main commit"):  # a v1 resend can't help
+        world.call_workspace("open_pr", args, Agent("cedar"), v2)
+    with pytest.raises(ToolError) as e:
+        world.call_workspace("run_bot", {"ref_or_path": "chatbot-swarm", "lines": ["hi"]},
+                             Agent("cedar"), v2)
+    assert e.value.code == "need_full"
+    v1 = {**capture(clone.parent, clone.name), "base_sha": "1" * 40}
+    with pytest.raises(ToolError, match="base is not a main commit"):
+        world.call_workspace("open_pr", args, Agent("cedar"), v1)
+    # the budget is checked before any apply
+    monkeypatch.setattr(world, "_check_budget", lambda agent: (_ for _ in ()).throw(
+        ToolError("budget", "open_budget")))
+    monkeypatch.setattr(chatbot4, "apply_patch", lambda *a: pytest.fail("applied"))
+    with pytest.raises(ToolError, match="budget"):
+        world.call_workspace("open_pr", args, Agent("cedar"), capture_v2(clone.parent, clone.name))
