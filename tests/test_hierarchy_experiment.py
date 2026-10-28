@@ -12,7 +12,8 @@ from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "hierarchy"
-SHARED = "You are one of several agents improving [PROJECT: to be provided]"
+REPOS = {"hierarchy": "HuggingFaceSwarms/chatbot-v5", "voting": "HuggingFaceSwarms/chatbot-v6"}  # one dataset each
+SHARED = "You are one of several agents improving " + REPOS["hierarchy"]
 
 
 def module(exp: Path, name: str):
@@ -44,7 +45,12 @@ def check_types(exp: Path):
     assert "You cannot start other agents" in worker and "$FLOCK_PARENT" in worker
     def team(role):  # the shared rules: the same text for both roles
         return (exp / f"prompts/{role}.md").read_text().split("## Team rules")[1].split("\n", 1)[1].split("\n## ")[0]
-    assert SHARED in team("coordinator") and team("coordinator") == team("worker")
+    repo = REPOS[exp.name]
+    assert f"improving {repo}." in team("coordinator") and team("coordinator") == team("worker")
+    system = (exp / "prompts/system.md").read_text()
+    assert f"`{repo}` on Hugging Face" in system and f"`https://huggingface.co/datasets/{repo}` into `chatbot-swarm`" in system
+    assert "[PROJECT" not in coord + worker
+    assert not any(r in coord + worker for r in REPOS.values() if r != repo)  # never the other run's repo
     return spec, coord, worker
 
 

@@ -264,6 +264,17 @@ round count stays), and once a round carried it (a `loop_prompt` that came at le
 the command left the queue), another loop_start with the plain prompt, or the next line. The
 key never reaches workers (`worker_type_spec`): one older than it would refuse the type spec.
 
+### Banner (`flock notice`)
+
+`flock notice set <swarm> [--type T] "final round at 20:00"` puts one line, then a blank line,
+in front of every loop prompt of the type (`first`, rounds, wakes, final). Without `--type`
+it applies to every type; a type's own line wins over the swarm's. It stays until
+`flock notice clear <swarm> [--type T]`, and it is stored, so a controller restart keeps it.
+Controller mode adds it to each prompt it sends. Worker mode sends a fresh loop_start when
+the banner changes (same run: the round count stays). API: `PUT /swarms/{s}/notice
+{type?, text}` (one line, at most 500 characters), `DELETE /swarms/{s}/notice?type=T`,
+`GET /swarms/{s}/notices`. Events `notice_set` and `notice_cleared`.
+
 ### Events
 
 Swarm stream (`GET /swarms/{s}/events`, `flock events <swarm>`): `loop_started {type, mode,

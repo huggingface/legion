@@ -1,1 +1,1 @@
-Continue your work. If you have time, read #proposals and vote on what interests you.
+Continue your work. If you have time, vote on open proposals in your channels and in #general that interest you.

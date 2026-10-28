@@ -1,18 +1,12 @@
 """The voting experiment: hierarchy's setup plus a vote before PRs and worker spawns."""
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
-import pytest
-
 from flock.cli import load_spec
-from flock.models import ALL_COMMS_TOOLS, load_spec_yaml
+from flock.models import load_spec_yaml
 
-from . import fake_msgboard
-from .test_comms import Team, custom
-from .test_hierarchy_experiment import check_types, module
-from .worker_fakes import until
+from .test_hierarchy_experiment import REPOS, check_types, module
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP, HIER = ROOT / "voting", ROOT / "hierarchy"
@@ -31,53 +25,23 @@ def test_role_prompts_are_hierarchy_plus_voting():
     spec, coord, worker = check_types(EXP)
     for role in ("coordinator", "worker"):
         text = (EXP / f"prompts/{role}.md").read_text()
-        base = (HIER / f"prompts/{role}.md").read_text()
+        base = (HIER / f"prompts/{role}.md").read_text().replace(REPOS["hierarchy"], REPOS["voting"])
         assert text.startswith(base) and "## Voting" in text[len(base):], role
-    for text in ("PROPOSAL (PR):", "#proposals", "Do not join #proposals",
+    for text in ("PROPOSAL (PR):", "in the channel of the PR's topic (your team channel)",
                  "at least 2 👍 and more 👍 than 👎", "Each round, if you have time", "You may abstain",
                  "A proposal is a direction", "`votes`", "@mention the proposer",
-                 "Act only when it says passed", "[PROJECT: to be provided]"):
+                 "Act only when it says passed", REPOS["voting"]):
         assert text in coord and text in worker, text
     assert "A changed plan" not in coord + worker and "cmpatino" not in coord + worker
     for text in ("own proposal", "own vote", "yourself", "your own 👍"):  # say nothing on self-votes
         assert text not in coord and text not in worker, text
     assert "PROPOSAL (workers):" in coord and "PROPOSAL (workers):" not in worker
-    assert "read #proposals and vote" in spec.types["worker"].loop.prompt
+    assert "vote on open proposals in your channels and in #general" in spec.types["worker"].loop.prompt
+    assert "Post a new-team proposal as a new thread in #general" in coord
+    assert "new-team proposal" not in worker
+    for f in (EXP / "prompts").iterdir():  # no separate proposals channel
+        assert "#proposals" not in f.read_text(), f.name
     assert spec.types["coordinator"].loop.prompt == spec.types["worker"].loop.prompt
-    assert load_spec(str(HIER / "spec.yaml")).types["worker"].system_prompt in worker
+    hier = load_spec(str(HIER / "spec.yaml")).types["worker"].system_prompt
+    assert hier.replace(REPOS["hierarchy"], REPOS["voting"]) in worker and REPOS["hierarchy"] not in worker
 
-
-@pytest.fixture
-def board():
-    b, server, url = fake_msgboard.serve()
-    b.url = url
-    yield b
-    server.shutdown()
-
-
-async def test_proposals_channel_works_without_joining_and_wakes_only_mentions(tmp_path, board):
-    """#proposals is public but not joined: agents read and post there, and a proposal wakes only
-    the agents it @mentions."""
-    team = Team(tmp_path, board, ["cedar", "birch", "pine", "oak"])
-    team.hub.poll_min_interval = 0.01
-    team.hub.poll_cycle_s = 0.03
-    team.spec.extended = True
-    team.spec.wake = ["mention", "thread", "dm", "channel"]  # as spec.yaml
-    team.hub.configure(team.spec, list(ALL_COMMS_TOOLS))
-    try:
-        await team.start()
-        # seeded after the agents joined (the operator's step), so only cedar is a member
-        out, error = await team.call("cedar", "create_channel", name="proposals", purpose="Proposals")
-        assert not error, out
-        out, error = await team.call("pine", "post", channel="proposals", thread="new",
-                                     text="PROPOSAL (PR): memory module. @birch")
-        assert not error, out
-        page, error = await team.call("oak", "read", channel="proposals")
-        assert not error and page["messages"][-1]["id"] == out["posted"]
-        await until(lambda: custom(team.agents["birch"], "comms_mention"))
-        await asyncio.sleep(0.3)  # a few poll cycles
-        for kind in ("comms_mention", "comms_channel_message", "comms_thread_reply"):
-            assert not custom(team.agents["oak"], kind), kind
-        assert custom(team.agents["cedar"], "comms_channel_message")  # a member is woken
-    finally:
-        await team.close()

@@ -1102,6 +1102,8 @@ def prompt(
     children: bool = typer.Option(
         False, "--children", help="prompt the direct children of --parent (one request)"),
     parent: str = typer.Option(None, "--parent", help="with --children; default: $FLOCK_AGENT"),
+    track: bool = typer.Option(
+        False, "--track", help="with --type: one prompt id for all, counted by `flock broadcasts`"),
 ) -> None:
     """Send a prompt to an agent (`prompt NAME TEXT`), to every agent of a type
     (`prompt --swarm S --type T [--state idle] TEXT`) or to your children
@@ -1124,11 +1126,14 @@ def prompt(
         if swarm is None or len(args) != 1:
             typer.echo("usage: flock prompt --swarm S --type T [--state STATE] TEXT", err=True)
             raise typer.Exit(2)
-        body.update(type=type, state=state, text=args[0])
+        body.update(type=type, state=state, text=args[0], track=track)
         if skip_pending is not None:
             body["skip_pending"] = skip_pending
         typer.echo(json.dumps(_call("POST", f"/swarms/{swarm}/prompts", json=body)))
         return
+    if track:
+        typer.echo("--track needs --swarm S --type T", err=True)
+        raise typer.Exit(2)
     if swarm is not None or state is not None or len(args) != 2:
         typer.echo("usage: flock prompt NAME TEXT (or --swarm S --type T TEXT)", err=True)
         raise typer.Exit(2)
@@ -1467,3 +1472,66 @@ def world_resume(swarm: str, lanes: Annotated[list[str], typer.Argument()]) -> N
 
 if __name__ == "__main__":
     app()
+
+
+# -- steering (docs/policies.md, docs/live.md) -------------------------------------------------
+
+policy_app = typer.Typer(help="Policies: alerts and automatic actions (docs/policies.md).",
+                         no_args_is_help=True)
+app.add_typer(policy_app, name="policy")
+
+
+def _show_policies(out: dict) -> None:
+    typer.echo(f"mode {out['mode']}{' (built-in rules)' if out['builtin'] else ''}; "
+               f"actions in the last hour {out['actions_last_hour']}/{out['max_actions_per_hour']}")
+    rows = [[r["name"], f"{r['metric']} {r['op']} {r['value']:g}", r["for"],
+             ", ".join(next(iter(a)) for a in r["do"]) or "-", r["effective_mode"],
+             "muted" if r["muted"] else "", ", ".join(r["firing"])] for r in out["rules"]]
+    _table(rows, ["rule", "when", "for", "do", "mode", "muted", "firing"])
+
+
+@policy_app.command("list")
+def policy_list(swarm: str) -> None:
+    """The swarm's rules, their mode, mutes and what fires now."""
+    _show_policies(_call("GET", f"/swarms/{swarm}/policies"))
+
+
+@policy_app.command("mute")
+def policy_mute(swarm: str, rule: str,
+                for_: str = typer.Option(None, "--for", help="e.g. 2h; default: until unmuted")) -> None:
+    """Mute a rule: no alerts, no actions (its state keeps updating)."""
+    _show_policies(_call("POST", f"/swarms/{swarm}/policies/{rule}/mute", json={"for": for_}))
+
+
+@policy_app.command("unmute")
+def policy_unmute(swarm: str, rule: str) -> None:
+    _show_policies(_call("POST", f"/swarms/{swarm}/policies/{rule}/unmute", json={}))
+
+
+notice_app = typer.Typer(help="Banner line on top of every loop prompt (docs/loop.md).",
+                         no_args_is_help=True)
+app.add_typer(notice_app, name="notice")
+
+
+@notice_app.command("set")
+def notice_set(swarm: str, text: str,
+               type: str = typer.Option(None, "--type", help="default: every type")) -> None:
+    """Add TEXT as the first line of every loop prompt of the type until `notice clear`."""
+    typer.echo(json.dumps(_call("PUT", f"/swarms/{swarm}/notice",
+                                json={"type": type, "text": text}), indent=2))
+
+
+@notice_app.command("clear")
+def notice_clear(swarm: str, type: str = typer.Option(None, "--type")) -> None:
+    typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}/notice",
+                                params={"type": type} if type else {}), indent=2))
+
+
+@app.command()
+def broadcasts(swarm: str, limit: int = typer.Option(10, "--limit")) -> None:
+    """Tracked prompts (`flock prompt --track`): how many agents acted on each."""
+    rows = [[b["id"], time.strftime("%m-%d %H:%M", time.gmtime(b["ts"])), b["type"],
+             f"{b['finished']}/{b['targets']} acted", f"{b['delivered']} delivered",
+             f"{b['started']} started", _short(b["text"], 50)]
+            for b in _call("GET", f"/swarms/{swarm}/broadcasts", params={"limit": limit})]
+    _table(rows, ["id", "sent", "type", "acted", "delivered", "started", "text"])

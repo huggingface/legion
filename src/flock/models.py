@@ -548,6 +548,25 @@ class WorkerKnobs(BaseModel):
     memory: MemoryKnobs | None = None
 
 
+class RampSpec(BaseModel):
+    """`types.T.replicas_ramp` (docs/live.md "Ramp"): the controller raises the type's
+    replicas to `start`, then by `add` every `every`, up to `max`. It never lowers them."""
+
+    model_config = {"extra": "forbid"}
+
+    start: int = Field(ge=0)
+    add: int = Field(ge=1)
+    every: str
+    max: int = Field(ge=1)
+
+    @field_validator("every")
+    @classmethod
+    def _every(cls, v: str) -> str:
+        if parse_duration(v).total_seconds() <= 0:
+            raise ValueError("every must be > 0")
+        return v
+
+
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
@@ -571,6 +590,10 @@ class TypeSpec(BaseModel):
     replicas: int = 0
     agents_per_worker: int = 50  # measured default, experiments/packing
     max_working_per_worker: int = 20  # measured default, experiments/packing
+    # Agents of this type in a turn at once, swarm-wide, admitted like a provider's
+    # `max_working` (both apply). Controller only.
+    max_working: int | None = Field(default=None, ge=1)
+    replicas_ramp: RampSpec | None = None  # controller only (docs/live.md "Ramp")
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
     # `spawn:` lets others create; None keeps v1's placement.
     workers: WorkersSpec | None = None
@@ -822,6 +845,127 @@ class ComputeSpec(BaseModel):
     max_mem: str = "54G"
 
 
+# ---------------------------------------------------------------- policies (docs/policies.md)
+
+# Metric paths a rule may read from the health snapshot (docs/health.md); `worker.*` is
+# evaluated per worker, the rest once per swarm.
+POLICY_METRICS = (
+    r"worker\.(nonreclaim_frac|eta_limit_s|slope_mb_h)",
+    r"world\.(up|manifest_ms)",
+    r"world\.metrics\.[\w.-]+",
+    r"tools\.[^.]+\.(rate_per_min|err_pct|refused_pct|max_s)",
+    r"types\.[^.]+\.(stuck_n|working|idle|stuck|starting|stopped|unknown)",
+    r"providers\.[^.]+\.(waiting|running|kv)",
+)
+POLICY_ACTIONS = ("notify", "drain_worker", "pause_type", "resume_type", "prompt", "world_knob",
+                  "world_pause", "world_resume")
+_SINK_RE = re.compile(r"(webhook:https?://\S+|file:(?!/)(?!.*\.\.)\S+)")
+
+
+def _sinks(v: list[str]) -> list[str]:
+    for s in v:
+        if not _SINK_RE.fullmatch(s):
+            raise ValueError(f"sink {s!r}: use webhook:<http(s) url> or file:<path under the "
+                             "state dir> (relative, no '..')")
+    return v
+
+
+def _actions(v: Any) -> list[dict[str, Any]]:
+    """`do` / `clear_do`: one action or a list; an action is a name or {name: argument}."""
+    out = []
+    for a in v if isinstance(v, list) else [] if v is None else [v]:
+        a = {a: None} if isinstance(a, str) else a
+        if not isinstance(a, dict) or len(a) != 1 or next(iter(a)) not in POLICY_ACTIONS:
+            raise ValueError(f"action {a!r}: one of {', '.join(POLICY_ACTIONS)} "
+                             "(a name, or {name: argument})")
+        out.append(a)
+    return out
+
+
+class PolicyRule(BaseModel):
+    """One rule: `metric op value` on `for` consecutive fresh samples fires (`alert`, then
+    `do`); `metric op clear` failing clears it (`alert_cleared`, then `clear_do`)."""
+
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
+    name: str
+    metric: str
+    op: Literal[">", ">=", "<", "<=", "==", "!="]
+    value: float
+    for_: str = Field(default="0s", alias="for")
+    clear: float | None = None  # None: clears as soon as `op value` no longer holds
+    do: list[dict[str, Any]] = Field(default_factory=list)
+    clear_do: list[dict[str, Any]] = Field(default_factory=list)
+    cooldown: str = "30m"  # per rule and target, between two enforced episodes
+    max_concurrent: int | None = Field(default=None, ge=1)  # targets acted on and still firing
+    max_per_hour: int | None = Field(default=None, ge=1)
+    mode: Literal["alert", "enforce"] | None = None  # None: the block's mode
+
+    @field_validator("do", "clear_do", mode="before")
+    @classmethod
+    def _norm(cls, v: Any) -> list[dict[str, Any]]:
+        return _actions(v)
+
+    @field_validator("metric")
+    @classmethod
+    def _metric(cls, v: str) -> str:
+        if not any(re.fullmatch(p, v) for p in POLICY_METRICS):
+            raise ValueError(f"metric {v!r} is not one of the snapshot paths (docs/policies.md)")
+        return v
+
+    @field_validator("for_", "cooldown")
+    @classmethod
+    def _duration(cls, v: str) -> str:
+        parse_duration(v)
+        return v
+
+
+class PolicySpec(BaseModel):
+    """The spec's `policies:` block (docs/policies.md). Without it the built-in rules run in
+    alert mode."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["alert", "enforce"] = "alert"
+    rules: list[PolicyRule] = Field(default_factory=list)
+    sinks: list[str] = Field(default_factory=list)  # for `notify`
+
+    @field_validator("sinks")
+    @classmethod
+    def _valid_sinks(cls, v: list[str]) -> list[str]:
+        return _sinks(v)
+
+    @field_validator("rules")
+    @classmethod
+    def _unique(cls, v: list[PolicyRule]) -> list[PolicyRule]:
+        names = [r.name for r in v]
+        if len(set(names)) != len(names):
+            raise ValueError("rule names must be unique")
+        return v
+
+
+class ReportSpec(BaseModel):
+    """The spec's `report:` block: a short digest from the latest health snapshot every
+    `every`, to each sink (docs/policies.md "Digest")."""
+
+    model_config = {"extra": "forbid"}
+
+    every: str = "1h"
+    sinks: list[str] = Field(default_factory=list)
+
+    @field_validator("sinks")
+    @classmethod
+    def _valid_sinks(cls, v: list[str]) -> list[str]:
+        return _sinks(v)
+
+    @field_validator("every")
+    @classmethod
+    def _every(cls, v: str) -> str:
+        if parse_duration(v).total_seconds() <= 0:
+            raise ValueError("every must be > 0")
+        return v
+
+
 class SwarmSpec(BaseModel):
     swarm: str
     # HF namespace jobs are launched under, and the bucket agents sync to (e.g.
@@ -948,6 +1092,8 @@ class SwarmSpec(BaseModel):
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
     limits: LimitsSpec = Field(default_factory=lambda: LimitsSpec())
     compute: ComputeSpec = Field(default_factory=ComputeSpec)
+    policies: PolicySpec | None = None  # controller only (docs/policies.md)
+    report: ReportSpec | None = None  # controller only: the periodic digest
 
     @field_validator("compute", mode="before")
     @classmethod
@@ -1422,6 +1568,28 @@ def loop_refusals(spec: SwarmSpec) -> list[str]:
     return out
 
 
+def policy_refusals(spec: SwarmSpec) -> list[str]:
+    """Policy rules naming what the spec does not have: a type, provider or (when the world's
+    tools are known) tool in a metric path, or a type in pause_type / resume_type."""
+    if spec.policies is None:
+        return []
+    out: list[str] = []
+    tools = {t for ts in spec.types.values() for t in world_tools(ts, spec.world)}
+    for r in spec.policies.rules:
+        head, _, rest = r.metric.partition(".")
+        name = rest.rpartition(".")[0]
+        known = {"types": spec.types, "providers": spec.providers, "tools": tools}.get(head)
+        if known is not None and (known or head != "tools") and name not in known:
+            out.append(f"policies.{r.name}.metric: no {head[:-1]} {name!r} in the spec")
+        for a in r.do + r.clear_do:
+            (act, arg), = a.items()
+            if act in ("pause_type", "resume_type") and arg is not None:
+                for t in arg if isinstance(arg, list) else [arg]:
+                    if t not in spec.types:
+                        out.append(f"policies.{r.name}.{act}: no type {t!r} in the spec")
+    return out
+
+
 CommsSpec.model_rebuild()
 WorldSpec.model_rebuild()
 TypeSpec.model_rebuild()
@@ -1765,6 +1933,9 @@ class BulkPromptRequest(BaseModel):
     # Skip agents that already have a pending (undelivered) prompt. Default: on with
     # state=idle ("only if idle and empty": repeated calls never stack prompts), off otherwise.
     skip_pending: bool | None = None
+    # One prompt id for every agent, counted as their turns start and end
+    # (`GET /swarms/{swarm}/broadcasts`, docs/live.md "Broadcasts").
+    track: bool = False
 
 
 class ChildrenPromptRequest(BaseModel):
@@ -1792,6 +1963,7 @@ class BulkPromptAck(BaseModel):
     skipped_removing: int = 0  # being removed (spawn cascade)
     skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
     skipped_budget: int = 0  # reached its granted limits.budget_usd (docs/live.md)
+    prompt_id: str | None = None  # `track`: the broadcast id
 
 
 class SpawnRequest(BaseModel):

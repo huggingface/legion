@@ -33,8 +33,8 @@ stream is tailed by byte offset.
 ## Snapshot body
 
 ```
-{world: {up, manifest_ms, slurm_state, metrics} | null,
- workers: {wid: {mem, slope_mb_h, eta_limit_s, restore: {..., eta_s}, relaunches}},
+{world: {up, manifest_ms, slurm_state, metrics, ts} | null,
+ workers: {wid: {hb, mem, slope_mb_h, eta_limit_s, restore: {..., eta_s}, relaunches}},
  types: {t: {by_state, stuck: [{agent, state, silent_s}], gens: {rev: n}}},
  tools: {name: {rate_per_min, err_pct, refused_pct, max_s}},
  providers: {p: {waiting, running, kv}},
@@ -49,6 +49,8 @@ stream is tailed by byte offset.
 - `stuck`: agents in `stuck`, or in `working` with no event for more than 30 min
   (`FLOCK_STUCK_MIN`). After a controller restart the clock starts at its first sample.
 - `gens`: agents by the type spec revision they run (`rev` in the agent heartbeat).
+- `hb` is the worker's last heartbeat time and `ts` the world probe's time. Policies use them
+  to skip stale samples ([policies.md](policies.md)).
 - Alerts: world down, a worker within 1 h of its memory limit, stuck agents, a tool with
   20 % or more errors or refusals over the last sample.
 
