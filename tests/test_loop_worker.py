@@ -49,6 +49,10 @@ def test_render_fills_builtins_and_leaves_the_rest():
     assert out == "r4 12/120 min $0.912 of $3.60 (every 120s) did it {other} {cap:.2f} {ROUND} {{x}}"
     bare = render("{round}|{wall}|{cap}|{last_summary}", meta(), spend=0, last_summary=None, now=T0)
     assert bare == "|none|none|(none yet)"
+    ws = render("{workspace}", meta(), spend=0, last_summary=None, now=T0,
+                workspace="182k files, 900 MB; largest: snaps/ 140k")
+    assert ws == "182k files, 900 MB; largest: snaps/ 140k"
+    assert render("{workspace}", meta(), spend=0, last_summary=None, now=T0) == "not measured yet"
 
 
 async def test_turn_end_loop_reprompts_until_max_rounds(tmp_path):

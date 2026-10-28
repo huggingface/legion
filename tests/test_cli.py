@@ -55,7 +55,7 @@ def test_scale_agents_workers_remove(tmp_path, monkeypatch, app, store, tick):
     r = runner.invoke(cli.app, ["agents", "demo", "--type", "researcher"])
     assert r.exit_code == 0 and r.output.count("researcher-000") == 5
     r = runner.invoke(cli.app, ["workers", "demo"])
-    assert r.exit_code == 0 and "demo-researcher-w0002" in r.output
+    assert r.exit_code == 0 and "demo-researcher-w0002" in r.output and "knobs" in r.output
     r = runner.invoke(cli.app, ["agent", "researcher-0004"])
     assert json.loads(r.output)["worker"] == "demo-researcher-w0002"
     r = runner.invoke(cli.app, ["events", "researcher-0004"])

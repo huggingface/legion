@@ -152,6 +152,9 @@ class ProviderSpec(BaseModel):
     # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
     # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
     auth: Literal["x-api-key", "bearer"] | None = None
+    # Scrape `<server root>/metrics` (vLLM Prometheus text) of each base URL into the swarm's
+    # health snapshots: num_requests_waiting / running, KV cache usage (docs/health.md).
+    metrics: bool = False
 
     @field_validator("api_key_env")
     @classmethod
@@ -398,6 +401,9 @@ class WorldSpec(BaseModel):
     # HMAC(secret, origin). A worker sends its secret only when its own HMAC matches.
     credential_origin: str | None = None
     credential_id: str | None = None
+    # The world's Slurm job name, when it runs as one: health shows its squeue state, so a
+    # world waiting for a node (PENDING) is told apart from a crashed one (docs/health.md).
+    slurm_job_name: str | None = None
 
     @field_validator("command", mode="before")
     @classmethod
@@ -446,6 +452,75 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     if listed:
         return list(dict.fromkeys(listed))
     return world.manifest.names() if world.manifest is not None else []
+
+
+class RecycleAfter(BaseModel):
+    """`recycle_after`: restart an agent's harness process (same session) at the first turn
+    boundary past any of these, counted from the process start (docs/pi.md "Memory")."""
+
+    model_config = {"extra": "forbid"}
+
+    turns: int | None = None
+    hours: float | None = None
+    pss_mb: float | None = None  # the harness process's PSS, sampled every 15 s
+
+
+class WorkdirSpec(BaseModel):
+    """Workdir size feedback and throwaway dirs (docs/pi.md "Workdir"). Sizes count what the
+    bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
+    a note naming its largest dirs (at most hourly); above `max_*` (default 5x soft) a
+    `workdir_over_quota` event too. Nothing is ever refused: the workdir still syncs."""
+
+    model_config = {"extra": "forbid"}
+
+    soft_files: int = Field(default=50_000, ge=1)
+    soft_mb: float = Field(default=2048.0, gt=0)
+    max_files: int | None = Field(default=None, ge=1)  # None: 5 x soft_files
+    max_mb: float | None = Field(default=None, gt=0)  # None: 5 x soft_mb
+    # dirs relative to the workdir: never synced, created at setup, wiped when the agent moves
+    ephemeral: list[str] = Field(default_factory=list)
+
+    @field_validator("ephemeral")
+    @classmethod
+    def _relative_dirs(cls, v: list[str]) -> list[str]:
+        out = []
+        for d in v:
+            parts = [p for p in d.strip().split("/") if p not in ("", ".")]
+            if not parts or d.strip().startswith("/") or ".." in parts:
+                raise ValueError(f"ephemeral {d!r}: a directory relative to the workdir")
+            out.append("/".join(parts) + "/")
+        return out
+
+
+class MemoryKnobs(BaseModel):
+    """Worker memory thresholds, passed through as the FLOCK_MEM_* settings (worker.main)."""
+
+    model_config = {"extra": "forbid"}
+
+    rotate: float | None = None
+    drain: float | None = None
+    preempt: float | None = None
+    spike_mb: float | None = Field(default=None, gt=0)
+    recycle_gap_s: float | None = Field(default=None, ge=0)
+
+
+class WorkerKnobs(BaseModel):
+    """A type's worker settings, applied live (heartbeats) by its workers. Each one unset
+    falls back to the worker's env variable, then to the built-in default (docs/slurm.md)."""
+
+    model_config = {"extra": "forbid"}
+
+    drain_budget_s: float | None = Field(default=None, gt=0)  # FLOCK_DRAIN_BUDGET_S
+    sync_interval_s: float | None = Field(default=None, ge=10)  # SYNC_INTERVAL
+    comms_rate: float | None = Field(default=None, ge=0)  # FLOCK_COMMS_RATE (0: off)
+    comms_burst: float | None = Field(default=None, ge=1)  # FLOCK_COMMS_BURST
+    comms_agent_rate: float | None = Field(default=None, ge=0)  # FLOCK_COMMS_AGENT_RATE
+    comms_agent_burst: float | None = Field(default=None, ge=1)  # FLOCK_COMMS_AGENT_BURST
+    comms_poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # FLOCK_COMMS_POLL_CYCLE_S
+    sync_exclude: list[str] | None = None  # FLOCK_SYNC_EXCLUDE (added to the defaults)
+    restore_batch: int | None = Field(default=None, ge=1)  # FLOCK_RESTORE_BATCH
+    restore_threads: int | None = Field(default=None, ge=1, le=32)  # FLOCK_RESTORE_THREADS
+    memory: MemoryKnobs | None = None
 
 
 class TypeSpec(BaseModel):
@@ -505,7 +580,15 @@ class TypeSpec(BaseModel):
     chars_per_token: float | None = None
     tool_output_chars: int | None = None
     persist_workdir: bool = True
+    workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
+    worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
+    # Memory (docs/pi.md "Memory"): restart the harness process at a turn boundary, keeping the
+    # session; RLIMIT_DATA (MB) on every tool command of a Pi agent (through BASH_ENV); Pi's
+    # V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
+    recycle_after: RecycleAfter | None = None
+    tool_memory_mb: int | None = None
+    node_heap_mb: int | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
     # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
     # `flock apply` refuses a name the folder does not define. None: no folder tools.
@@ -1495,7 +1578,7 @@ class WorkerHeartbeat(BaseModel):
     # the worker's last heartbeat after a preemption notice (SIGUSR1): it synced and exits;
     # the controller relaunches the slot at once, as a planned restart (docs/slurm.md)
     preempted: bool = False
-    # with `preempted`: agents whose turn the preemption cut; they get the type's
+    # agents whose turn a preemption or a bounded drain cut; they get the type's
     # resume_prompt after the restore
     interrupted: list[str] = Field(default_factory=list)
     # telemetry (docs/design.md "Heartbeat"); None from workers that do not send it
@@ -1503,6 +1586,9 @@ class WorkerHeartbeat(BaseModel):
     restore: RestoreProgress | None = None  # None when no restore is in flight
     tools: dict[str, ToolCounters] | None = None  # world tools by name
     knobs_rev: str | None = None  # hash of the worker's effective settings
+    # nonreclaimable memory passed FLOCK_MEM_ROTATE of the limit: the controller drains the
+    # worker when its rotation budget allows (docs/slurm.md "Memory")
+    wants_rotation: bool = False
 
 
 class Event(BaseModel):
@@ -1746,6 +1832,7 @@ class WorkerStatus(BaseModel):
     restore: RestoreProgress | None = None
     tools: dict[str, ToolCounters] | None = None
     knobs_rev: str | None = None
+    wants_rotation: bool = False
 
 
 class LoopStatus(BaseModel):

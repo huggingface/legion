@@ -117,3 +117,23 @@ def test_agent_memory_of_a_live_process_tree(tmp_path):
     assert m["pi_pss_mb"] > 0 and m["tmp_mb"] == 1.0 and m["tmpfs_root_mb"] is not None
     assert m["tools_pss_mb"] > 0 and m["tools_by_comm"]
     assert agent_memory(None, _descendants, tmp_path / "tmp") == {"tmp_mb": 1.0}
+
+
+def test_oom_score_adj_is_raised_for_the_sandbox(tmp_path):
+    """isolation._enter raises the sandbox's OOM score (run in a child: never raise ours; 1000,
+    since lowering a score that is already higher needs privilege)."""
+    import subprocess
+    import sys
+
+    import pytest
+
+    code = ("from pathlib import Path; from flock.isolation import set_oom_score_adj as s; "
+            "print(s(1000), Path('/proc/self/oom_score_adj').read_text().strip())")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         check=True).stdout.split()
+    if out[0] != "True":
+        pytest.skip("/proc/self/oom_score_adj is not writable here")
+    assert out[1] == "1000"
+    from flock.isolation import set_oom_score_adj
+
+    assert not set_oom_score_adj(path=str(tmp_path / "missing" / "oom_score_adj"))

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import subprocess
 import time
 from email.utils import parsedate_to_datetime
@@ -775,13 +776,22 @@ def preflight_cmd(
 
 
 @app.command()
-def status(swarm: str = typer.Argument(None)) -> None:
+def status(
+    swarm: str = typer.Argument(None),
+    watch: Annotated[bool, typer.Option("--watch", help="Health view, refreshed every 10 s "
+                                        "(docs/health.md).")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Status and newest health snapshot "
+                                          "as JSON.")] = False,
+) -> None:
     """Swarm status: counts by type and state. Given an agent name (or inside an agent), that
     agent's status as JSON."""
     if not swarm and _as_agent():
         swarm = os.environ.get("FLOCK_AGENT")
     if swarm and (_as_agent() or not _is_swarm(swarm)):
         typer.echo(json.dumps(_call("GET", f"/agents/{swarm}"), indent=2))
+        return
+    if watch or as_json:
+        _health_view(swarm, as_json=as_json, watch=watch)
         return
     if swarm:
         _print_status(_call("GET", f"/swarms/{swarm}")["status"])
@@ -792,6 +802,130 @@ def status(swarm: str = typer.Argument(None)) -> None:
     for st in swarms:
         _print_status(st)
         typer.echo("")
+
+
+def _health_of(swarm: str) -> dict | None:
+    with client() as c:
+        r = _request(c, "GET", f"/swarms/{swarm}/health")
+    return r.json() if r.status_code == 200 else None
+
+
+def _health_view(swarm: str | None, *, as_json: bool, watch: bool) -> None:
+    while True:
+        sts = [_call("GET", f"/swarms/{swarm}")["status"]] if swarm else _call("GET", "/swarms")
+        docs = [{"status": st, "health": _health_of(st["swarm"])} for st in sts]
+        if as_json:
+            typer.echo(json.dumps(docs if not swarm else docs[0], indent=2))
+        else:
+            if watch:
+                typer.echo("\x1b[H\x1b[J", nl=False)
+            for d in docs:
+                _print_health(d["status"], d["health"])
+                typer.echo("")
+        if not watch:
+            return
+        try:
+            time.sleep(10)
+        except KeyboardInterrupt:
+            return
+
+
+def _num(v: Any, fmt: str = "{:.0f}") -> str:
+    return "-" if v is None else fmt.format(v)
+
+
+def _print_health(st: dict, h: dict | None) -> None:
+    """`flock status --watch`: world, generation, alerts; workers by time to memory limit;
+    restores; tool rates; provider queues; world metrics; stuck agents; recent events."""
+    if h is None:
+        _print_status(st)
+        typer.echo("health: no snapshot yet")
+        return
+    b = h["body"]
+    w = b.get("world")
+    world = "no world" if not w else (
+        f"world {'up' if w['up'] else 'DOWN'} {_num(w.get('manifest_ms'))} ms"
+        + (f" slurm {w['slurm_state']}" if w.get("slurm_state") else ""))
+    age = time.time() - h["ts"]
+    typer.echo(f"{st['swarm']}  gen {h.get('generation')}  {world}  agents={st['agents_total']} "
+               f"workers={st['workers_total']} cost=${st['cost_usd']:.2f}  "
+               f"alerts {len(b['alerts'])}  (snapshot {age:.0f} s old)")
+    for a in b["alerts"]:
+        typer.echo(f"  ! {a['msg']}")
+    for name, t in b["types"].items():
+        gens = " ".join(f"{r[:8]}:{n}" for r, n in sorted(t["gens"].items(), key=lambda x: -x[1]))
+        typer.echo(f"type {name}: {_states(t['by_state'])}  revs {gens or '-'}")
+    workers = sorted(b["workers"].items(), key=lambda x: (x[1].get("eta_limit_s") is None,
+                                                          x[1].get("eta_limit_s") or 0))
+    if workers:
+        typer.echo("workers (by time to memory limit):")
+        _table([[wid, f"{_num(wk['mem'].get('current_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
+                 _num(wk.get("slope_mb_h")), _num(wk.get("eta_limit_s"), "{:.0f}s"),
+                 wk.get("relaunches", 0)] for wid, wk in workers[:15]],
+               ["worker", "mem MB", "MB/h", "to limit", "relaunches"])
+    restores = [(wid, wk["restore"]) for wid, wk in workers if wk.get("restore")]
+    if restores:
+        typer.echo("restores:")
+        _table([[wid, r.get("agents"), f"{r.get('files_done')}/{r.get('files_total')}",
+                 _num(r.get("eta_s"), "{:.0f}s")] for wid, r in restores],
+               ["worker", "agents", "files", "eta"])
+    if b["tools"]:
+        typer.echo("world tools:")
+        _table([[n, _num(t["rate_per_min"], "{:.1f}"), _num(t["err_pct"], "{:.1f}"),
+                 _num(t["refused_pct"], "{:.1f}"), _num(t["max_s"], "{:.1f}")]
+                for n, t in sorted(b["tools"].items())],
+               ["tool", "/min", "err %", "refused %", "max s"])
+    m = (w or {}).get("metrics") or {}
+    if m:
+        bits = [f"loop lag {_num(m.get('loop_lag_s'), '{:.3f}')} s",
+                f"429s {_num(m.get('overloaded_429_total'))}"]
+        bits += [f"{p} queue {_num(q.get('queue_wait_oldest_s'), '{:.1f}')} s"
+                 for p, q in (m.get("pools") or {}).items()]
+        wm = {k: v for k, v in (m.get("world") or {}).items() if isinstance(v, (int, float))}
+        if "lane_comment_outbox_depth" in wm:
+            bits.append(f"comment outbox {wm.pop('lane_comment_outbox_depth'):g} (oldest "
+                        f"{_num(wm.pop('lane_comment_outbox_oldest_age_s', None))} s)")
+        lanes: dict[str, dict[str, float]] = {}
+        for k in list(wm):
+            if mt := re.match(r"lane_(.+)_(tripped|paused|effective_slots|in_flight)$", k):
+                lanes.setdefault(mt[1], {})[mt[2]] = wm.pop(k)
+        bits += [f"{k} {v:g}" for k, v in sorted(wm.items())]  # any world's own numbers
+        typer.echo("world metrics: " + ", ".join(bits))
+        for lane, lv in sorted(lanes.items()):
+            st = "TRIPPED" if lv.get("tripped") else "paused" if lv.get("paused") else "ok"
+            typer.echo(f"  lane {lane}: {st} slots {_num(lv.get('effective_slots'))} "
+                       f"in flight {_num(lv.get('in_flight'))}")
+    for p, q in b["providers"].items():
+        typer.echo(f"provider {p}: waiting {_num(q.get('waiting'))} running "
+                   f"{_num(q.get('running'))} kv {_num(q.get('kv'), '{:.0%}')}")
+    stuck = sorted(((s, t) for t, ty in b["types"].items() for s in ty["stuck"]),
+                   key=lambda x: -x[0]["silent_s"])[:10]
+    if stuck:
+        typer.echo("stuck or silent (top 10):")
+        _table([[s["agent"], t, s["state"], f"{s['silent_s'] / 60:.0f} min"] for s, t in stuck],
+               ["agent", "type", "state", "silent"])
+    if h.get("recent_events"):
+        typer.echo("control-plane events (last 10):")
+        _table([[e["ts"][:19].replace("T", " "), e["type"],
+                 e["data"].get("target") or e["data"].get("generation") or "",
+                 str(e["data"].get("detail") or e["data"].get("error") or "")[:80]]
+                for e in h["recent_events"]], ["time (UTC)", "event", "target", "detail"])
+
+
+@app.command()
+def usage(
+    swarm: str,
+    by: Annotated[str, typer.Option("--by", help="type (all hours) or hour (UTC hour x type)")
+                  ] = "type",
+) -> None:
+    """Tokens a swarm used, from turn ends (docs/health.md)."""
+    if by not in ("type", "hour"):
+        raise typer.BadParameter("--by type or --by hour")
+    rows = _call("GET", f"/swarms/{swarm}/usage", params={"by": by})["rows"]
+    keys = ["input", "output", "cache_read", "cache_write", "reasoning"]
+    head = (["hour"] if by == "hour" else []) + ["type", *keys]
+    _table([([r["hour"]] if by == "hour" else []) + [r["type"], *(r.get(k, 0) for k in keys)]
+            for r in rows], head)
 
 
 @app.command()
@@ -1078,12 +1212,13 @@ def workers(swarm: str) -> None:
             w["crashes"],
             w["deadline"],
             w["last_heartbeat"],
+            w.get("knobs_rev") or "",
             w.get("last_error") or "",
         ]
         for w in found
     ]
     _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
-                  "last_error"])
+                  "knobs", "last_error"])
     if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
         typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
     elif any(str(w["job_id"] or "").startswith("external-") for w in found):
