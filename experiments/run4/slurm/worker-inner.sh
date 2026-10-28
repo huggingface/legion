@@ -36,7 +36,8 @@ fi
 # the container root (node disk, deleted with the container; never /tmp or /fsx) and flock-worker
 # deletes it once read (UNLINK=1; a new step runs this script again and writes a new one). Only the
 # names that are set are written: an empty NAME= line would shadow a real value. CHATBOT_WORLD_TOKEN
-# (copied to FLOCK_WORLD_TOKEN by worker.sbatch) is not read by the worker and is only unset.
+# (copied to FLOCK_WORLD_TOKEN by worker.sbatch) and FLOCK_WORLD_ADMIN_TOKEN (the world's /admin
+# secret, never a worker's) are not read by the worker and are only unset.
 umask 077
 SECRET_NAMES=(FLOCK_TOKEN HF_TOKEN OPENAI_API_KEY FLOCK_WORLD_TOKEN CHATBOT_BOARD_INVITE)
 SECRETS_DIR=$(dirname "$WORK_ROOT")
@@ -49,8 +50,8 @@ for v in "${SECRET_NAMES[@]}"; do
   fi
 done
 unset_args=()
-for v in "${SECRET_NAMES[@]}" CHATBOT_WORLD_TOKEN; do unset_args+=(-u "$v"); done
-log "secrets file $SECRETS_FILE: ${written[*]:-<none>} (unset from the exec environment: ${SECRET_NAMES[*]} CHATBOT_WORLD_TOKEN)"
+for v in "${SECRET_NAMES[@]}" CHATBOT_WORLD_TOKEN FLOCK_WORLD_ADMIN_TOKEN; do unset_args+=(-u "$v"); done
+log "secrets file $SECRETS_FILE: ${written[*]:-<none>} (unset from the exec environment: ${SECRET_NAMES[*]} CHATBOT_WORLD_TOKEN FLOCK_WORLD_ADMIN_TOKEN)"
 log "flock-worker in the container: WORK_ROOT=$WORK_ROOT FLOCK_LLM_HOME=$FLOCK_LLM_HOME HOME=$HOME"
 # Isolated Pi never sees this experiment's world/board/repo credentials (pi.isolated_env).
 exec env "${unset_args[@]}" FLOCK_WORKER_SECRETS_FILE="$SECRETS_FILE" FLOCK_WORKER_SECRETS_FILE_UNLINK=1 \

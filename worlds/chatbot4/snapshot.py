@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from flock.worker.sync import HubBucketStore
 
-FILES = ("repo.bundle", "prs.json", "prs.jsonl", "eval-queue.jsonl")
+FILES = ("repo.bundle", "prs.json", "prs.jsonl", "eval-queue.jsonl", "knobs.json")
 
 
 def transfer(mode, workspace, bucket, store=None):
