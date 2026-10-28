@@ -45,6 +45,7 @@ class Store:
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")  # WAL: durable at checkpoints, never corrupt
+        self._db.execute("PRAGMA journal_size_limit=4194304")  # truncate the WAL after big writes
         self._db.executescript(SCHEMA)
 
     def get(self, kind: str, key: str) -> Any:
