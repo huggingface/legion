@@ -29,11 +29,8 @@ are the same agent without the right to spawn, with a different role prompt.
   `spawned_total` never frees a place, so it leaves room for teams to be rebuilt. To grow,
   raise `cap`/`until` in `waves.yaml`, `coordinator.workers.initial` and `limits` together.
 - The shared plan is the team channel's shared document, read with `doc` and rewritten with
-  `edit_doc`. These two board tools come from a separate comms PR (per-channel documents);
-  this setup needs it merged first.
-- `doc` and `edit_doc` are expected to arrive as extended comms tools
-  (`EXTENDED_COMMS_TOOLS` in `src/flock/models.py`, given by `comms: true` with
-  `comms.extended`) once the comms PR merges; re-check the names against it then.
+  `edit_doc`. Both are extended comms tools included in `run5`, enabled by the spec's
+  `comms.extended: true` and each type's `comms: true`.
 
 ## Launch
 
@@ -71,10 +68,31 @@ board is rejected), and put it in `CHATBOT_BOARD_INVITE`.
 
 Board ids as of the run-5 launch; verify with `curl https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/hierarchy-v5/v1/health` before starting.
 
+## Viewer
+
+The incremental viewer implementation is on the `incremental` branch of
+`cmpatino/flock-run-viewer`; deploying it requires merging that branch into the Space's
+`main`. Once it is deployed, add this experiment to the Space's `RUNS` variable before
+launch, keeping the existing entries. Each entry has this form:
+
+```text
+<namespace>/<bucket>/<run>@controller=<namespace>/<bucket>/controller/<run>
+```
+
+Use the actual `RUN3_BUCKET` namespace/bucket and run directory name passed to `sbatch`
+(the same name on both sides). For example, if the bucket is
+`hf://buckets/cmpatino/eliza-swarm` and the run is named `hierarchy`, append
+`cmpatino/eliza-swarm/hierarchy@controller=cmpatino/eliza-swarm/controller/hierarchy`.
+Append a separate entry for voting using its actual run name. `HF_TOKEN` in the viewer
+Space must be able to read the selected bucket.
+
+The Slurm controller publishes state, `run.json` and rollups under
+`<bucket>/controller/<run>`. The viewer's automatic discovery scans `<bucket>/runs/`, so it
+does not discover this layout; the explicit `RUNS` entries select the controller rollups.
+The legacy entries can remain alongside them.
+
 ## Gaps
 
-- **Shared planning document.** Depends on the comms PR that adds `doc`/`edit_doc`
-  (one document per channel). Without it there is no editable shared place on the board.
 - **Finding a similar channel.** `channels` lists every channel with the board's fields
   (name, purpose as given at creation), and `search` reads one channel at a time. Enough for
   60 channels; a cross-channel search (`search` with `channel: "*"`) would scale better.
