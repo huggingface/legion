@@ -51,6 +51,36 @@ Preflight runs only when the update adds a provider-backed model the running spe
 have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
 through `.flock/current`, like the other commands do.
 
+## Env files, overlays and `--ref`
+
+`flock apply`, `flock update` and `flock run` render the spec as they read it, so one folder
+serves several clusters without a generated copy:
+
+```console
+$ flock apply experiments/run4/spec.yaml --env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml
+$ flock update experiments/run4 --env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml --ref origin/run5
+```
+
+- `--overlay FILE` (repeatable, in order) is deep-merged over the spec: mappings merge key by
+  key, lists replace, `null` deletes a key (`world: {dir: null, command: null, url: ...}`
+  turns a local world into a remote one). Relative paths in it (prompts, `world.dir`) stay
+  relative to the spec file.
+- Then every string value, inline prompts and commands included, may use `${VAR}` and
+  `${VAR:-default}` with an UPPERCASE name (as in `sh`, an empty value takes the default);
+  lowercase placeholders such as the loop's `${spend}` are left alone. Sources, later winning: each `--env FILE` in order (`NAME=value` lines,
+  `export ` and `#` comments allowed, no shell expansion), then the process environment. A
+  value that is one placeholder takes its YAML type (`replicas: "${REPLICAS:-20}"` is the
+  integer 20); otherwise it is plain text. Keys and prompt files are not substituted. An unset
+  variable without a default refuses the spec, naming every such variable. `$${` is a literal
+  `${` (any other `$$` stays as written); `${WORLD_HOST}` is always left for the controller
+  (docs/slurm.md), even when the environment sets it. `providers.*.base_urls` also takes a
+  comma-separated string, so `base_urls: ${OPENAI_BASE_URLS:-}` works (empty: none).
+- `--ref GIT_REF[:PATH]` (apply and update) exports the repo holding the given folder at
+  `GIT_REF` (`git archive`) into a temp dir and reads the spec from there: the folder's own
+  path in the repo, or `PATH` (repo-relative, a folder or a spec file). Overlays inside the repo
+  are read at the ref too; `--env` files are read where they are. The source sent is
+  `{git_sha, ref, dirty: false, by}`. `--check` works with it.
+
 ## Generations and `flock history`
 
 Every apply that changes the spec (`flock apply`, `flock update`, `flock scale`, the first

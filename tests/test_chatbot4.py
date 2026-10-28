@@ -1022,6 +1022,7 @@ def test_update_after_request_changes_tells_the_reviewer_and_approval_tells_merg
     assert inbox[1].startswith(f"PR #{rec['pr']} approved by birch; ready to merge_pr")
     world.call("merge_pr", {"pr": rec["pr"]}, Agent("cedar"))  # own merge: no news
     assert "cedar" not in world.state["inbox"]
+    assert world.state["inbox"]["birch"][-1]["text"] == f"PR #{rec['pr']} you approved was merged by cedar"
 
 
 def test_merge_and_close_by_others_are_news_for_the_author(setup):

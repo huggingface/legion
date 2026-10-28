@@ -62,7 +62,7 @@ from flock.models import CommsSpec, comms_name, normalize_board_url
 from flock.secrets_file import secret_env
 from flock.tools.runner import Result, check_args
 from flock.tools.toolset import GATEWAY_LINE_MAX, Toolset
-from flock.worker.comms_extended import ExtendedComms
+from flock.worker.comms_extended import DocConflict, ExtendedComms
 from flock.worker.identity import Identities, MsgboardIdentity
 
 if TYPE_CHECKING:
@@ -163,8 +163,8 @@ def _ok(out: Any, t0: float) -> Result:
     return Result(json.dumps(out, ensure_ascii=False), False, time.monotonic() - t0)
 
 
-def _err(msg: str, t0: float) -> Result:
-    return Result(json.dumps({"error": msg}, ensure_ascii=False), True, time.monotonic() - t0)
+def _err(msg: str, t0: float, **extra: Any) -> Result:
+    return Result(json.dumps({"error": msg, **extra}, ensure_ascii=False), True, time.monotonic() - t0)
 
 
 class CommsHub(ExtendedComms):
@@ -389,12 +389,15 @@ class CommsHub(ExtendedComms):
 
     # ------------------------------------------------------------------ joining
     async def on_prompt(self, agent: str, harness: str = "llm") -> None:
-        """An agent's harness is about to start for a prompt: join the board now (first time on
-        this worker), and open the gateway for a CLI harness. Never raises."""
+        """An agent's harness is about to start for a prompt: open the gateway for a CLI harness
+        and join the board now (first time on this worker). Never raises."""
+        if harness != "llm":  # also without comms: the `flock` CLI's controller calls
+            try:
+                await self.start_gateway()
+            except OSError as e:
+                log.warning("comms: cannot open the gateway: %s", e)
         if not self.active:
             return
-        if harness != "llm":
-            await self.start_gateway()
         self.members.setdefault(agent, Member(agent)).harness = harness
         with contextlib.suppress(BoardError, ValueError):
             await self._member(agent)
@@ -774,6 +777,8 @@ class CommsHub(ExtendedComms):
                 self.stats["refused"] += 1
                 self._emit(agent, "comms_refused", {"rule": e.rule, "error": str(e)})
                 return _err(str(e), t0)
+            except DocConflict as e:
+                return _err(str(e), t0, version=e.version, body=e.body)
             except BoardError as e:
                 if e.status == 401 and attempt == 0 and agent in self.members:
                     self._refused_token(self.members[agent])
@@ -920,7 +925,9 @@ class CommsHub(ExtendedComms):
             else:
                 tool = str(req.get("tool"))
                 handler = self.routes.get(tool.split(":", 1)[0], self.call)
-                r = self.with_news(agent, tool, await handler(agent, tool, req.get("args") or {}))
+                r = await handler(agent, tool, req.get("args") or {})
+                if not tool.startswith("controller:"):  # the `flock` CLI has no use for news
+                    r = self.with_news(agent, tool, r)
             writer.write(json.dumps({"output": r.output, "error": r.error,
                                      "duration_s": r.duration_s}).encode() + b"\n")
             await writer.drain()
