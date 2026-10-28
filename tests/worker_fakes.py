@@ -152,6 +152,11 @@ class MemoryStore:
         prefix = prefix.rstrip("/") + "/"
         self.download([(k, Path(local) / k[len(prefix):]) for k in self.list(prefix)])
 
+    def delete(self, paths):
+        for p in paths:
+            self.files.pop(p, None)
+            self.mtimes.pop(p, None)
+
 
 class RecordingSync(BucketSync):
     def __init__(self, store: MemoryStore, swarm: str = "sw", log: list | None = None) -> None:
@@ -160,10 +165,10 @@ class RecordingSync(BucketSync):
         self.restored: list[str] = []
         self.log = log if log is not None else []
 
-    async def push(self, rt):
+    async def push(self, rt, **kw):
         self.pushed.append(rt.name)
         self.log.append(("push", rt.name))
-        return await super().push(rt)
+        return await super().push(rt, **kw)
 
     async def restore(self, rt):
         self.restored.append(rt.name)

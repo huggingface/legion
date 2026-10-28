@@ -1075,6 +1075,8 @@ class Worker:
         # no early heartbeat: `preempted` tells the controller to relaunch, which must wait
         # until the bucket has this worker's last state
         self.preempted = self._terminating = self.draining = True
+        if self.sync:
+            self.sync.stop_rebase = True  # a workdir base build must not eat the budget
         agents = list(self.agents.values())
         for rt in agents:
             rt.allow_starts = False
@@ -1131,6 +1133,8 @@ class Worker:
             return
         log.info("draining (%s)", reason)
         self.draining = True
+        if self.sync:
+            self.sync.stop_rebase = True
         self._wake_heartbeat.set()
         loop = asyncio.get_running_loop()
         t0, snap = loop.time(), (self.sync.stats.snapshot() if self.sync else {})

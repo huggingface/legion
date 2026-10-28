@@ -184,6 +184,44 @@ A stopped loop stays stopped until `flock loop --start`. `limits.budget_usd` is 
 **Restart.** Loop state is in the controller's SQLite (`loops`, `loop_agents`, `swarm_flags`),
 so a controller restart resumes the loops; only queued wake-ups are lost.
 
+### Pause and resume
+
+A hold stops new work reaching some agents without ending their loop. Unlike `flock loop
+--stop` it resets nothing and runs no final round.
+
+```
+flock pause demo --type ds --reason "provider maintenance"     # one or more --type / --agent
+flock pause demo --agent ds-0003 --interrupt --reason "look"   # also stop the turn in flight
+flock pause demo --reason "..."                                # no --type/--agent: every type
+flock resume demo --type ds                                    # no --type/--agent: every hold
+```
+
+While an agent is held (its type or its name is held):
+
+- the `commands` poll hands it no prompt: loop rounds, notices, hand prompts, spawn kickoffs and
+  a relaunched worker's resume prompt stay queued and go out on the first poll after `resume`;
+- the loop engine skips it: no round is sent or counted, `idle_rounds` and loop errors ignore
+  turns that end during the hold, and queued wakes stay queued (delivered after `resume`).
+  Type-wide conditions keep running: `while.until` is wall-clock time and can end the loop
+  during a hold (its final prompts then wait for `resume`);
+- a worker-side loop gets `loop_stop {reason: held}` once; after `resume` it gets a
+  `loop_start` of the same run, so its round count goes on;
+- `--interrupt` sends `stop` (the hard budget stop's command) to its turns in flight, after a
+  `loop_stop` to an active worker-side loop (else the worker would re-prompt the cut turn). A
+  hand prompt whose turn `--interrupt` cuts is lost, as with `stop`.
+
+Holds are stored in `swarm_flags` (a controller restart keeps them). Events on the swarm stream:
+`paused {types, agents, reason, by, auto, interrupt}` and `resumed {types, agents, by, auto}`
+(only the names a call actually changed). `GET /swarms/{s}` has
+`status.held: {types: {T: {since, reason, by, auto}}, agents: {...}}` (null when nothing is
+held) and `flock status` prints a `HELD` line per held type or agent. An agent held through its
+type is resumed with its type, not with `--agent`.
+
+API: `POST /swarms/{s}/pause {types?, agents?, interrupt?, reason?, by?}` and
+`POST /swarms/{s}/resume {types?, agents?, by?}`; both answer `{swarm, held}` and 404 for an
+unknown type or agent. The controller makes holds of its own when the world is down
+(`auto: true`, docs/health.md); an operator hold is never replaced or lifted by those.
+
 ### Wake queue (`on:`)
 
 `LoopEngine.wake(agent, reason)` is fed by the board (docs/comms.md): every `comms_mention` and

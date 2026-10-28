@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from pydantic import TypeAdapter
 
 from flock.cli import load_spec
@@ -65,14 +66,14 @@ def test_rendered_slurm_spec_has_both_types_without_aliases(monkeypatch):
     mod_spec = importlib.util.spec_from_file_location("run4_render_spawner", EXP / "render.py")
     render = importlib.util.module_from_spec(mod_spec)
     mod_spec.loader.exec_module(render)
-    data = render.render(placeholders=True)
+    data = render.render()
     assert {"agent", "agent-spawner", "agent-child"} <= set(data["types"])
     assert data["types"]["agent-child"]["loop"] is not data["types"]["agent"]["loop"]
-    smoke = render.render("smoke", placeholders=True)
+    assert data["types"]["agent-child"]["system_prompt_append_file"] == "prompts/group-child.md"
+    smoke = render.render("smoke")
     assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
-    committed = (EXP / "spec.slurm.yaml").read_text()
-    assert "&id" not in committed and "agent-spawner:" in committed
-    assert "group-child.md" in committed
+    assert data["types"]["agent"]["loop"]["while"]["until"] == "48h"
+    assert "&id" not in yaml.safe_dump(data)
 
 
 async def test_spawner_spawns_four_children_and_the_fifth_is_refused(client, app, store, tick):

@@ -36,7 +36,7 @@ from pathlib import Path
 
 import yaml
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).absolute().parent  # not resolve(): a symlinked copy (experiments/hierarchy) reads its own folder
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 

@@ -76,7 +76,7 @@ trap on_term TERM INT
 # ---------------------------------------------------------------- inputs
 require_var HF_TOKEN FLOCK_TOKEN CHATBOT_WORLD_TOKEN CHATBOT_BOARD_INVITE OPENAI_API_KEY
 require_var RUN3_BUCKET RUN3_NAMESPACE CHATBOT_BOARD_URL CHATBOT_CHANNEL MODEL_WORKER
-[ -n "${OPENAI_BASE_URL:-}${OPENAI_BASE_URLS:-}" ] || die "OPENAI_BASE_URL (or OPENAI_BASE_URLS) is unset in $RUN_ENV"
+[ -n "${OPENAI_BASE_URLS:-}" ] || die "OPENAI_BASE_URLS (comma-separated, one URL is fine) is unset in $RUN_ENV"
 command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct >/dev/null \
   || die "sbatch/squeue/sacct are not on PATH on $(hostname): the Slurm jobs client cannot launch workers"
 # FLOCK_COMPUTE=slurm needs the backend in the venv: controller/main.py only special-cases `local`,
@@ -89,7 +89,8 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
 RUN3_BUCKET=${RUN3_BUCKET%/}
 CTL_PORT=7860
 CTL_HOST=$(hostname)
-EXP=$RUN_DIR/experiment                         # a writable copy of experiments/run4 (waves.py writes next to the spec)
+EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy or voting
+EXP=$RUN_DIR/experiment                         # a writable copy of experiments/$EXPERIMENT (waves.py writes next to the spec)
 SPEC=$EXP/spec.slurm.local.yaml
 WAVES_FILE=$EXP/${RUN3_WAVES:-waves.yaml}
 HEALTH_WAIT_S=${HEALTH_WAIT_S:-300}
@@ -179,12 +180,14 @@ waves_step() {  # runs in a background subshell (below) and exec's into waves.py
   # The experiment folder, copied once per run (the spec's prompts/, tools/, protocols/ are read
   # relative to the spec file; waves.py writes <spec>.waves.json and the jsonl next to it).
   if [ ! -d "$EXP" ]; then
-    mkdir -p "$EXP" && cp -a "$REPO/experiments/run4/." "$EXP/" || { log "copy of experiments/run4 failed"; return 1; }
-    log "experiment folder: $EXP (from $REPO/experiments/run4)"
+    # -L: hierarchy/voting link run4's scripts and prompts; the copy holds real files.
+    mkdir -p "$EXP" && cp -aL "$REPO/experiments/$EXPERIMENT/." "$EXP/" || { log "copy of experiments/$EXPERIMENT failed"; return 1; }
+    log "experiment folder: $EXP (from $REPO/experiments/$EXPERIMENT)"
   fi
-  # Render for Slurm: RUN3_VARIANT (jobs, or smoke for the 30-min smoke) with `--compute slurm`
-  # (compute.kind slurm, bucket, worker slots, world.url http://${WORLD_HOST}:7860 followed by the
-  # controller through FLOCK_WORLD_HOST_FILE; RUN3_WORLD_URL must stay unset for that).
+  # Render for Slurm: RUN3_VARIANT (jobs, or smoke for the 30-min smoke) with `--compute slurm`:
+  # spec.yaml with the spec.slurm.yaml overlay and ${VAR} from this environment (run.env), as
+  # `flock apply --env --overlay` does (compute.kind slurm, bucket, world.url
+  # http://${WORLD_HOST}:7860 followed by the controller through FLOCK_WORLD_HOST_FILE).
   "$VENV/bin/python" "$EXP/render.py" --variant "${RUN3_VARIANT:-jobs}" --compute slurm --out "$SPEC" >/dev/null \
     || { log "render.py failed"; return 1; }
   # compute: {kind: slurm, types: {interviewer: {cpus: 2, mem: 3800M}}}. Per-type sizes exist only
@@ -210,9 +213,7 @@ PY
   code=$(http_status "http://127.0.0.1:$CTL_PORT/swarms/$swarm" X-Flock-Token FLOCK_TOKEN)
   if [ "$code" = 404 ]; then  # first start: runbook B step 5 (replicas 0: swarm, kickoff, world check)
     # First launch only: apply checks the world, so wait for it (a requeue restores its state and
-    # follows the world's host by itself; it never waits). The URL stays local: an exported
-    # RUN3_WORLD_URL would make render.py write a literal world.url and the ${WORLD_HOST} follow
-    # (FLOCK_WORLD_HOST_FILE) would never trigger.
+    # follows the world's host by itself; it never waits).
     local t0 world_host
     t0=$(date +%s)
     until world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null) && [ -n "$world_host" ] &&
