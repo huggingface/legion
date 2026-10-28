@@ -122,7 +122,7 @@ async def test_busy_board_polling_rotates_once_per_cycle_on_a_busy_feed(monkeypa
     hub = CommsHub(swarm="run4")
     spec = CommsSpec(url="http://board", invite_env="INVITE", channel="general",
                      channel_id=12, extended=True, **({"poll_cycle_s": cycle} if cycle else {}))
-    assert spec.poll_cycle_s == (cycle or 300.0)  # default: each identity every 5 minutes
+    assert spec.poll_cycle_s == cycle  # unset: each identity every 5 minutes (300 s)
     hub.configure(spec, ["comms:read"])
     for i in range(12):
         name = f"agent-{i:04d}"

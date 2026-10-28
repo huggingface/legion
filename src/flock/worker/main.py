@@ -514,10 +514,8 @@ class Worker:
         self.comms.set_rate(cfg.comms_rate, cfg.comms_burst, cfg.comms_agent_rate,
                             cfg.comms_agent_burst)
         self.comms.poll_cycle_s = k.comms_poll_cycle_s  # env stays below comms.poll_cycle_s
-        sync_mod.SPEC_KNOBS.clear()
-        sync_mod.SPEC_KNOBS.update({n: v for n in ("sync_exclude", "restore_batch",
-                                                   "restore_threads")
-                                    if (v := getattr(k, n)) is not None})
+        sync_mod.SPEC_KNOBS = {n: v for n in ("sync_exclude", "restore_batch", "restore_threads")
+                               if (v := getattr(k, n)) is not None}  # one rebind: no empty window
         self.mem_knobs = {MEM_KNOB_ENV[n]: v for n, v in
                           (k.memory.model_dump() if k.memory else {}).items() if v is not None}
         rev = knobs_rev(cfg, self.mem_knobs)
