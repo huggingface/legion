@@ -634,6 +634,82 @@ async def test_hub_retries_only_read_only_tools_and_once(read_only, attempts):
     await hub.aclose()
 
 
+def _holdoff_hub(handler, tools, clock, **kw):
+    hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"}, clock=clock,
+                   transport=httpx.MockTransport(handler), **kw)
+    m = WorldManifest(world_api="v1", name="w", version="1", capabilities=["workspace-upload-v1"],
+                      tools=tools)
+    hub.configure(world_block("http://w", m, "t"), [t["name"] for t in tools])
+    return hub
+
+
+async def test_hub_holds_off_locally_after_a_429_then_tries_again(monkeypatch, tmp_path):
+    now, seen, captured = [100.0], [], []
+    overloaded = [True]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if overloaded[0]:
+            return httpx.Response(429, headers={"Retry-After": "30"}, json={"ok": False})
+        return httpx.Response(200, json={"ok": True, "text": "fine"})
+
+    monkeypatch.setattr("flock.world.hub.capture", lambda workdir, path: captured.append(path) or {})
+    ws = {"arg": "ref", "default": "main"}
+    hub = _holdoff_hub(handler, [
+        {"name": "up", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}}},
+         "x-flock-workspace": ws},
+        {"name": "peek", "annotations": {"readOnlyHint": True}}], lambda: now[0],
+        runtime=lambda name: type("Rt", (), {"workdir": tmp_path})())
+    r = await hub.call("x", "world:up", {"ref": "b"})  # the 429 itself
+    assert r.error and len(seen) == 1 and captured == ["b"]
+    now[0] += 10
+    r = await hub.call("x", "world:up", {"ref": "b"})
+    body = json.loads(r.output)
+    assert body["local"] and body["code"] == "overloaded" and body["retry_after_s"] == 20
+    assert "next slot in 1 min; do other work or end your turn" in body["error"]
+    assert len(seen) == 1 and captured == ["b"]  # no request, no capture
+    assert hub.counters["up"].refused == 2 and hub.counters["up"].n == 1  # local: not in n
+    await hub.call("x", "world:peek", {})  # read-only tools still try, once
+    assert len(seen) == 2
+    now[0] = 141.0  # the read-only try at 110 got its own 429: hold until 140
+    overloaded[0] = False
+    assert not (await hub.call("x", "world:up", {"ref": "b"})).error and len(seen) == 3
+    await hub.aclose()
+
+
+async def test_hub_holds_off_one_agent_and_tool_after_a_retry_hint():
+    now, seen = [0.0], []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["x-flock-agent"] + request.url.path)
+        return httpx.Response(200, json={"ok": False, "error": {
+            "code": "open_budget", "message": "too many open", "retry_after_s": 90}})
+
+    hub = _holdoff_hub(handler, [{"name": "open"}, {"name": "other"}], lambda: now[0])
+    await hub.call("a", "world:open", {})
+    r = await hub.call("a", "world:open", {})
+    body = json.loads(r.output)
+    assert body["local"] and body["code"] == "open_budget" and body["retry_after_s"] == 90
+    assert "too many open (next slot in 2 min" in body["error"] and len(seen) == 1
+    await hub.call("b", "world:open", {})  # another agent
+    await hub.call("a", "world:other", {})  # another tool
+    assert len(seen) == 3
+    now[0] = 91.0
+    await hub.call("a", "world:open", {})
+    assert len(seen) == 4
+    await hub.aclose()
+
+
+async def test_hub_tool_hint_of_nan_does_not_hold_off_forever():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"ok": false, "error": {"message": "m", "retry_after_s": NaN}}')
+
+    hub = _holdoff_hub(handler, [{"name": "t"}], lambda: 0.0)
+    await hub.call("a", "world:t", {})
+    assert "local" not in (await hub.call("a", "world:t", {})).output
+    await hub.aclose()
+
+
 async def test_hub_counts_calls_errors_refusals_and_timeouts_per_tool():
     def handler(request: httpx.Request) -> httpx.Response:
         name = request.url.path.rsplit("/", 1)[-1]
@@ -649,12 +725,12 @@ async def test_hub_counts_calls_errors_refusals_and_timeouts_per_tool():
                                                                      "message": "no"}})
         return httpx.Response(200, json={"ok": True, "text": "fine"})
 
-    names = ["ok", "slow", "full", "budget", "bad"]
+    names = ["ok", "slow", "budget", "bad", "full"]  # "full" last: its 429 holds the world off
     hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
                    transport=httpx.MockTransport(handler))
     m = WorldManifest(world_api="v1", name="w", version="1", tools=[{"name": n} for n in names])
     hub.configure(world_block("http://w", m, "t"), names)
-    for n in names + ["ok", "missing"]:
+    for n in ["ok", *names, "missing"]:
         await hub.call("x", f"world:{n}", {})
     got = {n: c.model_dump(include={"n", "err", "refused", "timeouts"}) for n, c in
            hub.counters.items()}
