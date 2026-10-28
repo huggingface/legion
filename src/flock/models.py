@@ -6,6 +6,7 @@ is expressed here. Change it deliberately and update the design doc.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -13,6 +14,9 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+
+from flock.world.protocol import TOOL_NAME_RE as WORLD_TOOL_RE
+from flock.world.protocol import WorldManifest
 
 # --------------------------------------------------------------------------- spec YAML
 
@@ -119,6 +123,11 @@ class ProviderSpec(BaseModel):
 
     type: Literal["openai_compat", "anthropic"]
     base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
+    # Several servers of one model (openai_compat, the `llm` harness): each agent is pinned to one
+    # by a stable hash of its name (rendezvous hashing) and keeps it while it stays listed, so
+    # its prefix cache stays warm. `base_url` is the one-element form; with `base_urls` it
+    # defaults to the first. Pi also hashes by agent; other harnesses use `base_url`.
+    base_urls: list[str] | None = None
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
     # Max agents of this swarm on this provider that may be in a turn at once. Enforced at
@@ -153,6 +162,17 @@ class ProviderSpec(BaseModel):
 
     @model_validator(mode="after")
     def _url(self) -> ProviderSpec:
+        if self.base_urls is not None:
+            urls = [u.strip().rstrip("/") for u in self.base_urls if u and u.strip()]
+            if not urls:
+                raise ValueError("base_urls must list at least one URL")
+            if len(set(urls)) != len(urls):
+                raise ValueError("base_urls must not repeat a URL")
+            if self.type != "openai_compat":
+                raise ValueError("base_urls is for openai_compat providers (the llm harness)")
+            self.base_urls = urls
+            if self.base_url is None:
+                self.base_url = urls[0]
         if self.type == "openai_compat" and not self.base_url:
             raise ValueError("base_url is required for type openai_compat (e.g. https://router.huggingface.co/v1)")
         if self.type == "openai_compat" and self.auth == "x-api-key":
@@ -160,6 +180,11 @@ class ProviderSpec(BaseModel):
         if self.base_url is not None:
             self.base_url = self.base_url.rstrip("/")
         return self
+
+    @property
+    def endpoints(self) -> list[str]:
+        """The servers to spread agents over: `base_urls`, else `[base_url]`."""
+        return list(self.base_urls) if self.base_urls else ([self.base_url] if self.base_url else [])
 
 
 class ModelSpec(BaseModel):
@@ -197,6 +222,9 @@ class ResolvedModel(BaseModel):
 
 # Built-in comms tools a type may list in `tools:`; the model sees the bare name (`post`).
 COMMS_TOOLS = ("comms:post", "comms:read", "comms:search")
+EXTENDED_COMMS_TOOLS = ("comms:channels", "comms:create_channel", "comms:join_channel",
+                        "comms:dm", "comms:read_dms", "comms:react")
+ALL_COMMS_TOOLS = COMMS_TOOLS + EXTENDED_COMMS_TOOLS
 COMMS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
@@ -233,6 +261,8 @@ class CommsRules(BaseModel):
     max_posts: int | None = None  # per agent, for the run (kept in the agent's synced state)
     max_len: int | None = None  # characters per post
     threads: Literal["per_topic"] | None = None  # posts must say thread: new or a root id
+    max_channels_per_agent: int = Field(default=3, ge=1, le=100)
+    max_channels: int = Field(default=60, ge=1, le=100)
     no_group_mentions: bool = False  # refuse @all / @agents / @humans (and @everyone, @people)
 
     @field_validator("min_post_gap")
@@ -263,6 +293,10 @@ class CommsSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     kind: Literal["msgboard"] = "msgboard"
+    extended: bool = False  # multi-channel tools and serialized per-identity activity polling
+    # extended: each agent identity's feed is polled about once per this many seconds; the
+    # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
+    poll_cycle_s: float = Field(default=300.0, ge=10.0, le=3600.0)
     url: str
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
     channel: str  # name, with or without `#`
@@ -271,7 +305,7 @@ class CommsSpec(BaseModel):
     rules: CommsRules = Field(default_factory=CommsRules)
     protocols: list[str] = Field(default_factory=list)  # files appended to the instructions
     protocols_text: list[str] = Field(default_factory=list)  # inlined by `flock apply`
-    wake: list[Literal["mention", "thread"]] = Field(default_factory=lambda: ["mention", "thread"])
+    wake: list[Literal["mention", "thread", "dm", "channel"]] = Field(default_factory=lambda: ["mention", "thread"])
     search: Literal["board", "index"] | None = "board"
     # Written by the controller at apply; anything given by hand is replaced.
     channel_id: int | None = None
@@ -318,12 +352,88 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
     them with `comms: true` (search only when the swarm's `comms.search` is set)."""
     if comms is None or ts.comms is False:
         return []
-    listed = [t for t in ts.tools if t in COMMS_TOOLS] if isinstance(ts.tools, list) else []
+    listed = [t for t in ts.tools if t in ALL_COMMS_TOOLS] if isinstance(ts.tools, list) else []
     if listed:
         return list(dict.fromkeys(listed))
     if not ts.comms:
         return []
-    return [t for t in COMMS_TOOLS if t != "comms:search" or comms.search]
+    return [t for t in (ALL_COMMS_TOOLS if comms.extended else COMMS_TOOLS)
+            if t != "comms:search" or comms.search]
+
+
+# --------------------------------------------------------------------------- world (docs/world.md)
+
+
+class WorldSpec(BaseModel):
+    """Swarm-level `world:` (docs/world.md): an HTTP service speaking World API v1 whose tools
+    the agents get. `command` (run in `dir`) is started by the controller as a child process
+    with `compute: local`; `url` names a world already running (required with `compute:
+    hf-jobs`, where starting one is not in this version). `token_env` names the secret sent as
+    `X-World-Token`; a started world without it gets a generated one. `endpoint` and `manifest`
+    are written by the controller at apply."""
+
+    model_config = {"extra": "forbid"}
+
+    dir: str | None = None  # relative to the spec file; `flock apply` / `flock run` resolve it
+    command: list[str] | None = None  # `{port}` and `{python}` are filled in by flock
+    url: str | None = None
+    token_env: str | None = None
+    # Written by the controller at apply; anything given by hand is replaced.
+    endpoint: str | None = None
+    manifest: WorldManifest | None = None
+    # Which credential this configuration belongs to, without the credential: the origin it is
+    # bound to (`endpoint`, or `local:<swarm>` for a world flock started) and
+    # HMAC(secret, origin). A worker sends its secret only when its own HMAC matches.
+    credential_origin: str | None = None
+    credential_id: str | None = None
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _command(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            import shlex
+
+            v = shlex.split(v)
+        if v is not None and (not isinstance(v, list) or not v):
+            raise ValueError("command must be a non-empty list (or a string), e.g. "
+                             "[flock, world, serve, \"taskboard:TaskBoard\"]")
+        return [str(x) for x in v] if v is not None else None
+
+    @field_validator("url", "endpoint")
+    @classmethod
+    def _url(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError(f"url {v!r} must start with http:// or https://")
+        return v.rstrip("/") if v else v
+
+    @field_validator("token_env")
+    @classmethod
+    def _env(cls, v: str | None) -> str | None:
+        if v is not None and not ENV_NAME_RE.match(v):
+            raise ValueError(f"token_env {v!r} must be an env var name (the token never goes in "
+                             "the spec)")
+        return v
+
+    @model_validator(mode="after")
+    def _how(self) -> WorldSpec:
+        if self.command is None and self.url is None:
+            raise ValueError("world needs `command` (started by flock, compute: local) or `url` "
+                             "(a world already running)")
+        if self.dir is not None and self.command is None:
+            raise ValueError("world.dir is where `command` runs; give the command too")
+        return self
+
+
+def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
+    """The world tools a type gets (model-visible names): the `world:*` entries of its `tools`,
+    else every tool of the world's manifest; none with `world: false`."""
+    if world is None or ts.world is False:
+        return []
+    listed = ([t.split(":", 1)[1] for t in ts.tools if t.startswith("world:")]
+              if isinstance(ts.tools, list) else [])
+    if listed:
+        return list(dict.fromkeys(listed))
+    return world.manifest.names() if world.manifest is not None else []
 
 
 class TypeSpec(BaseModel):
@@ -339,6 +449,10 @@ class TypeSpec(BaseModel):
     # The file's contents, inlined by `flock apply` (the controller and workers cannot
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None
+    # A second file appended to the system prompt by `flock apply` (after a blank line): a
+    # per-type section on top of a prompt several types share (experiments/run4's spawner and
+    # child types). The worker only sees the combined `system_prompt`.
+    system_prompt_append_file: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)
@@ -348,6 +462,13 @@ class TypeSpec(BaseModel):
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
     # `spawn:` lets others create; None keeps v1's placement.
     workers: WorkersSpec | None = None
+    # Spawned agents of this type live for one session (docs/spawn.md "Ephemeral types"): the
+    # controller removes one once a heartbeat reports it idle after a turn with nothing pending
+    # (done, max_turns, budget or an error alike), and its worker deletes its files. Spawn-only.
+    ephemeral: bool = False
+    # With the swarm's `naming: words`: put before every name of this type (e.g. "iv-" for
+    # interviewers), so roles stay recognizable. Lowercase letters and hyphens, ending in "-".
+    name_prefix: str | None = None
     flavor: str = "cpu-basic"
     worker_lifetime: str = "24h"
     lifetime_jitter: str = "4h"
@@ -364,6 +485,9 @@ class TypeSpec(BaseModel):
     # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
     # required. With it a forced turn runs several steps; without it, one action per prompt.
     done_tool: bool | None = None
+    # harness llm only: false takes the `bash` tool away (the agent keeps its folder and comms
+    # tools); None: on. Usually set live with `flock grant <target> bash=off` (docs/live.md).
+    bash: bool | None = None
     # harness llm only: starting chars/token for the size estimate (calibrated online from the
     # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
     chars_per_token: float | None = None
@@ -379,27 +503,33 @@ class TypeSpec(BaseModel):
     # Built-in comms tools (docs/comms.md): true gives all of them (`comms:post`, `comms:read`,
     # `comms:search`), or list the ones wanted in `tools`. Needs the swarm-level `comms:`.
     comms: bool | None = None
+    # World tools (docs/world.md): every tool of the swarm's `world:` unless `tools` lists
+    # `world:<name>` entries (then only those); false: none.
+    world: bool | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
     # replaced. None means a harness-native model.
     resolved_model: ResolvedModel | None = None
 
     @property
     def folder_tools(self) -> list[str] | Literal["all"] | None:
-        """`tools` without the built-in `comms:*` entries: what the tools folder must define
-        (None when nothing is left)."""
+        """`tools` without the built-in `comms:*` and the `world:*` entries: what the tools
+        folder must define (None when nothing is left)."""
         if not isinstance(self.tools, list):
             return self.tools
-        names = [t for t in self.tools if not t.startswith("comms:")]
+        names = [t for t in self.tools if not t.startswith(("comms:", "world:"))]
         return names or None
 
     @field_validator("tools")
     @classmethod
     def _known_comms(cls, v: list[str] | str | None) -> list[str] | str | None:
         if isinstance(v, list):
-            bad = [t for t in v if t.startswith("comms:") and t not in COMMS_TOOLS]
+            bad = [t for t in v if t.startswith("comms:") and t not in ALL_COMMS_TOOLS]
             if bad:
                 raise ValueError(f"unknown comms tool(s) {', '.join(bad)}; comms tools: "
                                  f"{', '.join(COMMS_TOOLS)}")
+            bad = [t for t in v if t.startswith("world:") and not WORLD_TOOL_RE.match(t[6:])]
+            if bad:
+                raise ValueError(f"bad world tool name(s) {', '.join(bad)}: world:<tool name>")
         return v
 
     @property
@@ -423,6 +553,14 @@ class TypeSpec(BaseModel):
     @classmethod
     def _valid_duration(cls, v: str) -> str:
         parse_duration(v)
+        return v
+
+    @field_validator("name_prefix")
+    @classmethod
+    def _name_prefix(cls, v: str | None) -> str | None:
+        if v is not None and not re.fullmatch(r"[a-z]+(-[a-z]+)*-", v):
+            raise ValueError(f"name_prefix {v!r}: lowercase letters and hyphens, ending in '-' "
+                             "(e.g. 'iv-')")
         return v
 
     @field_validator("replicas", "agents_per_worker", "max_working_per_worker")
@@ -453,6 +591,17 @@ class TypeSpec(BaseModel):
             raise ValueError("context_tokens must be >= 256")
         return v
 
+    @model_validator(mode="after")
+    def _bash_llm_only(self) -> TypeSpec:
+        if self.bash is False and self.harness != Harness.llm:
+            raise ValueError(f"bash: false: only the llm harness has a bash tool to take away "
+                             f"(this type's harness is {self.harness.value})")
+        if self.bash is False and self.tool_choice == "bash":
+            raise ValueError("bash: false contradicts tool_choice: bash (it forces the bash tool)")
+        if self.ephemeral and self.replicas:
+            raise ValueError("ephemeral: true is for spawned agents only; set replicas: 0")
+        return self
+
     @field_validator("workers")
     @classmethod
     def _replicas_fit(cls, v: WorkersSpec | None, info) -> WorkersSpec | None:
@@ -469,14 +618,88 @@ class TypeSpec(BaseModel):
         return v
 
 
-class ComputeSpec(BaseModel):
-    """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
-    `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
-    (`flock run`). The spec also accepts the short form `compute: local`."""
+_MEM = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)B?\s*$", re.IGNORECASE)
+
+
+def mem_mb(value: str) -> float:
+    """sbatch --mem as MB: a bare number is MB; K/M/G/T suffixes (1024-based)."""
+    m = _MEM.match(str(value))
+    if not m:
+        raise ValueError(f"memory {value!r}: expected a number with K, M, G or T")
+    scale = {"": 1, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}[m.group(2).upper()]
+    return float(m.group(1)) * scale
+
+
+def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str,
+                 max_mem: str) -> str | None:
+    """Why a job of this size can never start on the partition (None: it fits)."""
+    try:
+        if cpus is not None and int(cpus) > int(max_cpus):
+            return f"cpus {cpus} is over max_cpus {max_cpus}: the job would pend forever"
+        if mem is not None and mem_mb(mem) > mem_mb(max_mem):
+            return f"mem {mem} is over max_mem {max_mem}: the job would pend forever"
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+class SlurmResources(BaseModel):
+    """Per-type overrides of a `compute: slurm` spec."""
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["hf-jobs", "local"] = "hf-jobs"
+    partition: str | None = None
+    cpus: int | None = Field(default=None, ge=1)
+    mem: str | None = None
+    time: str | None = None
+    container_root: str | None = None
+
+
+class ComputeSpec(BaseModel):
+    """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
+    `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
+    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md). `external`: flock
+    launches nothing; workers started by someone else register with FLOCK_URL/FLOCK_TOKEN.
+    The spec also accepts the short form `compute: local`.
+
+    The other keys are for `slurm` (and `launch_dir`/`host_file` for `external`); unset keys
+    fall back to the controller's FLOCK_SLURM_* env, then to built-in defaults. `types` sets
+    per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["hf-jobs", "local", "slurm", "external"] = "hf-jobs"
+    partition: str | None = None
+    account: str | None = None
+    cpus: int | None = Field(default=None, ge=1)
+    mem: str | None = None  # sbatch --mem, e.g. 7G
+    time: str | None = None  # sbatch --time, e.g. 29:00:00
+    worker_script: str | None = None  # the cluster's worker sbatch script; $1 = the env file
+    log_dir: str | None = None  # shared dir: <log_dir>/<worker id>-<job id>.out
+    launch_dir: str | None = None  # shared dir: <worker id>-<incarnation>.env, no secrets
+    host_file: str | None = None  # shared file holding the controller's hostname
+    run: str | None = None  # RUN= in the env file; default: the launch_dir's parent dir name
+    venv: str | None = None  # written to the env file as FLOCK_VENV for the script
+    secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
+    # workers run in a container whose /tmp is RAM: every agent/harness path goes under this
+    # root instead: <root>/flock/<worker id>/{work,llm,home,hf,tmp}
+    container_root: str | None = None
+    container_image: str | None = None  # an Enroot image (.sqsh): FLOCK_CONTAINER_IMAGE
+
+    @model_serializer(mode="wrap")
+    def _compact(self, handler: Any) -> Any:
+        """Only the keys that are set: `{kind: local}` stays `{kind: local}` in dumps."""
+        out = handler(self)
+        if not isinstance(out, dict):
+            return out
+        defaults = {"types": {}, "max_cpus": 28, "max_mem": "54G"}
+        return {k: v for k, v in out.items()
+                if k == "kind" or (v is not None and defaults.get(k, object()) != v)}
+    types: dict[str, SlurmResources] = Field(default_factory=dict)
+    # the largest job the partition can ever run: sbatch accepts bigger ones, which then pend
+    # forever; a launch over these is refused (also checked at apply)
+    max_cpus: int = Field(default=28, ge=1)
+    max_mem: str = "54G"
 
 
 class SwarmSpec(BaseModel):
@@ -496,6 +719,14 @@ class SwarmSpec(BaseModel):
     tools_version: str | None = None
     # The team's message board (docs/comms.md); None: no comms.
     comms: CommsSpec | None = None
+    # The swarm's world (docs/world.md); None: no world.
+    world: WorldSpec | None = None
+    # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
+    # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
+    # reserved and never reused while the swarm exists). `naming_seed` makes the words
+    # deterministic for the swarm; unset, they are random.
+    naming: Literal["numeric", "words"] = "numeric"
+    naming_seed: int | None = None
 
     @field_validator("tools_version")
     @classmethod
@@ -564,7 +795,7 @@ class SwarmSpec(BaseModel):
         `comms:search` needs `comms.search`; `comms: false` with listed comms tools is a
         contradiction."""
         for name, ts in self.types.items():
-            listed = [t for t in ts.tools if t in COMMS_TOOLS] if isinstance(ts.tools, list) else []
+            listed = [t for t in ts.tools if t in ALL_COMMS_TOOLS] if isinstance(ts.tools, list) else []
             if (ts.comms or listed) and self.comms is None:
                 raise ValueError(f"types.{name}: comms tools need the swarm-level `comms:` block "
                                  "(kind, url, invite_env, channel)")
@@ -572,6 +803,14 @@ class SwarmSpec(BaseModel):
                 raise ValueError(f"types.{name}: comms: false but tools lists {', '.join(listed)}")
             if "comms:search" in listed and self.comms is not None and not self.comms.search:
                 raise ValueError(f"types.{name}.tools: comms:search needs comms.search (board)")
+        for name, ts in self.types.items():  # world tools (docs/world.md)
+            listed = ([t for t in ts.tools if t.startswith("world:")]
+                      if isinstance(ts.tools, list) else [])
+            if (ts.world or listed) and self.world is None:
+                raise ValueError(f"types.{name}: world tools need the swarm-level `world:` block "
+                                 "(command or url)")
+            if ts.world is False and listed:
+                raise ValueError(f"types.{name}: world: false but tools lists {', '.join(listed)}")
         c = self.comms
         if c is not None and c.protocols_text and len(c.protocols_text) != len(c.protocols):
             raise ValueError("comms.protocols_text is written by `flock apply` (one per protocols file)")
@@ -597,11 +836,29 @@ class SwarmSpec(BaseModel):
 
     @model_validator(mode="after")
     def _job_fields(self) -> SwarmSpec:
-        if self.compute.kind == "hf-jobs":
+        kind = self.compute.kind
+        if kind == "hf-jobs":
             missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
             if missing:
                 raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
                                  "(or set `compute: local`, docs/local.md)")
+        elif kind in ("slurm", "external") and not self.bucket:
+            # agent state goes to an HF bucket on every remote backend, never to a shared disk
+            raise ValueError(f"bucket is required for compute {kind}")
+        if kind != "local" and self.world is not None and self.world.url is None:
+            raise ValueError(f"world.url is required for compute {kind}: run the world as a "
+                             "Job, Space or cluster job and give its url (starting it from "
+                             "`command` is compute: local only, docs/world.md)")
+        if kind == "slurm":
+            sizes = [("compute", self.compute.cpus, self.compute.mem)] + [
+                (f"compute.types.{n}", r.cpus, r.mem) for n, r in self.compute.types.items()]
+            for where, cpus, mem in sizes:
+                if problem := size_problem(cpus, mem, self.compute.max_cpus,
+                                           self.compute.max_mem):
+                    raise ValueError(f"{where}: {problem}")
+        unknown = set(self.compute.types) - set(self.types)
+        if unknown:
+            raise ValueError(f"compute.types names unknown types: {sorted(unknown)}")
         return self
 
     @field_validator("spawn")
@@ -878,6 +1135,45 @@ class LoopFinal(BaseModel):
         return self
 
 
+class LoopWake(BaseModel):
+    """How `on:` wake-ups spend rounds (docs/loop.md, "Wake queue"). Per agent: at least
+    `min_gap` between two wake prompts (wakes in between are coalesced into the next one), at
+    most `max` wake prompts per run of the loop, or per `window` when set (None: no cap).
+    `counts_as_round: false` keeps wake prompts out of `max_rounds` (they carry the current
+    round number and do not advance it); `true` is the behaviour before this setting."""
+
+    model_config = {"extra": "forbid"}
+
+    min_gap: str = "30s"
+    max: int | None = 10
+    window: str | None = None
+    counts_as_round: bool = False
+
+    @field_validator("min_gap", "window")
+    @classmethod
+    def _duration(cls, v: str | None, info) -> str | None:
+        if v is not None and parse_duration(v).total_seconds() <= 0 and info.field_name == "window":
+            raise ValueError("window must be a duration > 0")
+        return v
+
+    @field_validator("max")
+    @classmethod
+    def _max(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+
+class LoopStopWhen(BaseModel):
+    """Extra ways for a loop to end. `all_agents_done`: an agent that calls `done` with
+    `finished: true` (the `llm` harness offers that argument then) leaves the loop, and the
+    loop stops once every live agent has left it."""
+
+    model_config = {"extra": "forbid"}
+
+    all_agents_done: bool = False
+
+
 class LoopSpec(BaseModel):
     """A type's prompting loop (docs/loop.md). `first` goes alone to each agent; the loop
     prompt follows once that turn ended, then on every `every` (`turn_end`: re-sent by the
@@ -896,12 +1192,19 @@ class LoopSpec(BaseModel):
     stagger: str | None = None  # agent i gets its first prompt i * stagger after the start
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
+    wake: LoopWake = Field(default_factory=LoopWake)
+    stop_when: LoopStopWhen = Field(default_factory=LoopStopWhen)
+    # Controller only: one line after the rendered loop prompt naming the board notifications
+    # (mentions, replies in the agent's threads) since its last round. Never sent to workers.
+    notices: bool = False
 
     @model_serializer(mode="wrap")
     def _dump(self, handler):  # `while` on the wire, as written in specs
         out = handler(self)
         if isinstance(out, dict) and "while_" in out:
             out["while"] = out.pop("while_")
+        if isinstance(out, dict) and not self.notices:
+            out.pop("notices", None)  # off: dumps (and hashes) exactly as before the key existed
         return out
 
     @field_validator("every")
@@ -946,6 +1249,14 @@ def hit_max_turns(turn_ended: dict) -> bool:
     return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
 
 
+def worker_type_spec(ts: TypeSpec) -> TypeSpec:
+    """The type spec as workers get it: without the controller-only `loop.notices` (workers
+    validate it with extra=forbid; one older than the key would refuse the whole spec)."""
+    if ts.loop is None or not ts.loop.notices:
+        return ts
+    return ts.model_copy(update={"loop": ts.loop.model_copy(update={"notices": False})})
+
+
 def agent_cap(ts: TypeSpec) -> float | None:
     """The type's per-agent loop cap (`loop.while.agent_usd`), resolved for its model."""
     cap = ts.loop.while_.agent_usd if ts.loop else None
@@ -980,10 +1291,13 @@ def loop_refusals(spec: SwarmSpec) -> list[str]:
             out.append(f"{where}.prompt_file: not inlined (use `flock apply`, which reads it)")
         if lp.final is not None and lp.final.prompt is None:
             out.append(f"{where}.final.prompt_file: not inlined (use `flock apply`, which reads it)")
+        if lp.stop_when.all_agents_done and (ts.harness != Harness.llm or ts.done_tool is False):
+            out.append(f"{where}.stop_when.all_agents_done needs harness llm with the done tool")
     return out
 
 
 CommsSpec.model_rebuild()
+WorldSpec.model_rebuild()
 TypeSpec.model_rebuild()
 SwarmSpec.model_rebuild()
 
@@ -1006,6 +1320,97 @@ class TokenUsage(BaseModel):
             cache_write=self.cache_write + other.cache_write,
             reasoning=self.reasoning + other.reasoning,
         )
+
+
+# --------------------------------------------------------------------------- grants (docs/live.md)
+
+
+class GrantLimits(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    max_turns: int | None = None  # per prompt, as `types.<type>.max_turns`
+    budget_usd: float | None = None  # the agent's total cost; at or above it no new turn starts
+
+    @field_validator("max_turns")
+    @classmethod
+    def _turns(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("max_turns must be >= 1")
+        return v
+
+    @field_validator("budget_usd")
+    @classmethod
+    def _usd(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("budget_usd must be >= 0")
+        return v
+
+
+class Grant(BaseModel):
+    """A live overlay on the spec for one type or one agent (`flock grant`, docs/live.md). The
+    controller stores it apart from the spec, so `flock update` and `flock apply` keep it; the
+    worker merges it in at the agent's next turn boundary. An agent's grant wins over its
+    type's, key by key."""
+
+    model_config = {"extra": "forbid"}
+
+    # tool name -> on (added) / off (taken away): folder tools by name, comms tools as comms:post
+    tools: dict[str, bool] = Field(default_factory=dict)
+    limits: GrantLimits = Field(default_factory=GrantLimits)
+    bash: bool | None = None  # harness llm: the bash tool on / off
+
+    def empty(self) -> bool:
+        return not self.tools and self.limits == GrantLimits() and self.bash is None
+
+    def compact(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_defaults=True)
+
+    def describe(self) -> str:
+        """One line: `tools +mul -comms:post, bash off, limits.max_turns 5`."""
+        parts = []
+        if self.tools:
+            parts.append("tools " + " ".join(f"{'+' if on else '-'}{n}"
+                                             for n, on in sorted(self.tools.items())))
+        if self.bash is not None:
+            parts.append(f"bash {'on' if self.bash else 'off'}")
+        for k in ("max_turns", "budget_usd"):
+            if (v := getattr(self.limits, k)) is not None:
+                parts.append(f"limits.{k} {v:g}")
+        return ", ".join(parts) or "none"
+
+
+def merge_grants(type_grant: Grant | None, agent_grant: Grant | None) -> Grant | None:
+    """The grant in force for one agent: its type's, then its own on top, key by key."""
+    if type_grant is None or agent_grant is None:
+        g = type_grant or agent_grant
+        return None if g is None or g.empty() else g
+    limits = {k: v if (v := getattr(agent_grant.limits, k)) is not None
+              else getattr(type_grant.limits, k) for k in GrantLimits.model_fields}
+    g = Grant(tools={**type_grant.tools, **agent_grant.tools}, limits=GrantLimits(**limits),
+              bash=agent_grant.bash if agent_grant.bash is not None else type_grant.bash)
+    return None if g.empty() else g
+
+
+def granted_spec(ts: TypeSpec, g: Grant | None, spent_usd: float = 0.0) -> TypeSpec:
+    """`ts` with a grant's limits and bash switch applied (tools are applied to the toolset).
+    A budget becomes the per-prompt cap `max_budget_usd` of what is left of it."""
+    if g is None:
+        return ts
+    upd: dict[str, Any] = {}
+    if g.limits.max_turns is not None:
+        upd["max_turns"] = g.limits.max_turns
+    if g.limits.budget_usd is not None:
+        left = max(0.0, g.limits.budget_usd - spent_usd)
+        upd["max_budget_usd"] = left if ts.max_budget_usd is None else min(ts.max_budget_usd, left)
+    if g.bash is not None and ts.harness == Harness.llm:
+        upd["bash"] = g.bash
+    return ts.model_copy(update=upd) if upd else ts
+
+
+def type_spec_rev(ts: TypeSpec) -> str:
+    """A short content hash of a type spec: the heartbeat sends a type spec only when the
+    worker's revision differs (docs/live.md)."""
+    return hashlib.sha256(ts.model_dump_json().encode()).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- worker -> controller
@@ -1032,6 +1437,15 @@ class WorkerHeartbeat(BaseModel):
     deadline: datetime
     draining: bool = False
     agents: list[AgentHeartbeat]
+    # `type_spec_rev` of the type spec the worker has (docs/live.md): the controller sends the
+    # current one in the heartbeat response only when it differs
+    spec_rev: str | None = None
+    # the worker's last heartbeat after a preemption notice (SIGUSR1): it synced and exits;
+    # the controller relaunches the slot at once, as a planned restart (docs/slurm.md)
+    preempted: bool = False
+    # with `preempted`: agents whose turn the preemption cut; they get the type's
+    # resume_prompt after the restore
+    interrupted: list[str] = Field(default_factory=list)
 
 
 class Event(BaseModel):
@@ -1070,6 +1484,10 @@ class LoopMeta(BaseModel):
     wall_s: float | None = None  # `while.until` in seconds, for {wall}
     cap_usd: float | None = None  # `while.agent_usd` for this agent, for {cap}
     why: str = ""
+    # False: a wake prompt outside `max_rounds` (`wake.counts_as_round: false`); it carries the
+    # current round and does not advance the worker's round counter
+    counted: bool = True
+    wake: bool = False  # a wake prompt (`on:`), counted or not: a deferral gives back its wake
     add_tools: list[str] = Field(default_factory=list)  # final round: tools it unlocks
 
 
@@ -1135,6 +1553,7 @@ class AssignCommand(BaseModel):
     agent_token: str | None = None
     tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
     comms: CommsSpec | None = None  # the swarm's comms block (docs/comms.md), channel resolved
+    world: WorldSpec | None = None  # the swarm's world (docs/world.md), manifest fetched
 
 
 class UnassignCommand(BaseModel):
@@ -1204,6 +1623,7 @@ class BulkPromptAck(BaseModel):
     skipped_state: int = 0  # not in the requested state
     skipped_removing: int = 0  # being removed (spawn cascade)
     skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
+    skipped_budget: int = 0  # reached its granted limits.budget_usd (docs/live.md)
 
 
 class SpawnRequest(BaseModel):
@@ -1246,6 +1666,8 @@ class AgentStatus(BaseModel):
     parent: str | None = None  # spawning agent; None for a replica
     children: list[str] = Field(default_factory=list)
     depth: int = 0  # generations this agent may still spawn below itself
+    # `flock grant` overlays in force for this agent (type grant + agent grant, docs/live.md)
+    grants: dict[str, Any] | None = None
 
 
 class WorkerStatus(BaseModel):
@@ -1274,10 +1696,11 @@ class LoopStatus(BaseModel):
     stopped_at: datetime | None = None
     reason: str | None = None  # why it stopped
     agents: int = 0
-    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors)
+    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors, done)
     rounds_min: int = 0
     rounds_max: int = 0
     rounds_total: int = 0
+    wakes_total: int = 0  # wake prompts sent (`on:`); in rounds_total too only with counts_as_round
     final_sent: int = 0
     final_done: int = 0
     per_agent: dict[str, dict[str, Any]] | None = None  # GET /swarms/{s}/loop only

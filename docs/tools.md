@@ -44,6 +44,21 @@ start with `_` and that has a docstring is a tool. A function without a docstrin
 - description: the docstring's first paragraph.
 - parameters: a JSON schema built from the type hints, `additionalProperties: false`. Per-parameter
   descriptions come from a Google-style `Args:` section.
+- readonly: optional, default false. Decorate the function with `@flock.tools.readonly` when the
+  tool changes nothing (a status or a listing); the manifest then has `readonly: true` (the key is
+  left out when false, so existing folders keep their version). A loop turn whose calls are all
+  read-only is idle for `while.idle_rounds` (docs/loop.md). The comms `read` and `search`
+  built-ins are read-only too.
+
+```python
+from flock.tools import readonly
+
+
+@readonly
+def task_board() -> str:
+    """Show the open tasks and who claimed them."""
+    ...
+```
 
 | Annotation | Schema |
 |---|---|
@@ -237,9 +252,10 @@ not a sandbox.
 
 ## Built-in tools
 
-A type's tools can also be built-ins served by the worker instead of the folder: today the comms
+A type's tools can also be built-ins served by the worker instead of the folder: the comms
 tools (`comms:post`, `comms:read`, `comms:search`, model names `post`, `read`, `search`;
-[docs/comms.md](comms.md)). They go through the same path: offered next to the folder tools in
+[docs/comms.md](comms.md)) and a world's tools (`world:<name>`, model name `<name>`;
+[docs/world.md](world.md)). They go through the same path: offered next to the folder tools in
 the `llm` harness and listed in the generated Tools section for `flock-tool`, pinned at the same
 turn boundaries. A built-in call runs in the worker (for `flock-tool`, through its local gateway
 on 127.0.0.1 with the agent's key from the pin), not in a subprocess, so it can use credentials
@@ -247,9 +263,10 @@ the agent never sees.
 
 ## Follow-ups
 
-- Hot reload under `flock run` (local mode, a separate PR): watch the folder and re-apply on save.
+- Hot reload: done, `flock run --watch` and `flock update` ([live.md](live.md)); a CLI harness
+  gets a "tools changed" note in its next prompt.
 - Per-tool settings (timeout, rate) via a decorator; a long-lived tool host per type for tools
   that want warm state.
-- MCP exposure for the CLI harnesses; a "tools changed" note in the next prompt.
+- MCP exposure for the CLI harnesses.
 - `flock status` showing the tools version per worker (today: `GET /swarms/{swarm}/tools` and the
   turn events).

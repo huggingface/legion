@@ -69,7 +69,11 @@ def deployment(env: Mapping[str, str] = os.environ) -> Deployment:
             raise SystemExit(f"FLOCK_MODE must be 'space' or 'job', not {mode!r}")
         status = int(env["FLOCK_STATUS_PORT"]) if env.get("FLOCK_STATUS_PORT") else None
         url = _space_url(env, port)
-        return Deployment("space", port, url, url, status_port=status)
+        # FLOCK_WORKER_URL: what workers are told, when it differs from the public URL, e.g.
+        # `http://${CTL_HOST}:7860` on Slurm (each worker expands it from its controller host
+        # file, so a controller that moves host does not relaunch the fleet; docs/slurm.md)
+        worker = env.get("FLOCK_WORKER_URL") or url
+        return Deployment("space", port, worker, url, status_port=status)
     group = env.get("FLOCK_NETWORK_GROUP", "")
     if not group:
         raise SystemExit("FLOCK_MODE=job needs FLOCK_NETWORK_GROUP (the workers' network group)")
@@ -137,12 +141,27 @@ class Built:
     final_push_timeout: float = FINAL_PUSH_TIMEOUT
 
 
+WORLD_FOLLOW_INTERVAL = 15.0  # s between reads of FLOCK_WORLD_HOST_FILE
+COMPUTE_KINDS = (None, "hf-jobs", "local", "slurm", "external")
+
+
 def build(env: Mapping[str, str] = os.environ) -> Built:
     token = env.get("FLOCK_TOKEN", "")
     if not token:
         raise SystemExit("FLOCK_TOKEN must be set")
+    kind = env.get("FLOCK_COMPUTE") or None
+    if kind not in COMPUTE_KINDS:
+        # never fall back to HF Jobs: a typo on a cluster would launch paid jobs
+        raise SystemExit(f"FLOCK_COMPUTE={kind!r} is not one of "
+                         f"{', '.join(k for k in COMPUTE_KINDS if k)} (unset: hf-jobs)")
     dep = deployment(env)
     data_dir = env.get("FLOCK_DATA", "./data")
+    if env is os.environ:  # a container with no usable HOME: hub caches under the data dir
+        from pathlib import Path
+
+        from flock.home import cache_defaults
+
+        cache_defaults(Path(data_dir).resolve() / "cache")
     state = state_sync_from_env(env, data_dir)
     if dep.mode == "job" and state is None:
         log.warning("job mode without FLOCK_STATE_URL: controller state is lost on restart")
@@ -153,17 +172,24 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         log.info("state: trimmed %d event streams to the restored index", fixed)
     jobs: JobsClient
     compute: str | None = None  # the spec `compute.kind` this controller accepts
-    if env.get("FLOCK_COMPUTE") == "local":  # docs/local.md: workers as local subprocesses
+    if kind == "local":  # docs/local.md: workers as local subprocesses
         if dep.mode == "job":
             raise SystemExit("FLOCK_COMPUTE=local cannot run with FLOCK_MODE=job")
         from flock.controller.local import LocalJobsClient
 
         jobs, compute = LocalJobsClient(root=data_dir), "local"
+    elif kind in ("slurm", "external"):  # docs/slurm.md
+        from flock.controller.slurm import ExternalJobsClient, SlurmJobsClient
+
+        compute = kind
+        jobs = SlurmJobsClient(env=env) if compute == "slurm" else ExternalJobsClient(env=env)
     elif env.get("FLOCK_FAKE_JOBS") == "1":
         jobs = FakeJobsClient(network_group=dep.network_group)
     else:
         jobs = HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
         compute = "hf-jobs"
+    log.info("compute %s: %s", compute or ("fake" if env.get("FLOCK_FAKE_JOBS") == "1"
+                                           else "hf-jobs"), type(jobs).__name__)
     settings = Settings(
         public_url=dep.worker_url,
         token=token,
@@ -188,6 +214,24 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
             await asyncio.sleep(STATS_LOG_INTERVAL)
             log.info("hub calls: %s", stats().get("hub_calls", {}))
 
+    async def follow_worlds() -> None:
+        """FLOCK_WORLD_HOST_FILE (docs/slurm.md): a world job requeued on another node writes
+        its new host there; specs with ${WORLD_HOST} in world.url get the new endpoint, and
+        workers get it with their next heartbeat (same credential: no relaunch)."""
+        from flock.world.host import follow_world_host
+
+        while True:
+            await asyncio.sleep(WORLD_FOLLOW_INTERVAL)
+            for sw in store.list_swarms():
+                try:
+                    new = await asyncio.to_thread(follow_world_host, sw["spec"], token, env,
+                                                    env=env)
+                except Exception:
+                    log.exception("world host check failed")
+                    continue
+                if new is not None:
+                    store.update_swarm_spec(new)
+
     async def sync_state() -> None:
         while True:
             await asyncio.sleep(sync_every)
@@ -201,6 +245,8 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     async def background(notifier: Notifier) -> None:
         loops.append(asyncio.current_task())
         tasks = [asyncio.create_task(log_stats())]
+        if env.get("FLOCK_WORLD_HOST_FILE"):
+            tasks.append(asyncio.create_task(follow_worlds()))
         if state is not None:
             tasks.append(asyncio.create_task(sync_state()))
         loops.extend(tasks)
@@ -235,7 +281,7 @@ async def final_push(b: Built) -> bool:
         return True
     try:
         n = await asyncio.wait_for(
-            asyncio.to_thread(b.state.push, b.store, force=True), b.final_push_timeout
+            asyncio.to_thread(b.state.push, b.store, force=True, final=True), b.final_push_timeout
         )
     except TimeoutError:
         log.error("final push: failed (timeout after %g s)", b.final_push_timeout)
@@ -245,6 +291,9 @@ async def final_push(b: Built) -> bool:
         return False
     log.info("final push: ok (%d files)", n)
     return True
+
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1)
 
 
 async def serve(b: Built, host: str = "0.0.0.0") -> None:
@@ -276,7 +325,9 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
             log.info("%s: shutting down", sig.name)
         stopping.set()
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    # SIGUSR1: a Spot notice on Slurm (the watcher signals every process of the job); the
+    # same once-only shutdown as SIGTERM (docs/slurm.md)
+    for sig in STOP_SIGNALS:
         loop.add_signal_handler(sig, on_signal, sig)
     log.info("flock controller (%s mode): API %s, workers use %s%s", dep.mode, dep.public_url,
              dep.worker_url, f", status {dep.status_url}" if dep.status_url else "")
@@ -299,7 +350,7 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
         for t in pending:
             t.cancel()
     finally:
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in STOP_SIGNALS:
             loop.remove_signal_handler(sig)
     log.info("flock controller: exit")
 

@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flock.tools import Context
+from flock.tools import READONLY_ATTR, Context
 
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 RESERVED = frozenset({"bash", "done"})  # the llm harness's own tools
@@ -49,6 +49,9 @@ class ToolDef:
     is_async: bool = False
     # A built-in served by the worker itself, not the folder (`comms:post`, docs/comms.md).
     builtin: str | None = None
+    # Changes nothing (`@flock.tools.readonly`): a loop turn of only such calls is idle for
+    # `while.idle_rounds` (docs/loop.md). In the manifest only when true.
+    readonly: bool = False
 
     def openai(self) -> dict[str, Any]:
         """The Chat Completions function tool."""
@@ -67,7 +70,9 @@ class Manifest:
         return next((t for t in self.tools if t.name == name), None)
 
     def to_json(self) -> dict[str, Any]:
-        return {"tools": [asdict(t) for t in self.tools]}
+        # `readonly` only when set, so a folder without it keeps its manifest (and version)
+        return {"tools": [{k: v for k, v in asdict(t).items() if k != "readonly" or v}
+                          for t in self.tools]}
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Manifest:
@@ -219,7 +224,8 @@ def tool_def(fn: Any, module: str) -> ToolDef:
     if required:
         params["required"] = required
     return ToolDef(name=name, description=_first_paragraph(doc), parameters=params, module=module,
-                   function=name, ctx=ctx, is_async=inspect.iscoroutinefunction(fn))
+                   function=name, ctx=ctx, is_async=inspect.iscoroutinefunction(fn),
+                   readonly=getattr(fn, READONLY_ATTR, False) is True)
 
 
 def tool_modules(folder: Path) -> list[Path]:

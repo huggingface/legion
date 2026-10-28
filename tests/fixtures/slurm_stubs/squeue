@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake squeue: `-h -j ID -o %T` or `--me -h -o '%i|%j|%k|%T'`; a job with a `purged` file is
+# gone from squeue (as after Slurm's MinJobAge).
+set -eu
+S="$SLURM_STUB_DIR"
+echo "squeue $*" >> "$S/calls"
+job=""; prev=""
+for a in "$@"; do [ "$prev" = "-j" ] && job="$a"; prev="$a"; done
+if [ -n "$job" ]; then
+  if [ ! -f "$S/jobs/$job.state" ] || [ -f "$S/jobs/$job.purged" ]; then
+    echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1
+  fi
+  cat "$S/jobs/$job.state"; exit 0
+fi
+for f in "$S"/jobs/*.state; do
+  [ -e "$f" ] || continue
+  id=$(basename "$f" .state)
+  [ -f "$S/jobs/$id.purged" ] && continue
+  echo "$id|$(cat "$S/jobs/$id.name")|$(cat "$S/jobs/$id.comment")|$(cat "$f")"
+done

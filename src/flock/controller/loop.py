@@ -18,7 +18,9 @@ Who sends the loop prompt (`mode`):
 
 `first` goes alone, and the loop prompt only after the turn that followed it ended. Wake-ups
 (`wake(agent, reason)`, fed by the workers' comms events for `on: comms.*`) queue the loop
-prompt after a 2 s debounce.
+prompt after a 2 s debounce, at most one per `wake.min_gap` per agent and `wake.max` per run
+(or `wake.window`); by default a wake prompt is not a round (`wake.counts_as_round`). Each one
+sent is a `loop_wake` event.
 
 State lives in the store (`loops`, `loop_agents`, `swarm_flags`), so a controller restart
 picks the loops up where they were. Swarm-level events go to the stream `_swarm.<swarm>`
@@ -64,6 +66,14 @@ ACK_TIMEOUT = 60.0  # s to wait for a worker's loop_stopped before the final pro
 ERROR_LIMIT = 3  # failed loop turns in a row (not max_turns) end an agent's loop (both sides)
 RESTOP_EVERY = 30.0  # s, hard budget stop: min gap between repeated stops to one working agent
 LOOP_KINDS = ("first", "loop")
+NOTICE_KEEP = 100  # pending notices kept per agent (the oldest go first)
+NOTICE_GROUPS = 5  # (kind, thread) groups named in the notice line; the rest are counted
+NOTICE_NAMES = 3  # names shown per group
+NOTICE_HEAD = "New for you since your last round: "
+# s after the controller saw the armed loop_start leave the queue before a `loop_prompt` counts
+# as the round that carried it: one emitted just before the fetch can arrive up to a worker
+# event flush (3 s) later. Erring late shows the line twice, never drops it.
+NOTICE_FETCH_MARGIN = 5.0
 
 
 def swarm_stream(swarm: str) -> str:
@@ -93,12 +103,112 @@ def _is_loop_body(body: str, kinds: tuple[str, ...] = LOOP_KINDS) -> bool:
     return meta.get("kind") in kinds
 
 
+def _wake_capped(lp: LoopSpec, st: dict, now: float) -> bool:
+    """The agent has had `wake.max` wake prompts in this run (or in the last `wake.window`)."""
+    cap = lp.wake.max
+    if cap is None:
+        return False
+    if lp.wake.window is None:
+        return st.get("wakes", 0) >= cap
+    window = parse_duration(lp.wake.window).total_seconds()
+    return sum(1 for t in st.get("wake_times", []) if now - t < window) >= cap
+
+
+def _is_wake(meta: dict) -> bool:
+    """A loop prompt's meta (or a worker's `loop` report) names a wake prompt. A worker older
+    than `wake` reports only `counted: false`, which is always a wake."""
+    return meta.get("wake") is True or meta.get("counted") is False
+
+
+def _unwake(st: dict) -> None:
+    """A wake prompt was dropped or deferred: not a wake after all (its wake allowance comes
+    back; the round, when it counted one, is rolled back by the caller)."""
+    st["wakes"] = max(0, st.get("wakes", 0) - 1)
+    if st.get("wake_times"):
+        st["wake_times"] = st["wake_times"][:-1]
+    st["wake_last"] = st["wake_times"][-1] if st.get("wake_times") else None
+
+
+def _who(n: dict) -> str:
+    # no braces (the worker's renderer would take `{round}` in a name for a placeholder)
+    name = "".join(c for c in str(n.get("from") or "?") if c not in "{}\n\r")[:64]
+    return f"@{name}" if n.get("human") else name
+
+
+def notice_line(notices: list[dict]) -> str:
+    """The one line appended to a round prompt (`loop.notices`): the board notifications since
+    the agent's last round, grouped by (kind, thread): mentions by humans first, then other
+    mentions, then replies in the agent's threads, each in the order they came; at most
+    NOTICE_GROUPS groups and NOTICE_NAMES names per group (humans first), the rest counted."""
+    if any(n.get("channel") or n["kind"] in ("dm", "channel") for n in notices):
+        return extended_notice_line(notices)
+    groups: dict[tuple[str, int], list[dict]] = {}
+    for n in notices:
+        groups.setdefault((n["kind"], n["thread"]), []).append(n)
+
+    def rank(item: tuple[tuple[str, int], list[dict]]) -> int:
+        (kind, _), ns = item
+        return (0 if kind == "mention" else 2) + (0 if any(n.get("human") for n in ns) else 1)
+
+    ordered = sorted(groups.items(), key=rank)  # stable: first come first within a rank
+    parts = []
+    for (kind, thread), ns in ordered[:NOTICE_GROUPS]:
+        names = list(dict.fromkeys(_who(n) for n in sorted(ns, key=lambda n: not n.get("human"))))
+        shown = ", ".join(names[:NOTICE_NAMES])
+        if len(names) > NOTICE_NAMES:
+            shown += f", +{len(names) - NOTICE_NAMES} more"
+        k = len(ns)
+        if kind == "mention":
+            parts.append(f"{shown} mentioned you in thread {thread}" if k == 1
+                         else f"{k} mentions of you in thread {thread} ({shown})")
+        else:
+            parts.append(f"{k} {'reply' if k == 1 else 'replies'} in your thread {thread} ({shown})")
+    rest = ordered[NOTICE_GROUPS:]
+    if rest:
+        more = sum(len(ns) for _, ns in rest)
+        threads = list(dict.fromkeys(str(t) for (_, t), _ in rest))
+        parts.append(f"+{more} more in thread{'s' if len(threads) > 1 else ''} "
+                     + ", ".join(threads[:NOTICE_GROUPS]) + (", ..." if len(threads) > NOTICE_GROUPS else ""))
+    return NOTICE_HEAD + "; ".join(parts) + ". Read them if useful."
+
+
+def with_notices(text: str, line: str | None) -> str:
+    return f"{text.rstrip()}\n\n{line}" if line else text
+
+
 def _new_agent() -> dict[str, Any]:
     return {"phase": "new", "rounds": 0, "last_sent": None, "first_delivered": False,
             "wstarted": None, "stop_sent": None, "acked": False, "last_activity": None,
             "turn_done": False, "idle_streak": 0, "errors": 0, "done_reason": None,
             "final": None, "final_sent": None,
+            "wakes": 0, "wake_last": None, "wake_times": [],  # wake prompts sent (`on:`)
             "inflight": None}  # {kind, round} of a loop prompt the worker took, until its turn starts
+
+
+def extended_notice_line(notices: list[dict]) -> str:
+    groups = {}
+    for n in notices:
+        groups.setdefault((n["kind"], n.get("channel", ""), n["thread"]), []).append(n)
+    parts = []
+    ordered = sorted(groups.items(), key=lambda x: {"dm": 0, "mention": 1, "reply": 2}.get(x[0][0], 3))
+    for (kind, channel, thread), ns in ordered[:NOTICE_GROUPS]:
+        names = list(dict.fromkeys(_who(n) for n in ns))
+        shown = ", ".join(names[:NOTICE_NAMES])
+        if len(names) > NOTICE_NAMES:
+            shown += f", +{len(names) - NOTICE_NAMES} more"
+        where = "".join(c for c in str(channel) if c not in "{}\n\r")[:64]
+        suffix = f" in #{where}" if where else ""
+        if kind == "dm":
+            parts.append(f"DM from {shown} (channel {where})")
+        elif kind == "mention":
+            parts.append(f"{shown} mentioned you{suffix}, thread {thread}")
+        elif kind == "channel":
+            parts.append(f"new topic{suffix}, thread {thread} ({shown})")
+        else:
+            parts.append(f"{len(ns)} replies{suffix}, thread {thread} ({shown})")
+    if len(ordered) > NOTICE_GROUPS:
+        parts.append(f"+{len(ordered) - NOTICE_GROUPS} more groups")
+    return NOTICE_HEAD + "; ".join(parts) + ". Read them if useful."
 
 
 # A prompt sender: (swarm, type, agents, build) -> names of the agents that got a prompt.
@@ -120,7 +230,8 @@ class LoopEngine:
         self.capped = capped or (lambda spec, t: False)
         self.turn_state = turn_state or agent_state
         self._lock = threading.RLock()
-        self._wakes: dict[str, tuple[float, float, list[str]]] = {}  # agent -> first, last, why
+        # agent -> first, last, why, events: queued wakes not yet sent
+        self._wakes: dict[str, tuple[float, float, list[str], int]] = {}
         self._stops: dict[str, float] = {}  # agent -> last StopCommand under the hard budget stop
 
     # ------------------------------------------------------------------ events out
@@ -133,9 +244,10 @@ class LoopEngine:
 
     # ------------------------------------------------------------------ public seams
     def wake(self, agent: str, reason: str) -> bool:
-        """Queue the agent's loop prompt (debounced WAKE_DEBOUNCE s, skip_pending), e.g. for a
-        comms mention. Only for a running loop whose `on:` lists `reason` (or its prefix
-        before ':') in a swarm the hard budget stop has not stopped; returns False when the
+        """Queue the agent's loop prompt (debounced WAKE_DEBOUNCE s, held until `wake.min_gap`
+        after its last wake prompt, skip_pending), e.g. for a comms mention. Only for a running
+        loop whose `on:` lists `reason` (or its prefix before ':') in a swarm the hard budget
+        stop has not stopped, and while the agent is under `wake.max`; returns False when the
         wake was ignored."""
         with self._lock:
             a = self.store.get_agent(agent)
@@ -152,8 +264,43 @@ class LoopEngine:
             if not L or L["state"] != "running" or not st or st["phase"] != "looping":
                 return False
             now = self.clock().timestamp()
-            first, _, why = self._wakes.get(agent, (now, now, []))
-            self._wakes[agent] = (first, now, [*why, reason][-10:])
+            if _wake_capped(ts.loop, st, now):
+                self._wakes.pop(agent, None)
+                return False
+            first, _, why, n = self._wakes.get(agent, (now, now, [], 0))
+            self._wakes[agent] = (first, now, [*why, reason][-10:], n + 1)
+            return True
+
+    def notice(self, agent: str, reason: str, data: dict[str, Any]) -> bool:
+        """A board notification for the agent (`comms_mention` / `comms_thread_reply` from its
+        worker): kept, with the loop agent's state in the store, until its next round prompt
+        names it (`loop.notices`). Ignored for a type without `loop.notices`, an agent out of
+        its loop and a message already kept. `reason`: mention or thread."""
+        with self._lock:
+            a = self.store.get_agent(agent)
+            if a is None:
+                return False
+            sw = self.store.get_swarm(a["swarm"])
+            ts = sw["spec"].types.get(a["type"]) if sw else None
+            if ts is None or ts.loop is None or not ts.loop.notices:
+                return False
+            st = self.store.get_loop_agent(agent)
+            thread, mid = data.get("thread"), data.get("msg_id")
+            if st is None or st["phase"] == "done" or not isinstance(thread, int):
+                return False
+            kind = reason if reason in ("mention", "dm", "channel") else "reply"
+            pending = st.get("notices") or []
+            if mid is not None and any(n["msg_id"] == mid and n["kind"] == kind for n in pending):
+                return False
+            sender = str(data.get("from") or "?")
+            human = data.get("identity_type") == "user" if "identity_type" in data else (
+                sender != "?" and self.store.get_agent(sender) is None)  # not one of ours
+            pending.append({"msg_id": mid, "thread": thread, "from": sender, "kind": kind,
+                            "human": human})
+            if data.get("channel"):
+                pending[-1]["channel"] = str(data["channel"])
+            st["notices"] = pending[-NOTICE_KEEP:]
+            self.store.put_loop_agent(agent, a["swarm"], a["type"], st)
             return True
 
     def control(self, swarm: str, type_name: str, action: str, final: bool = True) -> LoopStatus:
@@ -212,7 +359,13 @@ class LoopEngine:
                 d = _custom(ev)
                 if ev.type == "loop_prompt":
                     st["last_activity"] = now
-                    st["inflight"] = {"kind": d.get("kind"), "round": d.get("round")}
+                    arm = st.get("notice_armed")
+                    if (arm and not arm.get("used") and d.get("kind") == "loop" and not d.get("wake")
+                            and self._fetched(a, arm, now)
+                            and now - arm["fetched"] >= NOTICE_FETCH_MARGIN):
+                        arm["used"] = True  # this round carried the line: plain again next tick
+                    st["inflight"] = {"kind": d.get("kind"), "round": d.get("round"),
+                                      "counted": d.get("counted", True), "wake": d.get("wake", False)}
                     if d.get("kind") == "first":
                         st["first_delivered"] = True
                     elif d.get("kind") == "final":
@@ -226,7 +379,8 @@ class LoopEngine:
                 elif ev.type == "loop_stopped":
                     st["acked"] = True
                     st["wstarted"] = None
-                    if d.get("reason") in ("max_rounds", "errors", "deadline") and st["phase"] == "looping":
+                    if (d.get("reason") in ("max_rounds", "errors", "deadline", "done")
+                            and st["phase"] == "looping"):
                         st["phase"], st["done_reason"] = "done", d["reason"]
                 elif ev.type in ("turn_ended", "turn_interrupted"):
                     st["last_activity"] = now
@@ -240,25 +394,50 @@ class LoopEngine:
                     if st["final"] == "delivered":
                         st["final"] = "done"
                         continue
+                    # `done(finished: true)` under `stop_when.all_agents_done`: out of the loop
+                    finished = (ts.loop.stop_when.all_agents_done and ev.type == "turn_ended"
+                                and d.get("finished") is True)
                     if st["phase"] == "first" and st["first_delivered"]:
                         st["phase"] = "looping"
+                        stop_reason = "done" if finished else stop_reason
                         continue
                     if st["phase"] != "looping":
                         continue
                     status = d.get("status") if ev.type == "turn_ended" else "interrupted"
                     w = ts.loop.while_
                     if w.idle_rounds is not None and ev.type == "turn_ended":
-                        st["idle_streak"] = 0 if d.get("tool_calls", 1) else st["idle_streak"] + 1
+                        # read-only calls (`done`, comms read/search, `readonly` folder tools)
+                        # are not activity; a worker older than `state_calls` sends tool_calls
+                        busy = d.get("state_calls", d.get("tool_calls", 1))
+                        st["idle_streak"] = 0 if busy else st["idle_streak"] + 1
                         if st["idle_streak"] >= w.idle_rounds:
                             stop_reason = "idle_rounds"
+                    if finished:
+                        stop_reason = "done"
                     if L.get("mode") == "controller":
-                        st["errors"] = 0 if status == "completed" or max_turns else st["errors"] + 1
+                        st["errors"] = (0 if status == "completed" or max_turns else
+                                        st["errors"] if d.get("reason") in ("timeout", "model_transport")
+                                        else st["errors"] + 1)
                         if st["errors"] >= ERROR_LIMIT:
                             stop_reason = "errors"
                         st["turn_done"] = True
             if stop_reason and st["phase"] == "looping":
                 self._agent_done(a, st, L, stop_reason, now)
             self.store.put_loop_agent(a["name"], a["swarm"], a["type"], st)
+
+    def _fetched(self, a: Row, arm: dict, now: float) -> bool:
+        """The armed loop_start left its worker's command queue (`arm["fetched"]`: when the
+        controller first saw it gone)."""
+        if arm.get("fetched") is None:
+            for c in self.store.commands_for(a["worker"]) if a["worker"] else []:
+                try:
+                    body = json.loads(c["body"])
+                except ValueError:
+                    continue
+                if body.get("kind") == "loop_start" and body.get("agent") == a["name"]:
+                    return False
+            arm["fetched"] = now
+        return True
 
     def _undeliver(self, st: dict, took: dict | None, now: float) -> None:
         """The worker refused a loop prompt it had taken (draining, stopping): undo what its
@@ -268,12 +447,16 @@ class LoopEngine:
         if not took:
             return
         kind = took.get("kind")
+        if kind == "loop" and _is_wake(took):
+            _unwake(st)
         if kind == "first" and st["phase"] == "first":
             st["first_delivered"] = False
             st["last_activity"] = None  # due again at once
         elif kind == "final":
             if st["final"] in ("sent", "delivered"):
                 st["final"], st["final_sent"] = None, None
+        elif kind == "loop" and took.get("counted") is False:
+            st["turn_done"] = True  # no turn runs; the cadence (`last_sent`) is left as it was
         elif kind == "loop" and isinstance(took.get("round"), int):
             st["rounds"] = min(st["rounds"], max(0, took["round"] - 1))
             st["last_sent"], st["turn_done"] = None, True
@@ -394,7 +577,11 @@ class LoopEngine:
             if st is None or not meta:
                 continue
             kind, rnd = meta.get("kind"), meta.get("round")
-            if kind == "loop" and isinstance(rnd, int):
+            if kind == "loop" and _is_wake(meta):
+                _unwake(st)
+            if kind == "loop" and meta.get("counted") is False:
+                st["turn_done"] = True  # a wake outside the round count: the cadence stays
+            elif kind == "loop" and isinstance(rnd, int):
                 st["rounds"] = min(st["rounds"], max(0, rnd - 1))
                 st["last_sent"], st["turn_done"] = None, True
                 if st["phase"] == "done" and st["done_reason"] == "max_rounds":
@@ -533,12 +720,12 @@ class LoopEngine:
 
     # ------------------------------------------------------------------ running
     def _meta(self, ts: TypeSpec, type_name: str, L: dict, kind: str, *, round: int | None,
-              why: str) -> LoopMeta:
+              why: str, counted: bool = True, wake: bool = False) -> LoopMeta:
         assert ts.loop is not None
         until = ts.loop.while_.until
         return LoopMeta(kind=kind, type=type_name, round=round, started_at=_ts(L["started_at"]),
                         wall_s=parse_duration(until).total_seconds() if until else None,
-                        cap_usd=agent_cap(ts), why=why,
+                        cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake,
                         add_tools=list(ts.loop.final.add_tools) if kind == "final" and ts.loop.final else [])
 
     def _loop_start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, a: Row,
@@ -546,8 +733,12 @@ class LoopEngine:
         lp = ts.loop
         assert lp is not None and lp.prompt is not None
         until = lp.while_.until
+        arm = st.get("notice_armed")
+        line = arm["line"] if arm and not arm.get("used") and lp.notices else None
+        if line:
+            arm["fetched"] = None  # a new command to wait for
         cmd = LoopStartCommand(
-            agent=a["name"], text=lp.prompt,
+            agent=a["name"], text=with_notices(lp.prompt, line),
             meta=self._meta(ts, type_name, L, "loop", round=st["rounds"], why="turn_end"),
             max_rounds=lp.while_.max_rounds, run=L.get("run"),
             deadline=_ts(L["started_at"] + parse_duration(until).total_seconds()) if until else None)
@@ -587,6 +778,7 @@ class LoopEngine:
         max_rounds = lp.while_.max_rounds
         every = lp.every_s
         due: dict[str, PromptCommand] = {}
+        wakes: dict[str, int] = {}  # agent -> wake events folded into its due prompt
         changed: set[str] = set()
         for i, a in enumerate(sorted(agents, key=lambda r: r["name"])):
             name = a["name"]
@@ -616,7 +808,7 @@ class LoopEngine:
                 continue
             if st["phase"] != "looping":
                 continue
-            woken = self._woken(name, now)
+            woken = self._woken(name, st, lp, now)
             if L["mode"] == "worker":
                 if not a["worker"]:
                     continue
@@ -632,7 +824,18 @@ class LoopEngine:
                     changed.add(name)
                 elif woken and idle:
                     due[name] = self._prompt(a, lp.prompt or "", self._meta(
-                        ts, type_name, L, "loop", round=None, why=woken))
+                        ts, type_name, L, "loop", round=None, why=woken[0],
+                        counted=lp.wake.counts_as_round, wake=True))
+                    wakes[name] = woken[1]
+                else:
+                    arm = st.get("notice_armed")
+                    if (arm and not arm.get("used") and arm.get("fetched") is None
+                            and self._fetched(a, arm, now)):
+                        changed.add(name)  # seen leaving the queue: when, for `used`
+                    if self._arm_notices(lp, st, waiting=bool(st["stop_sent"] and not st["acked"]),
+                                         now=now):
+                        self._loop_start(spec, type_name, ts, L, a, st, now)
+                        changed.add(name)
                 continue
             if st["stop_sent"] and not st["acked"] and now - st["stop_sent"] < ACK_TIMEOUT:
                 continue  # its worker-side loop (before a mode change) has not confirmed the stop
@@ -643,7 +846,7 @@ class LoopEngine:
                 continue
             why = None
             if woken:
-                why = woken
+                why, wakes[name] = woken
             elif st["rounds"] == 0:
                 why = "start"
             elif every is None and st["turn_done"]:
@@ -653,13 +856,26 @@ class LoopEngine:
             elif every is not None and now - (st["last_sent"] or 0.0) >= every:
                 why = f"every {lp.every}"
             if why:
+                counted = name not in wakes or lp.wake.counts_as_round
                 due[name] = self._prompt(a, lp.prompt or "", self._meta(
-                    ts, type_name, L, "loop", round=st["rounds"] + 1, why=why))
+                    ts, type_name, L, "loop", round=st["rounds"] + int(counted), why=why,
+                    counted=counted, wake=name in wakes))
+        noticed: dict[str, int] = {}  # agent -> pending notices its due loop prompt names
+        for name, cmd in due.items():
+            pending = states[name].get("notices") if lp.notices else None
+            if pending and cmd.loop is not None and cmd.loop.kind == "loop":
+                due[name] = cmd.model_copy(update={"text": with_notices(cmd.text, notice_line(pending))})
+                noticed[name] = len(pending)
+            elif states[name].get("notices") and not lp.notices:
+                states[name]["notices"] = []  # switched off: nothing kept for later
+                changed.add(name)
         sent = set(self.send(spec.swarm, type_name, [a for a in agents if a["name"] in due],
                              lambda a: due[a["name"]])) if due else set()
         for name in sent:
             st, meta = states[name], due[name].loop
             assert meta is not None
+            if name in noticed:  # named once; what came in meanwhile waits for the next round
+                st["notices"] = st["notices"][noticed[name]:]
             if meta.kind == "first":
                 st["phase"], st["first_delivered"] = "first", False
             else:
@@ -668,6 +884,14 @@ class LoopEngine:
             st["last_activity"] = now
             self._wakes.pop(name, None)
             changed.add(name)
+            if name in wakes:
+                st["wakes"] = st.get("wakes", 0) + 1
+                st["wake_last"] = now
+                st["wake_times"] = [*st.get("wake_times", []), now][-(lp.wake.max or 1):]
+                self._event(spec.swarm, "loop_wake", {
+                    "type": type_name, "agent": name, "reason": meta.why.removeprefix("wake: "),
+                    "events": wakes[name], "coalesced": wakes[name] - 1, "round": meta.round,
+                    "counted": meta.counted, "wakes": st["wakes"]}, agent=name)
         for name in changed:
             self.store.put_loop_agent(name, spec.swarm, type_name, states[name])
         if sent:
@@ -681,14 +905,52 @@ class LoopEngine:
             self._stop(spec.swarm, type_name, ts, L, reasons.pop() if len(reasons) == 1
                        else "agents_done", final=True, now=now)
 
-    def _woken(self, name: str, now: float) -> str | None:
+    def _arm_notices(self, lp: LoopSpec, st: dict, *, waiting: bool, now: float) -> bool:
+        """Worker-side loop (`loop.notices`): the worker renders each round from the text of its
+        last loop_start, so the line rides in a fresh loop_start (same run: the round count
+        stays) and, once a round carried it (its `loop_prompt` after the command was fetched),
+        another loop_start puts the plain prompt back, or the line of what came in meanwhile.
+        True when a loop_start is due now (`notice_armed` updated)."""
+        arm = st.get("notice_armed")
+        if not st["wstarted"] or st["acked"] or waiting:
+            return False
+        if not lp.notices:  # switched off: nothing kept for later
+            if st.get("notices"):
+                st["notices"] = []
+            if arm:
+                st["notice_armed"] = None
+                return not arm.get("used")  # take the line out of the worker's loop text
+            return False
+        if arm and not arm.get("used"):
+            return False  # its round has not come yet
+        pending = st.get("notices") or []
+        if pending:
+            st["notice_armed"] = {"line": notice_line(pending), "at": now, "n": len(pending),
+                                  "fetched": None}
+            st["notices"] = []
+            return True
+        if arm:  # used, nothing new: the plain prompt again
+            st["notice_armed"] = None
+            return True
+        return False
+
+    def _woken(self, name: str, st: dict, lp: LoopSpec, now: float) -> tuple[str, int] | None:
+        """The queued wake that is due now, as (why, events): after WAKE_DEBOUNCE s of quiet
+        (at most WAKE_MAX_DELAY s after the first), and `wake.min_gap` after the agent's last
+        wake prompt; wakes held by the gap are coalesced into this one."""
         w = self._wakes.get(name)
         if w is None:
             return None
-        first, last, why = w
-        if now - last >= WAKE_DEBOUNCE or now - first >= WAKE_MAX_DELAY:
-            return "wake: " + ", ".join(dict.fromkeys(why))
-        return None
+        if _wake_capped(lp, st, now):  # e.g. `wake.max` lowered by a re-apply
+            self._wakes.pop(name, None)
+            return None
+        first, last, why, n = w
+        if now - last < WAKE_DEBOUNCE and now - first < WAKE_MAX_DELAY:
+            return None
+        gap = parse_duration(lp.wake.min_gap).total_seconds()
+        if st.get("wake_last") is not None and now - st["wake_last"] < gap:
+            return None
+        return "wake: " + ", ".join(dict.fromkeys(why)), n
 
     def _prompt(self, a: Row, text: str, meta: LoopMeta) -> PromptCommand:
         return PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=text, loop=meta)
@@ -748,8 +1010,9 @@ def loop_status(store: Store, swarm: str, type_name: str, *, detail: bool = Fals
     rounds = [st["rounds"] for st in agents.values()]
     per = None
     if detail:
-        per = {name: {k: st[k] for k in ("phase", "rounds", "done_reason", "final", "errors",
-                                         "idle_streak")} for name, st in sorted(agents.items())}
+        per = {name: {**{k: st[k] for k in ("phase", "rounds", "done_reason", "final", "errors",
+                                            "idle_streak")}, "wakes": st.get("wakes", 0)}
+               for name, st in sorted(agents.items())}
     return LoopStatus(
         type=type_name, state=L["state"], mode=L["mode"], every=L["every"],
         started_at=_ts(L["started_at"]) if L.get("started_at") else None,
@@ -757,7 +1020,7 @@ def loop_status(store: Store, swarm: str, type_name: str, *, detail: bool = Fals
         reason=L.get("reason"), agents=len(agents),
         agents_done=sum(1 for st in agents.values() if st["phase"] == "done"),
         rounds_min=min(rounds, default=0), rounds_max=max(rounds, default=0),
-        rounds_total=sum(rounds),
+        rounds_total=sum(rounds), wakes_total=sum(st.get("wakes", 0) for st in agents.values()),
         final_sent=sum(1 for st in agents.values() if st["final"] in ("sent", "delivered", "done")),
         final_done=sum(1 for st in agents.values() if st["final"] == "done"),
         per_agent=per)

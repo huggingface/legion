@@ -111,7 +111,8 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 
 ## Lifecycle
 
-- **Name:** `<parent>-<type>-<NNNN>`, `NNNN` from a per-swarm counter that is never reused while
+- **Name:** `<parent>-<type>-<NNNN>` (with `naming: words`: a reserved `<adjective>-<noun>`, see
+  "Names"), `NNNN` from a per-swarm counter that is never reused while
   the swarm exists, e.g. `leader-0000-analyst-0007`, then `leader-0000-analyst-0007-helper-0012`.
 - **Placement:** on the child type's own workers with v1's fill rule (fill in order, never move,
   open a new worker on demand). A type that declares `workers` never gets more than
@@ -129,6 +130,70 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 - **Persistence:** spawned rows live in the controller's SQLite, in `FLOCK_DATA` (default
   `./data`; the controller image sets `/data`). Turn on the Space's persistent storage so `/data`
   survives redeploys: unlike replicas, spawned agents cannot be rebuilt from the spec.
+
+### Ephemeral types
+
+`ephemeral: true` on a type makes each spawned agent of it live for one session: a judge, an
+interviewer, a one-shot helper. Added 2026-10-22 for experiments/chatbot-v1's interviewers.
+
+```yaml
+types:
+  interviewer: {harness: llm, model: glm, replicas: 0, ephemeral: true,
+                workers: {initial: 0, max_extra: 2}, max_turns: 26, max_budget_usd: 0.15}
+spawn:
+  dev: {types: [interviewer], max: 2}
+```
+
+- **When.** The controller removes the agent when a worker heartbeat reports it idle (or
+  stuck) after at least one turn, with no prompt pending or just handed out. How the turn
+  ended does not matter: `done`, `max_turns`, its budget or an error. A heartbeat's tokens
+  include the last turn, so the cost it leaves behind is complete.
+- **What.** The same removal as `DELETE /agents/{name}`: `child_removed {reason: ephemeral}` on
+  the parent's stream, an unassign to its worker (final sync), its token revoked, its cost
+  kept in the swarm's total (`removed_cost`), and its place under the parent's `spawn.max`
+  freed, since caps count live children. The worker then deletes the agent's workdir, session
+  log, state, tools pin and the harness's own session dir (`AgentRuntime.purge`).
+- **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
+  session. A run bundle (`flock run`) keeps removed agents' events (`events/<name>.jsonl`) and
+  lists them in `run.json` under `removed_agents`, each with its type, tokens and `cost_usd`
+  (priced from its turns' tokens, as the swarm's total counts it).
+- **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
+- **A follow-up prompt** from the parent must arrive while the agent is still working; a
+  prompt sent after its session ended gets 404, because the agent is gone.
+
+## Names
+
+`naming:` (swarm-level) picks how agents are named; it applies to replicas and spawned
+children alike.
+
+| `naming` | replicas | spawned children |
+|---|---|---|
+| `numeric` (default) | `<type>-NNNN` (the slot) | `<parent>-<type>-NNNN` (the per-swarm counter) |
+| `words` | `<adjective>-<noun>`, e.g. `amber-otter` | the same, e.g. `brisk-lantern` |
+
+```yaml
+naming: words
+naming_seed: 3          # optional: the same spec gives the same names; unset: random
+types:
+  interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
+```
+
+- **Words.** About 190 adjectives (colors, simple qualities) and 340 nouns (animals, fruits,
+  plants, everyday objects), lowercase, letters and hyphens only, so every name is a valid
+  board handle. When two-word names get crowded, a third word is added.
+- **Reserved.** The controller reserves each name in its store with the type and the slot (a
+  replica) or the parent (a child). A name is unique on the controller and never reused while
+  the swarm exists, not even after its agent is removed. A replica slot that is recreated
+  (scale down and up, a cascade removal) keeps its name, also across controller restarts (the
+  reservations are in `state.db`).
+- **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
+  counts it); with `words` it no longer appears in the name.
+- **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
+  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock remove <name>`. A words
+  name says nothing about the parent: a world that needs the parent uses `X-Flock-Type` and
+  its own records (worlds/chatbot3 binds an interview booking to the first interviewer that
+  uses it).
+- The CLI tells an agent from a swarm by looking the name up (a swarm wins a tie).
 
 ## API
 
@@ -223,7 +288,8 @@ keeps them until removed; it does nothing until prompted.
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
 - The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
-  type's `system_prompt_file`.
+  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock apply` appends to
+  a shared prompt.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
 - Spawned rows are not mirrored to the bucket. If the controller loses its SQLite (no persistent
   storage), workers report agents the controller does not know and the controller unassigns them.

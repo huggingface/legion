@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from flock.controller import naming
 from flock.controller import spawn as spawning
 from flock.controller.jobs import JobsClient, JobState
 from flock.controller.prices import cost_usd, type_price_table
@@ -40,11 +41,14 @@ from flock.models import (
     UnassignCommand,
     WorkerHeartbeat,
     WorkerState,
-    agent_name,
+    WorldSpec,
     comms_tools,
     max_workers,
     parse_duration,
+    worker_type_spec,
 )
+from flock.world.host import world_token
+from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
 
 log = logging.getLogger("flock.reconcile")
 
@@ -81,7 +85,10 @@ class Action:
 
 def launch_refused(exc: BaseException) -> bool:
     """Permanent launch failure: a Hub 4xx (not 408/429, which are worth retrying), or a
-    client-side validation error. Anything else (5xx, network) is transient."""
+    client-side validation error (or one a backend marks `launch_refused`, e.g. a Slurm spec
+    without its script). Anything else (5xx, network) is transient."""
+    if getattr(exc, "launch_refused", False):
+        return True
     status = getattr(getattr(exc, "response", None), "status_code", None)
     if isinstance(status, int):
         return 400 <= status < 500 and status not in (408, 429)
@@ -178,6 +185,8 @@ def _needs_check(w: Row, now: float) -> bool:
     """Fresh, non-draining workers are trusted from heartbeats; others get a job-status check."""
     if w["job_id"] is None:
         return False
+    if w.get("preempted"):  # the worker synced and is exiting: end the slot now
+        return True
     seen = last_seen(w)
     if seen is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
         return False
@@ -229,8 +238,7 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
         if ts is None or a["removing"] or (a["parent"] is None and a["slot"] >= replicas):
             for r in spawning.remove_subtree(store, a["name"], reason, p.now):
                 p.act("unassign", r["name"], r["worker"] or "")
-    for slot in range(replicas):
-        name = agent_name(type_name, slot)
+    for slot, name in enumerate(naming.replica_names(store, spec, type_name, replicas, p.now)):
         if name not in existing:
             store.insert_agent(name, spec.swarm, type_name, slot, p.now)
 
@@ -292,7 +300,8 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
             counts[w["id"]] += 1
             store.update_agent(a["name"], worker=w["id"])
             if w["job_id"]:
-                _send_assign(store, w["id"], a, type_name, ts, spec.tools_version, spec.comms)
+                _send_assign(store, w["id"], a, type_name, ts, spec.tools_version, spec.comms,
+                             spec.world)
             p.act("assign", a["name"], w["id"])
 
     for w in workers:
@@ -311,7 +320,8 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 
 
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec,
-                 tools_version: str | None = None, comms: CommsSpec | None = None) -> None:
+                 tools_version: str | None = None, comms: CommsSpec | None = None,
+                 world: WorldSpec | None = None) -> None:
     if a["removing"]:
         return  # mid-removal (docs/spawn.md): never re-assign it or re-issue its token
     resume = ts.resume_prompt if a["resume_pending"] else None
@@ -325,10 +335,11 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     hold = bool(resume) and (hard or bool(r and r.provider.max_working))
     held, resume = (resume, None) if hold else (None, resume)
     cmd = AssignCommand(
-        agent=a["name"], type=type_name, spec=ts, restore=True, resume_prompt=resume,
+        agent=a["name"], type=type_name, spec=worker_type_spec(ts), restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
         tools_version=tools_version,
         comms=comms,
+        world=world,
     )
     store.enqueue_command(worker_id, cmd.model_dump_json())
     if a["resume_pending"]:
@@ -344,6 +355,15 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
             p.store.update_worker(w["id"], state=worker_state(w, p.now).value)
         return
     p.store.update_worker(w["id"], last_inspect=p.now)
+    if w.get("preempted"):
+        # docs/slurm.md: the worker's last heartbeat said it was preempted and has synced.
+        # End the slot without waiting for the scheduler (squeue/sacct lag, a watcher that
+        # cancels 30 s later): the relaunch registers a fresh incarnation and restores.
+        if not getattr(p.jobs, "external", False):
+            p.cancel(w["job_id"], spec.namespace)
+        _job_ended(p, spec, w, ts, JobState("ERROR", "preempted: worker reported it",
+                                            preempted=True))
+        return
     st = p.job_state(w["job_id"], spec.namespace)
     if st is None:
         return
@@ -353,6 +373,13 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     hb, seen = w["last_heartbeat"], last_seen(w)
     silent = seen is not None and p.now - seen > _DEAD  # no heartbeat, poll or event post
     never = hb is None and st.stage != "SCHEDULING" and p.now - w["launched_at"] > LAUNCH_TIMEOUT
+    if silent and getattr(p.jobs, "external", False):
+        # compute external: nobody to cancel and nothing crashed on our side; the slot gets a
+        # fresh env file and waits for the next external start, without backoff
+        p.act("external_wait", w["id"], "worker silent; waiting for an external start")
+        _job_ended(p, spec, w, ts, JobState("CANCELED", "external worker silent",
+                                            preempted=True))
+        return
     if silent or never:
         p.cancel(w["job_id"], spec.namespace)
         p.act("cancel", w["id"], w["job_id"])
@@ -370,7 +397,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         return
     drain = parse_duration(ts.drain_window).total_seconds() if ts else 0.0
     near_deadline = w["deadline"] is not None and p.now >= w["deadline"] - drain
-    planned = (st.stage == "ERROR" and st.message == "Job timeout") or (
+    planned = st.preempted or (st.stage == "ERROR" and st.message == "Job timeout") or (
         st.stage == "COMPLETED" and (bool(w["draining"]) or near_deadline)
     )
     common = {
@@ -380,10 +407,13 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "last_heartbeat": None,
         "last_seen": None,
         "draining": 0,
+        "preempted": 0,
     }
     if planned:
         store.update_worker(wid, **common, consecutive_crashes=0, next_launch_at=p.now)
         p.act("planned_restart", wid, f"{st.stage}: {st.message}")
+        if st.preempted:  # turns cut by the reclaim resume after the restore
+            _interrupt_turns(p, w, st)
         return
     streak = w["consecutive_crashes"] + 1
     backoff = min(BACKOFF_BASE * 2 ** (streak - 1), BACKOFF_CAP)
@@ -396,6 +426,16 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         next_launch_at=p.now + backoff,
     )
     p.act("crash", wid, f"{st.stage}: {st.message}; backoff {backoff:.0f}s")
+    _interrupt_turns(p, w, st)
+    if streak >= CRASHLOOP_THRESHOLD:
+        store.set_type_health(w["swarm"], w["type"], TypeHealth.crashlooping.value)
+        p.act("crashloop", f"{w['swarm']}/{w['type']}")
+
+
+def _interrupt_turns(p: _Pass, w: Row, st: JobState) -> None:
+    """Agents whose turn the ended job cut: a `turn_interrupted` event and a resume prompt
+    after the restore (unless the worker already reported the turn finished)."""
+    store, wid = p.store, w["id"]
     for a in store.list_agents(worker=wid):
         if a["turn_id"]:
             ev = Event(
@@ -407,9 +447,14 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
             )
             store.append_events(a["swarm"], a["name"], [ev])
             store.update_agent(a["name"], resume_pending=1, turn_id=None)
-    if streak >= CRASHLOOP_THRESHOLD:
-        store.set_type_health(w["swarm"], w["type"], TypeHealth.crashlooping.value)
-        p.act("crashloop", f"{w['swarm']}/{w['type']}")
+
+
+def _file_tail(path: str, n: int = 5) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return [ln.strip() for ln in f.read().splitlines()[-n:] if ln.strip()]
+    except OSError:
+        return []
 
 
 def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
@@ -424,6 +469,8 @@ def _crash_reason(p: _Pass, spec: SwarmSpec, w: Row, st: JobState) -> str:
         except Exception as exc:  # noqa: BLE001 - logs are a nicety; never break the pass
             log.warning("logs of %s failed: %s", w["job_id"], type(exc).__name__)
             lines = []
+        if not lines and w.get("log_path"):  # a job an earlier controller launched
+            lines = _file_tail(w["log_path"])
         if lines:
             reason += " | " + " / ".join(lines)
     return reason[:500]
@@ -457,6 +504,10 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         names.append(spec.comms.invite_env)
     if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
         names.append(ts.resolved_model.provider.api_key_env)
+    if spec.world is not None and (wt := world_token(spec, s.token, s.secret_source)):
+        # the world's shared secret (docs/world.md), as of this launch: a worker whose secret no
+        # longer matches the world's `credential_id` drains and is relaunched with the new one
+        secrets[WORLD_TOKEN_ENV] = wt
     for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]
@@ -468,7 +519,10 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     p.budget -= 1
     store.record_launch(p.now)
     try:
-        job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace)
+        # backends configured per swarm (compute slurm/external) get the spec's compute block
+        extra = {"compute": spec.compute} if getattr(p.jobs, "uses_compute_spec", False) else {}
+        job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace,
+                               **extra)
     except Exception as exc:  # noqa: BLE001 - any Hub failure: keep the loop alive
         # the Hub's message says why (a 400 names the bad field); class name alone does not
         msg = f"{type(exc).__name__}: {str(exc)[:500]}"
@@ -486,6 +540,12 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         p.act("launch_failed", wid, f"{msg}; backoff {backoff:.0f}s")
         return
     store.set_launch_error(spec.swarm, type_name, None, 0)
+    log_path = None
+    if (path_of := getattr(p.jobs, "log_path", None)) is not None:
+        try:
+            log_path = path_of(job_id)
+        except Exception:  # noqa: BLE001 - a nicety
+            log_path = None
     store.clear_commands(wid)
     store.update_worker(
         wid,
@@ -497,11 +557,13 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         last_seen=None,
         last_inspect=None,
         draining=0,
+        preempted=0,
+        log_path=log_path,
         state=WorkerState.launching.value,
         next_launch_at=None,
     )
     for a in store.list_agents(worker=wid):
-        _send_assign(store, wid, a, type_name, ts, spec.tools_version, spec.comms)
+        _send_assign(store, wid, a, type_name, ts, spec.tools_version, spec.comms, spec.world)
     p.act("launch", wid, job_id)
 
 
@@ -521,6 +583,12 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         "draining": int(hb.draining),
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,
     }
+    if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
+        fields["preempted"] = 1
+        for name in hb.interrupted:  # their turn was cut: resume after the restore
+            a = store.get_agent(name)
+            if a is not None and a["worker"] == worker_id:
+                store.update_agent(name, resume_pending=1)
     if w["consecutive_crashes"] and t - (w["launched_at"] or t) >= STABLE_AFTER:
         fields["consecutive_crashes"] = 0
     store.update_worker(worker_id, **fields)
@@ -587,7 +655,7 @@ def _reassign_missing(store: Store, w: Row, reported: set[str], queued: set[str]
         if a["name"] not in pending:
             log.warning("re-sending assign for %s: missing from %s heartbeat", a["name"], w["id"])
             _send_assign(store, w["id"], a, w["type"], ts, sw["spec"].tools_version,
-                         sw["spec"].comms)
+                         sw["spec"].comms, sw["spec"].world)
 
 
 # --------------------------------------------------------------------------- startup and runner

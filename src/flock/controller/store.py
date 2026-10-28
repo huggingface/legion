@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from flock.models import Event, SwarmSpec, TokenUsage
+from flock.models import Event, Grant, SwarmSpec, TokenUsage
 
 DB_NAME = "controller.db"
 
@@ -131,12 +131,29 @@ CREATE TABLE IF NOT EXISTS swarm_flags (
   swarm TEXT PRIMARY KEY,
   body TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS grants (
+  swarm TEXT NOT NULL,
+  target TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (swarm, target)
+);
 CREATE TABLE IF NOT EXISTS spawn_keys (
   parent TEXT NOT NULL,
   key TEXT NOT NULL,
   child TEXT NOT NULL,
   PRIMARY KEY (parent, key)
 );
+CREATE TABLE IF NOT EXISTS agent_names (
+  name TEXT PRIMARY KEY,
+  swarm TEXT NOT NULL,
+  type TEXT NOT NULL,
+  slot INTEGER,
+  parent TEXT,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_names_by_type ON agent_names (swarm, type, slot);
 """
 
 Row = dict[str, Any]
@@ -192,6 +209,10 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
         if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
             self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
+        if "log_path" not in cols:  # the current job's log file (compute slurm)
+            self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
+        if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
+            self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
@@ -304,6 +325,10 @@ class Store:
             self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
         self.listener("reconcile", "")
 
+    def update_swarm_spec(self, spec: SwarmSpec) -> None:
+        """Replace a stored spec in place (no re-apply side effects): a world that moved."""
+        self._x("UPDATE swarms SET spec = ? WHERE name = ?", [spec.model_dump_json(), spec.swarm])
+
     def get_swarm(self, name: str) -> Row | None:
         row = self._one("SELECT * FROM swarms WHERE name = ?", [name])
         if row:
@@ -328,6 +353,35 @@ class Store:
             self._x("DELETE FROM loops WHERE swarm = ?", [name])
             self._x("DELETE FROM loop_agents WHERE swarm = ?", [name])
             self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
+            self._x("DELETE FROM grants WHERE swarm = ?", [name])
+            self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
+
+    # ----------------------------------------------------------------- grants (docs/live.md)
+
+    def put_grant(self, swarm: str, target: str, kind: str, grant: Grant, now: float) -> None:
+        """Set (replace) the grant of a type or an agent; an empty grant deletes it."""
+        if grant.empty():
+            self._x("DELETE FROM grants WHERE swarm = ? AND target = ?", [swarm, target])
+            return
+        self._x("INSERT INTO grants (swarm, target, kind, body, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(swarm, target) DO UPDATE SET kind = excluded.kind, "
+                "body = excluded.body, updated_at = excluded.updated_at",
+                [swarm, target, kind, grant.model_dump_json(exclude_defaults=True), now])
+
+    def list_grants(self, swarm: str) -> list[Row]:
+        rows = self._q("SELECT target, kind, body, updated_at FROM grants WHERE swarm = ? "
+                       "ORDER BY kind DESC, target", [swarm])
+        for row in rows:
+            row["grant"] = Grant.model_validate_json(row.pop("body"))
+        return rows
+
+    def agent_grants(self, swarm: str) -> tuple[dict[str, Grant], dict[str, Grant]]:
+        """(type grants, agent grants) of a swarm, by target."""
+        types: dict[str, Grant] = {}
+        agents: dict[str, Grant] = {}
+        for row in self.list_grants(swarm):
+            (types if row["kind"] == "type" else agents)[row["target"]] = row["grant"]
+        return types, agents
 
     # ----------------------------------------------------------------- tools bundles (docs/tools.md)
 
@@ -491,6 +545,7 @@ class Store:
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
         self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
+        self._x("DELETE FROM grants WHERE kind = 'agent' AND target = ?", [name])
 
     def mark_removing(self, name: str) -> None:
         """First phase of a cascade removal: refuse new children, revoke the token."""
@@ -507,6 +562,33 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [name, swarm, type_name, n, parent, depth, now],
         )
+
+    # ----------------------------------------------------------------- names (naming: words)
+
+    def reserve_name(self, name: str, swarm: str, type_name: str, slot: int | None,
+                     parent: str | None, now: float) -> bool:
+        """Reserve `name` for good (while the swarm exists): False if it is taken by a
+        reservation or an agent anywhere on this controller."""
+        with self._lock:
+            if self.get_agent(name) is not None:
+                return False
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO agent_names (name, swarm, type, slot, parent, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (name, swarm, type_name, slot, parent, now))
+            return cur.rowcount == 1
+
+    def reserved_slot_names(self, swarm: str, type_name: str) -> dict[int, str]:
+        """Replica slot -> its reserved name (a recreated slot keeps it)."""
+        return {r["slot"]: r["name"] for r in self._q(
+            "SELECT slot, name FROM agent_names WHERE swarm = ? AND type = ? AND parent IS NULL "
+            "AND slot IS NOT NULL", [swarm, type_name])}
+
+    def reserved_name(self, name: str) -> Row | None:
+        """A words name's reservation (it outlives the agent): type, slot, parent."""
+        return self._one("SELECT * FROM agent_names WHERE name = ?", [name])
+
+    def reserved_names_count(self, swarm: str) -> int:
+        return self._one("SELECT COUNT(*) AS n FROM agent_names WHERE swarm = ?", [swarm])["n"]
 
     def next_spawn_number(self, swarm: str) -> int:
         """The swarm's spawn counter, incremented; never reused while the swarm exists."""
@@ -808,6 +890,11 @@ class Store:
             n = self.event_count(agent)
         self.listener("events", agent)
         return n
+
+    def event_agents(self, swarm: str) -> list[str]:
+        """Every stream of the swarm with events, removed agents' included."""
+        return [r["agent"] for r in self._q(
+            "SELECT agent FROM event_index WHERE swarm = ? ORDER BY agent", [swarm])]
 
     def event_count(self, agent: str) -> int:
         row = self._one("SELECT lines FROM event_index WHERE agent = ?", [agent])
