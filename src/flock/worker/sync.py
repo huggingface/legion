@@ -46,6 +46,11 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   FLOCK_SYNC_EXCLUDE adds globs, FLOCK_SYNC_EXCLUDE_DEFAULTS=0 drops the defaults) are neither
   uploaded nor deleted by the mirror, and restore skips them, also those already in the bucket.
   `.git/` and worktrees are never excluded by default.
+- The type's `workdir.ephemeral` dirs (root-relative) are excluded like the caches; the agent's
+  setup empties them (`reset_ephemeral`), so they never come back after a move.
+- Each push's modes walk also measures what is mirrored (`WorkdirStats`): above the type's
+  `workdir.soft_*` the agent gets a note, above `max_*` a `workdir_over_quota` event (each at
+  most hourly, `BucketSync._quota`). A push is never refused for size.
 - Restore sets each workdir file's mtime to the bucket's (the listing carries it), so the first
   push after a restore uploads only real changes; session and harness files are marked as
   pushed (`_mark`).
@@ -60,6 +65,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import stat
 import threading
 import time
@@ -69,7 +75,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from flock.models import WorkdirSpec
+
 if TYPE_CHECKING:
+    from flock.models import TypeSpec
     from flock.worker.agents import AgentRuntime
 
 log = logging.getLogger(__name__)
@@ -144,6 +153,57 @@ class WorkdirStats:
     files: int = 0
     bytes: int = 0
     top_dirs: list[tuple[str, int]] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """'182k files, 3100 MB; largest: snaps/ 140k, src/ 2k' (`{workspace}` in loop prompts)."""
+        top = ", ".join(f"{d}/ {_k(n)}" for d, n in self.top_dirs[:3])
+        return (f"{_k(self.files)} files, {self.bytes / 2**20:.0f} MB"
+                + (f"; largest: {top}" if top else ""))
+
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+
+QUOTA_NOTE_EVERY = 3600.0  # s, per agent: the over-soft-limit note and workdir_over_quota
+
+
+def quota_note(ws: WorkdirStats, w: WorkdirSpec) -> str | None:
+    """The note for an agent whose workdir is above its soft limit, else None."""
+    if ws.files <= w.soft_files and ws.bytes / 2**20 <= w.soft_mb:
+        return None
+    where = f", or keep throwaway clones in {w.ephemeral[0]}" if w.ephemeral else ""
+    return (f"your workspace has {ws.summary()} (soft limit {_k(w.soft_files)} files, "
+            f"{w.soft_mb:.0f} MB); delete clones you no longer need{where}")
+
+
+def over_hard_limit(ws: WorkdirStats, w: WorkdirSpec) -> bool:
+    return (ws.files > (w.max_files or 5 * w.soft_files)
+            or ws.bytes / 2**20 > (w.max_mb or 5 * w.soft_mb))
+
+
+def ephemeral_excludes(spec: TypeSpec) -> list[str]:
+    """The type's `workdir.ephemeral` dirs as root-anchored globs (never synced nor restored)."""
+    return [d + "*" for d in (spec.workdir.ephemeral if spec.workdir else [])]
+
+
+def reset_ephemeral(workdir: Path, spec: TypeSpec) -> None:
+    """Empty (or create) the type's ephemeral dirs: run at every agent setup, so a move or a
+    restart never brings back their content. Blocking."""
+    root = workdir.resolve()
+    for d in spec.workdir.ephemeral if spec.workdir else []:
+        p = workdir / d
+        try:
+            if not p.parent.resolve().is_relative_to(root):  # a symlinked parent: leave it
+                log.warning("ephemeral dir %s is outside %s; not touched", p, root)
+                continue
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning("ephemeral dir %s: %s", p, e)
 
 
 def collect_modes(workdir: Path, stats: WorkdirStats | None = None,
@@ -493,6 +553,7 @@ class BucketSync:
         self._mirror: dict[str, bool] = {}
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
         self._meta: dict[str, dict] = {}  # per agent prefix: the meta.json last pushed
+        self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
         self.restore_progress: dict[str, list] = {}
 
@@ -553,10 +614,11 @@ class BucketSync:
             return 0
         meta: list[tuple[Path, str]] = []
         if rt.spec.persist_workdir and rt.workdir.is_dir():
-            exclude = workdir_excludes()
+            exclude = workdir_excludes() + ephemeral_excludes(rt.spec)
             ws = WorkdirStats()
             await asyncio.to_thread(write_modes, rt.workdir, ws, exclude)
-            rt.workdir_files = ws.files
+            rt.workdir_files, rt.workdir_stats = ws.files, ws
+            self._quota(rt, ws)
             stats = {"files": ws.files, "bytes": ws.bytes}
             if self._meta.get(pre) != stats:  # the workdir's size: predicts a restore's time
                 path = rt.sessions_dir / f"{rt.name}.meta.json"
@@ -576,6 +638,19 @@ class BucketSync:
             if meta:
                 self._meta[pre] = stats
         return len(files)
+
+    def _quota(self, rt: AgentRuntime, ws: WorkdirStats) -> None:
+        """Above the soft limit: a note in front of the agent's next prompt, and above the hard
+        one a `workdir_over_quota` event, each at most hourly. The push itself goes on."""
+        w = rt.spec.workdir or WorkdirSpec()
+        note, pre, now = quota_note(ws, w), self.prefix(rt), time.monotonic()
+        if note is None or now - self._quota_at.get(pre, -QUOTA_NOTE_EVERY) < QUOTA_NOTE_EVERY:
+            return
+        self._quota_at[pre] = now
+        rt._note(note)
+        if over_hard_limit(ws, w):
+            rt.emit("workdir_over_quota", {"files": ws.files, "bytes": ws.bytes,
+                                           "top_dirs": [list(t) for t in ws.top_dirs]})
 
     async def restore(self, rt: AgentRuntime) -> RestoreResult:
         try:
@@ -611,7 +686,7 @@ class BucketSync:
         n = sum([await asyncio.to_thread(_clean_parts, d) for d in (rt.workdir, rt.sessions_dir)])
         if n:
             log.info("%s: removed %d stray %s file(s)", rt.name, n, PART_SUFFIX)
-        skip = workdir_excludes()
+        skip = workdir_excludes() + ephemeral_excludes(rt.spec)
         for r, _ in listed:
             rel = r[len(pre):]
             area, _, sub = rel.partition("/")

@@ -516,3 +516,64 @@ async def test_restore_skips_excluded_remote_files(tmp_path):
     assert res.workdir == 2 and not res.failed
     assert sorted(p.relative_to(rt.workdir).as_posix() for p in rt.workdir.rglob("*")
                   if p.is_file()) == ["keep.txt", "wt/.git"]
+
+
+async def test_over_soft_limit_notes_hourly_and_hard_limit_emits_event(tmp_path):
+    from flock.worker.sync import QUOTA_NOTE_EVERY
+    store = MemoryStore()
+    sync = BucketSync(store, "sw")
+    rt, _ = runtime(tmp_path, sync=sync, workdir={"soft_files": 2, "max_files": 5})
+    await rt.setup(restore=False)
+    await rt.prompt("hi")
+    await until(lambda: rt.state.turns == 1)
+    for rel in ["snaps/1/a", "snaps/2/b", "snaps/c", "src/d"]:
+        (rt.workdir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (rt.workdir / rel).write_text("x")
+    await sync.push(rt)
+    assert list(rt._notes) == [("your workspace has 4 files, 0 MB; largest: snaps/ 3, src/ 1 "
+                                "(soft limit 2 files, 2048 MB); delete clones you no longer need")]
+    assert not over_quota(rt)  # 4 <= max_files
+    assert pre_files(store) == 4  # never refused
+    rt._notes.clear()
+    for i in range(3):
+        (rt.workdir / f"e{i}").write_text("x")
+    await sync.push(rt)
+    assert not rt._notes  # at most hourly
+    sync._quota_at[sync.prefix(rt)] -= QUOTA_NOTE_EVERY
+    await sync.push(rt)
+    assert "7 files" in next(iter(rt._notes))
+    ev = over_quota(rt)
+    assert len(ev) == 1 and ev[0]["files"] == 7 and ev[0]["top_dirs"][0] == ["snaps", 3]
+    assert pre_files(store) == 7
+    await rt.stop()
+
+
+def over_quota(rt):
+    return [e.data["data"] for e in list(rt.outbox._q)
+            if e.data.get("customType") == "workdir_over_quota"]
+
+
+def pre_files(store):
+    return sum(1 for k in store.files if "/workdir/" in k)
+
+
+async def test_ephemeral_dir_is_never_synced_and_wiped_on_a_move(tmp_path):
+    store = MemoryStore()
+    eph = {"ephemeral": ["scratch"]}
+    rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"), workdir=eph)
+    await rt.setup(restore=False)
+    assert (rt.workdir / "scratch").is_dir()  # created at setup
+    (rt.workdir / "scratch/clone").mkdir()
+    (rt.workdir / "scratch/clone/x").write_text("x")
+    (rt.workdir / "keep.txt").write_text("k")
+    await rt.sync_now("test")
+    pre = "sw/researcher/researcher-0001/workdir/"
+    assert pre + "keep.txt" in store.files and not [k for k in store.files if "scratch" in k]
+    assert rt.workdir_stats.files == 1  # scratch/ is not counted either
+    store.files[pre + "scratch/old"] = b"from before the setting"
+    await rt.stop()
+    # the next worker (same disk here: a stale local scratch/ too) restores everything else
+    rt2, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"), workdir=eph)
+    await rt2.setup(restore=True)
+    assert (rt2.workdir / "keep.txt").read_text() == "k"
+    assert (rt2.workdir / "scratch").is_dir() and not any((rt2.workdir / "scratch").iterdir())

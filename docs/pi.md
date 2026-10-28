@@ -91,6 +91,33 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   `types.<T>.env.<KEY>: dropped by pi isolation` for the type's `env` keys that would be dropped
   (by the same function; names only the worker's `FLOCK_HARNESS_ENV_DROP` lists are not previewed).
 
+## Workdir
+
+The workdir is mirrored to the bucket and restored whenever the agent moves to another worker,
+so its size is restore time. Regenerable trees are never synced (`node_modules/`, `.venv/`,
+`venv/`, `.cache/`, `.tox/`, `.nox/`, `.gradle/`, `.next/`, `.ipynb_checkpoints/`,
+`__pycache__/`, `*.pyc`, `*.o`, ...; `.git/` and worktrees are). The type's `workdir:` block
+gives the agent feedback instead of refusing anything:
+
+```yaml
+types:
+  coder:
+    workdir:
+      soft_files: 50000   # default; above it (or soft_mb) the agent's next prompt starts with
+      soft_mb: 2048       # "your workspace has 182k files, 3100 MB; largest: snaps/ 140k, ...
+                          # (soft limit 50k files, 2048 MB); delete clones you no longer need",
+                          # at most hourly
+      max_files: null     # default 5 x soft: above it (or max_mb) a `workdir_over_quota
+      max_mb: null        # {files, bytes, top_dirs}` event too, same hourly limit
+      ephemeral: [scratch/]
+```
+
+The workdir still syncs above every limit. `ephemeral` lists directories relative to the
+workdir that are never synced nor restored, and are emptied (or created) at every agent setup,
+so a move or a worker restart starts them empty. Tell the agents in their system prompt, e.g.
+"clone repositories you only need for this session into `scratch/`; it is not saved when you
+move". A loop prompt can show the current size with `{workspace}` (docs/loop.md).
+
 ## Event mapping
 
 | Pi record | AdapterEvent |
