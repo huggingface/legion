@@ -55,6 +55,7 @@ from flock.models import (
     agent_cap,
     hit_max_turns,
     parse_duration,
+    until_deadline,
 )
 
 log = logging.getLogger("flock.loop")
@@ -724,7 +725,7 @@ class LoopEngine:
         assert ts.loop is not None
         until = ts.loop.while_.until
         return LoopMeta(kind=kind, type=type_name, round=round, started_at=_ts(L["started_at"]),
-                        wall_s=parse_duration(until).total_seconds() if until else None,
+                        wall_s=until_deadline(until, L["started_at"]) - L["started_at"] if until else None,
                         cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake,
                         add_tools=list(ts.loop.final.add_tools) if kind == "final" and ts.loop.final else [])
 
@@ -741,7 +742,7 @@ class LoopEngine:
             agent=a["name"], text=with_notices(lp.prompt, line),
             meta=self._meta(ts, type_name, L, "loop", round=st["rounds"], why="turn_end"),
             max_rounds=lp.while_.max_rounds, run=L.get("run"),
-            deadline=_ts(L["started_at"] + parse_duration(until).total_seconds()) if until else None)
+            deadline=_ts(until_deadline(until, L["started_at"])) if until else None)
         self.store.enqueue_command(a["worker"], cmd.model_dump_json())
         st["wstarted"], st["acked"], st["last_activity"] = now, False, now
 
@@ -752,7 +753,7 @@ class LoopEngine:
             return "budget"
         if w is None:
             return None
-        if w.until and now - L["started_at"] >= parse_duration(w.until).total_seconds():
+        if w.until and now >= until_deadline(w.until, L["started_at"]):
             return "until"
         if w.budget_usd is not None:
             cost = sum(a["cost"] for a in self.store.list_agents(spec.swarm, type_name))
