@@ -10,7 +10,7 @@ import yaml
 
 from flock.models import SwarmSpec, load_spec_yaml
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).absolute().parent  # not resolve(): a symlinked copy (experiments/hierarchy) reads its own folder
 
 
 def render(variant="jobs", placeholders=False, compute=None):

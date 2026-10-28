@@ -1,0 +1,69 @@
+# Hierarchy experiment
+
+Run 4's setup (chatbot4 world, board, Pi on vLLM, loop, Slurm scripts) with the swarm
+organized in teams. Waves start **coordinators** only. Each coordinator picks an effort,
+opens or joins a board channel for it, and spawns a team of up to 4 **workers**. Workers
+are the same agent without the right to spawn, with a different role prompt.
+
+## Layout
+
+| file | what |
+|---|---|
+| `spec.yaml` | run 4's spec with two types: `coordinator` and `worker` (a YAML clone of it) |
+| `prompts/system.md` | run 4's system prompt; only the Organization section changed (teams) |
+| `prompts/coordinator.md` | appended for coordinators: the coordinator rules, how to spawn, the team rules |
+| `prompts/worker.md` | appended for workers: who started them, the team rules |
+| `prompts/round.md`, `prompts/final.md` | links to run 4's |
+| `waves.yaml` | 10 coordinators every 10 min, to 50 |
+| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
+
+## Mechanics
+
+- `spawn: {coordinator: {types: {worker: 4}, depth: 1}}`. A fifth worker is refused with
+  `max_children`; `flock remove <worker>` frees a place. Workers have no spawn entry
+  (depth 0), so their `flock spawn` is refused.
+- The worker's first prompt is the coordinator's `--prompt`; `$FLOCK_PARENT` is its coordinator.
+- Sizes: 50 coordinators (`workers.initial: 5`, 12 agents per worker job) and up to 200
+  workers (`max_extra: 17`, opened on demand); `limits: {alive: 250, spawned_total: 400}`.
+  `spawned_total` never frees a place, so it leaves room for teams to be rebuilt. To grow,
+  raise `cap`/`until` in `waves.yaml`, `coordinator.workers.initial` and `limits` together.
+- The shared plan is a `PLAN: <topic>` thread in the team channel; the newest full plan reply
+  is the current plan (see Gaps).
+
+## Launch
+
+Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
+`slurm/` scripts, in a new run directory (`runs/hierarchy/run.env`, from
+`../run4/slurm/run.env.example`) with:
+
+```sh
+RUN3_EXPERIMENT=hierarchy   # controller.sbatch copies experiments/hierarchy (links followed)
+CHATBOT_RUN=hierarchy       # the swarm name (render.py)
+```
+
+then `sbatch world.sbatch hierarchy` and `sbatch controller.sbatch hierarchy`. The controller
+renders this folder, applies it and runs `waves.py run` on `waves.yaml`. Use a fresh
+`CHATBOT_REPO` (seeded with `../run4/publish_seed.py`) if the run must start from the seed.
+
+Offline checks: `python experiments/hierarchy/render.py --committed --out /tmp/h.yaml`,
+`python experiments/hierarchy/waves.py plan`, `pytest tests/test_hierarchy_experiment.py`.
+
+## Gaps
+
+- **Shared planning document.** The board has no editable or pinned post, and a PR per plan
+  change is too slow (it needs review). The prompts use a `PLAN: <topic>` thread with the full
+  plan re-posted as a reply, capped by `max_len` (2000 characters). Needed: a comms tool to edit
+  one's own message or pin one per channel (`comms:edit`/`comms:pin` in
+  `src/flock/comms/tools.py` + `worker/comms_extended.py`, if the board API has them), or a
+  world tool for a plan file outside PR review.
+- **Finding a similar channel.** `channels` lists every channel with the board's fields
+  (name, purpose as given at creation), and `search` reads one channel at a time. Enough for
+  60 channels; a cross-channel search (`search` with `channel: "*"`) would scale better.
+- **Learning about merges.** The world tells only the author (`inbox`: "your PR #N was merged
+  by X") and the merger. The coordinator and teammates learn from the board: the prompt asks
+  the author to post each merge in the team channel. Needed for a reliable trigger: a
+  world-side notice to a list of names (a team field on `open_pr`), or flock relaying the
+  world's `merged` events to the author's parent and siblings as loop notices.
+- **Teams are fixed at spawn.** A worker belongs to the coordinator that spawned it; there is
+  no re-parenting. A coordinator that moves to another effort brings its workers or removes
+  them (unpushed work in a removed worker is lost).
