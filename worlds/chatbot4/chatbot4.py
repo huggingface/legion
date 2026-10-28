@@ -104,6 +104,20 @@ class Chatbot4World(World):
                    "merges, closes, updates); handle it first. New PRs are limited swarm-wide to "
                    "about the merge rate (pr_budget); reviews are unlimited.")
 
+    # The worker uploads the caller's local clone for these calls (workspace-upload-v1).
+    WORKSPACE: ClassVar[dict] = {
+        "open_pr": {"arg": "path", "default": "chatbot-swarm"},
+        "run_bot": {"arg": "ref_or_path", "default": "main", "skip": ["main"], "skip_prefix": "pr:"},
+    }
+
+    def manifest(self) -> dict:
+        m = super().manifest()
+        for t in m["tools"]:
+            t["x-flock-timeout_s"] = 330  # a 300 s run_bot conversation plus the upload
+            if t["name"] in self.WORKSPACE:
+                t["x-flock-workspace"] = self.WORKSPACE[t["name"]]
+        return m
+
     def __init__(self, ws=None, repository=None):
         protect_supervisor()
         self.ws = Path(ws or os.environ.get("CHATBOT_WS", HERE / "ws"))

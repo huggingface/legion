@@ -56,7 +56,7 @@ class LocalHub:
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     # Workflow/contract unit tests. Real kernel isolation is checked separately in
-    # test_run4_isolation.py and required by the prepared cluster dry run.
+    # test_isolation.py and required by the prepared cluster dry run.
     monkeypatch.setattr("sandbox.isolate_command", lambda argv, *args, **kwargs: argv)
     monkeypatch.setenv("CHATBOT_PR_CREATE_GAP_S", "0")  # the gap has its own test
     monkeypatch.setenv("CHATBOT_HUB_OUTBOX_GAP_S", "0")
@@ -1877,3 +1877,14 @@ def test_get_pr_is_a_registered_tool(setup):
     assert "pr" in json.dumps(schema) and "path" in json.dumps(schema)
     got = world.call("get_pr", {"pr": rec["pr"], "path": "bot/modules/weather.py"}, Agent("birch"))
     assert got["content"].startswith("PRIORITY")
+
+
+def test_manifest_declares_workspace_uploads_and_timeouts(setup):
+    from flock.world.protocol import WorldManifest
+
+    tools = {t.name: t for t in WorldManifest.model_validate(setup[0].manifest()).tools}
+    assert tools["open_pr"].workspace.arg == "path" and tools["open_pr"].workspace.default == "chatbot-swarm"
+    run = tools["run_bot"].workspace
+    assert (run.arg, run.default, run.skip, run.skip_prefix) == ("ref_or_path", "main", ["main"], "pr:")
+    assert tools["review_pr"].workspace is None
+    assert {t.timeout_s for t in tools.values()} == {330}

@@ -44,14 +44,29 @@ TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 RESERVED = frozenset({"bash", "done"})  # the llm harness's own tools
 
 
-class WorldTool(BaseModel):
-    """One tool: a Chat Completions function (`parameters` is a JSON schema of type object)."""
+class WorkspaceUpload(BaseModel):
+    """`x-flock-workspace` on a tool (worlds with workspace-upload-v1): the worker uploads the
+    local clone named by argument `arg` (`default` when absent), unless the value is in `skip`
+    or starts with `skip_prefix`."""
 
-    model_config = {"extra": "ignore"}
+    arg: str
+    default: str | None = None
+    skip: list[str] = Field(default_factory=list)
+    skip_prefix: str | None = None
+
+
+class WorldTool(BaseModel):
+    """One tool: a Chat Completions function (`parameters` is a JSON schema of type object),
+    plus optional flock metadata: `x-flock-workspace` and `x-flock-timeout_s` (the least HTTP
+    timeout the worker gives this tool's calls)."""
+
+    model_config = {"extra": "ignore", "populate_by_name": True}
 
     name: str
     description: str = ""
     parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+    workspace: WorkspaceUpload | None = Field(None, alias="x-flock-workspace")
+    timeout_s: float | None = Field(None, alias="x-flock-timeout_s", gt=0)
 
     @field_validator("name")
     @classmethod

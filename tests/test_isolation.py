@@ -24,7 +24,7 @@ def kernel_namespaces():
                             capture_output=True, timeout=5, check=False) if executable else None
     if result is None or result.returncode:
         if os.environ.get("FLOCK_REQUIRE_ISOLATION") == "1":
-            pytest.fail("run4 requires working user/PID/mount namespaces in this image")
+            pytest.fail("process isolation requires working user/PID/mount namespaces in this image")
         pytest.skip("this host denies unprivileged namespaces; required by the cluster dry run")
 
 

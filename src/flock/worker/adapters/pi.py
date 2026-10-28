@@ -164,15 +164,20 @@ def harness_env(env: Mapping[str, str] | None, home: Path,
 GIT_CONFIG_ENV = re.compile(r"GIT_CONFIG_COUNT|GIT_CONFIG_(?:KEY|VALUE)_\d+")
 
 
+ISOLATED_DENY = frozenset({"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN"})
+DROP_VAR = "FLOCK_HARNESS_ENV_DROP"  # comma-separated names a deployment also keeps from Pi
+
+
 def isolated_env(env: dict[str, str], provider_key: str | None) -> dict[str, str]:
-    """Run4 adds only its provider key, agent-scoped tool/controller routing and git's
-    GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n."""
+    """Isolation adds only the provider key, agent-scoped tool/controller routing and git's
+    GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n; never ISOLATED_DENY or the
+    names in the worker's FLOCK_HARNESS_ENV_DROP."""
     allowed = BASE_ENV | set(PI_ENV_DEFAULTS) | {"PI_CODING_AGENT_DIR", "FLOCK_TOOLS_PIN",
               "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", provider_key}
+    deny = ISOLATED_DENY | set(filter(None, os.environ.get(DROP_VAR, "").split(",")))
     return {k: v for k, v in env.items()
             if (k in allowed or k.startswith(BASE_ENV_PREFIXES) or GIT_CONFIG_ENV.fullmatch(k))
-            and k not in {"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN", "CHATBOT_WORLD_TOKEN",
-                          "CHATBOT_BOARD_INVITE", "CHATBOT_REPO_TOKEN"}}
+            and k not in deny}
 
 
 def _usage(u: dict[str, Any] | None) -> TokenUsage:

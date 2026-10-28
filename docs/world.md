@@ -250,20 +250,24 @@ Space is public, so the secret is its only protection.
 ## Local clone uploads (workspace-upload-v1)
 
 A world can advertise `workspace-upload-v1` and implement
-`call_workspace(name, args, agent, snapshot)`. For `open_pr(path=...)` and
-`run_bot(ref_or_path=<local path>)`, the worker captures a git clone rooted inside
-the caller's workdir. It forwards `{args: {...}, workspace: {base_sha, files}}` to
+`call_workspace(name, args, agent, snapshot)`. A tool opts in with
+`x-flock-workspace` on its manifest entry:
+`{"arg": "<argument>", "default": "<value when absent>", "skip": ["<value>", ...], "skip_prefix": "<prefix>"}`
+(only `arg` is required). For a call to that tool, the worker captures the git clone
+named by that argument, rooted inside the caller's workdir, unless the value is in
+`skip` or starts with `skip_prefix`. It forwards `{args: {...}, workspace: {base_sha, files}}` to
 the existing authenticated tool route; the file map contains base64 bytes. The
 upload is outside the model's tool arguments, so the model supplies neither a
-server path nor a base SHA. `main` and `pr:<number>` use no upload.
+server path nor a base SHA. chatbot4 declares it on `open_pr` (`path`) and `run_bot`
+(`ref_or_path`; `main` and `pr:<number>` use no upload).
 
 Only tracked and nonignored files are captured; missing tracked files represent
 deletions. Symlinks, paths outside the agent workspace, git metadata, more than
 10,000 files or more than 128 MiB are refused. The base is the merge base of local
 HEAD and origin/main; the world validates it against its own history. Commit
-local edits and fetch/rebase before refreshing a stale PR. Upload-capable calls
-have a 330-second HTTP read timeout so a 300-second conversation can finish.
-Other worlds keep their existing timeout and dispatch behavior.
+local edits and fetch/rebase before refreshing a stale PR. A tool's optional
+`x-flock-timeout_s` raises the worker's HTTP read timeout for its calls; chatbot4
+sets 330 seconds on every tool so a 300-second conversation can finish.
 
 The chatbot4 world preserves the seed input/output and module loader, runs the
 bot under stdlib/import and side-effect restrictions with resource limits, and

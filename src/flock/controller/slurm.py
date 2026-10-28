@@ -7,7 +7,7 @@ placement, heartbeats and events are unchanged. flock only shells out:
            --no-requeue -J <worker id> --comment=<labels> -o <log_dir>/<worker id>-%j.out
            <worker_script> <launch_dir>/<worker id>-<incarnation>.env
 
-The script is the cluster side's (experiments/run3/slurm/worker.sbatch is a reference): it
+The script is the cluster side's (site-specific, not part of flock): it
 sources the cluster's secrets file and the env file, traps USR1/TERM and runs `flock-worker`.
 `--export` is never passed (the job inherits the submitting environment, Slurm's default) and
 neither is `--signal`: the cluster's node watcher sends SIGUSR1 about 30 s before it cancels a

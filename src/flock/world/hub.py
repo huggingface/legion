@@ -348,13 +348,11 @@ class WorldHub:
         if rt is not None and getattr(rt, "turn_id", None):
             headers[TURN_HEADER] = rt.turn_id
         payload = {"args": args}
-        if "workspace-upload-v1" in snap.manifest.capabilities:
-            local = args.get("path", "chatbot-swarm") if name == "open_pr" else None
-            if name == "run_bot":
-                ref = args.get("ref_or_path", "main")
-                if ref != "main" and not str(ref).startswith("pr:"):
-                    local = ref
-            if local is not None:
+        ws = tool.workspace if "workspace-upload-v1" in snap.manifest.capabilities else None
+        if ws is not None:
+            local = args.get(ws.arg, ws.default)
+            if local is not None and local not in ws.skip and not (
+                    ws.skip_prefix and str(local).startswith(ws.skip_prefix)):
                 if rt is None:
                     return _err("no local workspace is available", t0)
                 try:
@@ -362,7 +360,7 @@ class WorldHub:
                 except (ValueError, OSError) as exc:
                     return _err(str(exc), t0)
         wname = snap.manifest.name
-        timeout = max(self.timeout, 330) if "workspace-upload-v1" in snap.manifest.capabilities else self.timeout
+        timeout = max(self.timeout, tool.timeout_s or 0)
         for attempt in range(RETRIES + 1):
             try:
                 r = await self._http().post(f"{snap.endpoint}/tools/{name}", json=payload,

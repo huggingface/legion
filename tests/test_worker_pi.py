@@ -207,6 +207,13 @@ def test_isolated_env_keeps_git_config_pairs_only():
                    "GIT_CONFIG_KEY_0": "pack.threads", "GIT_CONFIG_VALUE_0": "1",
                    "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0"}
 
+def test_isolated_env_drops_the_deployment_drop_list(monkeypatch):
+    monkeypatch.setenv("FLOCK_HARNESS_ENV_DROP", "REPO_TOKEN,OTHER")
+    env = isolated_env({"PATH": "/bin", "REPO_TOKEN": "r", "KEY": "k"}, "REPO_TOKEN")
+    assert env == {"PATH": "/bin"}
+    assert isolated_env({"KEY": "k", "FLOCK_WORLD_TOKEN": "w"}, "KEY") == {"KEY": "k"}
+
+
 PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://h:8000/v1", "api_key_env": "VLLM_KEY",
                      "self_hosted": True},
              "hf": {"type": "openai_compat", "base_url": "https://router.example/v1",

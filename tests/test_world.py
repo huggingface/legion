@@ -613,6 +613,31 @@ async def test_hub_retries_429_then_gives_the_result():
     await hub.aclose()
 
 
+async def test_hub_uploads_workspaces_and_raises_timeouts_from_the_manifest(monkeypatch, tmp_path):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((json.loads(request.content).get("workspace"), request.extensions["timeout"]["read"]))
+        return httpx.Response(200, json={"ok": True, "text": "fine"})
+
+    monkeypatch.setattr("flock.world.hub.capture", lambda workdir, path: {"path": path})
+    hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"}, timeout=60,
+                   transport=httpx.MockTransport(handler),
+                   runtime=lambda name: type("Rt", (), {"workdir": tmp_path})())
+    ws = {"arg": "ref", "default": "main", "skip": ["main"], "skip_prefix": "pr:"}
+    m = WorldManifest(world_api="v1", name="w", version="1", capabilities=["workspace-upload-v1"],
+                      tools=[{"name": "run", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}}},
+                              "x-flock-workspace": ws, "x-flock-timeout_s": 330},
+                             {"name": "plain"}])
+    assert WorldManifest.model_validate(m.model_dump(mode="json")) == m  # as stored in the spec
+    hub.configure(world_block("http://w", m, "t"), ["run", "plain"])
+    for args in ({}, {"ref": "main"}, {"ref": "pr:3"}, {"ref": "clone"}):
+        assert not (await hub.call("x", "world:run", args)).error
+    assert not (await hub.call("x", "world:plain", {})).error
+    assert seen == [(None, 330), (None, 330), (None, 330), ({"path": "clone"}, 330), (None, 60)]
+    await hub.aclose()
+
+
 async def test_world_tools_sit_next_to_comms_tools_and_reach_flock_tool_via_the_gateway(
         tmp_path, recorder):
     comms = CommsHub(swarm="sw", env={})

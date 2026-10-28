@@ -450,7 +450,7 @@ class TypeSpec(BaseModel):
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None
     # A second file appended to the system prompt by `flock apply` (after a blank line): a
-    # per-type section on top of a prompt several types share (experiments/run4's spawner and
+    # per-type section on top of a prompt several types share (e.g. a spawner and its
     # child types). The worker only sees the combined `system_prompt`.
     system_prompt_append_file: str | None = None
     env: dict[str, str] = Field(default_factory=dict)

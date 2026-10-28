@@ -52,5 +52,7 @@ unset_args=()
 for v in "${SECRET_NAMES[@]}" CHATBOT_WORLD_TOKEN; do unset_args+=(-u "$v"); done
 log "secrets file $SECRETS_FILE: ${written[*]:-<none>} (unset from the exec environment: ${SECRET_NAMES[*]} CHATBOT_WORLD_TOKEN)"
 log "flock-worker in the container: WORK_ROOT=$WORK_ROOT FLOCK_LLM_HOME=$FLOCK_LLM_HOME HOME=$HOME"
+# Isolated Pi never sees this experiment's world/board/repo credentials (pi.isolated_env).
 exec env "${unset_args[@]}" FLOCK_WORKER_SECRETS_FILE="$SECRETS_FILE" FLOCK_WORKER_SECRETS_FILE_UNLINK=1 \
+  FLOCK_HARNESS_ENV_DROP=CHATBOT_WORLD_TOKEN,CHATBOT_BOARD_INVITE,CHATBOT_REPO_TOKEN \
   "$VENV/bin/flock-worker"

@@ -14,7 +14,7 @@ from flock.cli import load_spec
 from flock.controller import spawn as spawning
 from flock.models import AssignCommand, Command
 
-from .test_run4_isolation import kernel_namespaces  # noqa: F401 - the fixture, for the namespace test
+from .test_isolation import kernel_namespaces  # noqa: F401 - the fixture, for the namespace test
 
 EXP = Path(__file__).resolve().parents[1] / "experiments/run4"
 CMD = TypeAdapter(Command)

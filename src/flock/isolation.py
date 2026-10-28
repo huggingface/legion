@@ -1,4 +1,4 @@
-"""Linux process isolation for run4. Setup errors abort; there is no unsandboxed fallback.
+"""Linux process isolation for harness and bot subprocesses. Setup errors abort; there is no unsandboxed fallback.
 
 unshare creates a user/PID/mount namespace and private procfs. The trusted setup
 then builds a small root with read-only runtimes and only the caller's data,
@@ -66,7 +66,7 @@ def _libc():
 def protect_supervisor() -> None:
     """Deny same-UID ptrace and /proc/<pid>/{environ,mem,root} on worker/world."""
     if not sys.platform.startswith("linux") or _libc().prctl(4, 0, 0, 0, 0) != 0:
-        raise RuntimeError("PR_SET_DUMPABLE=0 is required for run4")
+        raise RuntimeError("PR_SET_DUMPABLE=0 is required for process isolation")
 
 
 def tmpfs_size(env=os.environ) -> str:
@@ -176,7 +176,7 @@ def command(argv: list[str], root: Path, *, cwd: Path, readonly=(), writable=(),
     disk-backed directory bound writable at the sandbox's /tmp (see `plan`)."""
     unshare = shutil.which("unshare")
     if not unshare:
-        raise RuntimeError("unshare is required for run4 process isolation")
+        raise RuntimeError("unshare is required for process isolation")
     config = {"root": str(root.absolute()), "cwd": str(cwd.absolute()),
               "readonly_root": not network, "tmpfs_size": tmpfs_size(),
               **plan(argv, cwd=cwd, readonly=readonly, writable=writable, python_only=python_only,
@@ -364,9 +364,9 @@ if __name__ == "__main__":
     try:
         _enter(json.loads(sys.argv[1]), sys.argv[2:])
     except IsolationSetupError as e:  # step, path and flags only, never argv or the env
-        print(f"run4 process isolation failed during setup: {e.strerror}", file=sys.stderr)
+        print(f"process isolation failed during setup: {e.strerror}", file=sys.stderr)
         raise SystemExit(125) from None
     except Exception:  # noqa: BLE001 - fail closed, without leaking arguments or paths
         # Paths, argv and errors could contain credentials. Fail closed without their values.
-        print("run4 process isolation failed during setup", file=sys.stderr)
+        print("process isolation failed during setup", file=sys.stderr)
         raise SystemExit(125) from None
