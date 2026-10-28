@@ -83,6 +83,7 @@ The worker fills these in `prompt`, `first` and `final.prompt`, at send time:
 | `{cap}` | the agent's `while.agent_usd`, 2 decimals, or `none` |
 | `{why}` | what sent it: `first`, `start`, `turn_end`, `every 120s`, `wake: comms.mention`, `retry after error`, `final: max_rounds` |
 | `{last_summary}` | the text the agent last passed to `done` (`llm` harness), else its last reply; `(none yet)` before any. A turn that stopped without `done` (`max_turns`, `max_budget_usd`, an error) sets it to `previous turn ended (<reason>) after N tool call(s) without finishing (last calls: a, b, c)` instead, so the next prompt never repeats an older turn's summary |
+| `{workspace}` | the agent's workdir at its last push: `12k files, 340 MB; largest: snaps/ 9k, src/ 2k` (sync excludes and `workdir.ephemeral` left out), or `not measured yet` |
 
 Anything else in braces, and format specs such as `{cap:.2f}`, is left exactly as written, so
 JSON and code in a prompt survive.
@@ -305,7 +306,7 @@ types:
     tool_choice: required
     max_turns: 14                           # Eliza's tool calls per round
     loop:
-      prompt_file: prompts/round.md         # {round} {elapsed} {wall} {spend} {cap} {why} {last_summary}
+      prompt_file: prompts/round.md         # {round} {elapsed} {wall} {spend} {cap} {why} {last_summary} {workspace}
       every: 120s                           # idle_wake_s
       on: [comms.mention, comms.thread]     # "new board message", debounced 2 s
       stagger: 4s

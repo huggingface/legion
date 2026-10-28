@@ -96,6 +96,36 @@ A size over `max_cpus`/`max_mem` is refused at apply and at launch (`launch_refu
 would accept it and leave it pending forever. A missing `worker_script`/`log_dir`/`launch_dir`
 is refused too. `bucket` is required; `world.url` is required (no `command` worlds).
 
+### Worker knobs
+
+A type's `worker:` block sets its workers' own settings. Workers take it at assign and through
+heartbeats, so a `flock update` changes running workers without a relaunch. Each key set wins
+over the worker's env variable (from the job env, e.g. `run.env`), which wins over the default;
+removing a key returns to the env value.
+
+```yaml
+types:
+  coder:
+    worker:
+      drain_budget_s: 20        # FLOCK_DRAIN_BUDGET_S: the whole preemption handler
+      sync_interval_s: 180      # SYNC_INTERVAL: periodic bucket push
+      comms_rate: 0.5           # FLOCK_COMMS_RATE: board requests/s per worker (0: off)
+      comms_burst: 5            # FLOCK_COMMS_BURST
+      comms_agent_rate: 0.1     # FLOCK_COMMS_AGENT_RATE: one agent's comms calls/s (0: off)
+      comms_agent_burst: 10     # FLOCK_COMMS_AGENT_BURST
+      comms_poll_cycle_s: null  # FLOCK_COMMS_POLL_CYCLE_S (see below)
+      sync_exclude: [data/raw/] # FLOCK_SYNC_EXCLUDE: added to the default excludes
+      restore_batch: 1000       # FLOCK_RESTORE_BATCH: files per download batch
+      restore_threads: 4        # FLOCK_RESTORE_THREADS: one agent's batches in parallel
+      memory: {rotate: null, drain: null, preempt: null, spike_mb: null, recycle_gap_s: null}
+                                # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT, _SPIKE_MB, _RECYCLE_GAP_S
+```
+
+Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` when it is not
+the default 300, else `FLOCK_COMMS_POLL_CYCLE_S`, else 300. Each heartbeat carries `knobs_rev`,
+a hash of the settings in force, and `flock workers` shows it (`knobs`), so workers running
+an older configuration stand out.
+
 The controller: `FLOCK_COMPUTE=slurm` (or `external`). An unknown `FLOCK_COMPUTE` stops it at
 start (it never falls back to HF Jobs); the first log line names the kind and the client.
 
@@ -150,7 +180,9 @@ for the controller).
 15 s it reads its cgroup (the smallest `memory.max` up the tree; `FLOCK_MEMORY_LIMIT_MB` when
 none) and compares nonreclaimable memory (anon + shmem + slab_unreclaimable + kernel_stack +
 pagetables, not page cache) with the limit. Without a limit nothing below is armed. Each rung
-is logged once until memory falls below the first one again:
+is logged once until memory falls below the first one again. `rotate`, `drain`, `preempt`,
+`spike_mb` and `recycle_gap_s` can also be set per type under `worker.memory` (spec, then the
+env variable, then the default):
 
 | Nonreclaimable / limit | Worker |
 |---|---|

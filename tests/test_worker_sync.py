@@ -363,6 +363,22 @@ async def test_first_push_after_full_restore_uploads_nothing_unchanged(tmp_path)
     assert (meta["files"], meta["bytes"]) == (4, 4 * 5 + 3) and rt2.workdir_files == 4
 
 
+def test_workdir_stats_skip_excluded_paths_and_rank_top_dirs(tmp_path):
+    from flock.worker.sync import WorkdirStats, workdir_excludes
+    wd = tmp_path / "wd"
+    for rel, data in [("a.txt", "12"), ("snaps/1/x", "1"), ("snaps/2/y", "1"), ("snaps/z", "1"),
+                      ("src/m.py", "123"), ("src/node_modules/p/i.js", "big" * 100),
+                      ("src/m.o", "bin"), (".venv/bin/python", "b")]:
+        (wd / rel).parent.mkdir(parents=True, exist_ok=True)
+        (wd / rel).write_text(data)
+    os.chmod(wd / "src/m.py", 0o755)
+    (wd / ".venv/bin/python").chmod(0o755)
+    ws = WorkdirStats()
+    assert collect_modes(wd, ws, workdir_excludes()) == {"src/m.py": "0o755"}
+    assert (ws.files, ws.bytes) == (5, 2 + 3 + 3)
+    assert ws.top_dirs == [("snaps", 3), ("src", 1)]
+
+
 def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog):
     from flock.worker.sync import download_resilient
 
@@ -445,10 +461,13 @@ def test_default_workdir_excludes_match_at_any_depth(monkeypatch):
     for rel in ["__pycache__/a.cpython-311.pyc", "a/b/__pycache__/x.txt", "m.pyc", "a/b/m.pyc",
                 ".pytest_cache/v/x", "p/.pytest_cache/v/x", ".mypy_cache/x", "p/q/.mypy_cache/x",
                 ".ruff_cache/x", "p/.ruff_cache/x", ".hypothesis/x", "p/.hypothesis/d/x",
-                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.flock-part"]:
+                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.flock-part", ".cache/pip/x",
+                "web/node_modules/a/b.js", ".venv/bin/python", "p/venv/lib/x", ".tox/py/x",
+                ".nox/s/x", "n/.ipynb_checkpoints/a.ipynb", ".gradle/x", "app/.next/x", "a/b.o"]:
         assert is_excluded(rel, pats), rel
     for rel in ["src/main.py", "my__pycache__/x", ".git/config", "wt/.git", "wt/.git/HEAD",
-                "wt/src/a.py", "pycache/x", "notes.pyc.md", "egg-info/x"]:
+                "wt/src/a.py", "pycache/x", "notes.pyc.md", "egg-info/x", "build/x", "dist/x",
+                "target/x", "a.ox", "myvenv/x"]:
         assert not is_excluded(rel, pats), rel
 
 
@@ -497,3 +516,108 @@ async def test_restore_skips_excluded_remote_files(tmp_path):
     assert res.workdir == 2 and not res.failed
     assert sorted(p.relative_to(rt.workdir).as_posix() for p in rt.workdir.rglob("*")
                   if p.is_file()) == ["keep.txt", "wt/.git"]
+
+
+async def test_over_soft_limit_notes_hourly_and_hard_limit_emits_event(tmp_path):
+    from flock.worker.sync import QUOTA_NOTE_EVERY
+    store = MemoryStore()
+    sync = BucketSync(store, "sw")
+    rt, _ = runtime(tmp_path, sync=sync, workdir={"soft_files": 2, "max_files": 5})
+    await rt.setup(restore=False)
+    await rt.prompt("hi")
+    await until(lambda: rt.state.turns == 1)
+    for rel in ["snaps/1/a", "snaps/2/b", "snaps/c", "src/d"]:
+        (rt.workdir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (rt.workdir / rel).write_text("x")
+    await sync.push(rt)
+    assert list(rt._notes) == [("your workspace has 4 files, 0 MB; largest: snaps/ 3, src/ 1 "
+                                "(soft limit 2 files, 2048 MB); delete clones you no longer need")]
+    assert not over_quota(rt)  # 4 <= max_files
+    assert pre_files(store) == 4  # never refused
+    rt._notes.clear()
+    for i in range(3):
+        (rt.workdir / f"e{i}").write_text("x")
+    await sync.push(rt)
+    assert not rt._notes  # at most hourly
+    sync._quota_at[sync.prefix(rt)] -= QUOTA_NOTE_EVERY
+    await sync.push(rt)
+    assert "7 files" in next(iter(rt._notes))
+    ev = over_quota(rt)
+    assert len(ev) == 1 and ev[0]["files"] == 7 and ev[0]["top_dirs"][0] == ["snaps", 3]
+    assert pre_files(store) == 7
+    await rt.stop()
+
+
+def over_quota(rt):
+    return [e.data["data"] for e in list(rt.outbox._q)
+            if e.data.get("customType") == "workdir_over_quota"]
+
+
+def pre_files(store):
+    return sum(1 for k in store.files if "/workdir/" in k)
+
+
+async def test_ephemeral_dir_is_never_synced_and_wiped_on_a_move(tmp_path):
+    store = MemoryStore()
+    eph = {"ephemeral": ["scratch"]}
+    rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"), workdir=eph)
+    await rt.setup(restore=False)
+    assert (rt.workdir / "scratch").is_dir()  # created at setup
+    (rt.workdir / "scratch/clone").mkdir()
+    (rt.workdir / "scratch/clone/x").write_text("x")
+    (rt.workdir / "keep.txt").write_text("k")
+    await rt.sync_now("test")
+    pre = "sw/researcher/researcher-0001/workdir/"
+    assert pre + "keep.txt" in store.files and not [k for k in store.files if "scratch" in k]
+    assert rt.workdir_stats.files == 1  # scratch/ is not counted either
+    store.files[pre + "scratch/old"] = b"from before the setting"
+    await rt.stop()
+    # the next worker (same disk here: a stale local scratch/ too) restores everything else
+    rt2, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"), workdir=eph)
+    await rt2.setup(restore=True)
+    assert (rt2.workdir / "keep.txt").read_text() == "k"
+    assert (rt2.workdir / "scratch").is_dir() and not any((rt2.workdir / "scratch").iterdir())
+
+
+async def test_parallel_restore_gives_the_same_tree_as_sequential(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from flock.worker import sync as sync_mod
+
+    class SlowStore(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.active = self.peak = 0
+            self.lock = threading.Lock()
+
+        def download(self, files):
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            time.sleep(0.02)
+            try:
+                if any(r.endswith("/bad") for r, _ in files):
+                    raise RuntimeError("503")
+                super().download(files)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    store = SlowStore()
+    pre = await _seeded(tmp_path, store, n_files=40)
+    store.files[pre + "workdir/d/bad"] = b"x"  # fails in its batch and alone: retries keep going
+    trees = {}
+    for threads in (1, 4):
+        monkeypatch.setattr(sync_mod, "SPEC_KNOBS", {"restore_batch": 5, "restore_threads": threads})
+        store.peak = 0
+        rt, _ = runtime(tmp_path / f"t{threads}", sync=BucketSync(store, "sw"))
+        sync = rt.sync
+        monkeypatch.setattr(sync_mod, "RESTORE_BACKOFF", ())
+        res = await sync.restore(rt)
+        assert res.failed == [pre + "workdir/d/bad"] and res.workdir == 40
+        assert store.peak == threads
+        trees[threads] = {p.relative_to(rt.workdir).as_posix(): p.read_bytes()
+                          for p in rt.workdir.rglob("*") if p.is_file()}
+        assert not sync.mirror_deletes(rt)  # incomplete: pushes never delete
+    assert trees[1] == trees[4] and len(trees[4]) == 40

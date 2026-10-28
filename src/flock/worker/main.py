@@ -26,6 +26,7 @@ then `preempt("memory")` (exit 75). A tool tree above the spike size is SIGKILLe
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -62,6 +63,7 @@ from flock.models import (
     TypeSpec,
     UnassignCommand,
     WorkerHeartbeat,
+    WorkerKnobs,
     WorkerMem,
     comms_tools,
     parse_duration,
@@ -71,6 +73,7 @@ from flock.models import (
 from flock.secrets_file import load as load_secrets
 from flock.secrets_file import secret_env
 from flock.tools.toolset import Toolset
+from flock.worker import sync as sync_mod
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
 from flock.worker.cgroup import (
@@ -89,6 +92,8 @@ from flock.worker.sync import (
     BucketSync,
     HubBucketStore,
     count_hub_http,
+    restore_batch,
+    restore_threads,
     workdir_excludes,
 )
 from flock.worker.tools import ToolsManager, tools_root
@@ -363,11 +368,18 @@ def limit_malloc_arenas(env: Mapping[str, str] = os.environ, arenas: int = ARENA
     return libc.mallopt(-8, arenas) == 1  # M_ARENA_MAX
 
 
-def knobs_rev(cfg: WorkerConfig) -> str:
+def knobs_rev(cfg: WorkerConfig, mem: Mapping[str, float] | None = None) -> str:
     """A short hash of the settings this worker runs with (shown next to `spec_rev`)."""
     knobs = [cfg.drain_budget, cfg.sync_interval, cfg.comms_poll_cycle_s, cfg.comms_rate,
-             cfg.comms_burst, cfg.comms_agent_rate, cfg.comms_agent_burst, workdir_excludes()]
+             cfg.comms_burst, cfg.comms_agent_rate, cfg.comms_agent_burst, workdir_excludes(),
+             restore_batch(), restore_threads(), sorted((mem or {}).items())]
     return hashlib.sha256(json.dumps(knobs).encode()).hexdigest()[:12]
+
+
+# `worker.memory` keys of the type spec -> the env names the memory watchdog reads
+MEM_KNOB_ENV = {"rotate": "FLOCK_MEM_ROTATE", "drain": "FLOCK_MEM_DRAIN",
+                "preempt": "FLOCK_MEM_PREEMPT", "spike_mb": "FLOCK_MEM_SPIKE_MB",
+                "recycle_gap_s": "FLOCK_MEM_RECYCLE_GAP_S"}
 
 
 def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
@@ -452,7 +464,7 @@ class Worker:
         # comms (docs/comms.md): one hub per worker, one board poller for all its agents
         self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
                                        runtime=self.agents.get,
-                                       poll_cycle_s=cfg.comms_poll_cycle_s,
+                                       poll_cycle_env=cfg.comms_poll_cycle_s,
                                        rate=cfg.comms_rate, burst=cfg.comms_burst,
                                        agent_rate=cfg.comms_agent_rate,
                                        agent_burst=cfg.comms_agent_burst)
@@ -478,13 +490,51 @@ class Worker:
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
         self.cgroup = cgroup or CgroupMem()
         self.mem: WorkerMem | None = None  # the last cgroup sample (memory_loop)
-        self.mem_thresholds = MemThresholds.from_env()
         self.wants_rotation = False  # heartbeat: the controller may drain us (rotation budget)
         self._rung = 0  # highest ladder rung logged in this episode (0: below `rotate`)
         self._oom_kills: int | None = None
         self._last_recycle = float("-inf")  # loop time of the last memory recycle
         self._delegated = False  # per-agent cgroups (memory_start's probe)
+        self._env_cfg = dataclasses.replace(cfg)  # env/defaults, under the spec's `worker:`
+        self.mem_knobs: dict[str, float] = {}  # FLOCK_MEM_* name -> the spec's value
         self.knobs_rev = knobs_rev(cfg)
+
+    def apply_knobs(self, knobs: WorkerKnobs | None) -> None:
+        """The type's `worker:` block (assign and live spec): each value set wins over the
+        worker's env, which wins over the default. Takes effect at once (sync and drain read
+        `cfg` when they run; the comms budgets and sync excludes are updated here)."""
+        k, env, cfg = knobs or WorkerKnobs(), self._env_cfg, self.cfg
+        pick = (lambda v, e: e if v is None else v)
+        cfg.drain_budget = pick(k.drain_budget_s, env.drain_budget)
+        cfg.sync_interval = pick(k.sync_interval_s, env.sync_interval)
+        cfg.comms_rate = pick(k.comms_rate, env.comms_rate)
+        cfg.comms_burst = pick(k.comms_burst, env.comms_burst)
+        cfg.comms_agent_rate = pick(k.comms_agent_rate, env.comms_agent_rate)
+        cfg.comms_agent_burst = pick(k.comms_agent_burst, env.comms_agent_burst)
+        cfg.comms_poll_cycle_s = pick(k.comms_poll_cycle_s, env.comms_poll_cycle_s)
+        self.comms.set_rate(cfg.comms_rate, cfg.comms_burst, cfg.comms_agent_rate,
+                            cfg.comms_agent_burst)
+        self.comms.poll_cycle_s = k.comms_poll_cycle_s  # env stays below comms.poll_cycle_s
+        sync_mod.SPEC_KNOBS.clear()
+        sync_mod.SPEC_KNOBS.update({n: v for n in ("sync_exclude", "restore_batch",
+                                                   "restore_threads")
+                                    if (v := getattr(k, n)) is not None})
+        self.mem_knobs = {MEM_KNOB_ENV[n]: v for n, v in
+                          (k.memory.model_dump() if k.memory else {}).items() if v is not None}
+        rev = knobs_rev(cfg, self.mem_knobs)
+        if rev != self.knobs_rev:
+            log.info("worker knobs %s: %s", rev, k.model_dump(exclude_none=True) or "env/defaults")
+            self.knobs_rev = rev
+
+    def mem_knob(self, name: str, default: float) -> float:
+        """A memory threshold by its env name (MEM_KNOB_ENV): the spec's `worker.memory`, else
+        the env variable, else `default`."""
+        if name in self.mem_knobs:
+            return self.mem_knobs[name]
+        try:
+            return float(os.environ[name])
+        except (KeyError, ValueError):
+            return default
 
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
@@ -519,6 +569,7 @@ class Worker:
             if pending := self._unassigning.get(cmd.agent):  # re-assign right after unassign
                 await asyncio.shield(pending)
             self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
+            self.apply_knobs(cmd.spec.worker)
             self.world.configure(cmd.world, world_tools(cmd.spec, cmd.world))
             self._world_credential()
             if cmd.agent in self.agents:
@@ -708,6 +759,7 @@ class Worker:
                 log.warning("heartbeat: unreadable type spec: %s", e)
             else:
                 self.spec_rev = resp.get("spec_rev") or type_spec_rev(spec)
+                self.apply_knobs(spec.worker)
                 for rt in self.agents.values():
                     rt.set_live(spec=spec)
         grants = resp.get("grants")
@@ -845,7 +897,7 @@ class Worker:
         """One step of the memory relief ladder on the last sample (see the module doc), and
         the spike guard. Each rung is logged once per episode (until memory falls below
         `rotate`). `worker_lifetime` stays the backstop."""
-        th, mem = self.mem_thresholds, self.mem
+        th, mem = MemThresholds.read(self.mem_knob), self.mem
         if any(rt.live for rt in self.agents.values()):
             if self._delegated:
                 await asyncio.to_thread(self._place_agents)
@@ -894,7 +946,7 @@ class Worker:
                 continue
             try:
                 self.cgroup.place(rt.name, [pid, *(p for p, _ in _descendants(pid))],
-                                  self.cgroup.limit_mb * self.mem_thresholds.agent)
+                                  self.cgroup.limit_mb * MemThresholds.read(self.mem_knob).agent)
             except OSError as e:
                 log.warning("memory: per-agent cgroup for %s failed (%s); not using them", rt.name, e)
                 self._delegated = False

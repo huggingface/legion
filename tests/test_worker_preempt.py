@@ -298,19 +298,19 @@ def _nonreclaim(leaf: Path, mb: float, oom_kill: int = 2) -> None:
 
 
 async def _ladder_worker(tmp_path, n=2):
-    from flock.worker.cgroup import CgroupMem, MemThresholds
+    from flock.worker.cgroup import CgroupMem
 
     from .test_worker_cgroup import v2
 
     leaf = v2(tmp_path / "fs", parent_max=str(10000 * 1024 * 1024))  # 10000 MB
     worker, _, _ = make(tmp_path, FakeController(), MemoryStore(), turn_time=600)
     worker.cgroup = CgroupMem(tmp_path / "fs", env={})
-    worker.mem_thresholds = MemThresholds(drain_deadline_s=0.2)
     s = spec(idle_grace="30s", turn_timeout="10m")
     for name in names(n):
         await worker.dispatch(AssignCommand(agent=name, type="researcher", spec=s, restore=False))
         await worker.dispatch(PromptCommand(agent=name, prompt_id=name, text="work"))
     await until(lambda: all(rt.turn_id for rt in worker.agents.values()) and len(worker.agents) == n)
+    worker.mem_knobs["FLOCK_MEM_DRAIN_DEADLINE_S"] = 0.2  # after the assigns' apply_knobs
     pss = {name: 100.0 * (i + 1) for i, name in enumerate(names(n))}  # the last is the largest
     worker.agent_memory = lambda tmp=True: [(rt, {"pi_pss_mb": pss[rt.name]})
                                             for rt in worker.agents.values()]
@@ -372,10 +372,14 @@ async def test_spike_guard_kills_the_tool_tree_only(tmp_path, monkeypatch):
     assert not worker.draining and rt.turn_id  # the turn goes on
 
 
-def test_mem_thresholds_from_env():
+def test_mem_thresholds_spec_over_env_over_default(tmp_path, monkeypatch):
     from flock.worker.cgroup import MemThresholds
 
-    th = MemThresholds.from_env({"FLOCK_MEM_ROTATE": "0.6", "FLOCK_MEM_SPIKE_MB": "0",
-                                 "FLOCK_MEM_DRAIN_DEADLINE_S": "x"})
-    assert th.rotate == 0.6 and th.spike_mb == 0 and th.drain_deadline_s == 300
-    assert MemThresholds.from_env({}) == MemThresholds()
+    worker, _, _ = make(tmp_path, FakeController(), MemoryStore())
+    assert MemThresholds.read(worker.mem_knob) == MemThresholds()
+    for k, v in {"FLOCK_MEM_ROTATE": "0.6", "FLOCK_MEM_SPIKE_MB": "0",
+                 "FLOCK_MEM_DRAIN_DEADLINE_S": "x", "FLOCK_MEM_DRAIN": "0.8"}.items():
+        monkeypatch.setenv(k, v)
+    worker.mem_knobs["FLOCK_MEM_DRAIN"] = 0.9  # the spec's worker.memory.drain
+    th = MemThresholds.read(worker.mem_knob)
+    assert (th.rotate, th.spike_mb, th.drain_deadline_s, th.drain) == (0.6, 0, 300, 0.9)

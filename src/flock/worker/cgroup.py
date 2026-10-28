@@ -46,18 +46,11 @@ class MemThresholds:
     spike_mb: float = 3072.0  # FLOCK_MEM_SPIKE_MB: one agent's tools above this get SIGKILL; 0 off
     agent: float = 0.5  # FLOCK_MEM_AGENT: memory.max of an agent's own cgroup (if delegated)
 
-    # TODO: read through Worker.mem_knob (spec > env > default) once the worker knob block lands
     @classmethod
-    def from_env(cls, env: Mapping[str, str] = os.environ) -> MemThresholds:
-        kw = {}
-        for f in fields(cls):
-            name = f"FLOCK_MEM_{f.name.upper()}"
-            if env.get(name):
-                try:
-                    kw[f.name] = float(env[name])
-                except ValueError:
-                    log.warning("%s=%r is not a number; using %s", name, env[name], f.default)
-        return cls(**kw)
+    def read(cls, knob: Callable[[str, float], float]) -> MemThresholds:
+        """Each field through `knob(FLOCK_MEM_<NAME>, default)`: Worker.mem_knob (the spec's
+        `worker.memory`, then the env variable, then the default)."""
+        return cls(**{f.name: knob(f"FLOCK_MEM_{f.name.upper()}", f.default) for f in fields(cls)})
 
 
 def _read(p: Path) -> str | None:

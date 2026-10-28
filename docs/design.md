@@ -327,6 +327,8 @@ types:
     tool_choice: null          # llm harness only: auto | required | none | bash
     done_tool: null            # llm harness only: offer `done` (default: on for tool_choice required)
     persist_workdir: true
+    workdir: {soft_files: 50000, soft_mb: 2048, ephemeral: [scratch/]}  # docs/pi.md "Workdir"
+    worker: {sync_interval_s: 180, restore_threads: 4}   # live worker knobs, docs/slurm.md
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
     tools: [ws_write, run_bot] # functions from the tools folder, or `all` (docs/tools.md)
