@@ -192,27 +192,39 @@ container_srun_args() { CTR_SRUN=(); }
     assert (tmp_path / "sleeps").read_text().split() == ["300", "600", "1200", "1800", "1800"]
 
 
-def test_controller_wait_for_world_requeues_after_the_deadline(tmp_path):
+@pytest.mark.parametrize(("swarm_code", "waited", "calls"), [(200, False, ["pin", "run"]), (404, True, [])])
+def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm_code, waited, calls):
+    import shlex
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URL="http://fake/v1",
                CHATBOT_BOARD_URL="http://fake-board", CHATBOT_CHANNEL="general", MODEL_WORKER="fake",
-               WORLD_WAIT_S="2", HOSTS_DIR=str(tmp_path / "run/hosts"), CLOCK=str(tmp_path / "clock"))
+               WORLD_WAIT_S="2", HOSTS_DIR=str(tmp_path / "run/hosts"), CLOCK=str(tmp_path / "clock"),
+               CALLS=str(tmp_path / "calls"), SECRETS_FILE="s", REPO=str(tmp_path))
     (tmp_path / "run/hosts").mkdir()
-    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
-die() { echo "$*" >&2; exit 2; }
-require_var() { :; }
-http_status() { echo 000; }
+    (tmp_path / "run/hosts/world.host").write_text("w\n")
+    exp = tmp_path / "run/experiment"
+    exp.mkdir()
+    (exp / "render.py").write_text("import sys; open(sys.argv[sys.argv.index('--out') + 1], 'w').write('swarm: s\\n')")
+    (exp / "waves.py").write_text("import os, sys; open(os.environ['CALLS'], 'a').write(sys.argv[1] + '\\n')")
+    (tmp_path / "common.sh").write_text(f'''log() {{ echo "$*"; }}
+die() {{ echo "$*" >&2; exit 2; }}
+require_var() {{ :; }}
+publish_host() {{ :; }}
+http_status() {{ case $1 in */healthz) echo 200;; */swarms/*) echo {swarm_code};; *) echo 000;; esac; }}
 ''')
-    import shlex
     (tmp_path / "venv/bin/python").unlink()
     executable(tmp_path / "venv/bin/python", f'#!/bin/bash\nexec {shlex.quote(sys.executable)} "$@"\n')
-    executable(tmp_path / "venv/bin/sbatch", '#!/bin/bash\nexit 97\n')
-    executable(tmp_path / "venv/bin/sacct", '#!/bin/bash\nexit 97\n')
+    for name in ("sbatch", "sacct"):
+        executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
+    executable(tmp_path / "venv/bin/flock", '#!/bin/bash\necho "$1" >> "$CALLS"\n')
+    executable(tmp_path / "venv/bin/flock-controller", '#!/bin/bash\n/bin/sleep 1\n')
     executable(tmp_path / "venv/bin/date", '#!/bin/bash\nn=$(cat "$CLOCK" 2>/dev/null || echo 0)\nn=$((n+1))\necho "$n" > "$CLOCK"\necho "$n"\n')
     result = run_script(tmp_path, "controller.sbatch", env)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "world unavailable after 2s" in result.stdout
-    assert (tmp_path / "requeues").read_text().splitlines() == ["requeue 123"]
+    assert ("world unavailable after 2s" in result.stdout) == waited
+    assert not (tmp_path / "requeues").exists()  # never requeues itself over a missing world
+    called = tmp_path / "calls"
+    assert (called.read_text().split() if called.exists() else []) == calls
 
 
 def test_role_preparation_plan_and_existing_checkout_protection(tmp_path):

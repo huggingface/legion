@@ -91,34 +91,8 @@ CTL_HOST=$(hostname)
 EXP=$RUN_DIR/experiment                         # a writable copy of experiments/run4 (waves.py writes next to the spec)
 SPEC=$EXP/spec.slurm.local.yaml
 WAVES_FILE=$EXP/${RUN3_WAVES:-waves.yaml}
-WORLD_LOG_S=${WORLD_LOG_S:-300}                 # while waiting for the world: one log line every 5 min
 HEALTH_WAIT_S=${HEALTH_WAIT_S:-300}
-WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # bounded cold-start/recovery wait
-
-# ---------------------------------------------------------------- the world must be up first (runbook order)
-# Wait for recovery on a cold node, bounded by WORLD_WAIT_S. world.host is re-read on each try (a requeued world rewrites it). A signal runs the
-# trap once the foreground `sleep`/`http_status` returns; the loop then exits: requeued (USR1)
-# or cancelled (TERM). The URL stays local: an exported RUN3_WORLD_URL would make render.py write
-# a literal world.url and the controller's ${WORLD_HOST} follow (FLOCK_WORLD_HOST_FILE) would never trigger.
-t0=$(date +%s); next_log=$t0
-while :; do
-  [ "$STOPPING" = 0 ] || exit 0
-  world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null)
-  world_url="http://$world_host:7860"
-  [ -n "$world_host" ] && [ "$(http_status "$world_url/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ] && break
-  if [ $(( $(date +%s) - t0 )) -ge "$WORLD_WAIT_S" ]; then  # e.g. controller and world requeued together
-    log "world unavailable after ${WORLD_WAIT_S}s: requeue the controller to wait again (scontrol requeue $SLURM_JOB_ID)"
-    REQUEUE=1
-    scontrol requeue "$SLURM_JOB_ID" || die "scontrol requeue failed; inspect the world recovery log and resubmit the controller"
-    exit 0
-  fi
-  if [ "$(date +%s)" -ge "$next_log" ]; then
-    log "waiting for the world ($(( $(date +%s) - t0 ))s): world.host='${world_host}', no 200 on GET /manifest yet (start world.sbatch if it is not queued)"
-    next_log=$(( $(date +%s) + WORLD_LOG_S ))
-  fi
-  sleep 10
-done
-log "world: $world_url answers /manifest"
+WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # first launch only: how long `flock apply` waits for the world
 
 # ---------------------------------------------------------------- controller environment (fact sheet §2)
 export FLOCK_MODE=space                         # space mode: workers get FLOCK_URL as-is (main.py)
@@ -234,6 +208,19 @@ PY
   swarm=$("$VENV/bin/python" -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["swarm"])' "$SPEC") || return 1
   code=$(http_status "http://127.0.0.1:$CTL_PORT/swarms/$swarm" X-Flock-Token FLOCK_TOKEN)
   if [ "$code" = 404 ]; then  # first start: runbook B step 5 (replicas 0: swarm, kickoff, world check)
+    # First launch only: apply checks the world, so wait for it (a requeue restores its state and
+    # follows the world's host by itself; it never waits). The URL stays local: an exported
+    # RUN3_WORLD_URL would make render.py write a literal world.url and the ${WORLD_HOST} follow
+    # (FLOCK_WORLD_HOST_FILE) would never trigger.
+    local t0 world_host
+    t0=$(date +%s)
+    until world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null) && [ -n "$world_host" ] &&
+          [ "$(http_status "http://$world_host:7860/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ]; do
+      [ $(( $(date +%s) - t0 )) -lt "$WORLD_WAIT_S" ] \
+        || { log "world unavailable after ${WORLD_WAIT_S}s: start world.sbatch, then flock apply by hand (README)"; return 1; }
+      sleep 10
+    done
+    log "world: http://$world_host:7860 answers /manifest"
     log "swarm $swarm not on the controller: flock apply $SPEC ${RUN3_APPLY_ARGS:-}"
     # shellcheck disable=SC2086
     (cd "$EXP" && "$VENV/bin/flock" apply "$SPEC" ${RUN3_APPLY_ARGS:-}) >> "$RUN_DIR/logs/apply-$RUN.log" 2>&1 \
