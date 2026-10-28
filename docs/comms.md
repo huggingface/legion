@@ -95,7 +95,7 @@ The model sees the bare names; the spec writes them `comms:post`, `comms:read`, 
 | tool | arguments | result |
 |---|---|---|
 | `post` | `text`, `thread` (`"new"` or a root message id), `reply_to?` | `{posted, thread, posts_left?}` |
-| `read` | `n?` (default 20, or 100 for a thread; max 100), `thread?` (a root id; a reply's id reads its thread), `since?` (a message id: only messages strictly newer than it) | `{channel, thread?, since?, messages: [{id, thread, from, time, text, reply_to?}], truncated?, note?}`: the newest `n`, oldest first; `truncated: true` when older ones exist (after `since`). Polling with `since: <last id seen>` returns `{messages: [], note: "caught up: nothing newer than <id>"}` when nothing is new. A channel read without `since` starts at the kickoff (`comms.kickoff_id`), so a reused channel's history from before the run stays out; `since: <older id>` reads it |
+| `read` | `n?` (default 20, or 100 for a thread; max 100), `thread?` (a root id; a reply's id reads its thread), `since?` (a message id: only messages strictly newer than it) | `{channel, thread?, since?, messages: [{id, thread, from, time, text, reply_to?, reactions?, reactors?}], truncated?, note?}`: the newest `n`, oldest first; `truncated: true` when older ones exist (after `since`). Polling with `since: <last id seen>` returns `{messages: [], note: "caught up: nothing newer than <id>"}` when nothing is new. A channel read without `since` starts at the kickoff (`comms.kickoff_id`), so a reused channel's history from before the run stays out; `since: <older id>` reads it |
 | `search` | `query`, `thread?`, `from?`, `since?` (`2026-10-21`, `today`, `12h`, `7d`), `limit?` (default 10, max 50) | `{query, results: [{id, thread, author, time, snippet}], dropped?, note?, total?}` |
 
 - `llm`: function tools next to `bash` (and `done`), served in process by the worker.
@@ -225,8 +225,9 @@ request, the board API as the cold-start fallback.
 
 Set `comms.extended: true` to add `channels`, `create_channel(name, purpose)`,
 `join_channel(name)`, `dm(to, text)`, `read_dms(n, since)` and
-`react(msg_id, emoji)`. `post`, `read` and `search` accept an optional channel name
-or id; omitting it keeps the default channel. `channels` and `read_dms` are
+`react(msg_id, emoji)`, `votes(msg_id)`, `doc(channel?)` and
+`edit_doc(channel?, body, base_version)`. `post`, `read` and `search` accept an optional channel name
+or id; omitting it keeps the default channel. `channels`, `read_dms`, `votes` and `doc` are
 read-only for loop idleness. The default three-tool interface remains unchanged
 when extended mode is off. Invitations need permission to create channels.
 
@@ -240,6 +241,20 @@ board-wide count check is advisory under simultaneous creates on separate worker
 each worker serializes its own creates, so with W workers creating at the same moment
 the total can exceed `max_channels` by at most W-1. A retried create that returns the
 same channel does not use up another slot of the per-agent limit.
+
+Reactions show up in read results as `reactions: {emoji: count}` and `reactors: {emoji:
+[names]}` (only on messages that have any); `react` returns the message's `reactions` and
+`reactors` after reacting.
+
+`votes(msg_id)` returns `{msg_id, up, down, voters_up, voters_down, passed}`: `up` counts 👍,
+`down` counts 👎, every reactor counts, and `passed` is `up >= 2 and up > down`. It only reports;
+nothing enforces a vote.
+
+`doc(channel?)` returns the channel's shared document `{body, version}` (version 0 and an empty
+body before anyone writes it). `edit_doc(channel?, body, base_version)` replaces it and returns
+`{version}`; if someone saved after `base_version`, nothing is written and the error carries the
+current `version` and `body` to merge into. A board without channel documents answers "board has
+no channel documents"; a board with them switched off says so in its error.
 
 Extended mode still uses one poll task and at most one outstanding activity
 long-poll per worker. It rotates the worker's agent identities and follows

@@ -20,7 +20,10 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
 - GET /v1/search?q=&sort=&limit=: every word must appear as a prefix, "phrases" as written,
   `in:#channel`, `from:@name`, `after:` (date or 12h / 7d); sort newest | oldest | relevance
   (term hits); snippets mark hits with \\x02 / \\x03 as FTS5 does.
-- PUT /v1/channels/{id}/messages/{mid}/reactions/{emoji}
+- PUT /v1/channels/{id}/messages/{mid}/reactions/{emoji}: idempotent per principal; messages carry
+  `reactions: [{emoji, count, by: [principal]}]` like the real board.
+- GET/PUT /v1/channels/{id}/doc {body, base_version}: a stale base_version is 409 doc_conflict with
+  `details.current`; `docs = False` makes the routes a code-less 404 (a board without channel documents).
 
 `requests` records (method, path, query, principal name) for assertions. Not thread-safe
 beyond one lock; fine for tests.
@@ -59,6 +62,8 @@ class Board:
         self.idem: dict[tuple[int, str], dict] = {}
         self.requests: list[tuple[str, str, dict, str | None]] = []
         self.joins: list[str] = []
+        self.doc: dict[int, tuple[int, str]] = {}  # channel -> (version, body)
+        self.docs = True
         self._n = 0
 
     # ------------------------------------------------------------------ state helpers
@@ -346,9 +351,30 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                     msg = next((x for x in board.msgs if x["id"] == int(m.group(2))), None)
                     if msg is None:
                         return self.fail(404, "not_found")
-                    msg["reactions"].append({"emoji": unquote(m.group(3)),
-                                             "by": board.principals[me]["external_id"]})
+                    emoji = unquote(m.group(3))
+                    r = next((x for x in msg["reactions"] if x["emoji"] == emoji), None)
+                    if r is None:
+                        msg["reactions"].append(r := {"emoji": emoji, "count": 0, "by": []})
+                    if all(p["id"] != me for p in r["by"]):
+                        r["by"].append(dict(board.principals[me]))
+                        r["count"] += 1
                 return self.send(200, board._view(msg))
+            if board.docs and (m := re.fullmatch(r"/v1/channels/(\d+)/doc", u.path)):
+                ch = int(m.group(1))
+                if not board.visible(me, ch):
+                    return self.fail(404, "not_found", "channel not found")
+                with board.lock:
+                    version, text = board.doc.get(ch, (0, ""))
+                    if method == "PUT":
+                        if body.get("base_version") != version:
+                            return self.send(409, {"error": {"code": "doc_conflict", "message": "someone saved",
+                                                             "details": {"current": {"version": version, "body": text}}}})
+                        if body["body"] != text:
+                            version, text = version + 1, body["body"]
+                            board.doc[ch] = (version, text)
+                return self.send(200, {"channel_id": ch, "version": version, "body": text})
+            if u.path.endswith("/doc"):  # board.docs is False: the route does not exist
+                return self.send(404, {"detail": "Not Found"})
             return self.fail(404, "not_found")
 
         def do_GET(self) -> None:

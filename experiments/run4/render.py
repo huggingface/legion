@@ -11,7 +11,7 @@ import yaml
 from flock.models import SwarmSpec
 from flock.specrender import render as render_spec
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).absolute().parent  # not resolve(): a symlinked copy (experiments/hierarchy) reads its own folder
 
 
 def render(variant="jobs", compute=None, env_files=()):
