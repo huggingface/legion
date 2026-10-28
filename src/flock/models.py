@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -1090,6 +1090,12 @@ class LoopWhile(BaseModel):
                 score[k.removeprefix("score_")] = data.pop(k)
             data["score"] = score
         return data
+
+    @field_validator("until", mode="before")
+    @classmethod
+    def _until_from_yaml(cls, v: Any) -> Any:
+        """Unquoted YAML times arrive as date/datetime; a date means midnight UTC."""
+        return v.isoformat() if isinstance(v, date) else v
 
     @field_validator("until")
     @classmethod
