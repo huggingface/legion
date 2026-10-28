@@ -145,6 +145,9 @@ types:
       max_files: null     # default 5 x soft: above it (or max_mb) a `workdir_over_quota
       max_mb: null        # {files, bytes, top_dirs}` event too, same hourly limit
       ephemeral: [scratch/]
+      base: false             # true: restore from a tar plus per-file deltas (below)
+      base_interval_s: 3600   # a new base at most this old ...
+      base_delta_files: 5000  # ... or when this many files changed or were deleted since
 ```
 
 The workdir still syncs above every limit. `ephemeral` lists directories relative to the
@@ -152,6 +155,16 @@ workdir that are never synced nor restored, and are emptied (or created) at ever
 so a move or a worker restart starts them empty. Tell the agents in their system prompt, e.g.
 "clone repositories you only need for this session into `scratch/`; it is not saved when you
 move". A loop prompt can show the current size with `{workspace}` (docs/loop.md).
+
+A restore downloads every mirrored file, about 85 files/s per agent in run 4, so a 100k-file
+workdir took around 20 minutes. With `base: true` the worker keeps a tar of the workdir
+(`workdir.base.tar`, with modes, symlinks and mtimes) plus only the files changed since it, and a
+restore downloads the tar, then those files. Periodic syncs refresh the tar hourly or after 5000
+changed files; drain and preempt syncs only send the changes, as before. Agents whose bucket has
+no tar yet restore file by file and get one at their first periodic sync; turning `base` off
+again goes back to the plain mirror at the next sync. The tar is written to local disk before
+upload and downloaded before extraction, so a worker needs free disk for one workdir's size per
+agent being synced or restored. Details: `flock.worker.sync`.
 
 ## Event mapping
 
