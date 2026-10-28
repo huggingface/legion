@@ -904,8 +904,10 @@ SQLite database with retained online backups. Opt-in `storage.kind: hf-bucket` r
 `token_env` (default `HF_TOKEN`), and positive flush durations `flush_debounce` (`2s`),
 `flush_max_batch_window` (`15s`, at least debounce), `flush_shutdown_timeout` (`45s`).
 Storage settings are immutable during a run. The experimental backend owns one pinned
-hf-mount-nfs v0.13.2 mount and a unique bucket prefix, disables Flock SQLite backups,
+hf-mount-fuse v0.13.2 mount and a unique bucket prefix, disables Flock SQLite backups,
 verifies stopped remote bytes before marking persistence, and reopens from retained prefix
-metadata. It requires a private bucket, local staging and noninteractive NFS mount permission;
+metadata. The pinned msgboard token publication uses authenticated exclusive creation when
+FUSE hard links are unsupported; checkpointed WAL/shared-memory sidecars are normalized to
+empty files only after all SQLite connections close. It requires a private bucket, local staging and working /dev/fuse and fusermount3;
 no distributed SQLite writer support is implied. See `docs/comms.md` for the required live
 compatibility gate and the distinction between upload timing and database durability.

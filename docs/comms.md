@@ -361,7 +361,7 @@ controllers, Slurm or HF Jobs. Existing external-board configurations continue t
 
 ### Bucket-mounted managed boards (experimental)
 
-Set `comms.storage` to let a supervised **hf-mount-nfs v0.13.2** process handle live-file
+Set `comms.storage` to let a supervised **hf-mount-fuse v0.13.2** process handle live-file
 writeback instead of Flock's periodic/final SQLite backups:
 
 ```yaml
@@ -378,9 +378,12 @@ comms:
     flush_shutdown_timeout: 45s
 ```
 
-Install the pinned binary separately and put `hf-mount-nfs` on PATH. On Linux, `mount.nfs`
-and permission to mount/unmount NFS without a password prompt are required. Flock does not
-install software or prompt for sudo during startup. Bucket existence/privacy, the actual
+Install the pinned binary separately and put `hf-mount-fuse` on PATH. On Linux, access to `/dev/fuse`
+and a working `fusermount3` helper are required; no sudo invocation is used. The mount is
+restricted to its owner (`--fuse-owner-only`) and uses random-write staging
+(`--advanced-writes`). For the pinned msgboard version, Flock adapts its hard-link token
+publication to an authenticated, exclusive-create operation; existing tokens are never replaced.
+Flock does not install software or prompt for sudo during startup. Bucket existence/privacy, the actual
 kernel mount and a small upload/download through that mount are checked before agents start.
 The HF token is passed in a mode-0600 file outside the mount; storage does not add it to worker
 environments. Providers that explicitly request the same token still receive their configured
@@ -391,11 +394,13 @@ Every run mounts its own `flock/runs/<swarm>/<uuid>/board/` prefix under
 and writes directly there. Metadata in `<run>/board/metadata.json` and `run.json` records the
 bucket, exact prefix, mount settings and recovery directory. Keep that metadata to reopen
 with `flock board <run-dir>`; reopening uses the same prefix with a new, empty local cache.
-Only one board may own a prefix. Readers on other nodes must use HTTP through port forwarding, rather than opening these
-SQLite files directly. This provides no cross-node SQLite locking or multiple-writer support.
+Only one board may own a prefix. Readers on other nodes must use HTTP through port
+forwarding, rather than opening these SQLite files directly. This provides no cross-node SQLite locking or multiple-writer support.
 
-Shutdown drains workers, closes/checkpoints msgboard, then terminates the mount and waits
-for its upload drain. Flock independently downloads the stopped files through the Hub API,
+Shutdown drains workers and closes/checkpoints msgboard. After all SQLite connections close,
+Flock publishes empty WAL/shared-memory files through the mount to replace stale uploaded
+sidecars left by hf-mount v0.13.2's local-unlink behavior. It then terminates the mount and
+waits for its upload drain. Flock independently downloads the stopped files through the Hub API,
 compares their SHA-256 hashes and checks SQLite integrity and absence of a nonempty remote
 WAL. Only then is `verified_at` recorded and local staging removed. Any failure returns a
 nonzero exit status, keeps staging for recovery and leaves persistence unverified. Mount
@@ -415,7 +420,10 @@ uv run --no-sync python scripts/check_bucket_board.py --bucket HuggingFaceSwarms
 This explicit network check starts no models or HF Jobs. It tests concurrent readers/writers,
 WAL checkpoints, clean shutdown, cold remount, killed board/mount processes and interrupted
 uploads, retaining unique remote test prefixes for inspection. `--faults` additionally needs
-permission to detach its own failed NFS mount. Unit tests use fake mounts and Hub clients.
-The initial check on this dev node reached the private bucket but could not mount NFS
-(`sudo: a password is required`); live WAL and crash compatibility remain unverified.
+`fusermount3` to detach its own failed FUSE mount. Unit tests use fake mounts and Hub clients.
+The complete live FUSE gate passed on this dev node with v0.13.2: concurrent WAL reads/writes,
+checkpointing, verified clean shutdown, cold remount, killed board/server processes, and
+interrupted uploads followed by cold recovery. The two-agent local-vLLM example also completed
+with verified bucket persistence. This remains an experimental, single-owner backend;
+these checks do not guarantee recovery from every possible mid-upload host failure.
 Use `examples/managed-board-bucket.yaml` as an editable local-vLLM example after qualification.

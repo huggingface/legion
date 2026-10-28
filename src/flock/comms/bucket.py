@@ -1,4 +1,4 @@
-"""Owned hf-mount NFS sidecar. The mount, rather than Flock, uploads live board files.
+"""Owned hf-mount FUSE sidecar. The mount, rather than Flock, uploads live board files.
 
 A successful daemon exit is insufficient: verify stopped files through the Hub API.
 This is a single-client experimental backend, not distributed SQLite storage.
@@ -39,7 +39,7 @@ def _digest(path: Path) -> str:
 
 
 def _mount_entry(path: Path) -> tuple[str, str, str] | None:
-    """Read kernel state without touching a potentially dead NFS server."""
+    """Read kernel state without touching a potentially dead FUSE server."""
     target = str(path)
     found = None
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
@@ -86,14 +86,14 @@ class BucketMount:
         from huggingface_hub import HfApi
 
         if sys.platform != "linux":
-            raise BucketStorageError("Bucket boards currently require Linux NFS mount support.")
-        binary = shutil.which("hf-mount-nfs")
+            raise BucketStorageError("Bucket boards currently require Linux FUSE mount support.")
+        binary = shutil.which("hf-mount-fuse")
         if binary is None:
-            raise BucketStorageError(f"Install hf-mount-nfs v{MOUNT_VERSION} on PATH first.")
+            raise BucketStorageError(f"Install hf-mount-fuse v{MOUNT_VERSION} on PATH first.")
         result = subprocess.run([binary, "--version"], capture_output=True, text=True,
                                 timeout=5, env=self._env(), check=False)
-        if result.returncode or not re.fullmatch(r"hf-mount(?:-nfs)? 0\.13\.2\s*", result.stdout):
-            raise BucketStorageError(f"Bucket boards require hf-mount-nfs v{MOUNT_VERSION}.")
+        if result.returncode or not re.fullmatch(r"hf-mount(?:-fuse)? 0\.13\.2\s*", result.stdout):
+            raise BucketStorageError(f"Bucket boards require hf-mount-fuse v{MOUNT_VERSION}.")
         self._token = os.environ.get(self.config.token_env)
         if not self._token:
             raise BucketStorageError(f"Set {self.config.token_env} for the private board bucket.")
@@ -114,7 +114,8 @@ class BucketMount:
         with os.fdopen(fd, "w") as stream:
             stream.write(self._token)
         args = [binary, "--token-file", str(self.token_file), "--cache-dir", str(self.cache),
-                "--dir-mode", "0700", "--file-mode", "0600"]
+                "--dir-mode", "0700", "--file-mode", "0600",
+                "--fuse-owner-only", "--advanced-writes"]
         for field in ("flush_debounce", "flush_max_batch_window", "flush_shutdown_timeout"):
             ms = round(parse_duration(getattr(self.config, field)).total_seconds() * 1000)
             args += ["--" + field.replace("_", "-") + "-ms", str(ms)]
@@ -135,7 +136,7 @@ class BucketMount:
                 raise BucketStorageError(f"Bucket mount failed; see {self.log_path}")
             entry = _mount_entry(self.mount)
             if entry:
-                if entry[1] not in {"nfs", "nfs4"} or entry[2] != "127.0.0.1:/":
+                if entry[1] not in {"fuse", "fuse.hf-mount"} or entry[2] != "hf-mount":
                     raise BucketStorageError("Unexpected filesystem at the owned board mount.")
                 self._mount_id = entry[0]
                 if restore and not (self.mount / "board.db").is_file():
@@ -154,6 +155,7 @@ class BucketMount:
         expected = self.id.encode()
         probe.write_bytes(expected)
         downloaded = self.root / "write-check"
+        verified = False
         try:
             while time.monotonic() < deadline:
                 if cancel.is_set():
@@ -167,14 +169,15 @@ class BucketMount:
                             self.config.bucket, [(f"{self.prefix}/{name}", downloaded)],
                             raise_on_missing_files=True)
                         if downloaded.read_bytes() == expected:
+                            verified = True
                             return
                 except Exception:  # noqa: BLE001, S110 — redact SDK errors, retry until deadline
                     pass
                 cancel.wait(0.5)
             raise BucketStorageError("Bucket write-access check failed; no agents were started.")
         finally:
-            # Do not touch a dead NFS filesystem during failure cleanup.
-            if self.proc is not None and self.proc.poll() is None and _mount_entry(self.mount):
+            # Do not touch a dead FUSE filesystem during failure cleanup.
+            if verified:
                 probe.unlink(missing_ok=True)
             downloaded.unlink(missing_ok=True)
 
@@ -190,7 +193,7 @@ class BucketMount:
 
     def metadata(self) -> dict:
         return {**self.config.model_dump(), "prefix": self.prefix, "mount_version": MOUNT_VERSION,
-                "mount_dir": str(self.mount), "recovery_dir": str(self.cache),
+                "backend": "fuse", "mount_dir": str(self.mount), "recovery_dir": str(self.cache),
                 "stopped_manifest": str(self.root / "stopped-files.json"),
                 "pid": self.proc.pid if self.proc else None, "verified_at": self.verified_at}
 
@@ -206,25 +209,50 @@ class BucketMount:
             busy, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if busy or conn.execute("PRAGMA integrity_check").fetchone() != ("ok",):
                 raise BucketStorageError("Stopped board failed checkpoint or integrity_check.")
+        # All SQLite connections are closed and the WAL is checkpointed. hf-mount 0.13.2
+        # can leave uploaded sidecars behind after local unlink; publish empty sidecars
+        # through the mount so a cold reopen cannot replay an obsolete remote WAL/index.
+        for suffix in ("-wal", "-shm"):
+            with (self.mount / ("board.db" + suffix)).open("wb") as stream:
+                os.fsync(stream.fileno())
         return {p.relative_to(self.mount).as_posix(): _digest(p)
                 for p in self.mount.rglob("*") if p.is_file()
-                and not (p.name.endswith((".lock", "-shm", "-wal")) or p.name == "server.lock")}
+                and not (p.name.endswith((".lock", "-shm", "-wal"))
+                         or p.name.startswith(".flock-write-check-"))}
+
+    def _detach_failed_mount(self) -> None:
+        entry = _mount_entry(self.mount)
+        if entry is None:
+            return
+        if (entry[0] != self._mount_id or entry[1] not in {"fuse", "fuse.hf-mount"}
+                or entry[2] != "hf-mount"):
+            raise BucketStorageError("Refusing to detach an unrecognized or replaced mount.")
+        result = subprocess.run(["fusermount3", "-uz", str(self.mount)],
+                                stdin=subprocess.DEVNULL, capture_output=True,
+                                env=self._env(), timeout=10, check=False)
+        if result.returncode or _mount_entry(self.mount) is not None:
+            raise BucketStorageError(f"Could not detach the failed owned mount at {self.mount}.")
 
     def _drain(self) -> None:
-        if self.proc is not None:
-            if self.proc.poll() is not None:
-                raise BucketStorageError("Bucket mount exited before its shutdown drain.")
-            self.proc.terminate()
-            try:
-                rc = self.proc.wait(timeout=self.shutdown_timeout + 5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-                raise BucketStorageError("Bucket mount shutdown drain timed out.") from None
-            if rc:
-                raise BucketStorageError(f"Bucket mount shutdown failed; see {self.log_path}")
-        if _mount_entry(self.mount) is not None:
-            raise BucketStorageError(f"Owned mount is still active at {self.mount}; cache retained.")
+        try:
+            if self.proc is not None:
+                if self.proc.poll() is not None:
+                    raise BucketStorageError("Bucket mount exited before its shutdown drain.")
+                self.proc.terminate()
+                try:
+                    rc = self.proc.wait(timeout=self.shutdown_timeout + 5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=5)
+                    raise BucketStorageError("Bucket mount shutdown drain timed out.") from None
+                if rc:
+                    raise BucketStorageError(f"Bucket mount shutdown failed; see {self.log_path}")
+            if _mount_entry(self.mount) is not None:
+                raise BucketStorageError(f"Owned mount is still active at {self.mount}; cache retained.")
+        finally:
+            # A dead FUSE server can leave a disconnected mount; detach only our mount ID.
+            if self.proc is not None and self.proc.poll() is not None:
+                self._detach_failed_mount()
 
     def _verify(self, manifest: dict[str, str]) -> None:
         # A fresh download through Hub/Xet, outside the mount's metadata and block caches.
@@ -273,6 +301,8 @@ class BucketMount:
                 # Never traverse/remove an active or replaced mount.
                 if _mount_entry(self.mount) is None:
                     shutil.rmtree(self.root)
+        except sqlite3.Error:
+            raise BucketStorageError("Could not checkpoint the stopped board; cache retained.") from None
         finally:
             # Also remove the temporary credential on startup/verification failure.
             self.token_file.unlink(missing_ok=True)

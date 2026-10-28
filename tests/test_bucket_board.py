@@ -1,6 +1,7 @@
 """Bucket board lifecycle tests: fake mounts/Hub, real local SQLite and msgboard."""
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import sqlite3
@@ -80,7 +81,7 @@ def setup_mount(mount, monkeypatch):
     captured = {}
     monkeypatch.setenv("HF_TOKEN", "fake-secret-never-in-argv")
     monkeypatch.setattr(huggingface_hub, "HfApi", lambda **kw: hub)
-    monkeypatch.setattr(shutil, "which", lambda _: "/tools/hf-mount-nfs")
+    monkeypatch.setattr(shutil, "which", lambda _: "/tools/hf-mount-fuse")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
         returncode=0, stdout="hf-mount 0.13.2\n"))
 
@@ -89,7 +90,7 @@ def setup_mount(mount, monkeypatch):
         return process
 
     monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(bucket, "_mount_entry", lambda p: ("101", "nfs", "127.0.0.1:/")
+    monkeypatch.setattr(bucket, "_mount_entry", lambda p: ("101", "fuse", "hf-mount")
                         if process.poll() is None and mount.mount.exists() else None)
     monkeypatch.setattr(mount, "_check_writable", lambda *a: None)
     return mount, hub, process, captured
@@ -135,6 +136,8 @@ def test_start_passes_flush_controls_and_private_token_file(setup_mount):
     m, _, _, captured = setup_mount
     assert m.start(threading.Event(), 1) == m.mount
     args = captured["args"]
+    assert "--fuse-owner-only" in args and "--advanced-writes" in args
+    assert "sudo" not in args
     assert args[args.index("--flush-debounce-ms") + 1] == "2000"
     assert args[args.index("--flush-max-batch-window-ms") + 1] == "15000"
     assert args[args.index("--flush-shutdown-timeout-ms") + 1] == "45000"
@@ -179,7 +182,7 @@ def test_start_fails_without_writing_a_database(setup_mount, monkeypatch, failur
 def test_mount_disappearance_and_replacement_fail_health_check(setup_mount, monkeypatch):
     m, _, _, _ = setup_mount
     m.start(threading.Event(), 1)
-    monkeypatch.setattr(bucket, "_mount_entry", lambda _: ("999", "nfs", "127.0.0.1:/"))
+    monkeypatch.setattr(bucket, "_mount_entry", lambda _: ("999", "fuse", "hf-mount"))
     with pytest.raises(BucketStorageError, match="disappeared"):
         m.check()
     monkeypatch.setattr(bucket, "_mount_entry", lambda _: None)
@@ -214,7 +217,7 @@ def stopped_board(mount, monkeypatch):
     m.mount.mkdir(parents=True, mode=0o700)
     m.cache.mkdir()
     m.token_file.write_text("secret")
-    with sqlite3.connect(m.mount / "board.db") as db:
+    with contextlib.closing(sqlite3.connect(m.mount / "board.db")) as db, db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("CREATE TABLE messages(body TEXT)")
         db.execute("INSERT INTO messages VALUES ('retained')")
@@ -290,7 +293,7 @@ def test_drain_timeout_kills_sidecar_retains_cache(stopped_board, monkeypatch):
 
 @pytest.fixture
 def fake_mounts(tmp_path, monkeypatch):
-    """Real msgboard on local disk, standing in for the unprivileged NFS boundary."""
+    """Real msgboard on local disk, standing in for the unprivileged FUSE boundary."""
     pytest.importorskip("msgboard")
     remote = {}
     instances = []
@@ -441,21 +444,21 @@ def test_mount_supervisor_drains_on_parent_death_and_removes_token(tmp_path, mon
             raise OSError("cannot spawn")
         monkeypatch.setattr(subprocess, "Popen", fail)
         with pytest.raises(OSError):
-            bucket._supervise(100, token, 1, ["hf-mount-nfs"])
+            bucket._supervise(100, token, 1, ["hf-mount-fuse"])
     else:
         monkeypatch.setattr(subprocess, "Popen", lambda *args, **kw: process)
-        assert bucket._supervise(100, token, 1, ["hf-mount-nfs"]) == 0
+        assert bucket._supervise(100, token, 1, ["hf-mount-fuse"]) == 0
         assert process.terminated
     assert not token.exists()
 
 
 def test_mountinfo_rejects_overmount_and_decodes_spaces(tmp_path, monkeypatch):
     original = Path.read_text
-    lines = "101 1 0:1 / /scratch/my\\040mount rw - nfs 127.0.0.1:/ rw\n"
+    lines = "101 1 0:1 / /scratch/my\\040mount rw - fuse hf-mount rw\n"
     def read(self, *a, **kw):
         return lines if str(self) == "/proc/self/mountinfo" else original(self, *a, **kw)
     monkeypatch.setattr(Path, "read_text", read)
-    assert bucket._mount_entry(Path("/scratch/my mount")) == ("101", "nfs", "127.0.0.1:/")
+    assert bucket._mount_entry(Path("/scratch/my mount")) == ("101", "fuse", "hf-mount")
     lines += "102 1 0:2 / /scratch/my\\040mount rw - ext4 /dev/disk rw\n"
     with pytest.raises(BucketStorageError, match="Multiple mounts"):
         bucket._mount_entry(Path("/scratch/my mount"))
@@ -470,3 +473,107 @@ def test_live_check_script_clean_path_with_fake_mount(tmp_path, fake_mounts, mon
     check_bucket_board.main()
     assert "PASS: concurrent reads/writes" in capsys.readouterr().out
     assert len(fake_mounts) == 2
+
+
+def test_bucket_init_publishes_authenticated_token_without_hard_links(tmp_path, monkeypatch):
+    import errno
+
+    pytest.importorskip("msgboard")
+    import os
+
+    def no_links(src, dst, *a, **kw):
+        raise OSError(errno.ENOTSUP, "hard links unsupported", str(src), None, str(dst))
+
+    monkeypatch.setattr(os, "link", no_links)
+    root = tmp_path / "board"
+    assert managed._init_bucket(str(root)) == 0
+    token = root / "operator.token"
+    original = token.read_bytes()
+    assert token.stat().st_mode & 0o777 == 0o600
+    assert not (root / "operator.token.tmp").exists()
+    assert managed._init_bucket(str(root)) == 0
+    assert token.read_bytes() == original
+
+
+def test_bucket_init_rejects_unrelated_unsupported_operations(tmp_path, monkeypatch):
+    import errno
+
+    pytest.importorskip("msgboard")
+    from msgboard import cli
+
+    def fail(*a):
+        raise OSError(errno.ENOTSUP, "unrelated operation", "other-file")
+
+    monkeypatch.setattr(cli, "cmd_init", fail)
+    with pytest.raises(OSError):
+        managed._init_bucket(str(tmp_path))
+    assert not (tmp_path / "operator.token").exists()
+
+
+def test_failed_write_probe_keeps_file_without_blocking_unlink(setup_mount, monkeypatch):
+    m, _, _, _ = setup_mount
+    m.start(threading.Event(), 1)
+    unlink = Path.unlink
+    def refuse_probe_unlink(self, *a, **kw):
+        if self.parent == m.mount:
+            pytest.fail("failed readiness must not issue another request to the stalled mount")
+        return unlink(self, *a, **kw)
+    monkeypatch.setattr(Path, "unlink", refuse_probe_unlink)
+    with pytest.raises(BucketStorageError, match="write-access"):
+        BucketMount._check_writable(m, threading.Event(), time.monotonic())
+    assert list(m.mount.glob(".flock-write-check-*"))
+
+
+def test_bucket_init_rejects_forged_temporary_token(tmp_path, monkeypatch):
+    import errno
+    import os
+
+    pytest.importorskip("msgboard")
+    from msgboard.errors import ApiError
+
+    def corrupt_and_refuse(src, dst, *a, **kw):
+        Path(src).write_text("forged-token")
+        raise OSError(errno.ENOTSUP, "hard links unsupported", str(src), None, str(dst))
+
+    monkeypatch.setattr(os, "link", corrupt_and_refuse)
+    with pytest.raises(ApiError):
+        managed._init_bucket(str(tmp_path))
+    assert not (tmp_path / "operator.token").exists()
+
+
+def test_persistence_manifest_excludes_transient_probe(stopped_board):
+    m, _ = stopped_board
+    (m.mount / ".flock-write-check-old-cache-entry").write_text("transient")
+    manifest = m._manifest()
+    assert set(manifest) == {"board.db", "operator.token"}
+
+
+@pytest.mark.parametrize("replaced", [False, True])
+def test_dead_fuse_cleanup_detaches_only_owned_mount(stopped_board, monkeypatch, replaced):
+    m, _ = stopped_board
+    m._mount_id = "101"
+    m.proc.returncode = -9
+    active = ("999" if replaced else "101", "fuse", "hf-mount")
+    calls = []
+    monkeypatch.setattr(bucket, "_mount_entry", lambda _: active)
+    def detach(args, **kw):
+        nonlocal active
+        calls.append(args)
+        active = None
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, "run", detach)
+    with pytest.raises(BucketStorageError):
+        BucketMount._drain(m)
+    assert calls == ([] if replaced else [["fusermount3", "-uz", str(m.mount)]])
+    assert m.cache.exists()
+
+
+def test_checkpoint_normalizes_sidecars_only_after_database_is_closed(stopped_board):
+    m, _ = stopped_board
+    manifest = m._manifest()
+    assert (m.mount / "board.db-wal").read_bytes() == b""
+    assert (m.mount / "board.db-shm").read_bytes() == b""
+    assert "board.db-wal" not in manifest and "board.db-shm" not in manifest
+    with contextlib.closing(sqlite3.connect(m.mount / "board.db")) as conn:
+        assert conn.execute("SELECT body FROM messages").fetchall() == [("retained",)]
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)

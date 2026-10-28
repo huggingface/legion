@@ -9,6 +9,7 @@ not the controller's credentials, and exits when its parent disappears.
 from __future__ import annotations
 
 import contextlib
+import errno
 import importlib.util
 import json
 import logging
@@ -136,8 +137,12 @@ class ManagedBoard:
                     raise ManagedBoardError("Refusing to overwrite an existing board; use flock board.")
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.log_path.open("ab") as out:
+                    init_command = ([sys.executable, "-m", "flock.comms.managed",
+                                     "--init-bucket", str(self.local)] if self.bucket else
+                                    [sys.executable, "-m", "msgboard", "init", "--data-dir",
+                                     str(self.local)])
                     result = subprocess.run(
-                        [sys.executable, "-m", "msgboard", "init", "--data-dir", str(self.local)],
+                        init_command,
                         stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                         env=self._env(), timeout=self.startup_timeout, check=False,
                     )
@@ -398,6 +403,38 @@ def reopen(run_dir: Path) -> int:
                 signal.signal(sig, handler)
 
 
+def _init_bucket(data_dir: str) -> int:
+    """Adapt only token publication: bucket FUSE cannot create msgboard's hard link."""
+    from types import SimpleNamespace
+
+    from msgboard import cli, db, store
+
+    root = Path(data_dir)
+    target, temporary = root / TOKEN_FILE, root / (TOKEN_FILE + ".tmp")
+    try:
+        result = cli.cmd_init(SimpleNamespace(data_dir=data_dir))
+    except OSError as exc:
+        if (exc.errno != errno.ENOTSUP or exc.filename != str(temporary)
+                or exc.filename2 != str(target)):
+            raise
+        result = 0
+    if result or target.exists():
+        return result
+    # cmd_init may also leave this state when reopening after interrupted publication.
+    secret = temporary.read_text().strip()
+    with contextlib.closing(db.connect(root / DB_NAME)) as conn:
+        principal = store.authenticate(conn, secret, time.time())
+        if (principal.issuer, principal.external_id, principal.role) != ("local", "operator", "admin"):
+            raise ManagedBoardError("Temporary board token is not the initialized operator.")
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(secret + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.unlink()
+    return 0
+
+
 def _serve(data_dir: str, fd: int, parent: int) -> None:
     """Child process entry point: the socket belongs to us; the operator token stays on disk."""
     import uvicorn
@@ -430,4 +467,6 @@ def _serve(data_dir: str, fd: int, parent: int) -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "--init-bucket":
+        sys.exit(_init_bucket(sys.argv[2]))
     _serve(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))

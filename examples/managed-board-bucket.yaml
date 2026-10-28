@@ -17,7 +17,7 @@ models:
       chat_template_kwargs: {enable_thinking: false}
 comms:
   managed: true
-  # Experimental: requires hf-mount-nfs 0.13.2 on PATH and passwordless NFS mount permission.
+  # Experimental: requires hf-mount-fuse 0.13.2 on PATH and working /dev/fuse.
   # Run scripts/check_bucket_board.py --faults before relying on this storage backend.
   storage:
     kind: hf-bucket

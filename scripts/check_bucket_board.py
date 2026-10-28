@@ -45,8 +45,8 @@ def post(board: ManagedBoard, token: str, channel: int, body: str) -> None:
         response.raise_for_status()
 
 
-def reopen(run_dir: Path) -> ManagedBoard:
-    board = ManagedBoard(run_dir)
+def reopen(run_dir: Path, timeout: float = 300) -> ManagedBoard:
+    board = ManagedBoard(run_dir, startup_timeout=timeout)
     try:
         board.start(restore=True)
         return board
@@ -72,28 +72,6 @@ def faults(run_dir: Path, token: str, channel: int, baseline: set[str]) -> None:
         board.stop()
     print("PASS: abrupt msgboard exit, verified upload and fresh-cache recovery", flush=True)
 
-    # Force upload authentication failures, then require failure rather than a false success.
-    board = reopen(run_dir)
-    try:
-        mount = board.bucket
-        mount.token_file.write_text("invalid-test-token")
-        post(board, token, channel, "during-upload-outage")
-        time.sleep(3)
-    finally:
-        try:
-            board.stop()
-        except ManagedBoardError:
-            if not mount.cache.exists() or mount.verified_at is not None:
-                raise RuntimeError("Failed upload was incorrectly marked persisted.") from None
-        else:
-            raise RuntimeError("Interrupted-upload test unexpectedly reported persistence.")
-    board = reopen(run_dir)
-    try:
-        assert_history(board, token, channel, baseline)
-    finally:
-        board.stop()
-    print("PASS: interrupted uploads fail safely; fresh-cache baseline remains readable", flush=True)
-
     # Kill the actual foreground backend, not its supervisor. Detach only our mount.
     board = reopen(run_dir)
     mount = board.bucket
@@ -111,10 +89,7 @@ def faults(run_dir: Path, token: str, channel: int, baseline: set[str]) -> None:
         if entry is not None:
             if entry[0] != mount._mount_id:
                 raise RuntimeError("Refusing to detach a replacement mount.")
-            args = ["umount", "-l", str(mount.mount)]
-            if os.getuid() != 0:
-                args = ["sudo", "-n", *args]
-            subprocess.run(args, check=True, timeout=10)
+            subprocess.run(["fusermount3", "-uz", str(mount.mount)], check=True, timeout=10)
         with contextlib.suppress(ManagedBoardError):
             board.stop()
     board = reopen(run_dir)
@@ -124,14 +99,41 @@ def faults(run_dir: Path, token: str, channel: int, baseline: set[str]) -> None:
         board.stop()
     print("PASS: abrupt mount exit and empty-cache integrity/history recovery", flush=True)
 
+    # Force upload authentication failures, then require failure rather than a false success.
+    board = reopen(run_dir)
+    try:
+        mount = board.bucket
+        mount.token_file.write_text("invalid-test-token")
+        # hf-mount 0.13.2 caches file credentials for 30 seconds.
+        print("Waiting for the mount's 30-second token cache before upload fault...", flush=True)
+        time.sleep(31)
+        post(board, token, channel, "during-upload-outage")
+        time.sleep(3)
+    finally:
+        try:
+            board.stop()
+        except ManagedBoardError:
+            if not mount.cache.exists() or mount.verified_at is not None:
+                raise RuntimeError("Failed upload was incorrectly marked persisted.") from None
+        else:
+            raise RuntimeError("Interrupted-upload test unexpectedly reported persistence.")
+    board = reopen(run_dir)
+    try:
+        assert_history(board, token, channel, baseline)
+    finally:
+        board.stop()
+    print("PASS: interrupted uploads fail safely; fresh-cache baseline remains readable", flush=True)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", required=True, help="existing private namespace/bucket")
     parser.add_argument("--mount-root", default="/scratch/flock-boards")
     parser.add_argument("--data-dir", type=Path, default=Path(".flock"))
+    parser.add_argument("--startup-timeout", type=float, default=300,
+                        help="seconds for initial mount/upload readiness (default: 300)")
     parser.add_argument("--faults", action="store_true",
-                        help="also kill owned processes and interrupt uploads; requires umount permission")
+                        help="also kill owned processes and interrupt uploads; uses fusermount3 to detach its own failed mount")
     args = parser.parse_args()
     run_dir = args.data_dir.resolve() / f"bucket-check-{uuid.uuid4().hex}"
     spec = SwarmSpec.model_validate({
@@ -140,7 +142,7 @@ def main() -> None:
             "kind": "hf-bucket", "bucket": args.bucket, "mount_root": args.mount_root,
         }},
     })
-    board = ManagedBoard(run_dir)
+    board = ManagedBoard(run_dir, startup_timeout=args.startup_timeout)
     print(f"run directory: {run_dir}", flush=True)
     expected = {f"concurrent-message-{i}" for i in range(24)}
     try:
@@ -165,7 +167,7 @@ def main() -> None:
     finally:
         board.stop()
     previous_cache = board.bucket.cache
-    board = reopen(run_dir)
+    board = reopen(run_dir, args.startup_timeout)
     try:
         if previous_cache == board.bucket.cache:
             raise RuntimeError("Reopen reused its old cache.")
