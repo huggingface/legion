@@ -16,11 +16,13 @@ from typing import Any
 import yaml
 
 from flock.models import load_spec_yaml
+from flock.world.protocol import WORLD_HOST_VAR
 
-# `$$` is a literal `$`. `${WORLD_HOST}` is left as is: the controller expands it at run time
-# (world.url, docs/slurm.md; flock.world.protocol.WORLD_HOST_VAR).
-_RUNTIME = {"WORLD_HOST"}
-_VAR = re.compile(r"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+# Only UPPERCASE names are variables, so inline prompt placeholders (`${spend}`) pass through;
+# `$${` is a literal `${` (a `$$` elsewhere stays as is). `${WORLD_HOST}` is always left for the
+# controller, which expands it at run time (world.url, docs/slurm.md).
+_RUNTIME = {WORLD_HOST_VAR[2:-1]}
+_VAR = re.compile(r"\$\$(?=\{)|\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
 
 def read_env_file(path: str | Path) -> dict[str, str]:
@@ -66,13 +68,14 @@ def substitute(data: Any, env: dict[str, str]) -> Any:
         name, default = m.groups()
         if name is None:
             return "$"
+        if name in _RUNTIME:
+            return m.group(0)
         value = env.get(name)
         if value or (value is not None and default is None):  # `:-` as in sh: empty = unset
             return value
         if default is not None:
             return default
-        if name not in _RUNTIME:
-            missing.add(name)
+        missing.add(name)
         return m.group(0)
 
     def one(s: str) -> Any:

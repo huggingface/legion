@@ -52,11 +52,13 @@ def test_render_multiple_endpoints_and_cluster_lifetime(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_BASE_URLS", "http://first/v1,http://second/v1")
     (tmp_path / "run.env").write_text("MODEL_WORKER=fake-model\nRUN3_BUCKET=hf://buckets/x/y\n")
     data = module("render").render(env_files=[tmp_path / "run.env"])
+    smoke = module("render").render("smoke", env_files=[tmp_path / "run.env"])
+    assert all(t["loop"]["while"] == {"until": "30m", "max_rounds": 100}
+               for t in smoke["types"].values()) and smoke["compute"] == "local"
     assert data["compute"] == {"kind": "slurm", "partition": "hopper-cpu", "cpus": 4,
                                "mem": "7G", "time": "54:00:00"}
     assert data["bucket"] == "hf://buckets/x/y" and data["namespace"] == "cmpatino"
     assert data["world"] == {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"}
-    assert data["providers"]["vllm"]["base_urls"] == ["http://first/v1", "http://second/v1"]
     assert data["models"]["worker-pi"]["model"] == "vllm:fake-model"
     tools = {"world:run_bot", "world:open_pr", "world:review_pr", "world:merge_pr",
              "world:list_prs", "world:close_pr", "world:get_pr"}
@@ -69,6 +71,8 @@ def test_render_multiple_endpoints_and_cluster_lifetime(monkeypatch, tmp_path):
     spec = load_spec(str(out))  # as controller.sbatch applies it
     assert spec.world.url == "http://${WORLD_HOST}:7860" and spec.compute.kind == "slurm"
     assert set(spec.types["agent-child"].tools) == tools
+    assert spec.providers["vllm"].base_urls == ["http://first/v1", "http://second/v1"]
+    assert spec.providers["vllm"].base_url == "http://first/v1"
 
 
 def test_capacity_guard_checks_each_node_and_holds_on_missing_metrics():

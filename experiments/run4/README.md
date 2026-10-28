@@ -11,12 +11,13 @@ module interface. This folder prepares the run; nothing here has been launched.
 - `spec.slurm.yaml`: an overlay with only what differs on the cluster (`compute`,
   `world`, `bucket`, `namespace`), deep-merged over `spec.yaml` by
   `flock apply|update spec.yaml --env run.env --overlay spec.slurm.yaml`. `spec.yaml` holds
-  `${VAR:-default}` placeholders (CHATBOT_RUN, OPENAI_BASE_URL, MODEL_WORKER,
+  `${VAR:-default}` placeholders (CHATBOT_RUN, OPENAI_BASE_URLS, MODEL_WORKER,
   CHATBOT_BOARD_URL, CHATBOT_CHANNEL; the overlay RUN3_BUCKET, RUN3_NAMESPACE,
   RUN3_SLURM_PARTITION), so the defaults give a placeholder spec offline.
-- `render.py`: writes `spec.slurm.local.yaml` with flock's own substitution and overlay,
-  plus the list form of `OPENAI_BASE_URLS` and the `smoke` variant (30-min loops); the
-  controller job and `waves.py` use that file. It contacts no service.
+- `spec.smoke.yaml`: overlay for the 30-min smoke (`RUN3_VARIANT=smoke`).
+- `render.py`: a thin wrapper that writes the same rendered spec to `spec.slurm.local.yaml`
+  (the variant picks the overlays) for the controller job and `waves.py`. It contacts no
+  service.
 - `waves.py`, `waves.yaml`: 20 every 5 min to 100, then +20 every 10 minutes to 300.
   `load_guard.py` checks every configured node before any increase beyond 100:
   three samples across two minutes; hold on persistent queues, >15 s/request,
@@ -181,11 +182,10 @@ to 4 peer helpers (20 + 80 = 100).
   (this commit or later): an older CLI drops the group sections without an error. The
   controller and workers only get the combined `system_prompt`.
 
-Launch, after rendering the spec again (`render.py`). `flock update experiments/run4
---env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml` (add `--ref <commit>`
-for the committed folder) gives the same spec only with a single `OPENAI_BASE_URL`: the
-`OPENAI_BASE_URLS` list is added by `render.py` alone, so while it is set, render and
-`flock update spec.slurm.local.yaml`:
+A live change goes out with `flock update experiments/run4 --env runs/run4/run.env
+--overlay experiments/run4/spec.slurm.yaml` (add `--ref <commit>` for the committed folder);
+it reads the same spec `render.py` writes. Launch, after rendering the spec again
+(`render.py`, for waves.py):
 
 ```sh
 python experiments/run4/waves.py add 20 --spec experiments/run4/spec.slurm.local.yaml \

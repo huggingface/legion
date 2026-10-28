@@ -4,7 +4,7 @@ naming: words
 providers:
   vllm:
     type: openai_compat
-    base_url: ${OPENAI_BASE_URL:-https://your-vllm.example.invalid/v1}
+    base_urls: '${OPENAI_BASE_URLS:-https://your-vllm.example.invalid/v1}'  # comma-separated
     api_key_env: OPENAI_API_KEY
     self_hosted: true
     timeout_s: 300

@@ -18,14 +18,20 @@ def test_substitution_types_interpolates_defaults_and_escapes():
     env = {"N": "7", "HOST": "gpu1", "FLAG": "false", "BLANK": ""}
     data = {"replicas": "${N}", "other": "${M:-20}", "ratio": "${R:-0.5}", "on": "${FLAG}",
             "url": "http://${HOST}:${PORT:-8000}/v1", "model": "vllm:${MODEL:-MODEL_WORKER}",
-            "world": "http://$${WORLD_HOST}:7860", "empty": "${E:-}", "${N}": ["${HOST}"],
+            "world": "http://$${OTHER}:7860", "empty": "${E:-}", "${N}": ["${HOST}"],
             "blank": "${BLANK}", "blank_default": "${BLANK:-d}", "runtime": "${WORLD_HOST}"}
     assert substitute(data, env) == {
         "replicas": 7, "other": 20, "ratio": 0.5, "on": False,
         "url": "http://gpu1:8000/v1", "model": "vllm:MODEL_WORKER",
-        "world": "http://${WORLD_HOST}:7860", "empty": "", "${N}": ["gpu1"],  # keys untouched
+        "world": "http://${OTHER}:7860", "empty": "", "${N}": ["gpu1"],  # keys untouched
         "blank": "", "blank_default": "d", "runtime": "${WORLD_HOST}"}
     assert substitute({"m": "${HOST}"}, {"HOST": "a: b"}) == {"m": "a: b"}  # only scalars typed
+    # inline prompts: lowercase loop placeholders and a shell `$$` stay; WORLD_HOST is never ours
+    prompts = {"p": "spent ${spend} of ${budget:-x}", "cmd": "echo $$ $${HOME}",
+               "url": "http://${WORLD_HOST}:7860"}
+    assert substitute(prompts, {"WORLD_HOST": "node1"}) == {
+        "p": "spent ${spend} of ${budget:-x}", "cmd": "echo $$ ${HOME}",
+        "url": "http://${WORLD_HOST}:7860"}
 
 
 def test_unset_variables_are_listed():
@@ -114,3 +120,12 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
     assert r.exit_code == 1 and "--ref nope" in r.output
     hdr = cli.source_header(exp / "spec.yaml")["X-Flock-Source"]
     assert json.loads(hdr)["dirty"] is True  # without --ref: the working tree, as before
+
+
+def test_base_urls_take_a_comma_separated_string():
+    from flock.models import ProviderSpec
+
+    p = ProviderSpec(type="openai_compat", api_key_env="K", base_urls="http://a/v1, http://b/v1")
+    assert p.base_urls == ["http://a/v1", "http://b/v1"] and p.base_url == "http://a/v1"
+    one = ProviderSpec(type="openai_compat", api_key_env="K", base_url="http://c/v1", base_urls="")
+    assert one.base_urls is None and one.endpoints == ["http://c/v1"]

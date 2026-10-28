@@ -76,7 +76,7 @@ trap on_term TERM INT
 # ---------------------------------------------------------------- inputs
 require_var HF_TOKEN FLOCK_TOKEN CHATBOT_WORLD_TOKEN CHATBOT_BOARD_INVITE OPENAI_API_KEY
 require_var RUN3_BUCKET RUN3_NAMESPACE CHATBOT_BOARD_URL CHATBOT_CHANNEL MODEL_WORKER
-[ -n "${OPENAI_BASE_URL:-}${OPENAI_BASE_URLS:-}" ] || die "OPENAI_BASE_URL (or OPENAI_BASE_URLS) is unset in $RUN_ENV"
+[ -n "${OPENAI_BASE_URLS:-}" ] || die "OPENAI_BASE_URLS (comma-separated, one URL is fine) is unset in $RUN_ENV"
 command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct >/dev/null \
   || die "sbatch/squeue/sacct are not on PATH on $(hostname): the Slurm jobs client cannot launch workers"
 # FLOCK_COMPUTE=slurm needs the backend in the venv: controller/main.py only special-cases `local`,
