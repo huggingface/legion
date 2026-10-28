@@ -37,9 +37,12 @@ are the same agent without the right to spawn, with a different role prompt.
 
 ## Launch
 
-Placeholders to fill before launch: `[PROJECT: to be provided]` in `prompts/system.md` (the repo
-id and the clone line) and in the team rules of `prompts/coordinator.md` and `prompts/worker.md`
-(and of `../voting/prompts/`). Point `CHATBOT_REPO` in `run.env` at the same repo.
+The project repo is the dataset `HuggingFaceSwarms/chatbot-v5`, seeded with
+`../run4/publish_seed.py` (voting uses `HuggingFaceSwarms/chatbot-v6`). The prompts name it in
+`prompts/system.md` (the repo id and the clone line) and in the team rules of
+`prompts/coordinator.md` and `prompts/worker.md`. No placeholders are left. Set
+`CHATBOT_REPO=HuggingFaceSwarms/chatbot-v5` in `run.env` (the run 4 default is its own repo), with
+an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
 `slurm/` scripts, in a new run directory (`runs/hierarchy/run.env`, from
@@ -51,8 +54,7 @@ CHATBOT_RUN=hierarchy       # the swarm name (render.py)
 ```
 
 then `sbatch world.sbatch hierarchy` and `sbatch controller.sbatch hierarchy`. The controller
-renders this folder, applies it and runs `waves.py run` on `waves.yaml`. Use a fresh
-`CHATBOT_REPO` (seeded with `../run4/publish_seed.py`) if the run must start from the seed.
+renders this folder, applies it and runs `waves.py run` on `waves.yaml`.
 
 Offline checks: `python experiments/hierarchy/render.py --out /tmp/h.yaml`,
 `python experiments/hierarchy/waves.py plan`, `pytest tests/test_hierarchy_experiment.py`.

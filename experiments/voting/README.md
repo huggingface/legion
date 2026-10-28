@@ -13,7 +13,8 @@ the rule on their honour: flock and the world do not check it.
 | `spec.yaml` | `../hierarchy/spec.yaml` with `swarm: voting` (a test keeps them equal) |
 | `prompts/coordinator.md`, `prompts/worker.md` | hierarchy's role prompts plus a Voting section |
 | `prompts/round.md` | "Continue your work. If you have time, vote on open proposals in your channels and in #general that interest you." |
-| `prompts/system.md`, `prompts/final.md`, `waves.yaml` | links to hierarchy's / run 4's |
+| `prompts/system.md` | hierarchy's, naming this experiment's repo |
+| `prompts/final.md`, `waves.yaml` | links to hierarchy's / run 4's |
 | `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
 | `spec.slurm.yaml`, `spec.smoke.yaml` | links to run 4's and hierarchy's overlays |
 
@@ -36,8 +37,10 @@ the rule on their honour: flock and the world do not check it.
 
 ## Launch
 
-As hierarchy (fill the same `[PROJECT: to be provided]` placeholders in `prompts/`), with
-`RUN3_EXPERIMENT=voting` and `CHATBOT_RUN=voting` in the run's `run.env`, then
+As hierarchy, on its own dataset `HuggingFaceSwarms/chatbot-v6` (seeded with
+`../run4/publish_seed.py`; the prompts name it, no placeholders are left), with
+`RUN3_EXPERIMENT=voting`, `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/chatbot-v6`
+in the run's `run.env`, then
 `sbatch world.sbatch voting` and `sbatch controller.sbatch voting`.
 
 ## Gaps
