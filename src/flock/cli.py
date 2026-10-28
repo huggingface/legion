@@ -193,6 +193,7 @@ def _print_status(st: dict) -> None:
     typer.echo(
         f"{st['swarm']}  agents={st['agents_total']} workers={st['workers_total']} "
         f"pending={st['pending_prompts']} cost=${st['cost_usd']:.2f}"
+        + (f" gen {st['generation']}" if st.get("generation") else "")
     )
     rows = [
         [
@@ -770,6 +771,33 @@ def status(swarm: str = typer.Argument(None)) -> None:
     for st in swarms:
         _print_status(st)
         typer.echo("")
+
+
+@app.command()
+def history(
+    swarm: str,
+    diff: Annotated[tuple[int, int] | None, typer.Option(
+        "--diff", metavar="A B", help="What changed from generation A to generation B.")] = None,
+) -> None:
+    """A swarm's spec generations (docs/live.md): when each apply that changed the spec ran, who
+    ran it, from which commit, and what it changed. --diff A B diffs two stored specs."""
+    if diff is not None:
+        from flock.live import diff_specs
+
+        a, b = (SwarmSpec.model_validate(_call("GET", f"/swarms/{swarm}/history/{g}")["spec"])
+                for g in diff)
+        for line in diff_specs(a, b) or ["no changes"]:
+            typer.echo(line)
+        return
+    rows = []
+    for h in _call("GET", f"/swarms/{swarm}/history"):
+        src, changes = h["source"], h["diff_summary"]
+        git = " ".join(x for x in (src.get("git_sha", "")[:8] + ("+dirty" if src.get("dirty")
+                                                                   else ""), src.get("ref")) if x)
+        more = f" (+{len(changes) - 1} more)" if len(changes) > 1 else ""
+        rows.append([h["generation"], h["ts"][:19].replace("T", " "), src.get("by") or "-",
+                     git or "-", (changes[0] if changes else "-") + more])
+    _table(rows, ["gen", "applied (UTC)", "by", "git", "changes"])
 
 
 @app.command()

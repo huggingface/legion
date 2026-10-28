@@ -252,3 +252,26 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
         "by": "carlos"}  # not a repo (the folder does not exist)
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
     assert json.loads(cli.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
+
+
+def test_history_lists_generations_and_diffs_two(tmp_path, monkeypatch, app, store):
+    _wire(monkeypatch, app)
+    monkeypatch.setenv("USER", "carlos")
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
+    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    assert runner.invoke(cli.app, ["scale", "demo", "researcher", "5"]).exit_code == 0
+    r = runner.invoke(cli.app, ["status", "demo"])
+    assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[0], r.output
+    r = runner.invoke(cli.app, ["history", "demo"])
+    assert r.exit_code == 0, r.output
+    lines = r.output.splitlines()
+    assert lines[0].split() == ["gen", "applied", "(UTC)", "by", "git", "changes"]
+    assert lines[1].split()[0] == "1" and lines[1].endswith("created")
+    assert lines[2].split()[0] == "2" and "carlos" in lines[2]
+    assert lines[2].endswith("types.researcher.replicas: 3 -> 5")
+    r = runner.invoke(cli.app, ["history", "demo", "--diff", "1", "2"])
+    assert r.exit_code == 0 and r.output == "types.researcher.replicas: 3 -> 5\n", r.output
+    r = runner.invoke(cli.app, ["history", "demo", "--diff", "2", "2"])
+    assert r.output == "no changes\n"
+    assert runner.invoke(cli.app, ["history", "demo", "--diff", "1", "9"]).exit_code == 1
