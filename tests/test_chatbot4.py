@@ -2075,3 +2075,138 @@ def test_a_comment_the_hub_refuses_is_dropped_and_joined_ones_are_split(setup, m
     assert [text.split("\n\n")[1] for _, text in hub.comments] == ["fine", "good"]
     assert world.metrics()["hub_comments_rejected_total"] == 1
     assert world.lanes.metrics()["comment"]["final"] == 1
+
+
+# -- state.db: dirty-row saves, migration from prs.json, cold PR records ---------------------
+
+def _reload(world, tmp_path, name, keep, flush=True):
+    """The state a new world loads from a copy of the workspace holding only prs.json
+    (keep="json": the migration path) or only a backup of state.db (keep="db")."""
+    if flush:
+        world.flush()
+    copy = tmp_path / name
+    copy.mkdir()
+    if keep == "json":
+        shutil.copy(world.db, copy / "prs.json")
+    else:
+        world.store.backup_to(copy / "state.db")
+    loaded = Chatbot4World(copy, world.repo)
+    loaded.close()
+    return loaded.state
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_random_operations_give_the_same_state_through_json_and_sqlite(setup, tmp_path, seed):
+    import random
+
+    world, clone, _ = setup
+    rng = random.Random(seed)
+    names = ["cedar", "birch", "ash"]
+    for step in range(30):
+        op, who = rng.choice(["open", "open", "update", "review", "review", "review", "merge",
+                              "close", "inbox"]), rng.choice(names)
+        mine = [r for r in world.state["prs"].values() if r["state"] == "open" and r["author"] == who]
+        others = [r for r in world.state["prs"].values() if r["state"] == "open" and r["author"] != who]
+        try:
+            if op in ("open", "update"):
+                _module(clone, f"m{step}", f"reply {seed} {step}")
+                pr = rng.choice(mine)["pr"] if op == "update" and mine else None
+                branch = next((r["branch"].rsplit("/", 1)[1] for r in mine if r["pr"] == pr), f"b{step}")
+                submit(world, clone, who, branch, pr=pr)
+            elif op == "review" and others:
+                rec = rng.choice(others)
+                world.call("review_pr", {"pr": rec["pr"], "head_sha": rec["head_sha"],
+                                         "verdict": rng.choice(["approve", "approve", "request_changes"]),
+                                         "comment": "checked"}, Agent(who))
+            elif op == "merge" and (mine or others):
+                world.call("merge_pr", {"pr": rng.choice(mine + others)["pr"]}, Agent(who))
+            elif op == "close" and mine:
+                world.call("close_pr", {"pr": rng.choice(mine)["pr"], "reason": "superseded"}, Agent(who))
+            else:
+                world.call("list_prs", {}, Agent(who))  # delivers the inbox
+        except ToolError:
+            pass
+        world.flush()  # after every operation: the rows state.db holds are the memory's
+        rows = {kind: dict(world.store.iter(kind)) for kind in chatbot4.KINDS}
+        assert {**world.state, **rows, **dict(world.store.iter("_"))} == world.state, (step, op)
+    memory = json.loads(json.dumps(world.state))
+    assert memory["prs"]
+    assert _reload(world, tmp_path, "from-json", "json") == memory
+    assert _reload(world, tmp_path, "from-db", "db") == memory
+
+
+def test_a_save_cut_mid_transaction_keeps_the_saved_state_and_is_retried(setup, tmp_path):
+    import sqlite3
+
+    world, clone, _ = setup
+    world.save_stop.set()  # no background saver: this test runs every save
+    world.save_wake.set()
+    world.saver.join()
+    rec = submit(world, clone)
+    world.flush()
+    saved = json.loads(json.dumps(world.state))
+    approve(world, rec)  # the PR's review and the author's inbox: two dirty rows
+    real, calls = world.store._db, []
+
+    class Cut:  # dies after BEGIN and the first upsert, as a killed saver
+        def execute(self, *args):
+            calls.append(args[0])
+            if len(calls) == 3:
+                raise sqlite3.OperationalError("disk I/O error (injected)")
+            return real.execute(*args)
+
+    world.store._db = Cut()
+    with pytest.raises(sqlite3.OperationalError):
+        world.flush()
+    world.store._db = real
+    assert calls[0] == "BEGIN IMMEDIATE" and world.store.pending == 2
+    assert _reload(world, tmp_path, "cut", "db", flush=False) == saved
+    world.flush()
+    memory = json.loads(json.dumps(world.state))
+    assert memory != saved and _reload(world, tmp_path, "retried", "db") == memory
+
+
+def test_a_run4_prs_json_is_migrated_on_the_first_start(setup, caplog):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    world.close()
+    state = json.loads(world.db.read_text())  # what a run-4 archive carries, plus older records
+    state["prs"]["90"] = {**state["prs"][str(rec["pr"])], "pr": 90, "state": "merged",
+                          "branch": "agents/ash/old", "merged_sha": rec["head_sha"]}
+    state["drafts"]["agents/ash/parked"] = {"pr": 91, "author": "ash", "branch": "agents/ash/parked",
+                                            "base_sha": rec["base_sha"], "sha": rec["head_sha"],
+                                            "title": "t", "parked_at": 1.0, "url": "u"}
+    state["inbox"]["ash"] = [{"pr": 90, "kind": "merged", "text": "merged", "ts": 1.0}]
+    state["pr_merges"] = [time.time()]
+    state["hub_outbox"] = []
+    _write_archive(world, state)
+    caplog.set_level("WARNING")
+    migrated = Chatbot4World(world.ws, world.repo)
+    assert "migrated prs.json to state.db (2 PRs)" in caplog.text
+    del state["hub_outbox"]
+    assert migrated.state == state
+    migrated.close()
+    world.db.unlink()  # from state.db alone
+    assert Chatbot4World(world.ws, world.repo).state == state
+    assert "differ" not in caplog.text
+
+
+def test_old_merged_and_closed_prs_move_to_the_cold_table(setup):
+    world, clone, _ = setup
+    one, two = submit(world, clone, branch="one"), submit(world, clone, branch="two")
+    world.close_pr(Agent("cedar"), one["pr"], "superseded")
+    approve(world, two)
+    world.merge_pr(Agent("birch"), two["pr"])
+    with world.lock:
+        for key in world.ended:
+            world.ended[key] -= chatbot4.COLD_AFTER + 1
+    world.flush()
+    assert world.state["prs"] == {} and world.store.get("prs", str(one["pr"]))["state"] == "closed"
+    assert "closed" not in json.loads(world.db.read_text())["prs"]  # prs.json drops them too
+    for w in (world, Chatbot4World(world.ws, world.repo)):
+        assert w.state["prs"] == {}
+        assert [r["pr"] for r in w.list_prs("closed")] == [one["pr"]]
+        assert [r["pr"] for r in w.list_prs("all", author="cedar")] == [one["pr"], two["pr"]]
+        assert w.get_pr(two["pr"])["state"] == "merged"
+        with pytest.raises(ToolError, match="slug already used"):
+            submit(w, clone, branch="one")
