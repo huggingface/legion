@@ -197,7 +197,7 @@ container_srun_args() { CTR_SRUN=(); }
 def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm_code, waited, calls):
     import shlex
     env = shell_environment(tmp_path)
-    env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URL="http://fake/v1",
+    env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URLS="http://fake/v1",
                CHATBOT_BOARD_URL="http://fake-board", CHATBOT_CHANNEL="general", MODEL_WORKER="fake",
                WORLD_WAIT_S="2", HOSTS_DIR=str(tmp_path / "run/hosts"), CLOCK=str(tmp_path / "clock"),
                CALLS=str(tmp_path / "calls"), SECRETS_FILE="s", REPO=str(tmp_path))

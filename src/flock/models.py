@@ -156,6 +156,14 @@ class ProviderSpec(BaseModel):
     # health snapshots: num_requests_waiting / running, KV cache usage (docs/health.md).
     metrics: bool = False
 
+    @field_validator("base_urls", mode="before")
+    @classmethod
+    def _url_list(cls, v: Any) -> Any:
+        """A comma-separated string is a list (`base_urls: ${OPENAI_BASE_URLS:-}`); "" is none."""
+        if isinstance(v, str):
+            return [u.strip() for u in v.split(",") if u.strip()] or None
+        return v
+
     @field_validator("api_key_env")
     @classmethod
     def _env_name(cls, v: str) -> str:
