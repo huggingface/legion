@@ -4,7 +4,8 @@
 `Class` (or takes a World instance named so) and serves it with uvicorn on
 `$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default 127.0.0.1:8765), requiring `X-World-Token` to
 equal `$FLOCK_WORLD_TOKEN`. Synchronous tools and hooks run one at a time (a lock), so a world
-needs no locking of its own; `async def` tools run on the event loop. An `async` tool the world marks `cancellable(name)` is
+needs no locking of its own, unless it is `concurrent`; they run in two thread pools, "fast"
+and "slow" (`@tool(pool=)`), so slow tools never starve the fast ones; `async def` tools run on the event loop. An `async` tool the world marks `cancellable(name)` is
 cancelled when its caller disconnects (checked every second), so a call nobody waits for any
 more stops instead of running to the end.
 Needs the `controller` extra (FastAPI, uvicorn).
@@ -25,8 +26,8 @@ import threading
 import uuid
 from typing import Any
 
+from anyio import CapacityLimiter, to_thread
 from fastapi import FastAPI, Request
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from starlette.datastructures import Headers
 
@@ -49,6 +50,8 @@ from flock.world.workspace import MAX_BYTES
 log = logging.getLogger("flock.world")
 
 DEFAULT_PORT = 8765
+FAST_THREADS = 40  # tools that answer in well under a second, and hooks
+SLOW_THREADS = 64  # tools that block for seconds or minutes (`@tool(pool="slow")`)
 
 
 _SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|INVITE|API_KEY|_KEY$", re.IGNORECASE)
@@ -129,6 +132,11 @@ def create_app(world: World, token: str | None) -> FastAPI:
     network); otherwise every route needs `X-World-Token: <token>`."""
     app = FastAPI(title=f"world {world.name}", docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
+    # Separate thread budgets: a slow tool (minutes) never takes a fast tool's or a hook's thread.
+    limiters = {"fast": CapacityLimiter(FAST_THREADS), "slow": CapacityLimiter(SLOW_THREADS)}
+
+    def run(pool: str, fn, *args: Any) -> Any:
+        return to_thread.run_sync(locked, fn, *args, limiter=limiters.get(pool, limiters["fast"]))
 
     cache: dict[str, Any] = {"version": None}
 
@@ -179,15 +187,15 @@ def create_app(world: World, token: str | None) -> FastAPI:
                           404)
         if err := check_args(tools[name], args):
             return _error("bad_args", f"{name}: {err}")
+        pool = getattr(world, "pool", lambda _: "fast")(name)
         try:
             if isinstance(body, dict) and "workspace" in body:
                 handler = getattr(world, "call_workspace", None)
                 if "workspace-upload-v1" not in world.capabilities or handler is None:
                     return _error("bad_request", "this world does not accept workspace uploads", 400)
-                result = await run_in_threadpool(locked, handler, name, args, agent,
-                                                body["workspace"])
+                result = await run(pool, handler, name, args, agent, body["workspace"])
             else:
-                result = await run_in_threadpool(locked, world.call, name, args, agent)
+                result = await run(pool, world.call, name, args, agent)
             if inspect.isawaitable(result):
                 if getattr(world, "cancellable", lambda _: False)(name):
                     try:
@@ -222,7 +230,7 @@ def create_app(world: World, token: str | None) -> FastAPI:
         fn = getattr(world, f"on_{event}")
         hook_args = (agent,) if event == "agent_start" else (agent, body.get("data") or {})
         try:
-            result = await run_in_threadpool(locked, fn, *hook_args)
+            result = await run("fast", fn, *hook_args)
             if inspect.isawaitable(result):  # an `async def` hook
                 await result
         except Exception:
