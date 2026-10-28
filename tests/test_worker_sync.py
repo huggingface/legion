@@ -577,3 +577,47 @@ async def test_ephemeral_dir_is_never_synced_and_wiped_on_a_move(tmp_path):
     await rt2.setup(restore=True)
     assert (rt2.workdir / "keep.txt").read_text() == "k"
     assert (rt2.workdir / "scratch").is_dir() and not any((rt2.workdir / "scratch").iterdir())
+
+
+async def test_parallel_restore_gives_the_same_tree_as_sequential(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from flock.worker import sync as sync_mod
+
+    class SlowStore(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.active = self.peak = 0
+            self.lock = threading.Lock()
+
+        def download(self, files):
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            time.sleep(0.02)
+            try:
+                if any(r.endswith("/bad") for r, _ in files):
+                    raise RuntimeError("503")
+                super().download(files)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    store = SlowStore()
+    pre = await _seeded(tmp_path, store, n_files=40)
+    store.files[pre + "workdir/d/bad"] = b"x"  # fails in its batch and alone: retries keep going
+    trees = {}
+    for threads in (1, 4):
+        monkeypatch.setattr(sync_mod, "SPEC_KNOBS", {"restore_batch": 5, "restore_threads": threads})
+        store.peak = 0
+        rt, _ = runtime(tmp_path / f"t{threads}", sync=BucketSync(store, "sw"))
+        sync = rt.sync
+        monkeypatch.setattr(sync_mod, "RESTORE_BACKOFF", ())
+        res = await sync.restore(rt)
+        assert res.failed == [pre + "workdir/d/bad"] and res.workdir == 40
+        assert store.peak == threads
+        trees[threads] = {p.relative_to(rt.workdir).as_posix(): p.read_bytes()
+                          for p in rt.workdir.rglob("*") if p.is_file()}
+        assert not sync.mirror_deletes(rt)  # incomplete: pushes never delete
+    assert trees[1] == trees[4] and len(trees[4]) == 40

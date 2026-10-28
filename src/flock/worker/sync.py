@@ -14,7 +14,8 @@ before the first resume.
 
 Restore lists the agent's prefix once, then downloads every file it found in batches
 (`restore_batch()`: env `FLOCK_RESTORE_BATCH`, default 1000, minimum 1, an invalid value
-means the default), each to a `.flock-part` sibling renamed into place on success. A batch that
+means the default), `restore_threads()` batches at a time (env `FLOCK_RESTORE_THREADS`,
+default 4; the type's `worker:` block overrides both), each to a `.flock-part` sibling renamed into place on success. A batch that
 fails is retried file by file, with backoff (`RESTORE_BACKOFF`) between rounds: one unreadable
 file is skipped and reported in `RestoreResult.failed` instead of aborting the whole restore. A
 permanent "not found" (HTTP 404, e.g. xet "CAS Client Error: ... 404 Not Found" on the
@@ -70,6 +71,7 @@ import stat
 import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -481,9 +483,11 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
     for a file: batches first, then the files of a failed batch one by one, retried after each
     delay in `backoff` unless the error is a permanent "not found" (`_permanent`). Each file lands in a `.flock-part` sibling, renamed into place only
     when it arrived, so a failed file never leaves a truncated copy at its real path.
-    `progress(n)` is called with the number of files each attempt brought in."""
+    `progress(n)` is called with the number of files each attempt brought in (serialized: the
+    first pass runs `restore_threads()` batches in parallel threads)."""
 
     gone: list[str] = []  # permanent "not found": skipped, never retried
+    lock = threading.Lock()  # first-pass batches run in threads
 
     def attempt(batch: list[tuple[str, Path]]) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]]]:
         ok, bad = [], []
@@ -505,7 +509,8 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
             part.unlink(missing_ok=True)
             bad.append((r, p))
         if ok and progress is not None:
-            progress(len(ok))
+            with lock:
+                progress(len(ok))
         if err is not None and len(batch) == 1:
             log.debug("download of %s failed: %s", batch[0][0], _short(err))
             if bad and _permanent(err):
@@ -518,10 +523,13 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
     done: list[tuple[str, Path]] = []
     pending: list[tuple[str, Path]] = []
     size = restore_batch()
-    for i in range(0, len(files), size):
-        ok, bad = attempt(files[i : i + size])
-        done += ok
-        pending += bad
+    batches = [files[i : i + size] for i in range(0, len(files), size)]
+    # the first pass runs `restore_threads()` batches at once (per-request latency, not
+    # bandwidth, bounds a restore); the per-file retry rounds below stay sequential
+    with ThreadPoolExecutor(max(1, min(restore_threads(), len(batches)))) as pool:
+        for ok, bad in pool.map(attempt, batches):
+            done += ok
+            pending += bad
     if pending:  # each file alone, so one bad file costs only itself
         retry, pending = pending, []
         for f in retry:
