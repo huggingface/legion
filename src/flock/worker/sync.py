@@ -1,6 +1,7 @@
 """Bucket sync: per agent, `<BUCKET>/<swarm>/<type>/<agent>/` holds
 
-    workdir/<path relative to the workdir>        (if persist_workdir)
+    workdir/<path relative to the workdir>        (if persist_workdir; the deltas with a base)
+    workdir.base.tar, workdir.base.json           (only with the type's workdir.base, below)
     meta.json                                     ({files, bytes, ts} of the mirrored workdir when it last changed)
     sessions/<agent>.jsonl, <agent>.state.json    (pi session log + worker state)
     harness/<path relative to the harness home>   (CLAUDE_CONFIG_DIR, CODEX_HOME or PI_CODING_AGENT_DIR)
@@ -55,6 +56,29 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
 - Restore sets each workdir file's mtime to the bucket's (the listing carries it), so the first
   push after a restore uploads only real changes; session and harness files are marked as
   pushed (`_mark`).
+
+Base tar (the type's `workdir.base: true`; off by default). A restore of N small files costs N
+downloads; a base turns most of them into one:
+
+- A periodic push (never drain, preempt or unassign) makes a base when the agent has none, every
+  `workdir.base_interval_s` (3600) or when the delta passes `workdir.base_delta_files` (5000,
+  changed + deleted): an uncompressed tar of the workdir, sorted, regular files and symlinks
+  with modes and mtimes (excludes and ephemeral dirs left out), written to local disk and
+  uploaded as `workdir.base.tar`; then `workdir.base.json` `{created_at, files, bytes, deleted,
+  links}` is written: the commit point. Only from a full baseline (`_mirror`), like deletes.
+- Every push after that uploads to `workdir/` only files whose (mtime, size) differ from the
+  base's local index (`<sessions>/<agent>.base-index.json`), giving a changed file with an mtime
+  not after the base (`cp -p`) the current time; base paths gone locally go to `deleted`
+  (tombstones) and new or changed symlinks to `links`, rewriting the manifest when they change;
+  delta entries not needed any more (in the base, or deleted) are removed from `workdir/`.
+- Restore with a manifest: download it and the tar, extract the tar member by member from disk,
+  apply `deleted` and `links`, then download only the `workdir/` entries newer than
+  `created_at` (older ones are already in the tar). A failed manifest, tar or member makes the
+  restore incomplete (no deletes, no new base). Buckets without a manifest restore as before.
+- Crash safety: before the manifest is written the old manifest (or the plain mirror) stays
+  valid; after it, stale `workdir/` entries are older than `created_at`, ignored by restore and
+  removed by the next push. Turning `base` off makes the next full-baseline push mirror the whole
+  workdir to `workdir/` again and delete the base.
 """
 
 from __future__ import annotations
