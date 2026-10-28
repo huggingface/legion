@@ -181,6 +181,12 @@ class World:
         the end. A world returns True for tools whose work is wasted once nobody reads it."""
         return False
 
+    def metrics(self) -> dict[str, float]:
+        """World-specific numbers for `GET /metrics` (under `world`). Called in a thread,
+        concurrently with tools, every scrape (about every 30 s): keep it cheap; take your
+        own lock if you need one. Default: none."""
+        return {}
+
     # ------------------------------------------------------------------ hooks
     def on_agent_start(self, agent: Agent) -> None:
         """An agent got its first prompt on its worker (again after a relaunch)."""
