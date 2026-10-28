@@ -189,6 +189,24 @@ async def _seeded(tmp_path, store, n_files=3):
     return "sw/researcher/researcher-0001/"
 
 
+async def test_restore_reports_progress_while_in_flight(tmp_path):
+    store = FlakyStore()
+    pre = await _seeded(tmp_path, store)
+    sync = BucketSync(store, "sw")
+    seen = []
+    plain = store.download
+
+    def download(files):
+        seen.append(list(sync.restore_progress[pre][:2]))
+        plain(files)
+
+    store.download = download
+    rt2, _ = runtime(tmp_path / "b", sync=sync)
+    await sync.restore(rt2)
+    # 3 workdir files, then the 2 session files and 1 harness file in a second batch
+    assert seen == [[0, 6], [3, 6]] and sync.restore_progress == {}
+
+
 async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, monkeypatch):
     monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
     store = FlakyStore()
@@ -407,8 +425,10 @@ def test_failed_big_batch_falls_back_per_file(tmp_path, monkeypatch):
     for i in range(6):
         store.files[f"r/f{i}"] = b"x"
     files = [(f"r/f{i}", tmp_path / f"f{i}") for i in range(6)]
-    done, failed = download_resilient(store, files, backoff=(), sleep=lambda s: None)
-    assert failed == ["r/f2"] and len(done) == 5
+    got = []
+    done, failed = download_resilient(store, files, backoff=(), sleep=lambda s: None,
+                                      progress=got.append)
+    assert failed == ["r/f2"] and len(done) == 5 and sum(got) == 5
     assert [len(c) for c in store.calls[:2]] == [4, 2]  # batches of 4 from the env
     assert ["r/f2"] in store.calls  # the failed batch retried file by file
 

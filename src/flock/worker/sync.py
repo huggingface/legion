@@ -63,7 +63,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -358,12 +358,13 @@ def _part(p: Path) -> Path:
 
 
 def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
-                       backoff: tuple[float, ...] | None = None,
-                       sleep=None) -> tuple[list[tuple[str, Path]], list[str]]:
+                       backoff: tuple[float, ...] | None = None, sleep=None,
+                       progress=None) -> tuple[list[tuple[str, Path]], list[str]]:
     """Download (remote, local) pairs; returns (downloaded, failed remote paths). Never raises
     for a file: batches first, then the files of a failed batch one by one, retried after each
     delay in `backoff` unless the error is a permanent "not found" (`_permanent`). Each file lands in a `.flock-part` sibling, renamed into place only
-    when it arrived, so a failed file never leaves a truncated copy at its real path."""
+    when it arrived, so a failed file never leaves a truncated copy at its real path.
+    `progress(n)` is called with the number of files each attempt brought in."""
 
     gone: list[str] = []  # permanent "not found": skipped, never retried
 
@@ -386,6 +387,8 @@ def download_resilient(store: BucketStore, files: list[tuple[str, Path]], *,
                     pass
             part.unlink(missing_ok=True)
             bad.append((r, p))
+        if ok and progress is not None:
+            progress(len(ok))
         if err is not None and len(batch) == 1:
             log.debug("download of %s failed: %s", batch[0][0], _short(err))
             if bad and _permanent(err):
@@ -450,6 +453,8 @@ class BucketSync:
         # completes with every file; stays False after an incomplete one (module docstring).
         self._mirror: dict[str, bool] = {}
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
+        # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
+        self.restore_progress: dict[str, list] = {}
 
     def mirror_deletes(self, rt: AgentRuntime) -> bool:
         return self._mirror.get(self.prefix(rt), True)
@@ -531,10 +536,12 @@ class BucketSync:
         pre = self.prefix(rt)
         self._mirror[pre] = False  # until this restore completes with every file
         self._restoring.add(pre)
+        self.restore_progress[pre] = [0, 0, datetime.now(UTC)]
         try:
             res = await self._restore_files(rt, pre)
         finally:
             self._restoring.discard(pre)
+            self.restore_progress.pop(pre, None)
         self._mirror[pre] = not res.failed
         return res
 
@@ -565,9 +572,18 @@ class BucketSync:
                 plan.append((r, rt.sessions_dir / sub))
             elif area == "harness":
                 plan.append((r, home / sub))
+        prog = self.restore_progress.get(pre)
+        if prog is not None:
+            prog[1] = len(work) + len(plan)
+
+        def progress(n: int) -> None:
+            if prog is not None:
+                prog[0] += n
+
         if work:
             rt.workdir.mkdir(parents=True, exist_ok=True)
-            got, failed = await asyncio.to_thread(download_resilient, self.store, work)
+            got, failed = await asyncio.to_thread(download_resilient, self.store, work,
+                                                  progress=progress)
             res.workdir, res.failed = len(got), res.failed + failed
             await asyncio.to_thread(_set_mtimes, got, mtimes)
             if n := await asyncio.to_thread(apply_modes, rt.workdir):
@@ -575,7 +591,8 @@ class BucketSync:
         if plan:
             for _, p in plan:
                 _part(p).unlink(missing_ok=True)
-            got, failed = await asyncio.to_thread(download_resilient, self.store, plan)
+            got, failed = await asyncio.to_thread(download_resilient, self.store, plan,
+                                                  progress=progress)
             res.failed += failed
             await asyncio.to_thread(_set_mtimes, got, mtimes)
             for r, _ in got:

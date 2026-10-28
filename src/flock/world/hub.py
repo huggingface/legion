@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from flock.models import WorldSpec
+from flock.models import ToolCounters, WorldSpec
 from flock.secrets_file import secret_env
 from flock.tools.loader import ToolDef
 from flock.tools.runner import DEFAULT_TIMEOUT_S, RESULT_MAX_BYTES, Result, check_args
@@ -67,6 +67,9 @@ RETRIES = 1  # extra attempts after a 429 / 503, for read-only tools only
 RETRY_CAP_S = 10.0
 HOOK_TIMEOUT_S = 5.0
 SNAPSHOTS_KEPT = 32
+# world error codes that mean "not now" rather than "wrong" (counted as `refused`); any error
+# with a `retry_after_s` and any HTTP 429 counts too
+REFUSED_CODES = frozenset({"open_budget", "hub_busy", "busy", "paused", "overloaded"})
 
 
 def _err(msg: str, t0: float, **extra: Any) -> Result:
@@ -124,6 +127,7 @@ class WorldHub:
         self._shown: dict[str, str] = {}  # agent -> world version its instructions show
         self._acked: dict[str, str] = {}  # agent -> world version of its last finished turn
         self._tasks: set[asyncio.Task] = set()
+        self.counters: dict[str, ToolCounters] = {}  # per tool, since this process started
 
     # ------------------------------------------------------------------ configuration
     @property
@@ -334,10 +338,30 @@ class WorldHub:
         return await self._call(snap, agent, name, args)
 
     async def _call(self, snap: Snapshot, agent: str, name: str, args: dict[str, Any]) -> Result:
+        if snap.get(name) is None:  # not counted: names here come from the agent
+            return _err(f"{name} is not enabled for this agent", time.monotonic())
+        seen: dict[str, Any] = {}
+        res = await self._send(snap, agent, name, args, seen)
+        c = self.counters.setdefault(name, ToolCounters())
+        c.n += 1
+        c.sum_s += res.duration_s
+        c.max_s = max(c.max_s, res.duration_s)
+        c.timeouts += bool(seen.get("timeout"))
+        if res.error:
+            c.err += 1
+            try:
+                body = json.loads(res.output)
+            except ValueError:
+                body = {}
+            c.refused += (seen.get("status") == 429 or body.get("code") in REFUSED_CODES
+                          or "retry_after_s" in body)
+        return res
+
+    async def _send(self, snap: Snapshot, agent: str, name: str, args: dict[str, Any],
+                    seen: dict[str, Any]) -> Result:
+        """One call; `seen` gets the last HTTP status and whether it timed out."""
         t0 = time.monotonic()
         tool = snap.get(name)
-        if tool is None:
-            return _err(f"{name} is not enabled for this agent", t0)
         if snap.refused is not None:
             return _err(f"{name}: {snap.refused}", t0)
         if err := check_args(tool.parameters, args):
@@ -368,9 +392,11 @@ class WorldHub:
                 r = await self._http().post(f"{snap.endpoint}/tools/{name}", json=payload,
                                             headers=headers, timeout=timeout)
             except httpx.TimeoutException:
+                seen["timeout"] = True
                 return _err(f"{name}: world {wname} did not answer within {timeout:g} s", t0)
             except httpx.HTTPError as e:
                 return _err(f"{name}: world {wname} is unreachable ({type(e).__name__})", t0)
+            seen["status"] = r.status_code
             if r.status_code in (429, 503) and attempt < retries:
                 await asyncio.sleep(_retry_after(r))
                 continue

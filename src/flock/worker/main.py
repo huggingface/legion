@@ -21,6 +21,8 @@ planned restart, no crash backoff) and the new job restores every agent from the
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import random
@@ -50,10 +52,12 @@ from flock.models import (
     LoopStartCommand,
     LoopStopCommand,
     PromptCommand,
+    RestoreProgress,
     StopCommand,
     TypeSpec,
     UnassignCommand,
     WorkerHeartbeat,
+    WorkerMem,
     comms_tools,
     parse_duration,
     type_spec_rev,
@@ -64,10 +68,17 @@ from flock.secrets_file import secret_env
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
+from flock.worker.cgroup import CgroupMem
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.identity import Identities
-from flock.worker.sync import BucketStats, BucketSync, HubBucketStore, count_hub_http
+from flock.worker.sync import (
+    BucketStats,
+    BucketSync,
+    HubBucketStore,
+    count_hub_http,
+    workdir_excludes,
+)
 from flock.worker.tools import ToolsManager, tools_root
 from flock.world.hub import WorldHub
 
@@ -339,6 +350,13 @@ def limit_malloc_arenas(env: Mapping[str, str] = os.environ, arenas: int = ARENA
     return libc.mallopt(-8, arenas) == 1  # M_ARENA_MAX
 
 
+def knobs_rev(cfg: WorkerConfig) -> str:
+    """A short hash of the settings this worker runs with (shown next to `spec_rev`)."""
+    knobs = [cfg.drain_budget, cfg.sync_interval, cfg.comms_poll_cycle_s, cfg.comms_rate,
+             cfg.comms_burst, cfg.comms_agent_rate, cfg.comms_agent_burst, workdir_excludes()]
+    return hashlib.sha256(json.dumps(knobs).encode()).hexdigest()[:12]
+
+
 def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
         workdir = cfg.work_root / name
@@ -392,6 +410,7 @@ class Worker:
         tools: ToolsManager | None = None,
         comms: CommsHub | None = None,
         world: WorldHub | None = None,
+        cgroup: CgroupMem | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
@@ -429,6 +448,9 @@ class Worker:
         self._interrupted: set[str] = set()  # agents whose turn a preemption cut
         self._deadline = 0.0  # loop time by which a preempted worker has exited
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
+        self.cgroup = cgroup or CgroupMem()
+        self.mem: WorkerMem | None = None  # the last cgroup sample (memory_loop)
+        self.knobs_rev = knobs_rev(cfg)
 
     async def _fetch_tools(self, version: str) -> bytes:
         return await self.client.tools_bundle(self.cfg.swarm, version)
@@ -592,7 +614,18 @@ class Worker:
                                draining=self.draining, spec_rev=self.spec_rev,
                                preempted=self.preempt_synced,
                                interrupted=sorted(self._interrupted),
-                               agents=[a.heartbeat() for a in self.agents.values()])
+                               agents=[a.heartbeat() for a in self.agents.values()],
+                               mem=self.mem, restore=self.restore_progress(),
+                               tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev)
+
+    def restore_progress(self) -> RestoreProgress | None:
+        """Restores in flight, summed over agents (BucketSync.restore_progress)."""
+        prog = list(getattr(self.sync, "restore_progress", {}).values())
+        if not prog:
+            return None
+        return RestoreProgress(agents=len(prog), files_done=sum(p[0] for p in prog),
+                               files_total=sum(p[1] for p in prog),
+                               started=min(p[2] for p in prog))
 
     async def send_heartbeat(self) -> bool:
         try:  # retried inside the client for most of an interval: the controller declares a
@@ -803,7 +836,6 @@ class Worker:
         """`<swarm>/_workers/<worker>/preempted.json` in the bucket: who, when, why."""
         if self.sync is None:
             return
-        import json
         import tempfile
 
         body = json.dumps({"worker": self.cfg.worker_id, "reason": reason,

@@ -601,6 +601,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         "deadline": hb.deadline.timestamp(),
         "draining": int(hb.draining),
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,
+        "telemetry": hb.model_dump_json(include={"mem", "restore", "tools", "knobs_rev"}),
     }
     if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
         fields["preempted"] = 1
@@ -647,6 +648,8 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
                 "turns": ah.turns,
                 "last_sync": ah.last_sync.timestamp() if ah.last_sync else None,
                 "msgboard_principal": ah.msgboard_principal,
+                "rev": ah.rev,
+                "start_rev": ah.start_rev,
                 "last_heartbeat": t,
             },
             ah.tokens,

@@ -277,6 +277,8 @@ def agent_status(
         children=children or [],
         depth=agent_depth(spec, a),
         grants=grant.compact() if grant is not None else None,
+        rev=a.get("rev"),
+        start_rev=a.get("start_rev"),
     )
 
 
@@ -293,6 +295,7 @@ def worker_status(w: Row, agents: list[str], now: float) -> WorkerStatus:
         launched_at=_dt(w["launched_at"] or w["created_at"]),
         crashes=w["crashes"],
         last_error=w.get("last_error"),
+        **json.loads(w.get("telemetry") or "{}"),
     )
 
 
