@@ -1,0 +1,6 @@
+# One user line per line. ` => kw1|kw2`: the reply holds one of them (any case). `!kw`: it must not.
+hi there! => hi|hello|hey
+how's it going? => good|great|fine|well|not bad|thanks|!how does that make you feel
+what's your name? => name|i'm|i am|call me
+nice to meet you => nice|pleasure|likewise|glad
+bye for now => bye|see you|take care|later

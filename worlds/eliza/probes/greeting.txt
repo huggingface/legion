@@ -1,0 +1,5 @@
+# One user line per line. Optional: ` => kw1|kw2`, the reply must contain one of them (any case).
+hello => hello|hi|hey|welcome
+how are you?
+what is your name?
+goodbye => bye|goodbye|farewell|take care
