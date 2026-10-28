@@ -42,6 +42,14 @@ types:
     tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr']
     persist_workdir: true
     secrets: [OPENAI_API_KEY]
+    env:                                    # git memory caps for agent clones (git -c via env)
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
     max_turns: 150
     turn_timeout: 2h
     worker_lifetime: 54h

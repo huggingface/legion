@@ -64,6 +64,14 @@ types:
     persist_workdir: true
     secrets:
     - OPENAI_API_KEY
+    env:
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
     max_turns: 150
     turn_timeout: 2h
     worker_lifetime: 54h
@@ -101,6 +109,14 @@ types:
     persist_workdir: true
     secrets:
     - OPENAI_API_KEY
+    env:
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
     max_turns: 150
     turn_timeout: 2h
     worker_lifetime: 54h
@@ -142,6 +158,14 @@ types:
     persist_workdir: true
     secrets:
     - OPENAI_API_KEY
+    env:
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
     max_turns: 150
     turn_timeout: 2h
     worker_lifetime: 54h
