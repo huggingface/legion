@@ -445,10 +445,13 @@ def test_default_workdir_excludes_match_at_any_depth(monkeypatch):
     for rel in ["__pycache__/a.cpython-311.pyc", "a/b/__pycache__/x.txt", "m.pyc", "a/b/m.pyc",
                 ".pytest_cache/v/x", "p/.pytest_cache/v/x", ".mypy_cache/x", "p/q/.mypy_cache/x",
                 ".ruff_cache/x", "p/.ruff_cache/x", ".hypothesis/x", "p/.hypothesis/d/x",
-                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.flock-part"]:
+                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.flock-part", ".cache/pip/x",
+                "web/node_modules/a/b.js", ".venv/bin/python", "p/venv/lib/x", ".tox/py/x",
+                ".nox/s/x", "n/.ipynb_checkpoints/a.ipynb", ".gradle/x", "app/.next/x", "a/b.o"]:
         assert is_excluded(rel, pats), rel
     for rel in ["src/main.py", "my__pycache__/x", ".git/config", "wt/.git", "wt/.git/HEAD",
-                "wt/src/a.py", "pycache/x", "notes.pyc.md", "egg-info/x"]:
+                "wt/src/a.py", "pycache/x", "notes.pyc.md", "egg-info/x", "build/x", "dist/x",
+                "target/x", "a.ox", "myvenv/x"]:
         assert not is_excluded(rel, pats), rel
 
 

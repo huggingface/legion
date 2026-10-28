@@ -42,7 +42,7 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   not fetch stays in the bucket for the next restore.
 - `*.flock-part` (restore temporaries) is never uploaded nor deleted by a push; restore removes
   stray ones left by a crash.
-- Regenerable caches (`workdir_excludes`: `__pycache__/`, `*.pyc`, `.pytest_cache/`, ...; env
+- Regenerable caches (`workdir_excludes`: `__pycache__/`, `*.pyc`, `node_modules/`, `.venv/`, ...; env
   FLOCK_SYNC_EXCLUDE adds globs, FLOCK_SYNC_EXCLUDE_DEFAULTS=0 drops the defaults) are neither
   uploaded nor deleted by the mirror, and restore skips them, also those already in the bucket.
   `.git/` and worktrees are never excluded by default.
@@ -92,8 +92,11 @@ PART_SUFFIX = ".flock-part"
 PUSH_EXCLUDE = ["*" + PART_SUFFIX]  # sync_bucket patterns, matched on relative paths
 # Regenerable caches left out of the workdir mirror and of restore (module docstring). A trailing
 # "/" names a directory at any depth (`workdir_excludes`); other entries are plain globs.
+# Not build/, dist/ or target/: sometimes source.
 DEFAULT_WORKDIR_EXCLUDE = ["__pycache__/", "*.pyc", ".pytest_cache/", ".mypy_cache/",
-                           ".ruff_cache/", ".hypothesis/", "*.egg-info/"]
+                           ".ruff_cache/", ".hypothesis/", "*.egg-info/", ".cache/",
+                           "node_modules/", ".venv/", "venv/", ".tox/", ".nox/",
+                           ".ipynb_checkpoints/", ".gradle/", ".next/", "*.o"]
 
 
 def _expand(pattern: str) -> list[str]:
