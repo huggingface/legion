@@ -23,6 +23,7 @@ from flock.worker.adapters.pi import (
     PiMapper,
     PiModelConfig,
     _descendants,
+    env_dropped,
     harness_env,
     isolated_env,
     pi_model_config,
@@ -201,7 +202,7 @@ def test_isolated_env_keeps_git_config_pairs_only():
                 "HF_TOKEN": "hf_x", "CHATBOT_WORLD_TOKEN": "w", "FOO": "bar", "GH_TOKEN": "g",
                 "GIT_CONFIG_PARAMETERS": "'http.extraheader'='x'", "GIT_CONFIG_KEY_X": "a",
                 "GIT_CONFIG_VALUE_1_EXTRA": "b", "GIT_ASKPASS": "/bin/echo", "MSGBOARD_TOKEN": "mb"}
-    env = isolated_env(harness_env(selected, Path("/state/pi"), base={"PATH": "/bin"}), "VLLM_KEY")
+    env, _ = isolated_env(harness_env(selected, Path("/state/pi"), base={"PATH": "/bin"}), "VLLM_KEY")
     assert env == {"PATH": "/bin", "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
                    "PI_CODING_AGENT_DIR": "/state/pi", "VLLM_KEY": "sk-1", "GIT_CONFIG_COUNT": "2",
                    "GIT_CONFIG_KEY_0": "pack.threads", "GIT_CONFIG_VALUE_0": "1",
@@ -209,9 +210,20 @@ def test_isolated_env_keeps_git_config_pairs_only():
 
 def test_isolated_env_drops_the_deployment_drop_list(monkeypatch):
     monkeypatch.setenv("FLOCK_HARNESS_ENV_DROP", "REPO_TOKEN,OTHER")
-    env = isolated_env({"PATH": "/bin", "REPO_TOKEN": "r", "KEY": "k"}, "REPO_TOKEN")
-    assert env == {"PATH": "/bin"}
-    assert isolated_env({"KEY": "k", "FLOCK_WORLD_TOKEN": "w"}, "KEY") == {"KEY": "k"}
+    env, dropped = isolated_env({"PATH": "/bin", "REPO_TOKEN": "r", "KEY": "k"}, "REPO_TOKEN")
+    assert env == {"PATH": "/bin"} and dropped == ["KEY", "REPO_TOKEN"]
+    assert isolated_env({"KEY": "k", "FLOCK_WORLD_TOKEN": "w"}, "KEY")[0] == {"KEY": "k"}
+
+
+def test_isolated_env_passes_explicit_spec_env_minus_secrets(monkeypatch):
+    monkeypatch.setenv("FLOCK_HARNESS_ENV_DROP", "OPS_KEY")
+    env = {"PATH": "/bin", "GIT_CONFIG_COUNT": "1", "MY_FLAG": "1", "HF_TOKEN": "h", "MY_SECRET": "s",
+           "OPS_KEY": "o", "JUNK": "j"}
+    kept, dropped = isolated_env(env, None, explicit=["MY_FLAG", "HF_TOKEN", "MY_SECRET", "OPS_KEY"])
+    assert kept == {"PATH": "/bin", "GIT_CONFIG_COUNT": "1", "MY_FLAG": "1"}
+    assert dropped == ["HF_TOKEN", "JUNK", "MY_SECRET", "OPS_KEY"]
+    assert env_dropped(["GIT_CONFIG_COUNT", "MY_FLAG", "HF_TOKEN", "MY_SECRET", "OPS_KEY"]) == [
+        "HF_TOKEN", "MY_SECRET", "OPS_KEY"]
 
 
 PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://h:8000/v1", "api_key_env": "VLLM_KEY",

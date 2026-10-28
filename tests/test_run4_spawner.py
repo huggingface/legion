@@ -217,7 +217,7 @@ def _agent_env(url: str, home: Path) -> dict[str, str]:
               "HF_TOKEN": "hf-secret"}
     lineage = {"FLOCK_URL": url, "FLOCK_AGENT": "cedar", "FLOCK_PARENT": "",
                "FLOCK_AGENT_TOKEN": "flock_at_cedar", "FLOCK_TOKEN": ""}
-    env = pi.isolated_env(pi.harness_env(lineage, home, base=worker), None)
+    env = pi.isolated_env(pi.harness_env(lineage, home, base=worker), None)[0]
     env["HOME"] = str(home)
     return env
 

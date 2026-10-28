@@ -38,7 +38,7 @@ import shutil
 import signal
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -168,16 +168,35 @@ ISOLATED_DENY = frozenset({"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN"})
 DROP_VAR = "FLOCK_HARNESS_ENV_DROP"  # comma-separated names a deployment also keeps from Pi
 
 
-def isolated_env(env: dict[str, str], provider_key: str | None) -> dict[str, str]:
-    """Isolation adds only the provider key, agent-scoped tool/controller routing and git's
-    GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n; never ISOLATED_DENY or the
-    names in the worker's FLOCK_HARNESS_ENV_DROP."""
+# Explicit spec.env keys pass isolation unless they look like credentials (those belong in spec.secrets).
+SECRET_NAME = re.compile(r".*(TOKEN|SECRET)$", re.IGNORECASE)
+
+
+def _denied(k: str) -> bool:
+    return (k in ISOLATED_DENY or bool(SECRET_NAME.fullmatch(k))
+            or k in set(filter(None, os.environ.get(DROP_VAR, "").split(","))))
+
+
+def env_dropped(keys: Iterable[str]) -> list[str]:
+    """The spec.env names Pi isolation drops (pure; `flock update` warns with it)."""
+    return sorted(k for k in keys if _denied(k))
+
+
+def isolated_env(env: dict[str, str], provider_key: str | None,
+                 explicit: Iterable[str] = ()) -> tuple[dict[str, str], list[str]]:
+    """(env, dropped names). The allow-list covers the inherited environment: the provider key,
+    agent-scoped tool/controller routing and git's GIT_CONFIG_* pairs. Names in `explicit`
+    (spec.env) pass too, except `env_dropped` ones. ISOLATED_DENY and the worker's
+    FLOCK_HARNESS_ENV_DROP never pass."""
     allowed = BASE_ENV | set(PI_ENV_DEFAULTS) | {"PI_CODING_AGENT_DIR", "FLOCK_TOOLS_PIN",
               "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", provider_key}
-    deny = ISOLATED_DENY | set(filter(None, os.environ.get(DROP_VAR, "").split(",")))
-    return {k: v for k, v in env.items()
-            if (k in allowed or k.startswith(BASE_ENV_PREFIXES) or GIT_CONFIG_ENV.fullmatch(k))
-            and k not in deny}
+    explicit = set(explicit)
+    kept = {k: v for k, v in env.items()
+            if (k in explicit and not SECRET_NAME.fullmatch(k) or k in allowed
+                or k.startswith(BASE_ENV_PREFIXES) or GIT_CONFIG_ENV.fullmatch(k))
+            and k not in ISOLATED_DENY
+            and k not in set(filter(None, os.environ.get(DROP_VAR, "").split(",")))}
+    return kept, sorted(set(env) - set(kept))
 
 
 def _usage(u: dict[str, Any] | None) -> TokenUsage:
@@ -360,6 +379,7 @@ class PiAdapter:
         self.session_id: str | None = None
         self.session_file: Path | None = None
         self.env: dict[str, str] = {}
+        self.env_dropped_names: list[str] = []
         self.argv: list[str] = []
         self._proc: asyncio.subprocess.Process | None = None
         self._queue = EventQueue()
@@ -522,7 +542,8 @@ class PiAdapter:
         self.env = harness_env(env, self.home)
         launch = self.argv
         if isolation_enabled():
-            self.env = isolated_env(self.env, cfg.api_key_env if cfg else None)
+            self.env, self.env_dropped_names = isolated_env(
+                self.env, cfg.api_key_env if cfg else None, spec.env)
             # Private directories prevent a sibling from reading this agent's gateway key.
             pin = self.env.get("FLOCK_TOOLS_PIN")
             readonly = []
