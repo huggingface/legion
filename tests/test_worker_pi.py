@@ -24,6 +24,7 @@ from flock.worker.adapters.pi import (
     PiModelConfig,
     _descendants,
     harness_env,
+    isolated_env,
     pi_model_config,
     write_models_json,
 )
@@ -190,6 +191,21 @@ def test_harness_env_is_an_allow_list():
     assert env == {"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "PI_OFFLINE": "0", "PI_SKIP_VERSION_CHECK": "1",
                    "PI_TELEMETRY": "0", "PI_CODING_AGENT_DIR": "/p"}
 
+
+
+def test_isolated_env_keeps_git_config_pairs_only():
+    """Isolation passes spec.env's GIT_CONFIG_COUNT/KEY_n/VALUE_n (git memory caps) but still
+    drops credentials and every other variable not on the allow-list."""
+    selected = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "pack.threads", "GIT_CONFIG_VALUE_0": "1",
+                "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0", "VLLM_KEY": "sk-1",
+                "HF_TOKEN": "hf_x", "CHATBOT_WORLD_TOKEN": "w", "FOO": "bar", "GH_TOKEN": "g",
+                "GIT_CONFIG_PARAMETERS": "'http.extraheader'='x'", "GIT_CONFIG_KEY_X": "a",
+                "GIT_CONFIG_VALUE_1_EXTRA": "b", "GIT_ASKPASS": "/bin/echo", "MSGBOARD_TOKEN": "mb"}
+    env = isolated_env(harness_env(selected, Path("/state/pi"), base={"PATH": "/bin"}), "VLLM_KEY")
+    assert env == {"PATH": "/bin", "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
+                   "PI_CODING_AGENT_DIR": "/state/pi", "VLLM_KEY": "sk-1", "GIT_CONFIG_COUNT": "2",
+                   "GIT_CONFIG_KEY_0": "pack.threads", "GIT_CONFIG_VALUE_0": "1",
+                   "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0"}
 
 PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://h:8000/v1", "api_key_env": "VLLM_KEY",
                      "self_hosted": True},

@@ -159,11 +159,18 @@ def harness_env(env: Mapping[str, str] | None, home: Path,
     return out
 
 
+# Git's env-based config (`git -c` for every git under Pi, e.g. a type's pack memory caps in
+# spec.env). Only the count and numbered key/value pairs: GIT_CONFIG_PARAMETERS and the rest stay out.
+GIT_CONFIG_ENV = re.compile(r"GIT_CONFIG_COUNT|GIT_CONFIG_(?:KEY|VALUE)_\d+")
+
+
 def isolated_env(env: dict[str, str], provider_key: str | None) -> dict[str, str]:
-    """Run4 adds only its provider key and agent-scoped tool/controller routing."""
+    """Run4 adds only its provider key, agent-scoped tool/controller routing and git's
+    GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n."""
     allowed = BASE_ENV | set(PI_ENV_DEFAULTS) | {"PI_CODING_AGENT_DIR", "FLOCK_TOOLS_PIN",
               "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", provider_key}
-    return {k: v for k, v in env.items() if (k in allowed or k.startswith(BASE_ENV_PREFIXES))
+    return {k: v for k, v in env.items()
+            if (k in allowed or k.startswith(BASE_ENV_PREFIXES) or GIT_CONFIG_ENV.fullmatch(k))
             and k not in {"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN", "CHATBOT_WORLD_TOKEN",
                           "CHATBOT_BOARD_INVITE", "CHATBOT_REPO_TOKEN"}}
 
