@@ -34,6 +34,9 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   message) or a limit; without it a forced turn is one action: the forced call, its tool run,
   done (plus one more step per steered prompt). Constrained output is what makes small thinking
   models fast and reliable (2.5 s and 20/20 valid vs 25 s and 7/20 free-form, LFM2.5-2.6B).
+- Repeated calls: from the third call in a turn identical to an earlier one (same tool, same
+  arguments), its result starts with a nudge (REPEAT_NUDGE); after the fifth such call it is not
+  run and the nudge is the whole result. `turn_ended` counts them in `repeated_calls`.
 - Tool calls: native `tool_calls`, or, for small models that write the call as text, a reply
   that is only `{"tool": "bash", "command": ...}` (optionally fenced) or a pythonic
   `[bash(command="...")]`. Such a reply is stored as a proper tool call (`flock_from_text`), so
@@ -55,6 +58,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -66,10 +70,12 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from flock.controller.prices import Price, price_for
+from flock.home import home
 from flock.models import TokenUsage, TypeSpec
 from flock.tools.toolset import Toolset
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env, pi_usage
@@ -96,6 +102,12 @@ BASH_TIMEOUT_MAX_S = 600.0
 OUTPUT_LIMIT = 8_000  # default `tool_output_chars`: stored/sent tool output, head and tail
 STOP_GRACE = 5.0
 FORCED_DEFAULT_MAX_TURNS = 50  # forced tool choice with `done` and no max_turns
+# A forced turn whose reply has no tool call (a provider dropped it: an empty assistant message)
+# gets this once before the turn ends as before; the retry is a model call like any other.
+NUDGE = "Reply with exactly one tool call."
+REPEAT_NUDGE_AT = 3  # the 3rd identical call (tool + arguments) in a turn gets REPEAT_NUDGE
+REPEAT_SKIP_AFTER = 5  # identical calls after the 5th are not run: the nudge is the result
+REPEAT_NUDGE = "This is the third identical call in this turn. Are you stuck? Try a different action or call done."
 
 PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
 You have one tool, `bash`. It runs a shell command in that directory and returns the output \
@@ -134,13 +146,25 @@ DONE_TOOL: dict[str, Any] = {
         },
     },
 }
+# `loop.stop_when.all_agents_done` (docs/loop.md): `done` also takes `finished`
+FINISHED_ARG: dict[str, Any] = {
+    "type": "boolean",
+    "description": "true only when your whole task is complete and you need no more rounds; "
+                   "you then get no further loop prompts."}
+DONE_TOOL_FINISHED: dict[str, Any] = {"type": "function", "function": {
+    **DONE_TOOL["function"], "parameters": {"type": "object", "properties": {
+        **DONE_TOOL["function"]["parameters"]["properties"], "finished": FINISHED_ARG}}}}
 DONE_PREAMBLE = "\nWhen the task is done, call the `done` tool with a one-line summary."
 TOOLS_PREAMBLE = ("\nBesides `bash` you have task tools, offered as functions next to it; their "
                   "descriptions say what they do. Call them directly, not through bash.")
+# `bash: false` (usually `flock grant <target> bash=off`, docs/live.md)
+NO_BASH_PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
+You have no shell. Use the tools offered as functions; their descriptions say what they do.
+When the task is done, reply in plain text without a tool call."""
 
 
 def llm_home() -> Path:
-    return Path(os.environ.get("FLOCK_LLM_HOME") or Path.home() / ".flock-llm")
+    return Path(os.environ.get("FLOCK_LLM_HOME") or home() / ".flock-llm")
 
 
 def harness_env(env: Mapping[str, str] | None, base: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -407,6 +431,23 @@ def redact(text: str, *secrets: str | None) -> str:
 # --------------------------------------------------------------------------- adapter
 
 
+def pick_endpoint(agent: str, urls: list[str], current: str | None = None) -> str | None:
+    """The server an agent talks to: `current` while it is still listed (its prefix cache stays
+    warm), else the URL with the highest hash of (agent, url). Rendezvous hashing: stable for a
+    given list, spreads agents roughly evenly, and a URL added or removed moves only the agents
+    that must move (removed: its agents re-hash; added: only new agents land on it)."""
+    if not urls:
+        return None
+    if current in urls:
+        return current
+    return max(urls, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
+
+
+def endpoint_host(url: str | None) -> str | None:
+    """`host:port` of a server URL, for events and status."""
+    return (urlsplit(url).netloc or url) if url else None
+
+
 class LLMAdapter:
     harness = "llm"
 
@@ -425,6 +466,7 @@ class LLMAdapter:
         self.env: dict[str, str] = {}
         self.tool_env: dict[str, str] = {}
         self.in_turn = False
+        self._repeated = 0  # this turn's repeated identical calls (REPEAT_NUDGE_AT on)
         self._spec: TypeSpec | None = None
         self._key: str | None = None
         self._client: httpx.AsyncClient | None = None
@@ -439,6 +481,9 @@ class LLMAdapter:
         # new version applies from the next turn and never mid-turn. Set by AgentRuntime.
         self.toolbox = toolbox
         self._turn_tools: Toolset | None = None
+        # The server this agent talks to (provider `base_urls`), chosen at each turn start
+        self._endpoint: str | None = None
+        self._endpoint_from: str | None = None  # the previous one, when this turn moved
 
     @property
     def session_dir(self) -> Path:
@@ -463,6 +508,24 @@ class LLMAdapter:
         return choice is not None and choice not in ("auto", "none")
 
     @property
+    def bash_enabled(self) -> bool:
+        """The `bash` tool is offered (the type's `bash`, a `flock grant` switch; default on)."""
+        return self._spec is None or self._spec.bash is not False
+
+    def update_spec(self, spec: TypeSpec) -> None:
+        """A live change at a turn boundary (docs/live.md): limits, the bash switch and the
+        model id apply from the next turn. A provider change waits for the next start, where
+        the key and the HTTP client are set up."""
+        old = self._spec
+        if old is None or spec.resolved_model is None or old.resolved_model is None:
+            return
+        same = ("base_url", "base_urls")  # a new server list applies at the next turn start
+        if (spec.resolved_model.provider.model_copy(update=dict.fromkeys(same))
+                != old.resolved_model.provider.model_copy(update=dict.fromkeys(same))):
+            return
+        self._spec = spec
+
+    @property
     def done_enabled(self) -> bool:
         """`done` is offered: the type's `done_tool`, by default on when `required` is forced.
         With it a forced turn runs until `done` (or a limit); without it a forced turn is one
@@ -472,9 +535,17 @@ class LLMAdapter:
             return False
         if spec.done_tool is not None:
             return spec.done_tool
+        if self.done_finished:
+            return True
         r = spec.resolved_model
         choice = spec.tool_choice or ((r.extra or {}).get("tool_choice") if r else None)
         return choice == "required"
+
+    @property
+    def done_finished(self) -> bool:
+        """`done` takes `finished` (the type's `loop.stop_when.all_agents_done`)."""
+        lp = self._spec.loop if self._spec else None
+        return lp is not None and lp.stop_when.all_agents_done
 
     def projected_tokens(self) -> int:
         """Prompt size of the next request: the server's count for the previous request plus
@@ -512,10 +583,11 @@ class LLMAdapter:
 
     # ------------------------------------------------------------------ transcript file
     def system_prompt(self) -> str:
-        text = PREAMBLE.format(agent=self.agent, workdir=self.workdir)
+        bash = self.bash_enabled
+        text = (PREAMBLE if bash else NO_BASH_PREAMBLE).format(agent=self.agent, workdir=self.workdir)
         if self.done_enabled:
             text += DONE_PREAMBLE
-        if self.toolbox is not None and self.toolbox().tools:
+        if bash and self.toolbox is not None and self.toolbox().tools:
             text += TOOLS_PREAMBLE
         f = self.workdir / INSTRUCTIONS
         if f.is_file():
@@ -664,6 +736,12 @@ class LLMAdapter:
         self.in_turn = False
         if self._turn_tools is not None and self._turn_tools.version is not None:
             data.setdefault("tools_version", self._turn_tools.version)
+        if self._repeated:
+            data.setdefault("repeated_calls", self._repeated)
+        if self._endpoint is not None:  # the server this turn used (per-endpoint load)
+            data.setdefault("endpoint", endpoint_host(self._endpoint))
+            if self._endpoint_from is not None:
+                data.setdefault("endpoint_from", endpoint_host(self._endpoint_from))
         self._queue.put(AdapterEvent("turn_ended", status=status, error=error, data=data))
 
     @property
@@ -677,8 +755,13 @@ class LLMAdapter:
         assert spec is not None and spec.resolved_model is not None
         model = spec.resolved_model.model_id
         self.in_turn = True
+        prev = self._endpoint
+        self._endpoint = pick_endpoint(self.agent, spec.resolved_model.provider.endpoints, prev)
+        self._endpoint_from = prev if prev is not None and prev != self._endpoint else None
         calls, cost = 0, 0.0
-        overflow_retried = False
+        overflow_retried = nudged = False
+        seen: dict[str, int] = {}  # identical calls this turn, by tool + arguments
+        self._repeated = 0
         # a forced model that never calls `done` would loop until turn_timeout: cap it
         max_turns = spec.max_turns
         if max_turns is None and self.forced and self.done_enabled:
@@ -734,12 +817,27 @@ class LLMAdapter:
                         done = call
                         self._tool_result(call, "ok", False)
                     else:
-                        await self._run_tool(call)
+                        key = json.dumps([call["name"], call["arguments"]], sort_keys=True, default=str)
+                        seen[key] = k = seen.get(key, 0) + 1
+                        if k < REPEAT_NUDGE_AT:
+                            await self._run_tool(call)
+                            continue
+                        self._repeated += 1
+                        if k > REPEAT_SKIP_AFTER:
+                            self._tool_result(call, f"{REPEAT_NUDGE}\n[not run: the same call was "
+                                                    f"made {k - 1} times already this turn]", True)
+                        else:
+                            await self._run_tool(call, prefix=REPEAT_NUDGE + "\n")
                 if done is not None:
                     self._finish(done, model)
                     self._end("completed", num_turns=calls)
                     return
                 queued = self._drain()
+                if not tool_calls and not queued and self.forced and self.done_enabled and not nudged:
+                    nudged = True  # one nudge per miss, then the turn ends as before
+                    self._user([NUDGE])
+                    continue
+                nudged = nudged and not tool_calls
                 self._user(queued)
                 if not queued and (not tool_calls or (self.forced and not self.done_enabled)):
                     # forced tool choice without `done`: one action per prompt (the model could
@@ -769,7 +867,7 @@ class LLMAdapter:
                 calls.append({"id": c.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                               "name": fn.get("name"), "arguments": _parse_args(fn.get("arguments"))})
                 c.setdefault("id", calls[-1]["id"])
-        elif parsed := (text_tool_calls(content)
+        elif parsed := ((text_tool_calls(content) if self.bash_enabled else [])
                         or (text_tool_calls(content, "done") if self.done_enabled else [])
                         or next((c for n in (self.folder_tools.names() if self.folder_tools else [])
                                  if (c := text_tool_calls(content, n))), [])):
@@ -787,8 +885,13 @@ class LLMAdapter:
             blocks.append({"type": "thinking", "thinking": thinking})
         if isinstance(content, str) and content:
             blocks.append({"type": "text", "text": content})
+        # `readonly` from the turn's pinned tools (the version that runs the call), for the
+        # worker's `state_calls` (loop `idle_rounds`, docs/loop.md)
+        folder = self.folder_tools
         blocks += [{"type": "toolCall", "id": c["id"], "name": c["name"],
-                    "arguments": c["arguments"] if isinstance(c["arguments"], dict) else {}} for c in calls]
+                    "arguments": c["arguments"] if isinstance(c["arguments"], dict) else {},
+                    **({"readonly": True} if folder is not None and (t := folder.get(c["name"]))
+                       is not None and t.readonly else {})} for c in calls]
         r = self._spec.resolved_model if self._spec else None
         pi_msg = {"role": "assistant", "content": blocks, "api": "openai-completions",
                   "provider": r.provider_name if r else None, "model": model, "usage": pi_usage(usage),
@@ -806,10 +909,11 @@ class LLMAdapter:
         text = summary.strip() if isinstance(summary, str) and summary.strip() else "done"
         self._append({"role": "assistant", "content": text})
         r = self._spec.resolved_model if self._spec else None
+        finished = {"finished": True} if self.done_finished and args.get("finished") is True else {}
         self._queue.put(AdapterEvent("message", message={
             "role": "assistant", "content": [{"type": "text", "text": text}], "api": "openai-completions",
             "provider": r.provider_name if r else None, "model": model, "usage": pi_usage(TokenUsage()),
-            "stopReason": "stop", "fromDoneTool": True, "timestamp": _ms()}))
+            "stopReason": "stop", "fromDoneTool": True, "timestamp": _ms(), **finished}))
 
     def _tool_result(self, call: dict[str, Any], out: str, err: bool, **extra: Any) -> None:
         self._append({"role": "tool", "tool_call_id": call["id"], "content": out})
@@ -817,7 +921,7 @@ class LLMAdapter:
             "role": "toolResult", "toolCallId": call["id"], "toolName": call["name"],
             "content": [{"type": "text", "text": out}], "isError": err, "timestamp": _ms(), **extra}))
 
-    async def _run_tool(self, call: dict[str, Any]) -> None:
+    async def _run_tool(self, call: dict[str, Any], prefix: str = "") -> None:
         args = call["arguments"]
         folder = self.folder_tools
         if isinstance(args, str):
@@ -827,19 +931,20 @@ class LLMAdapter:
                                   env=self.tool_env)
             spec = self._spec
             out = _truncate(r.output, (spec.tool_output_chars if spec else None) or OUTPUT_LIMIT)
-            self._tool_result(call, out, r.error, toolsVersion=folder.version,
+            self._tool_result(call, prefix + out, r.error, toolsVersion=folder.version,
                               durationMs=int(r.duration_s * 1000))
             return
-        elif call["name"] != "bash":
-            names = ["bash", *(["done"] if self.done_enabled else []),
+        elif call["name"] != "bash" or not self.bash_enabled:
+            names = [*(["bash"] if self.bash_enabled else []), *(["done"] if self.done_enabled else []),
                      *(folder.names() if folder else [])]
-            tools = ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
+            tools = (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1
+                     else names[0] if names else "none")
             out, err = f"unknown tool {call['name']!r}; the tools are {tools}", True
         elif not isinstance(args.get("command"), str) or not args["command"].strip():
             out, err = "bash needs a non-empty `command` string", True
         else:
             out, err = await self._bash(args["command"], args.get("timeout"))
-        self._tool_result(call, out, err)
+        self._tool_result(call, prefix + out, err)
 
     async def _bash(self, command: str, timeout: Any) -> tuple[str, bool]:
         try:
@@ -878,7 +983,8 @@ class LLMAdapter:
         spec = self._spec
         assert spec is not None and spec.resolved_model is not None and self._client is not None
         r = spec.resolved_model
-        tools = [BASH_TOOL, DONE_TOOL] if self.done_enabled else [BASH_TOOL]
+        done = DONE_TOOL_FINISHED if self.done_finished else DONE_TOOL
+        tools = [*([BASH_TOOL] if self.bash_enabled else []), *([done] if self.done_enabled else [])]
         if self.folder_tools is not None:
             tools += [t.openai() for t in self.folder_tools.tools]
         body: dict[str, Any] = {"model": r.model_id, "messages": wire_messages(self.messages),
@@ -888,7 +994,10 @@ class LLMAdapter:
         body.pop("stream", None)
         if spec.tool_choice is not None:  # the type's setting wins over the alias's extra
             body["tool_choice"] = wire_tool_choice(spec.tool_choice)
-        url = f"{r.provider.base_url}/chat/completions"
+        if not tools:  # bash off and nothing else to call: a plain chat request
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
+        url = f"{self._endpoint or r.provider.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
         retries = r.provider.max_retries if r.provider.max_retries is not None else DEFAULT_MAX_RETRIES
         for attempt in range(retries + 1):
