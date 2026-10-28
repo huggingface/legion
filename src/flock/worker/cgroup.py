@@ -46,6 +46,7 @@ class MemThresholds:
     spike_mb: float = 3072.0  # FLOCK_MEM_SPIKE_MB: one agent's tools above this get SIGKILL; 0 off
     agent: float = 0.5  # FLOCK_MEM_AGENT: memory.max of an agent's own cgroup (if delegated)
 
+    # TODO: read through Worker.mem_knob (spec > env > default) once the worker knob block lands
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> MemThresholds:
         kw = {}
