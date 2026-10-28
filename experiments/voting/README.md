@@ -27,6 +27,9 @@ the rule on their honour: flock and the world do not check it.
   worker's first prompt names the proposal (`Proposal: #<id>`).
 - `votes(msg_id)` (`{up, down, voters, passed}`), reaction counts in `read` results and the
   `react` reply, and `doc`/`edit_doc` come from a separate comms PR; merge it first.
+- `votes`, `doc` and `edit_doc` are expected to arrive as extended comms tools
+  (`EXTENDED_COMMS_TOOLS` in `src/flock/models.py`, given by `comms: true` with
+  `comms.extended`) once the comms PR merges; re-check the names against it then.
 
 ## Launch
 

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from flock.cli import load_spec
+from flock.models import ALL_COMMS_TOOLS, comms_tools
 
 from .test_run4_spawner import as_agent
 
@@ -31,7 +32,13 @@ def check_types(exp: Path):
         assert t.replicas == 0 and t.model_dump(exclude=skip) == run4.model_dump(exclude=skip)
     assert set(spec.spawn) == {"coordinator"}  # workers: depth 0, no spawning
     assert spec.spawn["coordinator"].types == {"worker": 4} and spec.spawn["coordinator"].depth == 1
+    board = {"comms:" + n for n in ("channels", "create_channel", "join_channel", "search", "react",
+                                    "post", "read")}  # the board tools the prompts name
+    assert board <= set(ALL_COMMS_TOOLS)
+    for t in spec.types.values():
+        assert board <= set(comms_tools(t, spec.comms))
     coord, worker = spec.types["coordinator"].system_prompt, spec.types["worker"].system_prompt
+    assert "enforce" not in coord.lower() and "enforce" not in worker.lower()
     assert "flock spawn worker" in coord and "flock spawn" not in worker
     assert "You cannot start other agents" in worker and "$FLOCK_PARENT" in worker
     def team(role):  # the shared rules: the same text for both roles
@@ -42,6 +49,7 @@ def check_types(exp: Path):
 
 def test_types_prompts_and_spawn_policy():
     spec, coord, worker = check_types(EXP)
+    assert "vote" not in coord.lower() and "vote" not in worker.lower()  # voting's prompts carry it
     assert "The swarm works in teams" in coord and "# Project: Python Chatbot" in worker
     for text in ("benefits the goal of the task", "join that channel", "up to 4 new workers",
                  "opens and merges the PRs", "After every merge, assess"):

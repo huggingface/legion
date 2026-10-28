@@ -30,7 +30,8 @@ def test_role_prompts_are_hierarchy_plus_voting():
     for text in ("PROPOSAL (PR):", "at least 2 👍 and more 👍 than 👎", "Vote every round",
                  "`votes`", "@mention the proposer", "Act only when it says passed"):
         assert text in coord and text in worker, text
-    assert "own proposal" not in coord  # the owner: say nothing on self-votes
+    for text in ("own proposal", "own vote", "yourself", "your own 👍"):  # say nothing on self-votes
+        assert text not in coord and text not in worker, text
     assert "PROPOSAL (workers):" in coord and "PROPOSAL (workers):" not in worker
     assert "vote on new proposals" in spec.types["worker"].loop.prompt
     assert spec.types["coordinator"].loop.prompt == spec.types["worker"].loop.prompt

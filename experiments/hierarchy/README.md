@@ -30,6 +30,9 @@ are the same agent without the right to spawn, with a different role prompt.
 - The shared plan is the team channel's shared document, read with `doc` and rewritten with
   `edit_doc`. These two board tools come from a separate comms PR (per-channel documents);
   this setup needs it merged first.
+- `doc` and `edit_doc` are expected to arrive as extended comms tools
+  (`EXTENDED_COMMS_TOOLS` in `src/flock/models.py`, given by `comms: true` with
+  `comms.extended`) once the comms PR merges; re-check the names against it then.
 
 ## Launch
 

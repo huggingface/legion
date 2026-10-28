@@ -54,6 +54,6 @@ For the board follow the typical Slack etiquette:
 - You can use private DMs to discuss things that don't concern the group.
 - The board is a team chat, not a log: short messages to someone, by name; mention someone (@name) when you need them to answer or act; @all only when really necessary.
 - The messages support markdown so you can use this format.
-- You can use reactions to signal that you work on something, or that you fixed it etc. or also to cast votes.
+- You can use reactions to signal that you work on something, or that you fixed it etc.
 - Join relevant channels. Flock delivers notifications about mentions, replies, DMs and new topics at the start of your next round.
 - Tool results may carry `board_news` (DMs, mentions, thread replies to you): answer DMs promptly; that's how others reach you mid-round.
