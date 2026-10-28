@@ -563,6 +563,8 @@ Telemetry, all optional (older workers send none; the controller stores the last
   process started; `refused` is an HTTP 429 or a busy/budget error code.
 - `knobs_rev`: a hash of the worker's own settings (drain budget, sync interval, comms rates,
   sync excludes).
+- `wants_rotation`: nonreclaimable memory passed `FLOCK_MEM_ROTATE` of the limit; the controller
+  drains the worker within its rotation budget (docs/slurm.md "Memory").
 - per agent `rev` (the type spec revision applied at its last turn boundary) and `start_rev` (the
   one its running harness process started with).
 

@@ -194,6 +194,7 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         public_url=dep.worker_url,
         token=token,
         job_labels=parse_labels(env.get("FLOCK_JOB_LABELS", "")),
+        max_rotating=int(env["FLOCK_MAX_ROTATING"]) if env.get("FLOCK_MAX_ROTATING") else None,
     )
     interval = float(env.get("FLOCK_RECONCILE_INTERVAL", "5"))
     sync_every = float(env.get("FLOCK_STATE_SYNC_INTERVAL", DEFAULT_INTERVAL))

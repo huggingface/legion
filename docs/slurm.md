@@ -174,6 +174,36 @@ the type's `resume_prompt`. Without the flag (a hard kill), the unrequested `CAN
 The controller and `flock world serve` treat SIGUSR1 like SIGTERM, once (one final state push
 for the controller).
 
+## Memory
+
+`OUT_OF_MEMORY` is a crash with backoff, so the worker keeps itself under its limit. Every
+15 s it reads its cgroup (the smallest `memory.max` up the tree; `FLOCK_MEMORY_LIMIT_MB` when
+none) and compares nonreclaimable memory (anon + shmem + slab_unreclaimable + kernel_stack +
+pagetables, not page cache) with the limit. Without a limit nothing below is armed. Each rung
+is logged once until memory falls below the first one again. `rotate`, `drain`, `preempt`,
+`spike_mb` and `recycle_gap_s` can also be set per type under `worker.memory` (spec, then the
+env variable, then the default):
+
+| Nonreclaimable / limit | Worker |
+|---|---|
+| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it); recycles the agent with the largest Pi PSS at its next turn boundary (docs/pi.md "Memory"), at most one per `FLOCK_MEM_RECYCLE_GAP_S` (600) |
+| ≥ `FLOCK_MEM_DRAIN` (0.85) | drain: turns still running after `FLOCK_MEM_DRAIN_DEADLINE_S` (300) are interrupted (`drain_deadline`, resumed with `resume_prompt` after the restart), sync, exit 0: a planned restart |
+| ≥ `FLOCK_MEM_PREEMPT` (0.93), or a new `oom_kill` in `memory.events` | `preempt("memory")`, as on SIGUSR1: exit 75, relaunched at once |
+
+Spike guard: one agent's tool processes above `FLOCK_MEM_SPIKE_MB` (3072; 0 turns it off) are
+SIGKILLed, not Pi and not the other agents (`tool_tree_killed {agent, mb}`); no drain.
+`worker_lifetime` stays the backstop.
+
+The controller rotates workers that ask for it: each pass, among workers whose heartbeat says
+`wants_rotation`, it sends a drain to the one with the smallest `eta_limit_s` while fewer than
+`FLOCK_MAX_ROTATING` (default 10% of the swarm's worker slots, at least 1) are launching,
+restoring or draining, and writes `memory_rotation {worker, nonreclaim_mb, eta_limit_s}` to
+the swarm stream. A worker's own drain or preemption at 85% / 93% does not wait for this budget.
+
+`memory.oom.group` (logged at start): when it is 1 on the job's cgroup, one OOM kill ends every
+process in it, so `oom_score_adj` does not help; only this ladder and the
+tool limits (`tool_memory_mb`) do.
+
 ## The world on a moving host
 
 `world.url` may contain `${WORLD_HOST}` (e.g. `http://${WORLD_HOST}:7860`) with
