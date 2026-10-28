@@ -138,6 +138,8 @@ HTTP and JSON. A world is any server that answers these routes:
 | `POST /tools/<name>` | `{"args": {...}}` | `{"ok": true, "result": <any JSON>}` or `{"ok": false, "error": {"code": "...", "message": "..."}}` |
 | `POST /hooks` | `{"event", "agent", "type", "swarm", "turn", "data"}` | `{"ok": true}`; sent only for the events the manifest lists |
 | `GET /metrics` | | optional, capability `metrics-v1`: load and health numbers (below) |
+| `GET /healthz` | | optional, no secret: `{"status": "ready"}` or `{"status": "parked"}` |
+| `/admin/*` | | optional, capability `admin-v1`, the admin secret: knobs and lane pauses (below) |
 
 | header | sent | meaning |
 |---|---|---|
@@ -276,6 +278,76 @@ concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last
 `merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
 `outbox_depth`, `outbox_oldest_age_s`, `stale_lease_adoptions_total`, `hub_busy_total`,
 `hub_slot_wait_s_total`, `save_duration_s`, `save_age_s` and `state_bytes`.
+
+**Parked mode.** `flock world serve` binds its port first and builds the world in a background
+thread. While that raises (a failed restore, the Hub unreachable, a bad config), it is
+*parked*: it logs the error and builds again after 30 s, doubling up to 10 min, forever.
+`GET /manifest`, tool calls and hooks then answer `503` with `Retry-After` and
+
+```json
+{"ok": false, "parked": true, "error": "OSError: restore failed: ...", "attempt": 3, "next_retry_s": 120}
+```
+
+(`error`: the exception's first line, secrets redacted). `GET /healthz` (no secret) says
+`parked` or `ready`; `/metrics` adds `parked` (0 or 1), `attempt` and `paused` (paused lanes);
+`/admin` works. A worker that gets the parked `503` holds every tool of that world off until
+`next_retry_s` (no request, no upload) and the agent reads `world <name> unavailable (<error>);
+work locally`. At an apply, a parked world at the endpoint the stored spec already has keeps
+the stored manifest; one that was never applied refuses the apply with `world parked ...`.
+The SDK has no separate startup phase: do restores and first fetches in `__init__`, and a
+failure there parks the world.
+
+**Admin API: knobs and lane pauses.** A world registers runtime knobs in `__init__` and reads
+them later; a lane is a kind of work operators may pause (chatbot4: `open`, `push`, `merge`):
+
+```python
+class Shop(World):
+    def __init__(self) -> None:
+        # int, float, bool or str; returns the current value (the stored one if set, else default)
+        self.slots = self.knob("hub.push.slots", int, int(os.environ.get("SLOTS", "1")),
+                               min=0, max=4, doc="Concurrent Hub writes.",
+                               on_change=lambda v: setattr(self, "slots", v))
+
+    @tool
+    def push(self) -> str:
+        if self.paused("push"):  # an operator ran `flock world pause <swarm> push`
+            raise ToolError("pushes are paused; keep working locally", "paused")
+        return f"pushing with {self.knobs['hub.push.slots']} slots"
+```
+
+`on_change(value)` runs in a thread (raise to refuse); without one, read `self.knobs[name]`.
+Values set through the API and the paused lanes are written to `knobs.json` in the world's
+state dir (`World.state_dir()`: `$FLOCK_WORLD_STATE_DIR` by default; chatbot4 uses its
+workspace, archived with it) and read back at the next start, so a requeued world keeps them;
+the defaults a world passes (usually from its environment) apply only to knobs never set.
+The manifest lists the knob names under `knobs` and adds the capability `admin-v1`.
+
+| route | body | answer |
+|---|---|---|
+| `GET /admin/knobs` | | `{name: {value, default, type, min, max, doc}}` |
+| `PATCH /admin/knobs` | `{name: value, ...}` | `{"ok": true, "changes": [{name, old, new}], "knobs": {...}}`; `400` if any value is unknown, of the wrong type or out of range (nothing applied) |
+| `GET /admin/paused` | | `{"parked": false, "paused": {lane: reason}}` |
+| `POST /admin/pause` | `{"lanes": [...], "reason": "..."}` | `{"ok": true, "paused": {lane: reason}}` |
+| `POST /admin/resume` | `{"lanes": [...]}` | the same |
+
+`/admin/*` takes the admin secret in `X-World-Token`, never the world secret (that gets `401`):
+`$FLOCK_WORLD_ADMIN_TOKEN` if set, else HMAC-SHA256(world secret, `flock-world:flock-world-admin`)
+in hex (`flock.world.protocol.admin_token`). Workers never have it. Admission control never
+applies to `/admin`. Operators go through the controller, which knows the world secret, derives
+the admin secret (or uses its own `$FLOCK_WORLD_ADMIN_TOKEN`) and records each change as a swarm
+event (`world_knob {name, old, new, by, reason}`, `world_pause {lanes, reason, by}`,
+`world_resume {lanes, by}`):
+
+```bash
+flock world knobs <swarm>                                   # values, defaults, ranges, paused lanes
+flock world set <swarm> pr.open_floor=10 --reason "hub 429s"
+flock world pause <swarm> open push --reason "hub outage"
+flock world resume <swarm> open push
+```
+
+chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`) and `pr.open_floor`
+(`CHATBOT_PR_OPEN_FLOOR`). `open_pr` honours the `open` lane (new PRs) and `push`, `merge_pr`
+the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
