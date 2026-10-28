@@ -521,3 +521,46 @@ def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, ti
     assert assign.agent == "researcher-0000" and assign.resume_prompt is None
     (held,) = store.prompts_for_worker(W0)
     assert held["agent"] == "researcher-0000" and '"text":"go on"' in held["body"]
+
+
+def test_memory_rotation_drains_smallest_eta_within_budget(store, jobs, settings, clock, tick):
+    from flock.controller.reconcile import swarm_stream
+    from flock.models import DrainCommand, WorkerMem
+
+    store.put_swarm(make_spec(researcher={"replicas": 6, "agents_per_worker": 2}), 0)
+    tick()
+    w2 = "demo-researcher-w0002"
+
+    def hb(wid, i, eta=None, **kw):
+        h = WorkerHeartbeat(worker=wid, deadline=clock() + timedelta(hours=24),
+                            agents=[AgentHeartbeat(name=f"researcher-000{j}", state="idle")
+                                    for j in (2 * i, 2 * i + 1)],
+                            wants_rotation=eta is not None,
+                            mem=WorkerMem(limit_mb=10000, nonreclaim_mb=8000, eta_limit_s=eta), **kw)
+        assert record_heartbeat(store, wid, h, clock())
+
+    def drains(wid):
+        return [c for c in queued(store, wid) if isinstance(c, DrainCommand)]
+
+    hb(W0, 0)
+    hb(W1, 1, eta=7200)
+    hb(w2, 2, eta=3600)
+    tick()  # budget max(1, 10% of 3 slots) = 1: only the nearest to its limit
+    assert drains(w2) == [DrainCommand()] and drains(W1) == []
+    events = [e for e in store.read_events(swarm_stream("demo"), 0) if e["type"] == "memory_rotation"]
+    assert [e["data"] for e in events] == [{"worker": w2, "nonreclaim_mb": 8000.0,
+                                            "eta_limit_s": 3600.0}]
+    tick()  # w2 is draining: the budget is used up
+    assert drains(W1) == []
+
+    hb(w2, 2, draining=True)  # its drain ends in a planned restart
+    jobs.set_stage(jobs.job_for(w2), "COMPLETED")
+    clock.advance(20)
+    for wid, i in ((W0, 0), (W1, 1)):
+        hb(wid, i, eta=7200 if wid == W1 else None)
+    assert "planned_restart" in kinds(tick())
+    tick()
+    assert drains(W1) == []  # w2's relaunch (restoring) still uses the budget
+    settings.max_rotating = 2
+    tick()
+    assert drains(W1) == [DrainCommand()]

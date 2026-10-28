@@ -8,6 +8,7 @@ calls it every few seconds in a thread (Hub calls block). A worker row is a stab
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -76,6 +77,9 @@ class Settings:
     rate_window: timedelta = RATE_WINDOW
     rng: random.Random = field(default_factory=random.Random)
     job_labels: dict[str, str] = field(default_factory=dict)  # deployment-wide extra job labels
+    # FLOCK_MAX_ROTATING: workers restoring or draining at once before a memory rotation is
+    # sent (docs/slurm.md "Memory"); None: 10% of the swarm's worker slots, at least 1
+    max_rotating: int | None = None
 
 
 @dataclass
@@ -225,6 +229,8 @@ def reconcile(
         for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
             ts = None if sw["removing"] else spec.types.get(type_name)
             _reconcile_type(p, spec, type_name, ts)
+        if not sw["removing"]:
+            _rotate(p, spec)
         _record(p, spec.swarm, p.actions[first:])
         gone = not store.list_workers(spec.swarm) and not store.list_agents(spec.swarm)
         if sw["removing"] and gone:
@@ -241,6 +247,35 @@ def _record(p: _Pass, swarm: str, actions: list[Action]) -> None:
            for a in actions if a.kind not in QUIET_ACTIONS]
     if evs:
         p.store.append_events(swarm, swarm_stream(swarm), evs)
+
+
+def _rotate(p: _Pass, spec: SwarmSpec) -> None:
+    """Memory rotation (docs/slurm.md "Memory"): workers whose heartbeat says
+    `wants_rotation` are drained, the smallest `eta_limit_s` first, while fewer than
+    `max_rotating` workers are restoring (launched, or a restore in flight) or draining. The
+    drain ends in a planned restart. A worker's own drain or preemption at its hard
+    thresholds never waits for this budget (a preempted slot has already ended here)."""
+    workers = p.store.list_workers(spec.swarm)
+    budget = p.settings.max_rotating or max(1, len(workers) // 10)
+    tel = {w["id"]: json.loads(w.get("telemetry") or "{}") for w in workers}
+    live = [w for w in workers if w["job_id"] is not None]
+    busy = sum(1 for w in live if w["draining"] or w["retire_at"] or w["last_heartbeat"] is None
+               or tel[w["id"]].get("restore"))
+    want = [w for w in live if tel[w["id"]].get("wants_rotation") and not w["draining"]
+            and not w["retire_at"] and worker_state(w, p.now) == WorkerState.running]
+    mem = {w["id"]: tel[w["id"]].get("mem") or {} for w in want}
+    eta = {k: v.get("eta_limit_s") for k, v in mem.items()}
+    for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)):
+        if busy >= budget:
+            break
+        p.store.enqueue_command(w["id"], DrainCommand().model_dump_json())
+        p.store.update_worker(w["id"], draining=1)  # counted as draining from now on
+        busy += 1
+        data = {"worker": w["id"], "nonreclaim_mb": mem[w["id"]].get("nonreclaim_mb"),
+                "eta_limit_s": eta[w["id"]]}
+        log.info("memory rotation: %s", data)
+        p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
+            type="memory_rotation", ts=datetime.fromtimestamp(p.now, UTC), agent="", data=data)])
 
 
 def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:
@@ -601,7 +636,8 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         "deadline": hb.deadline.timestamp(),
         "draining": int(hb.draining),
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,
-        "telemetry": hb.model_dump_json(include={"mem", "restore", "tools", "knobs_rev"}),
+        "telemetry": hb.model_dump_json(include={"mem", "restore", "tools", "knobs_rev",
+                                                 "wants_rotation"}),
     }
     if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
         fields["preempted"] = 1

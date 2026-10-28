@@ -1766,6 +1766,7 @@ class WorkerStatus(BaseModel):
     restore: RestoreProgress | None = None
     tools: dict[str, ToolCounters] | None = None
     knobs_rev: str | None = None
+    wants_rotation: bool = False
 
 
 class LoopStatus(BaseModel):
