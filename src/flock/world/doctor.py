@@ -16,6 +16,8 @@ from flock.world.protocol import TOKEN_HEADER, WorldManifest, WorldTool
 
 READ_VERBS = ("get", "list", "read", "search", "show")
 BOUND_ARG = re.compile(r"limit|max|page|cursor|offset|bytes|top_k|count|size", re.IGNORECASE)
+MAX_CALLS = 64
+BURST_BUDGET_S = 60.0
 CAPS = ("metrics-v1", "admin-v1", "workspace-upload-v1", "workspace-upload-v2")
 
 
@@ -39,7 +41,7 @@ def lint(m: WorldManifest) -> list[str]:
             out.append(f"warn: {t.name} looks like a read but has no readOnlyHint (fast pool, retries)")
         if not (t.read_only or _looks_read(t)) and not any(_noun(t) & _noun(r) for r in reads):
             out.append(f"warn: write tool {t.name} has no read tool sharing its noun")
-        if t.read_only and not any(BOUND_ARG.search(p) for p in t.parameters["properties"]):
+        if t.read_only and not any(BOUND_ARG.search(p) for p in t.parameters.get("properties", {})):
             out.append(f"warn: read tool {t.name} has no limit/page/bytes argument")
     return out
 
@@ -47,6 +49,8 @@ def lint(m: WorldManifest) -> list[str]:
 def doctor(url: str, token: str | None = None, calls: int = 0,
            transport: httpx.BaseTransport | None = None) -> tuple[list[str], bool]:
     url = url.rstrip("/")
+    if calls > MAX_CALLS:
+        return [f"FAIL: --calls {calls} exceeds the cap of {MAX_CALLS}"], True
     try:
         m = fetch_manifest(url, token, transport=transport)
     except WorldError as e:
@@ -95,8 +99,12 @@ def _burst(http: httpx.Client, url: str, m: WorldManifest, n: int, out: list[str
 
     p = threading.Thread(target=poll, daemon=True)
     p.start()
+    t_end = time.monotonic() + BURST_BUDGET_S
     try:
         for t in (t for t in m.tools if t.read_only):
+            if time.monotonic() > t_end:
+                out.append(f"warn: burst budget {BURST_BUDGET_S:.0f} s spent; {t.name} and later tools skipped")
+                break
             if t.parameters.get("required"):
                 out.append(f"warn: {t.name} has required args; not called")
                 continue

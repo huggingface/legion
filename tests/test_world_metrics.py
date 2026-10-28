@@ -173,3 +173,11 @@ async def test_admission_refuses_a_full_pool_with_retry_after(monkeypatch):
     finally:
         served.world.release.set()
         served.close()
+
+
+def test_prometheus_groups_metrics_and_escapes_labels():
+    from flock.world.server import _prometheus
+    text = _prometheus({"tools": {"a": {"calls": 1, "p": 2}, 'b"\\x': {"calls": 3, "p": 4}}})
+    names = [l.split("{")[0] for l in text.splitlines()]
+    assert names == ["flock_world_tool_calls"] * 2 + ["flock_world_tool_p"] * 2
+    assert 'tool="b\\"\\\\x"' in text

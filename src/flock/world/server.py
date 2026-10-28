@@ -167,25 +167,33 @@ def _rss_mb() -> float:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
+def _lv(v: Any) -> str:  # Prometheus label-value escaping
+    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
 def _prometheus(m: dict[str, Any]) -> str:
-    """The /metrics JSON as Prometheus text exposition (untyped samples)."""
-    lines = []
+    """The /metrics JSON as Prometheus text exposition (untyped samples), lines grouped per metric name."""
+    groups: dict[str, list[str]] = {}
+
+    def add(metric: str, labels: str, v: Any) -> None:
+        groups.setdefault(metric, []).append(f"{metric}{labels} {v}")
+
     for key, value in m.items():
         if key in ("tools", "pools"):
             label = key[:-1]
             for name, stats in value.items():
                 for k, v in stats.items():
                     if k == "errors_by_code":
-                        lines += [f"flock_world_tool_errors{{tool={json.dumps(name)},"
-                                  f"code={json.dumps(c)}}} {n}" for c, n in v.items()]
+                        for c, n in v.items():
+                            add("flock_world_tool_errors", f"{{tool={_lv(name)},code={_lv(c)}}}", n)
                     else:
-                        lines.append(f"flock_world_{label}_{k}{{{label}={json.dumps(name)}}} {v}")
+                        add(f"flock_world_{label}_{k}", f"{{{label}={_lv(name)}}}", v)
         elif key == "world":
-            lines += [f"flock_world_world_{re.sub(r'[^A-Za-z0-9_]', '_', k)} {v}"
-                      for k, v in value.items()]
+            for k, v in value.items():
+                add(f"flock_world_world_{re.sub(r'[^A-Za-z0-9_]', '_', k)}", "", v)
         else:
-            lines.append(f"flock_world_{key} {value}")
-    return "\n".join(lines) + "\n"
+            add(f"flock_world_{key}", "", value)
+    return "\n".join(l for g in groups.values() for l in g) + "\n"
 
 
 _SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|INVITE|API_KEY|_KEY$", re.IGNORECASE)

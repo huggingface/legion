@@ -444,7 +444,8 @@ class WorldHub:
             seen["local"] = True
             if code == "world_down":
                 return _err(msg, t0, code=code, retry_after_s=math.ceil(left), local=True)
-            return _err(f"{msg} (next slot in {max(1, math.ceil(left / 60))} min; do other work "
+            slot = f"{math.ceil(left)} s" if left < 60 else f"{math.ceil(left / 60)} min"
+            return _err(f"{msg} (next slot in {slot}; do other work "
                         "or end your turn)", t0, code=code, retry_after_s=math.ceil(left),
                         local=True)
         headers = {**(self._auth() if snap.send_token else {}), AGENT_HEADER: agent,

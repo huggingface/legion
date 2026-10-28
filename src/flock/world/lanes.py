@@ -213,6 +213,8 @@ class Outbox:
         with open(tmp, "w") as out:
             for key, e in self.entries.items():
                 out.writelines(json.dumps({"put": key, "payload": payload, "ts": e["queued_at"]}) + "\n" for payload in e["payloads"])
+            out.flush()
+            os.fsync(out.fileno())  # the data is on disk before the name points at it
         os.replace(tmp, self.path)
         self.lines = sum(len(e["payloads"]) for e in self.entries.values())
 

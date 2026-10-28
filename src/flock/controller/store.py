@@ -942,6 +942,9 @@ class Store:
         return json.loads(row["body"]) if row else None
 
     def put_control(self, swarm: str, key: str, body: Any) -> None:
+        if key.startswith("broadcast:") and isinstance(body, dict) and "ts" in body:  # expire after 7 days
+            self._x("DELETE FROM controls WHERE swarm = ? AND key LIKE 'broadcast:%' "
+                    "AND json_extract(body, '$.ts') < ?", [swarm, body["ts"] - 7 * 86400])
         self._x("INSERT INTO controls (swarm, key, body) VALUES (?, ?, ?) "
                 "ON CONFLICT(swarm, key) DO UPDATE SET body = excluded.body",
                 [swarm, key, json.dumps(body, sort_keys=True)])

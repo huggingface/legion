@@ -667,7 +667,7 @@ async def test_hub_holds_off_locally_after_a_429_then_tries_again(monkeypatch, t
     r = await hub.call("x", "world:up", {"ref": "b"})
     body = json.loads(r.output)
     assert body["local"] and body["code"] == "overloaded" and body["retry_after_s"] == 20
-    assert "next slot in 1 min; do other work or end your turn" in body["error"]
+    assert "next slot in 20 s; do other work or end your turn" in body["error"]
     assert len(seen) == 1 and captured == ["b"]  # no request, no capture
     assert hub.counters["up"].refused == 2 and hub.counters["up"].n == 1  # local: not in n
     await hub.call("x", "world:peek", {})  # read-only tools still try, once
