@@ -351,6 +351,63 @@ def write_base_tar(workdir: Path, exclude: list[str], dest: Path) -> dict[str, l
     return index
 
 
+def extract_base_tar(src: Path, workdir: Path, exclude: list[str],
+                     base: dict) -> tuple[dict[str, list], int]:
+    """Extract a base tar into the workdir member by member (regular files and symlinks with
+    their modes and mtimes; nothing outside the workdir, nothing excluded), then apply the
+    manifest's tombstones (`deleted`) and symlinks (`links`). Returns (the index of the
+    extracted files {relative path: [mtime, size]}, members that failed)."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    root = workdir.resolve()
+    index: dict[str, list] = {}
+    bad = 0
+
+    def target(rel: str, make: bool = True) -> Path | None:
+        """The local path for `rel`, cleared, or None when it must not be written."""
+        p = workdir / rel
+        if rel.startswith("/") or ".." in rel.split("/") or is_excluded(rel, exclude) \
+                or not p.parent.resolve().is_relative_to(root):
+            return None
+        if make:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        if p.is_symlink() or p.is_file():
+            p.unlink()  # also read-only files (git objects) and links
+        elif p.exists():
+            return None  # a directory in the way
+        return p
+
+    with tarfile.open(src, "r:") as tf:
+        while (m := tf.next()) is not None:
+            tf.members.clear()  # a 500k-file tar keeps no member list in memory
+            try:
+                if not (m.isreg() or m.issym()) or (p := target(m.name)) is None:
+                    continue
+                if m.issym():
+                    os.symlink(m.linkname, p)
+                else:
+                    with tf.extractfile(m) as f, open(p, "wb") as out:
+                        shutil.copyfileobj(f, out)
+                    os.chmod(p, m.mode & 0o777)
+                os.utime(p, (m.mtime, m.mtime), follow_symlinks=False)
+                st = os.lstat(p)
+                index[m.name] = [st.st_mtime, st.st_size]
+            except OSError as e:
+                bad += 1
+                log.debug("base member %s: %s", m.name, e)
+    for rel in base.get("deleted", []):
+        try:
+            target(rel, make=False)
+        except OSError:
+            bad += 1
+    for rel, link in base.get("links", {}).items():
+        try:
+            if (p := target(rel)) is not None:
+                os.symlink(link, p)
+        except OSError:
+            bad += 1
+    return index, bad
+
+
 def _same(a: list | None, mtime: float, size: int) -> bool:
     return a is not None and abs(a[0] - mtime) <= 2e-3 and a[1] == size
 
@@ -833,6 +890,31 @@ class BucketSync:
         await asyncio.to_thread(self.store.upload, [(path, self.prefix(rt) + BASE_JSON)])
         self._base[self.prefix(rt)] = base
 
+    async def _restore_base(self, rt: AgentRuntime,
+                            skip: list[str]) -> tuple[dict | None, list[str], int]:
+        """Manifest, then tar (extracted while read from disk), tombstones and symlinks.
+        Returns (the manifest or None when the base could not be restored, failed bucket paths,
+        files extracted)."""
+        pre = self.prefix(rt)
+        mpath, tar = rt.sessions_dir / f"{rt.name}.base.json", rt.sessions_dir / f"{rt.name}.base.tar"
+        files = [(pre + BASE_JSON, mpath), (pre + BASE_TAR, tar)]
+        try:
+            _, failed = await asyncio.to_thread(download_resilient, self.store, files)
+            if failed:
+                return None, failed, 0
+            base = json.loads(mpath.read_text())
+            index, bad = await asyncio.to_thread(extract_base_tar, tar, rt.workdir, skip, base)
+        except (OSError, ValueError, KeyError, AttributeError, tarfile.TarError) as e:
+            log.warning("%s: workdir base not restored: %s", rt.name, _short(e))
+            return None, [pre + BASE_TAR], 0
+        finally:
+            tar.unlink(missing_ok=True)
+        await asyncio.to_thread(self._index_path(rt).write_text, json.dumps(index))
+        self._base[pre] = base
+        if bad:
+            log.warning("%s: %d workdir base entries not restored", rt.name, bad)
+        return base, [pre + BASE_TAR] if bad else [], len(index)
+
     def _quota(self, rt: AgentRuntime, ws: WorkdirStats) -> None:
         """Above the soft limit: a note in front of the agent's next prompt, and above the hard
         one a `workdir_over_quota` event, each at most hourly. The push itself goes on."""
@@ -877,6 +959,7 @@ class BucketSync:
         else:
             listed = [(r, None) for r in await asyncio.to_thread(self.store.list, pre)]
         mtimes = {r: mt for r, mt in listed}
+        self._base.pop(pre, None)  # known again only if this listing has one
         res = RestoreResult()
         work: list[tuple[str, Path]] = []
         plan: list[tuple[str, Path]] = []
@@ -908,11 +991,20 @@ class BucketSync:
             if prog is not None:
                 prog[0] += n
 
+        if rt.spec.persist_workdir and pre + BASE_JSON in mtimes:
+            base, failed, n = await self._restore_base(rt, skip)
+            res.workdir, res.failed = n, res.failed + failed
+            if prog is not None:
+                prog[1] += n
+            progress(n)
+            if base is not None:  # older deltas are already in the tar (or stale)
+                work = [(r, p) for r, p in work
+                        if mtimes.get(r) is None or mtimes[r] > base["created_at"]]
         if work:
             rt.workdir.mkdir(parents=True, exist_ok=True)
             got, failed = await asyncio.to_thread(download_resilient, self.store, work,
                                                   progress=progress)
-            res.workdir, res.failed = len(got), res.failed + failed
+            res.workdir, res.failed = res.workdir + len(got), res.failed + failed
             await asyncio.to_thread(_set_mtimes, got, mtimes)
             if n := await asyncio.to_thread(apply_modes, rt.workdir):
                 log.info("%s: restored the mode of %d file(s)", rt.name, n)
