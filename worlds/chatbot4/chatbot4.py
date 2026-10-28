@@ -1326,22 +1326,21 @@ class Chatbot4World(World):
             raise ToolError("offset must be nonnegative")
         if state not in ("open", "merged", "closed", "all"):
             raise ToolError("state must be open, merged, closed or all")
+        # Shallow copies under the lock (reviews are replaced, never edited in place); the
+        # review filter's git and the deep copy run outside it.
         with self.lock:
-            records = []
-            for rec in self.state["prs"].values():
-                if (state != "all" and rec["state"] != state) or (author and rec["author"] != author):
-                    continue
-                if needs_review and any(r["verdict"] == "approve"
-                                        for r in self._current_reviews(rec).values()):
-                    continue
-                records.append(json.loads(json.dumps(rec)))
-            if state in ("open", "all") and not needs_review:
-                records += [{"pr": d["pr"], "state": "open", "draft": True, "author": d["author"],
-                             "branch": d["branch"], "base_sha": d["base_sha"], "head_sha": None,
-                             "url": d["url"], "title": d["title"], "reviews": {}}
-                            for d in self.state["drafts"].values()
-                            if not author or d["author"] == author]
-            return records[offset:offset + 100]
+            records = [{**rec, "reviews": dict(rec["reviews"])} for rec in self.state["prs"].values()
+                       if (state == "all" or rec["state"] == state)
+                       and (not author or rec["author"] == author)]
+            drafts = [] if state not in ("open", "all") or needs_review else [
+                {"pr": d["pr"], "state": "open", "draft": True, "author": d["author"],
+                 "branch": d["branch"], "base_sha": d["base_sha"], "head_sha": None,
+                 "url": d["url"], "title": d["title"], "reviews": {}}
+                for d in self.state["drafts"].values() if not author or d["author"] == author]
+        if needs_review:
+            records = [rec for rec in records if not any(
+                r["verdict"] == "approve" for r in self._current_reviews(rec).values())]
+        return json.loads(json.dumps(records + drafts))[offset:offset + 100]
 
     @tool
     def get_pr(self, pr: int, path: str | None = None) -> dict:
