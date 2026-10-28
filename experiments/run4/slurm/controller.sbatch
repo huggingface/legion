@@ -3,6 +3,7 @@
 #
 #   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
 #   sbatch -J flock-ctl-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
+#          ${CTL_PARTITION:+-p $CTL_PARTITION} ${CTL_QOS:+--qos=$CTL_QOS} \
 #          /fsx/carlos_patino/prj-eliza/slurm/controller.sbatch <RUN>
 #
 # Fact sheet (notes/run3-slurm-facts.md) §3 controller, §5 restart, §7 proposed layout.

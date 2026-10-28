@@ -3,6 +3,7 @@
 #
 #   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
 #   sbatch -J flock-world-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
+#          ${WORLD_PARTITION:+-p $WORLD_PARTITION} ${WORLD_QOS:+--qos=$WORLD_QOS} \
 #          /fsx/carlos_patino/prj-eliza/slurm/world.sbatch <RUN>
 #
 # This batch script stays on the HOST (signals, <run>/hosts/world.host, `scontrol requeue`). The

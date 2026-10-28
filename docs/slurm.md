@@ -175,3 +175,12 @@ set) and logs `waiting for an external start of <worker> (...)`; the slot shows 
 secrets) heartbeats. A silent external worker sends the slot back to waiting with a fresh env
 file: never a crash, never backoff. Start workers from the newest
 `<launch_dir>/<worker>-*.env`: an older incarnation gets 409.
+
+## Singletons on Spot (run 4 scripts)
+
+The world and the controller are single jobs that Spot reclaim requeues. `world.sbatch` counts
+only crashes within `WORLD_STABLE_S` of the start toward its cap of 5 (a longer run resets it)
+and, past the cap, retries with 5 min to 30 min backoff instead of ending. A requeued controller
+restores its state and follows the world's host without waiting for it. For non-preemptible
+placement set `WORLD_PARTITION`/`WORLD_QOS` and `CTL_PARTITION`/`CTL_QOS` in run.env and pass them
+to `sbatch` (`experiments/run4/slurm/run.env.example`).
