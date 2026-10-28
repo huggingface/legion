@@ -206,6 +206,7 @@ def read_host_file(path: str) -> str:
 
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+UNSENT_STATUSES = frozenset({429, 503})  # not processed: safe to resend a non-idempotent call
 RETRY_BASE = 1.0  # s, first retry delay before jitter
 RETRY_CAP = 30.0  # s, longest single wait, Retry-After included
 MAX_CONCURRENCY = 3  # requests in flight per worker: one poll, one heartbeat, one event batch
@@ -266,8 +267,11 @@ class ControllerClient:
             self.http.base_url = url
             self.stats["moved"] += 1
 
-    async def _send(self, method: str, path: str, *, budget: float, **kw) -> httpx.Response:
-        """`budget`: seconds this call may spend waiting between attempts."""
+    async def _send(self, method: str, path: str, *, budget: float, retry_sent: bool = True,
+                    **kw) -> httpx.Response:
+        """`budget`: seconds this call may spend waiting between attempts. `retry_sent=False`:
+        retry only what never reached the app (no connection, 429, 503); a request that may
+        have been processed (read error or timeout, other 5xx) is not sent again."""
         waited = 0.0
         attempt = 0
         while True:
@@ -281,9 +285,13 @@ class ControllerClient:
                     err = e
             if err is not None:
                 self.refresh_url()
-            if r is not None and r.status_code not in RETRY_STATUSES:
+            if r is not None and r.status_code not in (RETRY_STATUSES if retry_sent
+                                                       else UNSENT_STATUSES):
                 r.raise_for_status()
                 return r
+            if err is not None and not retry_sent and not isinstance(
+                    err, httpx.ConnectError | httpx.ConnectTimeout):
+                raise err
             if r is not None and r.status_code == 429:
                 self.stats["throttled"] += 1
             delay = _retry_delay(attempt, _retry_after(r) if r is not None else None)
@@ -328,11 +336,13 @@ class ControllerClient:
                       body: object = None, budget: float = 60.0) -> httpx.Response:
         """An agent's own call (the gateway's `controller` route): sent with the agent's token
         instead of the worker's, retried and re-resolved like every route here; the answer is
-        returned whatever its status.
-        shortcut: like the worker's routes, a dropped connection is retried for any method, so a
-        non-idempotent POST (a prompt) can land twice; split ConnectError out if that shows up."""
+        returned whatever its status. Only a GET is retried after the request may have reached
+        the controller, so a prompt is never delivered twice.
+        shortcut: 503 counts as never processed (the Space edge's answer); an app 503 after a
+        side effect would be resent, revisit if the controller starts returning 503 itself."""
         try:
-            return await self._send(method, path, budget=budget, params=params, json=body,
+            return await self._send(method, path, budget=budget, retry_sent=method == "GET",
+                                    params=params, json=body,
                                     headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPStatusError as e:
             return e.response

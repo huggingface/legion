@@ -923,7 +923,9 @@ class CommsHub(ExtendedComms):
             else:
                 tool = str(req.get("tool"))
                 handler = self.routes.get(tool.split(":", 1)[0], self.call)
-                r = self.with_news(agent, tool, await handler(agent, tool, req.get("args") or {}))
+                r = await handler(agent, tool, req.get("args") or {})
+                if not tool.startswith("controller:"):  # the `flock` CLI has no use for news
+                    r = self.with_news(agent, tool, r)
             writer.write(json.dumps({"output": r.output, "error": r.error,
                                      "duration_s": r.duration_s}).encode() + b"\n")
             await writer.drain()

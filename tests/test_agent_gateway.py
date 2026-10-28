@@ -175,3 +175,40 @@ async def test_cli_call_goes_through_the_gateway_when_the_pin_names_one(tmp_path
     monkeypatch.delenv("FLOCK_TOOLS_PIN")  # no gateway: the direct path, as before
     assert cli._gateway() is None
     await worker.client.aclose()
+
+
+async def test_forwarded_post_is_not_resent_once_it_may_have_arrived(tmp_path):
+    """A read timeout or a 500 may come after the controller acted: a POST is not sent again
+    (a prompt would land twice); no connection or a 503 is retried; a GET is retried on both."""
+    ctrl = AgentRoutes("controller")
+    worker = await gateway_worker(tmp_path, ctrl)
+    script: list = []
+    base = ctrl.handler
+
+    def handler(request):
+        if request.url.path.startswith("/agents/") and script:
+            step = script.pop(0)
+            ctrl.agent_calls.append((request.method, request.url.path, "", {}))
+            if isinstance(step, Exception):
+                raise step
+            return httpx.Response(step, json={"detail": "x"})
+        return base(request)
+
+    ctrl.handler = handler
+    worker.client.http._transport = httpx.MockTransport(handler)
+    prompt = {"method": "POST", "path": f"/agents/{AGENT}/prompt", "json": {"text": "hi"}}
+    for first in (httpx.ReadTimeout("slow"), 500):
+        script[:] = [first]
+        ctrl.agent_calls.clear()
+        err, _ = await call(worker, prompt)
+        assert err and len(ctrl.agent_calls) == 1, first  # sent once, never resent
+    for first in (httpx.ConnectError("refused"), 503):
+        script[:] = [first]
+        ctrl.agent_calls.clear()
+        err, out = await call(worker, prompt)
+        assert not err and out["status"] == 200 and len(ctrl.agent_calls) == 2, first
+    script[:] = [httpx.ReadTimeout("slow")]
+    ctrl.agent_calls.clear()
+    err, _ = await call(worker, {"method": "GET", "path": f"/agents/{AGENT}"})
+    assert not err and len(ctrl.agent_calls) == 2
+    await worker.client.aclose()
