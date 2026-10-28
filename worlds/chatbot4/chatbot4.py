@@ -6,9 +6,11 @@ import base64
 import contextlib
 import contextvars
 import functools
+import hashlib
 import inspect
 import json
 import logging
+import marshal
 import math
 import os
 import re
@@ -33,6 +35,11 @@ MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
 EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
            "*.egg-info/", ".DS_Store")
 MAX_REQUESTS = 5000  # open_pr idempotency keys kept for worker retries (oldest dropped)
+# ... and for at most this long (a worker retries within minutes).
+REQUEST_TTL = float(os.environ.get("CHATBOT_REQUEST_TTL_S", "21600"))
+# prs.json is written by a background thread at most once per this many seconds while the
+# state changed (0: write synchronously on every change). close() always writes it.
+SAVE_INTERVAL = float(os.environ.get("CHATBOT_SAVE_INTERVAL_S", "2.0"))
 FETCH_TTL = float(os.environ.get("CHATBOT_FETCH_TTL_S", "60"))
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 # A world tool call must answer within about 55 s (the worker's deadline); Hub waits and push
@@ -52,6 +59,11 @@ HUB_SYNC_EVERY = float(os.environ.get("CHATBOT_HUB_STATES_EVERY_S", "600"))  # P
 FINAL_CODES = ("pr_closed", "pr_merged")  # Hub 400: the PR is already closed / merged
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
+
+
+def _key(key):
+    """A dict key as json.dumps writes it."""
+    return json.dumps(key) if isinstance(key, str) else json.dumps({key: 0})[1:-4]
 
 
 @atexit.register
@@ -98,7 +110,17 @@ class Chatbot4World(World):
             previous.close()
         self.lock = threading.RLock()
         self.db = self.ws / "prs.json"
+        for stale in self.ws.glob("prs.json.*.tmp"):  # a write cut by a crash
+            stale.unlink(missing_ok=True)
         self.state = json.loads(self.db.read_text()) if self.db.exists() else {"prs": {}, "requests": {}}
+        # Saving (see _save): every change bumps save_gen; written_gen is the generation on disk.
+        self.save_interval = float(os.environ.get("CHATBOT_SAVE_INTERVAL_S", SAVE_INTERVAL))
+        self.save_gen = self.written_gen = 0
+        self.save_sync = self.save_interval <= 0  # also set by close(): later saves write at once
+        self.replace_lock = threading.Lock()  # a leaf lock: never take self.lock while holding it
+        self.save_wake = threading.Event()
+        self.save_stop = threading.Event()
+        self.saver = None
         self.repo_id = repo_id = os.environ.get("CHATBOT_REPO", "cmpatino/chatbot-swarm")
         self.repo = repository or Repository(self.ws / "repo.git",
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
@@ -137,6 +159,9 @@ class Chatbot4World(World):
         self.outbox_gap = float(os.environ.get("CHATBOT_HUB_OUTBOX_GAP_S", "1"))
         self.stopping = threading.Event()
         self.wake = threading.Event()
+        with self.lock:  # cached results from before slimming: the first save is already small
+            if self._slim_requests():
+                self._save()
         with self.lock:  # the archive may predate merges that already landed on the Hub
             for rec in self.state["prs"].values():
                 if rec["state"] == "closing":  # interrupted close_pr: the author may retry
@@ -147,6 +172,9 @@ class Chatbot4World(World):
         self._sync_hub_states()  # outside the lock: a Hub read
         self.drainer = threading.Thread(target=self._drain, name="chatbot4-hub-outbox", daemon=True)
         self.drainer.start()
+        if not self.save_sync:
+            self.saver = threading.Thread(target=self._saver, name="chatbot4-save", daemon=True)
+            self.saver.start()
         _LIVE[str(self.ws.resolve())] = self
 
     # -- review comment outbox -------------------------------------------------------------
@@ -228,14 +256,20 @@ class Chatbot4World(World):
             self.stopping.wait(self.outbox_gap if posted else 0.2)
 
     def close(self, timeout=5.0):
-        """Stop the outbox thread and try each queued comment once within timeout seconds;
-        what is left stays in prs.json for the next start."""
+        """Write prs.json now, stop the outbox thread and try each queued comment once within
+        timeout seconds; what is left stays in prs.json for the next start. Saves after this
+        write synchronously."""
         deadline = time.monotonic() + timeout
+        self.save_sync = True
+        self.save_stop.set()
+        self.save_wake.set()
+        self.flush()  # first: the outbox below may use the whole timeout
         self.stopping.set()
         self.wake.set()
         if self.drainer.is_alive() and self.drainer is not threading.current_thread():
             self.drainer.join(max(0.0, deadline - time.monotonic()))
             if self.drainer.is_alive():
+                self.flush()
                 return
         with self.lock:
             items = [dict(e) for e in self.state["hub_outbox"]]
@@ -243,6 +277,7 @@ class Chatbot4World(World):
             left = deadline - time.monotonic()
             if left <= 0 or not self._post(item, left):
                 break
+        self.flush()
         if _LIVE.get(str(self.ws.resolve())) is self:
             del _LIVE[str(self.ws.resolve())]
 
@@ -293,10 +328,155 @@ class Chatbot4World(World):
         now = time.time()
         self._recent(self.state["pr_merges"], now).append(now)
 
+    # -- saving prs.json -------------------------------------------------------------------
+
     def _save(self):
-        tmp = self.db.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.state))
-        os.replace(tmp, self.db)
+        """Record that the state changed (call with the lock held). The saver thread writes
+        prs.json at most once per CHATBOT_SAVE_INTERVAL_S; flush() writes it at once."""
+        self.save_gen += 1
+        if self.save_sync:
+            self.flush()
+        else:
+            self.save_wake.set()
+
+    def _saver(self):
+        """Background thread: write prs.json when the state changed, at most once per
+        save_interval. close() stops it and writes the last change itself."""
+        last = float("-inf")
+        while True:
+            self.save_wake.wait()
+            self.save_wake.clear()
+            if self.save_stop.wait(max(0.0, last + self.save_interval - time.monotonic())):
+                return
+            last = time.monotonic()
+            try:
+                self.flush()
+            except Exception:  # keep the thread alive; the next change or close() retries
+                log.exception("prs.json: save failed; retrying")
+                self.save_wake.set()
+
+    def _snapshot(self):
+        """A consistent copy of the state as marshal blobs (call with the lock held).
+
+        marshal copies the JSON types several times faster than json.dumps or deepcopy, and the
+        copy is encoded and written after the lock is released. Each entry of a top-level dict
+        or list gets its own blob, so the encoding outside the lock also yields the GIL between
+        entries instead of holding it for one long json.dumps call."""
+        parts = []
+        for key, value in self.state.items():
+            if isinstance(value, dict):
+                parts.append((key, dict, [(k, marshal.dumps(v)) for k, v in value.items()]))
+            elif isinstance(value, list):
+                parts.append((key, list, [marshal.dumps(v) for v in value]))
+            else:
+                parts.append((key, None, marshal.dumps(value)))
+        return parts
+
+    @staticmethod
+    def _encode(parts, out):
+        """Write a snapshot as JSON, byte for byte what json.dumps(state) gives."""
+        out.write("{")
+        for i, (key, kind, body) in enumerate(parts):
+            out.write(f"{', ' if i else ''}{_key(key)}: ")
+            if kind is dict:
+                out.write("{")
+                for j, (k, blob) in enumerate(body):
+                    out.write(f"{', ' if j else ''}{_key(k)}: {json.dumps(marshal.loads(blob))}")
+                out.write("}")
+            elif kind is list:
+                out.write("[" + ", ".join(json.dumps(marshal.loads(b)) for b in body) + "]")
+            else:
+                out.write(json.dumps(marshal.loads(body)))
+        out.write("}")
+
+    def flush(self):
+        """Write prs.json now if the state changed since the last write. The lock is held
+        only for the snapshot; a write never replaces a newer one (tmp file + os.replace)."""
+        if self.save_gen == self.written_gen:
+            return
+        with self.lock:
+            gen = self.save_gen
+            if gen == self.written_gen:
+                return
+            parts = self._snapshot()
+        tmp = self.db.with_name(f"prs.json.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w") as out:
+                self._encode(parts, out)
+            with self.replace_lock:
+                if gen > self.written_gen:
+                    os.replace(tmp, self.db)
+                    self.written_gen = gen
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    # -- open_pr idempotency cache ----------------------------------------------------------
+
+    @staticmethod
+    def _digest(text):
+        return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+    def _slim(self, entry, now):
+        """Strip the description from a cached open_pr result (a replay rebuilds it, see
+        _replay) and stamp it; returns True if the entry changed."""
+        changed = False
+        if not isinstance(entry.get("_ts"), (int, float)):
+            entry["_ts"] = now
+            changed = True
+        if isinstance(entry.get("description"), str):
+            entry["_description_sha256"] = self._digest(entry["description"])
+            entry["description"] = None  # keeps the key's place in the result
+            changed = True
+        return changed
+
+    def _cache_request(self, key, result):
+        """Cache an open_pr result for retries of the same request (call with the lock held)."""
+        now = time.time()
+        entry = dict(result)
+        self._slim(entry, now)
+        requests = self.state["requests"]
+        requests.pop(key, None)
+        requests[key] = entry
+        self._prune_requests(now)
+
+    def _prune_requests(self, now):
+        """Drop cached results older than REQUEST_TTL, then the oldest past MAX_REQUESTS
+        (entries are in insertion order, so oldest first). Returns True if any was dropped."""
+        requests = self.state["requests"]
+        cut = now - REQUEST_TTL
+        stale = []
+        for key, entry in requests.items():
+            if entry["_ts"] > cut:
+                break
+            stale.append(key)
+        stale += list(requests)[len(stale):max(len(stale), len(requests) - MAX_REQUESTS)]
+        for key in stale:
+            del requests[key]
+        return bool(stale)
+
+    def _slim_requests(self):
+        """Startup: slim every cached result (entries cached before slimming existed get the
+        current time) and prune. Returns True if the state changed."""
+        now = time.time()
+        changed = False
+        for entry in self.state["requests"].values():
+            changed |= self._slim(entry, now)
+        return self._prune_requests(now) or changed
+
+    def _replay(self, key, description):
+        """The result an open_pr request already returned (call with the lock held). The
+        description comes from the retried call (the same request carries the same one) or
+        else from the PR record, whichever matches the digest stored with the result."""
+        entry = self.state["requests"][key]
+        result = {k: v for k, v in entry.items() if not k.startswith("_")}
+        digest = entry.get("_description_sha256")
+        if digest is not None:
+            rec = self.state["prs"].get(str(entry.get("pr"))) or {}
+            candidates = [description, rec.get("description")]
+            result["description"] = next(
+                (c for c in candidates if isinstance(c, str) and self._digest(c) == digest),
+                description)
+        return result
 
     def _event(self, action, agent, **data):
         with open(self.ws / "prs.jsonl", "a") as out:
@@ -621,7 +801,7 @@ class Chatbot4World(World):
         branch_ref = f"agents/{agent.name}/{branch}"
         with self.lock:
             if key and key in self.state["requests"]:
-                return self.state["requests"][key]
+                return self._replay(key, description)
             if pr is None and branch_ref not in self.state["drafts"]:
                 self._check_budget(agent)  # before any fetch, build or Hub call
         # The lock is held only for state and the main check; fetches, copies, compiles,
@@ -631,7 +811,7 @@ class Chatbot4World(World):
         token = object()
         with self.lock:
             if key and key in self.state["requests"]:
-                return self.state["requests"][key]
+                return self._replay(key, description)
             if not self.repo.ancestor(base, "main"):
                 raise ToolError("base is not a main commit; fetch main and rebase your branch")
             # A parked draft (its Hub PR exists, its head never landed) is reused, never recreated.
@@ -690,10 +870,7 @@ class Chatbot4World(World):
                                       f"git -c protocol.version=0 fetch origin refs/pr/{number} "
                                       "and continue from FETCH_HEAD")
                 if key:
-                    requests = self.state["requests"]
-                    requests[key] = result
-                    for stale in list(requests)[:max(0, len(requests) - MAX_REQUESTS)]:
-                        del requests[stale]
+                    self._cache_request(key, result)
                 self._save()
                 self._event("updated" if old else "opened", agent, **result)
                 return result

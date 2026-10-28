@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -245,6 +246,7 @@ def test_world_archive_restores_git_reviews_and_merge_hook(setup, tmp_path, monk
     snapshot = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(snapshot)
     store = FakeBucket(tmp_path / "bucket")
+    world.flush()  # the periodic archive sees prs.json at most CHATBOT_SAVE_INTERVAL_S old
     snapshot.transfer("push", world.ws, "hf://buckets/fake/run4", store)
     restored = tmp_path / "restored"
     assert snapshot.transfer("restore", restored, "hf://buckets/fake/run4", store)
@@ -544,6 +546,7 @@ def test_restore_from_an_archive_older_than_a_merge_reconciles(setup):
     world, clone, _ = setup
     rec = submit(world, clone)
     approve(world, rec)
+    world.flush()
     before = (world.ws / "prs.json").read_text()
     merged = world.merge_pr(Agent("birch"), rec["pr"])["merged_sha"]
     (world.ws / "prs.json").write_text(before)  # restored from an archive taken before the merge
@@ -813,6 +816,7 @@ def test_reviews_without_patch_id_only_count_for_their_exact_head(setup):
     world, clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
                                     lambda c: _module(c, "time", None))
     # State archived before patch ids existed, restored into a restarted world.
+    world.flush()
     state = json.loads(world.db.read_text())
     del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id"]
     del state["prs"][str(second["pr"])]["reviews"]["birch"]["patch_id0"]
@@ -894,6 +898,7 @@ def test_a_content_change_after_an_adjacent_rebase_needs_a_fresh_approval(setup)
 
 def _drop_patch_id0(world, pr):
     """A review stored before patch_id0 existed, restored into a restarted world."""
+    world.flush()
     state = json.loads(world.db.read_text())
     del state["prs"][str(pr)]["reviews"]["birch"]["patch_id0"]
     world.db.write_text(json.dumps(state))
@@ -1168,6 +1173,7 @@ def test_outbox_retries_persists_across_restarts_and_merge_needs_no_comment(setu
     fail[0] = False
     assert _wait(lambda: len(hub.comments) == 1) and hub.comments[0][0] == rec["pr"]
     assert _wait(lambda: restarted.state["hub_outbox"] == [])
+    restarted.flush()
     assert json.loads((world.ws / "prs.json").read_text())["hub_outbox"] == []
 
 
@@ -1523,3 +1529,177 @@ def test_status_change_on_a_closed_pr_is_not_retried(setup, monkeypatch):
     assert world._post(item, 1.0)
     assert posts == [three["pr"]] and world.state["hub_outbox"] == []
     assert world.state["prs"][str(three["pr"])]["state"] == "closed"
+
+
+# -- debounced prs.json saves and the slim open_pr request cache ------------------------------
+
+def _on_disk(world):
+    return json.loads(world.db.read_text())
+
+
+def test_save_snapshot_encodes_exactly_like_json_dumps(setup):
+    import io
+
+    world, _, _ = setup
+    with world.lock:
+        world.state["odd"] = {"\ud800 lone": ["é", 1.5, None, True, {"n": [1, 2]}], "": {}}
+        world.state["scalar"] = 3
+        world.state["inbox"]["x"] = [{"pr": 1, "kind": "k", "text": "t\n\"q\"", "ts": 1.25}]
+        out = io.StringIO()
+        world._encode(world._snapshot(), out)
+        assert out.getvalue() == json.dumps(world.state)
+
+
+def test_debounced_save_writes_within_the_interval(setup):
+    world, clone, _ = setup
+    world.save_interval = 0.5
+    submit(world, clone)
+    writes = []
+    real = world.flush
+
+    def counting():
+        before = world.written_gen
+        real()
+        if world.written_gen != before:
+            writes.append(world.written_gen)
+    world.flush = counting
+    time.sleep(0.6)  # the interval after the open's write has passed
+    started = time.monotonic()
+    for n in range(50):  # a burst of changes: one write now, one at most an interval later
+        with world.lock:
+            world._notify("cedar", n, "merged", f"news {n}")
+            world._save()
+        time.sleep(0.01)
+    assert _wait(lambda: any(e["pr"] == 49 for e in _on_disk(world)["inbox"].get("cedar", [])), 3)
+    assert time.monotonic() - started < 0.5 + 0.5 + 1.0  # the burst, one interval, slack
+    assert 1 <= len(writes) <= 3
+    assert _on_disk(world) == json.loads(json.dumps(world.state))
+
+
+def test_close_and_exit_flush_the_last_change(setup):
+    import chatbot4
+
+    world, clone, _ = setup
+    world.save_interval = 3600
+    rec = submit(world, clone)
+    world.flush()
+    assert _wait(lambda: str(rec["pr"]) in _on_disk(world)["prs"])
+    approve(world, rec)  # inside the interval: not on disk yet
+    assert _on_disk(world)["prs"][str(rec["pr"])]["reviews"] == {}
+    chatbot4._close_all()  # the atexit handler
+    assert "birch" in _on_disk(world)["prs"][str(rec["pr"])]["reviews"]
+    assert not world.saver.is_alive()
+    with world.lock:  # a straggling change after close is written at once
+        world._notify("cedar", 1, "merged", "late")
+        world._save()
+    assert _on_disk(world)["inbox"]["cedar"][-1]["text"] == "late"
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert "birch" in restarted.state["prs"][str(rec["pr"])]["reviews"]
+    assert not list(world.ws.glob("prs.json.*.tmp"))
+
+
+def test_saves_are_never_torn_under_concurrent_changes(setup):
+    import threading
+
+    world, _, _ = setup
+    world.save_interval = 0.005
+    with world.lock:
+        world.state["stress"] = {}
+        world._save()
+    world.flush()
+    stop = threading.Event()
+    errors = []
+
+    def mutate(name):
+        n = 0
+        while not stop.is_set():
+            n += 1
+            with world.lock:  # two entries that must always agree on disk
+                world.state["stress"][f"{name}-a"] = n
+                world.state["inbox"][name] = [{"pr": n, "kind": "k", "text": "x" * 500, "ts": n}]
+                world.state["stress"][f"{name}-b"] = n
+                world._save()
+
+    def read():
+        while not stop.is_set():
+            try:
+                state = _on_disk(world)
+            except ValueError as exc:  # a torn or partial file
+                errors.append(repr(exc))
+                continue
+            for name in ("t0", "t1", "t2", "t3"):
+                a, b = state["stress"].get(f"{name}-a"), state["stress"].get(f"{name}-b")
+                box = state["inbox"].get(name)
+                if a != b or (a is not None and box[0]["pr"] != a):
+                    errors.append(f"inconsistent {name}: {a} {b}")
+
+    def flusher():
+        while not stop.is_set():
+            world.flush()
+
+    threads = [threading.Thread(target=mutate, args=(f"t{i}",)) for i in range(4)]
+    threads += [threading.Thread(target=read), threading.Thread(target=read),
+                threading.Thread(target=flusher)]
+    for t in threads:
+        t.start()
+    time.sleep(3)
+    stop.set()
+    for t in threads:
+        t.join()
+    assert errors == []
+    world.flush()
+    assert world.written_gen == world.save_gen > 50
+    assert world.db.read_text() == json.dumps(world.state)
+
+
+def _open(world, clone, key, description="Tested a conversation.", pr=None, author="cedar"):
+    result = world.call_workspace("open_pr", {"branch": "greeting", "title": "Improve greetings",
+                                              "description": description, "pr": pr},
+                                  Agent(author, request_id=key), capture(clone.parent, clone.name))
+    return {k: v for k, v in result.items() if k not in ("pr_budget", "inbox")}
+
+
+def test_idempotent_replay_returns_the_same_result_from_a_slim_cache(setup):
+    world, clone, _ = setup
+    long = "Evidence:\n" + "transcript line\n" * 2000
+    first = _open(world, clone, "k1", long)
+    assert first["description"] == long
+    entry = world.state["requests"]["k1"]
+    assert entry["description"] is None and len(json.dumps(entry)) < 1500
+    assert _open(world, clone, "k1", long) == first
+    assert list(_open(world, clone, "k1", long)) == list(first)  # same keys, same order
+    # The PR is updated with another description; a late retry of k1 still gets its own.
+    (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hi!"\n')
+    second = _open(world, clone, "k2", "Second version.", pr=first["pr"])
+    assert second["description"] == "Second version."
+    assert _open(world, clone, "k1", long) == first
+    restarted = Chatbot4World(world.ws, world.repo)  # replays from prs.json
+    assert _open(restarted, clone, "k1", long) == first
+    assert _open(restarted, clone, "k2", "Second version.", pr=first["pr"]) == second
+
+
+def test_old_request_cache_is_slimmed_on_load_and_expires(setup, monkeypatch):
+    import chatbot4
+
+    world, clone, _ = setup
+    first = _open(world, clone, "k1", "Original long description " * 200)
+    world.close()
+    state = _on_disk(world)
+    # An archive from before slimming: the full result, no timestamp.
+    state["requests"]["k1"] = dict(first)
+    state["requests"]["old"] = {**first, "description": "y" * 10000}
+    world.db.write_text(json.dumps(state))
+    restarted = Chatbot4World(world.ws, world.repo)
+    restarted.close()
+    on_disk = _on_disk(restarted)["requests"]
+    assert all(e["description"] is None and "_ts" in e for e in on_disk.values())
+    assert len(json.dumps(on_disk)) < 2000
+    again = Chatbot4World(world.ws, world.repo)
+    assert _open(again, clone, "k1", "Original long description " * 200) == first
+    # The rebuilt description falls back to the PR record when the retry's differs.
+    assert _open(again, clone, "k1", "a different text")["description"] == first["description"]
+    monkeypatch.setattr(chatbot4, "REQUEST_TTL", 60)
+    with again.lock:
+        again.state["requests"]["k1"]["_ts"] -= 120
+        again._cache_request("new", {"pr": 9, "description": "z"})
+    assert list(again.state["requests"]) == ["old", "new"]
