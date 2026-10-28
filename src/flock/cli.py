@@ -31,6 +31,19 @@ from flock.specrender import at_ref, render
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
 
+@app.command("board")
+def board_cmd(run_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False)]) -> None:
+    """Reopen a run's retained msgboard on localhost, without starting agents."""
+    from flock.comms.managed import ManagedBoardError, reopen
+
+    try:
+        code = reopen(run_dir)
+    except (ManagedBoardError, OSError) as exc:
+        typer.echo(f"board: {exc}", err=True)
+        raise typer.Exit(1) from None
+    raise typer.Exit(code)
+
+
 def proxy_auth(url: str, env=os.environ) -> bool:
     """True when `url` is behind the HF Jobs proxy (a job-mode controller seen from outside its
     network group): the proxy wants `Authorization: Bearer <HF token>` (docs/deploy-job.md)."""

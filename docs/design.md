@@ -364,6 +364,22 @@ Comms (docs/comms.md): a swarm-level `comms:` block (`kind: msgboard`, `url`, `i
 at apply (`comms.channel_id`, `comms.kickoff_id`); assigns (`AssignCommand.comms`) and heartbeat
 responses (`{"comms": {...block, "tools"}}`) carry the block, so rules and protocols are live.
 
+### Managed local msgboard
+
+With `compute: local`, `flock run` accepts `comms.managed: true`. `url` and `invite_env`
+then become runtime connection fields supplied by the run owner. `channel` defaults to
+`general`; `channels` lists additional startup channels and `allow_create_channels` defaults
+to false. The latter two settings are valid only in managed mode. External boards still
+require `url` and `invite_env`. The invite value never enters the spec.
+
+Each run owns one loopback service and node-local SQLite database. It provisions an unlimited
+channel-scoped guest invite (or a member invite with channel creation when explicitly enabled),
+snapshots every 15 seconds into its private `board/` directory, and stops after the workers.
+The run owner resolves every apply/update to the same service and refuses changes to managed
+mode, channels or creation permission. Other controller launch paths refuse managed mode.
+`flock board RUN_DIR` restores and serves retained history without starting agents. Logs and
+public run metadata contain paths and addresses only, never credentials. See docs/comms.md.
+
 ### Providers
 
 Open models (vLLM in a GPU job, the HF router, any OpenAI-compatible or Anthropic-compatible

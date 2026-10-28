@@ -95,6 +95,10 @@ def diff_specs(old: SwarmSpec, new: SwarmSpec, tools: tuple[list[str], list[str]
     prompts: dict[str, list[str]] = {}
     keys: list[str] = []
     o, n = old.model_dump(mode="json"), new.model_dump(mode="json")
+    if old.comms and new.comms and old.comms.managed and new.comms.managed:
+        for doc in (o, n):
+            for key in ("url", "invite_env"):
+                doc["comms"].pop(key, None)  # resolved per-run connection is not a YAML edit
     for name in sorted(o["types"].keys() | n["types"].keys()):
         if name not in n["types"]:
             keys.append(f"- type {name} (its agents are removed)")

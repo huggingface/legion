@@ -63,6 +63,10 @@ them.
   on every save; `flock grant <target> tools=+x bash=off limits.budget_usd=1` changes what a
   type or one agent may do. Agents take each change at their next turn, with a one-line note.
   See [docs/live.md](docs/live.md).
+- **Managed experiment boards:** `comms: {managed: true}` starts a private msgboard for each
+  local run, creates `general` and any configured channels, and retains history when the run
+  stops. Install the `msgboard` extra; reopen a saved board with `flock board <run-dir>`
+  ([docs/comms.md](docs/comms.md#a-private-board-for-each-local-run)).
 - **Comms (optional):** a `comms:` block gives the agents one msgboard channel and
   built-in `post` / `read` / `search` tools; each agent joins under its own name at its
   first prompt, posting rules are enforced before the board is called, one poller per

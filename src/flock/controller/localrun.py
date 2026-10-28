@@ -43,6 +43,7 @@ from typing import Any, TextIO
 
 import httpx
 
+from flock.comms.managed import INVITE_ENV, SNAPSHOT_INTERVAL, ManagedBoard
 from flock.controller.api import create_app, swarm_status
 from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
@@ -556,8 +557,13 @@ async def run_local(opts: RunOptions) -> RunResult:
         raise ValueError("flock run needs `compute: local` in the spec")
     data_dir = Path(opts.data_dir).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = data_dir / run_name(spec.swarm, data_dir)
-    run_dir.mkdir(parents=True)
+    while True:
+        run_dir = data_dir / run_name(spec.swarm, data_dir)
+        try:
+            run_dir.mkdir()  # atomic allocation also when identical swarms start together
+            break
+        except FileExistsError:
+            continue
     handler = _log_to(run_dir / "logs" / "controller.log")
     tty = opts.out.isatty() if opts.tty is None else opts.tty
 
@@ -571,7 +577,15 @@ async def run_local(opts: RunOptions) -> RunResult:
     store = Store(run_dir / "controller")
     jobs = LocalJobsClient(root=run_dir, **({"command": opts.worker_command}
                                             if opts.worker_command else {}))
-    settings = Settings(public_url=url, token=token)
+    runtime_secrets = dict(os.environ)
+    settings = Settings(public_url=url, token=token, secret_source=runtime_secrets)
+    board = ManagedBoard(run_dir) if spec.comms is not None and spec.comms.managed else None
+    board_task: asyncio.Task | None = None
+
+    async def snapshot_board() -> None:
+        while True:
+            await asyncio.sleep(SNAPSHOT_INTERVAL)
+            await asyncio.to_thread(board.snapshot)
     reconcile_task: list[asyncio.Task] = []
 
     health = Health(store, token=token, jobs=jobs, run=run_dir.name)
@@ -587,7 +601,7 @@ async def run_local(opts: RunOptions) -> RunResult:
     worlds = WorldHost(log_dir=run_dir / "logs")  # a spec's `world.command` (docs/world.md)
     app = create_app(store, token, background=background, compute="local",
                      stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds,
-                     health=health)
+                     health=health, secret_source=runtime_secrets, managed_board=board)
     server = _Server(app, sock)
     started = datetime.now(UTC)
     t0 = time.monotonic()
@@ -601,6 +615,8 @@ async def run_local(opts: RunOptions) -> RunResult:
     loop = asyncio.get_running_loop()
 
     def on_signal() -> None:
+        if board is not None:
+            board.cancel_start()
         if stop.is_set():
             force.set()
         stop.set()
@@ -613,6 +629,11 @@ async def run_local(opts: RunOptions) -> RunResult:
     current = data_dir / CURRENT_FILE
     totals: dict[str, Any] = {}
     try:
+        if board is not None:
+            await asyncio.to_thread(board.start, spec)
+            runtime_secrets[INVITE_ENV] = board.invite
+            say(f"board: {board.url}; operator token: {board.archive / 'operator.token'}")
+            board_task = asyncio.create_task(snapshot_board(), name="board-snapshots")
         await server.start()
         write_current(data_dir, {"url": url, "token": token, "run_dir": str(run_dir),
                                  "swarm": spec.swarm, "pid": os.getpid()})
@@ -635,6 +656,10 @@ async def run_local(opts: RunOptions) -> RunResult:
             watcher = asyncio.create_task(_watch(opts, url, token, post), name="watch")
         idle_streak = 0
         while not stop.is_set():
+            if board is not None:
+                board.check()
+                if board_task is not None and board_task.done():
+                    board_task.result()  # a failed snapshot must not silently lose history
             elapsed = time.monotonic() - t0
             spec = active_spec(store, spec)  # a live PUT (flock scale, apply) wins
             snap = tracker.snapshot(spec, time.time())
@@ -693,12 +718,36 @@ async def run_local(opts: RunOptions) -> RunResult:
                                   ended=datetime.now(UTC), reason=reason, url=url,
                                   tracker=tracker)
         finally:
-            await asyncio.to_thread(worlds.stop_all)  # after the workers, before the server
+            if board_task is not None:
+                board_task.cancel()
+                await asyncio.gather(board_task, return_exceptions=True)
+            try:
+                await asyncio.to_thread(worlds.stop_all)  # after workers, before the board
+            except Exception:
+                log.exception("World shutdown failed")
+                reason, code = "world_shutdown_failed", 1
+            if board is not None:
+                try:
+                    await asyncio.to_thread(board.stop)
+                except Exception:
+                    log.exception("Managed board shutdown/snapshot failed")
+                    reason, code = "board_snapshot_failed", 1
+                bundle_path = run_dir / "run.json"
+                try:
+                    if bundle_path.is_file():
+                        doc = json.loads(bundle_path.read_text())
+                        doc["board"] = board.metadata()
+                        doc["stop_reason"] = reason
+                        bundle_path.write_text(json.dumps(doc, indent=2) + "\n")
+                except (OSError, ValueError):
+                    log.exception("Could not save board run metadata")
+                    reason, code = "bundle_failed", 1
             # parked long-polls of exited workers are cancelled at shutdown: not an error
             uv_log = logging.getLogger("uvicorn.error")
             level = uv_log.level
             uv_log.setLevel(logging.CRITICAL)
             await server.stop()
+            sock.close()
             uv_log.setLevel(level)
             clear_current(data_dir, os.getpid())
             store.close()

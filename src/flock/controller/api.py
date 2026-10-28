@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 
+from flock.comms.managed import ManagedBoard, ManagedBoardError
 from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
 from flock.controller.health import Health
@@ -742,6 +743,7 @@ def create_app(
     worlds: WorldHost | None = None,
     world_transport: httpx.BaseTransport | None = None,
     health: Health | None = None,
+    managed_board: ManagedBoard | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -760,7 +762,9 @@ def create_app(
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.
     `health` (docs/health.md) gets every posted event batch; its probe/snapshot loop is run by
-    the caller (main, localrun). Default: one that only counts."""
+    the caller (main, localrun). Default: one that only counts.
+    `managed_board` is the private board owned by flock run; applies and updates reuse it.
+    Other launch paths refuse managed comms."""
     secret_source = os.environ if secret_source is None else secret_source
     worlds = WorldHost() if worlds is None else worlds
     health = Health(store, token=token, secrets=secret_source) if health is None else health
@@ -934,6 +938,14 @@ def create_app(
                                          f"cannot change ({old.harness.value} -> "
                                          f"{ts.harness.value}); remove the type first or use a "
                                          "new type name")
+        # Only flock run owns managed boards. Updates bind back to the same private service.
+        try:
+            if managed_board is not None:
+                managed_board.resolve(spec)
+            elif spec.comms is not None and spec.comms.managed:
+                raise ManagedBoardError("comms.managed is supported by flock run only")
+        except ManagedBoardError as e:
+            raise HTTPException(400, str(e)) from None
         try:  # channel name -> id once, kickoff once (docs/comms.md)
             comms_resolve(spec, prev["spec"] if prev else None, secret_source,
                           transport=comms_transport, dry_run=dry_run)

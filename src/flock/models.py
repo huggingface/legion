@@ -309,7 +309,8 @@ class CommsRules(BaseModel):
 
 
 class CommsSpec(BaseModel):
-    """Swarm-level `comms:` (docs/comms.md). `url`, `invite_env` and `channel` are resolved
+    """Swarm-level `comms:` (docs/comms.md). A managed local run supplies `url` and
+    `invite_env`; external boards require both. `channel` (default general) is resolved
     once by the controller at apply (channel name -> `channel_id`); `kickoff_file` and
     `protocols` are files next to the spec that `flock apply` inlines (`kickoff`,
     `protocols_text`), because the controller and workers cannot read the caller's files."""
@@ -321,9 +322,12 @@ class CommsSpec(BaseModel):
     # extended: each agent identity's feed is polled about once per this many seconds; the
     # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
     poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # unset: 300
-    url: str
-    invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
-    channel: str  # name, with or without `#`
+    managed: bool = False  # flock run owns a private msgboard for this run
+    url: str | None = None
+    invite_env: str | None = None  # secret name, populated by flock for a managed board
+    channel: str = "general"  # the default channel, with or without `#`
+    channels: list[str] = Field(default_factory=list)  # additional managed startup channels
+    allow_create_channels: bool = False  # managed agents may create channels (member invite)
     kickoff_file: str | None = None
     kickoff: str | None = None  # the file's text, inlined by `flock apply` (or given inline)
     rules: CommsRules = Field(default_factory=CommsRules)
@@ -337,14 +341,18 @@ class CommsSpec(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _url(cls, v: str) -> str:
+    def _url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if not v.startswith(("http://", "https://")):
             raise ValueError(f"url {v!r} must start with http:// or https://")
         return normalize_board_url(v)
 
     @field_validator("invite_env")
     @classmethod
-    def _env(cls, v: str) -> str:
+    def _env(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if not ENV_NAME_RE.match(v):
             raise ValueError(f"invite_env {v!r} must be an env var name (the invite never goes in the spec)")
         return v
@@ -356,6 +364,21 @@ class CommsSpec(BaseModel):
         if not COMMS_NAME_RE.match(v):
             raise ValueError(f"channel {v!r}: use the channel's name, e.g. prj-eliza-v1")
         return v
+
+    @field_validator("channels")
+    @classmethod
+    def _channels(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(cls._channel(name) for name in v))
+
+    @model_validator(mode="after")
+    def _connection(self) -> CommsSpec:
+        if not self.managed:
+            if not self.url or not self.invite_env:
+                raise ValueError("external comms needs url and invite_env; or set managed: true "
+                                 "with flock run")
+            if self.channels or self.allow_create_channels:
+                raise ValueError("comms.channels and allow_create_channels need managed: true")
+        return self
 
     @field_validator("search")
     @classmethod
@@ -1051,6 +1074,12 @@ class SwarmSpec(BaseModel):
                 raise ValueError(
                     f"types.{type_name}.loop.while.agent_usd: no entry for model {ts.model!r} "
                     f"(keys: {sorted(cap)}); key it by the type's model alias or model id")
+        return self
+
+    @model_validator(mode="after")
+    def _managed_comms(self) -> SwarmSpec:
+        if self.comms and self.comms.managed and self.compute.kind != "local":
+            raise ValueError("comms.managed requires compute: local and flock run")
         return self
 
     @model_validator(mode="after")
