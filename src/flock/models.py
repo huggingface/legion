@@ -1743,6 +1743,8 @@ class SwarmStatus(BaseModel):
     # limits.budget_usd as a stop (docs/loop.md): None (under the threshold or no budget),
     # "final_reserve" (loops stopped, final rounds) or "hard" (every agent stopped).
     budget_stop: Literal["final_reserve", "hard"] | None = None
+    # bumped by every apply that changes the spec (docs/live.md, `flock history`)
+    generation: int | None = None
 
 
 class LoopRequest(BaseModel):

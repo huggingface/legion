@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 import resource
@@ -42,6 +43,7 @@ from flock.controller.spawn import (
 )
 from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
+from flock.live import diff_specs
 from flock.models import (
     COMMS_TOOLS,
     AgentState,
@@ -95,6 +97,22 @@ _COMMAND = TypeAdapter(Annotated[Command, Field(discriminator="kind")])
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def spec_source(header: str | None) -> dict[str, Any]:
+    """The `X-Flock-Source` header the CLI sends with an apply: {git_sha, ref, dirty, by}.
+    Unknown keys and anything that is not JSON are dropped."""
+    try:
+        raw = json.loads(header or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {k: str(raw[k])[:200] for k in ("git_sha", "ref", "by")
+                           if raw.get(k) is not None}
+    if "dirty" in raw:
+        out["dirty"] = bool(raw["dirty"])
+    return out
 
 
 def _dt(ts: float | None) -> datetime | None:
@@ -325,6 +343,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
         pending_prompts=sum(pending.values()),
         cost_usd=round(sum(t.cost_usd for t in types.values()), 6),
         budget_stop=store.swarm_flags(spec.swarm).get("budget_stop"),
+        generation=store.generation(spec.swarm),
     )
 
 
@@ -675,7 +694,8 @@ def create_app(
         return [swarm_status(store, sw["spec"], now) for sw in store.list_swarms()]
 
     @api.put("/swarms/{swarm}")
-    def apply(swarm: str, spec: SwarmSpec) -> SwarmStatus:
+    def apply(swarm: str, spec: SwarmSpec,
+              x_flock_source: Annotated[str | None, Header()] = None) -> SwarmStatus:
         if spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
         if namespace and spec.namespace != namespace:
@@ -719,11 +739,32 @@ def create_app(
                           transport=world_transport)
         except WorldError as e:
             raise HTTPException(400, str(e)) from None
+        diff = diff_specs(prev["spec"], spec) if prev else ["created"]
         store.put_swarm(spec, clock().timestamp())
+        if diff:  # an effective apply: a new generation, its spec kept for `flock history`
+            src = spec_source(x_flock_source)
+            gen = store.record_spec(spec, clock().timestamp(), src, diff[:50], new=prev is None)
+            store.append_events(swarm, swarm_stream(swarm), [Event(
+                type="spec_applied", ts=clock(), agent="",
+                data={"generation": gen, "source": src, "diff_summary": diff[:50]})])
         worlds.commit(swarm)  # a replaced world stops only now, after every check passed
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
         return swarm_status(store, spec, clock().timestamp())
+
+    @api.get("/swarms/{swarm}/history")
+    def history(swarm: str) -> list[dict]:
+        return [{"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
+                 "diff_summary": r["diff"]} for r in store.spec_history(swarm)]
+
+    @api.get("/swarms/{swarm}/history/{generation}")
+    def history_spec(swarm: str, generation: int) -> dict:
+        rows = store.spec_history(swarm, generation)
+        if not rows:
+            raise HTTPException(404, f"no generation {generation} of swarm {swarm!r}")
+        r = rows[0]
+        return {"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
+                "diff_summary": r["diff"], "spec": json.loads(r["spec"])}
 
     def folder_names(swarm: str, spec: SwarmSpec, type_name: str) -> list[str]:
         sel = spec.types[type_name].folder_tools

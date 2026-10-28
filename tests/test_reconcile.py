@@ -420,6 +420,21 @@ def test_store_migrates_workers_table_without_incarnation(tmp_path):
     assert s.get_worker("w")["incarnation"] == "abc"
 
 
+def test_store_migrates_swarms_to_generation_1(tmp_path):
+    import sqlite3
+
+    (tmp_path / "old").mkdir()
+    db = sqlite3.connect(tmp_path / "old" / "controller.db")
+    db.execute("CREATE TABLE swarms (name TEXT PRIMARY KEY, spec TEXT NOT NULL, "
+               "applied_at REAL NOT NULL, removing INTEGER NOT NULL DEFAULT 0)")
+    db.execute("INSERT INTO swarms VALUES ('demo', ?, 0, 0)", [make_spec().model_dump_json()])
+    db.commit()
+    db.close()
+    s = Store(tmp_path / "old")
+    assert s.generation("demo") == 1 and s.spec_history("demo") == []
+    assert s.record_spec(make_spec(), 5, {}, ["x: 1 -> 2"], new=False) == 2
+
+
 class _HubError(Exception):
     """Shaped like huggingface_hub's HfHubHTTPError: carries the response."""
 

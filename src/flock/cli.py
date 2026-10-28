@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
 import time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -156,6 +157,25 @@ def _is_swarm(name: str) -> bool:
         if AGENT_NAME_RE.match(name):
             return False
         return _request(c, "GET", f"/agents/{name}").status_code != 200
+
+
+def source_header(spec_file: str | Path | None) -> dict[str, str]:
+    """`X-Flock-Source` for an apply (`flock history`): who applied it and, when the spec's
+    folder is in a git repo, its commit, branch and whether the folder has local changes."""
+    src: dict[str, Any] = {"by": os.environ.get("USER")}
+    if spec_file is not None:
+        d = str(Path(spec_file).resolve().parent)
+        try:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=False,
+                                            capture_output=True, text=True, timeout=10)
+            head = git("rev-parse", "HEAD")
+            if head.returncode == 0:
+                src["git_sha"] = head.stdout.strip()
+                src["ref"] = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+                src["dirty"] = bool(git("status", "--porcelain", "--", ".").stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass  # no git: `by` only
+    return {"X-Flock-Source": json.dumps(src)}
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -438,7 +458,8 @@ def apply(
         spec.tools_version = up["version"]
         names = ", ".join(up["tools"]) or "none"
         typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
-    st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
+               headers=source_header(spec_file))
     _print_status(st)
 
 
@@ -507,7 +528,8 @@ def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = No
     lines = diff_specs(old, spec, names)
     if not lines:
         return [*warnings, "no changes"]
-    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
+                 headers=source_header(spec_file))
     if r.status_code >= 400:
         raise SpecError([f"refused: {_detail(r)}"])
     return [*warnings, *lines]
@@ -950,7 +972,8 @@ def scale(swarm: str, type: str, replicas: int) -> None:
         typer.echo(f"no type {type!r} in swarm {swarm!r}", err=True)
         raise typer.Exit(1)
     spec.types[type].replicas = replicas
-    _print_status(_call("PUT", f"/swarms/{swarm}", json=spec.model_dump(mode="json")))
+    _print_status(_call("PUT", f"/swarms/{swarm}", json=spec.model_dump(mode="json"),
+                        headers=source_header(None)))
 
 
 @app.command()

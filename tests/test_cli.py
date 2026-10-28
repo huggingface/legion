@@ -229,3 +229,26 @@ def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
     cli._warn_extra(spec)
     err = capsys.readouterr().err
     assert "type cl:" in err and "type cx:" not in err
+
+
+def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
+    import subprocess
+
+    _wire(monkeypatch, app)
+    monkeypatch.setenv("USER", "carlos")
+    git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
+                                     "-c", "user.email=t@t", *a], check=True, capture_output=True)
+    git("init", "-q", "-b", "exp")
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
+    git("add", ".")
+    git("commit", "-qm", "spec")
+    sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    (gen1,) = store.spec_history("demo")
+    assert gen1["source"] == {"by": "carlos", "git_sha": sha, "ref": "exp", "dirty": False}
+    assert json.loads(cli.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
+        "by": "carlos"}  # not a repo (the folder does not exist)
+    spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
+    assert json.loads(cli.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
