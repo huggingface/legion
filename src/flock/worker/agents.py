@@ -140,6 +140,10 @@ class AgentRuntime:
         self._next_spec: TypeSpec | None = None
         self._next_grant: Any = _UNSET
         self._notes: dict[str, None] = {}
+        # type_spec_rev of base_spec at the last turn boundary, and the one the harness started on
+        self.rev: str | None = None
+        self.start_rev: str | None = None
+        self.workdir_files: int | None = None  # files in the workdir at the last push
         self.work_root = Path(work_root)
         self.workdir = self.work_root / name
         self.sessions_dir = self.work_root / "_sessions"
@@ -311,6 +315,7 @@ class AgentRuntime:
         grant, self._next_grant = self._next_grant, _UNSET
         before = (self.base_spec.system_prompt, self.base_spec.system_prompt_file)
         self.base_spec = spec or self.base_spec
+        self.rev = type_spec_rev(self.base_spec)
         regrant = grant is not _UNSET and grant != self.grant
         if regrant:
             self.grant = grant
@@ -555,6 +560,7 @@ class AgentRuntime:
                 first.append(restart_prompt(old, transcript, self.log.path, str(e)))
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
+            self.start_rev = self.rev
             self.save_state()
             self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
@@ -947,4 +953,6 @@ class AgentRuntime:
             turns=self.state.turns,
             last_sync=self.last_sync,
             msgboard_principal=self.identities.principal(self.name) if self.identities else None,
+            rev=self.rev,
+            start_rev=self.start_rev,
         )

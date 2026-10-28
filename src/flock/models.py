@@ -1448,6 +1448,40 @@ class AgentHeartbeat(BaseModel):
     turns: int = 0
     last_sync: datetime | None = None
     msgboard_principal: str | None = None
+    rev: str | None = None  # `type_spec_rev` the agent applied at its last turn boundary
+    start_rev: str | None = None  # the one its running harness process started with
+
+
+class WorkerMem(BaseModel):
+    """The worker's cgroup memory (MB) at its last sample (flock.worker.cgroup)."""
+
+    current_mb: float | None = None
+    limit_mb: float | None = None  # None: no limit found, nothing is armed
+    nonreclaim_mb: float | None = None  # anon + shmem + slab_unreclaimable + stacks + pagetables
+    slope_mb_h: float | None = None  # of nonreclaim_mb over the last hour
+    eta_limit_s: float | None = None  # nonreclaim_mb reaches limit_mb at that slope
+    psi_some_avg10: float | None = None
+    oom_kills: int | None = None  # memory.events oom_kill, cumulative for the cgroup
+
+
+class RestoreProgress(BaseModel):
+    """Restores in flight on the worker: files downloaded of the files listed."""
+
+    agents: int = 0
+    files_done: int = 0
+    files_total: int = 0
+    started: datetime | None = None  # the oldest restore in flight
+
+
+class ToolCounters(BaseModel):
+    """One world tool's calls since this worker process started (world/hub.py)."""
+
+    n: int = 0
+    err: int = 0
+    refused: int = 0  # the world said no for now: HTTP 429 or a budget/busy error code
+    timeouts: int = 0
+    sum_s: float = 0.0
+    max_s: float = 0.0
 
 
 class WorkerHeartbeat(BaseModel):
@@ -1464,6 +1498,11 @@ class WorkerHeartbeat(BaseModel):
     # with `preempted`: agents whose turn the preemption cut; they get the type's
     # resume_prompt after the restore
     interrupted: list[str] = Field(default_factory=list)
+    # telemetry (docs/design.md "Heartbeat"); None from workers that do not send it
+    mem: WorkerMem | None = None
+    restore: RestoreProgress | None = None  # None when no restore is in flight
+    tools: dict[str, ToolCounters] | None = None  # world tools by name
+    knobs_rev: str | None = None  # hash of the worker's effective settings
 
 
 class Event(BaseModel):
@@ -1686,6 +1725,8 @@ class AgentStatus(BaseModel):
     depth: int = 0  # generations this agent may still spawn below itself
     # `flock grant` overlays in force for this agent (type grant + agent grant, docs/live.md)
     grants: dict[str, Any] | None = None
+    rev: str | None = None  # AgentHeartbeat.rev / start_rev
+    start_rev: str | None = None
 
 
 class WorkerStatus(BaseModel):
@@ -1700,6 +1741,11 @@ class WorkerStatus(BaseModel):
     launched_at: datetime
     crashes: int = 0
     last_error: str | None = None  # last launch failure or crash: job status, log tail
+    # from the last heartbeat (WorkerHeartbeat)
+    mem: WorkerMem | None = None
+    restore: RestoreProgress | None = None
+    tools: dict[str, ToolCounters] | None = None
+    knobs_rev: str | None = None
 
 
 class LoopStatus(BaseModel):

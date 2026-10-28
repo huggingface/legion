@@ -634,6 +634,39 @@ async def test_hub_retries_only_read_only_tools_and_once(read_only, attempts):
     await hub.aclose()
 
 
+async def test_hub_counts_calls_errors_refusals_and_timeouts_per_tool():
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rsplit("/", 1)[-1]
+        if name == "slow":
+            raise httpx.ReadTimeout("slow", request=request)
+        if name == "full":
+            return httpx.Response(429, json={"ok": False})
+        if name == "budget":
+            return httpx.Response(200, json={"ok": False, "error": {
+                "code": "open_budget", "message": "wait"}})
+        if name == "bad":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "nope",
+                                                                     "message": "no"}})
+        return httpx.Response(200, json={"ok": True, "text": "fine"})
+
+    names = ["ok", "slow", "full", "budget", "bad"]
+    hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
+                   transport=httpx.MockTransport(handler))
+    m = WorldManifest(world_api="v1", name="w", version="1", tools=[{"name": n} for n in names])
+    hub.configure(world_block("http://w", m, "t"), names)
+    for n in names + ["ok", "missing"]:
+        await hub.call("x", f"world:{n}", {})
+    got = {n: c.model_dump(include={"n", "err", "refused", "timeouts"}) for n, c in
+           hub.counters.items()}
+    assert got == {"ok": {"n": 2, "err": 0, "refused": 0, "timeouts": 0},
+                   "slow": {"n": 1, "err": 1, "refused": 0, "timeouts": 1},
+                   "full": {"n": 1, "err": 1, "refused": 1, "timeouts": 0},
+                   "budget": {"n": 1, "err": 1, "refused": 1, "timeouts": 0},
+                   "bad": {"n": 1, "err": 1, "refused": 0, "timeouts": 0}}  # no "missing"
+    assert hub.counters["ok"].max_s <= hub.counters["ok"].sum_s
+    await hub.aclose()
+
+
 async def test_hub_uploads_workspaces_and_raises_timeouts_from_the_manifest(monkeypatch, tmp_path):
     seen = []
 
