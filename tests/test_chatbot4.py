@@ -1919,3 +1919,24 @@ def test_a_slow_hub_merge_does_not_block_reads(setup, monkeypatch):
         release.set()
         merging.join(30)
     assert result["merged_sha"] == git(remote, "rev-parse", "main")
+
+
+def test_reconcile_runs_git_only_when_main_moved(setup, monkeypatch):
+    world, clone, _ = setup
+    one = submit(world, clone, branch="one")
+    (clone / "bot/modules/two.py").write_text('def respond(text, memory):\n    return None\n')
+    submit(world, clone, "birch", "two")
+    real, calls = world.repo.ancestor, []
+    monkeypatch.setattr(world.repo, "ancestor", lambda *a: (calls.append(a), real(*a))[1])
+    with world.lock:
+        world._reconcile()  # fills the cache for any PR not seen on this main yet
+    calls.clear()
+    with world.lock:
+        assert not world._reconcile()
+    assert not calls  # main unchanged: no git
+    approve(world, one)
+    world.merge_pr(Agent("birch"), one["pr"])  # main moved: the other PR is checked again
+    calls.clear()
+    with world.lock:
+        world._reconcile()
+    assert len(calls) == 1

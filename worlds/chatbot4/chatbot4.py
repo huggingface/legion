@@ -131,6 +131,7 @@ class Chatbot4World(World):
         # moves local main, and by the "did main move" check before a Hub PR is created. The
         # state lock is taken only around record reads and updates, never across a Hub call.
         self.main_lock = threading.Lock()
+        self.ancestry = {}  # (head, main sha) -> head is in main; read and written under self.lock
         self.db = self.ws / "prs.json"
         for stale in self.ws.glob("prs.json.*.tmp"):  # a write cut by a crash
             stale.unlink(missing_ok=True)
@@ -633,11 +634,16 @@ class Chatbot4World(World):
         This recovers a Hub merge whose local bookkeeping failed, and state restored
         from an archive that predates merges. Uses the local main ref.
         """
-        changed = False
+        changed, main = False, self.repo.sha()
         for rec in self.state["prs"].values():
             if rec["state"] != "open" or (author and rec["author"] != author):
                 continue
-            if not self.repo.ancestor(rec["head_sha"], "main"):
+            key = (rec["head_sha"], main)  # a git subprocess per open PR only when main moved
+            if key not in self.ancestry:
+                if len(self.ancestry) >= 10000:
+                    self.ancestry.clear()
+                self.ancestry[key] = self.repo.ancestor(rec["head_sha"], main)
+            if not self.ancestry[key]:
                 continue
             merged = self.repo.merged_by(rec["head_sha"])
             reviewers = sorted(name for name, r in self._current_reviews(rec).items()
