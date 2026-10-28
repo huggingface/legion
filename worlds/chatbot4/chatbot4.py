@@ -144,6 +144,13 @@ class Chatbot4World(World):
         self.save_wake = threading.Event()
         self.save_stop = threading.Event()
         self.saver = None
+        # For metrics(): the last prs.json write and in-memory counters since start.
+        self.save_s, self.saved_at = 0.0, self.db.stat().st_mtime if self.db.exists() else time.time()
+        self.state_bytes = self.db.stat().st_size if self.db.exists() else 0
+        self.budget_refusals = []  # unix times of open_budget refusals (last WINDOW seconds)
+        self.stale_adoptions = self.hub_busy_total = 0
+        self.hub_slot_wait_s = 0.0
+        self.counts_lock = threading.Lock()  # a leaf lock: the counters above, from tool threads
         self.repo_id = repo_id = os.environ.get("CHATBOT_REPO", "cmpatino/chatbot-swarm")
         self.repo = repository or Repository(self.ws / "repo.git",
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
@@ -344,17 +351,40 @@ class Chatbot4World(World):
         if info["opened_last_hour"] < info["limit"]:
             return
         n, m, k = info["opened_last_hour"], info["merged_last_hour"], info["next_slot_min"]
+        now = time.time()
+        self._recent(self.budget_refusals, now).append(now)
         log.warning("open_budget: refused a new PR for agent=%s opened=%d merged=%d limit=%d",
                     agent.name, n, m, info["limit"])
         raise ToolError(f"the swarm opened {n} PRs in the last hour and merged {m}; new PRs wait "
                         f"until more merge (next slot in ~{k} min). Meanwhile review others' PRs "
                         "(list_prs needs_review=true) or improve your open PR with pr=<n>.",
-                        "open_budget")
+                        "open_budget", retry_after_s=max(1, k) * 60)
 
     def _note_merge(self):
         """Count a merge for the new-PR budget (call with the lock held; the caller saves)."""
         now = time.time()
         self._recent(self.state["pr_merges"], now).append(now)
+
+    def _count(self, name, n=1):
+        with self.counts_lock:
+            setattr(self, name, getattr(self, name) + n)
+
+    def metrics(self):
+        """World numbers for GET /metrics (docs/world.md)."""
+        now = time.time()
+        with self.lock:
+            budget = self._budget()
+            box = self.state["hub_outbox"]
+            out = {"open_prs": sum(r["state"] == "open" for r in self.state["prs"].values()),
+                   "opens_last_hour": budget["opened_last_hour"],
+                   "merges_last_hour": budget["merged_last_hour"], "open_budget_limit": budget["limit"],
+                   "budget_refusals_last_hour": len(self._recent(self.budget_refusals, now)),
+                   "parked_drafts": len(self.state["drafts"]), "outbox_depth": len(box),
+                   "outbox_oldest_age_s": now - min((e.get("queued_at", now) for e in box), default=now)}
+        return {**out, "stale_lease_adoptions_total": self.stale_adoptions,
+                "hub_busy_total": self.hub_busy_total, "hub_slot_wait_s_total": self.hub_slot_wait_s,
+                "save_duration_s": self.save_s, "save_age_s": now - self.saved_at,
+                "state_bytes": self.state_bytes}
 
     # -- saving prs.json -------------------------------------------------------------------
 
@@ -428,13 +458,17 @@ class Chatbot4World(World):
                 return
             parts = self._snapshot()
         tmp = self.db.with_name(f"prs.json.{uuid.uuid4().hex}.tmp")
+        started = time.monotonic()
         try:
             with open(tmp, "w") as out:
                 self._encode(parts, out)
+                size = out.tell()
             with self.replace_lock:
                 if gen > self.written_gen:
                     os.replace(tmp, self.db)
                     self.written_gen = gen
+                    self.save_s, self.saved_at, self.state_bytes = (
+                        time.monotonic() - started, time.time(), size)
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -531,7 +565,8 @@ class Chatbot4World(World):
 
     def _busy(self, agent, what, pr=None, reason="slot_wait"):
         log.warning("hub_busy: refused %s for agent=%s pr=%s reason=%s", what, agent.name, pr, reason)
-        raise ToolError(BUSY, "hub_busy")
+        self._count("hub_busy_total")
+        raise ToolError(BUSY, "hub_busy", retry_after_s=60)
 
     @contextlib.contextmanager
     def _hub_write(self, agent, what, pr=None, deadline=None, slots=None):
@@ -542,7 +577,10 @@ class Chatbot4World(World):
         slots = slots or self.hub_slots
         if deadline is None:
             deadline = time.monotonic() + self.hub_wait
-        if not slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        started = time.monotonic()
+        acquired = slots.acquire(timeout=max(0.0, deadline - started))
+        self._count("hub_slot_wait_s", time.monotonic() - started)
+        if not acquired:
             self._busy(agent, what, pr)
         try:
             yield
@@ -1017,6 +1055,7 @@ class Chatbot4World(World):
                         pr, via, expected[:12], hub[:12])
         else:
             log.warning("adopted Hub value of %s for PR #%s after a stale lease%s", ref, pr, via)
+        self._count("stale_adoptions")
         if time.monotonic() + PUSH_ESTIMATE_S > started + CALL_BUDGET:
             raise refusal
         try:
@@ -1069,8 +1108,9 @@ class Chatbot4World(World):
         if code == "stale_base":
             raise ToolError(f"{failure.message}; your PR #{number} is kept: retry open_pr with "
                             f"pr={number}", "stale_base")
+        self._count("hub_busy_total")
         raise ToolError(f"the Hub did not accept the push for your PR #{number}; retry open_pr "
-                        f"with pr={number} in a minute", "hub_busy")
+                        f"with pr={number} in a minute", "hub_busy", retry_after_s=60)
 
     @tool
     @logs_refusals

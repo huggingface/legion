@@ -137,6 +137,7 @@ HTTP and JSON. A world is any server that answers these routes:
 | `GET /manifest` | | the manifest (below); also the health check |
 | `POST /tools/<name>` | `{"args": {...}}` | `{"ok": true, "result": <any JSON>}` or `{"ok": false, "error": {"code": "...", "message": "..."}}` |
 | `POST /hooks` | `{"event", "agent", "type", "swarm", "turn", "data"}` | `{"ok": true}`; sent only for the events the manifest lists |
+| `GET /metrics` | | optional, capability `metrics-v1`: load and health numbers (below) |
 
 | header | sent | meaning |
 |---|---|---|
@@ -164,9 +165,11 @@ The manifest:
   changes nothing; the worker may retry it.
 - Unknown fields are ignored. flock ignores capabilities it does not use, so a world can declare
   more.
-- A tool's error is a `200` with `ok: false`; the agent reads `message`. Use `4xx` and `5xx` for
-  protocol failures: `401` for the secret, `404` for an unknown tool, `429` or `503` with
-  `Retry-After` when overloaded.
+- A tool's error is a `200` with `ok: false`; the agent reads `message`. An optional
+  `error.retry_after_s` says the call cannot succeed for that many seconds (a budget, a busy
+  backend). Use `4xx` and `5xx` for protocol failures: `401` for the secret, `404` for an
+  unknown tool, `429` or `503` with `Retry-After` when overloaded (`flock world serve` answers
+  `{"ok": false, "error": {"code": "overloaded", "message", "retry_after_s"}}`).
 - `result` goes to the model as is if it is a string, otherwise as JSON. If `result` is absent,
   a `text` string is used instead.
 - Hooks are sent by the worker, one request per event, in the background, with a 5 s timeout and
@@ -234,6 +237,45 @@ args, agent)` serves tools that are not methods. The server checks each call aga
 `manifest()` as served at that moment, so what `GET /manifest` advertises is exactly what
 `POST /tools/<name>` accepts, also after the manifest changes. It needs the `controller` extra (FastAPI, uvicorn),
 which `flock run` needs too.
+
+`raise ToolError(message, code, retry_after_s=N)` adds `retry_after_s` to the error, for a
+refusal that will not change for a while (chatbot4 sends it with its new-PR budget,
+`open_budget`, and with `hub_busy`). The message stays what the agent reads.
+
+**Admission control.** The server refuses a tool call with `429`, `Retry-After` and
+`code: "overloaded"` when its pool is overloaded: the fast pool's oldest queued call has
+waited more than `FLOCK_WORLD_FAST_MAX_WAIT_S` (2 s), or the slow pool's running and queued
+calls reach its 64 threads plus `FLOCK_WORLD_SLOW_QUEUE` (8). `retry_after_s` is
+`FLOCK_WORLD_RETRY_AFTER_S` (30). The decision is made from the path before the body is read,
+so a refused upload is drained and never decoded. `GET /manifest`, `GET /metrics` and the
+hooks are never refused.
+
+**Metrics.** `GET /metrics` (the same token) answers JSON, or Prometheus text with
+`Accept: text/plain` (`flock_world_<name>`, labels `tool`, `pool`, `code`). Windowed values
+cover the last `window_s` (300 s):
+
+```json
+{"uptime_s": 812.4, "rss_mb": 412.0, "cpu_pct": 37.5,
+ "loop_lag_s": 0.002, "loop_lag_max_s": 0.08, "overloaded_429_total": 3, "window_s": 300.0,
+ "tools": {"open_pr": {"calls": 41, "errors_by_code": {"open_budget": 6}, "latency_p50_s": 9.1,
+                       "latency_p95_s": 31.0, "latency_max_s": 48.2, "bytes_in": 120000000,
+                       "bytes_out": 52000, "calls_total": 310, "errors_total": 44}},
+ "pools": {"fast": {"in_flight": 2, "queued": 0, "limit": 40, "queue_wait_oldest_s": 0.0,
+                    "queue_wait_p95_s": 0.0, "queue_wait_max_s": 0.01},
+           "slow": {"in_flight": 70, "queued": 6, "limit": 64, "queue_wait_oldest_s": 4.2,
+                    "queue_wait_p95_s": 3.0, "queue_wait_max_s": 9.5}},
+ "world": {"open_prs": 57}}
+```
+
+`tools` lists the tools called since start: `calls`, `errors_by_code` (refusals included as
+`overloaded`), latencies (admitted calls only, queue wait included) and bytes are over the
+window; `calls_total` and `errors_total` since start. `pools.*.in_flight` counts running and
+queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
+`metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
+concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
+`merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
+`outbox_depth`, `outbox_oldest_age_s`, `stale_lease_adoptions_total`, `hub_busy_total`,
+`hub_slot_wait_s_total`, `save_duration_s`, `save_age_s` and `state_bytes`.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
