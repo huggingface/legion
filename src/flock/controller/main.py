@@ -16,6 +16,7 @@ import contextlib
 import logging
 import os
 import signal
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -243,7 +244,8 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
                 log.exception("state push failed")
 
     # World/provider probes and health snapshots (docs/health.md), next to follow_worlds
-    health = Health(store, token=token, secrets=env, jobs=jobs)
+    run = env.get("FLOCK_RUN") or env.get("FLOCK_STATE_URL", "").rstrip("/").rsplit("/", 1)[-1]
+    health = Health(store, token=token, secrets=env, jobs=jobs, run=run or None)
     health_every = float(env.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
 
     loops: list[asyncio.Task] = []  # cancelled by `halt` on shutdown, before the final push
@@ -353,6 +355,11 @@ async def serve(b: Built, host: str = "0.0.0.0") -> None:
             s.should_exit = True
         if b.halt is not None:
             b.halt()
+        if b.health is not None:  # last snapshot, the open hour's rollups, run.json ended
+            try:
+                await asyncio.to_thread(b.health.close, time.time())
+            except Exception:
+                log.exception("health close failed")
         await final_push(b)
         _, pending = await asyncio.wait(tasks, timeout=GRACEFUL_SHUTDOWN + 5)
         for t in pending:

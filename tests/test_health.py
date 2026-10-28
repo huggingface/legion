@@ -239,3 +239,63 @@ def test_health_files_mirror_through_state_sync(tmp_path, store):
     restored = tmp_path / "restored"
     assert StateSync(bucket, restored).restore()
     assert (restored / "metrics/demo/2026-09-21.jsonl").exists()
+
+
+# --------------------------------------------------------------------------- rollups, run.json
+
+def test_hourly_rollup_lines_written_when_the_hour_closes(store):
+    a0, a1 = _fleet(store, T)
+    h = Health(store, run="run-x")
+    h.tick(T)
+    assert json.loads((store.data_dir / "run.json").read_text()) == {
+        "schema": 1, "run": "run-x", "swarm": "demo", "swarms": ["demo"],
+        "started_at": "2026-09-21T14:00:00+00:00", "ended_at": None, "status": "running",
+        "generation": 1,
+        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 3}}}
+    tok = {"m": {"input": 7, "output": 1}}
+    h.on_events(a0, [
+        _ev(a0["name"], "turn_started"),
+        _ev(a0["name"], "message", {"message": {"role": "toolResult", "toolName": "bash",
+                                                "isError": True}}),
+        _ev(a0["name"], "turn_ended", {"status": "completed", "tool_calls": 1, "tokens": tok}),
+        _ev(a0["name"], "turn_ended", {"status": "completed", "reason": "max_turns"}),
+        _ev(a0["name"], "error", {"error": "x"})], T + 10)
+    store.add_prompt(a1["name"], "{}", T)
+    for a in (a0, a1):
+        store.update_agent(a["name"], last_heartbeat=T + 30)
+    store.update_worker("demo-researcher-w0000", last_heartbeat=T + 30)
+    h.tick(T + 30)  # 30 s sampled: a0 working, a1 idle with a prompt queued (pending)
+    rollups = store.data_dir / "rollups" / "demo"
+    assert not rollups.exists()  # the hour is still open
+    h.tick(T + 3600)
+    (line_a0, line_a1) = [json.loads(x) for x in (rollups / "2026-09-21T14.jsonl").read_text()
+                          .splitlines()]
+    assert line_a0 == {
+        "h": "2026-09-21T14", "agent": "researcher-0000", "type": "researcher", "parent": None,
+        "ephemeral": False, "turns": 2, "out": {"done": 1, "max_turns": 1, "max_budget": 0,
+                                                "error": 0},
+        "working_s": 30.0, "pending_s": 0.0, "idle_s": 0.0, "tool_calls": 1,
+        "tools": {"bash": {"n": 1, "err": 1}},
+        "tokens": {"m": {"input": 7, "output": 1, "cache_read": 0, "cache_write": 0,
+                         "reasoning": 0}},
+        "events": {"turn_started": 1, "message": 1, "turn_ended": 2, "error": 1},
+        "wakes": 0, "errors": 1, "first_ts": "2026-09-21T14:00:00+00:00",
+        "last_ts": "2026-09-21T14:00:00+00:00"}
+    assert line_a1["pending_s"] == 30.0 and line_a1["turns"] == 0
+    h.close(T + 3700)
+    run = json.loads((store.data_dir / "run.json").read_text())
+    assert run["status"] == "ended" and run["started_at"] == "2026-09-21T14:00:00+00:00"
+    assert run["ended_at"] == "2026-09-21T15:01:40+00:00"
+
+
+def test_run_json_rewritten_on_a_new_generation(store):
+    _fleet(store, T)
+    h = Health(store)
+    h.tick(T)
+    spec = make_spec(researcher={"replicas": 5, "agents_per_worker": 2})
+    store.put_swarm(spec, T + 5)
+    store.record_spec(spec, T + 5, {}, [], new=False)
+    h.tick(T + 30)
+    run = json.loads((store.data_dir / "run.json").read_text())
+    assert run["generation"] == store.generation("demo")
+    assert run["types"]["researcher"]["replicas"] == 5
