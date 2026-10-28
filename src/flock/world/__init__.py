@@ -61,10 +61,24 @@ class ToolError(Exception):
         self.message = message
 
 
-def tool(fn: Callable) -> Callable:
-    """Mark a method of a World subclass as a tool."""
-    fn.__flock_world_tool__ = True  # type: ignore[attr-defined]
-    return fn
+POOLS = ("fast", "slow")
+
+
+def tool(fn: Callable | None = None, *, pool: str = "fast", read_only: bool = False) -> Any:
+    """Mark a method of a World subclass as a tool: `@tool`, or `@tool(pool="slow",
+    read_only=True)`. `pool`: the server's thread pool for the call ("slow" for tools that
+    block for seconds, so they never take the threads of the quick ones). `read_only`: the
+    tool changes nothing (manifest `annotations.readOnlyHint`; the worker may retry it)."""
+    if pool not in POOLS:
+        raise ValueError(f"pool {pool!r} must be one of {POOLS}")
+
+    def mark(f: Callable) -> Callable:
+        f.__flock_world_tool__ = True  # type: ignore[attr-defined]
+        f.__flock_world_pool__ = pool  # type: ignore[attr-defined]
+        f.__flock_world_read_only__ = read_only  # type: ignore[attr-defined]
+        return f
+
+    return mark if fn is None else mark(fn)
 
 
 def _is_agent(p: inspect.Parameter, hints: dict[str, Any]) -> bool:
@@ -135,6 +149,9 @@ class World:
         schemas = self.__dict__.get("_flock_schemas")
         if schemas is None:
             schemas = [tool_schema(fn) for fn in self.tools().values()]
+            for t, fn in zip(schemas, self.tools().values(), strict=True):
+                if getattr(fn, "__flock_world_read_only__", False):
+                    t["annotations"] = {"readOnlyHint": True}
             self.__dict__["_flock_schemas"] = schemas
         return {"world_api": WORLD_API, "name": self.name, "version": self.version,
                 "description": self.description, "tools": [dict(t) for t in schemas],
@@ -149,6 +166,10 @@ class World:
         extra = {p.name: agent for p in inspect.signature(fn).parameters.values()
                  if _is_agent(p, hints)}
         return fn(**args, **extra)
+
+    def pool(self, tool: str) -> str:
+        """The server's thread pool for `tool`: "fast" (default) or "slow" (`@tool(pool=)`)."""
+        return getattr(self.tools().get(tool), "__flock_world_pool__", "fast")
 
     def cancellable(self, tool: str) -> bool:
         """May the server cancel this tool's `async` work when its caller disconnects (the

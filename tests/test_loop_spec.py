@@ -43,7 +43,7 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "every": "0s"}, "duration > 0"),
     ({"prompt": "x", "on": ["board.mention"]}, "expected comms.<name>"),
     ({"prompt": "x", "while": {"max_rounds": 0}}, ">= 1"),
-    ({"prompt": "x", "while": {"until": "soon"}}, "bad duration"),
+    ({"prompt": "x", "while": {"until": "soon"}}, "bad until"),
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
@@ -199,3 +199,17 @@ def test_wake_and_stop_when_defaults_and_refusal():
     s = spec_with({"prompt": "x", "stop_when": {"all_agents_done": True}})
     assert loop_refusals(s) == [
         "types.researcher.loop.stop_when.all_agents_done needs harness llm with the done tool"]
+
+
+def test_until_takes_a_duration_or_a_clock_time():
+    from datetime import UTC, datetime
+
+    from flock.models import until_deadline
+    t = datetime(2026, 10, 28, 20, tzinfo=UTC).timestamp()
+    assert until_deadline("2h", 1000.0) == 8200.0
+    for v in ("2026-10-28T20:00Z", "2026-10-28T20:00", "2026-10-28T22:00+02:00"):
+        assert until_deadline(v, 5.0) == t  # naive = UTC; started_at is ignored
+        assert LoopSpec.model_validate({"prompt": "x", "while": {"until": v}}).while_.until == v
+    for bad in ("soon", "2026-13-40", "25"):
+        with pytest.raises(ValidationError):
+            LoopSpec.model_validate({"prompt": "x", "while": {"until": bad}})

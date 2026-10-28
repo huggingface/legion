@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -56,6 +56,18 @@ def parse_duration(value: str | int | float | timedelta) -> timedelta:
     if not m:
         raise ValueError(f"bad duration {value!r}; use e.g. 30s, 10m, 24h, 7d")
     return timedelta(seconds=int(m.group(1)) * _UNIT_SECONDS[m.group(2)])
+
+
+def until_deadline(until: str, started_at: float) -> float:
+    """Epoch deadline of `while.until`: started_at + duration, or the ISO-8601 time (naive = UTC)."""
+    try:
+        return started_at + parse_duration(until).total_seconds()
+    except ValueError:
+        try:
+            t = datetime.fromisoformat(until)
+        except ValueError:
+            raise ValueError(f"bad until {until!r}; use a duration (2h) or a time (2026-10-28T20:00Z)") from None
+        return (t if t.tzinfo else t.replace(tzinfo=UTC)).timestamp()
 
 
 # --------------------------------------------------------------------------- enums
@@ -1083,7 +1095,7 @@ class LoopWhile(BaseModel):
     @classmethod
     def _until(cls, v: str | None) -> str | None:
         if v is not None:
-            parse_duration(v)
+            until_deadline(v, 0.0)
         return v
 
     @field_validator("max_rounds", "idle_rounds")

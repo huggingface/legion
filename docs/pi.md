@@ -83,6 +83,12 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   type's `secrets`, the provider's key variable, the type's `env` and the msgboard identity.
   `PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0` unless set; `PI_CODING_AGENT_DIR`.
   `FLOCK_TOKEN` is always removed, even when listed.
+  With isolation on, the allow-list applies to the inherited worker environment only: the
+  type's `env` keys pass as written, except names ending in `TOKEN` or `SECRET`, `HF_TOKEN`,
+  `FLOCK_TOKEN`, `FLOCK_WORLD_TOKEN` and the worker's `FLOCK_HARNESS_ENV_DROP` (put credentials in
+  `secrets`, which stay allow-listed). The dropped names (never values) are logged and emitted
+  once per agent per spec revision as an `env_dropped {names}` event, and `flock update` warns
+  `types.<T>.env.<KEY>: dropped by pi isolation` for the type's `env` keys that would be dropped.
 
 ## Event mapping
 

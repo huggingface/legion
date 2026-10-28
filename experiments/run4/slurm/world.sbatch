@@ -3,6 +3,7 @@
 #
 #   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
 #   sbatch -J flock-world-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
+#          ${WORLD_PARTITION:+-p $WORLD_PARTITION} ${WORLD_QOS:+--qos=$WORLD_QOS} \
 #          /fsx/carlos_patino/prj-eliza/slurm/world.sbatch <RUN>
 #
 # This batch script stays on the HOST (signals, <run>/hosts/world.host, `scontrol requeue`). The
@@ -143,6 +144,7 @@ log "container=$CONTAINER_IMAGE; world log $RUN_DIR/logs/world-$RUN.log"
 trap '' USR1
 srun "${CTR_SRUN[@]}" bash "$SLURM_DIR/world-inner.sh" >> "$RUN_DIR/logs/world-$RUN.log" &
 SRUN_PID=$!
+STARTED_AT=$(date +%s)
 trap on_usr1 USR1
 log "world step: srun pid $SRUN_PID"
 
@@ -163,15 +165,39 @@ wait "$SRUN_PID"; rc=$?   # the real status even when the last wait was cut by a
 log "world step exited with $rc (requeue=$REQUEUE, term=${TERM_MODE:-none}); the final sync ran inside it"
 [ "$REQUEUE" = 1 ] && exit 0  # already requeued by the Spot handler
 # Crash requeues only: SLURM_RESTART_COUNT also counts Spot requeues, so keep our own count on /fsx.
+# Only FAST crashes (up within WORLD_STABLE_S of the start) count toward the cap; a longer run
+# resets the count and the backoff. Past the cap the job never ends: it sleeps with backoff and
+# starts again, so a transient Hub problem heals without a person.
 CRASHES_FILE=$WORLD_CTL/crash-requeues
+BACKOFF_FILE=$WORLD_CTL/retry-backoff-s
+WORLD_STABLE_S=${WORLD_STABLE_S:-600}
+WORLD_RETRY_MIN_S=${WORLD_RETRY_MIN_S:-300}
+WORLD_RETRY_MAX_S=${WORLD_RETRY_MAX_S:-1800}
+if [ "$rc" = 0 ] || [ "$STOPPING" = 1 ]; then
+  exit "$rc"
+fi
 crashes=$(cat "$CRASHES_FILE" 2>/dev/null); case $crashes in ""|*[!0-9]*) crashes=0;; esac
-if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ] && [ "$crashes" -lt 5 ]; then
-  log "world failed (rc=$rc): automatic recovery requeue $(( crashes + 1 ))/5"
+if [ $(( $(date +%s) - STARTED_AT )) -ge "$WORLD_STABLE_S" ]; then
+  log "world ran >= ${WORLD_STABLE_S}s before failing (rc=$rc): crash count and backoff reset"
+  rm -f "$BACKOFF_FILE"; echo 0 > "$CRASHES_FILE"
+  crashes=0
+elif [ "$crashes" -lt 5 ]; then
+  log "world failed fast (rc=$rc): automatic recovery requeue $(( crashes + 1 ))/5"
   echo $(( crashes + 1 )) > "$CRASHES_FILE"
   scontrol requeue "$SLURM_JOB_ID" || exit "$rc"
   exit 0
+else
+  delay=$(cat "$BACKOFF_FILE" 2>/dev/null); case $delay in ""|*[!0-9]*) delay=$WORLD_RETRY_MIN_S;; esac
+  [ "$delay" -le "$WORLD_RETRY_MAX_S" ] || delay=$WORLD_RETRY_MAX_S
+  log "world keeps failing fast (rc=$rc, $crashes crash requeues): retry in ${delay}s, never giving up"
+  echo $(( delay * 2 > WORLD_RETRY_MAX_S ? WORLD_RETRY_MAX_S : delay * 2 )) > "$BACKOFF_FILE"
+  sleep "$delay" & wait $!   # `wait` returns on a trap: a Spot reclaim or a clean stop cuts the backoff
+  [ "$REQUEUE" = 1 ] && exit 0
+  [ "$STOPPING" = 1 ] && exit "$rc"
+  log "retry after backoff: scontrol requeue $SLURM_JOB_ID"
+  scontrol requeue "$SLURM_JOB_ID" || exit "$rc"
+  exit 0
 fi
-if [ "$rc" != 0 ] && [ "$STOPPING" = 0 ]; then
-  log "FATAL: world recovery exhausted after $crashes crash requeues ($CRASHES_FILE); operator action required"
-fi
-exit "$rc"
+log "world failed (rc=$rc) after a stable run: automatic recovery requeue"
+scontrol requeue "$SLURM_JOB_ID" || exit "$rc"
+exit 0

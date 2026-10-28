@@ -135,10 +135,13 @@ bundle and PR state, and excludes transient git lock files. Restore occurs befor
 serving; transient failures retry five times with 30 s backoff. A missing archive
 still permits a first start. Exhausted restore failures stop startup without
 dropping review state. Abnormal world exits requeue up to five times unless
-stopping; only crash requeues count (in `<run>/world/crash-requeues`, delete it
-to reset), Spot reclaims do not. If no world is up after 30 min, the controller
-requeues itself instead of waiting forever. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S` and
-`WORLD_WAIT_S` configure these bounds. The controller snapshots state.db and uploads only changed event files after its
+stopping; only fast crashes (up less than `WORLD_STABLE_S`, 600 s) count, in
+`<run>/world/crash-requeues`, and a longer run resets the count. Past five the job does not
+end: it sleeps 5 min, doubling to 30 min (`WORLD_RETRY_MAX_S`), and starts again, logging each
+attempt. Spot reclaims never count. A requeued controller does not wait for the world (it restores
+its state and follows the world's host); only the first launch waits, up to `WORLD_WAIT_S` (30 min),
+before `flock apply`. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S`,
+`WORLD_STABLE_S`, `WORLD_RETRY_MAX_S` and `WORLD_WAIT_S` configure these bounds. The controller snapshots state.db and uploads only changed event files after its
 first full sync. Test real restart timing on the cluster before launch.
 
 During the smoke and first waves, watch stale-base orphan PRs, PRs left open

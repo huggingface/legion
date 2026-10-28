@@ -6,6 +6,7 @@ loop / final ordering, `every` as a duration and as turn_end (worker- and contro
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -275,6 +276,26 @@ async def test_while_until_stops_and_runs_final(sim):
     sim.tick(61)
     fin = prompts(await sim.commands())
     assert {p["loop"]["kind"] for p in fin.values()} == {"final"}
+    assert fin[A0]["loop"]["why"] == "final: until"
+
+
+async def test_while_until_clock_time_stops_regardless_of_start(sim):
+    at = (sim.clock() + timedelta(seconds=90)).isoformat()
+    await sim.apply({"prompt": "p", "every": "10s", "while": {"until": at}, "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    assert 85 <= got[A0]["loop"]["wall_s"] <= 90
+    await sim.turn(A0, got[A0])
+    await sim.turn(A1, got[A1])
+    sim.tick(60)  # before the clock time: still looping
+    mid = prompts(await sim.commands())
+    assert {p["loop"]["kind"] for p in mid.values()} == {"loop"}
+    await sim.turn(A0, mid[A0])
+    await sim.turn(A1, mid[A1])
+    await sim.heartbeat()  # the worker stays alive past the heartbeat timeout
+    sim.tick(31)
+    fin = prompts(await sim.commands())
     assert fin[A0]["loop"]["why"] == "final: until"
 
 

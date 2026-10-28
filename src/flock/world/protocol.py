@@ -58,7 +58,8 @@ class WorkspaceUpload(BaseModel):
 class WorldTool(BaseModel):
     """One tool: a Chat Completions function (`parameters` is a JSON schema of type object),
     plus optional flock metadata: `x-flock-workspace` and `x-flock-timeout_s` (the least HTTP
-    timeout the worker gives this tool's calls)."""
+    timeout the worker gives this tool's calls), and `annotations.readOnlyHint` (the tool
+    changes nothing: the worker may retry it once)."""
 
     model_config = {"extra": "ignore", "populate_by_name": True}
 
@@ -67,6 +68,11 @@ class WorldTool(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
     workspace: WorkspaceUpload | None = Field(None, alias="x-flock-workspace")
     timeout_s: float | None = Field(None, alias="x-flock-timeout_s", gt=0)
+    annotations: dict[str, Any] = Field(default_factory=dict)  # MCP-style, e.g. readOnlyHint
+
+    @property
+    def read_only(self) -> bool:
+        return self.annotations.get("readOnlyHint") is True
 
     @field_validator("name")
     @classmethod

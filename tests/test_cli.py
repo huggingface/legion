@@ -275,3 +275,12 @@ def test_history_lists_generations_and_diffs_two(tmp_path, monkeypatch, app, sto
     r = runner.invoke(cli.app, ["history", "demo", "--diff", "2", "2"])
     assert r.output == "no changes\n"
     assert runner.invoke(cli.app, ["history", "demo", "--diff", "1", "9"]).exit_code == 1
+
+
+def test_extra_warnings_flags_pi_env_dropped_by_isolation():
+    from flock.models import SwarmSpec
+
+    spec = SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b", "types": {
+        "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}},
+        "b": {"harness": "claude", "model": "m", "env": {"HF_TOKEN": "x"}}}})
+    assert cli.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
