@@ -15,7 +15,7 @@ dependencies = [
 msgboard = ["msgboard @ git+https://github.com/huggingface/msgboard.git@7f42721dc14204de7d74b2a70dc6125f92e8b392"]
 controller = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "jinja2>=3.1"]
 worker = ["claude-agent-sdk>=0.1"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "fastapi>=0.115", "uvicorn[standard]>=0.30", "jinja2>=3.1", "respx>=0.21"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "fastapi>=0.115", "uvicorn[standard]>=0.30", "jinja2>=3.1", "respx>=0.21", "jsonschema>=4.26"]
 
 [project.scripts]
 flock = "flock.cli:app"

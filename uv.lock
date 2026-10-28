@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
@@ -308,6 +308,7 @@ controller = [
 dev = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "respx" },
@@ -330,6 +331,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "jinja2", marker = "extra == 'controller'", specifier = ">=3.1" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.26" },
     { name = "msgboard", marker = "extra == 'msgboard'", git = "https://github.com/huggingface/msgboard.git?rev=7f42721dc14204de7d74b2a70dc6125f92e8b392" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },

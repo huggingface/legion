@@ -140,3 +140,9 @@ The first command uses a fake HTTP backend without network or real jobs. The
 second checks the pinned engine's isolation and answer checker using private
 state in a separate disposable session. Its synthetic correct submission is
 **not** a swarm result and never enters agent prompts or experiment trajectories.
+
+## Local Qwen3.8-27B on B300
+
+See [the Slurm serving and throughput benchmark](b300/README.md) for sequential
+1/2/4/8-GPU tensor-parallel and replica comparisons using real UltraChat prompts
+and AgentEscape replay, with natural EOS stopping.
