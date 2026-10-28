@@ -63,14 +63,15 @@ log = logging.getLogger(__name__)
 BUILTIN_MODULE = "flock:world"
 SECTION_START = "<!-- flock:world -->"
 SECTION_END = "<!-- /flock:world -->"
-RETRIES = 2  # extra attempts after a 429 / 503
+RETRIES = 1  # extra attempts after a 429 / 503, for read-only tools only
 RETRY_CAP_S = 10.0
 HOOK_TIMEOUT_S = 5.0
 SNAPSHOTS_KEPT = 32
 
 
-def _err(msg: str, t0: float) -> Result:
-    return Result(json.dumps({"error": msg}, ensure_ascii=False), True, time.monotonic() - t0)
+def _err(msg: str, t0: float, **extra: Any) -> Result:
+    return Result(json.dumps({"error": msg, **extra}, ensure_ascii=False), True,
+                  time.monotonic() - t0)
 
 
 def _retry_after(r: httpx.Response) -> float:
@@ -361,7 +362,8 @@ class WorldHub:
                     return _err(str(exc), t0)
         wname = snap.manifest.name
         timeout = max(self.timeout, tool.timeout_s or 0)
-        for attempt in range(RETRIES + 1):
+        retries = RETRIES if tool.read_only else 0  # a write may have happened: never resent
+        for attempt in range(retries + 1):
             try:
                 r = await self._http().post(f"{snap.endpoint}/tools/{name}", json=payload,
                                             headers=headers, timeout=timeout)
@@ -369,7 +371,7 @@ class WorldHub:
                 return _err(f"{name}: world {wname} did not answer within {timeout:g} s", t0)
             except httpx.HTTPError as e:
                 return _err(f"{name}: world {wname} is unreachable ({type(e).__name__})", t0)
-            if r.status_code in (429, 503) and attempt < RETRIES:
+            if r.status_code in (429, 503) and attempt < retries:
                 await asyncio.sleep(_retry_after(r))
                 continue
             break
@@ -390,7 +392,8 @@ class WorldHub:
         if isinstance(body, dict) and body.get("ok") is False:
             e = body.get("error")
             msg = e.get("message") if isinstance(e, dict) else e
-            return _err(str(msg or f"{name} failed"), t0)
+            extra = {k: e[k] for k in ("code", "retry_after_s") if k in e} if isinstance(e, dict) else {}
+            return _err(str(msg or f"{name} failed"), t0, **extra)
         return _err(f"{name}: world {wname} answered HTTP {r.status_code} without "
                     "{\"ok\": ...}", t0)
 
