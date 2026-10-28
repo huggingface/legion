@@ -364,11 +364,20 @@ class LoopEngine:
                                           "interrupt": interrupt})
             if interrupt:
                 workers = {w["id"]: w for w in self.store.list_workers(swarm)}
+                loops = self.store.get_loops(swarm)
                 now = self.clock().timestamp()
                 for a in self.store.list_agents(swarm):
                     if (a["worker"] and not a["removing"] and self.store.held(a, flags)
                             and self.turn_state(a, workers.get(a["worker"]), now)
                             == AgentState.working):
+                        # a worker-side loop would re-prompt the stopped turn: end it first
+                        st = self.store.get_loop_agent(a["name"])
+                        if ((loops.get(a["type"]) or {}).get("mode") == "worker" and st
+                                and st["wstarted"] and not st["acked"]):
+                            self.store.enqueue_command(a["worker"], LoopStopCommand(
+                                agent=a["name"], reason="held").model_dump_json())
+                            st["stop_sent"] = now
+                            self.store.put_loop_agent(a["name"], swarm, a["type"], st)
                         self.store.enqueue_command(a["worker"],
                                                    StopCommand(agent=a["name"]).model_dump_json())
             return h

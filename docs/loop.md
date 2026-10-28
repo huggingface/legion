@@ -206,7 +206,9 @@ While an agent is held (its type or its name is held):
   during a hold (its final prompts then wait for `resume`);
 - a worker-side loop gets `loop_stop {reason: held}` once; after `resume` it gets a
   `loop_start` of the same run, so its round count goes on;
-- `--interrupt` sends `stop` (the hard budget stop's command) to its turns in flight.
+- `--interrupt` sends `stop` (the hard budget stop's command) to its turns in flight, after a
+  `loop_stop` to an active worker-side loop (else the worker would re-prompt the cut turn). A
+  hand prompt whose turn `--interrupt` cuts is lost, as with `stop`.
 
 Holds are stored in `swarm_flags` (a controller restart keeps them). Events on the swarm stream:
 `paused {types, agents, reason, by, auto, interrupt}` and `resumed {types, agents, by, auto}`

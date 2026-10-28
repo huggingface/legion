@@ -134,7 +134,7 @@ def _down_message(since: object, raw: dict) -> str | None:
     except ValueError:
         hhmm = since
     name = (raw.get("manifest") or {}).get("name") or "?"
-    return f"world {name} down since {hhmm}; flock has paused new rounds; end your turn"
+    return f"world {name} down since {hhmm}; do local work or end your turn"
 
 
 class WorldHub:

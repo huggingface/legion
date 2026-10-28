@@ -1258,7 +1258,8 @@ def add_pause_commands(app: typer.Typer) -> None:
                                                 "flight")] = False,
     ) -> None:
         """Hold types or agents: no new prompts or loop rounds reach them (queued ones wait),
-        rounds are not counted, until `flock resume`. Not `flock loop --stop`."""
+        rounds are not counted, until `flock resume`. Not `flock loop --stop`. To pause world
+        lanes instead, see `flock world pause`."""
         _show(_call("POST", f"/swarms/{swarm}/pause", json={
             **_body(type_, agent), "interrupt": interrupt, "reason": reason}))
 
@@ -1364,7 +1365,8 @@ def world_pause(
     lanes: Annotated[list[str], typer.Argument(help="Lanes the world names (e.g. push open merge).")],
     reason: str = typer.Option("", "--reason", help="Shown with the pause; recorded in events."),
 ) -> None:
-    """Pause world lanes (the world refuses or defers that kind of work)."""
+    """Pause world lanes (the world refuses or defers that kind of work). To hold agents
+    instead, see `flock pause`."""
     out = _call("POST", f"/swarms/{swarm}/world/pause", json={"lanes": lanes, "reason": reason},
                 headers=source_header(None))
     typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")

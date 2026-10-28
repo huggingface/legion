@@ -87,6 +87,33 @@ async def test_agent_hold_with_interrupt_stops_only_that_agent(sim):
     await resume(sim, agents=[A0])
 
 
+async def test_interrupt_ends_a_worker_side_loop_before_the_stop(sim):
+    await sim.apply({"prompt": "go"})  # turn_end: the worker re-prompts
+    await sim.heartbeat()
+    sim.tick()
+    assert {c["kind"] for c in await sim.commands()} == {"loop_start"}
+    await sim.heartbeat(working=(A0,))
+    await pause(sim, agents=[A0], interrupt=True, reason="look")
+    cmds = await sim.commands()
+    assert [(c["kind"], c["agent"], c.get("reason")) for c in cmds] == [
+        ("loop_stop", A0, "held"), ("stop", A0, None)]
+    sim.tick()
+    assert await sim.commands() == []  # the tick does not send a second loop_stop
+
+
+async def test_budget_stop_and_raise_keep_the_holds(sim):
+    await sim.apply({"prompt": "go", "every": "30s"}, limits={"budget_usd": 1})
+    await pause(sim, types=["researcher"], reason="r")
+    sim.cost[A0] = 10_000_000
+    await sim.heartbeat()
+    sim.tick()
+    assert sim.store.swarm_flags("demo")["budget_stop"] == "hard"
+    await sim.apply({"prompt": "go", "every": "30s"}, limits={"budget_usd": 100_000})
+    sim.tick()
+    flags = sim.store.swarm_flags("demo")
+    assert "budget_stop" not in flags and set(flags["holds"]["types"]) == {"researcher"}
+
+
 async def test_worker_loop_is_stopped_by_a_hold_and_restarted_with_its_rounds(sim):
     await sim.apply({"prompt": "go", "while": {"max_rounds": 9}})
     await sim.heartbeat()
@@ -192,8 +219,7 @@ async def test_hub_refuses_at_once_when_the_heartbeat_says_the_world_is_down():
     for tool in ("world:a", "world:peek"):  # read-only calls too
         body = json.loads((await hub.call("x", tool, {})).output)
         assert body["local"] and body["code"] == "world_down"
-        assert body["error"] == ("world w down since 14:05 UTC; flock has paused new rounds; "
-                                 "end your turn")
+        assert body["error"] == "world w down since 14:05 UTC; do local work or end your turn"
     assert seen == []
     hub.configure_raw(block)  # back up
     assert not (await hub.call("x", "world:a", {})).error and seen == [1]
