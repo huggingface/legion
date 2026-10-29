@@ -13,6 +13,7 @@ single-turn everyday chat prompts with reference replies.
 | [`judge.py`](judge.py) | AlpacaEval 2.0's judge prompt, order swap, preference and win rates |
 | [`swarmchat_server.py`](swarmchat_server.py) | serves a bot checkout as an OpenAI-compatible endpoint |
 | [`evaluate.py`](evaluate.py), [`hf_job.py`](hf_job.py) | launch the eval on Hugging Face Jobs, adapted from Carbon-X |
+| [`sync.py`](sync.py) | evaluates every new `main` commit of the SwarmChat repos, as a scheduled Job |
 
 The script that builds the dataset lives in the dataset repo, as `scripts/create_dataset.py`.
 
@@ -89,6 +90,34 @@ passed with `--bucket`:
 ```sh
 inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/HuggingFaceSwarms/SwarmChat-v4
 ```
+
+## Keeping SwarmChat evals up to date
+
+`sync.py` launches an eval for every `main` commit of every `HuggingFaceSwarms/SwarmChat-v<N>`
+dataset that has none yet, one Job per commit, so many commits of one repo run side by side.
+
+- **What it skips.** Commits with a `summary.json` in the bucket, those with an eval in flight,
+  and those whose evals already failed twice (`--max_attempts`).
+- **Unchanged bots.** A commit that leaves `bot/` as its parent left it would reply as its
+  parent does. It gets `<revision>/skipped.json` in the bucket, naming that parent, instead of
+  an eval.
+- **Order.** Newest first, round-robin across repos, so new merges are scored within one run
+  while a backlog drains.
+- **Rate limit.** It stops at 50 evals in flight across all models (`--max_running`), which kept
+  the judge free of 429s.
+- **No state.** A run keeps no state of its own, so running it by hand is also a backfill.
+
+```sh
+# What a run would launch and skip
+uv run experiments/run4/eval/sync.py --dry_run
+
+# Run every 10 minutes as a scheduled cpu-basic Job, under the token's user
+uv run experiments/run4/eval/sync.py --schedule "*/10 * * * *"
+```
+
+The scheduled Job and its evals run the eval code as it was when the schedule was created; rerun
+`--schedule` after changing it, which replaces the old schedule. `hf jobs scheduled ps`,
+`hf jobs scheduled suspend <id>` and `hf jobs scheduled delete <id>` list, pause and remove it.
 
 ## SwarmChat
 
