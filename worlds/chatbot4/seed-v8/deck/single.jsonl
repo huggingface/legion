@@ -1,0 +1,97 @@
+{"id": "single-001", "area": "cooking", "turns": ["I have leftover rice from last night. What can I make with it for lunch?"]}
+{"id": "single-002", "area": "cooking", "turns": ["My scrambled eggs always come out rubbery. What am I doing wrong?"]}
+{"id": "single-003", "area": "cooking", "turns": ["How long should I boil an egg if I want the yolk still a bit runny?"]}
+{"id": "single-004", "area": "cooking", "turns": ["I'm cooking for a friend who is vegan. Any easy main course ideas?"]}
+{"id": "single-005", "area": "food-and-drink", "turns": ["What's the difference between baking soda and baking powder?"]}
+{"id": "single-006", "area": "food-and-drink", "turns": ["I'm trying to drink less coffee. What could I have in the afternoon instead?"]}
+{"id": "single-007", "area": "food-and-drink", "turns": ["Is it safe to eat cooked chicken that was left out overnight?"]}
+{"id": "single-008", "area": "food-and-drink", "turns": ["Which cheeses go well on a cheese board for six people?"]}
+{"id": "single-009", "area": "health", "turns": ["I get headaches most afternoons at work. What could be causing them?"]}
+{"id": "single-010", "area": "health", "turns": ["How much water should an adult drink in a day?"]}
+{"id": "single-011", "area": "health", "turns": ["I cut my finger chopping onions and it won't stop bleeding. What should I do?"]}
+{"id": "single-012", "area": "health", "turns": ["My eyes feel tired after a day at the screen. Anything that helps?"]}
+{"id": "single-013", "area": "fitness", "turns": ["I want to start running but I get out of breath after two minutes. How should I begin?"]}
+{"id": "single-014", "area": "fitness", "turns": ["What's a good stretch for a stiff lower back after sitting all day?"]}
+{"id": "single-015", "area": "fitness", "turns": ["Is it better to work out in the morning or the evening?"]}
+{"id": "single-016", "area": "fitness", "turns": ["I only have 20 minutes a day. What kind of workout gets the most out of that?"]}
+{"id": "single-017", "area": "sleep", "turns": ["My toddler wakes up at 5am every day. Is there a way to shift that later?"]}
+{"id": "single-018", "area": "sleep", "turns": ["I keep waking up at 3am and can't get back to sleep. Any advice?"]}
+{"id": "single-019", "area": "sleep", "turns": ["Is it bad to sleep with the TV on?"]}
+{"id": "single-020", "area": "money", "turns": ["I want to save for a holiday next summer. How should I go about it on a small salary?"]}
+{"id": "single-021", "area": "money", "turns": ["What's the difference between a credit card and a debit card?"]}
+{"id": "single-022", "area": "money", "turns": ["My energy bills have gone up a lot. What are some quick ways to cut them?"]}
+{"id": "single-023", "area": "money", "turns": ["Is it worth paying off a small loan early?"]}
+{"id": "single-024", "area": "work", "turns": ["I have a job interview on Thursday for an office manager role. What questions should I prepare for?"]}
+{"id": "single-025", "area": "work", "turns": ["How do I politely tell my boss I have too much on my plate?"]}
+{"id": "single-026", "area": "work", "turns": ["My colleague keeps taking credit for my ideas in meetings. How should I handle it?"]}
+{"id": "single-027", "area": "work", "turns": ["What should I put in a two-line bio for a conference badge? I'm a nurse."]}
+{"id": "single-028", "area": "school-and-study", "turns": ["I have a history exam in two weeks and I keep putting off revising. How do I get started?"]}
+{"id": "single-029", "area": "school-and-study", "turns": ["What's a good way to remember vocabulary for a French test?"]}
+{"id": "single-030", "area": "school-and-study", "turns": ["My son is struggling with fractions. How can I explain them simply?"]}
+{"id": "single-031", "area": "school-and-study", "turns": ["How do I write a good opening sentence for an essay?"]}
+{"id": "single-032", "area": "science", "turns": ["Why is the sky blue?"]}
+{"id": "single-033", "area": "science", "turns": ["How do vaccines teach the body to fight a disease?"]}
+{"id": "single-034", "area": "science", "turns": ["What's the difference between weather and climate?"]}
+{"id": "single-035", "area": "science", "turns": ["Why does ice float on water?"]}
+{"id": "single-036", "area": "science", "turns": ["How do plants make their food?"]}
+{"id": "single-037", "area": "history", "turns": ["Who built the pyramids of Giza, and roughly when?"]}
+{"id": "single-038", "area": "history", "turns": ["What was the Industrial Revolution in a nutshell?"]}
+{"id": "single-039", "area": "history", "turns": ["Why did the Roman Empire split into east and west?"]}
+{"id": "single-040", "area": "history", "turns": ["When did people first land on the Moon?"]}
+{"id": "single-041", "area": "geography-and-travel", "turns": ["I'm going to Lisbon for three days in May. What shouldn't I miss?"]}
+{"id": "single-042", "area": "geography-and-travel", "turns": ["What's the best way to get over jet lag after a long flight east?"]}
+{"id": "single-043", "area": "geography-and-travel", "turns": ["What's the capital of Australia? I always mix it up with Sydney."]}
+{"id": "single-044", "area": "geography-and-travel", "turns": ["We're driving through France with two kids. Any tips for a long car journey?"]}
+{"id": "single-045", "area": "technology", "turns": ["My phone battery drains really fast lately. What can I check?"]}
+{"id": "single-046", "area": "technology", "turns": ["What's a password manager and should I use one?"]}
+{"id": "single-047", "area": "technology", "turns": ["How do I take a screenshot on a Windows laptop?"]}
+{"id": "single-048", "area": "technology", "turns": ["My Wi-Fi keeps dropping in the bedroom. How can I improve the signal?"]}
+{"id": "single-049", "area": "home-and-diy", "turns": ["There's mould on my bathroom ceiling. How do I get rid of it and stop it coming back?"]}
+{"id": "single-050", "area": "home-and-diy", "turns": ["How do I unblock a slow kitchen sink without calling a plumber?"]}
+{"id": "single-051", "area": "home-and-diy", "turns": ["I want to paint my living room. What do I need besides paint?"]}
+{"id": "single-052", "area": "home-and-diy", "turns": ["What's the easiest way to get red wine out of a carpet?"]}
+{"id": "single-053", "area": "garden-and-plants", "turns": ["The leaves on my basil plant are turning yellow. What's wrong with it?"]}
+{"id": "single-054", "area": "garden-and-plants", "turns": ["What vegetables are easy to grow on a balcony?"]}
+{"id": "single-055", "area": "garden-and-plants", "turns": ["When should I plant tulip bulbs?"]}
+{"id": "single-056", "area": "pets", "turns": ["We're getting a kitten next week. What do we need to buy?"]}
+{"id": "single-057", "area": "pets", "turns": ["My dog pulls on the lead all the time. How do I train him out of it?"]}
+{"id": "single-058", "area": "pets", "turns": ["Is chocolate really dangerous for dogs?"]}
+{"id": "single-059", "area": "pets", "turns": ["How often should I clean my goldfish tank?"]}
+{"id": "single-060", "area": "family-and-parenting", "turns": ["My daughter is starting secondary school and she's nervous. How can I help her settle in?"]}
+{"id": "single-061", "area": "family-and-parenting", "turns": ["What are some fun things to do with kids on a rainy Saturday?"]}
+{"id": "single-062", "area": "family-and-parenting", "turns": ["My parents are visiting for a week and our flat is small. Any tips to keep everyone sane?"]}
+{"id": "single-063", "area": "friends-and-relationships", "turns": ["My best friend forgot my birthday. Should I say something?"]}
+{"id": "single-064", "area": "friends-and-relationships", "turns": ["I just moved to a new city and don't know anyone. How do people make friends as adults?"]}
+{"id": "single-065", "area": "friends-and-relationships", "turns": ["What's a thoughtful anniversary gift that doesn't cost much?"]}
+{"id": "single-066", "area": "shopping", "turns": ["I need a new laptop mainly for writing and video calls. What should I look for?"]}
+{"id": "single-067", "area": "shopping", "turns": ["Are expensive running shoes actually worth it?"]}
+{"id": "single-068", "area": "shopping", "turns": ["What should I check before buying a second-hand bike?"]}
+{"id": "single-069", "area": "entertainment", "turns": ["Can you recommend a funny film for a family night? The kids are 8 and 11."]}
+{"id": "single-070", "area": "entertainment", "turns": ["I loved The Martian. What should I read next?"]}
+{"id": "single-071", "area": "entertainment", "turns": ["What's a good board game for four adults who don't like long rules?"]}
+{"id": "single-072", "area": "entertainment", "turns": ["I need a new podcast for my commute. I like history and true stories."]}
+{"id": "single-073", "area": "sport", "turns": ["How does the offside rule work in football?"]}
+{"id": "single-074", "area": "sport", "turns": ["I want to watch my first cricket match. What should I know?"]}
+{"id": "single-075", "area": "sport", "turns": ["Who has won the most Wimbledon titles?"]}
+{"id": "single-076", "area": "language-and-writing", "turns": ["What's the difference between 'affect' and 'effect'?"]}
+{"id": "single-077", "area": "language-and-writing", "turns": ["Can you help me word a text cancelling dinner with a friend without sounding rude?"]}
+{"id": "single-078", "area": "language-and-writing", "turns": ["Is it 'fewer people' or 'less people'?"]}
+{"id": "single-079", "area": "feelings", "turns": ["I've been feeling really lonely since I started working from home."]}
+{"id": "single-080", "area": "feelings", "turns": ["I failed my driving test today and I feel like an idiot."]}
+{"id": "single-081", "area": "feelings", "turns": ["I'm so stressed about moving house next week."]}
+{"id": "single-082", "area": "small-talk", "turns": ["Hi! How's your day going?"]}
+{"id": "single-083", "area": "small-talk", "turns": ["Good morning. It's freezing here today."]}
+{"id": "single-084", "area": "small-talk", "turns": ["I finally finished that jigsaw I've been doing for a month!"]}
+{"id": "single-085", "area": "small-talk", "turns": ["Thanks, that's really helpful."]}
+{"id": "single-086", "area": "opinions", "turns": ["What do you think is the best season of the year?"]}
+{"id": "single-087", "area": "opinions", "turns": ["Cats or dogs?"]}
+{"id": "single-088", "area": "opinions", "turns": ["Is it ever OK to recline your seat on a plane?"]}
+{"id": "single-089", "area": "creative", "turns": ["Can you write a short poem about autumn for my daughter's card?"]}
+{"id": "single-090", "area": "creative", "turns": ["I need a name for my new sourdough starter. Any ideas?"]}
+{"id": "single-091", "area": "creative", "turns": ["Tell me a joke about cheese."]}
+{"id": "single-092", "area": "maths-and-numbers", "turns": ["What's 15% of 80?"]}
+{"id": "single-093", "area": "maths-and-numbers", "turns": ["If I drive 120 miles at 60 miles an hour, how long will it take?"]}
+{"id": "single-094", "area": "maths-and-numbers", "turns": ["How many weeks are there in a year, exactly?"]}
+{"id": "single-095", "area": "nature-and-weather", "turns": ["Why do leaves change colour in autumn?"]}
+{"id": "single-096", "area": "nature-and-weather", "turns": ["What should I do if I'm caught outside in a thunderstorm?"]}
+{"id": "single-097", "area": "nature-and-weather", "turns": ["Which birds might I see in a city park in winter?"]}
