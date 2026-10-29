@@ -238,15 +238,20 @@ def test_health_files_mirror_through_state_sync(tmp_path, store):
     sync.push(store)
     assert (tmp_path / "bucket/metrics/demo/latest.json").exists()
     assert (tmp_path / "bucket/metrics/demo/2026-09-21T12.jsonl").exists()
+    assert (tmp_path / "bucket/states/demo/latest.json").exists()
     h.tick(T + 30)
     before = len(bucket.ops)
-    # latest.json only: the DB did not change (30 s samples are in memory), nor did the
-    # 6-hour file
-    assert sync.push(store) == 1
+    # the two latest.json only: the DB did not change (30 s samples are in memory), nor did
+    # the 6-hour file
+    assert sync.push(store) == 2
     assert len(bucket.ops) == before + 1
+    h.close(T + 60)  # the open hour's 5-min state buckets
+    sync.push(store)
+    assert (tmp_path / "bucket/states/demo/2026-09-21T14.jsonl").exists()
     restored = tmp_path / "restored"
     assert StateSync(bucket, restored).restore()
     assert (restored / "metrics/demo/2026-09-21T12.jsonl").exists()
+    assert (restored / "states/demo/2026-09-21T14.jsonl").exists()
 
 
 # --------------------------------------------------------------------------- rollups, run.json
@@ -258,7 +263,7 @@ def test_hourly_rollup_lines_written_when_the_hour_closes(store):
     assert json.loads((store.data_dir / "run.json").read_text()) == {
         "schema": 1, "run": "run-x", "swarm": "demo", "swarms": ["demo"],
         "started_at": "2026-09-21T14:00:00+00:00", "ended_at": None, "status": "running",
-        "generation": 1,
+        "states": True, "generation": 1,
         "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 3}}}
     tok = {"m": {"input": 7, "output": 1}}
     h.on_events(a0, [
@@ -488,3 +493,71 @@ def test_restart_within_an_hour_keeps_one_line_per_agent_with_summed_totals(stor
     assert a["turns"] == 2 and a["tokens"]["m"]["input"] == 20 and a["events"]["turn_ended"] == 2
     second.close(T + 600)  # closing again rewrites, never appends
     assert len(path.read_text().splitlines()) == 1
+
+
+def test_state_buckets_per_agent_and_5_minutes_rewritten_whole(store):
+    a0, a1 = _fleet(store, T)
+    w = "demo-researcher-w0000"
+
+    def beat(t, **hb):
+        for name in (a0["name"], a1["name"]):
+            store.update_agent(name, last_heartbeat=t, **({"hb_state": hb[name]} if name in hb else {}))
+        store.update_worker(w, last_heartbeat=t)
+
+    states = store.data_dir / "states" / "demo"
+    h = Health(store)
+    h.tick(T)  # the first sample has no interval: nothing counted
+    beat(T + 30)
+    h.tick(T + 30)  # 14:00: a0 working 30, a1 idle 30
+    store.add_prompt(a1["name"], "{}", T)
+    beat(T + 60)
+    h.tick(T + 60)  # a1 pending from now
+    assert json.loads((states / "latest.json").read_text()) == {
+        "ts": T + 60, "states": {"researcher-0000": "working", "researcher-0001": "pending"}}
+    beat(T + 300, **{a0["name"]: "stuck"})
+    h.tick(T + 300)  # 14:00 (interval capped at 60 s), after the file was written
+    assert [json.loads(x) for x in (states / "2026-09-21T14.jsonl").read_text().splitlines()] == [
+        {"b": "2026-09-21T14:00", "agent": "researcher-0000", "type": "researcher", "w": 60.0},
+        {"b": "2026-09-21T14:00", "agent": "researcher-0001", "type": "researcher", "i": 30.0,
+         "p": 30.0}]
+    beat(T + 3600)
+    h.tick(T + 3600)  # [T+3540, T+3600] goes to 14:55
+    h.close(T + 3630)  # the hour closed: 14 rewritten once more with 14:55, then never again
+    assert h._buckets.keys() == {"2026-09-21T15"}
+    lines = [json.loads(x) for x in (states / "2026-09-21T14.jsonl").read_text().splitlines()]
+    assert lines == [
+        {"b": "2026-09-21T14:00", "agent": "researcher-0000", "type": "researcher", "w": 60.0,
+         "s": 60.0},
+        {"b": "2026-09-21T14:00", "agent": "researcher-0001", "type": "researcher", "i": 30.0,
+         "p": 90.0},
+        {"b": "2026-09-21T14:55", "agent": "researcher-0000", "type": "researcher", "s": 60.0},
+        {"b": "2026-09-21T14:55", "agent": "researcher-0001", "type": "researcher", "p": 60.0}]
+    # a restart within the hour reloads the hour's file and keeps adding: one line per bucket
+    h2 = Health(store)
+    beat(T + 3640)
+    h2.tick(T + 3640)
+    beat(T + 3670)
+    h2.tick(T + 3670)
+    h2.close(T + 3700)
+    out = [json.loads(x) for x in (states / "2026-09-21T15.jsonl").read_text().splitlines()]
+    assert [(r["b"], r["agent"], r.get("s"), r.get("p")) for r in out] == [
+        ("2026-09-21T15:00", "researcher-0000", 30.0 + 30 + 30, None),
+        ("2026-09-21T15:00", "researcher-0001", None, 30.0 + 30 + 30)]
+
+
+def test_state_buckets_split_the_interval_at_bucket_boundaries(store):
+    a0, a1 = _fleet(store, T)
+    h = Health(store)
+    for k in range(21):  # a sample every 31 s: never on a boundary
+        t = T + 31 * k
+        for a in (a0, a1):
+            store.update_agent(a["name"], last_heartbeat=t)
+        store.update_worker("demo-researcher-w0000", last_heartbeat=t)
+        h.tick(t)
+    h.close(T + 620)
+    out = [json.loads(x) for x in (store.data_dir / "states/demo/2026-09-21T14.jsonl")
+           .read_text().splitlines()]
+    assert [(r["b"][-5:], r["agent"], r.get("w") or r.get("i")) for r in out] == [
+        ("14:00", "researcher-0000", 300.0), ("14:00", "researcher-0001", 300.0),
+        ("14:05", "researcher-0000", 300.0), ("14:05", "researcher-0001", 300.0),
+        ("14:10", "researcher-0000", 20.0), ("14:10", "researcher-0001", 20.0)]
