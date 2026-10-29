@@ -9,8 +9,6 @@ Scenario (one `pi --mode rpc` process, no real model calls):
   get_session_stats. Absolute paths are rewritten to /tmp/pi-fixture.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import os

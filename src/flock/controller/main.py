@@ -9,8 +9,6 @@ Two deployments (docs/deploy-job.md):
   gated) and a read-only status page on 7861 (public). The SQLite state is synced to a bucket.
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging

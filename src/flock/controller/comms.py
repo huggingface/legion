@@ -9,8 +9,6 @@ the stored spec and makes no board call; a kickoff is never posted twice (and it
 Idempotency-Key, `flock-kickoff-<swarm>-<channel id>`, makes even a lost record safe).
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Mapping
 

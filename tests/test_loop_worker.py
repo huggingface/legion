@@ -1,8 +1,6 @@
 """Worker side of `loop:` (docs/loop.md): `every: turn_end` re-prompts, `loop_stop`, three failed
 turns in a row, rendering of the built-in placeholders and `{last_summary}`."""
 
-from __future__ import annotations
-
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta

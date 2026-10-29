@@ -7,8 +7,6 @@ child is spawned without a prompt and prompted once its worker reports it: a pro
 the spawn can reach the worker before the child is assigned there and be dropped (seen in the
 offline dry run, flock 01de71b)."""
 
-from __future__ import annotations
-
 import json
 import time
 from typing import Literal

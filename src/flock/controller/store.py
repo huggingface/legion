@@ -6,8 +6,6 @@ agent under `<data>/events/<swarm>/<agent>.jsonl`; the store keeps a per-agent l
 so `after=` cursors are line offsets.
 """
 
-from __future__ import annotations
-
 import json
 import sqlite3
 import threading

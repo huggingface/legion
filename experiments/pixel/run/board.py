@@ -17,8 +17,6 @@ BOARD_TOKEN in the env is used instead when set (the observer). Writes send an I
 retry 429 / 5xx with the same key, so a retried post never duplicates.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import sys

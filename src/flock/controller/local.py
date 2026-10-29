@@ -12,8 +12,6 @@ Stage mapping: running process -> RUNNING; exit 0 -> COMPLETED; other exit -> ER
 lifetime restart is a planned restart here too); cancelled -> CANCELED.
 """
 
-from __future__ import annotations
-
 import contextlib
 import logging
 import os
@@ -219,7 +217,7 @@ class LocalJobsClient:
                 out.append(JobListing(p.job_id, p.labels, st.stage, p.env, st.message))
         return out
 
-    def logs_tail(self, job_id: str, *, namespace: str, n: int = 5) -> list[str]:
+    def logs_tail(self, job_id: str, *, namespace: str, n: int = 5) -> "list[str]":
         p = self.procs.get(job_id)
         if p is None or not p.log_file.is_file():
             return []
@@ -228,7 +226,7 @@ class LocalJobsClient:
 
     # ------------------------------------------------------------------ shutdown helpers
 
-    def alive(self) -> list[str]:
+    def alive(self) -> "list[str]":
         return [j for j, p in self.procs.items() if p.popen.poll() is None]
 
     def wait_all(self, timeout: float) -> bool:
@@ -244,7 +242,7 @@ class LocalJobsClient:
         for p in self.procs.values():
             self._closed(p)
 
-    def _stop(self, procs: list[_Proc], grace: float) -> None:
+    def _stop(self, procs: "list[_Proc]", grace: float) -> None:
         """SIGTERM each worker's process group (a local worker then stops its agents, and the
         adapters kill their tools), SIGKILL the group after `grace`, then SIGKILL any
         descendant still alive: a worker's detached tool processes (own session) are recorded

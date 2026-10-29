@@ -3,8 +3,6 @@ loop / final ordering, `every` as a duration and as turn_end (worker- and contro
 `while` conditions, the wake queue's debounce, `flock loop --stop/--start` and the
 `limits.budget_usd` thresholds. The worker is simulated by posting its heartbeats and events."""
 
-from __future__ import annotations
-
 import json
 
 import httpx

@@ -9,8 +9,6 @@ checks the hash and every member (regular files and directories only, no absolut
 absent. Limits: MAX_BUNDLE_BYTES compressed, MAX_FILES files, MAX_UNPACKED_BYTES unpacked.
 """
 
-from __future__ import annotations
-
 import gzip
 import hashlib
 import io

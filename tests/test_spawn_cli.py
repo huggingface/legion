@@ -1,8 +1,6 @@
 """The flock CLI as an agent runs it: FLOCK_AGENT_TOKEN, FLOCK_AGENT, spawn/status/events/
 prompt/remove/whoami."""
 
-from __future__ import annotations
-
 import json
 import os
 

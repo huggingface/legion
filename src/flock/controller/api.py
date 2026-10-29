@@ -1,7 +1,5 @@
 """FastAPI app: the routes in design.md "API (controller)" plus /healthz and GET /swarms."""
 
-from __future__ import annotations
-
 import asyncio
 import html
 import logging

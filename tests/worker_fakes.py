@@ -1,7 +1,5 @@
 """Fakes for worker tests: a scripted harness adapter and an in-memory bucket."""
 
-from __future__ import annotations
-
 import asyncio
 import fnmatch
 import shutil

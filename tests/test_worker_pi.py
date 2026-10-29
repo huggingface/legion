@@ -5,8 +5,6 @@ The `pi_bin` tests need Pi on PATH or FLOCK_PI_CLI pointing at it, e.g.
 `FLOCK_PI_CLI=$AM_LOCAL/pi/node_modules/.bin/pi pytest tests/test_worker_pi.py`.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import os

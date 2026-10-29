@@ -3,8 +3,6 @@
     python monitor.py load-1k out/monitor.jsonl [--every 15]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

@@ -1,8 +1,6 @@
 """Fair `max_working` admission: FIFO across workers, slots released on turn end (run-1k
 finding 1), and the 1k-shaped simulation in tests/admission_sim.py."""
 
-from __future__ import annotations
-
 import asyncio
 import time
 from datetime import timedelta

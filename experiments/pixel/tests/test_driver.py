@@ -1,8 +1,6 @@
 """run/driver.py end to end against a real canvas and a fake flock controller whose agents
 execute each prompt's command in their own workdir (like the llm harness with a forced tool)."""
 
-from __future__ import annotations
-
 import gzip
 import json
 import os

@@ -1,7 +1,5 @@
 """Claim order (scattered / rows), the O(1) free list, and the painted-mask endpoints."""
 
-from __future__ import annotations
-
 import io
 
 import numpy as np

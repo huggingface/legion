@@ -8,8 +8,6 @@ latency percentiles per endpoint. Stdlib only (one keep-alive connection per wor
     python loadgen.py --url http://127.0.0.1:8765 --workers 100 --rate 1 --duration 60
 """
 
-from __future__ import annotations
-
 import argparse
 import http.client
 import json

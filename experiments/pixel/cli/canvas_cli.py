@@ -6,8 +6,6 @@ CANVAS_PROXY_TOKEN (optional: sent as ``Authorization: Bearer`` for the HF jobs 
 canvas token then goes in ``X-Canvas-Token``).
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

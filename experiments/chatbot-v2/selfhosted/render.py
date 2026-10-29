@@ -10,8 +10,6 @@ no $ caps, `every: turn_end`), the per-team prompts, the kickoff, the team proto
 phase-2 prompts, and world.yaml with scale.yaml's `world` knobs merged in. Knobs: scale.yaml
 (one place); endpoint and model ids: the environment (scale.yaml lists the variables)."""
 
-from __future__ import annotations
-
 import argparse
 import math
 import os

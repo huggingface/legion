@@ -3,8 +3,6 @@ the llm harness against two fake OpenAI servers: each agent talks to its own ser
 add keeps old agents where they are and spreads new ones, a live remove moves only the agents
 of the removed server (at their next turn start), and turn_ended names the server."""
 
-from __future__ import annotations
-
 import json
 import threading
 from http.server import ThreadingHTTPServer

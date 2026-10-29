@@ -10,8 +10,6 @@ its claimed tasks go back to open. Every change is logged in the `events` table 
 agent, request id and turn flock sent.
 """
 
-from __future__ import annotations
-
 import os
 import sqlite3
 import time

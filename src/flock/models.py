@@ -4,8 +4,6 @@ This file is the contract. Everything in docs/design.md section 5 ("Contracts")
 is expressed here. Change it deliberately and update the design doc.
 """
 
-from __future__ import annotations
-
 import hashlib
 import re
 from datetime import datetime, timedelta
@@ -161,7 +159,7 @@ class ProviderSpec(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _url(self) -> ProviderSpec:
+    def _url(self) -> "ProviderSpec":
         if self.base_urls is not None:
             urls = [u.strip().rstrip("/") for u in self.base_urls if u and u.strip()]
             if not urls:
@@ -347,7 +345,7 @@ class CommsSpec(BaseModel):
         return list(dict.fromkeys(v))
 
 
-def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
+def comms_tools(ts: "TypeSpec", comms: CommsSpec | None) -> list[str]:
     """The built-in comms tools a type gets: the `comms:*` entries of its `tools`, else all of
     them with `comms: true` (search only when the swarm's `comms.search` is set)."""
     if comms is None or ts.comms is False:
@@ -415,7 +413,7 @@ class WorldSpec(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _how(self) -> WorldSpec:
+    def _how(self) -> "WorldSpec":
         if self.command is None and self.url is None:
             raise ValueError("world needs `command` (started by flock, compute: local) or `url` "
                              "(a world already running)")
@@ -424,7 +422,7 @@ class WorldSpec(BaseModel):
         return self
 
 
-def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
+def world_tools(ts: "TypeSpec", world: WorldSpec | None) -> list[str]:
     """The world tools a type gets (model-visible names): the `world:*` entries of its `tools`,
     else every tool of the world's manifest; none with `world: false`."""
     if world is None or ts.world is False:
@@ -461,7 +459,7 @@ class TypeSpec(BaseModel):
     max_working_per_worker: int = 20  # measured default, experiments/packing
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
     # `spawn:` lets others create; None keeps v1's placement.
-    workers: WorkersSpec | None = None
+    workers: "WorkersSpec | None" = None
     # Spawned agents of this type live for one session (docs/spawn.md "Ephemeral types"): the
     # controller removes one once a heartbeat reports it idle after a turn with nothing pending
     # (done, max_turns, budget or an error alike), and its worker deletes its files. Spawn-only.
@@ -499,7 +497,7 @@ class TypeSpec(BaseModel):
     # `flock apply` refuses a name the folder does not define. None: no folder tools.
     tools: list[str] | Literal["all"] | None = None
     # Re-prompt this type's agents on a cadence, then a final round (docs/loop.md). None: off.
-    loop: LoopSpec | None = None
+    loop: "LoopSpec | None" = None
     # Built-in comms tools (docs/comms.md): true gives all of them (`comms:post`, `comms:read`,
     # `comms:search`), or list the ones wanted in `tools`. Needs the swarm-level `comms:`.
     comms: bool | None = None
@@ -592,7 +590,7 @@ class TypeSpec(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _bash_llm_only(self) -> TypeSpec:
+    def _bash_llm_only(self) -> "TypeSpec":
         if self.bash is False and self.harness != Harness.llm:
             raise ValueError(f"bash: false: only the llm harness has a bash tool to take away "
                              f"(this type's harness is {self.harness.value})")
@@ -604,7 +602,7 @@ class TypeSpec(BaseModel):
 
     @field_validator("workers")
     @classmethod
-    def _replicas_fit(cls, v: WorkersSpec | None, info) -> WorkersSpec | None:
+    def _replicas_fit(cls, v: "WorkersSpec | None", info) -> "WorkersSpec | None":
         """Declared workers are a cap (docs/spawn.md): the replicas must fit in them."""
         replicas, per = info.data.get("replicas"), info.data.get("agents_per_worker")
         if v is None or v.initial is None or replicas is None or per is None:
@@ -744,7 +742,7 @@ class SwarmSpec(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _resolve_models(self) -> SwarmSpec:
+    def _resolve_models(self) -> "SwarmSpec":
         """Apply-time checks and pinning: every alias and provider prefix exists, every
         provider-backed model has a price, harness and provider speak the same API. The price
         used is written into the spec (`resolved_model.pricing`, and the self-hosted default
@@ -790,7 +788,7 @@ class SwarmSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_comms(self) -> SwarmSpec:
+    def _check_comms(self) -> "SwarmSpec":
         """A type that wants comms tools needs the swarm's `comms:` block; a listed
         `comms:search` needs `comms.search`; `comms: false` with listed comms tools is a
         contradiction."""
@@ -825,8 +823,8 @@ class SwarmSpec(BaseModel):
 
     # Run policy for spawned agents (docs/spawn.md), separate from what a type is. A type
     # absent from `spawn` cannot spawn.
-    spawn: dict[str, SpawnRule] = Field(default_factory=dict)
-    limits: LimitsSpec = Field(default_factory=lambda: LimitsSpec())
+    spawn: "dict[str, SpawnRule]" = Field(default_factory=dict)
+    limits: "LimitsSpec" = Field(default_factory=lambda: LimitsSpec())
     compute: ComputeSpec = Field(default_factory=ComputeSpec)
 
     @field_validator("compute", mode="before")
@@ -835,7 +833,7 @@ class SwarmSpec(BaseModel):
         return {"kind": v} if isinstance(v, str) else v
 
     @model_validator(mode="after")
-    def _job_fields(self) -> SwarmSpec:
+    def _job_fields(self) -> "SwarmSpec":
         kind = self.compute.kind
         if kind == "hf-jobs":
             missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
@@ -863,7 +861,7 @@ class SwarmSpec(BaseModel):
 
     @field_validator("spawn")
     @classmethod
-    def _valid_spawn(cls, v: dict[str, SpawnRule], info) -> dict[str, SpawnRule]:
+    def _valid_spawn(cls, v: "dict[str, SpawnRule]", info) -> "dict[str, SpawnRule]":
         types = info.data.get("types")
         if types is not None:
             validate_spawn(v, types)
@@ -1129,7 +1127,7 @@ class LoopFinal(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _has_prompt(self) -> LoopFinal:
+    def _has_prompt(self) -> "LoopFinal":
         if self.prompt is None and self.prompt_file is None:
             raise ValueError("final needs prompt or prompt_file")
         return self
@@ -1230,7 +1228,7 @@ class LoopSpec(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _has_prompt(self) -> LoopSpec:
+    def _has_prompt(self) -> "LoopSpec":
         if self.prompt is None and self.prompt_file is None:
             raise ValueError("loop needs prompt or prompt_file")
         return self
@@ -1312,7 +1310,7 @@ class TokenUsage(BaseModel):
     cache_write: int = 0
     reasoning: int = 0
 
-    def __add__(self, other: TokenUsage) -> TokenUsage:
+    def __add__(self, other: "TokenUsage") -> "TokenUsage":
         return TokenUsage(
             input=self.input + other.input,
             output=self.output + other.output,

@@ -2,8 +2,6 @@
 lowercase letters only, so a name is a valid board handle. Colors and simple qualities;
 animals, fruits, plants and everyday objects. Plain, neutral words only."""
 
-from __future__ import annotations
-
 
 def _list(text: str) -> tuple[str, ...]:
     return tuple(text.split())

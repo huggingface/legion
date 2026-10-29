@@ -1,7 +1,5 @@
 """Background / alpha handling and the read-open, write-token policy."""
 
-from __future__ import annotations
-
 import numpy as np
 import pytest
 from conftest import H

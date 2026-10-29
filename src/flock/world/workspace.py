@@ -4,7 +4,6 @@ The worker captures files itself; an agent supplies a path within its own worksp
 never a server path or a repository base SHA. Only git-tracked/nonignored files are
 included, and symlinks and git metadata are refused. Transport lives outside tool args.
 """
-from __future__ import annotations
 
 import base64
 import subprocess

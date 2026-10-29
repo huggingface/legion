@@ -2,8 +2,6 @@
 controller's compute check, `.flock/current` discovery and the `flock run` pieces. The end-to-end
 runs are in test_local_run_e2e.py."""
 
-from __future__ import annotations
-
 import asyncio
 import io
 import json

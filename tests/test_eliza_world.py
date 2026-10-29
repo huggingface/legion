@@ -1,8 +1,6 @@
 """worlds/eliza in process: the own-dir rule, patch-style edits (edit_file, insert_after,
 copy_file), line-range reads, the compile check with rollback, run_bot and promote_best."""
 
-from __future__ import annotations
-
 import asyncio
 import importlib.util
 import json

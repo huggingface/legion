@@ -1,8 +1,6 @@
 """Spawn on the controller: admission and its 409 reasons, cascade removal, events, the
 ?parent= filter, per-agent tokens and their scope, persistence of spawned rows."""
 
-from __future__ import annotations
-
 import httpx
 import pytest
 from pydantic import TypeAdapter

@@ -1,8 +1,6 @@
 """The `flock` CLI retries 429 / 5xx with backoff honouring Retry-After (bounded), so 1,000
 agents calling it through the Space edge do not fail on throttling."""
 
-from __future__ import annotations
-
 import json
 
 import httpx

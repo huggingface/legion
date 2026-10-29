@@ -11,8 +11,6 @@ last 5-15 rounds (15-45 s), events are flushed every round and heartbeats go out
 rounds (30 s) with a per-worker phase.
 """
 
-from __future__ import annotations
-
 import asyncio
 import random
 import tempfile

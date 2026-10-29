@@ -21,8 +21,6 @@ reply, tokens, worker, HTTP errors) is uploaded to `--out`; a summary is printed
 Needs FLOCK_URL, FLOCK_TOKEN and HF_TOKEN in the environment.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json

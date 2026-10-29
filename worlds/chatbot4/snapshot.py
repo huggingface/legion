@@ -1,5 +1,4 @@
 """One archive for world state; agent clones live in their own worker snapshots."""
-from __future__ import annotations
 
 import argparse
 import os

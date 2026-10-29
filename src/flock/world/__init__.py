@@ -27,8 +27,6 @@ other way. The hooks `on_agent_start`, `on_agent_done` and `on_turn` are sent on
 subclass overrides them (the manifest lists them in `hooks`).
 """
 
-from __future__ import annotations
-
 import inspect
 import typing
 from collections.abc import Callable

@@ -1,8 +1,6 @@
 """Parent-scoped bulk prompt (`POST /agents/{name}/children/prompts`, `flock prompt
 --children`): a leader prompts its 100 children in one request with its own token."""
 
-from __future__ import annotations
-
 from datetime import timedelta
 
 from typer.testing import CliRunner

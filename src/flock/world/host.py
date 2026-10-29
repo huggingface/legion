@@ -8,8 +8,6 @@ get that block with every assign and heartbeat; the secret goes to them as a job
 (`FLOCK_WORLD_TOKEN`), never in the spec.
 """
 
-from __future__ import annotations
-
 import contextlib
 import hashlib
 import hmac

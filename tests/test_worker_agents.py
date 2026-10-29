@@ -1,7 +1,5 @@
 """AgentRuntime: process-per-burst, stuck, heartbeat, restore, unassign."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 

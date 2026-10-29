@@ -1,7 +1,5 @@
 """BucketSync: layout under <swarm>/<type>/<agent>/, incremental push, restore to the same paths."""
 
-from __future__ import annotations
-
 import json
 import os
 

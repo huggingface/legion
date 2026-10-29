@@ -2,8 +2,6 @@
 FLOCK_WORLD_HOST_FILE on the controller. The controller follows the file and republishes the
 endpoint; workers keep their credential (no relaunch) and call the new host."""
 
-from __future__ import annotations
-
 import httpx
 import pytest
 

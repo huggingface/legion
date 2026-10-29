@@ -43,8 +43,6 @@ queued gate runs to the end and lands in its ticket.
 
 Knobs: the YAML file $CHATBOT_CONFIG (probes, interviews, runs), re-read when it changes."""
 
-from __future__ import annotations
-
 import asyncio
 import contextvars
 import functools

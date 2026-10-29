@@ -3,8 +3,6 @@
     python fetch_runs.py round1 out/sent1.jsonl
 """
 
-from __future__ import annotations
-
 import argparse
 import tempfile
 from pathlib import Path

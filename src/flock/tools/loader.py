@@ -12,8 +12,6 @@ subprocess (what `flock apply` uses), so a module's side effects, crashes and ha
 there. `python -m flock.tools.loader <dir>` prints the manifest as JSON.
 """
 
-from __future__ import annotations
-
 import importlib
 import inspect
 import json
@@ -75,7 +73,7 @@ class Manifest:
                           for t in self.tools]}
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> Manifest:
+    def from_json(cls, data: dict[str, Any]) -> "Manifest":
         return cls([ToolDef(**t) for t in data.get("tools") or []])
 
 

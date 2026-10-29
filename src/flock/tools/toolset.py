@@ -5,8 +5,6 @@ and keeps it for the whole turn, so a version switch never lands mid-turn. `floc
 same thing from the agent's pin file, which the worker rewrites at each turn start.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import os
@@ -96,7 +94,7 @@ class Toolset:
         return d
 
     @classmethod
-    def from_json(cls, d: dict[str, Any]) -> Toolset:
+    def from_json(cls, d: dict[str, Any]) -> "Toolset":
         d = dict(d)
         d["dir"] = Path(d["dir"]) if d.get("dir") else None
         d["data_dir"] = Path(d["data_dir"])

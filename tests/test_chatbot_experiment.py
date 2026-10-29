@@ -13,8 +13,6 @@ world token) and `flock update phase2/spec.yaml`. Phase 2: the other team's file
 promote_best works and is mirrored to $CHATBOT_BUCKET (a local dir here), the agents see the
 merged world and the phase-2 prompts, the final round posts verdicts, and the bundle is written."""
 
-from __future__ import annotations
-
 import contextlib
 import copy
 import json

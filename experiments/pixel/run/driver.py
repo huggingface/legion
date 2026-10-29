@@ -23,8 +23,6 @@ Env: FLOCK_URL, FLOCK_TOKEN (controller), CANVAS_URL (canvas, reads need no toke
 Stdlib only (huggingface_hub only for the Space upload). --dry-run prints what it would send.
 """
 
-from __future__ import annotations
-
 import argparse
 import gzip
 import json

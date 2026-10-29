@@ -4,7 +4,6 @@ unshare creates a user/PID/mount namespace and private procfs. The trusted setup
 then builds a small root with read-only runtimes and only the caller's data,
 chroots and drops capabilities before executing any agent-supplied code.
 """
-from __future__ import annotations
 
 import contextlib
 import ctypes

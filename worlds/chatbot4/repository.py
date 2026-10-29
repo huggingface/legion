@@ -1,5 +1,4 @@
 """Git transport and native Hub PRs. The world uses the shared experiment HF_TOKEN for writes."""
-from __future__ import annotations
 
 import logging
 import os

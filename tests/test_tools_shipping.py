@@ -2,8 +2,6 @@
 assigns and heartbeats carry the version, workers fetch and switch versions between turns, CLI
 harnesses get a Tools section and `flock-tool`, and the llm adapter keeps one version per turn."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import os

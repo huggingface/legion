@@ -3,8 +3,6 @@ in the store, unique on the controller, never reused, kept for a recreated repli
 across a controller restart, deterministic with `naming_seed`, a type's `name_prefix`, valid
 board handles; numeric naming unchanged."""
 
-from __future__ import annotations
-
 import pytest
 from pydantic import ValidationError
 

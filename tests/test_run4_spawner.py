@@ -1,7 +1,6 @@
 """Run 4's spawner wave: agent-spawner agents may spawn up to four agent-child peers, children
 cannot spawn, both get the shared system prompt plus their group section, a child's first
 prompt is the spawner's context, and an isolated Pi agent gets what `flock spawn` needs."""
-from __future__ import annotations
 
 import json
 from pathlib import Path

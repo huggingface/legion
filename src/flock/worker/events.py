@@ -12,8 +12,6 @@ An `Event` carries the whole pi entry in `data`; `Event.type` is the entry type 
 messages and the `customType` for custom entries, so the two forms round-trip.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging

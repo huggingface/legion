@@ -53,8 +53,6 @@ Inspired by swarmlab's `LLMAgent`; no swarmlab import.
   subprocess (flock.tools.runner). Turn events carry `tools_version`.
 """
 
-from __future__ import annotations
-
 import ast
 import asyncio
 import contextlib

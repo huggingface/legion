@@ -3,8 +3,6 @@ examples/world-demo/spec.yaml (pointed at tests/fake_openai.py and a copy of wor
 the controller starts the world as a child process, two `llm` agents call `claim_task` through
 the worker, one gets the task, the other reads who holds it, and the world stops with the run."""
 
-from __future__ import annotations
-
 import json
 import shutil
 import sqlite3

@@ -13,8 +13,6 @@ Per-pixel outcomes (evaluated in commit order, against the canvas *before* this 
   refused      enforced claim mode only: pixel leased by another agent; not applied
 """
 
-from __future__ import annotations
-
 import io
 import json
 import math

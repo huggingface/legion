@@ -2,8 +2,6 @@
 client retries with backoff honouring Retry-After, caps requests in flight, delivers events
 once, and the controller does not declare a worker dead while any of its requests get in."""
 
-from __future__ import annotations
-
 import asyncio
 from datetime import timedelta
 

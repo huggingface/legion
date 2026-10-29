@@ -6,8 +6,6 @@ The result comes back to the model and the agent's events carry the tools versio
 folder changes (a new `mul` tool), `flock apply` runs again on the running swarm, and the next
 turns use the new version without any worker restart."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import random

@@ -11,8 +11,6 @@ the pin's `env_deny` (the provider key) and FLOCK_TOKEN, and is the same subproc
 harness uses.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

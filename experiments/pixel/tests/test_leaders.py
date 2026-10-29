@@ -1,8 +1,6 @@
 """Experiment 2 support: region queues for leaders + children, bulk grant, renew, per-region
 progress, /score?region=, leader-territory agent map, CLI region verbs."""
 
-from __future__ import annotations
-
 import io
 
 import numpy as np

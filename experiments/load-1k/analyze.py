@@ -7,8 +7,6 @@ time; turn = turn_started -> turn_ended (server ts); e2e = turn_ended - send. Co
 Claude's estimate come from the agents' status (cumulative, so run this right after a run).
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

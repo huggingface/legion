@@ -8,8 +8,6 @@ names that are not set already, and `home()` is $HOME when it is a writable dire
 `<parent of WORK_ROOT>/home`, else a per-user dir under the temp dir.
 """
 
-from __future__ import annotations
-
 import os
 import tempfile
 from collections.abc import MutableMapping

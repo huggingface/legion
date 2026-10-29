@@ -10,8 +10,6 @@ more stops instead of running to the end.
 Needs the `controller` extra (FastAPI, uvicorn).
 """
 
-from __future__ import annotations
-
 import asyncio
 import hmac
 import importlib

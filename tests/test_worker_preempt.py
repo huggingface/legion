@@ -2,8 +2,6 @@
 exit 75, all inside FLOCK_DRAIN_BUDGET_S; then a restart with the same name restores. Also the
 controller host file (Slurm) and a container with no usable HOME."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import os

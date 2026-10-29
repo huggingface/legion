@@ -24,8 +24,6 @@ tools and the harness). First wave = min(20, agents // 5).
 Only stdlib + httpx; sends requests only to OPENAI_BASE_URL. Output: a table on stdout and
 <out>/load-smoke.md + results.json. Never prints the key."""
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json

@@ -22,8 +22,6 @@ writes an empty snapshot, so a later controller in the same group starts clean.
 `scripts/deploy-job.sh --down` also deletes the whole prefix (`clear`).
 """
 
-from __future__ import annotations
-
 import hashlib
 import logging
 import os

@@ -2,8 +2,6 @@
 network group, X-Flock-Token auth next to the jobs proxy's HF bearer, state sync to a bucket,
 the public status port, and the launch arguments of scripts/deploy-job.sh."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os

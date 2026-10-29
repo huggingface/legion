@@ -4,8 +4,6 @@
 Sums turn_ended tokens per model, prices them with the controller's table, and counts turns.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import sys

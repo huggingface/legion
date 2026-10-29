@@ -3,8 +3,6 @@ the knee and the recommendation, and two dry runs: against tests/fake_openai.py 
 and against a tiny vLLM-like server with /metrics (running, waiting, KV, prefix-cache
 counters)."""
 
-from __future__ import annotations
-
 import importlib.util
 import json
 import subprocess

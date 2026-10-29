@@ -22,8 +22,6 @@ the built-in `comms:*` tools with their rules, and the local gateway `flock-tool
   response; rules apply from the next call, protocols from the next turn boundary.
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import functools
@@ -133,11 +131,11 @@ class _Op:
     c: CommsSpec
     gen: int  # the hub's configuration generation when the call started
 
-    def board(self, hub: CommsHub) -> AsyncBoard:
+    def board(self, hub: "CommsHub") -> AsyncBoard:
         return hub._board(self.ident.url)
 
     @property
-    def source(self) -> Source:
+    def source(self) -> "Source":
         assert self.c.channel_id is not None
         return Source(self.ident.url, self.c.channel_id, self.gen)
 
@@ -169,7 +167,7 @@ def _err(msg: str, t0: float) -> Result:
 
 class CommsHub(ExtendedComms):
     def __init__(self, *, swarm: str, identities: Identities | None = None,
-                 runtime: Callable[[str], AgentRuntime | None] | None = None,
+                 runtime: "Callable[[str], AgentRuntime | None] | None" = None,
                  env: Mapping[str, str] | None = None,
                  transport: httpx.AsyncBaseTransport | None = None,
                  clock: Callable[[], float] = time.time, poll_wait: float = POLL_WAIT_S,

@@ -20,8 +20,6 @@ operator's merge, the bucket mirror) with these changes.
 Knobs (merge, probes, interviews) come from the YAML file $CHATBOT_CONFIG, re-read when it
 changes (so a live update applies them); DEFAULTS when it is unset."""
 
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import json

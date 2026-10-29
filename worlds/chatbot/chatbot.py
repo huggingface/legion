@@ -21,8 +21,6 @@ The operator flips the phase (never an agent): `python chatbot.py merge` posts t
 copies best/, log.jsonl and phase.json to `$CHATBOT_BUCKET` (hf://buckets/<ns>/<name>/<prefix>/,
 or a local directory for dry runs); unset: no copy."""
 
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import json

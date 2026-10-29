@@ -7,8 +7,6 @@ sessions/<agent>.jsonl and a harness transcript harness/projects/<enc-cwd>/<id>.
 random sample, also checks that the transcript id matches session_id in <agent>.state.json.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import random

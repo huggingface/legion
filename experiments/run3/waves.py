@@ -21,8 +21,6 @@ one agent at a time, that many seconds apart; `tick` and `run` block meanwhile. 
 one JSON line in --log (default: <S>.waves.jsonl). The start time is kept in
 <S>.waves.json (`--start` epoch seconds overrides it)."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import re

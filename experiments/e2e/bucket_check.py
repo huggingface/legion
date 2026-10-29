@@ -3,8 +3,6 @@
     python bucket_check.py <bucket-url-with-prefix> <swarm>     (FLOCK_URL/TOKEN for ids)
 """
 
-from __future__ import annotations
-
 import json
 import os
 import sys

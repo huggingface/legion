@@ -1,7 +1,5 @@
 """Agent map (/agents.png, /replay/agents), activity (/agents/active) and /status additions."""
 
-from __future__ import annotations
-
 import io
 import time
 

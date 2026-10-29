@@ -1,8 +1,6 @@
 """Side-by-side replay core (progress/app.js): two logs at once, aligned by wall time since first
 paint or by % done, give the service's frames at the matching log positions (needs node)."""
 
-from __future__ import annotations
-
 import bisect
 import gzip
 import json

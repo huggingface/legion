@@ -5,8 +5,6 @@ Everything here is pure (no board, no clock) except `relaxed_search`, which take
 as a function, so the rules and the relaxation are tested without a board.
 """
 
-from __future__ import annotations
-
 import math
 import re
 from collections.abc import Awaitable, Callable

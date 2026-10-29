@@ -15,8 +15,6 @@ one fixing promotion; the strong quota (charged in phase 1) refuses every bookin
 interview of best runs on its snapshot while best moves on. The final round and the bundle.
 A second test runs the job's bootstrap.sh: a live update, the switch marker, the stop marker."""
 
-from __future__ import annotations
-
 import copy
 import json
 import shutil

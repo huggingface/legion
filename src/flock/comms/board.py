@@ -7,8 +7,6 @@ AsyncBoard raises a 429 at once (BoardError.retry_after) instead of retrying; ot
 codes are never part of an error message.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import math

@@ -1,5 +1,4 @@
 """Run-4 world: local snapshots, native Hub PRs and independent reviews."""
-from __future__ import annotations
 
 import atexit
 import base64
@@ -61,7 +60,7 @@ FINAL_CODES = ("pr_closed", "pr_merged")
 MAX_DIFF_BYTES = int(os.environ.get("CHATBOT_GET_PR_DIFF_BYTES", str(200 << 10)))
 DESCRIPTION_CHARS = 4000  # PR description characters returned by get_pr  # Hub 400: the PR is already closed / merged
 log = logging.getLogger(__name__)
-_LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
+_LIVE: "dict[str, Chatbot4World]" = {}  # one world per state directory: a restart replaces it
 
 
 def _key(key):

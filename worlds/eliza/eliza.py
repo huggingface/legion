@@ -4,8 +4,6 @@ best/ (bot.py, v<n>.py, history.jsonl), probes/ (seeded from probes/ here), log.
 edits are atomic, and a .py change that does not compile is refused. Bots run as
 `python -I bot.py` in an empty temp dir under rlimits and a timeout: not a sandbox."""
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import fcntl

@@ -18,8 +18,6 @@ with `preempted: true`, exit PREEMPT_EXIT (75). The controller relaunches the sl
 planned restart, no crash backoff) and the new job restores every agent from the bucket.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os
@@ -132,7 +130,7 @@ class WorkerConfig:
     comms_agent_burst: float = 10.0
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
+    def from_env(cls, env: Mapping[str, str] = os.environ) -> "WorkerConfig":
         host_file = env.get("FLOCK_CTL_HOST_FILE") or None
         template = env["FLOCK_URL"] if host_file and "${CTL_HOST}" in env["FLOCK_URL"] else None
         if template is not None:

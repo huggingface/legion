@@ -2,8 +2,6 @@
 join at the first prompt, one poller per worker with fan-out, the gateway, the controller's
 channel resolution and kickoff. No real board is called."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import re

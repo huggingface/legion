@@ -38,8 +38,6 @@ absolute path, so util-linux /usr/bin/flock on PATH never matters.
 --out default: <variant spec>.local.yaml next to spec.yaml (spec.local.yaml, ...). Without
 --out and with --committed, writes spec.<variant>.yaml (placeholders only)."""
 
-from __future__ import annotations
-
 import argparse
 import math
 import os

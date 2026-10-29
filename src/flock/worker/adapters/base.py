@@ -5,8 +5,6 @@ An adapter owns at most one live harness process at a time (one burst). It is re
 `events()` until the process exits; the last event of a burst is always `exited`.
 """
 
-from __future__ import annotations
-
 import asyncio
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field

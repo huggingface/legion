@@ -10,8 +10,6 @@ tail is kept for error messages. Whatever the tool does, the worker only sees a 
 agent wrote cannot shadow a module; the tools folder is put first on sys.path instead.
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json

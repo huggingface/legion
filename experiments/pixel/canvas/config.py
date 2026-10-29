@@ -1,7 +1,5 @@
 """Settings, all from environment variables (see README for the table)."""
 
-from __future__ import annotations
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +60,7 @@ class Settings:
             raise ValueError("CANVAS_CLAIM_MODE must be advisory or enforced")
 
     @classmethod
-    def from_env(cls) -> Settings:
+    def from_env(cls) -> "Settings":
         data = os.environ.get("CANVAS_DATA")
         return cls(
             target=Path(_env("CANVAS_TARGET", str(DEFAULT_TARGET))),

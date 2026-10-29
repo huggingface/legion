@@ -1,5 +1,4 @@
 """Read vLLM metrics before increasing a wave; this module launches nothing."""
-from __future__ import annotations
 
 import math
 import os
