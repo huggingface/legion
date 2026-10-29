@@ -323,6 +323,8 @@ class Chatbot4World(World):
         self.save_sync = True
         self.save_stop.set()
         self.save_wake.set()
+        if self.saver is not None:  # its write in flight: a restart deletes leftover tmp files
+            self.saver.join(timeout)
         self.flush()
         self.stopping.set()
         self.lanes.close(timeout)

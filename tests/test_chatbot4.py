@@ -542,7 +542,9 @@ def test_admin_lanes_and_knobs(setup):
     world.admin.pause(["open"], "hub 429s")
     with pytest.raises(ToolError, match="paused by the operators"):
         submit(world, clone, branch="second")  # a new PR: the open lane
-    assert submit(world, clone, pr=rec["pr"])["pr"] == rec["pr"]  # an update is a push only
+    updated = submit(world, clone, pr=rec["pr"])  # an update is a push only
+    assert updated["pr"] == rec["pr"]
+    rec = updated  # its head: a new commit once the clock passed a second (commit date)
     world.admin.pause(["merge"])
     with pytest.raises(ToolError, match="paused by the operators"):
         world.merge_pr(Agent("birch"), rec["pr"])
