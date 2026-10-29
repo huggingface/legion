@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from flock.cli import load_spec
 from flock.models import ALL_COMMS_TOOLS, comms_tools
 
@@ -23,6 +25,12 @@ RULES = (  # Carlos's six rules, verbatim, with the tool insertions
     "6. Verify and hand off. Test the combined behavior, follow the project's review process,",
     "When your PR merges, say so in the team channel.",
 )
+
+
+@pytest.fixture(autouse=True)
+def _spec_defaults(monkeypatch):  # the spec's ${VAR:-default}s, not the caller's run.env
+    for var in ("CHATBOT_BOARD_URL", "CHATBOT_RUN"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_one_type_no_spawn_and_the_rules():
