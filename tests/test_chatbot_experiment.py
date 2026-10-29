@@ -105,6 +105,8 @@ def _offline(path: Path, model_url: str, board_url: str | None, phase: int,
     if board_url is not None:
         spec["comms"].update(url=board_url, channel="chatbot-test", invite_env="FAKE_INVITE")
     for name, t in spec["types"].items():
+        # no worker board budget: a refused post (several interviewers at once) is not retried
+        t["worker"] = {**(t.get("worker") or {}), "comms_rate": 0}
         if "loop" not in t:  # the interviewers: their prompt comes from spawn_interviewer
             continue
         me = name.split("-")[1]
@@ -388,7 +390,7 @@ def _job(tmp_path, model_url, board, board_url, variant: str = "one", **extra: s
            "CHATBOT_BOARD_INVITE": board.invite, "CHATBOT_WORLD_TOKEN": "w0rld-t0ken",
            "CHATBOT_SYNC_S": "3", "CHATBOT_CHECK_S": "1", "CHATBOT_TICK_S": "1",
            "CHATBOT_FLOCK_ARGS": "--skip-preflight", "CHATBOT_VARIANT": variant,
-           "CHATBOT_CHANNEL_B": "chatbot-b", **extra}
+           "CHATBOT_CHANNEL_B": "chatbot-b", "CHATBOT_WORLD_PORT": str(_free_port()), **extra}
     out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
     proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
                             stdout=out, stderr=subprocess.STDOUT, text=True,
@@ -403,6 +405,14 @@ def _job(tmp_path, model_url, board, board_url, variant: str = "one", **extra: s
         _kill(proc)
         raise
     return proc, env, bucket
+
+
+def _free_port() -> int:  # not 8790: other test runs on the host start the same world
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _kill(proc: subprocess.Popen) -> None:
