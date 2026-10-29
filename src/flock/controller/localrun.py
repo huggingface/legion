@@ -497,14 +497,49 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
 
 
 async def _prompt_all(http: httpx.AsyncClient, opts: RunOptions, store: Store,
-                      tracker: Tracker, say) -> bool:
-    for type_name in opts.spec.types:
-        r = await http.post(f"/swarms/{opts.spec.swarm}/prompts",
-                            json={"type": type_name, "text": opts.prompt})
-        if r.status_code >= 400:
-            say(f"prompt to type {type_name} refused ({r.status_code}): {r.text}")
+                      tracker: Tracker, say, stop: asyncio.Event | None = None) -> bool:
+    deadline = time.monotonic() + 300
+    expected = {name: definition.replicas for name, definition in opts.spec.types.items()}
+    while True:
+        if stop is not None and stop.is_set():
             return False
-    tracker.prompted = {a["name"] for a in store.list_agents(opts.spec.swarm)}
+        agents = [a for a in store.list_agents(opts.spec.swarm) if not a["parent"]]
+        if all(sum(a["type"] == name for a in agents) == count
+               for name, count in expected.items()):
+            break
+        if time.monotonic() >= deadline:
+            tracker.startup_timed_out = True
+            say("startup_timeout: full agent roster was not created within 300 seconds")
+            return False
+        await asyncio.sleep(0.1)
+    status_path = store.data_dir.parent / "startup.json"
+    def save_startup():
+        status_path.write_text(json.dumps({"expected_agents": sorted(a["name"] for a in agents),
+            "prompted_agents": sorted(tracker.prompted),
+            "missing_agents": sorted(a["name"] for a in agents if a["name"] not in tracker.prompted)}))
+    save_startup()
+    for agent in agents:
+        name = agent["name"]
+        while time.monotonic() < deadline:
+            if stop is not None and stop.is_set():
+                return False
+            try:
+                r = await http.post(f"/agents/{name}/prompt", json={
+                    "text": opts.prompt, "idempotency_key": "local-run-initial-prompt"}, timeout=10)
+                if r.status_code < 400:
+                    tracker.prompted.add(name)
+                    save_startup()
+                    break
+                if r.status_code < 500:
+                    say(f"prompt to {name} refused ({r.status_code}): {r.text}")
+                    return False
+            except httpx.TransportError:
+                pass  # retry safely if the acknowledgement was lost
+            await asyncio.sleep(0.1)
+        else:
+            tracker.startup_timed_out = True
+            say(f"startup_timeout: initial prompt not acknowledged for {name}")
+            return False
     return True
 
 
@@ -637,8 +672,9 @@ async def run_local(opts: RunOptions) -> RunResult:
             if not await _apply(http, opts, say):
                 reason, code = "apply_failed", 1
                 stop.set()
-            elif opts.prompt and not await _prompt_all(http, opts, store, tracker, say):
-                reason, code = "prompt_failed", 1
+            elif opts.prompt and not await _prompt_all(http, opts, store, tracker, say, stop):
+                reason = "startup_timeout" if getattr(tracker, "startup_timed_out", False) else "prompt_failed"
+                code = 1
                 stop.set()
         if opts.watch is not None and not stop.is_set():
             def post(line: str) -> None:

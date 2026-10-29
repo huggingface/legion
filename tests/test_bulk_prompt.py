@@ -150,3 +150,19 @@ def test_cli_skip_pending_flag(monkeypatch, app, store, tick, tmp_path):
         assert r.exit_code == 0, r.output
     assert ["skip_pending" in b for b in sent] == [False, True, True]
     assert [b.get("skip_pending") for b in sent[1:]] == [False, True]
+
+
+async def test_idempotency_receipt_survives_delivery(client, store, clock, tick):
+    await apply(client)
+    tick()
+    body = {"text": "start once", "idempotency_key": "initial"}
+    first = await client.post("/agents/researcher-0000/prompt", json=body)
+    assert first.status_code == 200
+    pending = store._q("SELECT id FROM pending_prompts WHERE agent=?", ["researcher-0000"])
+    store.delete_prompts([p["id"] for p in pending])
+    second = await client.post("/agents/researcher-0000/prompt", json=body)
+    assert second.json()["prompt_id"] == first.json()["prompt_id"]
+    assert not store.pending_counts("demo")
+    conflict = await client.post("/agents/researcher-0000/prompt",
+                                json={**body, "text": "different"})
+    assert conflict.status_code == 409

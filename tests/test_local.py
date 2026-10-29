@@ -451,3 +451,29 @@ async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     doc = json.loads((result.run_dir / "run.json").read_text())
     assert doc["spec"]["limits"]["budget_usd"] == 0
     assert doc["spec"]["types"]["w"]["labels"] == {"applied": "live"}
+
+
+async def test_initial_prompts_wait_for_full_roster_and_retry_ack(tmp_path):
+    from types import SimpleNamespace
+
+    calls = []
+    class Roster:
+        data_dir = tmp_path / "controller"
+        def list_agents(self, swarm):
+            calls.append("roster")
+            n = 1 if len(calls) == 1 else 2
+            return [{"name": f"w-{i:04d}", "type": "w", "parent": None} for i in range(n)]
+    sent = []
+    class HTTP:
+        async def post(self, path, *, json, timeout):
+            assert calls.count("roster") >= 2
+            sent.append((path, json))
+            if len(sent) == 1:
+                raise httpx.ReadTimeout("lost acknowledgment")
+            return httpx.Response(200)
+    tracker = SimpleNamespace(prompted=set())
+    opts = localrun.RunOptions(spec=local_spec(), prompt="start", data_dir=tmp_path)
+    assert await localrun._prompt_all(HTTP(), opts, Roster(), tracker, lambda msg: None)
+    assert tracker.prompted == {"w-0000", "w-0001"}
+    assert sent[0] == sent[1]
+    assert json.loads((tmp_path / "startup.json").read_text())["missing_agents"] == []

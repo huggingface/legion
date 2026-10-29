@@ -290,7 +290,7 @@ class LocalBoardStorage(BaseModel):
 
 
 class BucketBoardStorage(BaseModel):
-    """Opt-in single-owner SQLite storage on an hf-mount FUSE mount."""
+    """Single-owner local SQLite with verified snapshots in a private Hub bucket."""
 
     model_config = {"extra": "forbid"}
     kind: Literal["hf-bucket"] = "hf-bucket"
@@ -1665,6 +1665,7 @@ class CommandBatch(BaseModel):
 
 class PromptRequest(BaseModel):
     text: str
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
     timeout: str | None = None
     reply_to: str | None = None
 

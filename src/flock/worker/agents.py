@@ -153,6 +153,7 @@ class AgentRuntime:
         self.state = AgentState()
         self.phase = "none"
         self.buffer: list[str] = []
+        self._received_prompt_ids: set[str] = set()
         self.turn_id: str | None = None
         self.awaiting = False  # a prompt was forwarded and its turn has not started yet
         self.stuck = False
@@ -361,6 +362,8 @@ class AgentRuntime:
 
     async def prompt(self, text: str, *, prompt_id: str | None = None, timeout: str | None = None,
                      loop: LoopMeta | None = None) -> None:
+        if prompt_id is not None and prompt_id in self._received_prompt_ids:
+            return
         if loop is not None:
             text = self._loop_prompt(text, loop)
         if (budget := self._over_budget()) is not None:
@@ -370,6 +373,8 @@ class AgentRuntime:
         if timeout:
             self._next_timeout = parse_duration(timeout).total_seconds()
         if self.phase == "running" and not self._stop_req:
+            if prompt_id is not None:
+                self._received_prompt_ids.add(prompt_id)
             await self._forward(text)
             return
         if self.phase == "none" and (not self.allow_starts or self._stop_req):
@@ -377,6 +382,8 @@ class AgentRuntime:
                                           "reason": "draining" if not self.allow_starts else self._stop_req,
                                           **self._loop_untaken()})
             return
+        if prompt_id is not None:
+            self._received_prompt_ids.add(prompt_id)
         self.buffer.append(text)
         if self.phase == "none":
             self.phase = "starting"

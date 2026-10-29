@@ -879,11 +879,19 @@ SQLite database with retained online backups. Opt-in `storage.kind: hf-bucket` r
 `bucket: namespace/name` and accepts `mount_root` (default `/scratch/flock-boards`),
 `token_env` (default `HF_TOKEN`), and positive flush durations `flush_debounce` (`2s`),
 `flush_max_batch_window` (`15s`, at least debounce), `flush_shutdown_timeout` (`45s`).
-Storage settings are immutable during a run. The experimental backend owns one pinned
-hf-mount-fuse v0.13.2 mount and a unique bucket prefix, disables Flock SQLite backups,
-verifies stopped remote bytes before marking persistence, and reopens from retained prefix
-metadata. The pinned msgboard token publication uses authenticated exclusive creation when
-FUSE hard links are unsupported; checkpointed WAL/shared-memory sidecars are normalized to
-empty files only after all SQLite connections close. It requires a private bucket, local staging and working /dev/fuse and fusermount3;
-no distributed SQLite writer support is implied. See `docs/comms.md` for the required live
-compatibility gate and the distinction between upload timing and database durability.
+Storage settings are immutable during a run. Live SQLite is always node-local, including
+`hf-bucket`: `mount_root` is retained as the legacy name for its local data/staging root.
+The backend uses SQLite online backups and Hub uploads, never FUSE. Immutable generations
+are verified by download, hash and integrity checks before manifest publication; retain
+three verified generations. A private bucket is required because backups include credentials.
+Transient upload failures leave the local board serving; final persistence failure retains
+local recovery data and fails the run. See `docs/comms.md`.
+
+### Idempotent initial prompts (2026-10-29)
+
+`PromptRequest.idempotency_key` is optional (1–256 characters), scoped to an agent's lifetime.
+The controller stores the payload and prompt ID transactionally with its pending command.
+An identical retry returns that ID after delivery too; a conflicting payload returns 409.
+Workers suppress repeated prompt IDs during their runtime. This does not guarantee exactly-once
+execution across worker loss. Local runs wait for the complete configured root-agent roster
+before sending initial prompts individually, with a five-minute startup delivery deadline.

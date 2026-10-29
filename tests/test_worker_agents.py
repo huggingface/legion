@@ -271,3 +271,14 @@ async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
     await rt.sync_now("after")
     assert sync.pushed == ["researcher-0001", "researcher-0001"]
     assert store.files[pre + "workdir/a.txt"] == b"A"
+
+
+async def test_duplicate_prompt_id_is_not_forwarded_twice(tmp_path):
+    rt, adapter = runtime(tmp_path)
+    await rt.setup(restore=False)
+    await rt.prompt("once", prompt_id="initial")
+    await rt.prompt("once", prompt_id="initial")
+    await until(lambda: adapter.sent == ["once"])
+    await rt.prompt("once", prompt_id="initial")
+    assert adapter.sent == ["once"]
+    await until(lambda: rt.phase == "none")

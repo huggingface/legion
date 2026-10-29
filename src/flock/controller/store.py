@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS commands (
   body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS commands_by_worker ON commands (worker, id);
+CREATE TABLE IF NOT EXISTS prompt_receipts (
+    agent TEXT NOT NULL,
+    key TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    prompt_id TEXT NOT NULL,
+    PRIMARY KEY (agent, key)
+);
 CREATE TABLE IF NOT EXISTS pending_prompts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent TEXT NOT NULL,
@@ -542,6 +549,7 @@ class Store:
         )
         self._x("DELETE FROM agents WHERE name = ?", [name])
         self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
+        self._x("DELETE FROM prompt_receipts WHERE agent = ?", [name])
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
         self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
@@ -734,6 +742,20 @@ class Store:
             self._x(f"DELETE FROM commands WHERE id IN ({marks})", ids)
 
     # ----------------------------------------------------------------- pending prompts
+
+    def add_prompt_once(self, agent: str, key: str, payload: str, body: str, now: float) -> str:
+        """Atomically retain the receipt even after its pending command is consumed."""
+        with self.transaction():
+            rows = self._q("SELECT * FROM prompt_receipts WHERE agent=? AND key=?", [agent, key])
+            if rows:
+                if rows[0]["payload"] != payload:
+                    raise ValueError("Idempotency key already used for a different prompt")
+                return rows[0]["prompt_id"]
+            prompt_id = json.loads(body)["prompt_id"]
+            self._x("INSERT INTO prompt_receipts VALUES (?, ?, ?, ?)",
+                    [agent, key, payload, prompt_id])
+            self.add_prompt(agent, body, now)
+            return prompt_id
 
     def add_prompt(self, agent: str, body: str, now: float) -> None:
         self._x(

@@ -1029,7 +1029,15 @@ def create_app(
             reply_to=req.reply_to,
         )
         now = clock().timestamp()
-        store.add_prompt(name, cmd.model_dump_json(), now)
+        if req.idempotency_key:
+            try:
+                cmd.prompt_id = store.add_prompt_once(
+                    name, req.idempotency_key,
+                    req.model_dump_json(exclude={"idempotency_key"}), cmd.model_dump_json(), now)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from None
+        else:
+            store.add_prompt(name, cmd.model_dump_json(), now)
         w = store.get_worker(a["worker"]) if a["worker"] else None
         live = w is not None and worker_state(w, now) == WorkerState.running
         return PromptAck(
