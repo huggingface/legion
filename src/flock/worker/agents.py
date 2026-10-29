@@ -446,6 +446,11 @@ class AgentRuntime:
         if self.spec.harness.value == "llm" or not self.workdir.is_dir():
             return
         section = instructions_section(tools)
+        if self.spec.pi_tools_only:
+            section = ("<!-- flock:tools -->\n## Tools\n"
+                       "Call the offered native functions directly. Shell and file tools are disabled.\n"
+                       + "\n".join(f"- {t.name}: {t.description}" for t in tools.tools)
+                       + "\n<!-- /flock:tools -->")
         if section != (self._tools_section or ""):
             target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
             text = target.read_text() if target.is_file() else ""

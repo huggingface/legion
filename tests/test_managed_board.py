@@ -426,3 +426,18 @@ async def test_final_snapshot_failure_fails_run_and_retains_data(tmp_path, monke
                 await client.get(doc["controller_url"] + "/healthz")
     finally:
         shutil.rmtree(boards[0].local, ignore_errors=True)
+
+
+def test_long_run_name_still_provisions_invite(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLOCK_BOARD_LOCAL_ROOT", raising=False)
+    name = "escape-pi-qwen27b-d10-s00-n32-r01-20261029t120000z-a1b2c3d4-20261029-120000"
+    board = ManagedBoard(tmp_path / name)
+    try:
+        board.start(spec())
+        with join(board) as client:
+            assert client.get("/v1/me").status_code == 200
+        assert board.run_dir.name == name
+    finally:
+        board.stop()
+        if board.local is not None:
+            shutil.rmtree(board.local, ignore_errors=True)

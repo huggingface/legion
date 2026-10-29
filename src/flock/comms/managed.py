@@ -274,7 +274,7 @@ class ManagedBoard:
                 "kind": "agent", "role": "member" if c.allow_create_channels else "guest",
                 "can_create_channels": c.allow_create_channels, "channels": names,
                 "join_open_channels": False, "max_uses": None, "expires_in_seconds": None,
-                "label": f"flock {self.run_dir.name}",
+                "label": f"flock {self.run_dir.name}"[:80],
             })
             if r.status_code >= 400:
                 raise ManagedBoardError("Could not create the managed board's agent invite.")

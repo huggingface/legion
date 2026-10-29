@@ -63,17 +63,20 @@ def prepare(args):
             (args.spec.parent / definition["system_prompt_file"]).resolve())
     spec["comms"]["storage"]["mount_root"] = f"/tmp/flock-boards-{os.getuid()}"
     SwarmSpec.model_validate(spec)
-    if spec["types"]["worker"]["replicas"] != 4:
-        raise ValueError("AgentEscape currently requires four workers")
+    if not 1 <= getattr(args, "agents", 4) <= 32:
+        raise ValueError("Agent count must be between 1 and 32")
     output = args.output.resolve() if args.output else ROOT / ".flock/agent-escape-slurm" / (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8])
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     (output / "spec.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
     write_json(output / "secrets.json", {"HF_TOKEN": os.environ["HF_TOKEN"], "LOCAL_KEY": key})
-    sources = [HERE / name for name in ["run.py", "world.py", "prompt.md", "slurm.py", "run.slurm"]]
+    sources = [HERE / name for name in ["run.py", "world.py", "prompt.md", "slurm.py", "run.slurm", "usage_proxy.py", "prompt-pi.md"]]
+    sources += [ROOT / "src/flock/worker/adapters" / name
+                for name in ("pi.py", "pi_tools.mjs")]
     config = {"output": str(output), "spec": str(output / "spec.yaml"),
               "endpoint": endpoint, "difficulties": args.difficulties,
               "scenario_index": args.scenario_index, "timeout": args.timeout,
+              "agents": getattr(args, "agents", 4), "trial": getattr(args, "trial", 1),
               "secrets_file": str(output / "secrets.json"),
               "source_sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
               "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"],
@@ -177,7 +180,9 @@ def run(config_path):
                 label = f"{index:02d}-d{difficulty}"
                 command = [sys.executable, str(HERE / "run.py"), "--spec", config["spec"],
                            "--difficulty", str(difficulty), "--scenario-index",
-                           str(config["scenario_index"]), "--timeout", str(config["timeout"])]
+                           str(config["scenario_index"]), "--timeout", str(config["timeout"]),
+                           "--agents", str(config.get("agents", 4)),
+                           "--trial", str(config.get("trial", 1))]
                 attempt = None
                 print(f"START difficulty={difficulty} scenario={config['scenario_index']}", flush=True)
                 with (output / f"{label}.log").open("w") as log, (
@@ -237,6 +242,8 @@ def main():
     s.add_argument("--spec", type=Path, default=HERE / "spec-router-qwen27b.yaml")
     s.add_argument("--difficulties", type=int, nargs="+", choices=[5, 10, 15, 20, 25], default=[5, 10])
     s.add_argument("--scenario-index", type=int, default=0)
+    s.add_argument("--agents", type=int, default=4)
+    s.add_argument("--trial", type=int, default=1)
     s.add_argument("--timeout", type=int, default=900)
     s.add_argument("--partition", default="hopper-cpu")
     s.add_argument("--cpus", type=int, default=8)

@@ -22,12 +22,13 @@ class EscapeWorld(World):
         "your environment. Only submit_answer can confirm victory."
     )
 
-    def __init__(self, client=None, case_file=None, output=None, run_id=None):
+    def __init__(self, client=None, case_file=None, output=None, run_id=None, agents=None):
         self.client = client or httpx.Client(base_url=os.environ["ESCAPE_SERVER_URL"], timeout=20)
         self.case_file = case_file or os.environ["ESCAPE_CASE_FILE"]
         self.output = Path(output or os.environ["ESCAPE_OUTPUT"])
         self.output.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id or os.environ["ESCAPE_RUN_ID"]
+        self.agents = int(agents if agents is not None else os.environ.get("ESCAPE_AGENTS", "4"))
         self.sessions: dict[str, dict] = {}
         self.winner: str | None = None
         self.action_counts: dict[str, int] = {}
@@ -59,7 +60,7 @@ class EscapeWorld(World):
             raise ToolError("Benchmark server unavailable or returned invalid JSON.") from exc
 
     def _session(self, agent):
-        if agent.name not in {f"worker-{i:04d}" for i in range(4)}:
+        if agent.name not in {f"worker-{i:04d}" for i in range(self.agents)}:
             raise ToolError("Unknown experiment worker", "unknown_agent")
         if agent.name not in self.sessions:
             result = self._request(

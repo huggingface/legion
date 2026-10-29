@@ -67,6 +67,8 @@ def main():
                         help="Puzzle node count (default: 10)")
     parser.add_argument("--scenario-index", type=int, default=0,
                         help="Zero-based index in sorted scenario filenames (default: 0)")
+    parser.add_argument("--agents", type=int, default=None)
+    parser.add_argument("--trial", type=int, default=1)
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -97,12 +99,23 @@ def main():
     spec_path = args.spec.resolve()
     spec = yaml.safe_load(spec_path.read_text())
     workers = spec.get("types", {}).get("worker", {})
+    agents = args.agents if args.agents is not None else workers.get("replicas", 4)
+    if not 1 <= agents <= 32:
+        parser.error("Agent count must be between 1 and 32")
+    workers["replicas"] = agents
+    for provider in spec.get("providers", {}).values():
+        provider["max_working"] = agents
+    stamp = time.strftime("%Y%m%dt%H%M%Sz", time.gmtime())
+    spec["swarm"] = (f"escape-{workers['harness']}-qwen27b-d{args.difficulty}-s{args.scenario_index:02d}"
+                     f"-n{agents:02d}-r{args.trial:02d}-{stamp}-{run_id[:8]}")
+    spec["comms"]["kickoff"] = (f"{agents} workers have independent copies of the same puzzle. "
+                                "Share exact discoveries and inputs in general.")
     if (
         set(spec.get("types", {})) != {"worker"}
-        or workers.get("replicas") != 4
+        or workers.get("replicas", 0) < 1
         or workers.get("agents_per_worker") != 1
     ):
-        parser.error("This experiment requires four replicas of worker, one agent per worker")
+        parser.error("This experiment requires worker replicas, one agent per worker")
     shutil.copyfile(HERE / "world.py", output / "world.py")
     spec["world"]["dir"] = str(output)
     for name, definition in spec["types"].items():
@@ -122,13 +135,27 @@ def main():
         port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}"
     env.update(
+        ESCAPE_AGENTS=str(agents),
         ESCAPE_SERVER_URL=url,
         ESCAPE_CASE_FILE=str(case_file),
         ESCAPE_OUTPUT=str(output),
         ESCAPE_RUN_ID=run_id,
     )
+    proxy_url = upstream = None
+    if workers["harness"] == "pi":
+        with socket.socket() as proxy_socket:
+            proxy_socket.bind(("127.0.0.1", 0))
+            proxy_port = proxy_socket.getsockname()[1]
+        proxy_url = f"http://127.0.0.1:{proxy_port}"
+        upstream = spec["providers"]["local"]["base_url"]
+        spec["providers"]["local"]["base_url"] = proxy_url + "/v1"
+        snapshot.write_text(yaml.safe_dump(spec, sort_keys=False))
     metadata = {
         "run_id": run_id,
+        "agents": agents,
+        "trial": args.trial,
+        "harness": workers["harness"],
+        "upstream": upstream,
         **selection,
         "world_sha256": hashlib.sha256((output / "world.py").read_bytes()).hexdigest(),
         "launcher_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -140,11 +167,27 @@ def main():
     print(f"Selected difficulty {args.difficulty}, scenario index {args.scenario_index}: "
           f"{case_file.name}", flush=True)
     print(f"Attempt artifacts: {output}", flush=True)
-    backend = flock = None
+    backend = flock = proxy = None
     reason = "error"
     failure = None
     started = time.monotonic()
     try:
+        if proxy_url:
+            with (output / "usage-proxy.log").open("w") as log:
+                proxy = subprocess.Popen([str(ROOT / ".venv/bin/python"),
+                    str(HERE / "usage_proxy.py"), "--port", str(proxy_port), "--agents", str(agents),
+                    "--upstream", upstream, "--output", str(output)], cwd=ROOT,
+                    env={k: env[k] for k in ["PATH", "HOME", "LANG", "LOCAL_KEY"] if k in env},
+                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            for _ in range(100):
+                try:
+                    if httpx.get(proxy_url + "/health", timeout=1).is_success:
+                        break
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Usage proxy startup failed")
         # The benchmark needs no model or bucket credentials.
         backend_env = {key: env[key] for key in ("PATH", "HOME", "LANG") if key in env}
         with (output / "benchmark.log").open("w") as log:
@@ -185,6 +228,7 @@ def main():
                     str(ROOT / ".venv/bin/flock"),
                     "run",
                     str(snapshot),
+                    *(["--skip-preflight"] if proxy_url else []),
                     "--data-dir",
                     str(output / "flock"),
                     "--until",
@@ -224,7 +268,20 @@ def main():
     except (OSError, RuntimeError, httpx.HTTPError) as exc:
         failure = str(exc)
     finally:
-        for process in (flock, backend):
+        if proxy_url and proxy and proxy.poll() is None:
+            try:
+                with httpx.Client(timeout=5) as client:
+                    client.post(proxy_url + "/close").raise_for_status()
+                    deadline = time.monotonic() + 180
+                    while client.get(proxy_url + "/health").json()["active"]:
+                        if time.monotonic() >= deadline:
+                            failure = "Model calls did not drain; accounting may be incomplete"
+                            break
+                        time.sleep(0.5)
+                    time.sleep(1)  # let Pi consume the final usage records
+            except httpx.HTTPError:
+                failure = "Usage proxy drain failed"
+        for process in (flock, backend, proxy):
             try:
                 stop(process)
             except (OSError, RuntimeError, httpx.HTTPError) as exc:
@@ -236,6 +293,9 @@ def main():
         success = output / "success.json"
         report = {
             **selection,
+            "agents": agents,
+            "trial": args.trial,
+            "harness": workers["harness"],
             "reason": reason,
             "success": json.loads(success.read_text()) if success.exists() else None,
             "error": failure,
@@ -246,6 +306,11 @@ def main():
             ),
             "actions_by_type": dict(Counter(e["action"] for e in events)),
         }
+        if proxy_url:
+            from usage_proxy import summarize
+            report["accounting"] = summarize(output / "model-requests.jsonl")
+            if not report["accounting"]["complete"]:
+                report["measurement_error"] = "Incomplete upstream token accounting"
         bundles = list((output / "flock").glob("*/run.json"))
         if len(bundles) == 1:
             bundle = json.loads(bundles[0].read_text())
@@ -262,7 +327,7 @@ def main():
             report["time_to_success_seconds"] = report["success"]["time"] - metadata["started"]
         (output / "result.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2), flush=True)
-    return 0 if report["success"] and not failure and report["flock_exit_code"] == 0 else 1
+    return 0 if report["success"] and not failure and report["flock_exit_code"] == 0 and not report.get("measurement_error") else 1
 
 
 if __name__ == "__main__":

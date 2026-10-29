@@ -195,7 +195,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
         with LOCK, open(self.log_path, "a") as f:
-            f.write(json.dumps({"auth": self.headers.get("authorization"), "body": body}) + "\n")
+            f.write(json.dumps({"auth": self.headers.get("authorization"), "body": body,
+                                "session_id": self.headers.get("x-session-id")}) + "\n")
         last_text = _text((body.get("messages") or [{}])[-1].get("content"))
         if "fail!" in last_text:
             # echoes the caller's Authorization header, as a careless server might

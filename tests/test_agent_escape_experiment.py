@@ -269,3 +269,11 @@ def test_invalid_selection_exits_before_artifacts_or_processes(
     assert message in capsys.readouterr().err
     assert not (tmp_path / ".flock/agent-escape-attempts").exists()
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("agents", [2, 4, 8, 16, 32])
+def test_configured_agent_count_bounds_identities(world, agents):
+    world.agents = agents
+    assert world.get_observation(Agent(f"worker-{agents-1:04d}"))["narrative"] == "Puzzle"
+    with pytest.raises(ToolError, match="Unknown experiment worker"):
+        world.get_observation(Agent(f"worker-{agents:04d}"))

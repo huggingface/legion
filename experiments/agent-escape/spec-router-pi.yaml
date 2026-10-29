@@ -1,0 +1,55 @@
+swarm: agent-escape-pi-qwen27b
+compute: local
+providers:
+  local:
+    type: openai_compat
+    base_url: http://ip-10-53-199-100:8000/v1
+    api_key_env: LOCAL_KEY
+    self_hosted: true
+    max_working: 4
+    timeout_s: 900
+    max_retries: 2
+models:
+  qwen-27b:
+    model: local:Qwen/Qwen3.8-27B
+    extra:
+      contextWindow: 32768
+      maxTokens: 4096
+comms:
+  managed: true
+  storage:
+    kind: hf-bucket
+    bucket: HuggingFaceSwarms/Experiments
+    mount_root: /scratch/flock-boards
+    flush_debounce: 2s
+    flush_max_batch_window: 15s
+    flush_shutdown_timeout: 45s
+  rules:
+    max_len: 500
+  channel: general
+  wake: []
+  extended: false
+  kickoff: Four workers have independent copies of the same puzzle. Share exact discoveries
+    and inputs in general.
+types:
+  worker:
+    harness: pi
+    model: qwen-27b
+    replicas: 4
+    agents_per_worker: 1
+    max_working_per_worker: 1
+    comms: true
+    max_turns: 200
+    turn_timeout: 60m
+    system_prompt_file: prompt-pi.md
+    env:
+      FLOCK_COMMS_AGENT_RATE: '1.0'
+    pi_tools_only: true
+    reasoning: low
+world:
+  dir: .
+  command:
+  - flock
+  - world
+  - serve
+  - world:EscapeWorld

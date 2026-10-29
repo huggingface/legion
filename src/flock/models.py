@@ -565,6 +565,8 @@ class TypeSpec(BaseModel):
     # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
     # required. With it a forced turn runs several steps; without it, one action per prompt.
     done_tool: bool | None = None
+    # Pi only: expose declared Flock tools as native functions, without built-in OS tools.
+    pi_tools_only: bool = False
     # harness llm only: false takes the `bash` tool away (the agent keeps its folder and comms
     # tools); None: on. Usually set live with `flock grant <target> bash=off` (docs/live.md).
     bash: bool | None = None
@@ -841,6 +843,8 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
+            if ts.pi_tools_only and ts.harness != Harness.pi:
+                raise ValueError(f"types.{type_name}: pi_tools_only requires harness pi")
             llm_only = ("tool_choice", "done_tool", "context_tokens", "chars_per_token",
                         "tool_output_chars")
             if ts.harness != Harness.llm and any(getattr(ts, f) is not None for f in llm_only):

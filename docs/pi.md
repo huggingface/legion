@@ -134,3 +134,22 @@ response 0.4 to 3.3 s on a busy shared dev box.
 - A real model or vLLM endpoint; tool-call parsing is the server's job.
 - Pi 1.3.0 (released 2026-10-15) exists and is untested (not upgraded); the version is part of the resume contract, so a
   bump needs the fixture re-recorded and the gate re-run.
+
+## Native Flock tools
+
+Set `pi_tools_only: true` on a Pi type to expose its declared Flock tools as native
+functions. The adapter loads the trusted `pi_tools.mjs` extension explicitly, disables
+Pi's built-in tools, and selects only names from the agent's tools pin. Calls go through
+`flock.tools.cli`, preserving argument validation, agent identity, and provider-key
+removal before the tool runs. A missing or empty pin fails startup.
+
+In this mode each provider request carries `X-Session-ID` equal to the Pi session UUID;
+resume retains it. The native-tool and resumed-routing path is tested with real Pi 1.2.0
+against the fake OpenAI server. The AgentEscape pilots additionally exercise the real
+Qwen router and native puzzle/communication tools.
+
+Provider-backed Pi models accept `contextWindow`, `maxTokens`, `samplingParams`, and
+`compat` from model `extra` as Pi model settings. Other extra keys remain unsupported.
+For example, AgentEscape uses a 32768-token context and 4096-token generation cap.
+Its dedicated usage proxy records every upstream call and drains admitted requests
+before stopping Pi; see [the sweep guide](../experiments/agent-escape/PI-SWEEP.md).

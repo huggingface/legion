@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -116,7 +117,9 @@ def pi_model_config(spec: TypeSpec, agent: str = "") -> PiModelConfig | None:
     endpoint = pick_endpoint(agent, r.provider.endpoints) if agent else r.provider.base_url
     return PiModelConfig(base_url=endpoint or "", api_key_env=r.provider.api_key_env,
                          model_id=r.model_id, provider=r.provider_name,
-                         reasoning=spec.effective_reasoning)
+                         reasoning=spec.effective_reasoning,
+                         extra={k: v for k, v in (r.extra or {}).items()
+                                if k in {"contextWindow", "maxTokens", "samplingParams", "compat"}})
 
 
 def write_models_json(home: Path, cfg: PiModelConfig) -> Path:
@@ -168,7 +171,8 @@ def isolated_env(env: dict[str, str], provider_key: str | None) -> dict[str, str
     """Run4 adds only its provider key, agent-scoped tool/controller routing and git's
     GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n."""
     allowed = BASE_ENV | set(PI_ENV_DEFAULTS) | {"PI_CODING_AGENT_DIR", "FLOCK_TOOLS_PIN",
-              "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", provider_key}
+              "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN",
+              "FLOCK_PI_SESSION_ID", "FLOCK_PI_PYTHON", provider_key}
     return {k: v for k, v in env.items()
             if (k in allowed or k.startswith(BASE_ENV_PREFIXES) or GIT_CONFIG_ENV.fullmatch(k))
             and k not in {"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN", "CHATBOT_WORLD_TOKEN",
@@ -515,6 +519,19 @@ class PiAdapter:
         if cfg is not None and cfg.reasoning:
             self.argv += ["--thinking", cfg.reasoning]
         self.env = harness_env(env, self.home)
+        self.env["FLOCK_PI_SESSION_ID"] = sid
+        if spec.pi_tools_only:
+            pin = self.env.get("FLOCK_TOOLS_PIN")
+            if not pin or not Path(pin).is_file():
+                raise RuntimeError("Pi tools-only mode requires a Flock tools pin")
+            definitions = json.loads(Path(pin).read_text())["toolset"]["tools"]
+            names = [tool["name"] for tool in definitions]
+            if not names:
+                raise RuntimeError("Pi tools-only mode requires at least one declared tool")
+            extension = Path(__file__).with_name("pi_tools.mjs")
+            self.argv += ["--no-builtin-tools", "--extension", str(extension),
+                          "--tools", ",".join(names)]
+            self.env["FLOCK_PI_PYTHON"] = sys.executable
         launch = self.argv
         if isolation_enabled():
             self.env = isolated_env(self.env, cfg.api_key_env if cfg else None)

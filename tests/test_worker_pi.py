@@ -628,3 +628,42 @@ async def test_reader_skips_streaming_records_from_the_process(tmp_path):
     a._dispatch = lambda rec: seen.append(rec["type"])  # what the reader parsed
     await a._read()
     assert seen == ["agent_start", "agent_settled"]
+
+
+@pi_bin
+async def test_pi_native_tools_and_stable_routing(tmp_path, fake_server, monkeypatch):
+    from flock.tools.loader import ToolDef
+    from flock.tools.toolset import Toolset
+
+    a, wd = make_adapter(tmp_path, fake_server, monkeypatch)
+    folder = tmp_path / "tools"
+    folder.mkdir()
+    (folder / "echo.py").write_text("def echo():\n    return {'native': True}\n")
+    ts = Toolset(version="v1", dir=folder, swarm="test", type="pi", data_dir=tmp_path,
+                 tools=(ToolDef("echo", "Echo", {"type": "object", "properties": {},
+                            "additionalProperties": False}, "echo", "echo"),))
+    pin = tmp_path / "pin.json"
+    ts.write_pin(pin, agent="pi-0001", workdir=wd, env_deny=["FLOCK_TEST_PI_KEY"])
+    env = {"FLOCK_TOOLS_PIN": str(pin)}
+    sid = await a.start(wd, None, pi_spec(pi_tools_only=True), env=env)
+    try:
+        await a.send("call: echo {}")
+        events = await until_turn_ended(a)
+        assert events[-1].status == "completed"
+        results = [e.message for e in events if e.kind == "message"
+                   and e.message.get("role") == "toolResult"]
+        assert len(results) == 1 and '"native": true' in str(results[0])
+        assert len([e for e in events if e.kind == "usage"]) == 2
+    finally:
+        await a.stop()
+    b, _ = make_adapter(tmp_path, fake_server, monkeypatch)
+    try:
+        assert await b.start(wd, sid, pi_spec(pi_tools_only=True), env=env) == sid
+        await b.send("hello resumed")
+        assert (await until_turn_ended(b))[-1].status == "completed"
+    finally:
+        await b.stop()
+    requests = requests_seen(fake_server)
+    assert {r["session_id"] for r in requests} == {sid}
+    assert all([t["function"]["name"] for t in r["body"]["tools"]] == ["echo"]
+               for r in requests)

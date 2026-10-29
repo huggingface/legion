@@ -369,7 +369,9 @@ def extra_warnings(spec: SwarmSpec) -> list[str]:
             f"{ts.harness.value} harness (docs/open-models.md)"
             for name, ts in spec.types.items()
             if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
-            and ts.resolved_model.extra]
+            and ts.resolved_model.extra
+            and not (ts.harness.value == "pi" and set(ts.resolved_model.extra) <= {
+                "contextWindow", "maxTokens", "samplingParams", "compat"})]
 
 
 def _warn_extra(spec: SwarmSpec) -> None:
