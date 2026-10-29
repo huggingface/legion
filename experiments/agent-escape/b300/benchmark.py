@@ -24,8 +24,10 @@ CONTEXT = 32768
 MATRIX = [("tp", n) for n in (1, 2, 4, 8)] + [("replicas", n) for n in (2, 4, 8)]
 
 
-def payload_for(row):
+def payload_for(row, context=CONTEXT):
     # No ignore_eos, min_tokens or artificial output target. The context is the safety cap.
+    if not 0 <= row["prompt_tokens"] < context:
+        raise ValueError("Prompt does not fit the configured context")
     return {
         **row["payload"],
         "model": MODEL,
@@ -33,7 +35,7 @@ def payload_for(row):
         "seed": 42,
         "reasoning_effort": "low",
         "chat_template_kwargs": {"reasoning_effort": "low"},
-        "max_tokens": CONTEXT - row["prompt_tokens"],
+        "max_tokens": context - row["prompt_tokens"],
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -58,7 +60,7 @@ def tool_error(calls, tools):
     return None
 
 
-async def measure(client, url, row, timeout=900):
+async def measure(client, url, row, timeout=900, *, context=CONTEXT):
     started = time.perf_counter()
     result = {
         "id": row["id"],
@@ -80,7 +82,7 @@ async def measure(client, url, row, timeout=900):
     try:
         async with asyncio.timeout(timeout):
             async with client.stream(
-                "POST", url + "/v1/chat/completions", json=payload_for(row)
+                "POST", url + "/v1/chat/completions", json=payload_for(row, context)
             ) as response:
                 if response.status_code != 200:
                     result.update(

@@ -80,6 +80,51 @@ container compatibility or measured throughput. A separate CPU-only check with
 `vllm-router==0.1.16` and two fake HTTP backends passed startup, authentication
 forwarding, unhealthy-backend exclusion, and recovered-backend routing.
 
+## Load the router with real prompts
+
+`router_load.py` sends a bounded **5,000-request** concurrency ramp through an
+existing router. It does not submit jobs. Its default workload is the prepared,
+revision-pinned UltraChat dataset below; `--workload agent_escape` replays the
+prepared real agent contexts instead. File and prompt hashes are checked before
+requests begin.
+
+```bash
+uv run python experiments/agent-escape/b300/router_load.py \
+  --server-run /absolute/path/qwen-run \
+  --data .flock/b300-qwen/data \
+  --requests 5000 --concurrency 16,32,64,128,256,512,1024 \
+  --output /absolute/path/load-5000
+```
+
+The server directory supplies `endpoint.json`, `config.json`, and the private
+`api-key`; credentials are never command-line arguments or result artifacts.
+The client waits up to one hour for readiness. The output directory must be new.
+Default request allocation is 128/128/128/256/512/1024/2824 across those seven
+levels, totaling exactly 5,000 with at least two full waves per level. To test a
+higher concurrency, increase the request budget to at least twice the sum of the
+requested levels. For a small check, use `--requests 16 --concurrency 8`.
+
+Prompts are shuffled deterministically, reused verbatim after exhausting the
+selected dataset, and retain their real content/tool schemas. Prefix caching
+stays enabled: this is a repeated-workload test, not a cold-cache test. Responses
+stop naturally at EOS; the only output cap is remaining context. Timeouts (900 s
+by default), HTTP failures, malformed streams/tools, and context exhaustion are
+recorded separately, never counted as successful natural completions.
+
+Each level writes `requests.jsonl`, sampled backend `metrics.jsonl`, and
+`summary.json`. Aggregate summaries include valid output tokens/s, requests/s,
+p50/p95 latency, TTFT/TPOT, errors, and observed client concurrency. Per-instance
+metrics include running/waiting requests and KV/prefix-cache counters. Content
+and chunk gaps are omitted by default to keep the load driver light; use
+`--save-responses` to retain them. The client raises its own soft file-descriptor
+limit when possible and refuses a ramp that exceeds its hard limit.
+
+`completion.json` appears only after all levels finish. It reports the best
+measured throughput and largest tested zero-error concurrency, **not a proven
+hard limit**. Compare throughput plateaus, latency and queue growth to identify
+saturation. Inference interruptions remain visible as errors and are not retried.
+The script never cancels the serving allocation.
+
 ## Prepare and launch
 
 From the flock repository, prepare the dataset once (requires model/data network access):
