@@ -89,7 +89,7 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
 RUN3_BUCKET=${RUN3_BUCKET%/}
 CTL_PORT=7860
 CTL_HOST=$(hostname)
-EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy or voting
+EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy, voting or teams
 EXP=$RUN_DIR/experiment                         # a writable copy of experiments/$EXPERIMENT (waves.py writes next to the spec)
 SPEC=$EXP/spec.slurm.local.yaml
 WAVES_FILE=$EXP/${RUN3_WAVES:-waves.yaml}
@@ -180,7 +180,7 @@ waves_step() {  # runs in a background subshell (below) and exec's into waves.py
   # The experiment folder, copied once per run (the spec's prompts/, tools/, protocols/ are read
   # relative to the spec file; waves.py writes <spec>.waves.json and the jsonl next to it).
   if [ ! -d "$EXP" ]; then
-    # -L: hierarchy/voting link run4's scripts and prompts; the copy holds real files.
+    # -L: hierarchy/voting/teams link run4's scripts and prompts; the copy holds real files.
     mkdir -p "$EXP" && cp -aL "$REPO/experiments/$EXPERIMENT/." "$EXP/" || { log "copy of experiments/$EXPERIMENT failed"; return 1; }
     log "experiment folder: $EXP (from $REPO/experiments/$EXPERIMENT)"
   fi
