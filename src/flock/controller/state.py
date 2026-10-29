@@ -18,7 +18,7 @@ whole file again and deletes them. After a restore the restored files count as u
 first push after a restart is incremental too.
 
 Health files (docs/health.md) are mirrored too: `metrics/<swarm>/latest.json` and the 6-hour
-`<date>T<HH>.jsonl`, `rollups/<swarm>/<hour>.jsonl` and `run.json`, each uploaded whole when it
+`<date>T<HH>.jsonl`, `rollups/<swarm>/<hour>.jsonl`, `states/<swarm>/`, and `run.json`, each uploaded whole when it
 changed (also when the DB did not), and restored with the snapshot so a restarted controller
 keeps adding to them.
 
@@ -46,7 +46,7 @@ STATE_DB = "state.db"
 EVENTS = "events"
 DEFAULT_INTERVAL = 60.0
 TAIL = ".tail"  # events/<swarm>/<agent>.jsonl.tail/<offset>: bytes appended after <offset>
-MIRRORED = ("metrics", "rollups", "run.json")  # health files, uploaded whole when changed
+MIRRORED = ("metrics", "rollups", "states", "run.json")  # health files, uploaded whole when changed
 _CHECK = 4096  # bytes before the uploaded end that must still match for a tail upload
 
 

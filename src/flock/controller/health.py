@@ -14,6 +14,9 @@ active that hour, the whole file rewritten with the running totals every 5 min, 
 closes and at shutdown (hours by arrival time at the controller; a restart within an hour
 reloads the file and keeps adding to it). And `run.json` at the state root (at start, on each
 new generation, at the end).
+
+And `states/<swarm>/<YYYY-MM-DDTHH>.jsonl`: the same sampled seconds per agent in 5-min buckets,
+the hour's file rewritten whole with the rollups; `states/<swarm>/latest.json` every sample.
 """
 
 from __future__ import annotations
@@ -156,6 +159,7 @@ class Health:
         self.interval = SAMPLE_S  # set by `run`; policies count `for:` in samples of it
         self.policies = Policies(store, secrets=secrets)  # docs/policies.md
         self._digest_at: dict[str, float] = {}  # swarm -> last digest (or first tick)
+        self._buckets: dict[str, dict[tuple[str, str, str], dict]] = {}  # hour -> (swarm, b, agent) -> line
 
     # ------------------------------------------------------------------ counters (post_events)
     def on_events(self, a: Row, evs: list[Event], now: float) -> None:
@@ -263,14 +267,49 @@ class Health:
             self._roll(now)
             current = json.loads(json.dumps(self._rollups))  # a copy, taken under the lock
         self._write_hour(current)
+        self._write_buckets(now)
         self._rollups_at = now
 
+    # ------------------------------------------------------------------ 5-min state buckets
+    def _bucket_hour(self, h: str) -> dict[tuple[str, str, str], dict]:
+        """The hour's bucket lines; a restart within the hour reloads its files (under the lock)."""
+        lines = self._buckets.get(h)
+        if lines is None:
+            lines = self._buckets[h] = {}
+            for path in (self.store.data_dir / "states").glob(f"*/{h}.jsonl"):
+                try:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        r = json.loads(line)
+                        lines[(path.parent.name, r["b"], r["agent"])] = r
+                except (OSError, ValueError, KeyError):
+                    log.exception("cannot reload %s", path)
+        return lines
+
+    def _write_buckets(self, now: float) -> None:
+        """Rewrite each hour's `states/<swarm>/<hour>.jsonl` whole; closed hours are then
+        dropped and never written again."""
+        with self._lock:
+            hours = {h: [(k, dict(r)) for k, r in lines.items()]
+                     for h, lines in self._buckets.items()}
+        for h, lines in hours.items():
+            files: dict[str, list[str]] = {}
+            for (swarm, _, _), r in lines:
+                files.setdefault(swarm, []).append(json.dumps(r))
+            for swarm, out in files.items():
+                _write_text(self.store.data_dir / "states" / swarm / f"{h}.jsonl",
+                            "\n".join(sorted(out)) + "\n")
+            if h != hour_of(now):
+                with self._lock:
+                    self._buckets.pop(h, None)
+
     def _sample_states(self, swarm: str, agents: list[Row], states: dict[str, str],
-                       dt: float, now: float) -> None:
+                       pending: dict[str, int], dt: float, now: float) -> None:
         """Working / pending / idle seconds, sampled: each tick adds its interval to the state
         each agent is in (pending: idle with a prompt queued)."""
-        pending = self.store.pending_counts(swarm)
+        d = datetime.fromtimestamp(now, UTC)
+        b = f"{d:%Y-%m-%dT%H}:{d.minute // 5 * 5:02d}"
         with self._lock:
+            lines = self._bucket_hour(b[:13])
             for a in agents:
                 st = states[a["name"]]
                 key = ("working_s" if st == "working" else
@@ -279,6 +318,11 @@ class Health:
                 if key:
                     r = self._rollup(a, now)
                     r[key] = round(r[key] + dt, 1)
+                short = key[0] if key else "s" if st == "stuck" else None
+                if short:  # zero fields are left out
+                    line = lines.setdefault((swarm, b, a["name"]),
+                                            {"b": b, "agent": a["name"], "type": a["type"]})
+                    line[short] = round(line.get(short, 0) + dt, 1)
 
     # ------------------------------------------------------------------ run.json
     def write_run(self, now: float, ended: bool = False) -> None:
@@ -296,7 +340,7 @@ class Health:
             "schema": 1, "run": self.run_name, "swarm": spec.swarm if spec else None,
             "swarms": [sw["name"] for sw in swarms], "started_at": started,
             "ended_at": datetime.fromtimestamp(now, UTC).isoformat() if ended else None,
-            "status": "ended" if ended else "running",
+            "status": "ended" if ended else "running", "states": True,
             "generation": swarms[0]["generation"] if swarms else None,
             "types": {t: {"harness": ts.harness.value, "model": ts.model, "replicas": ts.replicas}
                       for t, ts in spec.types.items()} if spec else {}})
@@ -465,8 +509,12 @@ class Health:
         baseline = self._since or now
         agents = self.store.list_agents(swarm)
         states = {a["name"]: agent_state(a, workers.get(a["worker"]), now).value for a in agents}
+        pending = self.store.pending_counts(swarm)
         if prev_tick and now > prev_tick:
-            self._sample_states(swarm, agents, states, min(now - prev_tick, 2 * SAMPLE_S), now)
+            self._sample_states(swarm, agents, states, pending, min(now - prev_tick, 2 * SAMPLE_S),
+                                now)
+        _write_json(self.store.data_dir / "states" / swarm / "latest.json", {"ts": now, "states": {
+            n: "pending" if st == "idle" and pending.get(n) else st for n, st in states.items()}})
         for a in agents:
             t = types.setdefault(a["type"], {"by_state": Counter(), "stuck": [], "gens": Counter()})
             state = states[a["name"]]

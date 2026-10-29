@@ -76,11 +76,15 @@ Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flo
 
 ```
 run.json                                 {schema: 1, run, swarm, swarms, started_at, ended_at|null,
-                                          status: running|ended, generation, types: {t: {harness, model, replicas}}}
+                                          status: running|ended, states: true, generation,
+                                          types: {t: {harness, model, replicas}}}
 metrics/<swarm>/latest.json              {ts, body}: the newest 30 s sample (full), overwritten
 metrics/<swarm>/<YYYY-MM-DD>T<HH>.jsonl  {ts, body} per 5-min sample (slim); one file per 6 h,
                                          HH = 00, 06, 12, 18, so each upload stays small
 rollups/<swarm>/<YYYY-MM-DDTHH>.jsonl    one line per agent active that hour
+states/<swarm>/latest.json               {ts, states: {agent: working|pending|idle|stuck|unknown|dead}},
+                                         every 30 s sample, overwritten
+states/<swarm>/<YYYY-MM-DDTHH>.jsonl     one line per agent per 5-min bucket of that hour
 ```
 
 `ts` is epoch seconds. `run` is `FLOCK_RUN`, else the last part of `FLOCK_STATE_URL`, else the
@@ -98,6 +102,16 @@ keeps adding to it, so a SIGKILL loses at most the last 5 minutes.
 `working_s`/`pending_s`/`idle_s` are sampled (each sample adds its interval to the agent's
 state; pending = idle with a prompt queued); `tools` counts tool results; `wakes` counts
 `loop_wake`; `errors` counts `error` events (failed turns are in `out.error`).
+
+A state line, for the viewer's per-agent lanes: `{"b": "YYYY-MM-DDTHH:MM", "agent", "type",
+"w", "p", "i", "s"}`, the seconds sampled working, pending, idle and stuck in the 5-min bucket
+starting at `b` (UTC, by sample time). Zero fields are left out; an agent with no sample in a
+bucket (dead, unknown, removed) has no line. Same sampling and rewrite rules as the rollups: the
+open hour's file is rewritten whole every 5 min, once more after the hour closes and at
+shutdown, then never changes; one line per (agent, b), read with replace semantics; a restart
+within the hour reloads the file. About 100 bytes per line: 360 live agents give 4,320 lines
+(about 430 KB) per hour file, roughly 10 MB a day. `latest.json` seeds the lanes after a viewer restart (`pending`: idle
+with a prompt queued).
 
 ## Surface
 
