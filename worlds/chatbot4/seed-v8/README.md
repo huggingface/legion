@@ -26,9 +26,10 @@ For every input line, including an empty line, the bot prints exactly one nonemp
 and flushes. Each conversation is a fresh process, with 300 seconds in total. Use only the
 Python standard library, with no network or file I/O beyond importing the bot's modules.
 
-The seed's `bot/__main__.py`, `bot/runtime.py` and package initializers are fixed: the world
-refuses changes to them. Everything else lives in `bot/modules/`, which the runtime loads by
-itself. A module may define any of these, all optional:
+The seed's `bot/__main__.py`, `bot/runtime.py` and `bot/__init__.py`/`bot/modules/__init__.py`
+are fixed: the world refuses changes to them. The runtime loads every module in `bot/modules/` by
+itself; the shared parts of the bot live in packages next to it ("Architecture"). A module may
+define any of these, all optional:
 
 | name | what it does |
 |---|---|
@@ -46,6 +47,32 @@ reply, the module that gave it and every candidate, for tools and tests.
 
 Coordinate module names and `memory` keys on the board. Keep the greeting fallback at
 PRIORITY -1000.
+
+## Architecture
+
+The bot has four parts. Each has a home and an owning lane, and modules build on them instead
+of each doing everything itself:
+
+| part | what it does | where | lane |
+|---|---|---|---|
+| understanding engine | what the user said and meant: clean text, the kind of line, the topic, what "it" refers to | `bot/understanding/`, stored in `memory["understood"]` by `bot/modules/understand.py` before any module replies | understanding |
+| memory store | what the user and the bot have said: the user's facts, the topic, the turns | `bot/memory/` and the `memory` keys below | conversation |
+| knowledge base | facts about the world, as data keyed by meaning | `bot/knowledge/`, one module per domain | answers |
+| response composer | what to do this turn, and how to phrase it | the modules' `respond`, `bot/modules/arbiter.py`, `bot/compose/` | routing (every lane writes replies) |
+
+Shared `memory` keys (add new ones here):
+
+| key | what | written by |
+|---|---|---|
+| `memory["turns"]` | every earlier turn: `{"user", "bot", "module"}` | the runtime |
+| `memory["understood"]` | this turn's reading of the line: `text`, `clean`, `words`, `kind` | `bot/modules/understand.py` |
+| `memory["user"]` | facts the user told about themselves, e.g. `{"name": "Sam"}` (`bot.memory.user`) | the conversation lane |
+| `memory["topic"]` | what the conversation is about now | the conversation lane |
+
+The project runs for a long time and will produce a lot of code. Prefer general mechanisms that
+improve many conversations at once (better understanding, a richer knowledge base, a better
+composer) over rules or content written for one phrasing. When a reply falls short, find which
+part failed and improve that part.
 
 ## Routing
 
@@ -71,7 +98,7 @@ own sample; CONTRIBUTING.md has the steps.
 
 | path | what |
 |---|---|
-| `bot/` | the bot: the fixed runtime and `bot/modules/` |
+| `bot/` | the bot: the fixed runtime, `bot/modules/` and the shared parts ("Architecture") |
 | `deck/` | the conversations comparisons are run on |
 | `tools/compare.py` | the comparison tool |
 | `tests/` | unit tests; add one with every module |

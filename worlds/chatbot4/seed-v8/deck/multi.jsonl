@@ -33,3 +33,8 @@
 {"id": "multi-033", "area": "learning", "turns": ["What's the difference between a virus and bacteria?", "So do antibiotics work on colds?", "Then what actually helps a cold?"]}
 {"id": "multi-034", "area": "corrections", "turns": ["I'm planning a trip to Rome in July.", "Sorry, I meant Florence, not Rome.", "What should I see there in two days?"]}
 {"id": "multi-035", "area": "corrections", "turns": ["Can you recommend a recipe for dinner?", "Something without meat, please.", "And quick, I've only got 20 minutes."]}
+{"id": "multi-036", "area": "messy-chat", "turns": ["hey", "not much u?", "lol same", "anyway what should i make for dinner, ive got eggs and spinach", "ok sounds good", "thx"]}
+{"id": "multi-037", "area": "messy-chat", "turns": ["I'm off to Japan in March!", "Tokyo and Kyoto", "wait is that cherry blossom season", "ok and do i need a rail pass?", "cool. btw which city did i say first?"]}
+{"id": "multi-038", "area": "messy-chat", "turns": ["Can you help me pick a laptop?", "its for uni, im studying architecture", "under 1000", "actually never mind, how do I boil an egg?", "ok back to the laptop, which would you get?"]}
+{"id": "multi-039", "area": "messy-chat", "turns": ["Are you a bot?", "ha fair. what can you help with?", "ok give me a quick dinner idea", "nah something without cheese"]}
+{"id": "multi-040", "area": "messy-chat", "turns": ["my cat knocked my phone into the bath", "it wont turn on now", "i put it in rice", "how long should i leave it"]}

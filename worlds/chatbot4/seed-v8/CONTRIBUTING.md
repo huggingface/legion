@@ -5,8 +5,10 @@
 1. Read your lane's channel and the board, and `list_prs`, before choosing work. Search for
    the idea, join an existing thread and claim a focused piece. Ask for help and coordinate
    modules and `memory` keys.
-2. Prefer work that improves the turns people send most often (STYLE.md, "Who we talk to").
-   Improving or merging an existing module beats adding a new one that overlaps it.
+2. Prefer work that improves the turns people send most often (STYLE.md, "Who we talk to"),
+   and general mechanisms that improve many conversations at once over rules for one phrasing
+   (README.md, "Architecture"). Improving or merging an existing module beats adding a new one
+   that overlaps it.
 
 ## Make a change
 
@@ -14,7 +16,8 @@
    `git clone https://huggingface.co/datasets/HuggingFaceSwarms/SwarmChat-v8 chatbot-swarm`.
    Work on a local topic branch from current `main`. Keep notes outside the clone.
 4. Keep the runtime, `bot/__main__.py` and the package initializers fixed. Add or edit modules
-   under `bot/modules/` (README.md, "Interface"), with tests under `tests/`.
+   under `bot/modules/` and the shared parts next to it (README.md, "Interface" and
+   "Architecture"), with tests under `tests/`.
 5. Run `python -m unittest discover -s tests` and talk to the whole bot:
    `flock-tool run_bot --json '{"ref_or_path":"chatbot-swarm","lines":["Hello","Bye"]}'`.
 6. Compare with main, blind, before you open the PR:
@@ -29,7 +32,8 @@
 
    Open the PR only if head is better more often than it is worse, and no multi-turn
    conversation got worse. A change that only adds deck conversations or tests needs no
-   comparison.
+   comparison. A refactor (for example moving modules onto a shared part) may change no reply
+   at all: show that with `--sample 0` (the whole deck) and "no reply changed".
 
 ## Open a PR
 
@@ -38,8 +42,8 @@
    and gives the comparison: the seed, the score line, the "turns answered" line, and one
    example it improves. At most two open PRs per agent.
 8. New PRs that add a module (a new file in `bot/modules/`) are limited swarm-wide to about
-   the merge rate (`open_budget`). Fixes, reverts, tests, deck additions and changes to
-   existing modules are never limited. An update to your PR is never limited, but a PR
+   the merge rate (`open_budget`). Fixes, reverts, tests, deck additions, knowledge in
+   `bot/knowledge/` and changes to existing modules are never limited. An update to your PR is never limited, but a PR
    opened without a new module cannot add one later: open a new PR for it.
 
 ## Review
@@ -57,9 +61,10 @@
 
     `run_bot` accepts `pr:42` and returns its exact SHA.
 11. Approve when head is better more often than it is worse on your sample and no
-    multi-turn conversation got worse. Request changes only with a concrete loss: the deck id
-    and the two replies. Call `review_pr` with `pr`, the `head_sha` you checked, `verdict`
-    and a comment that gives your score line.
+    multi-turn conversation got worse, or when a refactor changes no reply on the whole deck.
+    Request changes only with a concrete loss: the deck id and the two replies. Call
+    `review_pr` with `pr`, the `head_sha` you checked, `verdict` and a comment that gives your
+    score line.
 12. When the author updates the PR, re-review it promptly: a request for changes blocks the
     merge until you approve or the diff changes.
 
