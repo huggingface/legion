@@ -1,9 +1,84 @@
 # Qwen3.8-27B on B300
 
-Serve the original BF16 `Qwen/Qwen3.8-27B` checkpoint, or measure TP1/2/4/8 and
-2/4/8 independent TP1 replicas sequentially on one exclusive eight-B300 node.
-Replica routing uses vLLM's native data-parallel frontend; it is pinned with vLLM
-0.32.0 rather than installing a separate proxy. TP1 is the one-replica baseline.
+This directory contains a multi-node serving launcher and a single-node benchmark
+for the original BF16 `Qwen/Qwen3.8-27B` checkpoint. Both use vLLM 0.32.0. The
+benchmark measures TP1/2/4/8 and 2/4/8 replicas using the native DP frontend; the
+multi-node launcher uses independent instances behind an external router.
+
+## Multi-node serving behind one router
+
+`serve-qwen38-27b.slurm` runs eight **independent TP1/DP1 instances per node**, one
+per allocated GPU, behind a single cache-aware router. This is separate from the
+benchmark launcher below, which still supports its original TP/DP layouts.
+
+Prepare a complete, immutable local snapshot of `Qwen/Qwen3.8-27B` on the shared
+filesystem. From the repository root, create a fresh run directory, then submit
+**only after reviewing the resource request**:
+
+```bash
+mkdir -p /absolute/path/qwen-run
+sbatch --nodes=4 --output=/absolute/path/qwen-run/slurm.log \
+  experiments/agent-escape/b300/serve-qwen38-27b.slurm \
+  /absolute/path/to/model/snapshot /absolute/path/qwen-run
+```
+
+This example reserves **four exclusive eight-B300 nodes (32 GPUs)**. Defaults are
+one node, 12 hours, 88 CPUs per node, and all host RAM (`--mem=0`). Slurm command-line
+options override those defaults. All model replicas use BF16, 32,768-token context,
+128 sequences, 8,192 batched tokens, prefix caching, and low reasoning. Override
+`MAX_MODEL_LEN`, `MAX_NUM_SEQS`, `MAX_BATCHED_TOKENS`, or `QWEN_IMAGE` through the
+submission environment. TP/DP are fixed at one. `QWEN_LAUNCHER` can point to
+`qwen_serve.py` when submitting from outside the repository root.
+
+The script freezes its Python helper and non-secret configuration in the run
+directory. Each node stages weights once onto `/scratch/$USER/qwen-serving` and
+runs instances on ports 8100–8107. vLLM uses the pinned 0.32.0 image; the first node
+also installs `vllm-router==0.1.16` into job-local storage (requires package-index
+access). Its router on port 8000 registers every instance URL, uses `cache_aware`,
+and disables request retries. Clients use the router, not individual instances.
+
+After **all** requested instances and the router pass readiness within one hour
+(including staging), `endpoint.json` contains the router `base_url`, model ID,
+job ID and each backend's host, GPU assignment, port and URL. Read the credential
+from `api-key` (0600) into the client's `OPENAI_API_KEY`; use an `openai_compat`
+provider with that base URL and model `Qwen/Qwen3.8-27B`. Inference authentication
+is enforced by the backends using the Authorization header forwarded by the
+router. Health and operational endpoints are internal-cluster endpoints, not a
+public authenticated control plane.
+
+`logs/<host>-gpu-<index>.log` records each instance; supervisor and router logs
+are alongside it. `status.json` reports the latest healthy/total instance count.
+A failed or unresponsive instance restarts independently with 10–120-second
+exponential backoff. Five consecutive unsuccessful starts exhaust its retry
+budget; ten continuous healthy minutes reset the counter. Other instances
+continue serving. If none recover within ten minutes, the job fails. An in-flight
+request on a failed instance may fail; it is not replayed automatically.
+
+Cancel the allocation with `scancel <job_id>`. Cleanup stops every child step and
+removes `endpoint.json`; logs, credential and final status remain for inspection.
+Node loss reduces capacity and cannot be replaced within this fixed allocation;
+`--no-kill` requests survival of the other nodes. Loss of the first node, its
+supervisor, or the router ends the service. There is no router failover.
+
+### Validation and later GPU smoke
+
+CPU-only checks (no jobs submitted):
+
+```bash
+bash -n experiments/agent-escape/b300/serve-qwen38-27b.slurm
+uv run pytest -q tests/test_qwen_slurm_serving.py tests/test_b300_benchmark.py tests/test_slurm_scripts.py
+uv run ruff check .
+```
+
+The later, separately authorized two-node GPU smoke should verify 16 distinct
+GPU assignments/ports, authenticated streaming and required-tool requests through
+the router, rejection of missing/wrong keys, and traffic in multiple backend
+logs. Terminate one instance and confirm the other 15 keep serving while it
+restarts and rejoins. Finally cancel the allocation and verify all steps exit
+and `endpoint.json` disappears. The CPU tests do not establish GPU memory fit,
+container compatibility or measured throughput. A separate CPU-only check with
+`vllm-router==0.1.16` and two fake HTTP backends passed startup, authentication
+forwarding, unhealthy-backend exclusion, and recovered-backend routing.
 
 ## Prepare and launch
 
