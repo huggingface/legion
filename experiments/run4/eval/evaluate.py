@@ -36,8 +36,8 @@ DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
 # SwarmChat's replies are CPU-bound (about 0.6 s each), so it gets 8 vCPUs; endpoint only waits
 DEFAULT_FLAVORS = {"swarmchat": "cpu-upgrade", "vllm": "rtx-pro-6000", "endpoint": "cpu-basic"}
 SWARMCHAT = "SwarmChat"
-# SwarmChat's name in the bucket and the logs: run4's chatbot, beside run5's SwarmChat-chatbot-v5/v6
-SWARMCHAT_ID = "SwarmChat-chatbot-v4"
+# SwarmChat's name in the bucket and the logs, with an org like a Hub model: run4's chatbot
+SWARMCHAT_ID = "HuggingFaceSwarms/SwarmChat-chatbot-v4"
 SWARMCHAT_REPO = "cmpatino/chatbot-swarm"
 TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
