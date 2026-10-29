@@ -41,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True, help="hf://buckets/... folder")
     parser.add_argument("--eval_kwargs", type=json.loads, required=True,
                         help="JSON keyword arguments for eval()")
-    parser.add_argument("--workers", type=int, default=4, help="SwarmChat conversations at once")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="forks SwarmChat keeps ready, as many as Inspect's max_connections")
     parser.add_argument("--vllm_args", nargs="+", default=[], metavar="KEY=VALUE")
     return parser.parse_args()
 
@@ -151,7 +152,8 @@ def build_summary(log) -> dict:
         "completed_samples": log.results.completed_samples,
         "judged_samples": len(judged),
         "empty_outputs": sum(not s.output.completion for s in samples),
-        "stop_reasons": dict(Counter(s.output.stop_reason for s in samples).most_common()),
+        "stop_reasons": dict(Counter(s.output.stop_reason if s.output.choices else "error"
+                                     for s in samples).most_common()),
         "error_samples": sum(s.error is not None for s in samples),
     })
     metrics = {m.name: _json_value(m.value) for score in log.results.scores

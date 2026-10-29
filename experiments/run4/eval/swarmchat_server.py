@@ -197,7 +197,9 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model", default="SwarmChat", help="the model id the endpoint serves")
-    parser.add_argument("--workers", type=int, default=4, help="conversations held at once")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="forks kept ready for new conversations; the client caps how many "
+                             "run at once")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=60, help="seconds per conversation")
     parser.add_argument("--log", type=Path, default=Path("swarmchat_server.log"),
@@ -209,6 +211,8 @@ def main():
         print(f"{args.model}: loaded in {bot.ready['load_s']}s ({bot.ready['handlers']} "
               f"handlers), {args.workers} workers; http://{args.host}:{args.port}/v1", flush=True)
         server = ThreadingHTTPServer((args.host, args.port), handler(bot, args.model))
+        # hf_job.py stops the server with SIGTERM: leave through `finally`, which stops the bot
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit())
         try:
             server.serve_forever()
         except KeyboardInterrupt:

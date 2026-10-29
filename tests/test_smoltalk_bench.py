@@ -5,9 +5,14 @@ The expected AlpacaEval values were computed with the alpaca_eval package (0.6.x
 import importlib.util
 import json
 import math
+import os
+import random
 import shutil
+import signal
+import subprocess
 import sys
 import threading
+import time
 import types
 import urllib.error
 import urllib.request
@@ -88,6 +93,21 @@ def test_length_controlled_win_rate_matches_alpaca_eval():
     lc = judge.length_controlled(prefs, out, ref, bootstrap=20)
     assert lc["length_controlled_win_rate"] == pytest.approx(29.5837587498, abs=1e-8)
     assert 0 < lc["lc_standard_error"] < 20
+
+
+def test_length_controlled_win_rate_without_wins_or_losses():
+    pytest.importorskip("sklearn")
+    lengths, reference = list(range(10, 1010)), [500] * 1000
+    # Nothing to fit: the GLM alone would put both at 50%
+    assert judge.length_controlled([1.0] * 1000, lengths, reference, bootstrap=5) == {
+        "length_controlled_win_rate": 0, "lc_standard_error": 0}
+    assert judge.length_controlled([2.0] * 1000, lengths, reference, bootstrap=5) == {
+        "length_controlled_win_rate": 100, "lc_standard_error": 0}
+    # Three wins: the resamples that miss them all are 0%, not 50% (the SE was 14 points)
+    rng = random.Random(0)
+    lc = judge.length_controlled([2.0] * 3 + [1.0] * 997, [rng.randint(5, 50) for _ in range(1000)],
+                                 [20] * 1000, bootstrap=50)
+    assert lc["length_controlled_win_rate"] < 1 and lc["lc_standard_error"] < 1
 
 
 # A bot whose replies expose everything that could differ between conversations: module
@@ -191,6 +211,30 @@ def test_endpoint_answers_the_user_turns_as_one_conversation(server, probe_tree,
     assert health["ok"] and health["model"] == "SwarmChat"
 
 
+def test_sigterm_stops_the_bot_with_the_server(probe_tree, tmp_path):
+    proc = subprocess.Popen([sys.executable, str(EVAL / "swarmchat_server.py"), str(probe_tree),
+                             "--port", "0", "--workers", "2", "--log", str(tmp_path / "bot.log")],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert "loaded in" in proc.stdout.readline()
+        loader = int(subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True,
+                                    text=True, check=True).stdout.split()[0])
+        os.killpg(loader, 0)  # the loader's group: the loader and its waiting forks
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 0
+    finally:
+        proc.kill()
+        proc.stdout.close()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(loader, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    pytest.fail("the bot outlived the server")
+
+
 def test_task_scores_the_model_against_the_reference(tmp_path):
     pytest.importorskip("inspect_ai")
     pytest.importorskip("sklearn")
@@ -235,6 +279,52 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     assert summary["metadata"] | {"judged_samples": 2, "model_id": "mock",
                                   "model_roles": {"grader": "mockllm/judge"}} == summary["metadata"]
     json.dumps(summary)
+
+
+def test_a_sample_that_errors_still_counts(tmp_path):
+    pytest.importorskip("inspect_ai")
+    from inspect_ai import Task
+    from inspect_ai import eval as inspect_eval
+    from inspect_ai.dataset import MemoryDataset, Sample
+    from inspect_ai.log import read_eval_log
+    from inspect_ai.model import (
+        ChatCompletionChoice,
+        ChatMessageAssistant,
+        Logprob,
+        Logprobs,
+        ModelOutput,
+        TopLogprob,
+        get_model,
+    )
+    from inspect_ai.solver import solver
+
+    bench, evaluate, hf_job = load("smoltalk_bench"), load("evaluate"), load("hf_job")
+
+    @solver
+    def fails_on(sample_id):
+        async def solve(state, generate):
+            if state.sample_id == sample_id:
+                raise RuntimeError("the model server went away")
+            return await generate(state)
+        return solve
+
+    # The judge prefers the reference ("M" on "egg", which is not switched) with P = 0.9
+    top = [TopLogprob(token="M", logprob=math.log(0.9)), TopLogprob(token="m", logprob=math.log(0.1))]
+    verdict = ModelOutput(model="judge", choices=[ChatCompletionChoice(
+        message=ChatMessageAssistant(content="M"), stop_reason="max_tokens",
+        logprobs=Logprobs(content=[Logprob(token="M", logprob=math.log(0.9), top_logprobs=top)]))])
+    grader = get_model("mockllm/judge", custom_outputs=[verdict] * 4)
+    dataset = MemoryDataset([Sample(id="hi", input="Hi", target="Hello! How can I help?"),
+                             Sample(id="egg", input="How do I boil an egg?", target="Boil it.")])
+    task = Task(dataset=dataset, solver=fails_on("egg"), scorer=bench.alpaca_eval_judge())
+    log = inspect_eval(task, model="mockllm/model", model_roles={"grader": grader},
+                       log_dir=str(tmp_path), display="none", **evaluate.ON_ERROR)[0]
+    assert log.status == "success"
+    log = read_eval_log(log.location)
+    egg = next(s for s in log.samples if s.id == "egg")
+    assert egg.error is not None and egg.scores["alpaca_eval_judge"].answer == ""
+    summary = hf_job.build_summary(log)
+    assert summary["metrics"]["n_total"] == 2 and summary["metadata"]["error_samples"] == 1
 
 
 def test_swarmchat_revisions_sort_by_commit_time():

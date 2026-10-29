@@ -43,6 +43,9 @@ JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 PROMPT_MARGIN = 512
 # Sampling for a Hub model whose generation_config.json does not set it: pure sampling
 PURE_SAMPLING = {"temperature": 1.0, "top_p": 1.0}
+# A sample that still errors after one retry is judged on its empty reply, like any other
+# empty reply, so failures count against the model and the metrics cover the whole dataset
+ON_ERROR = {"retry_on_error": 1, "fail_on_error": False, "score_on_error": True}
 PROVIDER_API_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY")
 JOB_ENV = {"HF_HUB_DISABLE_PROGRESS_BARS": "1", "TOKENIZERS_PARALLELISM": "false"}
 VLLM_JOB_ENV = {"TORCH_COMPILE_DISABLE": "1", "VLLM_USE_AOT_COMPILE": "0",
@@ -226,9 +229,7 @@ def main():
             if args.chat_template_kwargs else None,
             "model_base_url": args.model_base_url,
             "model_roles": {"grader": args.judge},
-            "max_retries": 10, "timeout": 600,
-            # Score samples that still error after a retry so metrics cover the whole dataset
-            "retry_on_error": 1, "fail_on_error": False,
+            "max_retries": 10, "timeout": 600, **ON_ERROR,
             "metadata": metadata,
         }
         eval_kwargs = {k: v for k, v in eval_kwargs.items() if v is not None}
