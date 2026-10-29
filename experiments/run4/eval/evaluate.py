@@ -9,8 +9,9 @@ so revisions sort in merge order. A Hub repo ID is served with vLLM on a GPU Job
 
 Usage:
 
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision 62dbbb8f50a4
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --swarm_repo HuggingFaceSwarms/SwarmChat-v6
+uv run experiments/run4/eval/evaluate.py --model SwarmChat
+uv run experiments/run4/eval/evaluate.py --model SwarmChat --swarm_repo HuggingFaceSwarms/SwarmChat-v5 \
+  --revision 62dbbb8f50a4
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
 """
 
@@ -39,7 +40,7 @@ DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
 DEFAULT_FLAVORS = {"swarmchat": "cpu-upgrade", "vllm": "rtx-pro-6000", "endpoint": "cpu-basic"}
 SWARMCHAT = "SwarmChat"
 # A swarm's chatbot, from https://huggingface.co/collections/HuggingFaceSwarms/chatbot-project
-DEFAULT_SWARM_REPO = "HuggingFaceSwarms/SwarmChat-v5"
+DEFAULT_SWARM_REPO = "HuggingFaceSwarms/SwarmChat-v4"
 TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # Prompt tokens reserved when deriving max_tokens from a Hub model's context length

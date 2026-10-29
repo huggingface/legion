@@ -46,13 +46,13 @@ inflated.
 logging in with `hf auth login`:
 
 ```sh
-# SwarmChat at the head of HuggingFaceSwarms/SwarmChat-v5, on a cpu-upgrade Job with one
-# conversation per vCPU, and at an earlier commit
+# SwarmChat at the head of HuggingFaceSwarms/SwarmChat-v4, on a cpu-upgrade Job with one
+# conversation per vCPU
 uv run experiments/run4/eval/evaluate.py --model SwarmChat
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision 62dbbb8
 
-# Another swarm's chatbot
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --swarm_repo HuggingFaceSwarms/SwarmChat-v6
+# Another swarm's chatbot, at an earlier commit
+uv run experiments/run4/eval/evaluate.py --model SwarmChat \
+  --swarm_repo HuggingFaceSwarms/SwarmChat-v5 --revision 62dbbb8
 
 # A Hub model, served with vLLM on an rtx-pro-6000 Job
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
@@ -70,7 +70,7 @@ uv run experiments/run4/eval/evaluate.py --backend endpoint \
   `--top_p` and `--top_k` override it.
 - **Where Jobs run.** They run under the token's user, or under `--namespace`. The files
   they need are uploaded to the `jobs-artifacts` bucket of the output bucket's namespace.
-- **SwarmChat.** `--swarm_repo` picks the swarm's chatbot, `HuggingFaceSwarms/SwarmChat-v5`
+- **SwarmChat.** `--swarm_repo` picks the swarm's chatbot, `HuggingFaceSwarms/SwarmChat-v4`
   by default. Like a Hub model, the repo is the model ID and a commit is a revision. Each
   revision is named by its commit time and hash, e.g. `20261028T214140Z-62dbbb8f50a4`, so
   revisions sort in merge order.
@@ -87,7 +87,7 @@ passed with `--bucket`:
 ```
 
 ```sh
-inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/HuggingFaceSwarms/SwarmChat-v5
+inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/HuggingFaceSwarms/SwarmChat-v4
 ```
 
 ## SwarmChat
