@@ -44,8 +44,9 @@ TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # Prompt tokens reserved when deriving max_tokens from a Hub model's context length
 PROMPT_MARGIN = 512
-# Sampling for a Hub model whose generation_config.json does not set it: pure sampling
-PURE_SAMPLING = {"temperature": 1.0, "top_p": 1.0}
+# Sampling for a Hub model whose generation_config.json does not set it: pure sampling (top-k 0
+# is off in vLLM)
+PURE_SAMPLING = {"temperature": 1.0, "top_p": 1.0, "top_k": 0}
 # A sample that still errors after one retry is judged on its empty reply, like any other
 # empty reply, so failures count against the model and the metrics cover the whole dataset
 ON_ERROR = {"retry_on_error": 1, "fail_on_error": False, "score_on_error": True}
@@ -242,11 +243,15 @@ def main():
         "judge": args.judge, **sampling, "max_tokens": max_tokens,
         "chat_template_kwargs": args.chat_template_kwargs,
     }
+    extra_body = {}
+    if args.chat_template_kwargs:
+        extra_body["chat_template_kwargs"] = args.chat_template_kwargs
+    if backend == "vllm":
+        # Inspect's vLLM provider drops GenerateConfig.top_k, so it goes in the request body
+        extra_body["top_k"] = sampling["top_k"]
     eval_kwargs = {
         "limit": args.limit, "max_connections": max_connections, "max_tokens": max_tokens,
-        **sampling,
-        "extra_body": {"chat_template_kwargs": args.chat_template_kwargs}
-        if args.chat_template_kwargs else None,
+        **sampling, "extra_body": extra_body or None,
         "model_base_url": args.model_base_url,
         "model_roles": {"grader": args.judge},
         "max_retries": 10, "timeout": 600, **ON_ERROR,

@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -431,3 +431,73 @@ def test_swarmchat_is_filed_under_its_repo(monkeypatch, capsys):
     assert metadata["commit_url"].startswith(
         "https://huggingface.co/datasets/HuggingFaceSwarms/SwarmChat-v6/tree/d8645ac9e103")
     assert "/HuggingFaceSwarms/SwarmChat-v6/20261029T004431Z-d8645ac9e103/" in job["output_url"]
+
+
+def test_vllm_requests_carry_top_k(monkeypatch, capsys):
+    """top_k reaches the vLLM server: from --top_k, else the generation config, else 0 (off)."""
+    pytest.importorskip("inspect_ai")
+    import asyncio
+
+    from inspect_ai.model import GenerateConfig, get_model
+
+    evaluate = load("evaluate")
+
+    class Api:
+        def __init__(self, token):
+            pass
+
+        def list_jobs_hardware(self):
+            return [types.SimpleNamespace(name="rtx-pro-6000", cpu="16 vCPU",
+                                          accelerator=types.SimpleNamespace(quantity="1"))]
+
+    hub = {"config.json": {"max_position_embeddings": 2048},
+           "generation_config.json": {"temperature": 0.2}}
+    monkeypatch.setattr(evaluate, "HfApi", Api)
+    monkeypatch.setattr(evaluate, "get_token", lambda: "token")
+    monkeypatch.setattr(evaluate, "_hub_json", lambda repo_id, filename, revision: hub[filename])
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _reply(self, body):
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            self._reply({"object": "list", "data": [{"id": "org/model", "object": "model"}]})
+
+        def do_POST(self):
+            requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self._reply({"id": "1", "object": "chat.completion", "created": 0,
+                         "model": "org/model", "choices": [{
+                             "index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "Hello!"}}]})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        model = get_model("vllm/org/model", api_key="unused",
+                          base_url=f"http://127.0.0.1:{server.server_port}/v1")
+        for extra, top_k in (([], 0), (["--top_k", "40"], 40)):
+            monkeypatch.setattr(sys, "argv", [
+                "evaluate.py", "--model", "org/model", "--namespace", "lewtun",
+                "--chat_template_kwargs", '{"thinking": false}', "--dry_run", *extra])
+            evaluate.main()
+            command = json.loads(capsys.readouterr().out)["command"]
+            eval_kwargs = json.loads(command[command.index("--eval_kwargs") + 1])
+            config = GenerateConfig(**{k: eval_kwargs[k] for k in (
+                "max_tokens", "temperature", "top_p", "top_k", "extra_body")})
+            asyncio.run(model.generate("Hi", config=config))
+            request = [r for r in requests if "messages" in r][-1]
+            assert request["top_k"] == top_k
+            assert request["temperature"] == 0.2 and request["top_p"] == 1.0
+            assert request["chat_template_kwargs"] == {"thinking": False}
+    finally:
+        server.shutdown()
