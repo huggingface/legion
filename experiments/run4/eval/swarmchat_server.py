@@ -1,113 +1,73 @@
-"""Serve a chatbot-swarm checkout as an OpenAI-compatible chat endpoint for evals.
+"""Serve a chatbot-swarm checkout as SwarmChat, an OpenAI-compatible chat endpoint for evals.
 
-    python experiments/run4/eval/bot_server.py <clone of cmpatino/chatbot-swarm> --port 8000
+    python experiments/run4/eval/swarmchat_server.py <checkout of cmpatino/chatbot-swarm> --port 8000
 
-Loading the bot takes seconds (hundreds of modules), answering takes milliseconds. So each of
---hosts sandboxed processes loads the bot once and forks a child per request, and every
-conversation starts from the same just-loaded state. The same lines get the same replies, on
-any host and in any order: the hash seed, the global `random` state (restored in each child),
-the seeds of the bot's own random.Random() instances and its object ids (no address
-randomisation, no request data in the parent) are all fixed. Replies that read the clock can
-still change. POST /v1/chat/completions feeds the request's user
-messages to the bot in order (system and assistant messages are ignored: the bot only reads
-user lines) and returns its last reply. The hosts run under flock.isolation, like the world's
-contract runner (worlds/chatbot4/sandbox.py), with the same rlimits and audit hook.
+Loading the bot takes seconds (hundreds of modules), answering takes milliseconds. So one
+process loads the bot and forks a worker per conversation, and every conversation starts from
+the same just-loaded state. The same lines get the same replies whatever the order or the
+concurrency of the requests, in this run or the next: the hash seed, the global `random` state
+(restored in each worker) and the seeds of the bot's own random.Random() instances are fixed.
+Replies that read the clock or seed from an object id (a few modules use id(memory)) can still
+change: ids move with address randomisation, which HF Jobs do not let us turn off.
+
+POST /v1/chat/completions feeds the request's user messages to the bot in order (system and
+assistant messages are ignored: the bot only reads user lines) and returns its last reply.
+There is no sandbox: the bot runs as the server's user, with an empty environment, so run it
+somewhere disposable such as an HF Job.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import queue
-import select
-import shutil
+import os
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from flock.isolation import command as isolate_command
-
-# The world's SHIM, plus a loop that forks one child per conversation. Only that loop may fork
-# (the `trusted` flag); children lose it before running any bot code.
-HOST = r'''
-import io, json, os, random, resource, runpy, sys, time
-root, seed, timeout = os.path.realpath(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])
-resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))
-resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))
-resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-sys.dont_write_bytecode = True
+LOADER = r'''
+import io, json, os, random, resource, runpy, signal, socket, sys, time
+root, seed, timeout, path, workers = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4], int(sys.argv[5])
 sys.path.insert(0, root)
-requests = os.fdopen(os.dup(0), "r")
-reply_fd = os.dup(1)
-os.dup2(2, 1)  # stray prints from the bot go to the log, not the protocol
-allowed = set(sys.stdlib_module_names) | {'bot'}
-blocked = {'ctypes', '_ctypes', '_posixsubprocess', 'subprocess', 'socket', '_socket', 'multiprocessing'}
-trusted = [False]
-def audit(event, args):
-    if trusted[0] and event == 'os.fork':
-        return
-    if event == 'import':
-        name = args[0].split('.')[0]
-        if name not in allowed or name in blocked:
-            raise PermissionError('only standard-library bot imports are allowed')
-    if event == 'open':
-        path, mode, flags = args
-        if not isinstance(path, (str, bytes, os.PathLike)):
-            raise PermissionError('file access is disabled')
-        path = os.path.realpath(os.fsdecode(path))
-        if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
-            raise PermissionError('file writes are disabled')
-        roots = (root + os.sep, os.path.realpath(sys.base_prefix) + os.sep)
-        if not path.startswith(roots) or not path.endswith(('.py', '.pyc', '.so')):
-            raise PermissionError('file access is disabled except module loading')
-    if event.startswith(('socket.', 'subprocess.', 'ctypes.', 'os.kill', 'signal.')) or event in {
-        'os.system', 'os.exec', 'os.fork', 'os.forkpty', 'os.posix_spawn', 'os.kill', 'os.killpg',
-        'os.remove', 'os.rename', 'os.mkdir', 'os.rmdir', 'os.chmod', 'os.link',
-        'os.symlink', 'os.truncate', 'os.putenv', 'os.unsetenv'}:
-        raise PermissionError('bot side effects are disabled')
-import signal, _signal
-for module in (os, sys.modules.get('posix'), signal, _signal):
-    for name in ('kill', 'killpg', 'pthread_kill', 'pidfd_send_signal'):
-        if module is not None and hasattr(module, name):
-            delattr(module, name)
-sys.addaudithook(audit)
-
-
-def send(obj):
-    data = (json.dumps(obj) + "\n").encode()
-    while data:
-        data = data[os.write(reply_fd, data):]
+status = os.fdopen(os.dup(1), "w")
+os.dup2(2, 1)  # stray prints from the bot go to the log
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(path)
+listener.listen(256)
+# A worker writes a byte here when it takes a conversation; the loader forks one per byte.
+spawn_r, spawn_w = os.pipe()
+os.write(spawn_w, bytes(workers))
 
 
 def converse():
-    """A child: read one request, hold the conversation, send the result."""
-    raw = requests.readline()
-    if not raw:
-        os._exit(EOF)
+    """A worker: take one connection, hold that conversation, send the result and exit."""
+    conn = listener.accept()[0]
+    os.write(spawn_w, b"\0")
     random.setstate(loaded)  # random reseeds itself from the OS in every forked child
-    lines = json.loads(raw)
     started = time.monotonic()
+    lines = json.loads(conn.makefile("rb").readline())
     limit = int(timeout) + 1
+    signal.alarm(limit)
     resource.setrlimit(resource.RLIMIT_CPU, (limit, limit + 1))
-    resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
     sys.stdin = io.StringIO("".join(line + "\n" for line in lines))
     sys.stdout = buffer = io.StringIO()
-    status = "ok"
+    result = "ok"
     try:
         runpy.run_module("bot", run_name="__main__")
     except BaseException as exc:  # the fixed __main__ catches reply errors; this is the rest
-        status = f"error {type(exc).__name__}"
-    send({"replies": buffer.getvalue().splitlines(), "status": status,
-          "seconds": round(time.monotonic() - started, 3)})
+        result = f"error {type(exc).__name__}"
+    conn.sendall((json.dumps({"replies": buffer.getvalue().splitlines(), "status": result,
+                              "seconds": round(time.monotonic() - started, 3)}) + "\n").encode())
     os._exit(0)
 
 
 # Modules make their own random.Random(), which seeds itself from the OS: derive those seeds
-# from the run's seed and a counter instead, so every host is in the same state.
+# from the run's seed and a counter instead, so every run starts in the same state.
 os_seeded, created = random.Random.seed, iter(range(1 << 62))
 def derived_seed(self, a=None, version=2):
     os_seeded(self, f"{seed}:{next(created)}" if a is None else a, version)
@@ -117,96 +77,57 @@ random.seed(seed)
 started = time.monotonic()
 import bot.runtime
 loaded = random.getstate()
-send({"ready": True, "load_s": round(time.monotonic() - started, 2),
-      "handlers": len(bot.runtime._HANDLERS)})
-# Fork first, then the child reads its request: the parent never touches a request, so every
-# child starts from the same heap and a seed made from id(memory) repeats too. The server
-# sends one request at a time and enforces the wall-clock timeout (by replacing this host).
-EOF = 77
+print(json.dumps({"load_s": round(time.monotonic() - started, 2),
+                  "handlers": len(bot.runtime._HANDLERS)}), file=status, flush=True)
+# Keep `workers` forks waiting for a connection. The workers read the requests, never the
+# loader, and the kernel reaps them.
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 while True:
-    trusted[0] = True
-    pid = os.fork()
-    if pid == 0:
-        trusted[0] = False
+    os.read(spawn_r, 1)
+    if os.fork() == 0:
         converse()
-    trusted[0] = False
-    code = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
-    if code == EOF:
-        break
-    if code:
-        send({"replies": [], "status": f"exit {code}"})
 '''
 
 
-class Host:
-    """One sandboxed process with the bot loaded; ask() runs one conversation in a fork."""
+class Bot:
+    """The loader process; ask() holds one conversation in a fresh worker."""
 
-    def __init__(self, tree: Path, seed: int, timeout: float, log):
+    def __init__(self, tree: Path, *, seed: int, timeout: float, workers: int, log):
         self.timeout = timeout
-        self.tmp = Path(tempfile.mkdtemp(prefix="bot-host-"))
-        argv = isolate_command([sys.executable, "-s", "-S", "-P", "-B", "-c", HOST, str(tree),
-                                str(seed), str(timeout)], self.tmp / "root", cwd=tree,
-                               readonly=[tree], python_only=True)
-        # setarch -R: the same addresses in every host, so id()-based choices agree across
-        # hosts. No -I: PYTHONHASHSEED must apply. The environment holds nothing else.
-        self.proc = subprocess.Popen(["setarch", "-R", *argv], cwd=self.tmp,
-                                     env={"PYTHONHASHSEED": str(seed)}, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=log, text=True, bufsize=1,
-                                     start_new_session=True)
-        self.ready = self._read(None)
-        if not self.ready.get("ready"):
-            raise RuntimeError(f"bot host did not start: {self.ready}")
-
-    def _read(self, timeout):
-        if timeout is not None and not select.select([self.proc.stdout], [], [], timeout)[0]:
-            raise TimeoutError
+        self.tmp = tempfile.TemporaryDirectory(prefix="swarmchat-")
+        self.path = os.path.join(self.tmp.name, "bot.sock")
+        # No -I: PYTHONHASHSEED must apply. The environment holds nothing else.
+        self.proc = subprocess.Popen(
+            [sys.executable, "-s", "-S", "-P", "-c", LOADER, str(tree), str(seed), str(timeout),
+             self.path, str(workers)],
+            cwd=self.tmp.name, env={"PYTHONHASHSEED": str(seed)}, stdout=subprocess.PIPE,
+            stderr=log, text=True, start_new_session=True)
         line = self.proc.stdout.readline()
         if not line:
-            raise RuntimeError(f"bot host exited ({self.proc.poll()})")
-        return json.loads(line)
+            raise RuntimeError(f"the bot did not load (exit {self.proc.wait()}); see the log")
+        self.ready = json.loads(line)
 
     def ask(self, lines: list[str]) -> dict:
-        self.proc.stdin.write(json.dumps(lines) + "\n")
-        self.proc.stdin.flush()
-        return self._read(self.timeout + 5)
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(self.timeout + 5)
+            conn.connect(self.path)
+            conn.sendall((json.dumps(lines) + "\n").encode())
+            try:
+                raw = conn.makefile("rb").readline()
+            except TimeoutError:
+                return {"replies": [], "status": "timeout"}
+        # The worker died without replying, e.g. on its CPU or wall-clock limit.
+        return json.loads(raw) if raw else {"replies": [], "status": "worker exited"}
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
 
     def close(self):
-        self.proc.kill()
+        if self.alive():
+            os.killpg(self.proc.pid, signal.SIGKILL)
         self.proc.wait()
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-
-class Pool:
-    def __init__(self, n: int, start):
-        self.start, self.idle = start, queue.Queue()
-        threads = [threading.Thread(target=lambda: self.idle.put(start())) for _ in range(n)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        if self.idle.qsize() != n:
-            raise RuntimeError("some bot hosts failed to start; see the log")
-        self.hosts = list(self.idle.queue)
-
-    def _replace(self, host):
-        host.close()
-        self.hosts.remove(host)
-        host = self.start()
-        self.hosts.append(host)
-        return host
-
-    def ask(self, lines):
-        host = self.idle.get()
-        try:
-            return host.ask(lines)
-        except TimeoutError:  # the conversation is stuck in its child: replace the host
-            host = self._replace(host)
-            return {"replies": [], "status": "timeout"}
-        except (OSError, RuntimeError, ValueError):  # a dead host: replace it, retry once
-            host = self._replace(host)
-            return host.ask(lines)
-        finally:
-            self.idle.put(host)
+        self.proc.stdout.close()
+        self.tmp.cleanup()
 
 
 def user_lines(messages) -> list[str]:
@@ -222,7 +143,7 @@ def user_lines(messages) -> list[str]:
     return lines
 
 
-def handler(pool: Pool, model: str):
+def handler(bot: Bot, model: str):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body):
             data = json.dumps(body).encode()
@@ -237,7 +158,8 @@ def handler(pool: Pool, model: str):
                 return self._send(200, {"object": "list", "data": [
                     {"id": model, "object": "model", "owned_by": "chatbot-swarm"}]})
             if self.path == "/health":
-                return self._send(200, {"ok": True, "model": model, "hosts": len(pool.hosts)})
+                return self._send(200 if bot.alive() else 503,
+                                  {"ok": bot.alive(), "model": model, **bot.ready})
             self._send(404, {"error": {"message": "not found"}})
 
         def do_POST(self):
@@ -252,7 +174,7 @@ def handler(pool: Pool, model: str):
                 return self._send(400, {"error": {"message": "no user message"}})
             if body.get("stream"):
                 return self._send(400, {"error": {"message": "streaming is not supported"}})
-            result = pool.ask(lines)
+            result = bot.ask(lines)
             replies = result.get("replies", [])
             reply = replies[-1] if len(replies) == len(lines) else ""
             self._send(200, {
@@ -275,31 +197,25 @@ def main():
     parser.add_argument("tree", type=Path, help="a checkout of cmpatino/chatbot-swarm")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--hosts", type=int, default=4, help="sandboxed bot processes")
+    parser.add_argument("--model", default="SwarmChat", help="the model id the endpoint serves")
+    parser.add_argument("--workers", type=int, default=4, help="conversations held at once")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--timeout", type=float, default=300, help="seconds per conversation")
-    parser.add_argument("--log", type=Path, default=Path("bot_server.log"),
-                        help="the bot hosts' stderr")
+    parser.add_argument("--timeout", type=float, default=60, help="seconds per conversation")
+    parser.add_argument("--log", type=Path, default=Path("swarmchat_server.log"),
+                        help="the bot's stderr")
     args = parser.parse_args()
-    tree = args.tree.resolve()
-    sha = subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"], capture_output=True,
-                         text=True, check=True).stdout.strip()
-    model = f"chatbot-swarm@{sha[:12]}"
     with open(args.log, "a") as log:
-        started = time.monotonic()
-        pool = Pool(args.hosts, lambda: Host(tree, args.seed, args.timeout, log))
-        ready = pool.hosts[0].ready
-        print(f"{model}: {args.hosts} hosts ready in {time.monotonic() - started:.1f}s "
-              f"({ready['handlers']} handlers, {ready['load_s']}s load); "
-              f"http://{args.host}:{args.port}/v1", flush=True)
-        server = ThreadingHTTPServer((args.host, args.port), handler(pool, model))
+        bot = Bot(args.tree.resolve(), seed=args.seed, timeout=args.timeout,
+                  workers=args.workers, log=log)
+        print(f"{args.model}: loaded in {bot.ready['load_s']}s ({bot.ready['handlers']} "
+              f"handlers), {args.workers} workers; http://{args.host}:{args.port}/v1", flush=True)
+        server = ThreadingHTTPServer((args.host, args.port), handler(bot, args.model))
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
-            for host in pool.hosts:
-                host.close()
+            bot.close()
 
 
 if __name__ == "__main__":
