@@ -111,8 +111,8 @@ dataset that has none yet, one Job per commit, so many commits of one repo run s
 # What a run would launch and skip
 uv run experiments/run4/eval/sync.py --dry_run
 
-# Run every 10 minutes as a scheduled cpu-basic Job, under the token's user
-uv run experiments/run4/eval/sync.py --schedule "*/10 * * * *"
+# Run every 5 minutes as a scheduled cpu-basic Job, under the token's user
+uv run experiments/run4/eval/sync.py --schedule "*/5 * * * *"
 ```
 
 The scheduled Job and its evals run the eval code as it was when the schedule was created; rerun

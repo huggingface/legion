@@ -17,7 +17,7 @@ Usage:
 
 uv run experiments/run4/eval/sync.py --dry_run
 uv run experiments/run4/eval/sync.py
-uv run experiments/run4/eval/sync.py --schedule "*/10 * * * *"
+uv run experiments/run4/eval/sync.py --schedule "*/5 * * * *"
 """
 
 import argparse
@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bucket", default=evaluate.DEFAULT_BUCKET)
     parser.add_argument("--namespace", help="who runs the Jobs (default: the token's user)")
     parser.add_argument("--schedule", metavar="CRON",
-                        help='register a scheduled Job that runs this sync, e.g. "*/10 * * * *"')
+                        help='register a scheduled Job that runs this sync, e.g. "*/5 * * * *"')
     parser.add_argument("--dry_run", action="store_true",
                         help="print what a run would launch and skip, and change nothing")
     return parser.parse_args()
