@@ -10,11 +10,12 @@ from .test_hierarchy_experiment import module
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "teams"
+REPO = "HuggingFaceSwarms/chatbot-v7"
 RULES = (  # Carlos's six rules, verbatim, with the tool insertions
-    "You are one of several agents improving [PROJECT: to be provided]. Help the team deliver a working result.",
+    "You are one of several agents improving " + REPO + ". Help the team deliver a working result.",
     "1. Establish the goal. Read the brief, recent discussion, existing plan, and open changes: check `channels`, `search` the board and `list_prs` first.",
     "2. Build the shared plan.",
-    "Put this in one shared planning document and update it as decisions change. Keep it in the main channel's shared doc: read it with `doc`, rewrite it with `edit_doc` when decisions change.",
+    "Put this in one shared planning document and update it as decisions change. Keep it in the main channel's shared doc: read it with `doc`, rewrite it with `edit_doc`.",
     "3. Form smaller teams. For each active workstream, start with 2–4 existing agents and create or reuse a dedicated channel (`create_channel` or `join_channel`).",
     "Coordinate each round's work in that channel;",
     "4. Claim and execute.",
@@ -44,8 +45,11 @@ def test_one_type_no_spawn_and_the_rules():
     assert "Coordinate daily work" not in text and "All agents are equal" in text
     lower = text.lower()
     for banned in ("spawn", "flock remove", "$flock_parent", "vote", "voting", "#proposals",
-                   "chatbot-v", "enforce", "flock prompt"):
+                   "chatbot-v5", "chatbot-v6", "[project", "enforce", "flock prompt"):
         assert banned not in lower, banned
+    assert f"`{REPO}` on Hugging Face" in text
+    assert f"`https://huggingface.co/datasets/{REPO}` into `chatbot-swarm`" in text
+    assert spec.comms.url == "https://huggingfaceswarms-chatbot-v7-msgboard.hf.space"
 
 
 def test_render_and_waves_read_this_folder():

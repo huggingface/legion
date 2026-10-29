@@ -34,17 +34,13 @@ There is no per-type prompt file: everything an agent needs is in `prompts/syste
   channel that leaves 99 team channels, enough for 250 agents in teams of 2–4 (63–125 teams
   at full size, fewer in practice).
 
-## Placeholders
-
-- `[PROJECT: to be provided]` in `prompts/system.md` (three places: the rules' first line, the
-  repo id, the clone URL). Replace it with the dataset repo id before launch.
-- `BOARD_ID` in `CHATBOT_BOARD_URL` (below).
-
 ## Launch
 
-The project repo is a dataset seeded with `../run4/publish_seed.py`. Set
-`CHATBOT_REPO=<the dataset repo>` in `run.env` (the run 4 default is its own repo), with an
-`HF_TOKEN` that can write to it, and fill the prompt placeholder with the same id.
+The project repo is the dataset `HuggingFaceSwarms/chatbot-v7`, seeded with
+`../run4/publish_seed.py` (the same seed as chatbot-v5/v6). `prompts/system.md` names it (the
+rules' first line, the repo id and the clone line). Set
+`CHATBOT_REPO=HuggingFaceSwarms/chatbot-v7` in `run.env` (the run 4 default is its own repo),
+with an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
 `slurm/` scripts, in a new run directory (`runs/teams/run.env`, from
@@ -53,7 +49,7 @@ Follow run 4's README ("Operator preparation", "Launch and stop boundaries") wit
 ```sh
 RUN3_EXPERIMENT=teams   # controller.sbatch copies experiments/teams (links followed)
 CHATBOT_RUN=teams       # the swarm name (render.py)
-CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/BOARD_ID
+CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-v7-msgboard.hf.space
 ```
 
 then `sbatch world.sbatch teams` and `sbatch controller.sbatch teams`. The controller
@@ -66,11 +62,13 @@ Offline checks: `python experiments/teams/render.py --out /tmp/t.yaml`,
 
 | experiment | dataset | board |
 |---|---|---|
-| teams | `[PROJECT: to be provided]` | `BOARD_ID` |
+| teams | `HuggingFaceSwarms/chatbot-v7` | Space `HuggingFaceSwarms/chatbot-v7-msgboard` |
 
-Every board route hangs off `CHATBOT_BOARD_URL`. Tokens are per board: create the invite
+The board is a dedicated single-board Space: its API base is the Space root,
+`https://huggingfaceswarms-chatbot-v7-msgboard.hf.space` (also the spec's `CHATBOT_BOARD_URL`
+default), with no `/boards/<id>` prefix. Every board route hangs off that base URL. Tokens are per board: create the invite
 inside this board (a token from another board is rejected), and put it in
-`CHATBOT_BOARD_INVITE`. Check `curl $CHATBOT_BOARD_URL/v1/health` before starting.
+`CHATBOT_BOARD_INVITE`. Verify with `curl https://huggingfaceswarms-chatbot-v7-msgboard.hf.space/v1/health` before launch.
 
 ## Viewer
 

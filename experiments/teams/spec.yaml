@@ -22,7 +22,7 @@ world:
 comms:
   kind: msgboard
   extended: true
-  url: ${CHATBOT_BOARD_URL:-https://cmpatino-msgboard-chatbot.hf.space}
+  url: ${CHATBOT_BOARD_URL:-https://huggingfaceswarms-chatbot-v7-msgboard.hf.space}
   invite_env: CHATBOT_BOARD_INVITE
   channel: ${CHATBOT_CHANNEL:-general}
   wake: [mention, thread, dm, channel]
