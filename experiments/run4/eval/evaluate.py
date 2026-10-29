@@ -1,7 +1,7 @@
 """Evaluate SwarmChat or a Hub model on SmolTalkBench with Hugging Face Jobs, one Job per revision.
 
-`--model SwarmChat` serves commits of cmpatino/chatbot-swarm with swarmchat_server.py on a CPU
-Job. A revision is named by its commit's time and hash, e.g. 20261028T162718Z-fdef14e9f8e3, so
+`--model SwarmChat` serves commits of cmpatino/chatbot-swarm with swarmchat_server.py on a
+cpu-upgrade Job, one conversation per vCPU. A revision is named by its commit's time and hash, e.g. 20261028T162718Z-fdef14e9f8e3, so
 revisions sort in merge order. A Hub repo ID is served with vLLM on a GPU Job, and with
 `--backend endpoint` any Inspect model string is called from a CPU Job. Inspect logs and a
 `summary.json` go to a Storage Bucket, in `<model>/<revision>/<task>/<timestamp>/`.
@@ -33,8 +33,8 @@ JOB_ROOT = "/workspace/flock"
 VLLM_IMAGE = "vllm/vllm-openai:v0.32.0"
 CPU_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
 DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
-DEFAULT_GPU_FLAVOR = "rtx-pro-6000"
-DEFAULT_CPU_FLAVOR = "cpu-basic"
+# SwarmChat's replies are CPU-bound (about 0.6 s each), so it gets 8 vCPUs; endpoint only waits
+DEFAULT_FLAVORS = {"swarmchat": "cpu-upgrade", "vllm": "rtx-pro-6000", "endpoint": "cpu-basic"}
 SWARMCHAT = "SwarmChat"
 SWARMCHAT_REPO = "cmpatino/chatbot-swarm"
 TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
@@ -80,13 +80,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge", default=JUDGE, help="Inspect model string of the judge")
     parser.add_argument("--bucket", default=DEFAULT_BUCKET, help="Storage Bucket for the logs")
     parser.add_argument("--namespace", help="who runs the Jobs (default: the token's user)")
-    parser.add_argument("--flavor", help=f"Job hardware (default: {DEFAULT_GPU_FLAVOR} for "
-                                         f"vllm, {DEFAULT_CPU_FLAVOR} otherwise)")
+    parser.add_argument("--flavor", help="Job hardware (default: " + ", ".join(
+        f"{flavor} for {backend}" for backend, flavor in DEFAULT_FLAVORS.items()) + ")")
     parser.add_argument("--timeout", default="6h", help="maximum Job duration")
     parser.add_argument("--limit", type=int, help="evaluate only the first N samples")
     parser.add_argument("--max_connections", type=int,
-                        help="concurrent requests to the model (default: 4 for SwarmChat, "
-                             "128 for vllm, 50 for endpoint)")
+                        help="concurrent requests to the model (default: one per vCPU for "
+                             "SwarmChat, 128 for vllm, 50 for endpoint)")
     parser.add_argument("--max_tokens", type=int,
                         help="default for vllm: the context length minus a prompt margin")
     parser.add_argument("--temperature", type=float,
@@ -135,11 +135,23 @@ def context_length(repo_id: str, revision: str) -> int:
     raise ValueError(f"no context length for {repo_id}; pass --vllm_args max_model_len=...")
 
 
-def gpu_count(api: HfApi, flavor: str) -> int:
+def _hardware(api: HfApi, flavor: str):
     hardware = next((h for h in api.list_jobs_hardware() if h.name == flavor), None)
-    if hardware is None or hardware.accelerator is None:
+    if hardware is None:
+        raise ValueError(f"unknown Job flavor {flavor!r}")
+    return hardware
+
+
+def gpu_count(api: HfApi, flavor: str) -> int:
+    hardware = _hardware(api, flavor)
+    if hardware.accelerator is None:
         raise ValueError(f"--backend vllm needs a GPU flavor, got {flavor!r}")
     return int(hardware.accelerator.quantity)
+
+
+def vcpu_count(api: HfApi, flavor: str) -> int:
+    """A flavor's vCPUs, from its description, e.g. "8 vCPU"."""
+    return int(_hardware(api, flavor).cpu.split()[0])
 
 
 def snapshot_volume(api: HfApi, namespace: str) -> Volume:
@@ -177,7 +189,7 @@ def main():
         raise ValueError("several revisions are only supported for SwarmChat")
     if backend == "endpoint" and args.revision != ["main"]:
         raise ValueError("--revision does not apply to --backend endpoint")
-    flavor = args.flavor or (DEFAULT_GPU_FLAVOR if backend == "vllm" else DEFAULT_CPU_FLAVOR)
+    flavor = args.flavor or DEFAULT_FLAVORS[backend]
     sampling = {"temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k}
     max_tokens = args.max_tokens
     vllm_args = {}
@@ -195,8 +207,12 @@ def main():
                     for k, v in sampling.items()}
         if max_tokens is None:
             max_tokens = max_model_len - PROMPT_MARGIN
-    max_connections = args.max_connections or {"swarmchat": 4, "vllm": 128,
-                                               "endpoint": 50}[backend]
+    if args.max_connections:
+        max_connections = args.max_connections
+    elif backend == "swarmchat":
+        max_connections = vcpu_count(api, flavor)
+    else:
+        max_connections = {"vllm": 128, "endpoint": 50}[backend]
 
     secrets = {"HF_TOKEN": token}
     for name in args.secrets:

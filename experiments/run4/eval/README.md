@@ -45,7 +45,7 @@ inflated.
 logging in with `hf auth login`:
 
 ```sh
-# SwarmChat at two commits: one CPU Job each
+# SwarmChat at two commits: one cpu-upgrade Job each, one conversation per vCPU
 uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main fdef14e
 
 # A Hub model, served with vLLM on an rtx-pro-6000 Job

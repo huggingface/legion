@@ -378,3 +378,32 @@ def test_job_files_go_to_the_output_bucket_namespace(monkeypatch, capsys):
     assert calls["volume_namespace"] == "HuggingFaceSwarms"
     assert calls["job_namespace"] == "lewtun" and calls["volumes"] == ["volume"]
     assert "experiments/run4/eval/hf_job.py" in calls["files"]
+
+
+def test_swarmchat_runs_one_conversation_per_vcpu(monkeypatch, capsys):
+    evaluate = load("evaluate")
+    committed = datetime(2026, 10, 29, 0, 44, 31, tzinfo=UTC)
+
+    class Api:
+        def __init__(self, token):
+            pass
+
+        def dataset_info(self, repo_id, revision):
+            return types.SimpleNamespace(sha="d8645ac9e103" + "0" * 28, last_modified=committed)
+
+        def list_jobs_hardware(self):
+            return [types.SimpleNamespace(name="cpu-basic", cpu="2 vCPU", accelerator=None),
+                    types.SimpleNamespace(name="cpu-upgrade", cpu="8 vCPU", accelerator=None),
+                    types.SimpleNamespace(name="cpu-xl", cpu="16 vCPU", accelerator=None)]
+
+    monkeypatch.setattr(evaluate, "HfApi", Api)
+    monkeypatch.setattr(evaluate, "get_token", lambda: "token")
+    for extra, flavor, workers in (([], "cpu-upgrade", "8"), (["--flavor", "cpu-xl"], "cpu-xl", "16")):
+        monkeypatch.setattr(sys, "argv", ["evaluate.py", "--model", "SwarmChat", "--namespace",
+                                          "lewtun", "--dry_run", *extra])
+        evaluate.main()
+        [job] = json.loads(capsys.readouterr().out)
+        command = job["command"]
+        assert job["flavor"] == flavor
+        assert command[command.index("--workers") + 1] == workers
+        assert json.loads(command[command.index("--eval_kwargs") + 1])["max_connections"] == int(workers)
