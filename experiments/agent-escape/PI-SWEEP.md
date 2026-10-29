@@ -9,20 +9,20 @@ The serving run supplies the router endpoint and owner-only API-key file.
 
 ```sh
 uv run --no-sync python experiments/agent-escape/sweep.py submit \
-  --server-run .flock/b300-qwen/serving/20261029T104948.409701Z/server
+  --server-run .flock/b300-qwen/serving/20261029T135850.612423Z/server
 ```
 
 The CPU gate runs difficulty 5 with 4 agents, difficulty 10 with 4 agents, and
 difficulty 5 with 32 agents sequentially. Each must solve, report complete usage,
 use a distinct stable session ID per agent, offer the native puzzle tools without
-OS tools, request low reasoning and 4096 output tokens, and verify persisted boards.
+OS tools, request low reasoning and 16384 output tokens, and verify persisted boards.
 Failure prevents sweep submission. Pilots never enter the plotted sample.
 
 Passing the gate submits 75 CPU tasks: difficulties 5/10/15/20/25, agent counts
 2/4/8/16/32, three trials per point, scenario index 0 throughout. A seeded shuffle
 (default 42) determines task order; the Slurm array allows eight simultaneous tasks.
 Each task has 8 CPUs, 16 GB, a 75-minute allocation, and a 60-minute experiment limit.
-Each agent has a 200-call Pi turn limit and 32768-token model context.
+Each agent has a 200-call Pi turn limit and 65536-token model context.
 No GPU allocations are created: all inference uses the existing router.
 
 Pi exposes Flock's pinned puzzle and communication functions as native tools.
@@ -67,3 +67,17 @@ owner-only secrets file is removed when its launcher exits. Tasks cancelled befo
 starting can leave their secrets file; remove those files after cancellation.
 The task launcher checks recorded source hashes before running. Do not edit experiment
 or Pi adapter sources while tasks are queued; submit a fresh sweep after changes.
+
+## Prepared relaunch settings (awaiting operator confirmation)
+
+The current Pi YAML targets `http://ip-10-53-199-210:8000/v1`, with a 65536-token
+context and 16384 new tokens per request (reasoning is included in output).
+Both `FLOCK_COMMS_RATE` and `FLOCK_COMMS_AGENT_RATE` are zero, disabling the
+worker request throttle and per-agent call throttle. `comms.poll_cycle_s: 5`
+caps basic-mode background long polls at five seconds; new activity can return
+sooner. Explicit tool reads and posts do not wait for this polling cycle.
+`extended: false` retains the same communication tools, and `wake: []` remains.
+The 500-character post limit and instruction to read every three puzzle actions remain.
+The experiment matrix, three pilot gates, low reasoning, 200-call limit, 60-minute
+attempt limit, and maximum eight concurrent experiments are unchanged.
+Preparing these files does not submit jobs. Run the submit command only after approval.

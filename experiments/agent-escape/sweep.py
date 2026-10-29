@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import slurm
+import yaml
 
 HERE, ROOT = slurm.HERE, slurm.ROOT
 DIFFICULTIES = [5, 10, 15, 20, 25]
@@ -61,6 +62,8 @@ def gate_errors(result, agents, attempt):
     journal = attempt / "model-requests.jsonl"
     rows = [json.loads(line) for line in journal.read_text().splitlines()] if journal.exists() else []
     starts = [r for r in rows if r["event"] == "start"]
+    spec = yaml.safe_load((attempt / "spec.yaml").read_text())
+    max_tokens = spec["models"]["qwen-27b"]["extra"]["maxTokens"]
     expected = {"get_observation", "investigate", "tool_call", "use_item", "submit_answer"}
     for row in starts:
         offered = set(row.get("tools", []))
@@ -69,7 +72,7 @@ def gate_errors(result, agents, attempt):
             break
         settings = row["settings"]
         if settings.get("reasoning_effort") != "low" or max(
-                settings.get("max_tokens", 0), settings.get("max_completion_tokens", 0)) != 4096:
+                settings.get("max_tokens", 0), settings.get("max_completion_tokens", 0)) != max_tokens:
             errors.append("incorrect reasoning or generation cap")
             break
     if not starts:

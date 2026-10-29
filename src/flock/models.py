@@ -349,8 +349,9 @@ class CommsSpec(BaseModel):
     kind: Literal["msgboard"] = "msgboard"
     extended: bool = False  # multi-channel tools and serialized per-identity activity polling
     # extended: each agent identity's feed is polled about once per this many seconds; the
-    # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
-    poll_cycle_s: float = Field(default=300.0, ge=10.0, le=3600.0)
+    # worker's poll interval is max(2 s, poll_cycle_s / its agents).
+    # Basic mode: caps the long-poll wait (messages can return sooner).
+    poll_cycle_s: float = Field(default=300.0, ge=5.0, le=3600.0)
     storage: LocalBoardStorage | BucketBoardStorage = Field(
         default_factory=LocalBoardStorage, discriminator="kind")
     managed: bool = False  # flock run owns a private msgboard for this run

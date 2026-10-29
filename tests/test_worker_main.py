@@ -347,3 +347,19 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
         assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
     monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # off
     await asyncio.wait_for(w.memory_loop(), 1)
+
+
+
+async def test_zero_comms_rates_disable_both_limiters():
+    cfg = WorkerConfig.from_env({"FLOCK_URL": "http://c", "FLOCK_TOKEN": "t",
+        "WORKER_ID": WID, "SWARM": "sw", "TYPE": "researcher",
+        "DEADLINE": "2026-10-15T09:12:00Z", "FLOCK_COMMS_RATE": "0",
+        "FLOCK_COMMS_AGENT_RATE": "0"})
+    client = ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(
+        FakeController().handler))
+    try:
+        worker = Worker(cfg, client)
+        assert worker.comms.limiter is None
+        assert worker.comms.agent_rate == 0
+    finally:
+        await client.aclose()

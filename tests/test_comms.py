@@ -898,3 +898,24 @@ async def test_a_rate_limited_join_waits_at_least_retry_after_and_backs_off(monk
         assert m.join_failures == 3 and m.retry_at - now[0] == 120.0  # the envelope grew
     finally:
         await hub.aclose()
+
+
+
+async def test_basic_poller_honors_five_second_wait(tmp_path, board):
+    team = Team(tmp_path, board, ["dev-0000"])
+    team.spec.poll_cycle_s = 5
+    team.hub.poll_wait = 25
+    waits = []
+    try:
+        await team.start()
+        async def activity(*args, **kwargs):
+            if "wait" in kwargs:
+                waits.append(kwargs["wait"])
+                raise asyncio.CancelledError
+            return {"next_cursor": 1, "messages": []}
+        client = team.hub._board(board.url)
+        client.activity = activity
+        await until(lambda: bool(waits))
+        assert waits == [5]
+    finally:
+        await team.close()

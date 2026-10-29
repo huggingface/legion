@@ -127,3 +127,34 @@ async def test_first_model_requests_wait_for_all_agents(tmp_path):
             responses = await asyncio.wait_for(asyncio.gather(first, second), 2)
             assert all(r.status_code == 200 for r in responses)
             assert set(seen) == {"a", "b"}
+
+
+
+def test_review_config_and_generation_gate(tmp_path, sweep):
+    import yaml
+
+    from flock.models import SwarmSpec
+    from flock.worker.adapters.pi import pi_model_config
+
+    raw = yaml.safe_load((HERE / "spec-router-pi.yaml").read_text())
+    spec = SwarmSpec.model_validate(raw)
+    assert spec.comms.poll_cycle_s == 5
+    worker = spec.types["worker"]
+    assert worker.env["FLOCK_COMMS_RATE"] == worker.env["FLOCK_COMMS_AGENT_RATE"] == "0"
+    model = pi_model_config(worker)
+    assert model.base_url == "http://ip-10-53-199-210:8000/v1"
+    assert model.extra["contextWindow"] == 65536
+    assert model.extra["maxTokens"] == 16384
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(raw))
+    result = {"success": True, "flock_exit_code": 0,
+              "accounting": {"complete": True, "session_ids": ["agent"]},
+              "board": {"verified_at": "now"}}
+    row = {"event": "start", "tools": ["get_observation", "investigate", "tool_call",
+           "use_item", "submit_answer", "read", "post"],
+           "settings": {"reasoning_effort": "low", "max_completion_tokens": 16384}}
+    journal = tmp_path / "model-requests.jsonl"
+    journal.write_text(json.dumps(row) + "\n")
+    assert sweep.gate_errors(result, 1, tmp_path) == []
+    row["settings"]["max_completion_tokens"] = 4096
+    journal.write_text(json.dumps(row) + "\n")
+    assert "incorrect reasoning or generation cap" in sweep.gate_errors(result, 1, tmp_path)

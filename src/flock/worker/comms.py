@@ -699,7 +699,9 @@ class CommsHub(ExtendedComms):
                     self._cursor = int(page.get("next_cursor") or 0)
                     continue
                 self.stats["polls"] += 1
-                page = await board.activity(ident, c.channel_id, self._cursor, wait=self.poll_wait)
+                cycle = self.poll_cycle_s or c.poll_cycle_s
+                page = await board.activity(ident, c.channel_id, self._cursor,
+                                            wait=min(self.poll_wait, cycle))
                 attempt = 0
                 self._cursor = int(page.get("next_cursor") or self._cursor)
                 self.fanout([x for x in page.get("messages") or [] if isinstance(x, dict)], source)

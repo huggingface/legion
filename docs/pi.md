@@ -150,6 +150,6 @@ Qwen router and native puzzle/communication tools.
 
 Provider-backed Pi models accept `contextWindow`, `maxTokens`, `samplingParams`, and
 `compat` from model `extra` as Pi model settings. Other extra keys remain unsupported.
-For example, AgentEscape uses a 32768-token context and 4096-token generation cap.
+For example, AgentEscape uses a 65536-token context and 16384-token generation cap.
 Its dedicated usage proxy records every upstream call and drains admitted requests
 before stopping Pi; see [the sweep guide](../experiments/agent-escape/PI-SWEEP.md).
