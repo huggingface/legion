@@ -88,3 +88,41 @@ advantage over a single agent or an official AgentEscapeBench score.
 The full-suite log is `.flock/escape-validation/pytest-full.log`. The focused tests
 were rerun after the final adapter/launcher edits; the broader suite ran alongside
 live validation. Work completed within the approved four-hour budget.
+
+## Router validation through Slurm — 2026-10-29
+
+CPU Slurm job `284602` (`ip-10-53-88-29`) ran difficulty 5 followed by difficulty 10,
+scenario index 0, four agents each, using `spec-router-qwen27b.yaml` and the existing
+Qwen3.8-27B router at `http://ip-10-53-199-100:8000/v1`. Low reasoning, 4,096 output
+limit, 10,000 context budget, automatic tool selection. Scheduler result:
+`COMPLETED`, exit `0:0`, elapsed `00:02:38`.
+
+| Difficulty | Verified solution | Seconds to solution | Tokens in calls completed by solution | Total tokens after shutdown |
+|---:|:---:|---:|---:|---:|
+| 5 | Yes | 31.317 | 29,095 | 65,586 |
+| 10 | Yes | 97.516 | 238,629 | 297,465 |
+
+Tokens include input plus output across all four agents; reasoning is included in
+output and is not counted twice. The solution-time column sums assistant usage
+records timestamped at or before the first verified `is_win` response. It excludes
+requests still in flight then; the final column includes calls completed during
+graceful shutdown. Times include experiment startup. Final input/output counts:
+62,964/2,622 for difficulty 5 and 275,355/22,110 for difficulty 10.
+
+Both runs had zero assistant error records, no metric-sampling errors, verified
+bucket persistence, and no viewer publication failures. Backend request-success
+counters increased on ports 8101, 8103, 8104, and 8107; this establishes that the
+router served the workload across multiple replicas, not a sustained capacity or
+session-affinity benchmark. Each experiment used four concurrent agents.
+
+Artifacts: `.flock/agent-escape-slurm/20261029T115205Z-3c275cdf/`.
+Attempts: `210c27d3221442c19dbb5f8a807ef6df` (5),
+`bf5e20586f294c2184c99bced4168c39` (10).
+Viewer boards: `1a7fd7e7bf414fb4b9f08312eacdbcc2` (5),
+`85739ffd71d44a0c9c92efe511bdcb10` (10).
+
+An earlier local validation using forced tool selection was interrupted and is
+not counted as a success. Direct-backend and router probes both returned invalid
+extra arguments for a zero-argument tool with `required`; `auto` returned `{}`.
+The successful runs changed only this tool-selection behavior (and explicitly
+kept the done tool), without weakening tool validation or changing the puzzle.

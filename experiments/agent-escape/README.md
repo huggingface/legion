@@ -146,3 +146,61 @@ state in a separate disposable session. Its synthetic correct submission is
 See [the Slurm serving and throughput benchmark](b300/README.md) for sequential
 1/2/4/8-GPU tensor-parallel and replica comparisons using real UltraChat prompts
 and AgentEscape replay, with natural EOS stopping.
+
+## Run experiments through Slurm against an existing router
+
+`slurm.py` submits one CPU-only allocation and runs the selected difficulties
+**sequentially**, with four local Flock workers per attempt. It reuses an existing
+model server; it neither allocates GPUs nor starts/stops that server.
+
+```bash
+uv run --no-sync python experiments/agent-escape/slurm.py submit \
+  --server-run .flock/b300-qwen/serving/20261029T104948.409701Z/server \
+  --difficulties 5 10 --scenario-index 0
+```
+
+The server directory supplies `endpoint.json` and its private `api-key`. Export
+`HF_TOKEN` for the private board bucket. The launcher stores these credentials in
+an owner-only file, passes only a configuration path to `sbatch`, and removes the
+credential file when the job exits. If cancelled while still pending, remove that
+run's `secrets.json` manually. Secrets never appear in scheduler arguments or its
+exported environment.
+
+Defaults: `hopper-cpu`, 8 CPUs, 16 GB RAM, one hour, and 900 seconds per attempt.
+Override with `--partition`, `--cpus`, `--mem`, `--time`, and `--timeout`; increase
+wall time when selecting more difficulties. `--dry-run` prepares and prints the
+submission without launching a job, then deletes its credential file. Each output
+directory must be new. The script uses the existing shared repository, `.venv`,
+benchmark environment, and `.flock/tools/hf-mount-fuse`; install them before
+submission. CPU nodes need `/dev/fuse` and `fusermount3`. Mount staging lives under
+node-local `/tmp/flock-boards-<uid>`. Source hashes are checked at job start, so
+resubmit if experiment code changes while a job is queued.
+
+`spec-router-qwen27b.yaml` targets Qwen3.8-27B with low reasoning and **automatic**
+tool selection. On the current vLLM/qwen3_coder serving configuration, forcing
+`tool_choice: required` produced spurious parameters for the zero-argument
+`get_observation` tool, both directly and through the router. `auto` returned the
+correct `{}` and passed both real puzzles. Argument validation remains strict;
+no malformed calls are silently repaired.
+
+Submission prints the job ID and `.flock/agent-escape-slurm/<timestamp-id>/`:
+
+- `slurm-<job-id>.log`: sequential progress.
+- `00-d5.log`, `01-d10.log`: per-attempt launcher output, including artifact paths.
+- `*-attempt.json`: exact attempt location; no guessing among concurrent runs.
+- `*-metrics.jsonl`: backend metrics sampled about every ten seconds.
+- `summary.json`: original result reports, verified success, tokens and board locations.
+- `config.json`, `submission.json`, `runtime.json`: configuration, source hashes,
+  scheduler command, job and node identity; no credential values.
+
+A failed puzzle is retained and the next selection still runs. The batch exits
+successfully only if every requested attempt verifies a solution and shuts down
+cleanly. For a graceful early stop, use `scancel --signal=TERM --batch JOB_ID`:
+the driver interrupts the active launcher, drains its services, and does not
+start another puzzle. Hard cancellation/preemption can interrupt persistence;
+check `board.verified_at` rather than assuming a completed upload.
+
+Validation on 2026-10-29: job **284602**, CPU node `ip-10-53-88-29`, completed both
+scenario-0 puzzles against `http://ip-10-53-199-100:8000/v1`. Difficulty 5 solved in
+31.3 seconds; difficulty 10 in 97.5 seconds. Both boards were verified and exported
+for the private viewer. See `RESULTS.md` for token accounting.
