@@ -34,7 +34,8 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert spec.spawn["coordinator"].types == {"worker": 4, "interviewer": 2}
     assert spec.spawn["worker"].types == {"interviewer": 2}
     assert spec.limits.alive >= 50 + 200 + iv.workers.max_extra * iv.agents_per_worker
-    assert spec.limits.spawned_total >= 400 + 600
+    assert spec.limits.spawned_total >= 400 + 150 * 48  # ~150 interviews an hour for 48 h
+    assert iv.workers.max_extra * iv.agents_per_worker <= 26  # run_bot's run slots
     assert spec.comms.url.endswith("chatbot-v9-msgboard.hf.space/boards/chatbot-v9")
     system = (EXP / "prompts/system.md").read_text()
     assert f"`{REPO}` on Hugging Face" in system and f"datasets/{REPO}` into `chatbot-swarm`" in system
@@ -45,7 +46,9 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert "understanding engine" in system and "general mechanisms" in system
     assert "## Interviews" in spec.types["worker"].system_prompt
     interviewer = iv.system_prompt
-    for text in ("run_bot", "record_verdict", "`post` in it", "@mentions", "`dm`", "8 to 15"):
+    assert "new key per interview" in system
+    for text in ("run_bot", "record_verdict", "`post` in it", "thread: \"new\"", "says busy",
+                 "@mentions", "`dm`", "8 to 15"):
         assert text in interviewer, text
 
 

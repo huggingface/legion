@@ -38,9 +38,11 @@ script.
   queues an inbox line for its author ("interviewer X judged PR #N: script (0.8)").
   `verdicts(target?, limit?)` (read-only, coordinators and workers) lists them newest first.
   `/metrics` adds `verdicts_total` and `main_verdicts_last_hour_{human,agent,script}`.
-- Sizes: 50 coordinators, up to 200 workers, up to 200 live interviewers (`agents_per_worker:
-  25`, `max_extra: 8`); `limits: {alive: 450, spawned_total: 1000}` (400 for teams, 600 for
-  interviewers; `spawned_total` never frees a place).
+- Sizes: 50 coordinators, up to 200 workers, up to 25 live interviewers (`agents_per_worker:
+  25`, `max_extra: 1`; `run_bot` has 26 run slots, and average demand is about 8 alive);
+  `limits: {alive: 275, spawned_total: 10000}` (~400 for teams, ~7,200 interviewers over 48 h
+  at about 150 an hour; `spawned_total` never frees a place). Past 25 live interviewers a
+  spawn is refused with `workers`.
 
 ## Launch
 
@@ -93,4 +95,6 @@ As in `../hierarchy/README.md` ("Viewer"), with this run's name in the `RUNS` en
   rule.
 - **One verdict row.** All verdicts are one state row rewritten on each verdict (fine for
   hundreds; move to its own table if interviews become frequent).
+- **Board identities.** Each interviewer joins the board as its own identity, so a run
+  registers about 7,000 of them.
 - Hierarchy's gaps (finding a similar channel, learning about merges, team moves) still apply.

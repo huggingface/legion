@@ -81,7 +81,7 @@ types:
     replicas: 0
     ephemeral: true                         # removed once its session ends (docs/spawn.md)
     agents_per_worker: 25
-    workers: {initial: 0, max_extra: 8}     # 200 live interviewers at 25 per worker
+    workers: {initial: 0, max_extra: 1}     # 25 live interviewers (run_bot has 26 run slots)
     system_prompt_file: prompts/interviewer.md
     tools: ['world:run_bot', 'world:record_verdict', 'comms:join_channel', 'comms:post', 'comms:read', 'comms:dm']
     bash: false
@@ -93,6 +93,6 @@ types:
 spawn:
   coordinator: {types: {worker: 4, interviewer: 2}, depth: 2}
   worker: {types: {interviewer: 2}, depth: 1}
-# 50 coordinators + 200 workers + up to 200 live interviewers. spawned_total never frees a
-# place: 400 for teams to be rebuilt, 600 for interviewers.
-limits: {alive: 450, spawned_total: 1000}
+# 50 coordinators + 200 workers + up to 25 live interviewers. spawned_total never frees a
+# place: ~400 for teams, ~7,200 interviewers over 48 h (about 150 an hour).
+limits: {alive: 275, spawned_total: 10000}

@@ -2298,6 +2298,10 @@ def test_record_verdict_round_trip_inbox_and_metrics(setup):
         world.record_verdict(Agent("iv-owl"), "pr:999", "script", 0.5, "x")
     with pytest.raises(ToolError, match="confidence"):
         world.record_verdict(Agent("iv-owl"), "main", "agent", 1.5, "x")
+    with pytest.raises(ToolError, match="confidence"):
+        world.record_verdict(Agent("iv-owl"), "main", "agent", True, "x")
+    with pytest.raises(ToolError, match="limit"):
+        world.verdicts(limit="many")
     world.record_verdict(Agent("iv-owl"), "main", "agent", 0.7, "remembered my dog's name")
     out = world.call("record_verdict", {"target": target, "verdict": "script", "confidence": 0.8,
                                         "notes": "same reply twice"}, Agent("iv-fox"))

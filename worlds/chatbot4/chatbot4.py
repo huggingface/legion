@@ -1626,7 +1626,8 @@ class Chatbot4World(World):
             raise ToolError("target must be main or pr:<number>")
         if verdict not in ("human", "agent", "script"):
             raise ToolError("verdict must be human, agent or script")
-        if not isinstance(confidence, int | float) or not 0 <= confidence <= 1:
+        if (isinstance(confidence, bool) or not isinstance(confidence, int | float)
+                or not 0 <= confidence <= 1):
             raise ToolError("confidence must be between 0.0 and 1.0")
         notes = " ".join(str(notes).split())[:VERDICT_NOTES]
         sha = None
@@ -1656,7 +1657,9 @@ class Chatbot4World(World):
         """Interviewers' verdicts, newest first: who they believed they talked to (human, agent
         or script). target: main or pr:<number> (all when empty); limit: at most 100."""
         target = str(target).strip()
-        limit = max(1, min(int(limit), 100))
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ToolError("limit must be a whole number")
+        limit = max(1, min(limit, 100))
         with self.lock:
             recs = [dict(r) for r in reversed(self.state["verdicts"])
                     if not target or r["target"] == target][:limit]
