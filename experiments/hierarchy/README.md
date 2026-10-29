@@ -34,11 +34,11 @@ are the same agent without the right to spawn, with a different role prompt.
 
 ## Launch
 
-The project repo is the dataset `HuggingFaceSwarms/chatbot-v5`, seeded with
-`../run4/publish_seed.py` (voting uses `HuggingFaceSwarms/chatbot-v6`). The prompts name it in
+The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v5`, seeded with
+`../run4/publish_seed.py` (voting uses `HuggingFaceSwarms/SwarmChat-v6`). The prompts name it in
 `prompts/system.md` (the repo id and the clone line) and in the team rules of
 `prompts/coordinator.md` and `prompts/worker.md`. No placeholders are left. Set
-`CHATBOT_REPO=HuggingFaceSwarms/chatbot-v5` in `run.env` (the run 4 default is its own repo), with
+`CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v5` in `run.env` (the run 4 default is its own repo), with
 an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
@@ -60,7 +60,7 @@ Offline checks: `python experiments/hierarchy/render.py --out /tmp/h.yaml`,
 
 | experiment | dataset | board |
 |---|---|---|
-| hierarchy | `HuggingFaceSwarms/chatbot-v5` | `hierarchy-v5` |
+| hierarchy | `HuggingFaceSwarms/SwarmChat-v5` | `hierarchy-v5` |
 
 Set `CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/hierarchy-v5` in the run's `run.env`; every board route hangs off
 that base URL. Tokens are per board: create the invite inside this board (a token from another
