@@ -270,7 +270,8 @@ They are generated from the main specs and checked by a test.
 
 What changes:
 - **The world.** It is no longer started by flock. The bootstrap starts it on
-  `127.0.0.1:8790`, and both specs use `world.url` with the same `token_env`.
+  `127.0.0.1:8790` (`CHATBOT_WORLD_PORT` sets another port), and both specs use `world.url`
+  with the same `token_env`.
 - **Channels.** Team B's spec uses the placeholder `your-team-b-channel`, which the bootstrap
   fills from `CHATBOT_CHANNEL_B`.
   - In phase 2, `phase2/spec-b.yaml` moves team B to the main channel.
