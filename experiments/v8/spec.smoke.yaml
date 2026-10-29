@@ -1,7 +1,8 @@
 # Overlay for the 30-min smoke (RUN3_VARIANT=smoke): 16 agents (no ramp past the start), and
 # every lane's loop ends after 30 min.
 types:
-  answers: {replicas_ramp: {start: 6, add: 1, every: 24h, max: 6}, loop: {while: {until: 30m, max_rounds: 100}}}
+  answers: {replicas_ramp: {start: 3, add: 1, every: 24h, max: 3}, loop: {while: {until: 30m, max_rounds: 100}}}
+  understanding: {replicas_ramp: {start: 3, add: 1, every: 24h, max: 3}, loop: {while: {until: 30m, max_rounds: 100}}}
   conversation: {replicas_ramp: {start: 3, add: 1, every: 24h, max: 3}, loop: {while: {until: 30m, max_rounds: 100}}}
   routing: {replicas_ramp: {start: 3, add: 1, every: 24h, max: 3}, loop: {while: {until: 30m, max_rounds: 100}}}
   quality: {replicas_ramp: {start: 3, add: 1, every: 24h, max: 3}, loop: {while: {until: 30m, max_rounds: 100}}}

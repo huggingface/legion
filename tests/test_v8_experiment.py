@@ -1,4 +1,4 @@
-"""The v8 experiment: five lanes as agent types, ramped by the controller, on the v8 seed."""
+"""The v8 experiment: six lanes as agent types, ramped by the controller, on the v8 seed."""
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 EXP = ROOT / "experiments/v8"
 SEED = ROOT / "worlds/chatbot4/seed-v8"
 REPO = "HuggingFaceSwarms/SwarmChat-v8"
-LANES = {"answers": (12, 12, "10m", 120), "conversation": (6, 6, "10m", 48),
+LANES = {"answers": (12, 12, "10m", 96), "understanding": (6, 6, "10m", 24),
+         "conversation": (6, 6, "10m", 48),
          "routing": (6, 6, "20m", 24), "quality": (6, 6, "15m", 36), "safety": (3, 3, "30m", 6)}
 # The swarm is steered by STYLE.md and the lanes, never told how it is scored.
 HIDDEN = ("smoltalk", "benchmark", "leaderboard", "win rate", "evaluation", "interviewer", "turing")
@@ -23,7 +24,7 @@ def _spec_defaults(monkeypatch):  # the spec's ${VAR:-default}s, not the caller'
         monkeypatch.delenv(var, raising=False)
 
 
-def test_five_lanes_are_run4_agents_with_their_own_ramp_and_prompt():
+def test_six_lanes_are_run4_agents_with_their_own_ramp_and_prompt():
     spec = load_spec(str(EXP / "spec.yaml"))
     run4 = load_spec(str(ROOT / "experiments/run4/spec.yaml")).types["agent"]
     assert set(spec.types) == set(LANES) and not spec.spawn
@@ -48,6 +49,9 @@ def test_the_prompts_name_the_repo_and_lanes_and_hide_the_eval():
     assert f"`https://huggingface.co/datasets/{REPO}` into `chatbot-swarm`" in text
     for name in LANES:
         assert f"| {name} | #{name} |" in text
+    for part in ("an understanding engine", "a memory store", "a knowledge base", "a response composer"):
+        assert part in text, part
+    assert "prefer general mechanisms" in text and "millions of lines" not in text
     for path in [EXP / "prompts/system.md", *sorted((EXP / "prompts/lanes").glob("*.md"))]:
         lower = path.read_text().lower()
         for word in (*HIDDEN, "chatbot-v", "spawn", "vote", "@all"):
@@ -62,8 +66,11 @@ def test_the_seed_documents_the_interface_and_hides_the_eval():
     assert f"datasets/{REPO} chatbot-swarm" in (SEED / "CONTRIBUTING.md").read_text()
     readme = (SEED / "README.md").read_text()
     for hook in ("observe(text, memory)", "respond(text, memory)", "after(text, reply, memory)",
-                 "choose(text, memory, candidates)", 'memory["turns"]'):
+                 "choose(text, memory, candidates)", 'memory["turns"]', 'memory["understood"]',
+                 "bot/understanding/", "bot/memory/", "bot/knowledge/", "bot/compose/"):
         assert hook in readme, hook
+    for package in ("understanding", "memory", "knowledge", "compose"):
+        assert (SEED / "bot" / package / "__init__.py").is_file(), package
 
 
 def test_render_reads_this_folder():

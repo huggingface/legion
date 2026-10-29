@@ -19,8 +19,9 @@ then stayed flat or fell while hundreds of agents kept merging. The causes:
 - **A broadcast board.** `#general` ran at 550–900 posts an hour. Teams owned files or niches,
   not outcomes.
 
-v8 steers the swarm in five ways, borrowed from InstructGPT's labeller guidelines and
-Askell et al.'s HHH assistant. Neither mentions any evaluation.
+v8 steers the swarm in six ways. Most are borrowed from InstructGPT's labeller guidelines
+and Askell et al.'s HHH assistant; the four-part architecture came from a suggestion during the
+design. None of them mentions an evaluation.
 
 | change | where |
 |---|---|
@@ -28,7 +29,8 @@ Askell et al.'s HHH assistant. Neither mentions any evaluation.
 | Who the users are and what they ask, so work goes to the turns people send most | `STYLE.md`, `prompts/system.md`, `prompts/lanes/answers.md` |
 | Every change judged by blind side-by-side comparison with main on a deck of realistic single- and multi-turn conversations; multi-turn losses block a merge | seed `deck/`, `tools/compare.py`, `CONTRIBUTING.md` |
 | Routing by an owned arbiter: every module proposes a reply on its own copy of memory, and `bot/modules/arbiter.py` chooses | seed `bot/runtime.py` (fixed) |
-| Five lanes we define, each its own agent type with a channel and an outcome: answers, conversation, routing, quality, safety | `spec.yaml`, `prompts/lanes/` |
+| A four-part architecture (understanding engine, memory store, knowledge base, response composer), each part with a home in the seed and an owning lane; general mechanisms preferred over rules for one phrasing; regular chats like a real person's, with failures traced to a part | `prompts/system.md` ("Task"), seed `README.md` ("Architecture"), `bot/understanding/`, `bot/memory/`, `bot/knowledge/`, `bot/compose/` |
+| Six lanes we define, each its own agent type with a channel and an outcome: understanding, answers, conversation, routing, quality, safety | `spec.yaml`, `prompts/lanes/` |
 
 The world adds three settings, off by default (v4–v7 are unchanged):
 
@@ -41,13 +43,13 @@ The world adds three settings, off by default (v4–v7 are unchanged):
 
 | file | what |
 |---|---|
-| `spec.yaml` | run 4's agent as five types (lanes), each with a `replicas_ramp`; stricter board rules |
-| `prompts/system.md` | the shared system prompt: goal, lanes, work loop, setting, board etiquette |
+| `spec.yaml` | run 4's agent as six types (lanes), each with a `replicas_ramp`; stricter board rules |
+| `prompts/system.md` | the shared system prompt: the task (with the four parts), lanes, work loop, setting, board etiquette |
 | `prompts/lanes/*.md` | appended per lane: its scope and how it works |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
 | `render.py`, `load_guard.py`, `spec.slurm.yaml` | links to run 4's |
 | `spec.smoke.yaml` | the 30-min smoke: 16 agents, loops end after 30 min |
-| `../../worlds/chatbot4/seed-v8/` | the repository seed: runtime, arbiter, `STYLE.md`, `deck/`, `tools/compare.py`, tests |
+| `../../worlds/chatbot4/seed-v8/` | the repository seed: runtime, arbiter, the four parts' packages, `STYLE.md`, `deck/`, `tools/compare.py`, tests |
 
 ## Mechanics
 
@@ -55,13 +57,14 @@ The world adds three settings, off by default (v4–v7 are unchanged):
 
   | type | start | add | every | max |
   |---|---|---|---|---|
-  | `answers` | 12 | 12 | 10 min | 120 |
+  | `answers` | 12 | 12 | 10 min | 96 |
+  | `understanding` | 6 | 6 | 10 min | 24 |
   | `conversation` | 6 | 6 | 10 min | 48 |
   | `routing` | 6 | 6 | 20 min | 24 |
   | `quality` | 6 | 6 | 15 min | 36 |
   | `safety` | 3 | 3 | 30 min | 6 |
 
-  That is 33 agents at the start and 234 after 90 minutes, under `limits.alive: 250`. The
+  That is 39 agents at the start and 234 after 75 minutes, under `limits.alive: 250`. The
   controller runs the ramps (docs/live.md, "Ramp"). There is no `waves.yaml`, so
   `controller.sbatch` applies the spec and starts no waves runner. To change a lane's size
   live, use `flock scale` (the next ramp step still applies) or edit its ramp and `flock update`.
@@ -92,7 +95,7 @@ The world adds three settings, off by default (v4–v7 are unchanged):
    with its API at the Space root, `https://huggingfaceswarms-chatbot-v8-msgboard.hf.space`.
    - Verify `/v1/health`.
    - Create the agent invite inside this board and put it in `CHATBOT_BOARD_INVITE`.
-   - Optionally create the five lane channels as an operator first, with the purposes from
+   - Optionally create the six lane channels as an operator first, with the purposes from
      `prompts/system.md`; otherwise the first agent of each lane creates its channel.
 3. **The run directory.** Follow run 4's README ("Operator preparation", "Launch and stop
    boundaries") with its `slurm/` scripts, in `runs/v8/run.env` (from

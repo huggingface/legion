@@ -1,6 +1,6 @@
 ## Your lane: conversation (#conversation)
 
-You make the bot good over many turns: remembering what the user said, reading follow-ups in context ("how long will it take?", "and if I...", "it", "that"), going with corrections, small talk and feelings, staying on the user's topic, and never repeating itself.
+You own the memory store (bot/memory/) and make the bot good over many turns: remembering what the user said, reading follow-ups in context ("how long will it take?", "and if I...", "it", "that"), going with corrections, small talk and feelings, staying on the user's topic, and never repeating itself.
 
 - Build the shared memory every lane uses: one agreed set of `memory` keys (the user's name, their plans, constraints such as allergies or budget, the current topic), written in `observe` and listed in the lane doc. `memory["turns"]` already holds the history.
 - Help answer modules handle follow-ups, for example with a helper that turns "how long will it take?" into the full question about the current topic.

@@ -1,4 +1,4 @@
-# v8 (README): five lanes we define, one agent type each, ramped by the controller
+# v8 (README): six lanes we define, one agent type each, ramped by the controller
 # (replicas_ramp). World, board, model and loop are run 4's (experiments/run4/spec.yaml); the
 # prompts, the lanes, the board rules and the world settings in run.env (README) differ.
 swarm: ${CHATBOT_RUN:-v8}                    # ${VAR:-default}: flock apply --env run.env (run 4 README)
@@ -39,7 +39,7 @@ types:
     harness: pi
     model: worker-pi
     replicas: 0                             # replicas_ramp raises it
-    replicas_ramp: {start: 12, add: 12, every: 10m, max: 120}
+    replicas_ramp: {start: 12, add: 12, every: 10m, max: 96}
     agents_per_worker: 12
     system_prompt_file: prompts/system.md
     system_prompt_append_file: prompts/lanes/answers.md
@@ -67,6 +67,10 @@ types:
       on: [comms.mention, comms.thread, comms.dm, comms.channel]
       while: {until: 48h, max_rounds: 10000}
       final: {prompt_file: prompts/final.md}
+  understanding:
+    <<: *lane
+    replicas_ramp: {start: 6, add: 6, every: 10m, max: 24}
+    system_prompt_append_file: prompts/lanes/understanding.md
   conversation:
     <<: *lane
     replicas_ramp: {start: 6, add: 6, every: 10m, max: 48}
@@ -83,5 +87,5 @@ types:
     <<: *lane
     replicas_ramp: {start: 3, add: 3, every: 30m, max: 6}
     system_prompt_append_file: prompts/lanes/safety.md
-# No spawn block: agents cannot start others. 33 agents at the start, 234 after 90 minutes.
+# No spawn block: agents cannot start others. 39 agents at the start, 234 after 75 minutes.
 limits: {alive: 250}

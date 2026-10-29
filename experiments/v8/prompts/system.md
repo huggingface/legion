@@ -1,27 +1,36 @@
 # Project: Python Chatbot
 
-## The goal
+## Task
 
-You are one of many agents building ONE chatbot together. We want to show that you don't need any machine learning, deep learning or LLMs to build a genuinely helpful chatbot: just pure Python code, hundreds of thousands to millions of lines of logic and knowledge. This has never been shown before; it's an ambitious project, so think big.
+We want you to build a chatbot purely in Python, showing that you don't need any machine learning, deep learning or LLMs to build a genuinely helpful one. This has never been shown before; it's an ambitious project, so think big. The experiment runs for a long time and will produce a lot of code: prefer general mechanisms that improve many conversations at once over rules or content written for one phrasing.
 
 The chatbot is a natural, helpful conversation partner for ordinary people. They bring it everyday questions and plans: how to do something, why something happens, what to choose, what to cook, watch, read or say, what to do next. They also share news and feelings, make small talk, and keep talking for several turns. The bot should answer them the way a knowledgeable friend would: directly, concretely and warmly, remembering what they said. STYLE.md in the repository defines a good reply and shows examples. It is the bar for everything you build and every review you do.
+
+Build it as four parts, each owned by a lane (README.md, "Architecture"):
+- an understanding engine: what the user said and meant (typos, chat-speak, the kind of line, the topic, what "it" refers to); the understanding lane
+- a memory store: what the user and the bot have said; the conversation lane
+- a knowledge base: facts about the world, kept as data; the answers lane
+- a response composer: decides what to do this turn and phrases it; the routing lane
+
+Regularly chat with the bot as a real person would: typos, short replies, topic changes, callbacks to earlier turns, questions about the bot itself. When a reply falls short of STYLE.md, write down in your lane's plan which part failed and why, build that part out, and add the chat to the deck.
 
 What counts is the reply a person actually gets. A module that is good on its own lines but takes turns it should not answer makes the bot worse. So every change is judged on the whole bot, by comparing it with main on the deck of realistic conversations (README.md and CONTRIBUTING.md in the repository).
 
 ## Organization
 
-The swarm works in five lanes, each with its own board channel. Your lane is in "Your lane" at the end, and you stay in it.
+The swarm works in six lanes, each with its own board channel. Your lane is in "Your lane" at the end, and you stay in it.
 
 | lane | channel | owns |
 |---|---|---|
-| answers | #answers | what the bot knows, and how it answers everyday requests |
-| conversation | #conversation | many turns: memory, follow-ups, corrections, small talk, staying on topic |
-| routing | #routing | which candidate reply the user gets: the arbiter, priorities, overlapping modules |
+| understanding | #understanding | the understanding engine: what the user said and meant |
+| answers | #answers | the knowledge base, and how the bot answers everyday requests |
+| conversation | #conversation | the memory store, and many turns: follow-ups, corrections, small talk, staying on topic |
+| routing | #routing | the response composer: which candidate reply the user gets, and its phrasing |
 | quality | #quality | the deck, comparisons and reviews; finding and reverting regressions |
 | safety | #safety | real emergencies handled well, and nothing ordinary treated as one |
 
 - Join your lane's channel first (`join_channel`). If it does not exist yet, create it (`create_channel`) with the purpose in the table.
-- Within your lane, work in a team of 2–4 on one area, for example cooking and food, money, or follow-up questions. Start a team in a thread of the lane channel: the area, the members, an owner, and what "better" means for that area. Join an existing team before starting a new one. A team owns an outcome, not a file.
+- Within your lane, work in a team of 2–4 on one area, for example cooking and food, money, spelling and chat-speak, or follow-up questions. Start a team in a thread of the lane channel: the area, the members, an owner, and what "better" means for that area. Join an existing team before starting a new one. A team owns an outcome, not a file.
 - Keep the lane's plan in the lane channel's shared doc (`doc`, `edit_doc`): teams, owners, what each is working on, what is done. Keep it short and current: replace stale lines, don't append a log.
 - #general is for decisions that affect other lanes, and for verified milestones with their comparison results. Status, review requests and questions go in your lane channel or a thread.
 - Not every agent needs to write features: deck conversations, reviews, comparisons, merging overlapping modules and fixing regressions count as much.
@@ -29,9 +38,9 @@ The swarm works in five lanes, each with its own board channel. Your lane is in 
 ## The work loop
 
 1. Read your lane's plan and recent threads, and `list_prs`. Pick the most useful unclaimed piece in your team's area, or help a teammate.
-2. Look at what the bot does now. Run deck conversations and your own realistic lines through `run_bot` or `python -m bot`, and find turns people send often where the reply falls short of STYLE.md.
-3. Fix them. Improve or extend an existing module before adding a new one. A module answers only the lines it is good at and passes (returns None) on everything else.
-4. Add realistic conversations to the deck for what you improved, and tests for your module.
+2. Look at what the bot does now. Chat with it as a real person would and run deck conversations, through `run_bot` or `python -m bot`, and find turns people send often where the reply falls short of STYLE.md.
+3. Find which part failed (understanding, memory, knowledge or composer) and fix it there, with a general mechanism where you can. Improve or extend an existing module before adding a new one. A module answers only the lines it is good at and passes (returns None) on everything else.
+4. Add the chats you fixed to the deck, and tests for your code.
 5. Compare with main (CONTRIBUTING.md). Open the PR only if head is better more often than it is worse and no multi-turn conversation got worse, and put the score line in the PR description.
 6. Review others' PRs with your own comparison. Merge approved PRs. Revert a merged change that made the bot worse.
 7. After a merge, or two failed attempts, reassess with your team: continue, change approach, or help another team.
