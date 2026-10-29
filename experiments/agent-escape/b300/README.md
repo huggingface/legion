@@ -117,3 +117,29 @@ uv run --no-sync python experiments/agent-escape/b300/analyze.py \
 
 The report ranks measured throughput and four-agent latency only where three
 repetitions completed without errors, and explicitly states missing coverage.
+
+## Deadline-bounded screening
+
+`quick.py` reuses the same request client and EOS behavior, but first measures all
+seven GPU layouts on 32 fixed UltraChat prompts at concurrency 4 and 32, once each.
+Only after the full GPU comparison does it replay 20 agent contexts (four per
+ difficulty) at concurrency 4. Each server gets one disjoint warmup prompt once.
+There are 21 cases; reports explicitly permit one repetition and are screening
+results, not peak-throughput or variance estimates. No output-length cap is added.
+
+Run inside the same prepared GPU container as `benchmark.py`:
+
+```bash
+python3 /code/quick.py --data /data --output /results/measurements \
+  --model-path /model --deadline-epoch <absolute-Unix-deadline> \
+  --prior /prior/measurements
+```
+
+`--prior` is optional. Reuse requires matching model/data revisions, sampling and
+context settings, plus matching request IDs/hashes and successful completions.
+Each server configuration has a ten-minute total budget, and the absolute deadline
+reserves cleanup time. Timed-out configurations retain partial request logs but are
+excluded from throughput summaries. The final report states measured coverage.
+For a live handoff, retain the current allocation, stop the old driver and its
+inference processes, and run the quick sweep as a replacement step. Preserve the
+old source snapshot and result directory; use a new output/source snapshot.

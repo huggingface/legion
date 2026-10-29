@@ -295,3 +295,74 @@ def test_model_staging_uses_system_lock_with_project_cli_on_path(tmp_path):
     )
     assert (target / "config.json").read_bytes() == (source / "config.json").read_bytes()
     assert (target / ".complete").exists()
+
+
+def load_quick(monkeypatch):
+    monkeypatch.syspath_prepend(str(BASE))
+    spec = importlib.util.spec_from_file_location("b300_quick", BASE / "quick.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_quick_prioritizes_gpu_coverage_and_balances_replay(monkeypatch):
+    quick = load_quick(monkeypatch)
+    assert quick.stages()[:7] == [("ultrachat", layout, n) for layout, n in bench.MATRIX]
+    datasets = {
+        "ultrachat": list(range(512)),
+        "agent_escape": [
+            {"difficulty": d, "id": i} for d in (5, 10, 15, 20, 25) for i in range(20)
+        ],
+    }
+    assert quick.select_rows(datasets, "ultrachat") == list(range(32))
+    selected = quick.select_rows(datasets, "agent_escape")
+    assert len(selected) == 20
+    assert all(sum(r["difficulty"] == d for r in selected) == 4 for d in (5, 10, 15, 20, 25))
+
+
+def test_quick_reuse_requires_matching_prompts_and_success(tmp_path, monkeypatch):
+    quick = load_quick(monkeypatch)
+    case = tmp_path / "tp1-ultrachat"
+    case.mkdir()
+    result = {"dataset": "ultrachat", "layout": "tp", "gpus": 1, "concurrency": 4, "repeat": 0}
+    (tmp_path / "summary.jsonl").write_text(json.dumps(result) + "\n")
+    source = case / "c4-r0.jsonl"
+    source.write_text(
+        json.dumps({"id": "a", "prompt_sha256": "correct", "status": "completed"}) + "\n"
+    )
+    dest = tmp_path / "copy.jsonl"
+    assert (
+        quick.reuse_case(tmp_path, [{"id": "a", "sha256": "wrong"}], "ultrachat", "tp", 1, 4, dest)
+        is None
+    )
+    selected = [{"id": "a", "sha256": "correct"}]
+    reused = quick.reuse_case(tmp_path, selected, "ultrachat", "tp", 1, 4, dest)
+    assert reused["reused_from"] == str(source)
+    assert dest.read_bytes() == source.read_bytes()
+    source.write_text(
+        json.dumps({"id": "a", "prompt_sha256": "correct", "status": "timeout"}) + "\n"
+    )
+    assert quick.reuse_case(tmp_path, selected, "ultrachat", "tp", 1, 4, dest) is None
+
+
+def test_quick_report_explicitly_uses_single_repetition(tmp_path):
+    spec = importlib.util.spec_from_file_location("b300_analyze_quick", BASE / "analyze.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    (tmp_path / "runtime.json").write_text('{"required_repetitions":1,"expected_cases":21}')
+    result = {
+        "dataset": "ultrachat",
+        "layout": "tp",
+        "gpus": 1,
+        "concurrency": 4,
+        "seconds": 10,
+        "completed": 32,
+        "requests": 32,
+        "output_tokens_s": 320,
+        "latency_s_p50": 13,
+    }
+    (tmp_path / "summary.jsonl").write_text(json.dumps(result) + "\n")
+    report = module.analyze(tmp_path)
+    assert report["expected_cases"] == 21 and not report["coverage_complete"]
+    assert report["best_measured_throughput"]["output_tokens_s"] == 320
+    assert "1 error-free repetition" in report["note"]

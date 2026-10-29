@@ -8,6 +8,10 @@ from pathlib import Path
 
 
 def analyze(directory):
+    runtime_path = directory / "runtime.json"
+    runtime = json.loads(runtime_path.read_text()) if runtime_path.exists() else {}
+    required = runtime.get("required_repetitions", 3)
+    expected = runtime.get("expected_cases", 168)
     summary = directory / "summary.jsonl"
     rows = [json.loads(line) for line in summary.read_text().splitlines()]
     groups = collections.defaultdict(list)
@@ -39,13 +43,13 @@ def analyze(directory):
                 else None,
             }
         )
-    eligible = [r for r in aggregate if r["repetitions"] == 3 and r["error_rate"] == 0]
+    eligible = [r for r in aggregate if r["repetitions"] == required and r["error_rate"] == 0]
     throughput = [r for r in eligible if r["dataset"] == "ultrachat"]
     latency = [r for r in eligible if r["dataset"] == "agent_escape" and r["concurrency"] == 4]
     report = {
         "completed_cases": len(rows),
-        "expected_cases": 168,
-        "coverage_complete": len(rows) == 168,
+        "expected_cases": expected,
+        "coverage_complete": len(rows) == expected,
         "aggregates": aggregate,
         "best_measured_throughput": max(
             throughput, key=lambda r: r["output_tokens_s"], default=None
@@ -53,7 +57,7 @@ def analyze(directory):
         "best_measured_four_agent_latency": min(
             latency, key=lambda r: r["mean_p50_latency_s"], default=None
         ),
-        "note": "Recommendations require three error-free repetitions; rankings cover "
+        "note": f"Recommendations require {required} error-free repetition(s); rankings cover "
         "measured cases only. Means of per-case latency medians are labeled as such.",
     }
     return report
