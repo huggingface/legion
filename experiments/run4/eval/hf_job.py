@@ -27,21 +27,23 @@ RUNTIME_ENV_VAR = "SMOLTALK_EVAL_RUNTIME"
 LOG_DIR = Path("/tmp/inspect-logs")
 PORT = 8000
 STARTUP_TIMEOUT = 900
-SWARMCHAT_REPO = "cmpatino/chatbot-swarm"
-SCORER, PRIMARY_METRIC = "alpaca_eval_judge", "length_controlled_win_rate"
+SCORER = "alpaca_eval_judge"
+PRIMARY_METRIC, PRIMARY_METRIC_ERROR = "length_controlled_win_rate", "lc_standard_error"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True,
-                        help="SwarmChat, a Hub repo ID for vllm or an Inspect model string")
+                        help="a SwarmChat dataset repo for swarmchat, a Hub repo ID for vllm "
+                             "or an Inspect model string")
     parser.add_argument("--backend", choices=["swarmchat", "vllm", "endpoint"], required=True)
-    parser.add_argument("--revision", help="chatbot-swarm commit for swarmchat")
+    parser.add_argument("--revision", help="commit of the SwarmChat repo for swarmchat")
     parser.add_argument("--task", required=True, help="Inspect task, e.g. smoltalk_bench.py@...")
     parser.add_argument("--output_dir", required=True, help="hf://buckets/... folder")
     parser.add_argument("--eval_kwargs", type=json.loads, required=True,
                         help="JSON keyword arguments for eval()")
-    parser.add_argument("--workers", type=int, default=4, help="SwarmChat conversations at once")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="forks SwarmChat keeps ready, as many as Inspect's max_connections")
     parser.add_argument("--vllm_args", nargs="+", default=[], metavar="KEY=VALUE")
     return parser.parse_args()
 
@@ -87,11 +89,11 @@ def stop(server: subprocess.Popen) -> None:
         server.wait()
 
 
-def start_swarmchat(revision: str, workers: int) -> subprocess.Popen:
+def start_swarmchat(repo_id: str, revision: str, workers: int) -> subprocess.Popen:
     from huggingface_hub import snapshot_download
 
-    tree = snapshot_download(SWARMCHAT_REPO, repo_type="dataset", revision=revision,
-                             allow_patterns=["bot/**"], local_dir="/tmp/chatbot-swarm")
+    tree = snapshot_download(repo_id, repo_type="dataset", revision=revision,
+                             allow_patterns=["bot/**"], local_dir="/tmp/swarmchat")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     server = subprocess.Popen(
         [sys.executable, str(EVAL_DIR / "swarmchat_server.py"), tree, "--port", str(PORT),
@@ -132,7 +134,8 @@ def _json_value(value):
 
 
 def build_summary(log) -> dict:
-    """The primary metric, all metrics and sample counts of an Inspect log."""
+    """The primary metric with its standard error, all metrics and sample counts of an
+    Inspect log."""
     samples = log.samples or []
     scores = [s.scores.get(SCORER) for s in samples if s.scores]
     judged = [s for s in scores if s is not None and isinstance(s.value, float)
@@ -151,13 +154,15 @@ def build_summary(log) -> dict:
         "completed_samples": log.results.completed_samples,
         "judged_samples": len(judged),
         "empty_outputs": sum(not s.output.completion for s in samples),
-        "stop_reasons": dict(Counter(s.output.stop_reason for s in samples).most_common()),
+        "stop_reasons": dict(Counter(s.output.stop_reason if s.output.choices else "error"
+                                     for s in samples).most_common()),
         "error_samples": sum(s.error is not None for s in samples),
     })
     metrics = {m.name: _json_value(m.value) for score in log.results.scores
                if score.name == SCORER for m in score.metrics.values()}
     return {"metadata": metadata,
-            "primary_metric": {"name": PRIMARY_METRIC, "value": metrics.get(PRIMARY_METRIC)},
+            "primary_metric": {"name": PRIMARY_METRIC, "value": metrics.get(PRIMARY_METRIC),
+                               "standard_error": metrics.get(PRIMARY_METRIC_ERROR)},
             "metrics": metrics}
 
 
@@ -176,7 +181,7 @@ def main():
     try:
         model = args.model
         if args.backend == "swarmchat":
-            server = start_swarmchat(args.revision, args.workers)
+            server = start_swarmchat(args.model, args.revision, args.workers)
             model = "openai-api/swarmchat/SwarmChat"
         elif args.backend == "vllm":
             server = start_vllm(args.model, args.vllm_args)
@@ -189,7 +194,9 @@ def main():
         if status == "success":
             summary = build_summary(read_eval_log(log.location))
             (LOG_DIR / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-            print(f"{log.eval.task}: {PRIMARY_METRIC} = {summary['primary_metric']['value']}")
+            primary = summary["primary_metric"]
+            print(f"{log.eval.task}: {PRIMARY_METRIC} = {primary['value']} "
+                  f"± {primary['standard_error']}")
     finally:
         if server is not None:
             stop(server)

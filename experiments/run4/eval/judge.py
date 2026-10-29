@@ -54,6 +54,8 @@ Evaluate the models based on the quality and relevance of their outputs, and sel
 
 ## Best Model Identifier'''
 SEED = 0
+# How close to 0 or 1 a win probability gets in the GLM fit
+PROB_EPS = 1e-12
 
 
 def is_switched(instruction: str) -> bool:
@@ -116,6 +118,9 @@ def _fit(x, wins, groups, *, C=None):
     from sklearn.metrics import make_scorer
     from sklearn.model_selection import GroupKFold
 
+    # Keep every class weight above zero: a CV training fold without a single win (or loss)
+    # otherwise misfits in liblinear and skews the choice of C (one win in 1,000 came out at 17%)
+    wins = np.clip(wins, PROB_EPS, 1 - PROB_EPS)
     x2, y2 = np.concatenate([x, x]), np.concatenate([np.ones(len(x)), np.zeros(len(x))])
     prob = np.concatenate([wins, 1 - wins])
     # AlpacaEval's penalty="l1", in the l1_ratio form that sklearn >= 1.8 asks for
@@ -133,6 +138,18 @@ def _fit(x, wins, groups, *, C=None):
                          true_sample_weight=None, true_prob=prob)
 
 
+def _equal_length_win_rate(x, wins, groups, *, C=None):
+    """The GLM's win probability at no length difference, where only the intercept is left,
+    and the fitted model. Without a single win, or a single loss, there is nothing to fit (the
+    GLM would sit at 50%), so the rate is 0 or 1."""
+    if not wins.any():
+        return 0.0, None
+    if (wins == 1).all():
+        return 1.0, None
+    model = _fit(x, wins, groups, C=C)
+    return 1 / (1 + math.exp(-model.coef_[0][1])), model
+
+
 def length_controlled(preferences: list[float], output_lengths: list[int],
                       reference_lengths: list[int], *, bootstrap: int = 200) -> dict[str, float]:
     """AlpacaEval's length_controlled_minimal win rate. Lengths are in characters. Its standard
@@ -147,15 +164,13 @@ def length_controlled(preferences: list[float], output_lengths: list[int],
     std = delta.std(ddof=1)
     x = np.stack([np.tanh(delta / std if std > 0 else 0 * delta), np.ones(len(delta))], axis=1)
     x, wins = x[keep], prefs[keep] - 1
-    model = _fit(x, wins, np.arange(len(wins)))
-    # Predict at no length difference: only the intercept is left.
-    lc = 1 / (1 + math.exp(-model.coef_[0][1]))
-    C = float(np.ravel(model.C_)[0])
+    lc, model = _equal_length_win_rate(x, wins, np.arange(len(wins)))
+    # A one-sided sample has no fit, and neither has any of its resamples.
+    C = float(np.ravel(model.C_)[0]) if model is not None else None
     rng = np.random.default_rng(SEED)
     boots = []
     for _ in range(bootstrap):
         idx = rng.integers(0, len(wins), len(wins))
-        coef = _fit(x[idx], wins[idx], idx, C=C).coef_[0][1]
-        boots.append(1 / (1 + math.exp(-coef)))
+        boots.append(_equal_length_win_rate(x[idx], wins[idx], idx, C=C)[0])
     return {"length_controlled_win_rate": 100 * lc,
             "lc_standard_error": 100 * float(np.std(boots, ddof=1)) if boots else math.nan}

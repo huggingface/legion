@@ -1,8 +1,9 @@
 # SwarmChat evaluation
 
-The run4 swarm builds a rule-based chatbot in
-[`cmpatino/chatbot-swarm`](https://huggingface.co/datasets/cmpatino/chatbot-swarm). These scripts
-score any commit of it, as the model `SwarmChat`, and any Hub or API model, on
+Each chatbot swarm builds a rule-based chatbot in a dataset repo of the
+[Chatbot Project](https://huggingface.co/collections/HuggingFaceSwarms/chatbot-project) collection,
+e.g. [`HuggingFaceSwarms/SwarmChat-v5`](https://huggingface.co/datasets/HuggingFaceSwarms/SwarmChat-v5).
+These scripts score any commit of one, as a model called SwarmChat, and any Hub or API model, on
 [SmolTalkBench](https://huggingface.co/datasets/HuggingFaceSwarms/SmolTalkBench) (private): 1,000
 single-turn everyday chat prompts with reference replies.
 
@@ -41,12 +42,16 @@ inflated.
 
 ## Run on Hugging Face Jobs
 
-`evaluate.py` launches one Job per model revision. Run it from the repository root, after
+`evaluate.py` launches one Job, which runs one eval. Run it from the repository root, after
 logging in with `hf auth login`:
 
 ```sh
-# SwarmChat at two commits: one CPU Job each
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main fdef14e
+# SwarmChat at the head of HuggingFaceSwarms/SwarmChat-v4, on a cpu-upgrade Job with one
+# conversation per vCPU
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceSwarms/SwarmChat-v4
+
+# Another swarm's chatbot, at an earlier commit
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceSwarms/SwarmChat-v5 --revision 62dbbb8
 
 # A Hub model, served with vLLM on an rtx-pro-6000 Job
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
@@ -62,9 +67,13 @@ uv run experiments/run4/eval/evaluate.py --backend endpoint \
 - **Hub models.** Sampling defaults to the model's `generation_config.json`, and to pure
   sampling (temperature 1, top-p 1, no top-k) for whatever it leaves out. `--temperature`,
   `--top_p` and `--top_k` override it.
-- **Where Jobs run.** They run under the token's user, or under `--namespace`.
-- **SwarmChat revisions.** Each revision is named by its commit time and hash, e.g.
-  `20261028T162718Z-fdef14e9f8e3`, so revisions sort in merge order.
+- **Where Jobs run.** They run under the token's user, or under `--namespace`. The files
+  they need are uploaded to the `jobs-artifacts` bucket of the output bucket's namespace.
+- **SwarmChat.** A model ID with `SwarmChat` in it is a swarm's chatbot, served with
+  `swarmchat_server.py`; `--backend swarmchat` does the same for a repo without it. Like a Hub
+  model, the repo is the model ID and a commit is a revision. Each revision is named by its
+  commit time and hash, e.g. `20261028T214140Z-62dbbb8f50a4`, so revisions sort in merge
+  order.
 
 Logs go to the private Storage Bucket `HuggingFaceSwarms/swarmchat-evals`, or to the bucket
 passed with `--bucket`:
@@ -72,12 +81,13 @@ passed with `--bucket`:
 ```
 <model>/<revision>/smoltalk_bench_gold/<timestamp>/
 ├── <timestamp>_smoltalk-bench-gold_<id>.eval    # Inspect log
-├── summary.json                                 # primary metric, all metrics, sample counts
+├── summary.json                                 # primary metric and its standard error,
+│                                                #   all metrics, sample counts
 └── swarmchat_server.log                         # SwarmChat only, if the bot wrote to stderr
 ```
 
 ```sh
-inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/SwarmChat
+inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/HuggingFaceSwarms/SwarmChat-v4
 ```
 
 ## SwarmChat
