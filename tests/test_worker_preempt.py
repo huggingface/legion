@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 import threading
 import time
 from datetime import timedelta
@@ -223,8 +224,19 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
     monkeypatch.setenv("TYPE", "researcher")
     monkeypatch.setenv("DEADLINE", "2026-10-25T00:00:00+00:00")
     monkeypatch.setenv("WORK_ROOT", str(work))
-    real_tmp = Path("/tmp")
-    before = {p.name for p in real_tmp.iterdir() if p.name.startswith("flock")}
+    made, watching = [], [True]  # what this process creates under /tmp outside tmp_path
+
+    def audit(event, args):  # not a scan of /tmp: concurrent test runs share it
+        if not watching[0] or event not in ("open", "os.mkdir") or not isinstance(
+                args[0], (str, bytes)):
+            return
+        if event == "open" and not args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
+            return
+        path = Path(os.path.abspath(os.fsdecode(args[0])))
+        if path.is_relative_to("/tmp") and not path.is_relative_to(tmp_path):
+            made.append(str(path))
+
+    sys.addaudithook(audit)  # cannot be removed: `watching` turns it off
     started = {}
 
     def fake_run(coro, **kw):  # startup only: do not enter the loops
@@ -257,9 +269,9 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
                                  env=env))
         assert (r.output, r.error) == (str(root / "tmp"), False)
         assert list(ro_home.iterdir()) == []
-        after = {p.name for p in real_tmp.iterdir() if p.name.startswith("flock")}
-        assert after <= before  # nothing of ours appeared directly under /tmp
+        assert made == []  # nothing of ours under /tmp
     finally:
+        watching[0] = False
         ro_home.chmod(0o700)
 
 
