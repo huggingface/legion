@@ -54,6 +54,8 @@ Evaluate the models based on the quality and relevance of their outputs, and sel
 
 ## Best Model Identifier'''
 SEED = 0
+# How close to 0 or 1 a win probability gets in the GLM fit
+PROB_EPS = 1e-12
 
 
 def is_switched(instruction: str) -> bool:
@@ -116,6 +118,9 @@ def _fit(x, wins, groups, *, C=None):
     from sklearn.metrics import make_scorer
     from sklearn.model_selection import GroupKFold
 
+    # Keep every class weight above zero: a CV training fold without a single win (or loss)
+    # otherwise misfits in liblinear and skews the choice of C (one win in 1,000 came out at 17%)
+    wins = np.clip(wins, PROB_EPS, 1 - PROB_EPS)
     x2, y2 = np.concatenate([x, x]), np.concatenate([np.ones(len(x)), np.zeros(len(x))])
     prob = np.concatenate([wins, 1 - wins])
     # AlpacaEval's penalty="l1", in the l1_ratio form that sklearn >= 1.8 asks for

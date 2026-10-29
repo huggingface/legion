@@ -91,7 +91,9 @@ def test_length_controlled_win_rate_matches_alpaca_eval():
     pytest.importorskip("sklearn")
     prefs, out, ref = synthetic()
     lc = judge.length_controlled(prefs, out, ref, bootstrap=20)
-    assert lc["length_controlled_win_rate"] == pytest.approx(29.5837587498, abs=1e-8)
+    # 5e-8 off: rows the fit used to drop for a zero weight now carry PROB_EPS, which moves
+    # liblinear's solution within its tolerance
+    assert lc["length_controlled_win_rate"] == pytest.approx(29.5837587498, abs=1e-6)
     assert 0 < lc["lc_standard_error"] < 20
 
 
@@ -103,6 +105,12 @@ def test_length_controlled_win_rate_without_wins_or_losses():
         "length_controlled_win_rate": 0, "lc_standard_error": 0}
     assert judge.length_controlled([2.0] * 1000, lengths, reference, bootstrap=5) == {
         "length_controlled_win_rate": 100, "lc_standard_error": 0}
+    # One win, or one loss: a cross-validation fold can miss it (this was 17% and 99.86%)
+    one_win = judge.length_controlled([2.0] + [1.0] * 999, [10] * 1000, [10] * 1000, bootstrap=2)
+    one_loss = judge.length_controlled([1.0] + [2.0] * 999, [10] * 1000, [10] * 1000, bootstrap=2)
+    assert one_win["length_controlled_win_rate"] == pytest.approx(
+        100 - one_loss["length_controlled_win_rate"], abs=1e-3)
+    assert one_win["length_controlled_win_rate"] < 0.2
     # Three wins: the resamples that miss them all are 0%, not 50% (the SE was 14 points)
     rng = random.Random(0)
     lc = judge.length_controlled([2.0] * 3 + [1.0] * 997, [rng.randint(5, 50) for _ in range(1000)],
