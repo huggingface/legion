@@ -1,0 +1,3 @@
+# Overlay for the 30-min smoke (RUN3_VARIANT=smoke): the loop ends after 30 min.
+types:
+  agent: {loop: {while: {until: 30m, max_rounds: 100}}}
