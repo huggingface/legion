@@ -105,6 +105,9 @@ def _offline(path: Path, model_url: str, board_url: str | None, phase: int,
     if board_url is not None:
         spec["comms"].update(url=board_url, channel="chatbot-test", invite_env="FAKE_INVITE")
     for name, t in spec["types"].items():
+        # The scripted fake model does not retry rate-limit responses. This rehearsal
+        # tests the phase protocol, not wall-clock-dependent communications throttling.
+        t.setdefault("env", {}).update(FLOCK_COMMS_RATE="0", FLOCK_COMMS_AGENT_RATE="0")
         if "loop" not in t:  # the interviewers: their prompt comes from spawn_interviewer
             continue
         me = name.split("-")[1]
