@@ -405,5 +405,6 @@ def test_swarmchat_runs_one_conversation_per_vcpu(monkeypatch, capsys):
         [job] = json.loads(capsys.readouterr().out)
         command = job["command"]
         assert job["flavor"] == flavor
+        assert "/SwarmChat-chatbot-v4/20261029T004431Z-d8645ac9e103/" in job["output_url"]
         assert command[command.index("--workers") + 1] == workers
         assert json.loads(command[command.index("--eval_kwargs") + 1])["max_connections"] == int(workers)

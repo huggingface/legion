@@ -65,7 +65,8 @@ uv run experiments/run4/eval/evaluate.py --backend endpoint \
 - **Where Jobs run.** They run under the token's user, or under `--namespace`. The files
   they need are uploaded to the `jobs-artifacts` bucket of the output bucket's namespace.
 - **SwarmChat revisions.** Each revision is named by its commit time and hash, e.g.
-  `20261028T162718Z-fdef14e9f8e3`, so revisions sort in merge order.
+  `20261028T162718Z-fdef14e9f8e3`, so revisions sort in merge order. In the bucket, run4's
+  SwarmChat is `SwarmChat-chatbot-v4`, beside run5's `SwarmChat-chatbot-v5` and `-v6`.
 
 Logs go to the private Storage Bucket `HuggingFaceSwarms/swarmchat-evals`, or to the bucket
 passed with `--bucket`:
@@ -78,7 +79,7 @@ passed with `--bucket`:
 ```
 
 ```sh
-inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/SwarmChat
+inspect view --log-dir hf://buckets/HuggingFaceSwarms/swarmchat-evals/SwarmChat-chatbot-v4
 ```
 
 ## SwarmChat
