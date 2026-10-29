@@ -1,6 +1,6 @@
-"""Serve a chatbot-swarm checkout as SwarmChat, an OpenAI-compatible chat endpoint for evals.
+"""Serve a checkout of a swarm's chatbot as SwarmChat, an OpenAI-compatible endpoint for evals.
 
-    python experiments/run4/eval/swarmchat_server.py <checkout of cmpatino/chatbot-swarm> --port 8000
+    python experiments/run4/eval/swarmchat_server.py <chatbot checkout> --port 8000
 
 Loading the bot takes seconds (hundreds of modules), answering takes milliseconds. So one
 process loads the bot and forks a worker per conversation, and every conversation starts from
@@ -193,7 +193,7 @@ def handler(bot: Bot, model: str):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("tree", type=Path, help="a checkout of cmpatino/chatbot-swarm")
+    parser.add_argument("tree", type=Path, help="a checkout of a swarm's chatbot")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model", default="SwarmChat", help="the model id the endpoint serves")

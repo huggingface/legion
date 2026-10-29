@@ -1,14 +1,16 @@
 """Evaluate SwarmChat or a Hub model on SmolTalkBench with Hugging Face Jobs, one Job per revision.
 
-`--model SwarmChat` serves commits of cmpatino/chatbot-swarm with swarmchat_server.py on a
-cpu-upgrade Job, one conversation per vCPU. A revision is named by its commit's time and hash, e.g. 20261028T162718Z-fdef14e9f8e3, so
-revisions sort in merge order. A Hub repo ID is served with vLLM on a GPU Job, and with
+`--model SwarmChat` serves commits of a swarm's chatbot, the dataset repo `--swarm_repo`, with
+swarmchat_server.py on a cpu-upgrade Job, one conversation per vCPU. The repo is the model ID and
+a commit is a revision, named by its commit's time and hash, e.g. 20261028T162718Z-fdef14e9f8e3,
+so revisions sort in merge order. A Hub repo ID is served with vLLM on a GPU Job, and with
 `--backend endpoint` any Inspect model string is called from a CPU Job. Inspect logs and a
 `summary.json` go to a Storage Bucket, in `<model>/<revision>/<task>/<timestamp>/`.
 
 Usage:
 
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main fdef14e9f8e3
+uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main 62dbbb8f50a4
+uv run experiments/run4/eval/evaluate.py --model SwarmChat --swarm_repo HuggingFaceSwarms/SwarmChat-v6
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
 """
 
@@ -36,9 +38,8 @@ DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
 # SwarmChat's replies are CPU-bound (about 0.6 s each), so it gets 8 vCPUs; endpoint only waits
 DEFAULT_FLAVORS = {"swarmchat": "cpu-upgrade", "vllm": "rtx-pro-6000", "endpoint": "cpu-basic"}
 SWARMCHAT = "SwarmChat"
-# SwarmChat's name in the bucket and the logs, with an org like a Hub model: run4's chatbot
-SWARMCHAT_ID = "HuggingFaceSwarms/SwarmChat-v4"
-SWARMCHAT_REPO = "cmpatino/chatbot-swarm"
+# A swarm's chatbot, from https://huggingface.co/collections/HuggingFaceSwarms/chatbot-project
+DEFAULT_SWARM_REPO = "HuggingFaceSwarms/SwarmChat-v5"
 TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # Prompt tokens reserved when deriving max_tokens from a Hub model's context length
@@ -76,8 +77,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", choices=["swarmchat", "vllm", "endpoint"],
                         help="default: swarmchat for SwarmChat, vllm otherwise")
     parser.add_argument("--revision", nargs="+", default=["main"],
-                        help="chatbot-swarm commits for SwarmChat (one Job each), or the Hub "
+                        help="commits of --swarm_repo for SwarmChat (one Job each), or the Hub "
                              "model revision for vllm")
+    parser.add_argument("--swarm_repo", default=DEFAULT_SWARM_REPO,
+                        help="the dataset repo of the swarm's chatbot, SwarmChat's model ID")
     parser.add_argument("--task", choices=list(TASKS), default="smoltalk_bench_gold")
     parser.add_argument("--judge", default=JUDGE, help="Inspect model string of the judge")
     parser.add_argument("--bucket", default=DEFAULT_BUCKET, help="Storage Bucket for the logs")
@@ -229,15 +232,17 @@ def main():
     for requested in args.revision:
         commit = None
         if backend == "swarmchat":
-            info = api.dataset_info(SWARMCHAT_REPO, revision=requested)
+            info = api.dataset_info(args.swarm_repo, revision=requested)
             commit, revision = info.sha, swarmchat_revision(info.sha, info.last_modified)
+            # The repo's current name, should it have been renamed since
+            model_id = info.id
         else:
             revision = requested if backend == "vllm" else "main"
-        model_id = SWARMCHAT_ID if backend == "swarmchat" else log_model_id(args.model)
+            model_id = log_model_id(args.model)
         metadata = {
             "model_id": model_id, "revision": revision, "backend": backend,
             "commit": commit, "commit_url": commit and
-            f"https://huggingface.co/datasets/{SWARMCHAT_REPO}/tree/{commit}",
+            f"https://huggingface.co/datasets/{model_id}/tree/{commit}",
             "judge": args.judge, **sampling, "max_tokens": max_tokens,
             "chat_template_kwargs": args.chat_template_kwargs,
         }
@@ -258,7 +263,8 @@ def main():
                    "--output_dir", f"hf://buckets/{args.bucket}/{output_path}",
                    "--eval_kwargs", json.dumps(eval_kwargs)]
         if commit:
-            command += ["--revision", commit, "--workers", str(max_connections)]
+            command += ["--swarm_repo", model_id, "--revision", commit,
+                        "--workers", str(max_connections)]
         if vllm_args:
             command += ["--vllm_args", *(f"{k}={v}" for k, v in vllm_args.items())]
         jobs.append({

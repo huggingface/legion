@@ -380,23 +380,27 @@ def test_job_files_go_to_the_output_bucket_namespace(monkeypatch, capsys):
     assert "experiments/run4/eval/hf_job.py" in calls["files"]
 
 
+class SwarmApi:
+    """The Hub as evaluate.py sees it for SwarmChat dry runs."""
+
+    def __init__(self, token):
+        pass
+
+    def dataset_info(self, repo_id, revision):
+        # chatbot-v6 was renamed SwarmChat-v6
+        return types.SimpleNamespace(id=repo_id.replace("chatbot-", "SwarmChat-"),
+                                     sha="d8645ac9e103" + "0" * 28,
+                                     last_modified=datetime(2026, 10, 29, 0, 44, 31, tzinfo=UTC))
+
+    def list_jobs_hardware(self):
+        return [types.SimpleNamespace(name="cpu-basic", cpu="2 vCPU", accelerator=None),
+                types.SimpleNamespace(name="cpu-upgrade", cpu="8 vCPU", accelerator=None),
+                types.SimpleNamespace(name="cpu-xl", cpu="16 vCPU", accelerator=None)]
+
+
 def test_swarmchat_runs_one_conversation_per_vcpu(monkeypatch, capsys):
     evaluate = load("evaluate")
-    committed = datetime(2026, 10, 29, 0, 44, 31, tzinfo=UTC)
-
-    class Api:
-        def __init__(self, token):
-            pass
-
-        def dataset_info(self, repo_id, revision):
-            return types.SimpleNamespace(sha="d8645ac9e103" + "0" * 28, last_modified=committed)
-
-        def list_jobs_hardware(self):
-            return [types.SimpleNamespace(name="cpu-basic", cpu="2 vCPU", accelerator=None),
-                    types.SimpleNamespace(name="cpu-upgrade", cpu="8 vCPU", accelerator=None),
-                    types.SimpleNamespace(name="cpu-xl", cpu="16 vCPU", accelerator=None)]
-
-    monkeypatch.setattr(evaluate, "HfApi", Api)
+    monkeypatch.setattr(evaluate, "HfApi", SwarmApi)
     monkeypatch.setattr(evaluate, "get_token", lambda: "token")
     for extra, flavor, workers in (([], "cpu-upgrade", "8"), (["--flavor", "cpu-xl"], "cpu-xl", "16")):
         monkeypatch.setattr(sys, "argv", ["evaluate.py", "--model", "SwarmChat", "--namespace",
@@ -405,6 +409,25 @@ def test_swarmchat_runs_one_conversation_per_vcpu(monkeypatch, capsys):
         [job] = json.loads(capsys.readouterr().out)
         command = job["command"]
         assert job["flavor"] == flavor
-        assert "/HuggingFaceSwarms/SwarmChat-v4/20261029T004431Z-d8645ac9e103/" in job["output_url"]
+        assert "/HuggingFaceSwarms/SwarmChat-v5/20261029T004431Z-d8645ac9e103/" in job["output_url"]
+        assert command[command.index("--swarm_repo") + 1] == "HuggingFaceSwarms/SwarmChat-v5"
         assert command[command.index("--workers") + 1] == workers
         assert json.loads(command[command.index("--eval_kwargs") + 1])["max_connections"] == int(workers)
+
+
+def test_swarmchat_is_filed_under_its_repo(monkeypatch, capsys):
+    evaluate = load("evaluate")
+    monkeypatch.setattr(evaluate, "HfApi", SwarmApi)
+    monkeypatch.setattr(evaluate, "get_token", lambda: "token")
+    monkeypatch.setattr(sys, "argv", ["evaluate.py", "--model", "SwarmChat", "--swarm_repo",
+                                      "HuggingFaceSwarms/chatbot-v6", "--namespace", "lewtun",
+                                      "--dry_run"])
+    evaluate.main()
+    [job] = json.loads(capsys.readouterr().out)
+    command = job["command"]
+    metadata = json.loads(command[command.index("--eval_kwargs") + 1])["metadata"]
+    assert command[command.index("--swarm_repo") + 1] == "HuggingFaceSwarms/SwarmChat-v6"
+    assert metadata["model_id"] == "HuggingFaceSwarms/SwarmChat-v6"
+    assert metadata["commit_url"].startswith(
+        "https://huggingface.co/datasets/HuggingFaceSwarms/SwarmChat-v6/tree/d8645ac9e103")
+    assert "/HuggingFaceSwarms/SwarmChat-v6/20261029T004431Z-d8645ac9e103/" in job["output_url"]

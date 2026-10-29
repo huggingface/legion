@@ -27,7 +27,6 @@ RUNTIME_ENV_VAR = "SMOLTALK_EVAL_RUNTIME"
 LOG_DIR = Path("/tmp/inspect-logs")
 PORT = 8000
 STARTUP_TIMEOUT = 900
-SWARMCHAT_REPO = "cmpatino/chatbot-swarm"
 SCORER, PRIMARY_METRIC = "alpaca_eval_judge", "length_controlled_win_rate"
 
 
@@ -36,7 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True,
                         help="SwarmChat, a Hub repo ID for vllm or an Inspect model string")
     parser.add_argument("--backend", choices=["swarmchat", "vllm", "endpoint"], required=True)
-    parser.add_argument("--revision", help="chatbot-swarm commit for swarmchat")
+    parser.add_argument("--swarm_repo", help="dataset repo of the swarm's chatbot for swarmchat")
+    parser.add_argument("--revision", help="commit of --swarm_repo for swarmchat")
     parser.add_argument("--task", required=True, help="Inspect task, e.g. smoltalk_bench.py@...")
     parser.add_argument("--output_dir", required=True, help="hf://buckets/... folder")
     parser.add_argument("--eval_kwargs", type=json.loads, required=True,
@@ -88,11 +88,11 @@ def stop(server: subprocess.Popen) -> None:
         server.wait()
 
 
-def start_swarmchat(revision: str, workers: int) -> subprocess.Popen:
+def start_swarmchat(repo_id: str, revision: str, workers: int) -> subprocess.Popen:
     from huggingface_hub import snapshot_download
 
-    tree = snapshot_download(SWARMCHAT_REPO, repo_type="dataset", revision=revision,
-                             allow_patterns=["bot/**"], local_dir="/tmp/chatbot-swarm")
+    tree = snapshot_download(repo_id, repo_type="dataset", revision=revision,
+                             allow_patterns=["bot/**"], local_dir="/tmp/swarmchat")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     server = subprocess.Popen(
         [sys.executable, str(EVAL_DIR / "swarmchat_server.py"), tree, "--port", str(PORT),
@@ -178,7 +178,7 @@ def main():
     try:
         model = args.model
         if args.backend == "swarmchat":
-            server = start_swarmchat(args.revision, args.workers)
+            server = start_swarmchat(args.swarm_repo, args.revision, args.workers)
             model = "openai-api/swarmchat/SwarmChat"
         elif args.backend == "vllm":
             server = start_vllm(args.model, args.vllm_args)
