@@ -70,6 +70,7 @@ class ManagedBoard:
         self._closed = False
         self._snapshot_at: str | None = None
         self._cancel_start = threading.Event()
+        self._viewer = None
 
     def _acquire(self) -> None:
         import fcntl
@@ -165,6 +166,14 @@ class ManagedBoard:
                     assert spec is not None and spec.comms is not None
                     self._provision(spec)
                 self.snapshot()
+                if self.bucket:
+                    try:
+                        from flock.board_viewer.export import Publisher
+                        self._viewer = Publisher(self.bucket, self.local)
+                        self._viewer.start()
+                    except Exception:  # noqa: BLE001 — redact upstream errors and retain last good data
+                        self._viewer = None
+                        log.warning("Board viewer publisher could not start")
             except BaseException as exc:
                 try:
                     self._terminate()
@@ -354,17 +363,39 @@ class ManagedBoard:
             if self._closed:
                 return
             self._closed = True
+            if self._viewer and not self._viewer.stop():
+                self._viewer = None
             self._terminate()
             saved = False
+            final_export = None
             try:
                 if self.bucket:
+                    if self._viewer:
+                        try:
+                            from flock.board_viewer.export import capture
+                            final_export = tempfile.TemporaryDirectory(prefix="flock-viewer-final-")
+                            capture(self.local, Path(final_export.name))
+                        except Exception:  # noqa: BLE001 — redact upstream errors and retain last good data
+                            if final_export:
+                                final_export.cleanup()
+                            final_export = None
+                            log.warning("Final viewer snapshot failed; retaining previous export")
                     self.bucket.stop(verify=True)
+                    if final_export:
+                        try:
+                            from flock.board_viewer.export import publish
+                            publish(self._viewer.api, self._viewer.bucket, self._viewer.prefix,
+                                    Path(final_export.name), completed=True)
+                        except Exception:  # noqa: BLE001 — redact upstream errors and retain last good data
+                            log.warning("Final viewer upload failed; retaining previous export")
                 else:
                     self.snapshot()
                 saved = True
             except BucketStorageError as exc:
                 raise ManagedBoardError(str(exc)) from None
             finally:
+                if final_export:
+                    final_export.cleanup()
                 if not saved:
                     log.error("Board persistence failed; live data retained at %s", self.local)
                 try:

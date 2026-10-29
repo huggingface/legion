@@ -52,6 +52,10 @@ class Hub:
         self.remote = {}
         self.downloads = 0
 
+    def batch_bucket_files(self, bucket_id, *, add):
+        for source, dest in add:
+            self.remote[dest] = source if isinstance(source, bytes) else Path(source).read_bytes()
+
     def bucket_info(self, bucket_id):
         return SimpleNamespace(private=self.private)
 
@@ -298,6 +302,8 @@ def fake_mounts(tmp_path, monkeypatch):
     remote = {}
     instances = []
     hub = Hub()
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda **kw: hub)
     monkeypatch.setattr(bucket, "_mount_entry", lambda _: None)
 
     class Mount(BucketMount):
@@ -577,3 +583,55 @@ def test_checkpoint_normalizes_sidecars_only_after_database_is_closed(stopped_bo
     with contextlib.closing(sqlite3.connect(m.mount / "board.db")) as conn:
         assert conn.execute("SELECT body FROM messages").fetchall() == [("retained",)]
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_bucket_viewer_final_export_follows_verified_shutdown(tmp_path, fake_mounts):
+    cfg = {"kind": "hf-bucket", "bucket": "team/private", "mount_root": str(tmp_path / "scratch")}
+    b = ManagedBoard(tmp_path / "viewer-run")
+    b.start(spec(storage=cfg))
+    api = b._viewer.api
+    prefix = b.bucket.prefix.removesuffix("board") + "viewer/"
+    try:
+        with join(b) as client:
+            channel = client.get("/v1/channels").json()["channels"][0]["id"]
+            client.post(f"/v1/channels/{channel}/messages", json={"body": "final viewer message"},
+                        headers={"Idempotency-Key": "viewer"}).raise_for_status()
+    finally:
+        b.stop()
+    manifest = json.loads(api.remote[prefix + "manifest.json"])
+    assert manifest["completed"] and b.bucket.verified_at
+    doc = json.loads(api.remote[prefix + manifest["generation"] + "/board.json"])
+    assert any(m["body"] == "final viewer message" for m in doc["messages"])
+
+
+def test_viewer_upload_failure_does_not_fail_board_persistence(tmp_path, fake_mounts, monkeypatch):
+    from flock.board_viewer import export
+
+    def fail(*args, **kwargs):
+        raise OSError("fake upload unavailable")
+
+    monkeypatch.setattr(export, "publish", fail)
+    cfg = {"kind": "hf-bucket", "bucket": "team/private", "mount_root": str(tmp_path / "scratch")}
+    b = ManagedBoard(tmp_path / "failed-viewer-run")
+    b.start(spec(storage=cfg))
+    b.stop()
+    assert b.bucket.verified_at
+    assert not b._viewer.thread.is_alive()
+
+
+def test_failed_bucket_verification_never_marks_viewer_complete(tmp_path, fake_mounts, monkeypatch):
+    cfg = {"kind": "hf-bucket", "bucket": "team/private", "mount_root": str(tmp_path / "scratch")}
+    b = ManagedBoard(tmp_path / "unverified-viewer-run")
+    b.start(spec(storage=cfg))
+    b._viewer.stop()
+    b._viewer.once()
+    api = b._viewer.api
+    prefix = b.bucket.prefix.removesuffix("board") + "viewer/"
+
+    def fail(*args):
+        raise BucketStorageError("fake verification failure")
+
+    monkeypatch.setattr(b.bucket, "_verify", fail)
+    with pytest.raises(ManagedBoardError, match="verification"):
+        b.stop()
+    assert not json.loads(api.remote[prefix + "manifest.json"])["completed"]
