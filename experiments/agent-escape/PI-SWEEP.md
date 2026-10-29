@@ -81,3 +81,23 @@ The 500-character post limit and instruction to read every three puzzle actions 
 The experiment matrix, three pilot gates, low reasoning, 200-call limit, 60-minute
 attempt limit, and maximum eight concurrent experiments are unchanged.
 Preparing these files does not submit jobs. Run the submit command only after approval.
+
+
+## Reliability gates and retries (2026-10-29)
+
+Submission now runs a 30-minute real-bucket stress/fault gate, eight concurrent synthetic
+experiments and three live Pi pilots (d5/n4, d10/n4, d5/n32). Only after every gate passes does
+it launch the fresh shuffled 75-trial array, at most eight concurrent attempts.
+
+Each attempt has five minutes startup, 60 minutes work after all conversations reach the
+first-request barrier, up to 15 minutes drain, and cleanup within a 90-minute allocation.
+The Pi timeout is 80 minutes; the proxy enforces a 900-second absolute upstream deadline.
+Disconnecting a client does not abort usage collection. Generation remains 16K, context 64K,
+reasoning low, 200 calls per agent, five-second polling and unlimited board rates.
+
+The finalizer joins Slurm states and retains every attempt. Only NODE_FAIL and explicit
+startup failures receive one fresh retry with a fresh board/session identity; cancellations,
+budget exhaustion, board crashes and accounting failures do not. Retrying never adds a fourth
+replicate. Results include partial observed costs separately from complete measured totals;
+plots still average only valid successful trials. A durable submission intent prevents duplicate
+retry arrays after an ambiguous scheduler response; reconcile the named job before resubmitting.

@@ -77,7 +77,8 @@ def test_proxy_records_usage_forwards_session_and_closes_admission(tmp_path, str
         assert seen[0].headers["X-Session-ID"] == "conversation-1"
         assert proxy.summarize(tmp_path / "model-requests.jsonl")["total_tokens"] == 120
         client.post("/close")
-        assert client.get("/health").json() == {"active": 0, "closed": True}
+        assert client.get("/health").json()["active"] == 0
+        assert client.get("/health").json()["closed"]
         assert client.post("/v1/chat/completions", headers=headers, json=body).status_code == 200
         assert len(seen) == 1
         assert client.post("/v1/chat/completions", json=body).status_code == 401
@@ -158,3 +159,144 @@ def test_review_config_and_generation_gate(tmp_path, sweep):
     row["settings"]["max_completion_tokens"] = 4096
     journal.write_text(json.dumps(row) + "\n")
     assert "incorrect reasoning or generation cap" in sweep.gate_errors(result, 1, tmp_path)
+
+
+async def test_cancelled_client_still_records_final_usage(tmp_path):
+    import asyncio
+
+    sent = asyncio.Event()
+    release = asyncio.Event()
+
+    class Chunks(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices": []}\n\n'
+            sent.set()
+            await release.wait()
+            yield b'data: {"usage": {"prompt_tokens": 10, "completion_tokens": 7}}\n\n'
+
+    app = proxy.create_app("http://upstream/v1", "key", tmp_path)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Chunks()))
+    ) as backend:
+        app.state.client = backend
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as client:
+            task = asyncio.create_task(client.post("/v1/chat/completions",
+                json={"model": "fake", "stream": True},
+                headers={"Authorization": "Bearer key", "X-Session-ID": "a"}))
+            await asyncio.wait_for(sent.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert (await client.get("/health")).json()["active"] == 1
+            release.set()
+            for _ in range(100):
+                if (await client.get("/health")).json()["active"] == 0:
+                    break
+                await asyncio.sleep(.01)
+            result = proxy.summarize(tmp_path / "model-requests.jsonl")
+            assert result["complete"] and result["total_tokens"] == 17
+
+
+async def test_absolute_request_deadline_and_startup_timeout(tmp_path):
+    import asyncio
+
+    class Endless(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                yield b'data: {"choices": []}\n\n'
+                await asyncio.sleep(.005)
+
+    app = proxy.create_app("http://upstream/v1", "key", tmp_path, request_timeout=.05)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Endless()))
+    ) as backend:
+        app.state.client = backend
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as client:
+            await asyncio.wait_for(client.post("/v1/chat/completions",
+                json={"model": "fake", "stream": True},
+                headers={"Authorization": "Bearer key", "X-Session-ID": "a"}), 2)
+            assert (await client.get("/health")).json()["active"] == 0
+    rows = [json.loads(line) for line in (tmp_path / "model-requests.jsonl").read_text().splitlines()]
+    assert rows[-1]["error"] == "request_deadline"
+    assert not proxy.summarize(tmp_path / "model-requests.jsonl")["complete"]
+    app = proxy.create_app("http://upstream/v1", "key", tmp_path, agents=2, startup_timeout=.02)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/chat/completions", json={"model": "fake"},
+            headers={"Authorization": "Bearer key", "X-Session-ID": "a"})
+        assert response.status_code == 503
+        assert (await client.get("/health")).json()["missing_count"] == 1
+
+
+def test_scheduler_classification_and_retry_selection(tmp_path, sweep):
+    tasks = []
+    reasons = ["startup_failure", "cancelled", "ok", "failed", "unknown"]
+    for i, reason in enumerate(reasons):
+        folder = tmp_path / str(i)
+        folder.mkdir()
+        task = {"config": str(folder / "config.json"), "difficulty": 5, "agents": 2, "trial": i}
+        tasks.append(task)
+        sweep.slurm.write_json(folder / "summary.json", [{"exit_code": 1, "result": {
+            "infrastructure_outcome": reason, "reason": "timeout" if i == 2 else reason,
+            "accounting": {"complete": i == 2, "total_tokens": 100}}}])
+    states = {"0": "FAILED", "1": "CANCELLED", "2": "FAILED", "3": "FAILED", "4": "NODE_FAIL"}
+    sweep.slurm.write_json(tmp_path / "scheduler-states.json", states)
+    manifest = tmp_path / "manifest.json"
+    sweep.slurm.write_json(manifest, {"tasks": tasks})
+    rows = sweep.collect(manifest)
+    assert [r["infrastructure_outcome"] for r in rows] == [
+        "startup_failure", "cancelled", "ok", "failed", "node_failure"]
+    assert rows[2]["measurement_valid"] and rows[2]["normalized_tokens"] == 50
+    assert not rows[2]["success"]
+    assert rows[4]["total_tokens"] is None
+
+
+def test_finalizer_retries_once_and_preserves_attempts(tmp_path, sweep, monkeypatch):
+    folder = tmp_path / "primary"
+    folder.mkdir()
+    task = {"config": str(folder / "config.json"), "difficulty": 5, "agents": 2, "trial": 1}
+    manifest = tmp_path / "manifest.json"
+    secret = tmp_path / "secrets.json"
+    sweep.slurm.write_json(secret, {"HF_TOKEN": "fake"})
+    sweep.slurm.write_json(manifest, {"tasks": [task], "server_run": "server", "secrets_file": str(secret)})
+    sweep.slurm.write_json(tmp_path / "array-submission.json", {"job_id": "100"})
+    monkeypatch.setattr(sweep, "scheduler_states", lambda job: {
+        "100_0": "NODE_FAIL", "200_0": "FAILED"})
+    monkeypatch.setattr(sweep, "prepare_task", lambda root, server, row, label: root / label / "config.json")
+    calls = []
+    def batch(root, mode, argument, **kwargs):
+        calls.append(mode)
+        return {"job_id": "200" if mode == "retry" else "201"}
+    monkeypatch.setattr(sweep, "batch", batch)
+    monkeypatch.setattr(sweep, "analyze", lambda path: 0)
+    assert sweep.finalize(manifest) == 0
+    assert calls == ["retry", "finalize"]
+    assert sweep.finalize(manifest) == 0
+    assert calls == ["retry", "finalize"]
+    rows = sweep.collect(manifest)
+    assert len(rows) == 1 and rows[0]["attempt_count"] == 2
+    assert len(rows[0]["attempt_history"]) == 2
+    assert not secret.exists()
+
+
+def test_scheduler_uses_array_task_ids_not_allocation_ids(sweep, monkeypatch):
+    def sacct(command, **kwargs):
+        assert "--format=JobID%100,State" in command
+        return "123_0|NODE_FAIL\n123_1|CANCELLED by 1000\n123_1.batch|CANCELLED\n"
+    monkeypatch.setattr(sweep.subprocess, "check_output", sacct)
+    assert sweep.scheduler_states("123")["123_0"] == "NODE_FAIL"
+    assert sweep.scheduler_states("123")["123_1"] == "CANCELLED"
+
+
+def test_truncated_journal_retains_observed_costs(tmp_path):
+    path = tmp_path / "model-requests.jsonl"
+    rows = [{"event": "start", "id": "1", "session_id": "a"},
+            {"event": "end", "id": "1", "status": 200,
+             "usage": {"prompt_tokens": 10, "completion_tokens": 2}}]
+    path.write_text("\n".join(map(json.dumps, rows)) + '\n{"event": "sta')
+    report = proxy.summarize(path)
+    assert not report["complete"] and report["total_tokens"] == 12
+    assert report["malformed_records"] == 1

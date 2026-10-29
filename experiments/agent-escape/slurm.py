@@ -71,12 +71,13 @@ def prepare(args):
     (output / "spec.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
     write_json(output / "secrets.json", {"HF_TOKEN": os.environ["HF_TOKEN"], "LOCAL_KEY": key})
     sources = [HERE / name for name in ["run.py", "world.py", "prompt.md", "slurm.py", "run.slurm", "usage_proxy.py", "prompt-pi.md"]]
-    sources += [ROOT / "src/flock/worker/adapters" / name
-                for name in ("pi.py", "pi_tools.mjs")]
+    sources += sorted((ROOT / "src/flock").rglob("*.py"))
+    sources += [ROOT / "src/flock/worker/adapters/pi_tools.mjs", output / "spec.yaml"]
     config = {"output": str(output), "spec": str(output / "spec.yaml"),
               "endpoint": endpoint, "difficulties": args.difficulties,
               "scenario_index": args.scenario_index, "timeout": args.timeout,
               "agents": getattr(args, "agents", 4), "trial": getattr(args, "trial", 1),
+              "attempt_number": getattr(args, "attempt_number", 1),
               "secrets_file": str(output / "secrets.json"),
               "source_sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
               "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"],
@@ -148,7 +149,7 @@ def run(config_path):
     def wait_for_stop():
         if process is None or process.poll() is not None:
             return
-        remaining = max(0, 180 - (time.monotonic() - stop_at)) if stop_at is not None else 180
+        remaining = max(0, 1200 - (time.monotonic() - stop_at)) if stop_at is not None else 1200
         try:
             process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
@@ -182,14 +183,15 @@ def run(config_path):
                            "--difficulty", str(difficulty), "--scenario-index",
                            str(config["scenario_index"]), "--timeout", str(config["timeout"]),
                            "--agents", str(config.get("agents", 4)),
-                           "--trial", str(config.get("trial", 1))]
+                           "--trial", str(config.get("trial", 1)),
+                           "--attempt-number", str(config.get("attempt_number", 1))]
                 attempt = None
                 print(f"START difficulty={difficulty} scenario={config['scenario_index']}", flush=True)
                 with (output / f"{label}.log").open("w") as log, (
                         output / f"{label}-metrics.jsonl").open("w") as metrics:
                     process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log,
                                                stderr=subprocess.STDOUT, start_new_session=True)
-                    deadline = time.monotonic() + config["timeout"] + 240
+                    deadline = time.monotonic() + config["timeout"] + 1500
                     while True:
                         metrics.write(json.dumps({"time": time.time(), "backends":
                             sample_metrics(client, config["endpoint"].get("instances", []))}) + "\n")
@@ -203,7 +205,7 @@ def run(config_path):
                         if process.poll() is not None:
                             break
                         if time.monotonic() > deadline or (
-                                stop_at is not None and time.monotonic() - stop_at > 180):
+                                stop_at is not None and time.monotonic() - stop_at > 1200):
                             stop()
                             wait_for_stop()
                             break

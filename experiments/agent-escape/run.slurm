@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00
-#SBATCH --signal=B:TERM@300
+#SBATCH --signal=B:TERM@1200
 #SBATCH --no-requeue
 set -euo pipefail
 umask 077

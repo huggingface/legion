@@ -41,7 +41,7 @@ types:
     max_working_per_worker: 1
     comms: true
     max_turns: 200
-    turn_timeout: 60m
+    turn_timeout: 80m
     system_prompt_file: prompt-pi.md
     env:
       FLOCK_COMMS_RATE: '0'

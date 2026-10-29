@@ -69,6 +69,7 @@ def main():
                         help="Zero-based index in sorted scenario filenames (default: 0)")
     parser.add_argument("--agents", type=int, default=None)
     parser.add_argument("--trial", type=int, default=1)
+    parser.add_argument("--attempt-number", type=int, default=1)
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -107,7 +108,7 @@ def main():
         provider["max_working"] = agents
     stamp = time.strftime("%Y%m%dt%H%M%Sz", time.gmtime())
     spec["swarm"] = (f"escape-{workers['harness']}-qwen27b-d{args.difficulty}-s{args.scenario_index:02d}"
-                     f"-n{agents:02d}-r{args.trial:02d}-{stamp}-{run_id[:8]}")
+                     f"-n{agents:02d}-r{args.trial:02d}-a{args.attempt_number:02d}-{stamp}-{run_id[:8]}")
     spec["comms"]["kickoff"] = (f"{agents} workers have independent copies of the same puzzle. "
                                 "Share exact discoveries and inputs in general.")
     if (
@@ -154,6 +155,7 @@ def main():
         "run_id": run_id,
         "agents": agents,
         "trial": args.trial,
+        "attempt_number": args.attempt_number,
         "harness": workers["harness"],
         "upstream": upstream,
         **selection,
@@ -171,6 +173,8 @@ def main():
     reason = "error"
     failure = None
     started = time.monotonic()
+    work_started = None
+    startup = {}
     try:
         if proxy_url:
             with (output / "usage-proxy.log").open("w") as log:
@@ -259,7 +263,16 @@ def main():
             if flock.poll() is not None:
                 reason = "idle" if flock.returncode == 0 else "flock_error"
                 break
-            if time.monotonic() - started >= args.timeout:
+            if proxy_url:
+                startup = httpx.get(proxy_url + "/health", timeout=5).json()
+                if startup.get("barrier_opened") and work_started is None:
+                    work_started = time.monotonic()
+                if work_started is None and time.monotonic() - started >= 300:
+                    reason = "startup_timeout"
+                    break
+            elif work_started is None:
+                work_started = started
+            if work_started is not None and time.monotonic() - work_started >= args.timeout:
                 reason = "timeout"
                 break
             time.sleep(1)
@@ -268,11 +281,13 @@ def main():
     except (OSError, RuntimeError, httpx.HTTPError) as exc:
         failure = str(exc)
     finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         if proxy_url and proxy and proxy.poll() is None:
             try:
                 with httpx.Client(timeout=5) as client:
                     client.post(proxy_url + "/close").raise_for_status()
-                    deadline = time.monotonic() + 180
+                    deadline = time.monotonic() + 905
                     while client.get(proxy_url + "/health").json()["active"]:
                         if time.monotonic() >= deadline:
                             failure = "Model calls did not drain; accounting may be incomplete"
@@ -295,8 +310,10 @@ def main():
             **selection,
             "agents": agents,
             "trial": args.trial,
+            "attempt_number": args.attempt_number,
             "harness": workers["harness"],
             "reason": reason,
+            "startup": startup,
             "success": json.loads(success.read_text()) if success.exists() else None,
             "error": failure,
             "elapsed_seconds": time.monotonic() - started,
@@ -316,6 +333,10 @@ def main():
             bundle = json.loads(bundles[0].read_text())
             report["flock_bundle"] = str(bundles[0].relative_to(output))
             report["totals"] = bundle.get("totals", {})
+            report["flock_stop_reason"] = bundle.get("stop_reason")
+            startup_path = bundles[0].parent / "startup.json"
+            if startup_path.exists():
+                report["prompt_delivery"] = json.loads(startup_path.read_text())
             board_path = bundles[0].parent / "board/metadata.json"
             if board_path.exists():
                 board = json.loads(board_path.read_text())
@@ -323,6 +344,24 @@ def main():
                     "location": board.get("data_dir"),
                     "verified_at": board.get("storage", {}).get("verified_at"),
                 }
+        report["puzzle_outcome"] = ("solved" if report["success"] else
+                                     "budget_exhausted" if reason == "timeout" else "unsolved")
+        report["infrastructure_outcome"] = (
+            "startup_failure" if reason == "startup_timeout" else
+            "cancelled" if reason == "interrupted" else
+            "failed" if failure or reason in {"error", "flock_error"} else "ok")
+        if reason != "interrupted":
+            if report.get("flock_stop_reason") == "startup_timeout":
+                report["infrastructure_outcome"] = "startup_failure"
+            elif (report.get("flock_stop_reason") or "").startswith("board"):
+                report["infrastructure_outcome"] = "board_failure"
+            elif report["flock_exit_code"] not in {None, 0}:
+                report["infrastructure_outcome"] = "failed"
+            elif report.get("measurement_error") and report["infrastructure_outcome"] == "ok":
+                report["infrastructure_outcome"] = "accounting_failure"
+        report["measurement_valid"] = bool(report.get("accounting", {}).get("complete"))
+        report["persistence_status"] = ("verified" if report.get("board", {}).get("verified_at")
+                                        else "unverified")
         if report["success"]:
             report["time_to_success_seconds"] = report["success"]["time"] - metadata["started"]
         (output / "result.json").write_text(json.dumps(report, indent=2))

@@ -2,7 +2,7 @@
 #SBATCH --job-name=escape-pi-sweep
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --signal=B:TERM@300
+#SBATCH --signal=B:TERM@1200
 #SBATCH --no-requeue
 set -euo pipefail
 umask 077
