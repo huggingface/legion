@@ -27,7 +27,8 @@ RUNTIME_ENV_VAR = "SMOLTALK_EVAL_RUNTIME"
 LOG_DIR = Path("/tmp/inspect-logs")
 PORT = 8000
 STARTUP_TIMEOUT = 900
-SCORER, PRIMARY_METRIC = "alpaca_eval_judge", "length_controlled_win_rate"
+SCORER = "alpaca_eval_judge"
+PRIMARY_METRIC, PRIMARY_METRIC_ERROR = "length_controlled_win_rate", "lc_standard_error"
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,7 +134,8 @@ def _json_value(value):
 
 
 def build_summary(log) -> dict:
-    """The primary metric, all metrics and sample counts of an Inspect log."""
+    """The primary metric with its standard error, all metrics and sample counts of an
+    Inspect log."""
     samples = log.samples or []
     scores = [s.scores.get(SCORER) for s in samples if s.scores]
     judged = [s for s in scores if s is not None and isinstance(s.value, float)
@@ -159,7 +161,8 @@ def build_summary(log) -> dict:
     metrics = {m.name: _json_value(m.value) for score in log.results.scores
                if score.name == SCORER for m in score.metrics.values()}
     return {"metadata": metadata,
-            "primary_metric": {"name": PRIMARY_METRIC, "value": metrics.get(PRIMARY_METRIC)},
+            "primary_metric": {"name": PRIMARY_METRIC, "value": metrics.get(PRIMARY_METRIC),
+                               "standard_error": metrics.get(PRIMARY_METRIC_ERROR)},
             "metrics": metrics}
 
 
@@ -191,7 +194,9 @@ def main():
         if status == "success":
             summary = build_summary(read_eval_log(log.location))
             (LOG_DIR / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-            print(f"{log.eval.task}: {PRIMARY_METRIC} = {summary['primary_metric']['value']}")
+            primary = summary["primary_metric"]
+            print(f"{log.eval.task}: {PRIMARY_METRIC} = {primary['value']} "
+                  f"± {primary['standard_error']}")
     finally:
         if server is not None:
             stop(server)

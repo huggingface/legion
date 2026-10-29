@@ -281,9 +281,9 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     summary = hf_job.build_summary(log)
     assert summary["metrics"]["win_rate"] == pytest.approx(50)
     assert summary["metrics"]["n_total"] == 2
-    assert summary["primary_metric"]["name"] == "length_controlled_win_rate"
     # Too few samples for the GLM: NaN, written as null.
-    assert summary["primary_metric"]["value"] is None
+    assert summary["primary_metric"] == {"name": "length_controlled_win_rate", "value": None,
+                                         "standard_error": None}
     assert summary["metadata"] | {"judged_samples": 2, "model_id": "mock",
                                   "model_roles": {"grader": "mockllm/judge"}} == summary["metadata"]
     json.dumps(summary)

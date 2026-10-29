@@ -80,7 +80,8 @@ passed with `--bucket`:
 ```
 <model>/<revision>/smoltalk_bench_gold/<timestamp>/
 ├── <timestamp>_smoltalk-bench-gold_<id>.eval    # Inspect log
-├── summary.json                                 # primary metric, all metrics, sample counts
+├── summary.json                                 # primary metric and its standard error,
+│                                                #   all metrics, sample counts
 └── swarmchat_server.log                         # SwarmChat only, if the bot wrote to stderr
 ```
 
