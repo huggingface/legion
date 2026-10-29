@@ -300,3 +300,59 @@ def test_truncated_journal_retains_observed_costs(tmp_path):
     report = proxy.summarize(path)
     assert not report["complete"] and report["total_tokens"] == 12
     assert report["malformed_records"] == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_open_barrier_survives_startup_deadline_and_close(tmp_path, monkeypatch, stream):
+    import time
+    from types import SimpleNamespace
+
+    now = 0.0
+    monkeypatch.setattr(proxy, "time", SimpleNamespace(time=time.time, monotonic=lambda: now))
+    seen = []
+    usage = {"prompt_tokens": 10, "completion_tokens": 2}
+    def upstream(request):
+        seen.append(request)
+        if stream:
+            return httpx.Response(200, text='data: ' + json.dumps({"usage": usage}) + '\n\n')
+        return httpx.Response(200, json={"usage": usage})
+    app = proxy.create_app("http://upstream/v1", "key", tmp_path)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    ) as backend:
+        app.state.client = backend
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as client:
+            async def request():
+                return await client.post("/v1/chat/completions",
+                    json={"model": "fake", "stream": stream},
+                    headers={"Authorization": "Bearer key", "X-Session-ID": "a"})
+            assert (await request()).status_code == 200
+            opened = (await client.get("/health")).json()["barrier_opened"]
+            for now in (300, 301, 3600):
+                assert (await request()).status_code == 200
+            assert len(seen) == 4
+            assert (await client.get("/health")).json()["barrier_opened"] == opened
+            await client.post("/close")
+            assert (await request()).status_code == 200
+            assert len(seen) == 4
+    assert proxy.summarize(tmp_path / "model-requests.jsonl")["complete"]
+
+
+async def test_late_first_arrival_does_not_open_expired_barrier(tmp_path, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    now = 0.0
+    monkeypatch.setattr(proxy, "time", SimpleNamespace(time=time.time, monotonic=lambda: now))
+    app = proxy.create_app("http://upstream/v1", "key", tmp_path)
+    now = 301
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        body = {"model": "fake"}
+        headers = {"Authorization": "Bearer key", "X-Session-ID": "a"}
+        assert (await client.post("/v1/chat/completions", json=body, headers=headers)).status_code == 503
+        assert (await client.get("/health")).json()["barrier_opened"] is None
+        await client.post("/close")
+        assert (await client.post("/v1/chat/completions", json=body, headers=headers)).status_code == 200

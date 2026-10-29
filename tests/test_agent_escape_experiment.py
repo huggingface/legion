@@ -277,3 +277,17 @@ def test_configured_agent_count_bounds_identities(world, agents):
     assert world.get_observation(Agent(f"worker-{agents-1:04d}"))["narrative"] == "Puzzle"
     with pytest.raises(ToolError, match="Unknown experiment worker"):
         world.get_observation(Agent(f"worker-{agents:04d}"))
+
+
+def test_transport_failure_detected_even_when_flock_exits_idle(runner, tmp_path):
+    event_file = tmp_path / "flock/run/events/worker-0000.jsonl"
+    event_file.parent.mkdir(parents=True)
+    rows = [
+        {"type": "turn_ended", "agent": "worker-0000", "data": {"data": {
+            "status": "error", "reason": "model_transport", "error": "private details"}}},
+        {"type": "turn_ended", "agent": "worker-0001", "data": {"data": {
+            "status": "completed"}}},
+    ]
+    event_file.write_text("\n".join(map(json.dumps, rows)))
+    assert runner.agent_transport_failures(tmp_path) == [
+        {"agent": "worker-0000", "reason": "model_transport"}]

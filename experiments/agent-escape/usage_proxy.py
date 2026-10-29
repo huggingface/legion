@@ -85,18 +85,26 @@ def create_app(upstream: str, key: str, output: Path, agents: int = 1, *, reques
         if sid not in arrivals:
             arrivals.add(sid)
             record({"event": "barrier_arrival", "session_id": sid, "time": time.time()})
-        if len(arrivals) >= agents and barrier_opened is None and not closed:
-            barrier_opened = time.time()
-            record({"event": "barrier_opened", "time": barrier_opened,
-                    "session_ids": sorted(arrivals)})
-            ready.set()
         if closed:
             ready.set()
-        try:
-            await asyncio.wait_for(ready.wait(), timeout=max(0, startup_timeout -
-                                                          (time.monotonic() - startup_started)))
-        except TimeoutError:
-            raise HTTPException(503, "Agent startup barrier timed out") from None
+        # The startup deadline applies only until the barrier opens. In particular,
+        # wait_for(event.wait(), timeout=0) can fail even for an already-set event.
+        if not ready.is_set():
+            remaining = startup_timeout - (time.monotonic() - startup_started)
+            if remaining <= 0:
+                record({"event": "barrier_timeout", "session_id": sid, "time": time.time()})
+                raise HTTPException(503, "Agent startup barrier timed out")
+            if len(arrivals) >= agents:
+                barrier_opened = time.time()
+                record({"event": "barrier_opened", "time": barrier_opened,
+                        "session_ids": sorted(arrivals)})
+                ready.set()
+            else:
+                try:
+                    await asyncio.wait_for(ready.wait(), timeout=remaining)
+                except TimeoutError:
+                    record({"event": "barrier_timeout", "session_id": sid, "time": time.time()})
+                    raise HTTPException(503, "Agent startup barrier timed out") from None
         if closed or stop_file.exists() or (output / "success.json").exists():
             # No upstream call. Finish Pi's loop without admitting further model work.
             completion = {"id": "experiment-ended", "object": "chat.completion",

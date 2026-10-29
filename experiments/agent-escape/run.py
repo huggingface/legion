@@ -55,6 +55,17 @@ def stop(process, grace=120):
         raise RuntimeError("Process did not shut down gracefully; inspect logs and mount state")
 
 
+def agent_transport_failures(output: Path) -> list[dict]:
+    failures = []
+    for event_file in (output / "flock").glob("*/events/*.jsonl"):
+        for line in event_file.read_text().splitlines():
+            event = json.loads(line)
+            data = event.get("data", {}).get("data", {})
+            if event.get("type") == "turn_ended" and data.get("reason") == "model_transport":
+                failures.append({"agent": event["agent"], "reason": "model_transport"})
+    return failures
+
+
 def main():
     def interrupted(signum, frame):
         raise KeyboardInterrupt
@@ -359,6 +370,10 @@ def main():
                 report["infrastructure_outcome"] = "failed"
             elif report.get("measurement_error") and report["infrastructure_outcome"] == "ok":
                 report["infrastructure_outcome"] = "accounting_failure"
+        agent_failures = agent_transport_failures(output)
+        report["agent_failures"] = agent_failures
+        if agent_failures and report["infrastructure_outcome"] == "ok":
+            report["infrastructure_outcome"] = "model_transport_failure"
         report["measurement_valid"] = bool(report.get("accounting", {}).get("complete"))
         report["persistence_status"] = ("verified" if report.get("board", {}).get("verified_at")
                                         else "unverified")
@@ -366,7 +381,7 @@ def main():
             report["time_to_success_seconds"] = report["success"]["time"] - metadata["started"]
         (output / "result.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2), flush=True)
-    return 0 if report["success"] and not failure and report["flock_exit_code"] == 0 and not report.get("measurement_error") else 1
+    return 0 if report["success"] and not failure and report["flock_exit_code"] == 0 and not report.get("measurement_error") and not agent_failures else 1
 
 
 if __name__ == "__main__":
