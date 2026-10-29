@@ -89,9 +89,12 @@ vllm:num_requests_waiting{engine="0"} 3
 vllm:num_requests_waiting_by_reason{reason="capacity"} 3
 vllm:kv_cache_usage_perc{engine="0"} 0.25
 vllm:prefix_cache_hits_total{engine="0"} 123
+vllm:generation_tokens_total{engine="0"} 4500
+vllm:prompt_tokens_total{engine="0"} 800
 ''')
     assert metrics == {"vllm:num_requests_running": 14, "vllm:num_requests_waiting": 3,
-                       "vllm:kv_cache_usage_perc": 0.25, "vllm:prefix_cache_hits_total": 123}
+                       "vllm:kv_cache_usage_perc": 0.25, "vllm:prefix_cache_hits_total": 123,
+                       "vllm:generation_tokens_total": 4500, "vllm:prompt_tokens_total": 800}
 
 
 async def fake_server(request):

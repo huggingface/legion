@@ -18,7 +18,8 @@ from benchmark import MODEL, measure, summarize
 
 METRICS = re.compile(
     r'^(vllm:(?:num_requests_running|num_requests_waiting|kv_cache_usage_perc|'
-    r'prefix_cache_hits_total|prefix_cache_queries_total))(?:\{.*\})?\s+(\S+)'
+    r'prefix_cache_hits_total|prefix_cache_queries_total|generation_tokens_total|'
+    r'prompt_tokens_total))(?:\{.*\})?\s+(\S+)'
 )
 
 

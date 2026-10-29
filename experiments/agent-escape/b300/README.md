@@ -114,7 +114,9 @@ recorded separately, never counted as successful natural completions.
 Each level writes `requests.jsonl`, sampled backend `metrics.jsonl`, and
 `summary.json`. Aggregate summaries include valid output tokens/s, requests/s,
 p50/p95 latency, TTFT/TPOT, errors, and observed client concurrency. Per-instance
-metrics include running/waiting requests and KV/prefix-cache counters. Content
+metrics include running/waiting requests, generated/prompt token totals, and
+KV/prefix-cache counters. Counter deltas show throughput during active serving,
+separately from the end-to-end summary that includes draining long responses. Content
 and chunk gaps are omitted by default to keep the load driver light; use
 `--save-responses` to retain them. The client raises its own soft file-descriptor
 limit when possible and refuses a ramp that exceeds its hard limit.
