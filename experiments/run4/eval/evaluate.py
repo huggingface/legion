@@ -11,7 +11,6 @@ Usage:
 uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main fdef14e9f8e3
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
 """
-from __future__ import annotations
 
 import argparse
 import json
@@ -31,7 +30,7 @@ from huggingface_hub.utils import disable_progress_bars
 ROOT = Path(__file__).resolve().parents[3]
 EVAL_DIR = "experiments/run4/eval"
 JOB_ROOT = "/workspace/flock"
-VLLM_IMAGE = "vllm/vllm-openai:v0.25.1"
+VLLM_IMAGE = "vllm/vllm-openai:v0.32.0"
 CPU_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
 DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
 DEFAULT_GPU_FLAVOR = "rtx-pro-6000"
@@ -42,6 +41,8 @@ TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # Prompt tokens reserved when deriving max_tokens from a Hub model's context length
 PROMPT_MARGIN = 512
+# Sampling for a Hub model whose generation_config.json does not set it: pure sampling
+PURE_SAMPLING = {"temperature": 1.0, "top_p": 1.0}
 PROVIDER_API_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY")
 JOB_ENV = {"HF_HUB_DISABLE_PROGRESS_BARS": "1", "TOKENIZERS_PARALLELISM": "false"}
 VLLM_JOB_ENV = {"TORCH_COMPILE_DISABLE": "1", "VLLM_USE_AOT_COMPILE": "0",
@@ -85,9 +86,10 @@ def parse_args() -> argparse.Namespace:
                              "128 for vllm, 50 for endpoint)")
     parser.add_argument("--max_tokens", type=int,
                         help="default for vllm: the context length minus a prompt margin")
-    parser.add_argument("--temperature", type=float, help="default for vllm: generation_config")
-    parser.add_argument("--top_p", type=float, help="default for vllm: generation_config")
-    parser.add_argument("--top_k", type=int, help="default for vllm: generation_config")
+    parser.add_argument("--temperature", type=float,
+                        help="default for vllm: generation_config, else 1")
+    parser.add_argument("--top_p", type=float, help="default for vllm: generation_config, else 1")
+    parser.add_argument("--top_k", type=int, help="default for vllm: generation_config, else off")
     parser.add_argument("--chat_template_kwargs", type=_json_object,
                         help="JSON object for extra_body.chat_template_kwargs")
     parser.add_argument("--model_base_url", help="base URL of an endpoint")
@@ -184,7 +186,7 @@ def main():
                      "data_parallel_size": gpu_count(api, flavor) // tensor_parallel_size,
                      "disable_uvicorn_access_log": "true", **user_vllm_args}
         generation_config = _hub_json(args.model, "generation_config.json", revision)
-        sampling = {k: v if v is not None else generation_config.get(k)
+        sampling = {k: v if v is not None else generation_config.get(k, PURE_SAMPLING.get(k))
                     for k, v in sampling.items()}
         if max_tokens is None:
             max_tokens = max_model_len - PROMPT_MARGIN
@@ -230,7 +232,7 @@ def main():
         }
         eval_kwargs = {k: v for k, v in eval_kwargs.items() if v is not None}
         output_path = f"{model_id}/{revision}/{args.task}/{timestamp}"
-        command = ["python3", f"{JOB_ROOT}/{EVAL_DIR}/job.py", "--model", args.model,
+        command = ["python3", f"{JOB_ROOT}/{EVAL_DIR}/hf_job.py", "--model", args.model,
                    "--backend", backend, "--task", TASKS[args.task],
                    "--output_dir", f"hf://buckets/{args.bucket}/{output_path}",
                    "--eval_kwargs", json.dumps(eval_kwargs)]

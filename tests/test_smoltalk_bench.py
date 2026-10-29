@@ -1,7 +1,6 @@
 """SmolTalkBench evals (experiments/run4/eval): the AlpacaEval port, the SwarmChat server, the
 Inspect task with mock models, and the Job helpers. Nothing here calls the Hub or a judge.
 The expected AlpacaEval values were computed with the alpaca_eval package (0.6.x)."""
-from __future__ import annotations
 
 import importlib.util
 import json
@@ -28,7 +27,7 @@ def load(name):
     return module
 
 
-judge = load("alpaca_judge")
+judge = load("judge")
 
 
 def test_order_switches_as_alpaca_eval():
@@ -206,7 +205,7 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     )
 
     bench = load("smoltalk_bench")
-    job = load("job")
+    hf_job = load("hf_job")
     # The judge always prefers "m" with P = 0.9. "Hi" is switched (the model's reply is "m"),
     # "How do I boil an egg?" is not (the reference is "m").
     top = [TopLogprob(token="m", logprob=math.log(0.9)), TopLogprob(token="M", logprob=math.log(0.1))]
@@ -224,7 +223,7 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     scores = {s.id: s.scores["alpaca_eval_judge"] for s in log.samples}
     assert scores["hi"].value == pytest.approx(0.9) and scores["hi"].metadata["switched"]
     assert scores["egg"].value == pytest.approx(0.1) and not scores["egg"].metadata["switched"]
-    summary = job.build_summary(log)
+    summary = hf_job.build_summary(log)
     assert summary["metrics"]["win_rate"] == pytest.approx(50)
     assert summary["metrics"]["n_total"] == 2
     assert summary["primary_metric"]["name"] == "length_controlled_win_rate"

@@ -1,4 +1,5 @@
-"""AlpacaEval's pairwise judge and win rates, ported from tatsu-lab/alpaca_eval (Apache-2.0).
+"""AlpacaEval's pairwise judge and win rates, ported from tatsu-lab/alpaca_eval (Apache-2.0):
+https://github.com/tatsu-lab/alpaca_eval
 
 This follows AlpacaEval 2.0's default annotator, weighted_alpaca_eval_gpt4_turbo:
 
@@ -14,7 +15,6 @@ This follows AlpacaEval 2.0's default annotator, weighted_alpaca_eval_gpt4_turbo
   equal length. AlpacaEval's default GLM also needs instruction difficulties, which are only
   fitted for its own 805 instructions.
 """
-from __future__ import annotations
 
 import math
 import random

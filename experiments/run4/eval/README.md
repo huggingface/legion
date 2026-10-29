@@ -8,11 +8,12 @@ single-turn everyday chat prompts with reference replies.
 
 | File | What it does |
 |---|---|
-| [`build_smoltalkbench.py`](build_smoltalkbench.py) | builds the dataset's `gold` config from smoltalk's everyday-conversations |
 | [`smoltalk_bench.py`](smoltalk_bench.py) | the Inspect task `smoltalk_bench_gold` |
-| [`alpaca_judge.py`](alpaca_judge.py) | AlpacaEval 2.0's judge prompt, order swap, preference and win rates |
+| [`judge.py`](judge.py) | AlpacaEval 2.0's judge prompt, order swap, preference and win rates |
 | [`swarmchat_server.py`](swarmchat_server.py) | serves a bot checkout as an OpenAI-compatible endpoint |
-| [`evaluate.py`](evaluate.py), [`job.py`](job.py) | launch the eval on Hugging Face Jobs, adapted from Carbon-X |
+| [`evaluate.py`](evaluate.py), [`hf_job.py`](hf_job.py) | launch the eval on Hugging Face Jobs, adapted from Carbon-X |
+
+The script that builds the dataset lives in the dataset repo, as `scripts/create_dataset.py`.
 
 ## Scoring
 
@@ -33,7 +34,7 @@ The scoring follows AlpacaEval 2.0's default annotator (`weighted_alpaca_eval_gp
 
 All numbers are percentages against the gold references, which are Llama-3.1-70B-Instruct's
 replies in smoltalk. `tests/test_smoltalk_bench.py` checks the port against values computed
-with the `alpaca_eval` package.
+with the [`alpaca_eval`](https://github.com/tatsu-lab/alpaca_eval) package.
 
 SmolLM and SmolLM2 Instruct were trained on the source conversations, so their scores are
 inflated.
@@ -48,8 +49,7 @@ logging in with `hf auth login`:
 uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main fdef14e
 
 # A Hub model, served with vLLM on an rtx-pro-6000 Job
-uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct \
-  --temperature 0.2 --top_p 0.9
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
 
 # An API model, called from a CPU Job
 uv run experiments/run4/eval/evaluate.py --backend endpoint \
@@ -59,7 +59,9 @@ uv run experiments/run4/eval/evaluate.py --backend endpoint \
 
 - **Smoke tests and dry runs.** `--limit 20` runs a quick smoke test, and `--dry_run`
   prints the Jobs without submitting them.
-- **Hub models.** Sampling defaults to the model's `generation_config.json`.
+- **Hub models.** Sampling defaults to the model's `generation_config.json`, and to pure
+  sampling (temperature 1, top-p 1, no top-k) for whatever it leaves out. `--temperature`,
+  `--top_p` and `--top_k` override it.
 - **Where Jobs run.** They run under the token's user, or under `--namespace`.
 - **SwarmChat revisions.** Each revision is named by its commit time and hash, e.g.
   `20261028T162718Z-fdef14e9f8e3`, so revisions sort in merge order.

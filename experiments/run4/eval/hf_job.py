@@ -4,7 +4,6 @@ Installs the `evals` dependency group, serves the model (SwarmChat with swarmcha
 Hub model with vLLM), runs the Inspect task, writes `summary.json` beside the log and uploads
 the folder to the output bucket. Adapted from Carbon-X's evaluation/job.py.
 """
-from __future__ import annotations
 
 import argparse
 import json
@@ -58,7 +57,7 @@ def bootstrap() -> None:
     subprocess.run(["uv", "sync", "--frozen", "--only-group", "evals"], cwd=RUNTIME_ROOT,
                    env=env | {"UV_PROJECT_ENVIRONMENT": str(VENV)}, check=True)
     python = str(VENV / "bin" / "python")
-    os.execve(python, [python, str(EVAL_DIR / "job.py"), *sys.argv[1:]], env)
+    os.execve(python, [python, str(EVAL_DIR / "hf_job.py"), *sys.argv[1:]], env)
 
 
 def wait_healthy(server: subprocess.Popen, url: str) -> None:

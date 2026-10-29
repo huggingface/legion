@@ -15,7 +15,6 @@ assistant messages are ignored: the bot only reads user lines) and returns its l
 There is no sandbox: the bot runs as the server's user, with an empty environment, so run it
 somewhere disposable such as an HF Job.
 """
-from __future__ import annotations
 
 import argparse
 import json
