@@ -406,7 +406,7 @@ def test_swarmchat_runs_one_conversation_per_vcpu(monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["evaluate.py", "--model", "SwarmChat", "--namespace",
                                           "lewtun", "--dry_run", *extra])
         evaluate.main()
-        [job] = json.loads(capsys.readouterr().out)
+        job = json.loads(capsys.readouterr().out)
         command = job["command"]
         assert job["flavor"] == flavor
         assert "/HuggingFaceSwarms/SwarmChat-v5/20261029T004431Z-d8645ac9e103/" in job["output_url"]
@@ -423,7 +423,7 @@ def test_swarmchat_is_filed_under_its_repo(monkeypatch, capsys):
                                       "HuggingFaceSwarms/chatbot-v6", "--namespace", "lewtun",
                                       "--dry_run"])
     evaluate.main()
-    [job] = json.loads(capsys.readouterr().out)
+    job = json.loads(capsys.readouterr().out)
     command = job["command"]
     metadata = json.loads(command[command.index("--eval_kwargs") + 1])["metadata"]
     assert command[command.index("--swarm_repo") + 1] == "HuggingFaceSwarms/SwarmChat-v6"

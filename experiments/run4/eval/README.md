@@ -42,13 +42,14 @@ inflated.
 
 ## Run on Hugging Face Jobs
 
-`evaluate.py` launches one Job per model revision. Run it from the repository root, after
+`evaluate.py` launches one Job, which runs one eval. Run it from the repository root, after
 logging in with `hf auth login`:
 
 ```sh
-# SwarmChat at two commits of HuggingFaceSwarms/SwarmChat-v5: one cpu-upgrade Job each, one
-# conversation per vCPU
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision main 62dbbb8
+# SwarmChat at the head of HuggingFaceSwarms/SwarmChat-v5, on a cpu-upgrade Job with one
+# conversation per vCPU, and at an earlier commit
+uv run experiments/run4/eval/evaluate.py --model SwarmChat
+uv run experiments/run4/eval/evaluate.py --model SwarmChat --revision 62dbbb8
 
 # Another swarm's chatbot
 uv run experiments/run4/eval/evaluate.py --model SwarmChat --swarm_repo HuggingFaceSwarms/SwarmChat-v6
