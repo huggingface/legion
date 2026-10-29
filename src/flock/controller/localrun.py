@@ -349,7 +349,8 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         # its cost from its turns' tokens (the store keeps only the swarm's removed total)
         rtoks: dict[str, TokenUsage] = {}
         for ev in evs:
-            data = (ev.get("data") or {}).get("data") if ev.get("type") == "turn_ended" else None
+            data = (ev.get("data") or {}).get("data") if ev.get("type") in (
+                "turn_ended", "turn_interrupted") else None  # a turn cut by the stop costs too
             for model, u in ((data or {}).get("tokens") or {}).items():
                 with contextlib.suppress(ValueError, TypeError):
                     rtoks[model] = rtoks.get(model, TokenUsage()) + TokenUsage(**u)

@@ -356,6 +356,26 @@ def test_write_bundle(tmp_path):
     store.close()
 
 
+def test_bundle_counts_a_removed_agents_interrupted_turn(tmp_path):
+    from flock.models import Event
+
+    store = Store(tmp_path / "data")
+    spec = local_spec()
+    store.put_swarm(spec, time.time())
+    store.insert_agent("p-w-0009", "loc", "w", 9, time.time())  # a spawned child, then removed
+    store.append_events("loc", "p-w-0009", [Event(
+        type="turn_interrupted", ts=datetime.now(UTC), agent="p-w-0009", turn_id="t-1",
+        data={"data": {"reason": "terminated", "tokens": {"fake:m": {"input": 10, "output": 2}}}})])
+    store.delete_agent_rows("p-w-0009")
+    localrun.write_bundle(tmp_path / "run", store, spec, started=datetime.now(UTC),
+                          ended=datetime.now(UTC), reason="interrupted", url="u",
+                          tracker=localrun.Tracker(store, "loc"))
+    (gone,) = json.loads((tmp_path / "run" / "run.json").read_text())["removed_agents"]
+    assert gone["type"] == "w" and gone["cost_usd"] is not None
+    assert (gone["tokens"]["fake:m"]["input"], gone["tokens"]["fake:m"]["output"]) == (10, 2)
+    store.close()
+
+
 def test_run_local_refuses_a_jobs_spec(tmp_path):
     opts = localrun.RunOptions(spec=make_spec(), data_dir=tmp_path, out=io.StringIO())
     with pytest.raises(ValueError, match="compute: local"):

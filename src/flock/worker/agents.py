@@ -774,7 +774,8 @@ class AgentRuntime:
     def _interrupt(self, reason: str) -> None:
         if self.turn_id is not None:
             extra = {"tools_version": self._turn_tools} if self._turn_tools is not None else {}
-            self.emit("turn_interrupted", {"reason": reason, **extra})
+            tokens = {m: u.model_dump() for m, u in self._turn_tokens.items()}  # as turn_ended
+            self.emit("turn_interrupted", {"reason": reason, "tokens": tokens, **extra})
             self._end_turn()
             self._after_turn("interrupted", reason)
         self.awaiting = False
