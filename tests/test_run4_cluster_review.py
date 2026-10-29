@@ -193,8 +193,10 @@ container_srun_args() { CTR_SRUN=(); }
     assert backoffs == ["300", "600", "1200", "1800", "1800"]
 
 
-@pytest.mark.parametrize(("swarm_code", "waited", "calls"), [(200, False, ["pin", "run"]), (404, True, [])])
-def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm_code, waited, calls):
+@pytest.mark.parametrize(("swarm_code", "waited", "calls", "waves"),
+                         [(200, False, ["pin", "run"], True), (404, True, [], True),
+                          (200, False, [], False)])  # no waves.yaml (v8): replicas_ramp, no runner
+def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm_code, waited, calls, waves):
     import shlex
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URLS="http://fake/v1",
@@ -207,6 +209,8 @@ def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm
     exp.mkdir()
     (exp / "render.py").write_text("import sys; open(sys.argv[sys.argv.index('--out') + 1], 'w').write('swarm: s\\n')")
     (exp / "waves.py").write_text("import os, sys; open(os.environ['CALLS'], 'a').write(sys.argv[1] + '\\n')")
+    if waves:
+        (exp / "waves.yaml").write_text("type: agent\n")
     (tmp_path / "common.sh").write_text(f'''log() {{ echo "$*"; }}
 die() {{ echo "$*" >&2; exit 2; }}
 require_var() {{ :; }}
@@ -223,6 +227,7 @@ http_status() {{ case $1 in */healthz) echo 200;; */swarms/*) echo {swarm_code};
     result = run_script(tmp_path, "controller.sbatch", env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert ("world unavailable after 2s" in result.stdout) == waited
+    assert ("replicas_ramp schedules agents" in result.stdout) == (not waves)
     assert not (tmp_path / "requeues").exists()  # never requeues itself over a missing world
     called = tmp_path / "calls"
     assert (called.read_text().split() if called.exists() else []) == calls

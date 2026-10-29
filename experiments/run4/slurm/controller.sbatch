@@ -89,7 +89,7 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
 RUN3_BUCKET=${RUN3_BUCKET%/}
 CTL_PORT=7860
 CTL_HOST=$(hostname)
-EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy, voting or teams
+EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy, voting, teams or v8
 EXP=$RUN_DIR/experiment                         # a writable copy of experiments/$EXPERIMENT (waves.py writes next to the spec)
 SPEC=$EXP/spec.slurm.local.yaml
 WAVES_FILE=$EXP/${RUN3_WAVES:-waves.yaml}
@@ -227,6 +227,8 @@ PY
     # shellcheck disable=SC2086
     (cd "$EXP" && "$VENV/bin/flock" apply "$SPEC" ${RUN3_APPLY_ARGS:-}) >> "$RUN_DIR/logs/apply-$RUN.log" 2>&1 \
       || { log "flock apply failed: see $RUN_DIR/logs/apply-$RUN.log"; return 1; }
+  elif [ "$code" = 200 ] && [ ! -f "$WAVES_FILE" ]; then  # replicas_ramp (v8): the controller keeps the schedule
+    log "swarm $swarm is live; no $(basename "$WAVES_FILE"): the spec's replicas_ramp schedules agents"
   elif [ "$code" = 200 ]; then  # a requeue: never lower the live count (waves.py docstring)
     log "swarm $swarm is live: waves.py pin (the controller's replicas into the spec)"
     (cd "$EXP" && "$VENV/bin/python" waves.py pin --spec "$SPEC" --waves "$WAVES_FILE") >> "$RUN_DIR/logs/waves-$RUN.out" 2>&1 \
@@ -234,6 +236,8 @@ PY
   else
     log "GET /swarms/$swarm -> $code"; return 1
   fi
+  # An experiment without a waves file (v8) ramps with types.<type>.replicas_ramp instead.
+  [ -f "$WAVES_FILE" ] || { log "no $(basename "$WAVES_FILE"): the spec's replicas_ramp schedules agents, no waves runner"; return 0; }
   # The waves runner: ticks every 30 s until the schedule is over. Its start time lives in
   # <spec>.waves.json on /fsx, so a requeued controller continues the schedule. `exec`: the
   # subshell becomes the runner, so WAVES_PID is waves.py itself from here on.
