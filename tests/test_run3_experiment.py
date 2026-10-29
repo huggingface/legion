@@ -450,9 +450,11 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
             url2 = f"http://127.0.0.1:{srv2.server_port}/v1"
             (bucket / "control" / "endpoints").write_text(url2 + "\n")
             _until(proc, tmp_path, "endpoints 1 ok", timeout=60)
-            deadline = time.monotonic() + 60
-            while not (tmp_path / "requests-2.jsonl").is_file() or len(
-                    (tmp_path / "requests-2.jsonl").read_text().splitlines()) < 10:
+            deadline, host2 = time.monotonic() + 120, f"127.0.0.1:{srv2.server_port}"
+            (ctl,) = (home / "repo/experiments/run3/.flock").glob("*/controller")
+            # an agent's turn ended on server 2 (its requests alone may be a turn the stop cuts)
+            while not any(e["type"] == "turn_ended" and e["data"]["data"].get("endpoint") == host2
+                          for a in joined for e in _jsonl(ctl / "events/run3-t1" / f"{a}.jsonl")):
                 assert time.monotonic() < deadline and proc.poll() is None
                 time.sleep(1)
         (bucket / "control" / "stop").write_text("stop\n")
