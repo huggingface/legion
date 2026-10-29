@@ -900,3 +900,72 @@ async def test_message_polls_return_fresh_results_beyond_repeat_limit(
             assert events[-1].data["repeated_calls"] == min(7, max_turns) - 2
     finally:
         await a.stop()
+
+
+@pytest.mark.parametrize("authenticated", [False, True])
+async def test_routing_identity_survives_retries_turns_and_resume(tmp_path, authenticated):
+    import httpx
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "busy"})
+        return httpx.Response(200, json={
+            "model": "fake-model", "choices": [{"finish_reason": "stop", "message": {
+                "role": "assistant", "content": "Ready."}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2}})
+
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    home = tmp_path / "llm"
+    spec = llm_spec(bash=False, done_tool=False)
+    env = {KEY_ENV: "test-key"} if authenticated else {}
+
+    def adapter(agent="worker-0000", storage=home):
+        return LLMAdapter(wd, agent=agent, home=storage, backoff_s=0.001,
+                          transport=httpx.MockTransport(handler))
+
+    a = adapter()
+    session = await a.start(wd, None, spec, env=env)
+    try:
+        for prompt in ("First turn", "Second turn"):
+            await a.send(prompt)
+            assert (await turn(a))[-1].status == "completed"
+    finally:
+        await a.stop()
+    assert len(calls) == 3  # one retried call, then a later turn
+    assert {r.headers["x-session-id"] for r in calls} == {session}
+
+    resumed = adapter()
+    assert await resumed.start(wd, session, spec, env=env) == session
+    try:
+        await resumed.send("After worker restart")
+        assert (await turn(resumed))[-1].status == "completed"
+    finally:
+        await resumed.stop()
+    assert calls[-1].headers["x-session-id"] == session
+    assert any(m.get("content") == "First turn"
+               for m in json.loads(calls[-1].content)["messages"])
+
+    # Fresh conversations, different agents, and the same agent name in another run
+    # all get independent routing identities.
+    sessions = {session}
+    for agent, storage in [("worker-0000", home), ("worker-0001", home),
+                           ("worker-0000", tmp_path / "other-run")]:
+        fresh = adapter(agent, storage)
+        new_session = await fresh.start(wd, None, spec, env=env)
+        try:
+            await fresh.send("New conversation")
+            assert (await turn(fresh))[-1].status == "completed"
+        finally:
+            await fresh.stop()
+        assert new_session not in sessions
+        assert calls[-1].headers["x-session-id"] == new_session
+        sessions.add(new_session)
+
+    for request in calls:
+        assert request.headers.get("authorization") == (
+            "Bearer test-key" if authenticated else None)
+        assert "session_id" not in json.loads(request.content)  # metadata stays in the header

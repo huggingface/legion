@@ -181,6 +181,12 @@ requests show the model the proper form; the pi message carries `toolCallsFromTe
 - Session file: `$FLOCK_LLM_HOME/sessions/<agent>/<session id>.jsonl` (`/state/llm` in the
   worker image), one Chat Completions message per line, appended as the turn runs. It is the
   adapter's only `session_files()` entry, synced to the bucket like Pi's.
+- Every Chat Completions request sends `X-Session-ID: <session id>`, using the persisted
+  conversation UUID. It stays the same across model/tool steps, retries, subsequent turns,
+  compaction and worker resumes; new conversations get a new UUID, including for agents
+  with the same name in different runs. Routers such as vLLM Router can use this header
+  for session affinity. It is sent with or without an API key and contains no agent name
+  or filesystem path. This supplies routing identity; the router chooses the routing policy.
 - Resume reloads it (a missing file is a `ResumeError`: fresh session plus the restart prompt).
   The system message is rebuilt on every start from the preamble and the workdir's `AGENTS.md`,
   so prompt changes apply to old sessions. Tool calls left without a result by an interrupted

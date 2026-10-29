@@ -1005,7 +1005,11 @@ class LLMAdapter:
             body.pop("tools", None)
             body.pop("tool_choice", None)
         url = f"{self._endpoint or r.provider.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self._key}"} if self._key else {}
+        assert self.session_id is not None
+        # Persisted conversation identity: stable across turns, retries, and worker resumes.
+        headers = {"X-Session-ID": self.session_id}
+        if self._key:
+            headers["Authorization"] = f"Bearer {self._key}"
         retries = r.provider.max_retries if r.provider.max_retries is not None else DEFAULT_MAX_RETRIES
         for attempt in range(retries + 1):
             retry_after = None
