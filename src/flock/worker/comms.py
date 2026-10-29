@@ -377,8 +377,9 @@ class CommsHub(ExtendedComms):
                   f"{', '.join(names)} tools for it (you hold no board token, so not curl).")]
         if c.kickoff_id:
             lines.append(f"The kickoff is message {c.kickoff_id}; its thread is the run's main thread.")
-        lines.append("`flock-tool` results may carry `board_news` (DMs, mentions and replies to "
-                     "you since your last call); read and answer them promptly.")
+        news = "DMs, mentions and replies" if "comms:dm" in self.entries_for(agent) else "mentions and replies"
+        lines.append(f"`flock-tool` results may carry `board_news` ({news} to you since your last "
+                     "call); read and answer them promptly.")
         if rules:
             lines += ["", "Rules (the post tool refuses a post that breaks one and says why):"]
             lines += [f"- {x}" for x in rules]
