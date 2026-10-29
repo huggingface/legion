@@ -64,6 +64,7 @@ async def test_stuck_on_turn_timeout(tmp_path):
     assert adapter.stops == 1
     interrupted = [e for e in rt.outbox._q if e.type == "turn_interrupted"]
     assert interrupted[0].data["data"]["reason"] == "timeout" and interrupted[0].turn_id == "t-1"
+    assert interrupted[0].data["data"]["tokens"] == {}  # the cut turn's usage, as turn_ended
     # cleared by the next turn
     adapter.hang = False
     await rt.prompt("again")

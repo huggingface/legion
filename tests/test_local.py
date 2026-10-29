@@ -356,6 +356,26 @@ def test_write_bundle(tmp_path):
     store.close()
 
 
+def test_bundle_counts_a_removed_agents_interrupted_turn(tmp_path):
+    from flock.models import Event
+
+    store = Store(tmp_path / "data")
+    spec = local_spec()
+    store.put_swarm(spec, time.time())
+    store.insert_agent("p-w-0009", "loc", "w", 9, time.time())  # a spawned child, then removed
+    store.append_events("loc", "p-w-0009", [Event(
+        type="turn_interrupted", ts=datetime.now(UTC), agent="p-w-0009", turn_id="t-1",
+        data={"data": {"reason": "terminated", "tokens": {"fake:m": {"input": 10, "output": 2}}}})])
+    store.delete_agent_rows("p-w-0009")
+    localrun.write_bundle(tmp_path / "run", store, spec, started=datetime.now(UTC),
+                          ended=datetime.now(UTC), reason="interrupted", url="u",
+                          tracker=localrun.Tracker(store, "loc"))
+    (gone,) = json.loads((tmp_path / "run" / "run.json").read_text())["removed_agents"]
+    assert gone["type"] == "w" and gone["cost_usd"] is not None
+    assert (gone["tokens"]["fake:m"]["input"], gone["tokens"]["fake:m"]["output"]) == (10, 2)
+    store.close()
+
+
 def test_run_local_refuses_a_jobs_spec(tmp_path):
     opts = localrun.RunOptions(spec=make_spec(), data_dir=tmp_path, out=io.StringIO())
     with pytest.raises(ValueError, match="compute: local"):
@@ -400,7 +420,7 @@ def test_local_env_keeps_harness_overrides_and_isolates_pi(tmp_path):
 def _pid_dead(pid: int) -> bool:
     from flock.controller.local import _alive
 
-    end = time.monotonic() + 5
+    end = time.monotonic() + 30  # a loaded host reaps slowly; the tool sleeps 600 s
     while _alive(pid) and time.monotonic() < end:
         time.sleep(0.05)
     return not _alive(pid)
@@ -410,12 +430,12 @@ def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
     # a "worker" that ignores SIGTERM and has a tool in its own session (as the llm harness
     # starts bash): the group SIGKILL misses the tool, the descendant sweep does not
     code = ("import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-            "p = subprocess.Popen(['sleep', '60'], start_new_session=True); "
-            "open('tool.pid', 'w').write(str(p.pid)); time.sleep(60)")
+            "p = subprocess.Popen(['sleep', '600'], start_new_session=True); "
+            "open('tool.pid', 'w').write(str(p.pid)); time.sleep(600)")
     jobs = LocalJobsClient(root=tmp_path, command=_script(code),
                            base_env={"PATH": os.environ["PATH"]})
     jobs.launch("w", local_spec().types["w"], {"WORKER_ID": "w"}, {}, {}, 60, namespace="")
-    end = time.monotonic() + 10
+    end = time.monotonic() + 60
     while not (tmp_path / "tool.pid").exists() or not (tmp_path / "tool.pid").read_text():
         assert time.monotonic() < end
         time.sleep(0.05)

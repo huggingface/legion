@@ -442,8 +442,9 @@ async def test_stop_mid_tool_interrupts_and_kills_the_tool(tmp_path, fake_server
     await a.stop()
     evs = [e async for e in a.events()]
     assert [e.status for e in evs if e.kind == "turn_ended"] == ["interrupted"] and evs[-1].kind == "exited"
-    await asyncio.sleep(0.2)
-    assert not Path(f"/proc/{pid}").exists() or "Z" in Path(f"/proc/{pid}/stat").read_text().split()[2]
+    from flock.controller.local import _alive
+
+    await until(lambda: not _alive(pid), timeout=10)  # killed; a loaded host reaps it late
     lines = [json.loads(x) for x in a.session_path(sid).read_text().splitlines()]
     assert lines[-1]["role"] == "tool" and "interrupted" in lines[-1]["content"]  # repaired
     with pytest.raises(RuntimeError):

@@ -5,6 +5,7 @@
 # env:     CHATBOT_BUCKET   hf://buckets/<ns>/<bucket>/<run> (payload/ in, everything else out)
 #          CHATBOT_BOARD_URL, CHATBOT_CHANNEL (+ CHATBOT_CHANNEL_B for the two-channel variant)
 #          CHATBOT_VARIANT  one (default) | two-channels
+#          CHATBOT_WORLD_PORT  the two-channel variant's world port (default 8790)
 #          CHATBOT_SYNC_S   seconds between bucket syncs (default 300)
 #          CHATBOT_CHECK_S  seconds between looks for the control marker (default 30)
 #          CHATBOT_FLOCK_ARGS  extra `flock run` flags (e.g. --skip-preflight)
@@ -59,6 +60,7 @@ render() {  # the *.local.yaml specs: board, channels, run name (and job/smoke.j
     sed -e "s|https://msgboard.example.invalid|$CHATBOT_BOARD_URL|" \
         -e "s|your-team-b-channel|${CHATBOT_CHANNEL_B:-your-team-b-channel}|" \
         -e "s|your-chatbot-channel|$CHATBOT_CHANNEL|" \
+        -e "s|127.0.0.1:8790|127.0.0.1:${CHATBOT_WORLD_PORT:-8790}|" \
         -e "s|^swarm: chatbot-v1|swarm: chatbot-v1${CHATBOT_RUN:+-$CHATBOT_RUN}|" \
         "$EXP/$f" > "$EXP/${f%.yaml}.local.yaml"
   done
@@ -90,7 +92,7 @@ log "installed $(flock --help >/dev/null && echo flock) $($PYTHON --version); va
 PIDS=()
 RUNS=()
 if [ "$VARIANT" = two-channels ]; then
-  (cd "$H/repo/worlds/chatbot" && FLOCK_WORLD_TOKEN=$CHATBOT_WORLD_TOKEN FLOCK_WORLD_PORT=8790 \
+  (cd "$H/repo/worlds/chatbot" && FLOCK_WORLD_TOKEN=$CHATBOT_WORLD_TOKEN FLOCK_WORLD_PORT=${CHATBOT_WORLD_PORT:-8790} \
      exec "$PYTHON" chatbot.py serve) > "$H/logs/world.log" 2>&1 &
   WORLD=$!
   for i in $(seq 30); do [ -s "$CHATBOT_WS/world.json" ] && "$PYTHON" "$H/repo/worlds/chatbot/chatbot.py" status >/dev/null 2>&1 && break; sleep 1; done

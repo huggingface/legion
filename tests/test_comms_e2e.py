@@ -239,7 +239,10 @@ async def test_board_reads_are_idle_rounds(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "client",
                         lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     raw = wake_spec(llm_url, board_url)
-    loop = {"every": "1s", "while": {"max_rounds": 3, "idle_rounds": 2}}
+    # `turn_end` under `max_working`: the controller counts a round's turn before it sends the
+    # next (`every: 1s` could send round 3 before a slow round 2 was counted idle)
+    raw["providers"]["gpu"]["max_working"] = 2
+    loop = {"every": "turn_end", "while": {"max_rounds": 3, "idle_rounds": 2}}
     raw["types"]["mw"]["loop"] = {**loop, "prompt": "call: read {}"}
     raw["types"]["nw"]["loop"] = {**loop, "prompt": "bash: echo round {round}"}
     spec_file = tmp_path / "spec.yaml"

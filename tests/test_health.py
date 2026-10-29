@@ -453,6 +453,22 @@ def test_turn_without_usage_counts_its_message_usage(store):
     assert (row["input"], row["output"]) == (9, 4)
 
 
+def test_interrupted_turn_counts_its_total_once_or_its_message_usage(store):
+    a0, _ = _fleet(store, T)
+    h = Health(store)
+    msg = {"message": {"role": "assistant", "model": "m", "usage": {"input": 9, "output": 4}}}
+    tok = {"reason": "terminated", "tokens": {"m": {"input": 12, "output": 5}}}
+    h.on_events(a0, [_ev(a0["name"], "turn_started"), _ev(a0["name"], "message", msg),
+                     _ev(a0["name"], "turn_interrupted", tok)], T)  # the total, not both
+    h.on_events(a0, [_ev(a0["name"], "turn_started"), _ev(a0["name"], "message", msg),
+                     _ev(a0["name"], "turn_interrupted", {"reason": "timeout"})], T)  # no total
+    h.on_events(a0, [_ev(a0["name"], "session_resumed")], T + 1)  # nothing left held
+    h.tick(T + 2)
+    (row,) = store.usage("demo")
+    assert (row["input"], row["output"]) == (21, 9)
+    assert h.latest("demo")["body"]["tokens"]["by_type"]["researcher"]["input"] == 21
+
+
 def test_restart_within_an_hour_keeps_one_line_per_agent_with_summed_totals(store):
     a0, _ = _fleet(store, T)
     tok = {"tokens": {"m": {"input": 10, "output": 1}}}

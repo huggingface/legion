@@ -316,16 +316,19 @@ class Chatbot4World(World):
         while not self.stopping.wait(5.0):
             self._sync_hub_states(every=HUB_SYNC_EVERY)
 
-    def close(self, timeout=5.0):
-        """Write the state now and stop the background threads within timeout seconds; queued
-        comments stay in the outbox file for the next start. Saves after this write
-        synchronously."""
+    def close(self, timeout=4.0):
+        """Write the state now and stop the background threads within timeout seconds in all
+        (under the world host's 5 s stop grace); queued comments stay in the outbox file for
+        the next start. Saves after this write synchronously."""
+        end = time.monotonic() + timeout
         self.save_sync = True
         self.save_stop.set()
         self.save_wake.set()
+        if self.saver is not None:  # its write in flight: a restart deletes leftover tmp files
+            self.saver.join(timeout)
         self.flush()
         self.stopping.set()
-        self.lanes.close(timeout)
+        self.lanes.close(max(0.0, end - time.monotonic()))
         self.flush()
         self.store.checkpoint()
         if _LIVE.get(str(self.ws.resolve())) is self:

@@ -241,7 +241,10 @@ class Chatbot2World(ChatbotWorld):
             src: what to copy, e.g. best/bot.py, best/bot or teams/b/agents/ds-b-0000/bot
             path: the new file or directory, e.g. teams/a/agents/<your name>/bot
         """
-        s = self._stable(self._path(src.rstrip("/"), agent=agent, tool="copy_file"))
+        # the snapshot first: a promotion briefly removes best/bot, never best/v<n>/
+        s = self._stable(self._path(src.rstrip("/"), False, agent=agent, tool="copy_file"))
+        if not s.exists():
+            self._path(src.rstrip("/"), agent=agent, tool="copy_file")  # raises not_found
         try:
             return self._copy_from(agent, s, path)
         except FileNotFoundError as e:  # the source changed under the copy (not best/: frozen)
@@ -539,8 +542,9 @@ class Chatbot2World(ChatbotWorld):
                    "ts": round(time.time()), "sha": self._sha(p)[:12], "size": self._size(p),
                    "best_before": self._best[0][:12] or None if cur else None, "gate": gate}
             new = self._best_files()
-            (b / "current.json").write_text(json.dumps(
+            (b / "current.json.tmp").write_text(json.dumps(  # replaced whole: copy_file reads it
                 {"n": n, "kind": kind[0], "entry": f"best/{kind[1]}", "files": new}) + "\n")
+            os.replace(b / "current.json.tmp", b / "current.json")
             self._best = (self._sha(self._best_path()), dict(cand["results"]))
             self._gate_scored(self._best[0], cand["results"])  # the new best on the gate
             rec["best_after"] = self._best[0][:12]

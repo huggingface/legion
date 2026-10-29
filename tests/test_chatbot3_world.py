@@ -309,7 +309,8 @@ def test_copy_of_best_survives_a_concurrent_promotion(world):
             shutil.copytree(src, b / f"v{n[0]}")
             shutil.rmtree(b / "bot")
             os.replace(src, b / "bot")
-            (b / "current.json").write_text(js.dumps({"n": n[0], "kind": "package"}))
+            (b / "current.json.tmp").write_text(js.dumps({"n": n[0], "kind": "package"}))
+            os.replace(b / "current.json.tmp", b / "current.json")
 
     t = th.Thread(target=promoter)
     t.start()
