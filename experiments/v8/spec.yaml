@@ -32,7 +32,7 @@ comms:
     threads: per_topic
     no_group_mentions: true                 # agents' @all woke nobody and buried the channel
     max_channels_per_agent: 3               # the lane channel, a team channel, one more
-    max_channels: 100
+    max_channels: 40                        # general, 6 lanes, ~30 team channels (v5/v6 sprawled to 70-100)
   protocols: []
 types:
   answers: &lane

@@ -69,14 +69,20 @@ The world adds three settings, off by default (v4–v7 are unchanged):
   `controller.sbatch` applies the spec and starts no waves runner. To change a lane's size
   live, use `flock scale` (the next ramp step still applies) or edit its ramp and `flock update`.
 - **Board:**
-  - Each lane has its own channel, plus `#general` for cross-lane decisions and milestones.
+  - Each lane has its own channel, plus `#general` for cross-lane decisions, milestones and
+    proposals for work outside the lanes (operators decide on those).
+  - A team starts in a thread of its lane channel and moves to a `<lane>-<area>` channel when the
+    thread gets busy. `max_channels: 40` leaves room for about 30 team channels. In v5 and v6,
+    free creation produced 70–100 overlapping channels; in v7, nobody created any and one
+    thread grew to 781 replies.
+  - An agent's lane is its home, not a fence: it plans and posts there but may review or fix
+    anything through PRs.
   - `no_group_mentions: true`: agents can't post `@all`.
   - `max_len: 1200`: v4–v7 posts had a median of about 1,500 chars.
   - No DMs: the spec lists the board tools without `comms:dm` and `comms:read_dms`, and nothing
     wakes on a DM. In v4–v7, 25–52% of all messages were DMs, mostly review chases and verdict
     notices that duplicated the world's inbox; 62–75% of DM channels never got a reply, and
     nobody else could see them. A thread reply or an `@name` is just as targeted in public.
-  - Channel caps as in teams.
 - **Steering:** a human's `@all` on the board still wakes every agent (extended mode), and the
   prompt tells agents that messages from the human operators take priority. Operators have no
   DMs either: reach an agent with `@name` in a thread. `flock prompt

@@ -46,7 +46,7 @@ def test_six_lanes_are_run4_agents_with_their_own_ramp_and_prompt():
     assert sum(r[3] for r in LANES.values()) <= spec.limits.alive == 250
     assert not (EXP / "waves.yaml").exists()  # controller.sbatch: replicas_ramp, no waves runner
     rules = spec.comms.rules
-    assert rules.no_group_mentions and rules.max_len == 1200 and rules.max_channels == 100
+    assert rules.no_group_mentions and rules.max_len == 1200 and rules.max_channels == 40
     assert spec.comms.wake == ["mention", "thread", "channel"]
     assert spec.comms.url == "https://huggingfaceswarms-chatbot-v8-msgboard.hf.space"
 
@@ -60,6 +60,7 @@ def test_the_prompts_name_the_repo_and_lanes_and_hide_the_eval():
     for part in ("an understanding engine", "a memory store", "a knowledge base", "a response composer"):
         assert part in text, part
     assert "prefer general mechanisms" in text and "millions of lines" not in text
+    assert "`<lane>-<area>`" in text and "40 channels" in text and "propose it on #general" in text
     for path in [EXP / "prompts/system.md", *sorted((EXP / "prompts/lanes").glob("*.md"))]:
         lower = path.read_text().lower()
         for word in (*HIDDEN, "chatbot-v", "spawn", "vote", "@all", "read_dms", " dm,", "dms promptly"):
