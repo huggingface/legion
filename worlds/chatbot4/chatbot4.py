@@ -33,6 +33,8 @@ from flock.world.workspace import apply_patch, unpack
 HERE = Path(__file__).resolve().parent
 UPLOAD = contextvars.ContextVar("workspace", default=None)
 FIXED = ("bot/__init__.py", "bot/__main__.py", "bot/runtime.py", "bot/modules/__init__.py")
+# A module the loader finds: bot/modules/<name>.py or a package bot/modules/<name>/__init__.py.
+MODULE_FILE = re.compile(r"bot/modules/(?:[^/]+\.py|[^/]+/__init__\.py)")
 MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
 EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
            "*.egg-info/", ".DS_Store")
@@ -112,7 +114,7 @@ class Chatbot4World(World):
                    "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation. "
                    "Tool results may carry an `inbox` with news about your PRs (reviews, "
                    "merges, closes, updates); handle it first. New PRs are limited swarm-wide to "
-                   "about the merge rate (pr_budget); reviews are unlimited.")
+                   "about the merge rate (pr_budget).")
 
     # The worker uploads the caller's local clone for these calls (workspace-upload-v1).
     WORKSPACE: ClassVar[dict] = {
@@ -198,7 +200,10 @@ class Chatbot4World(World):
         self.repo_id = repo_id = os.environ.get("CHATBOT_REPO", "cmpatino/chatbot-swarm")
         self.repo = repository or Repository(self.ws / "repo.git",
                                             f"https://huggingface.co/datasets/{repo_id}", Hub(repo_id))
-        self.fixed = {name: (HERE / "seed" / name).read_bytes() for name in FIXED}
+        # The seed whose fixed files the contract compares (CHATBOT_SEED_DIR: a directory
+        # next to this file, or an absolute path), e.g. seed-v8 for the v8 runtime.
+        self.seed_dir = HERE / os.environ.get("CHATBOT_SEED_DIR", "seed")
+        self.fixed = {name: (self.seed_dir / name).read_bytes() for name in FIXED}
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
         # Merge contract checks get their own runners, so run_bot load never blocks merges.
         self.merge_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_MERGE_SLOTS", "4")))
@@ -242,6 +247,16 @@ class Chatbot4World(World):
         if budget not in ("merges", "off"):
             raise ValueError("CHATBOT_PR_OPEN_BUDGET must be merges or off")
         self.budget_on = budget == "merges"
+        # all: every new PR counts; new_modules: only a PR that adds a module counts (and
+        # waits), so fixes, reverts, tests and edits of existing modules are never rationed.
+        scope = os.environ.get("CHATBOT_PR_OPEN_BUDGET_SCOPE", "all").strip().lower() or "all"
+        if scope not in ("all", "new_modules"):
+            raise ValueError("CHATBOT_PR_OPEN_BUDGET_SCOPE must be all or new_modules")
+        self.budget_scope = scope
+        self.max_reviewers = self.knob(
+            "review.max_reviewers", int, int(os.environ.get("CHATBOT_MAX_REVIEWERS", "0")), min=0,
+            doc="Reviewers per PR change (0: unlimited); one more is refused with review_full.",
+            on_change=lambda v: setattr(self, "max_reviewers", v))
         self.budget_floor = self.knob(
             "pr.open_floor", int, int(os.environ.get("CHATBOT_PR_OPEN_FLOOR", "20")), min=0,
             doc="New PRs allowed per hour however few merged (the open budget's floor).",
@@ -353,6 +368,8 @@ class Chatbot4World(World):
         info = {"mode": "merges" if self.budget_on else "off", "opened_last_hour": used,
                 "merged_last_hour": len(merges), "limit": limit,
                 "available": max(0, limit - used) if self.budget_on else None}
+        if self.budget_scope != "all":
+            info["scope"] = self.budget_scope  # only PRs that add a module count
         if self.budget_on and used >= limit:
             # The next slot frees when enough of the oldest opens leave the window.
             index = used - limit
@@ -922,6 +939,35 @@ class Chatbot4World(World):
             raise ToolError("invalid workspace upload", "bad_workspace") from exc
         return sorted(changed)
 
+    def _adds_module(self, snapshot, base):
+        """Does an upload add a module the loader finds (MODULE_FILE, new or renamed to)?
+        Anything unreadable counts as adding one, so the budget still applies to it."""
+        if "patch" in snapshot:
+            try:
+                patch = base64.b64decode(snapshot.get("patch") or "", validate=True)
+            except (ValueError, TypeError):
+                return True
+            for block in re.split(rb"^diff --git ", patch, flags=re.MULTILINE)[1:]:
+                header = block.split(b"\n@@", 1)[0].decode(errors="replace")
+                names = re.match(r"a/(\S+) b/(\S+)\n", header)
+                if names is None:  # a quoted path (spaces, non-ASCII): count it if it may be one
+                    if "bot/modules/" in header.split("\n", 1)[0]:
+                        return True
+                    continue
+                old, new = names.groups()
+                if MODULE_FILE.fullmatch(new) and ("\nnew file mode" in header or old != new):
+                    return True
+            return False
+        files = snapshot.get("files")
+        if not isinstance(files, dict):
+            return True
+        try:
+            tracked = set(self.repo.git("ls-tree", "-r", "--name-only", base, "--", "bot/modules")
+                          .splitlines())
+        except ToolError:
+            return True
+        return any(isinstance(n, str) and MODULE_FILE.fullmatch(n) and n not in tracked for n in files)
+
     def _contract(self, tree, names=None):
         """Check the fixed interface, and that names (default: every .py file) compile."""
         for name, expected in self.fixed.items():
@@ -971,7 +1017,9 @@ class Chatbot4World(World):
         branch is a short slug like my-topic; the world stores it as agents/<you>/<slug>.
         New PRs are budgeted swarm-wide: one is refused (code open_budget) while the swarm
         opened max(merges in the last hour, 20) new PRs in the last hour; updates with
-        pr=<n> are never counted. Results carry pr_budget with the current counts.
+        pr=<n> are never counted. When pr_budget has scope new_modules, only a PR that adds a
+        module (a new bot/modules/<name>.py) is counted or refused: fixes, reverts, tests and
+        edits of existing modules always open. Results carry pr_budget with the current counts.
         """
         started = time.monotonic()
         self._identity(agent)
@@ -984,12 +1032,15 @@ class Chatbot4World(World):
         snapshot = UPLOAD.get()
         if not isinstance(snapshot, dict):
             raise ToolError("submit a local clone through flock-tool; the worker uploads it")
+        # Scope new_modules: a PR that adds no module is outside the budget (git runs unlocked).
+        exempt = (self.budget_scope == "new_modules"
+                  and not self._adds_module(snapshot, snapshot.get("base_sha", "")))
         key = agent.request_id
         branch_ref = f"agents/{agent.name}/{branch}"
         with self.lock:
             if key and key in self.state["requests"]:
                 return self._replay(key, description)
-            if pr is None and branch_ref not in self.state["drafts"]:
+            if pr is None and branch_ref not in self.state["drafts"] and not exempt:
                 self._check_budget(agent)  # before any fetch, build or Hub call
         # The lock is held only for state and the main check; fetches, copies, compiles,
         # Hub calls and pushes run outside it. A reservation keeps the cap and slugs exact.
@@ -1009,6 +1060,9 @@ class Chatbot4World(World):
                     raise ToolError("only the author can update this PR")
                 if existing and existing["branch"] != branch_ref:
                     raise ToolError("use the original branch slug when updating a PR")
+            if old and old.get("budget_exempt") and not exempt:
+                raise ToolError(f"PR #{pr} opened outside the open budget because it added no "
+                                "module; open a new PR to add one", "open_budget")
             number = draft["pr"] if draft else (pr if old else None)
             pending = self.pending.values()
             if key and any(p[3] == key for p in pending):
@@ -1027,13 +1081,15 @@ class Chatbot4World(World):
                         or branch_ref in self.state["drafts"] or branch_ref in self.cold_branches
                         or any(p[1] == branch_ref for p in pending)):
                     raise ToolError("branch slug already used; choose a new topic slug")
-                self._check_budget(agent)
-                self.open_reserved.add(token)
+                if not exempt:
+                    self._check_budget(agent)
+                    self.open_reserved.add(token)
             old_head = old["head_sha"] if old else None
             self.pending[token] = (agent.name, branch_ref, number, key)
         try:
             number, sha, main, old_head = self._publish(agent, snapshot, base, title, description,
-                                                        branch_ref, number, old_head, started, token)
+                                                        branch_ref, number, old_head, started, token,
+                                                        counted=not exempt)
             with self.lock:
                 if old and (old["state"] != "open" or old["head_sha"] != old_head):
                     raise ToolError("the PR was merged or closed during the update")
@@ -1043,6 +1099,8 @@ class Chatbot4World(World):
                           "title": title, "description": description,
                           # Kept so reviews of an identical diff carry over a clean rebase.
                           "reviews": dict(old["reviews"]) if old else {}}
+                if old.get("budget_exempt") if old else exempt:
+                    record["budget_exempt"] = True  # an update may not add a module
                 self.state["prs"][str(number)] = record
                 self.state["drafts"].pop(branch_ref, None)
                 self._dirty("prs", number)
@@ -1079,7 +1137,7 @@ class Chatbot4World(World):
             return self.repo.commit(tree, base, agent.name, title, onto=main)
 
     def _publish(self, agent, snapshot, base, title, description, branch_ref, pr, old_head, started,
-                 token=None):
+                 token=None, counted=True):
         """Publish the upload: update open PR pr (old_head set), finish parked draft pr, or
         create one Hub PR. At most one create_pull_request per call, and a created PR is
         never closed by the world: if its head cannot be pushed it is parked as a draft."""
@@ -1105,10 +1163,11 @@ class Chatbot4World(World):
                         pr = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
                         with self.lock:  # the reservation becomes a counted open
                             self.open_reserved.discard(token)
-                            now = time.time()
-                            self._recent(self.state["pr_opens"], now).append(now)
-                            self._dirty("_", "pr_opens")
-                            self._save()
+                            if counted:
+                                now = time.time()
+                                self._recent(self.state["pr_opens"], now).append(now)
+                                self._dirty("_", "pr_opens")
+                                self._save()
                         with self.gap_lock:
                             self.last_create = max(self.last_create, time.monotonic())
                     sha, main = self._land(agent, snapshot, base, title, branch_ref, pr, sha, main,
@@ -1239,8 +1298,9 @@ class Chatbot4World(World):
                   verdict: Literal["approve", "request_changes"], comment: str) -> dict:
         """Review the exact head SHA you inspected or tested, independently of the author.
 
-        Reviews are unlimited: the review counts at once, and its Hub comment is posted
-        in the background."""
+        The review counts at once, and its Hub comment is posted in the background. When the
+        world caps reviewers per PR change, a review by one more agent is refused
+        (review_full): review a PR that still needs one (list_prs needs_review=true)."""
         self._identity(agent)
         if verdict not in ("approve", "request_changes") or not comment.strip():
             raise ToolError("give a verdict and a review comment")
@@ -1252,6 +1312,12 @@ class Chatbot4World(World):
             # Only the world writes PR refs, so its record is the PR head.
             if head_sha != rec["head_sha"]:
                 raise ToolError("the PR head changed; inspect it again before reviewing")
+            if self.max_reviewers:  # a reviewer of the current change may always review again
+                reviewers = self._reviewers(rec)
+                if agent.name not in reviewers and len(reviewers) >= self.max_reviewers:
+                    raise ToolError(f"PR #{pr} already has {len(reviewers)} reviewers on this change; "
+                                    "review a PR that still needs one (list_prs needs_review=true)",
+                                    "review_full")
             return rec
 
         with self.lock:
@@ -1313,6 +1379,10 @@ class Chatbot4World(World):
                 continue
             current[name] = r
         return current
+
+    def _reviewers(self, rec):
+        """Reviews of the current change, the author's excluded."""
+        return {name: r for name, r in self._current_reviews(rec).items() if name != rec["author"]}
 
     def _approved(self, rec):
         reviews = {name: r for name, r in self._current_reviews(rec).items()
@@ -1512,9 +1582,12 @@ class Chatbot4World(World):
             records[:0] = [rec for _, rec in self.store.iter("prs", cold=True)
                            if (state == "all" or rec["state"] == state)
                            and (not author or rec["author"] == author)]
-        if needs_review:
-            records = [rec for rec in records if not any(
-                r["verdict"] == "approve" for r in self._current_reviews(rec).values())]
+        if needs_review:  # no approval yet, and room for one more reviewer under the cap
+            def needs(rec):
+                reviews = self._reviewers(rec)
+                return (not any(r["verdict"] == "approve" for r in reviews.values())
+                        and (not self.max_reviewers or len(reviews) < self.max_reviewers))
+            records = [rec for rec in records if needs(rec)]
         return json.loads(json.dumps(records + drafts))[offset:offset + 100]
 
     @tool(read_only=True)

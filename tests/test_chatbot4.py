@@ -56,13 +56,24 @@ class LocalHub:
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    return _setup(tmp_path, monkeypatch, "seed")
+
+
+@pytest.fixture
+def setup_v8(tmp_path, monkeypatch):
+    """A world on the v8 seed (CHATBOT_SEED_DIR=seed-v8): the runtime with an arbiter."""
+    monkeypatch.setenv("CHATBOT_SEED_DIR", "seed-v8")
+    return _setup(tmp_path, monkeypatch, "seed-v8")
+
+
+def _setup(tmp_path, monkeypatch, seed_dir):
     # Workflow/contract unit tests. Real kernel isolation is checked separately in
     # test_isolation.py and required by the prepared cluster dry run.
     monkeypatch.setattr("sandbox.isolate_command", lambda argv, *args, **kwargs: argv)
     monkeypatch.setenv("CHATBOT_PR_CREATE_GAP_S", "0")  # the gap has its own test
     monkeypatch.setenv("CHATBOT_HUB_OUTBOX_GAP_S", "0")
     seed = tmp_path / "seed"
-    shutil.copytree(ROOT / "worlds/chatbot4/seed", seed, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "worlds/chatbot4" / seed_dir, seed, ignore=shutil.ignore_patterns("__pycache__"))
     git(seed, "init", "-b", "main")
     git(seed, "add", ".")
     git(seed, "-c", "user.name=seed", "-c", "user.email=seed@flock.invalid", "commit", "-m", "seed")
@@ -531,8 +542,8 @@ def test_admin_lanes_and_knobs(setup):
     world, clone, _ = setup
     rec = submit(world, clone)
     approve(world, rec)
-    assert world.knobs == {"save.interval_s": world.save_interval, "save.legacy_json": True, "pr.open_floor": 20,
-                           "hub.push.slots": 1, "hub.merge.slots": 1, "hub.comment.slots": 1,
+    assert world.knobs == {"save.interval_s": world.save_interval, "save.legacy_json": True,
+                           "review.max_reviewers": 0, "pr.open_floor": 20, "hub.push.slots": 1, "hub.merge.slots": 1, "hub.comment.slots": 1,
                            "hub.comment.gap_s": 0.0}
     world.admin.set({"hub.push.slots": 2, "hub.comment.gap_s": 0.5})
     assert world.lanes["push"].slots == 2 and world.lanes["comment"].gap_s == 0.5
@@ -2284,3 +2295,94 @@ def test_v2_with_an_unknown_base_asks_for_the_full_tree(setup, monkeypatch):
     monkeypatch.setattr(chatbot4, "apply_patch", lambda *a: pytest.fail("applied"))
     with pytest.raises(ToolError, match="budget"):
         world.call_workspace("open_pr", args, Agent("cedar"), capture_v2(clone.parent, clone.name))
+
+
+# ---------------------------------------------------------------- v8 settings (all off by default)
+
+def test_reviewer_cap_refuses_one_more_reviewer_and_hides_full_prs(setup, monkeypatch):
+    monkeypatch.setenv("CHATBOT_MAX_REVIEWERS", "2")
+    world, clone, _ = setup
+    world = Chatbot4World(world.ws, world.repo)
+    _module(clone, "weather", "Sunny!")
+    rec = submit(world, clone, branch="weather")
+    for who in ("birch", "pine"):
+        world.review_pr(Agent(who), rec["pr"], rec["head_sha"], "request_changes", "Off-topic reply")
+    assert world.list_prs(needs_review=True) == []
+    with pytest.raises(ToolError) as exc:
+        world.review_pr(Agent("oak"), rec["pr"], rec["head_sha"], "approve", "Looks good")
+    assert exc.value.code == "review_full" and "already has 2 reviewers" in exc.value.message
+    approve(world, rec, "birch")  # a reviewer of this change may review it again
+    _module(clone, "weather", "Sunny today!")  # a new change: only its reviews count
+    rec = submit(world, clone, branch="weather", pr=rec["pr"])
+    assert [r["pr"] for r in world.list_prs(needs_review=True)] == [rec["pr"]]
+    approve(world, rec, "oak")
+    world.merge_pr(Agent("cedar"), rec["pr"])
+
+
+def test_adds_module_reads_v1_and_v2_uploads(setup):
+    from flock.world.workspace import capture_v2
+
+    world, clone, _ = setup
+    base = git(clone, "rev-parse", "HEAD")
+
+    def adds():
+        return (world._adds_module(capture(clone.parent, clone.name), base),
+                world._adds_module(capture_v2(clone.parent, clone.name), base))
+
+    assert adds() == (False, False)
+    (clone / "tests/test_more.py").write_text("x = 1\n")
+    (clone / "bot/modules/greeting.py").write_text('PRIORITY = -1000\n\ndef respond(text, memory):\n    return "Hi!"\n')
+    assert adds() == (False, False)  # a test and an edit of an existing module
+    (clone / "bot/modules/helpers").mkdir()
+    (clone / "bot/modules/helpers/__init__.py").write_text("")
+    assert adds() == (True, True)  # a new package
+    shutil.rmtree(clone / "bot/modules/helpers")
+    git(clone, "mv", "bot/modules/greeting.py", "bot/modules/hello.py")
+    assert adds() == (True, True)  # renamed to a new module name
+    assert world._adds_module({"files": None}, base) and world._adds_module({"patch": "%%"}, base)
+
+
+def test_new_modules_scope_rations_only_prs_that_add_a_module(setup, monkeypatch):
+    monkeypatch.setenv("CHATBOT_PR_OPEN_FLOOR", "1")
+    monkeypatch.setenv("CHATBOT_PR_OPEN_BUDGET_SCOPE", "new_modules")
+    world, clone, _ = setup
+    world = Chatbot4World(world.ws, world.repo)
+    _module(clone, "weather", None)
+    first = submit(world, clone, "cedar", "weather")
+    assert first["pr_budget"]["scope"] == "new_modules" and "budget_exempt" not in first
+    with pytest.raises(ToolError) as exc:  # a second new module this hour: refused
+        submit(world, clone, "birch", "weather-two")
+    assert exc.value.code == "open_budget"
+    (clone / "bot/modules/weather.py").unlink()
+    _module(clone, "greeting", "Hi!")  # an edit of an existing module: never counted
+    fix = submit(world, clone, "birch", "greeting-fix")
+    assert fix["budget_exempt"] is True and len(world.state["pr_opens"]) == 1
+    _module(clone, "news", None)
+    with pytest.raises(ToolError, match="open a new PR to add one") as exc:
+        submit(world, clone, "birch", "greeting-fix", pr=fix["pr"])
+    assert exc.value.code == "open_budget"
+    with pytest.raises(ValueError, match="all or new_modules"):
+        monkeypatch.setenv("CHATBOT_PR_OPEN_BUDGET_SCOPE", "some")
+        Chatbot4World(world.ws, world.repo)
+
+
+def test_v8_seed_runtime_passes_the_contract_and_merges(setup_v8):
+    world, clone, _ = setup_v8
+    assert world.fixed["bot/runtime.py"] == (ROOT / "worlds/chatbot4/seed-v8/bot/runtime.py").read_bytes()
+    (clone / "bot/modules/names.py").write_text(
+        'def observe(text, memory):\n'
+        '    if text.lower().startswith("my name is "):\n'
+        '        memory["name"] = text.split()[-1]\n\n'
+        'def respond(text, memory):\n'
+        '    if "my name" in text.lower() and "?" in text and "name" in memory:\n'
+        '        return f"You are {memory[\'name\']}."\n'
+        '    return None\n')
+    rec = submit(world, clone, branch="names")
+    approve(world, rec)
+    world.merge_pr(Agent("cedar"), rec["pr"])
+    replies = world.run_bot("main", ["Hello", "My name is Sam", "What is my name?"])["replies"]
+    assert replies == ["Hello!", "Hello!", "You are Sam."]
+    (clone / "bot/runtime.py").write_text((ROOT / "worlds/chatbot4/seed/bot/runtime.py").read_text())
+    with pytest.raises(ToolError) as exc:  # the v4 runtime is not this seed's
+        submit(world, clone, branch="old-runtime")
+    assert exc.value.code == "fixed_interface"
