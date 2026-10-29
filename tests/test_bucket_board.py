@@ -1,21 +1,17 @@
-"""Bucket board lifecycle tests: fake mounts/Hub, real local SQLite and msgboard."""
+"""Real local SQLite and msgboard; fake Hub, no network or jobs."""
 from __future__ import annotations
 
 import contextlib
 import json
-import shutil
 import sqlite3
-import subprocess
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 from pydantic import ValidationError
 
-from flock.comms import bucket, managed
+from flock.comms import managed
 from flock.comms.bucket import BucketMount, BucketStorageError
 from flock.comms.managed import ManagedBoard, ManagedBoardError
 from flock.models import BucketBoardStorage, CommsSpec
@@ -23,81 +19,50 @@ from flock.models import BucketBoardStorage, CommsSpec
 from .test_managed_board import join, spec
 
 
-class Process:
-    pid = 12345
-
-    def __init__(self):
-        self.returncode = None
-        self.terminated = False
-        self.killed = False
-
-    def poll(self):
-        return self.returncode
-
-    def terminate(self):
-        self.terminated = True
-
-    def kill(self):
-        self.killed = True
-        self.returncode = -9
-
-    def wait(self, timeout):
-        self.returncode = 0 if self.returncode is None else self.returncode
-        return self.returncode
-
-
 class Hub:
-    def __init__(self, token=None):
+    def __init__(self):
         self.private = True
         self.remote = {}
-        self.downloads = 0
-
-    def batch_bucket_files(self, bucket_id, *, add):
-        for source, dest in add:
-            self.remote[dest] = source if isinstance(source, bytes) else Path(source).read_bytes()
+        self.fail = False
 
     def bucket_info(self, bucket_id):
         return SimpleNamespace(private=self.private)
 
+    def batch_bucket_files(self, bucket_id, *, add=(), delete=()):
+        if self.fail:
+            raise OSError("private credential must never appear")
+        for source, dest in add:
+            self.remote[dest] = source if isinstance(source, bytes) else Path(source).read_bytes()
+        for name in delete:
+            self.remote.pop(name, None)
+
     def get_bucket_paths_info(self, bucket_id, paths):
-        return [SimpleNamespace(path=p, size=len(self.remote[p]))
-                for p in paths if p in self.remote]
+        return iter(SimpleNamespace(path=p, size=len(self.remote[p]))
+                    for p in paths if p in self.remote)
+
+    def list_bucket_tree(self, bucket_id, prefix, recursive=True):
+        return [SimpleNamespace(path=p, size=len(data)) for p, data in self.remote.items()
+                if p.startswith(prefix)]
 
     def download_bucket_files(self, bucket_id, files, *, raise_on_missing_files):
-        self.downloads += 1
         for remote, local in files:
             Path(local).parent.mkdir(parents=True, exist_ok=True)
             Path(local).write_bytes(self.remote[remote])
 
 
 @pytest.fixture
-def mount(tmp_path):
-    return BucketMount(BucketBoardStorage(bucket="team/private", mount_root=str(tmp_path)),
-                       "test-swarm", tmp_path / "logs" / "mount.log")
+def fake_mounts(monkeypatch):
+    import huggingface_hub
+    hub = Hub()
+    monkeypatch.setenv("HF_TOKEN", "fake-secret")
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda **kw: hub)
+    return hub
 
 
 @pytest.fixture
-def setup_mount(mount, monkeypatch):
-    import huggingface_hub
-
-    hub = Hub()
-    process = Process()
-    captured = {}
-    monkeypatch.setenv("HF_TOKEN", "fake-secret-never-in-argv")
-    monkeypatch.setattr(huggingface_hub, "HfApi", lambda **kw: hub)
-    monkeypatch.setattr(shutil, "which", lambda _: "/tools/hf-mount-fuse")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
-        returncode=0, stdout="hf-mount 0.13.2\n"))
-
-    def popen(args, **kw):
-        captured.update(args=args, **kw)
-        return process
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(bucket, "_mount_entry", lambda p: ("101", "fuse", "hf-mount")
-                        if process.poll() is None and mount.mount.exists() else None)
-    monkeypatch.setattr(mount, "_check_writable", lambda *a: None)
-    return mount, hub, process, captured
+def mount(tmp_path):
+    return BucketMount(BucketBoardStorage(bucket="team/private", mount_root=str(tmp_path)),
+                       "test-swarm", tmp_path / "logs" / "storage.log")
 
 
 def test_storage_defaults_and_roundtrip():
@@ -136,351 +101,6 @@ def test_retained_prefix_cannot_escape(mount, prefix):
         BucketMount(mount.config, "test", mount.log_path, prefix=prefix)
 
 
-def test_start_passes_flush_controls_and_private_token_file(setup_mount):
-    m, _, _, captured = setup_mount
-    assert m.start(threading.Event(), 1) == m.mount
-    args = captured["args"]
-    assert "--fuse-owner-only" in args and "--advanced-writes" in args
-    assert "sudo" not in args
-    assert args[args.index("--flush-debounce-ms") + 1] == "2000"
-    assert args[args.index("--flush-max-batch-window-ms") + 1] == "15000"
-    assert args[args.index("--flush-shutdown-timeout-ms") + 1] == "45000"
-    assert args[-2] == f"team/private/{m.prefix}"
-    assert m.token_file.parent != m.mount and m.token_file.stat().st_mode & 0o777 == 0o600
-    assert m.root.stat().st_mode & 0o777 == 0o700
-    assert "fake-secret-never-in-argv" not in json.dumps(args)
-    assert "HF_TOKEN" not in captured["env"]
-    assert "fake-secret-never-in-argv" not in json.dumps(m.metadata())
-
-
-@pytest.mark.parametrize("failure", ["missing", "version", "token", "public", "exited",
-                                     "unexpected", "cancelled"])
-def test_start_fails_without_writing_a_database(setup_mount, monkeypatch, failure):
-    m, hub, process, _ = setup_mount
-    cancel = threading.Event()
-    if failure == "missing":
-        monkeypatch.setattr(shutil, "which", lambda _: None)
-    elif failure == "version":
-        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
-            returncode=0, stdout="hf-mount 0.13.2-dev"))
-    elif failure == "token":
-        monkeypatch.delenv("HF_TOKEN")
-    elif failure == "public":
-        hub.private = False
-    elif failure == "exited":
-        process.returncode = 1
-    elif failure == "unexpected":
-        monkeypatch.setattr(bucket, "_mount_entry", lambda _: ("101", "ext4", "/dev/sda"))
-    elif failure == "cancelled":
-        cancel.set()
-    with pytest.raises(BucketStorageError):
-        m.start(cancel, 0.1)
-    assert not (m.mount / "board.db").exists()
-    try:
-        m.stop(verify=False)
-    except BucketStorageError:
-        pass
-    assert not m.token_file.exists() and m.verified_at is None
-
-
-def test_mount_disappearance_and_replacement_fail_health_check(setup_mount, monkeypatch):
-    m, _, _, _ = setup_mount
-    m.start(threading.Event(), 1)
-    monkeypatch.setattr(bucket, "_mount_entry", lambda _: ("999", "fuse", "hf-mount"))
-    with pytest.raises(BucketStorageError, match="disappeared"):
-        m.check()
-    monkeypatch.setattr(bucket, "_mount_entry", lambda _: None)
-    with pytest.raises(BucketStorageError):
-        m.check()
-
-
-def test_preflight_verifies_upload_through_hub(setup_mount, monkeypatch):
-    m, hub, _, _ = setup_mount
-    m.start(threading.Event(), 1)
-
-    def find(bucket_id, paths):
-        hub.remote[paths[0]] = (m.mount / paths[0].split("/")[-1]).read_bytes()
-        return [SimpleNamespace(size=32)]
-
-    monkeypatch.setattr(hub, "get_bucket_paths_info", find)
-    BucketMount._check_writable(m, threading.Event(), time.monotonic() + 1)
-    assert hub.downloads == 1
-    assert not list(m.mount.glob(".flock-write-check-*"))
-
-
-def test_preflight_rejects_unuploaded_writes(setup_mount):
-    m, _, _, _ = setup_mount
-    m.start(threading.Event(), 1)
-    with pytest.raises(BucketStorageError, match="write-access"):
-        BucketMount._check_writable(m, threading.Event(), time.monotonic())
-
-
-@pytest.fixture
-def stopped_board(mount, monkeypatch):
-    m = mount
-    m.mount.mkdir(parents=True, mode=0o700)
-    m.cache.mkdir()
-    m.token_file.write_text("secret")
-    with contextlib.closing(sqlite3.connect(m.mount / "board.db")) as db, db:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("CREATE TABLE messages(body TEXT)")
-        db.execute("INSERT INTO messages VALUES ('retained')")
-    (m.mount / "operator.token").write_text("operator-secret")
-    (m.mount / "server.lock").touch()
-    m.proc = Process()
-    m._api = Hub()
-    monkeypatch.setattr(m, "check", lambda: None)
-    monkeypatch.setattr(bucket, "_mount_entry", lambda _: None)
-    hub = m._api
-
-    def drain():
-        hub.remote = {f"{m.prefix}/{p.name}": p.read_bytes() for p in m.mount.iterdir()
-                      if p.is_file()}
-
-    monkeypatch.setattr(m, "_drain", drain)
-    return m, hub
-
-
-def test_shutdown_verifies_remote_bytes_then_removes_cache(stopped_board):
-    m, hub = stopped_board
-    m.stop(verify=True)
-    assert m.verified_at and not m.root.exists() and hub.downloads == 1
-    assert f"{m.prefix}/operator.token" in hub.remote
-    assert m._api is None and m._token is None
-
-
-@pytest.mark.parametrize("failure", ["stale", "wal", "missing", "offline", "checkpoint"])
-def test_failed_persistence_retains_cache_and_never_marks_verified(stopped_board,
-                                                                 monkeypatch, failure):
-    m, hub = stopped_board
-    original = m._drain
-
-    def drain():
-        original()
-        if failure == "stale":
-            hub.remote[f"{m.prefix}/board.db"] = b"stale DB"
-        elif failure == "wal":
-            hub.remote[f"{m.prefix}/board.db-wal"] = b"uncheckpointed"
-        elif failure == "missing":
-            del hub.remote[f"{m.prefix}/operator.token"]
-        elif failure == "offline":
-            def offline(*a, **kw):
-                raise OSError("network down with secret=do-not-display")
-            hub.download_bucket_files = offline
-
-    monkeypatch.setattr(m, "_drain", drain)
-    if failure == "checkpoint":
-        (m.mount / "board.db").write_bytes(b"corrupt")
-    with pytest.raises((BucketStorageError, sqlite3.DatabaseError)) as exc:
-        m.stop(verify=True)
-    assert "do-not-display" not in str(exc.value)
-    assert m.root.exists() and m.cache.exists() and not m.token_file.exists()
-    assert m.verified_at is None and m._api is None
-
-
-def test_drain_timeout_kills_sidecar_retains_cache(stopped_board, monkeypatch):
-    m, _ = stopped_board
-    calls = []
-
-    def wait(timeout):
-        calls.append(timeout)
-        if len(calls) == 1:
-            raise subprocess.TimeoutExpired("mount", timeout)
-        return -9
-
-    monkeypatch.setattr(m.proc, "wait", wait)
-    monkeypatch.setattr(m, "_drain", lambda: BucketMount._drain(m))
-    with pytest.raises(BucketStorageError, match="timed out"):
-        m.stop(verify=True)
-    assert m.proc.killed and m.cache.exists() and not m.token_file.exists()
-
-
-@pytest.fixture
-def fake_mounts(tmp_path, monkeypatch):
-    """Real msgboard on local disk, standing in for the unprivileged FUSE boundary."""
-    pytest.importorskip("msgboard")
-    remote = {}
-    instances = []
-    hub = Hub()
-    import huggingface_hub
-    monkeypatch.setattr(huggingface_hub, "HfApi", lambda **kw: hub)
-    monkeypatch.setattr(bucket, "_mount_entry", lambda _: None)
-
-    class Mount(BucketMount):
-        def start(self, cancel, timeout, *, restore=False):
-            self.mount.mkdir(parents=True)
-            self.cache.mkdir()
-            self._api = hub
-            if restore:
-                for name, data in remote[self.prefix].items():
-                    (self.mount / name).write_bytes(data)
-            instances.append(self)
-            return self.mount
-
-        def check(self):
-            pass
-
-        def _drain(self):
-            data = {p.name: p.read_bytes() for p in self.mount.iterdir() if p.is_file()}
-            remote[self.prefix] = data
-            hub.remote.update({f"{self.prefix}/{k}": v for k, v in data.items()})
-
-    monkeypatch.setattr(managed, "BucketMount", Mount)
-    return instances
-
-
-def test_managed_bucket_skips_sqlite_backups_and_reopens_prefix(tmp_path, fake_mounts, monkeypatch):
-    cfg = {"kind": "hf-bucket", "bucket": "team/private", "mount_root": str(tmp_path / "scratch")}
-    b = ManagedBoard(tmp_path / "run")
-    b.start(spec(storage=cfg))
-    try:
-        assert not b.periodic_snapshots
-        with join(b) as client:
-            channel = client.get("/v1/channels").json()["channels"][0]["id"]
-            response = client.post(f"/v1/channels/{channel}/messages", json={"body": "retained"},
-                                   headers={"Idempotency-Key": "one"})
-            response.raise_for_status()
-            credentials = dict(client.headers)
-        b.snapshot()
-        assert not (b.archive / "board.db").exists()
-        with pytest.raises(ManagedBoardError, match="storage"):
-            b.resolve(spec(storage={**cfg, "flush_debounce": "3s"}))
-        b.resolve(spec(storage=cfg))
-        original_terminate = b._terminate
-
-        def terminate():
-            original_terminate()
-            assert b.proc.poll() is not None  # close/checkpoint DB before mount drain
-        monkeypatch.setattr(b, "_terminate", terminate)
-    finally:
-        b.stop()
-    meta = json.loads((b.archive / "metadata.json").read_text())
-    assert meta["storage"]["verified_at"] and meta["snapshot_at"] is None
-    reopened = ManagedBoard(b.run_dir)
-    try:
-        reopened.start(restore=True)
-        assert fake_mounts[0].prefix == fake_mounts[1].prefix
-        assert fake_mounts[0].cache != fake_mounts[1].cache
-        with httpx.Client(base_url=reopened.url, headers=credentials) as client:
-            messages = client.get(f"/v1/channels/{channel}/messages").json()["messages"]
-            assert [m["body"] for m in messages] == ["retained"]
-    finally:
-        reopened.stop()
-
-
-def test_managed_mount_failure_never_initializes_fallback_db(tmp_path, monkeypatch):
-    pytest.importorskip("msgboard")
-    def fail(*a, **kw):
-        raise BucketStorageError("mount denied")
-    monkeypatch.setattr(BucketMount, "start", fail)
-    b = ManagedBoard(tmp_path / "run")
-    with pytest.raises(ManagedBoardError, match="mount denied"):
-        b.start(spec(storage={"kind": "hf-bucket", "bucket": "team/private",
-                              "mount_root": str(tmp_path / "scratch")}))
-    b.stop()
-    assert b.local is None and b.proc is None
-    assert not (b.archive / "board.db").exists()
-    assert b.metadata()["storage"]["verified_at"] is None
-
-
-@pytest.mark.parametrize("failed", [False, True])
-async def test_local_run_persistence_status_and_worker_credentials(tmp_path, fake_mounts,
-                                                                 monkeypatch, failed):
-    import io
-
-    from flock.controller import localrun
-
-    monkeypatch.setenv("HF_TOKEN", "mount-only-token")
-    monkeypatch.setattr(localrun, "SNAPSHOT_INTERVAL", 0.01)
-    jobs = []
-    snapshots = []
-    factory = localrun.LocalJobsClient
-
-    def capture_jobs(**kwargs):
-        value = factory(**kwargs)
-        jobs.append(value)
-        return value
-
-    class Board(ManagedBoard):
-        def snapshot(self):
-            snapshots.append(self)
-            super().snapshot()
-
-    if failed:
-        def fail(*a):
-            raise BucketStorageError("upload incomplete")
-        monkeypatch.setattr(BucketMount, "_verify", fail)
-    monkeypatch.setattr(localrun, "LocalJobsClient", capture_jobs)
-    monkeypatch.setattr(localrun, "ManagedBoard", Board)
-    result = await localrun.run_local(localrun.RunOptions(
-        spec=spec(storage={"kind": "hf-bucket", "bucket": "team/private",
-                           "mount_root": str(tmp_path / "scratch")}),
-        data_dir=tmp_path / "runs", until=0.2, refresh=0.05, grace=0, out=io.StringIO()))
-    doc = json.loads((result.run_dir / "run.json").read_text())
-    assert result.exit_code == (1 if failed else 0)
-    assert (doc["board"]["storage"]["verified_at"] is None) == failed
-    assert result.reason == ("board_persistence_failed" if failed else "until")
-    assert len(snapshots) == 1  # initial metadata only; no periodic/final SQLite backups
-    assert "HF_TOKEN" not in jobs[0].process_env({}, {})
-    assert jobs[0].process_env({}, {"HF_TOKEN": "provider-key"})["HF_TOKEN"] == "provider-key"
-    assert "mount-only-token" not in json.dumps(doc)
-
-
-def test_fresh_start_preserves_existing_bucket_metadata(tmp_path):
-    pytest.importorskip("msgboard")
-    b = ManagedBoard(tmp_path / "run")
-    b.archive.mkdir(parents=True)
-    saved = '{"storage": {"kind": "hf-bucket", "prefix": "keep-me"}}'
-    (b.archive / "metadata.json").write_text(saved)
-    with pytest.raises(ManagedBoardError, match="overwrite"):
-        b.start(spec(storage={"kind": "hf-bucket", "bucket": "team/private"}))
-    assert (b.archive / "metadata.json").read_text() == saved
-
-
-@pytest.mark.parametrize("spawn_failed", [False, True])
-def test_mount_supervisor_drains_on_parent_death_and_removes_token(tmp_path, monkeypatch,
-                                                                  spawn_failed):
-    token = tmp_path / "hf.token"
-    token.write_text("private")
-    process = Process()
-    monkeypatch.setattr(bucket.os, "getppid", lambda: 99)
-    monkeypatch.setattr(bucket.signal, "signal", lambda *args: None)
-    if spawn_failed:
-        def fail(*args, **kw):
-            raise OSError("cannot spawn")
-        monkeypatch.setattr(subprocess, "Popen", fail)
-        with pytest.raises(OSError):
-            bucket._supervise(100, token, 1, ["hf-mount-fuse"])
-    else:
-        monkeypatch.setattr(subprocess, "Popen", lambda *args, **kw: process)
-        assert bucket._supervise(100, token, 1, ["hf-mount-fuse"]) == 0
-        assert process.terminated
-    assert not token.exists()
-
-
-def test_mountinfo_rejects_overmount_and_decodes_spaces(tmp_path, monkeypatch):
-    original = Path.read_text
-    lines = "101 1 0:1 / /scratch/my\\040mount rw - fuse hf-mount rw\n"
-    def read(self, *a, **kw):
-        return lines if str(self) == "/proc/self/mountinfo" else original(self, *a, **kw)
-    monkeypatch.setattr(Path, "read_text", read)
-    assert bucket._mount_entry(Path("/scratch/my mount")) == ("101", "fuse", "hf-mount")
-    lines += "102 1 0:2 / /scratch/my\\040mount rw - ext4 /dev/disk rw\n"
-    with pytest.raises(BucketStorageError, match="Multiple mounts"):
-        bucket._mount_entry(Path("/scratch/my mount"))
-
-
-def test_live_check_script_clean_path_with_fake_mount(tmp_path, fake_mounts, monkeypatch, capsys):
-    from scripts import check_bucket_board
-
-    monkeypatch.setattr("sys.argv", ["check_bucket_board.py", "--bucket", "team/private",
-                                   "--mount-root", str(tmp_path / "scratch"),
-                                   "--data-dir", str(tmp_path / "runs")])
-    check_bucket_board.main()
-    assert "PASS: concurrent reads/writes" in capsys.readouterr().out
-    assert len(fake_mounts) == 2
-
-
 def test_bucket_init_publishes_authenticated_token_without_hard_links(tmp_path, monkeypatch):
     import errno
 
@@ -514,75 +134,6 @@ def test_bucket_init_rejects_unrelated_unsupported_operations(tmp_path, monkeypa
     with pytest.raises(OSError):
         managed._init_bucket(str(tmp_path))
     assert not (tmp_path / "operator.token").exists()
-
-
-def test_failed_write_probe_keeps_file_without_blocking_unlink(setup_mount, monkeypatch):
-    m, _, _, _ = setup_mount
-    m.start(threading.Event(), 1)
-    unlink = Path.unlink
-    def refuse_probe_unlink(self, *a, **kw):
-        if self.parent == m.mount:
-            pytest.fail("failed readiness must not issue another request to the stalled mount")
-        return unlink(self, *a, **kw)
-    monkeypatch.setattr(Path, "unlink", refuse_probe_unlink)
-    with pytest.raises(BucketStorageError, match="write-access"):
-        BucketMount._check_writable(m, threading.Event(), time.monotonic())
-    assert list(m.mount.glob(".flock-write-check-*"))
-
-
-def test_bucket_init_rejects_forged_temporary_token(tmp_path, monkeypatch):
-    import errno
-    import os
-
-    pytest.importorskip("msgboard")
-    from msgboard.errors import ApiError
-
-    def corrupt_and_refuse(src, dst, *a, **kw):
-        Path(src).write_text("forged-token")
-        raise OSError(errno.ENOTSUP, "hard links unsupported", str(src), None, str(dst))
-
-    monkeypatch.setattr(os, "link", corrupt_and_refuse)
-    with pytest.raises(ApiError):
-        managed._init_bucket(str(tmp_path))
-    assert not (tmp_path / "operator.token").exists()
-
-
-def test_persistence_manifest_excludes_transient_probe(stopped_board):
-    m, _ = stopped_board
-    (m.mount / ".flock-write-check-old-cache-entry").write_text("transient")
-    manifest = m._manifest()
-    assert set(manifest) == {"board.db", "operator.token"}
-
-
-@pytest.mark.parametrize("replaced", [False, True])
-def test_dead_fuse_cleanup_detaches_only_owned_mount(stopped_board, monkeypatch, replaced):
-    m, _ = stopped_board
-    m._mount_id = "101"
-    m.proc.returncode = -9
-    active = ("999" if replaced else "101", "fuse", "hf-mount")
-    calls = []
-    monkeypatch.setattr(bucket, "_mount_entry", lambda _: active)
-    def detach(args, **kw):
-        nonlocal active
-        calls.append(args)
-        active = None
-        return SimpleNamespace(returncode=0)
-    monkeypatch.setattr(subprocess, "run", detach)
-    with pytest.raises(BucketStorageError):
-        BucketMount._drain(m)
-    assert calls == ([] if replaced else [["fusermount3", "-uz", str(m.mount)]])
-    assert m.cache.exists()
-
-
-def test_checkpoint_normalizes_sidecars_only_after_database_is_closed(stopped_board):
-    m, _ = stopped_board
-    manifest = m._manifest()
-    assert (m.mount / "board.db-wal").read_bytes() == b""
-    assert (m.mount / "board.db-shm").read_bytes() == b""
-    assert "board.db-wal" not in manifest and "board.db-shm" not in manifest
-    with contextlib.closing(sqlite3.connect(m.mount / "board.db")) as conn:
-        assert conn.execute("SELECT body FROM messages").fetchall() == [("retained",)]
-        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
 def test_bucket_viewer_final_export_follows_verified_shutdown(tmp_path, fake_mounts):
@@ -635,3 +186,109 @@ def test_failed_bucket_verification_never_marks_viewer_complete(tmp_path, fake_m
     with pytest.raises(ManagedBoardError, match="verification"):
         b.stop()
     assert not json.loads(api.remote[prefix + "manifest.json"])["completed"]
+
+
+def test_snapshot_recovery_retention_and_transient_failure(mount, fake_mounts):
+    m = mount
+    m.start(threading.Event(), 5)
+    with contextlib.closing(sqlite3.connect(m.mount / "board.db")) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE messages(body TEXT)")
+        db.execute("INSERT INTO messages VALUES ('retained')")
+        db.commit()
+        (m.mount / "operator.token").write_text("operator-secret")
+        attachment = m.mount / "blobs/objects/file"
+        attachment.parent.mkdir(parents=True)
+        attachment.write_bytes(b"attachment")
+        for _ in range(4):
+            m.snapshot()
+        manifest_path = m.prefix + "/manifest.json"
+        good_manifest = fake_mounts.remote[manifest_path]
+        doc = json.loads(good_manifest)
+        assert len(doc["generations"]) == 3
+        assert not any(p.endswith(("-wal", "-shm")) for p in fake_mounts.remote)
+        fake_mounts.fail = True
+        with pytest.raises(BucketStorageError):
+            m.snapshot()
+        assert fake_mounts.remote[manifest_path] == good_manifest
+        db.execute("INSERT INTO messages VALUES ('still serving')")
+        db.commit()
+        fake_mounts.fail = False
+    m.stop(verify=True)
+    assert m.verified_at and not m.root.exists()
+    restored = BucketMount(m.config, "test", m.log_path, prefix=m.prefix)
+    restored.start(threading.Event(), 5, restore=True)
+    with contextlib.closing(sqlite3.connect(restored.mount / "board.db")) as db:
+        assert len(db.execute("SELECT * FROM messages").fetchall()) == 2
+    assert (restored.mount / "blobs/objects/file").read_bytes() == b"attachment"
+    restored.stop(verify=True)
+
+
+def test_final_upload_failure_keeps_local_and_previous_generation(mount, fake_mounts):
+    mount.start(threading.Event(), 5)
+    with contextlib.closing(sqlite3.connect(mount.mount / "board.db")) as db:
+        db.execute("CREATE TABLE messages(body TEXT)")
+    (mount.mount / "operator.token").write_text("private")
+    mount.snapshot()
+    fake_mounts.fail = True
+    with pytest.raises(BucketStorageError) as error:
+        mount.stop(verify=True)
+    assert "credential" not in str(error.value)
+    assert mount.verified_at is None and mount.mount.exists()
+
+
+def test_public_bucket_rejected(mount, fake_mounts):
+    fake_mounts.private = False
+    with pytest.raises(BucketStorageError, match="private"):
+        mount.start(threading.Event(), 5)
+
+
+def test_corrupt_latest_generation_falls_back(mount, fake_mounts):
+    mount.start(threading.Event(), 5)
+    with contextlib.closing(sqlite3.connect(mount.mount / "board.db")) as db:
+        db.execute("CREATE TABLE messages(body TEXT)")
+    (mount.mount / "operator.token").write_text("private")
+    mount.snapshot()
+    mount.stop(verify=True)
+    latest = mount._generations[0]["id"]
+    fake_mounts.remote[f"{mount.prefix}/generations/{latest}/board.db"] = b"corrupt"
+    reopened = BucketMount(mount.config, "test", mount.log_path, prefix=mount.prefix)
+    reopened.start(threading.Event(), 5, restore=True)
+    reopened.stop(verify=True)
+
+
+def test_legacy_flat_backup_recovers_on_local_disk(mount, fake_mounts, tmp_path):
+    source = tmp_path / "legacy.db"
+    with contextlib.closing(sqlite3.connect(source)) as db:
+        db.execute("CREATE TABLE messages(body TEXT)")
+        db.execute("INSERT INTO messages VALUES ('legacy')")
+        db.commit()
+    fake_mounts.remote[f"{mount.prefix}/board.db"] = source.read_bytes()
+    fake_mounts.remote[f"{mount.prefix}/operator.token"] = b"private"
+    fake_mounts.remote[f"{mount.prefix}/board.db-wal"] = b""
+    mount.start(threading.Event(), 5, restore=True)
+    with contextlib.closing(sqlite3.connect(mount.mount / "board.db")) as db:
+        assert db.execute("SELECT * FROM messages").fetchall() == [("legacy",)]
+    mount.stop(verify=True)
+    assert f"{mount.prefix}/manifest.json" in fake_mounts.remote
+
+
+def test_manifest_failure_does_not_publish_partial_generation(mount, fake_mounts, monkeypatch):
+    mount.start(threading.Event(), 5)
+    with contextlib.closing(sqlite3.connect(mount.mount / "board.db")) as db:
+        db.execute("CREATE TABLE messages(body TEXT)")
+    (mount.mount / "operator.token").write_text("private")
+    mount.snapshot()
+    manifest = f"{mount.prefix}/manifest.json"
+    previous = fake_mounts.remote[manifest]
+    upload = fake_mounts.batch_bucket_files
+    def fail_manifest(bucket, *, add=(), delete=()):
+        if any(dest == manifest for _, dest in add):
+            raise OSError("manifest unavailable")
+        return upload(bucket, add=add, delete=delete)
+    monkeypatch.setattr(fake_mounts, "batch_bucket_files", fail_manifest)
+    with pytest.raises(BucketStorageError):
+        mount.snapshot()
+    assert fake_mounts.remote[manifest] == previous
+    monkeypatch.setattr(fake_mounts, "batch_bucket_files", upload)
+    mount.stop(verify=True)

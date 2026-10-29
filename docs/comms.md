@@ -342,74 +342,55 @@ Managed provisioning is currently supported only by local `flock run`, not stand
 controllers, Slurm or HF Jobs. Existing external-board configurations continue to work.
 
 
-### Bucket-mounted managed boards (experimental)
+### Bucket-backed managed boards
 
-Set `comms.storage` to let a supervised **hf-mount-fuse v0.13.2** process handle live-file
-writeback instead of Flock's periodic/final SQLite backups:
+`comms.storage.kind: hf-bucket` keeps the live database on local disk and publishes consistent
+SQLite backups to an existing **private** bucket. It no longer requires hf-mount, FUSE or sudo.
+Existing YAML remains valid:
 
 ```yaml
 comms:
   managed: true
-  channel: general
   storage:
     kind: hf-bucket
-    bucket: HuggingFaceSwarms/Experiments  # existing private bucket; never created automatically
-    mount_root: /scratch/flock-boards    # node-local cache/staging, outside the mount
-    token_env: HF_TOKEN                 # variable name only; default HF_TOKEN
+    bucket: HuggingFaceSwarms/Experiments
+    mount_root: /tmp/flock-boards  # legacy name: now the node-local data/staging root
+    token_env: HF_TOKEN
     flush_debounce: 2s
     flush_max_batch_window: 15s
     flush_shutdown_timeout: 45s
 ```
 
-Install the pinned binary separately and put `hf-mount-fuse` on PATH. On Linux, access to `/dev/fuse`
-and a working `fusermount3` helper are required; no sudo invocation is used. The mount is
-restricted to its owner (`--fuse-owner-only`) and uses random-write staging
-(`--advanced-writes`). For the pinned msgboard version, Flock adapts its hard-link token
-publication to an authenticated, exclusive-create operation; existing tokens are never replaced.
-Flock does not install software or prompt for sudo during startup. Bucket existence/privacy, the actual
-kernel mount and a small upload/download through that mount are checked before agents start.
-The HF token is passed in a mode-0600 file outside the mount; storage does not add it to worker
-environments. Providers that explicitly request the same token still receive their configured
-secret. Mounted files/directories default to 0600/0700 because buckets do not preserve modes.
+The actual live database directory is checked for unsupported shared filesystems. Bucket
+credentials stay in the controller and are not added to worker environments. Backups contain
+operator credentials and therefore require private bucket access. Local roots are owner-only.
 
-Every run mounts its own `flock/runs/<swarm>/<uuid>/board/` prefix under
-`<mount_root>/<uuid>/mount`; its `cache/` sibling holds staging data. The board initializes
-and writes directly there. Metadata in `<run>/board/metadata.json` and `run.json` records the
-bucket, exact prefix, mount settings and recovery directory. Keep that metadata to reopen
-with `flock board <run-dir>`; reopening uses the same prefix with a new, empty local cache.
-Only one board may own a prefix. Readers on other nodes must use HTTP through port
-forwarding, rather than opening these SQLite files directly. This provides no cross-node SQLite locking or multiple-writer support.
+Each run owns `flock/runs/<swarm>/<uuid>/board`. An online SQLite backup, credentials and
+attachments form an immutable generation; live WAL, SHM and lock files are excluded. Uploads
+are serialized and downloaded for hash/integrity verification before the manifest is replaced.
+The manifest retains three verified generations. Recovery tries them newest first and never
+combines generations. Legacy flat DB/WAL backups are downloaded and recovered locally; invalid
+legacy backups fail clearly and remain untouched remotely.
 
-Shutdown drains workers and closes/checkpoints msgboard. After all SQLite connections close,
-Flock publishes empty WAL/shared-memory files through the mount to replace stale uploaded
-sidecars left by hf-mount v0.13.2's local-unlink behavior. It then terminates the mount and
-waits for its upload drain. Flock independently downloads the stopped files through the Hub API,
-compares their SHA-256 hashes and checks SQLite integrity and absence of a nonempty remote
-WAL. Only then is `verified_at` recorded and local staging removed. Any failure returns a
-nonzero exit status, keeps staging for recovery and leaves persistence unverified. Mount
-logs are in `<run>/logs/hf-mount.log`; an unexpected mount exit also fails the run. Flock only
-manages the mount it created, never an existing shared mount.
+`flush_max_batch_window` controls the interval between background backup attempts (15 seconds
+by default), plus backup/upload time. `flush_debounce` remains accepted for compatibility;
+periodic backups already coalesce all intervening writes. `flush_shutdown_timeout` bounds
+waiting for an existing uploader before final backup. Upload failures retry on the next interval
+while the board continues serving. Final upload/verification failure fails the run and retains
+its local recovery directory. A node loss can lose messages newer than the last verified backup.
+Only one owner may write a prefix; other readers use HTTP or the sanitized viewer export.
 
-The flush settings map to `--flush-debounce-ms`, `--flush-max-batch-window-ms` and
-`--flush-shutdown-timeout-ms`. They control upload batching, not consistent database snapshots
-or a strict durability deadline. A crash may lose acknowledged but unuploaded messages;
-independently uploaded DB/WAL files may also require recovery. Do not treat this backend as
-supported until the live compatibility gate passes on your actual node and mount version:
+Reopen with `flock board <run-dir>` using retained metadata. The Space remains private and uses
+its existing authentication policy. To qualify storage without model calls or HF Jobs:
 
 ```sh
-uv run --no-sync python scripts/check_bucket_board.py --bucket HuggingFaceSwarms/Experiments --faults
+uv run --no-sync python scripts/check_bucket_board.py --bucket HuggingFaceSwarms/Experiments \
+  --mount-root /tmp/flock-boards --duration 1800 --faults
 ```
 
-This explicit network check starts no models or HF Jobs. It tests concurrent readers/writers,
-WAL checkpoints, clean shutdown, cold remount, killed board/mount processes and interrupted
-uploads, retaining unique remote test prefixes for inspection. `--faults` additionally needs
-`fusermount3` to detach its own failed FUSE mount. Unit tests use fake mounts and Hub clients.
-The complete live FUSE gate passed on this dev node with v0.13.2: concurrent WAL reads/writes,
-checkpointing, verified clean shutdown, cold remount, killed board/server processes, and
-interrupted uploads followed by cold recovery. The two-agent local-vLLM example also completed
-with verified bucket persistence. This remains an experimental, single-owner backend;
-these checks do not guarantee recovery from every possible mid-upload host failure.
-Use `examples/managed-board-bucket.yaml` as an editable local-vLLM example after qualification.
+The gate exercises concurrent traffic, cold recovery, an abrupt board exit and upload failure.
+Unit tests use fake Hub clients. Existing FUSE-era successful short tests did not rule out the
+intermittent SIGBUS crash; the database no longer runs on that filesystem.
 
 ### Browse bucket-backed boards in a Space
 

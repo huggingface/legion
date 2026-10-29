@@ -1,6 +1,6 @@
 """A private msgboard per local run. No package installs or remote services at startup.
 
-Live SQLite files default to node-local disk; opt-in bucket mounts own their writeback.
+Live SQLite files stay on node-local disk; bucket storage uploads consistent backups.
 Local snapshots or bucket location metadata live in the run's private board/ directory.
 The child inherits a pre-bound socket (no port selection race),
 not the controller's credentials, and exits when its parent disappears.
@@ -113,11 +113,12 @@ class ManagedBoard:
                     self._check_local(Path(storage.mount_root))  # cache/staging must be local
                     self.bucket = BucketMount(
                         storage, spec.swarm if spec else "retained",
-                        self.run_dir / "logs" / "hf-mount.log",
+                        self.run_dir / "logs" / "bucket-storage.log",
                         prefix=retained.get("storage", {}).get("prefix"))
                     self._save_metadata()  # retain the exact remote prefix even if setup fails
                     self.local = self.bucket.start(self._cancel_start, self.startup_timeout,
                                                    restore=restore)
+                    self._check_local(self.local)
                 else:
                     root = Path(os.environ.get("FLOCK_BOARD_LOCAL_ROOT", "/tmp"))
                     self._check_local(root)
@@ -167,6 +168,7 @@ class ManagedBoard:
                     self._provision(spec)
                 self.snapshot()
                 if self.bucket:
+                    self.bucket.start_snapshots()
                     try:
                         from flock.board_viewer.export import Publisher
                         self._viewer = Publisher(self.bucket, self.local)
@@ -318,6 +320,8 @@ class ManagedBoard:
         """Atomic online SQLite backup; copy attachments and credentials before publishing it."""
         with self._lock:
             if self.bucket:
+                self.bucket.snapshot()
+                self._snapshot_at = self.bucket.snapshot_at
                 self._save_metadata()
                 return
             if self.local is None or not (self.local / DB_NAME).is_file():
@@ -480,7 +484,7 @@ def _serve(data_dir: str, fd: int, parent: int) -> None:
     import uvicorn
     from msgboard.server import Board, create_app
 
-    faulthandler.enable()  # Keep native SQLite/FUSE crash traces in msgboard.log.
+    faulthandler.enable()  # Keep native SQLite crash traces in msgboard.log.
     board = Board(Path(data_dir))
 
     class Server(uvicorn.Server):

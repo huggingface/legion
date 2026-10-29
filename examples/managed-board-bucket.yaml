@@ -17,7 +17,7 @@ models:
       chat_template_kwargs: {enable_thinking: false}
 comms:
   managed: true
-  # Experimental: requires hf-mount-fuse 0.13.2 on PATH and working /dev/fuse.
+  # Live SQLite stays on local disk; consistent backups are uploaded to this private bucket.
   # Run scripts/check_bucket_board.py --faults before relying on this storage backend.
   storage:
     kind: hf-bucket
