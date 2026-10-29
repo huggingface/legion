@@ -278,11 +278,16 @@ class Health:
             lines = self._buckets[h] = {}
             for path in (self.store.data_dir / "states").glob(f"*/{h}.jsonl"):
                 try:
-                    for line in path.read_text(encoding="utf-8").splitlines():
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    log.exception("cannot reload %s", path)
+                    continue
+                for line in text.splitlines():
+                    try:
                         r = json.loads(line)
                         lines[(path.parent.name, r["b"], r["agent"])] = r
-                except (OSError, ValueError, KeyError):
-                    log.exception("cannot reload %s", path)
+                    except (ValueError, KeyError, TypeError):
+                        log.warning("skipping a bad line in %s", path)
         return lines
 
     def _write_buckets(self, now: float) -> None:
@@ -306,10 +311,13 @@ class Health:
                        pending: dict[str, int], dt: float, now: float) -> None:
         """Working / pending / idle seconds, sampled: each tick adds its interval to the state
         each agent is in (pending: idle with a prompt queued)."""
-        d = datetime.fromtimestamp(now, UTC)
-        b = f"{d:%Y-%m-%dT%H}:{d.minute // 5 * 5:02d}"
+        pieces, t = [], now - dt  # the interval split at the 5-min bucket boundaries
+        while t < now:
+            end = min(now, (t // 300 + 1) * 300)
+            d = datetime.fromtimestamp(t, UTC)
+            pieces.append((f"{d:%Y-%m-%dT%H}:{d.minute // 5 * 5:02d}", end - t))
+            t = end
         with self._lock:
-            lines = self._bucket_hour(b[:13])
             for a in agents:
                 st = states[a["name"]]
                 key = ("working_s" if st == "working" else
@@ -319,10 +327,10 @@ class Health:
                     r = self._rollup(a, now)
                     r[key] = round(r[key] + dt, 1)
                 short = key[0] if key else "s" if st == "stuck" else None
-                if short:  # zero fields are left out
-                    line = lines.setdefault((swarm, b, a["name"]),
-                                            {"b": b, "agent": a["name"], "type": a["type"]})
-                    line[short] = round(line.get(short, 0) + dt, 1)
+                for b, sec in pieces if short else ():  # zero fields are left out
+                    line = self._bucket_hour(b[:13]).setdefault(
+                        (swarm, b, a["name"]), {"b": b, "agent": a["name"], "type": a["type"]})
+                    line[short] = round(line.get(short, 0) + sec, 1)
 
     # ------------------------------------------------------------------ run.json
     def write_run(self, now: float, ended: bool = False) -> None:

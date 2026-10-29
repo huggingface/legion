@@ -105,7 +105,7 @@ state; pending = idle with a prompt queued); `tools` counts tool results; `wakes
 
 A state line, for the viewer's per-agent lanes: `{"b": "YYYY-MM-DDTHH:MM", "agent", "type",
 "w", "p", "i", "s"}`, the seconds sampled working, pending, idle and stuck in the 5-min bucket
-starting at `b` (UTC, by sample time). Zero fields are left out; an agent with no sample in a
+starting at `b` (UTC; each sampled interval is split at the bucket boundaries, so a bucket holds at most 300 s per agent). Zero fields are left out; an agent with no sample in a
 bucket (dead, unknown, removed) has no line. Same sampling and rewrite rules as the rollups: the
 open hour's file is rewritten whole every 5 min, once more after the hour closes and at
 shutdown, then never changes; one line per (agent, b), read with replace semantics; a restart

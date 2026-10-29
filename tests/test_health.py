@@ -515,19 +515,23 @@ def test_state_buckets_per_agent_and_5_minutes_rewritten_whole(store):
     assert json.loads((states / "latest.json").read_text()) == {
         "ts": T + 60, "states": {"researcher-0000": "working", "researcher-0001": "pending"}}
     beat(T + 300, **{a0["name"]: "stuck"})
-    h.tick(T + 300)  # 14:05 (interval capped at 60 s); 14:00 written before this sample
+    h.tick(T + 300)  # 14:00 (interval capped at 60 s), after the file was written
     assert [json.loads(x) for x in (states / "2026-09-21T14.jsonl").read_text().splitlines()] == [
         {"b": "2026-09-21T14:00", "agent": "researcher-0000", "type": "researcher", "w": 60.0},
         {"b": "2026-09-21T14:00", "agent": "researcher-0001", "type": "researcher", "i": 30.0,
          "p": 30.0}]
     beat(T + 3600)
-    h.tick(T + 3600)  # the hour closes: 14 rewritten once more with 14:05, then never again
-    lines = [json.loads(x) for x in (states / "2026-09-21T14.jsonl").read_text().splitlines()]
-    assert lines[2:] == [
-        {"b": "2026-09-21T14:05", "agent": "researcher-0000", "type": "researcher", "s": 60.0},
-        {"b": "2026-09-21T14:05", "agent": "researcher-0001", "type": "researcher", "p": 60.0}]
+    h.tick(T + 3600)  # [T+3540, T+3600] goes to 14:55
+    h.close(T + 3630)  # the hour closed: 14 rewritten once more with 14:55, then never again
     assert h._buckets.keys() == {"2026-09-21T15"}
-    h.close(T + 3630)
+    lines = [json.loads(x) for x in (states / "2026-09-21T14.jsonl").read_text().splitlines()]
+    assert lines == [
+        {"b": "2026-09-21T14:00", "agent": "researcher-0000", "type": "researcher", "w": 60.0,
+         "s": 60.0},
+        {"b": "2026-09-21T14:00", "agent": "researcher-0001", "type": "researcher", "i": 30.0,
+         "p": 90.0},
+        {"b": "2026-09-21T14:55", "agent": "researcher-0000", "type": "researcher", "s": 60.0},
+        {"b": "2026-09-21T14:55", "agent": "researcher-0001", "type": "researcher", "p": 60.0}]
     # a restart within the hour reloads the hour's file and keeps adding: one line per bucket
     h2 = Health(store)
     beat(T + 3640)
@@ -537,5 +541,23 @@ def test_state_buckets_per_agent_and_5_minutes_rewritten_whole(store):
     h2.close(T + 3700)
     out = [json.loads(x) for x in (states / "2026-09-21T15.jsonl").read_text().splitlines()]
     assert [(r["b"], r["agent"], r.get("s"), r.get("p")) for r in out] == [
-        ("2026-09-21T15:00", "researcher-0000", 60.0 + 30 + 30 + 30, None),
-        ("2026-09-21T15:00", "researcher-0001", None, 60.0 + 30 + 30 + 30)]
+        ("2026-09-21T15:00", "researcher-0000", 30.0 + 30 + 30, None),
+        ("2026-09-21T15:00", "researcher-0001", None, 30.0 + 30 + 30)]
+
+
+def test_state_buckets_split_the_interval_at_bucket_boundaries(store):
+    a0, a1 = _fleet(store, T)
+    h = Health(store)
+    for k in range(21):  # a sample every 31 s: never on a boundary
+        t = T + 31 * k
+        for a in (a0, a1):
+            store.update_agent(a["name"], last_heartbeat=t)
+        store.update_worker("demo-researcher-w0000", last_heartbeat=t)
+        h.tick(t)
+    h.close(T + 620)
+    out = [json.loads(x) for x in (store.data_dir / "states/demo/2026-09-21T14.jsonl")
+           .read_text().splitlines()]
+    assert [(r["b"][-5:], r["agent"], r.get("w") or r.get("i")) for r in out] == [
+        ("14:00", "researcher-0000", 300.0), ("14:00", "researcher-0001", 300.0),
+        ("14:05", "researcher-0000", 300.0), ("14:05", "researcher-0001", 300.0),
+        ("14:10", "researcher-0000", 20.0), ("14:10", "researcher-0001", 20.0)]
