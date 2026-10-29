@@ -83,14 +83,14 @@ def spawn(command, *, env=None, log=None):
                                 stderr=subprocess.STDOUT, start_new_session=True)
 
 
-def instances(hosts):
+def instances(hosts, gpus=8):
     return [{"hostname": host, "gpu_index": gpu, "port": 8100 + gpu,
-             "url": f"http://{host}:{8100 + gpu}"} for host in hosts for gpu in range(8)]
+             "url": f"http://{host}:{8100 + gpu}"} for host in hosts for gpu in range(gpus)]
 
 
-def srun(hosts):
+def srun(hosts, gpus=8):
     return ["srun", "--overlap", f"--nodes={len(hosts)}", f"--ntasks={len(hosts)}",
-            "--ntasks-per-node=1", "--gpus-per-task=8", "--kill-on-bad-exit=0",
+            "--ntasks-per-node=1", f"--gpus-per-task={gpus}", "--kill-on-bad-exit=0",
             "--nodelist=" + ",".join(hosts)]
 
 
@@ -99,7 +99,7 @@ def container(config, hosts):
     # Mount paths use Pyxis's comma/colon syntax, checked before submission work starts.
     mounts = f'{config["model_local"]}:/model:ro,{local}:/job,{run}:/launch:ro'
     mounts += f",{run}/logs:/logs"
-    return srun(hosts) + [f'--container-image={config["image"]}',
+    return srun(hosts, config.get("gpus", 8)) + [f'--container-image={config["image"]}',
                           "--no-container-mount-home", f"--container-mounts={mounts}"]
 
 
@@ -114,19 +114,19 @@ def stage(config):
                            check=True)
             (model / ".complete").touch()
     local = Path(config["local"])
-    for name in ["tmp", "router"] + [f"gpu-{i}" for i in range(8)]:
+    for name in ["tmp", "router"] + [f"gpu-{i}" for i in range(config.get("gpus", 8))]:
         (local / name).mkdir(parents=True, exist_ok=True)
 
 
-def gpu_devices():
+def gpu_devices(expected=8):
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is None:
         visible = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"], text=True
         ).strip().replace("\n", ",")
     devices = [device.strip() for device in visible.split(",") if device.strip()]
-    if len(devices) != 8 or len(set(devices)) != 8:
-        raise ValueError(f"Expected eight distinct allocated GPUs, got {devices!r}")
+    if len(devices) != expected or len(set(devices)) != expected:
+        raise ValueError(f"Expected {expected} distinct allocated GPUs, got {devices!r}")
     return devices
 
 
@@ -200,13 +200,13 @@ class Replica:
 
 
 def node(config, host):
-    devices = gpu_devices()
+    devices = gpu_devices(config.get("gpus", 8))
     key = Path("/launch/api-key").read_text().strip()
     replicas = [Replica(config, host, i, device, key) for i, device in enumerate(devices)]
     atomic_json(f"/logs/{host}-devices.json", devices)
     try:
         while True:
-            states = health([f"http://127.0.0.1:{8100 + i}" for i in range(8)])
+            states = health([f"http://127.0.0.1:{8100 + i}" for i in range(len(devices))])
             for replica, healthy in zip(replicas, states):
                 replica.tick(time.monotonic(), healthy)
             time.sleep(POLL)
@@ -217,7 +217,7 @@ def node(config, host):
 
 
 def router_command(config):
-    urls = [item["url"] for item in instances(config["hosts"])]
+    urls = [item["url"] for item in instances(config["hosts"], config.get("gpus", 8))]
     return [sys.executable, "-m", "vllm_router.launch_router", "--host", "0.0.0.0",
             "--port", "8000", "--worker-urls", *urls, "--policy", "cache_aware",
             "--intra-node-data-parallel-size", "1", "--disable-retries",
@@ -247,7 +247,7 @@ def verify_auth(base, key):
 
 def monitor(config, children, router_proc, key, deadline):
     run = Path(config["run"])
-    backends = instances(config["hosts"])
+    backends = instances(config["hosts"], config.get("gpus", 8))
     urls = [item["url"] for item in backends]
     base = f'http://{config["hosts"][0]}:8000'
     published = False
@@ -303,7 +303,8 @@ def launch(snapshot, run):
     config = {"snapshot": str(snapshot), "run": str(run), "image": str(image),
               "hosts": hosts, "job_id": job, "local": str(scratch / "jobs" / job),
               "model_local": str(scratch / "models" / digest)}
-    for name, variable, default in (("context", "MAX_MODEL_LEN", 32768),
+    for name, variable, default in (("gpus", "SLURM_GPUS_PER_NODE", 8),
+                                    ("context", "MAX_MODEL_LEN", 32768),
                                     ("sequences", "MAX_NUM_SEQS", 128),
                                     ("batch_tokens", "MAX_BATCHED_TOKENS", 8192)):
         config[name] = int(os.environ.get(variable, default))
@@ -320,7 +321,7 @@ def launch(snapshot, run):
     children = []
     deadline = time.monotonic() + STARTUP
     try:
-        staging = spawn(srun(hosts) + ["python3", helper, "stage", str(run / "config.json")])
+        staging = spawn(srun(hosts, config["gpus"]) + ["python3", helper, "stage", str(run / "config.json")])
         children.append(staging)
         staging.wait(timeout=max(1, deadline - time.monotonic()))
         if staging.returncode:

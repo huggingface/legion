@@ -2,7 +2,7 @@
 # From the repository root, after creating RUN_DIR:
 # sbatch --nodes=4 -o RUN_DIR/slurm.log \
 #   experiments/agent-escape/b300/serve-qwen38-27b.slurm MODEL_SNAPSHOT RUN_DIR
-# Eight independent Qwen3.8-27B instances per node; one cache-aware router on :8000.
+# One independent Qwen3.8-27B instance per allocated GPU; router on :8000.
 # QWEN_IMAGE, MAX_MODEL_LEN, MAX_NUM_SEQS, MAX_BATCHED_TOKENS are optional overrides.
 # QWEN_LAUNCHER may name qwen_serve.py when submitting from another directory.
 #SBATCH --job-name=qwen27b-serve
@@ -10,9 +10,8 @@
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=8
-#SBATCH --cpus-per-task=88
-#SBATCH --mem=0
-#SBATCH --exclusive
+#SBATCH --cpus-per-gpu=11
+#SBATCH --mem-per-gpu=496000M
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:TERM@120
 #SBATCH --no-requeue

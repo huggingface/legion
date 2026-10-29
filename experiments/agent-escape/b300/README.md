@@ -7,7 +7,7 @@ multi-node launcher uses independent instances behind an external router.
 
 ## Multi-node serving behind one router
 
-`serve-qwen38-27b.slurm` runs eight **independent TP1/DP1 instances per node**, one
+`serve-qwen38-27b.slurm` runs **independent TP1/DP1 instances**, one
 per allocated GPU, behind a single cache-aware router. This is separate from the
 benchmark launcher below, which still supports its original TP/DP layouts.
 
@@ -22,9 +22,11 @@ sbatch --nodes=4 --output=/absolute/path/qwen-run/slurm.log \
   /absolute/path/to/model/snapshot /absolute/path/qwen-run
 ```
 
-This example reserves **four exclusive eight-B300 nodes (32 GPUs)**. Defaults are
-one node, 12 hours, 88 CPUs per node, and all host RAM (`--mem=0`). Slurm command-line
-options override those defaults. All model replicas use BF16, 32,768-token context,
+This example requests **four eight-B300 nodes (32 GPUs)**. Defaults are one node,
+eight GPUs per node, 12 hours, 11 CPUs and 496000 MiB RAM per GPU, without exclusive
+node access. Slurm command-line options override those defaults. For four replicas
+on a shared node, use `--nodes=1 --gpus-per-node=4 --qos=high`; the launcher reads
+`SLURM_GPUS_PER_NODE` and adjusts every step and router backend accordingly. All model replicas use BF16, 32,768-token context,
 128 sequences, 8,192 batched tokens, prefix caching, and low reasoning. Override
 `MAX_MODEL_LEN`, `MAX_NUM_SEQS`, `MAX_BATCHED_TOKENS`, or `QWEN_IMAGE` through the
 submission environment. TP/DP are fixed at one. `QWEN_LAUNCHER` can point to
@@ -32,7 +34,8 @@ submission environment. TP/DP are fixed at one. `QWEN_LAUNCHER` can point to
 
 The script freezes its Python helper and non-secret configuration in the run
 directory. Each node stages weights once onto `/scratch/$USER/qwen-serving` and
-runs instances on ports 8100–8107. vLLM uses the pinned 0.32.0 image; the first node
+runs instances on ports 8100 upward (one port per allocated GPU). Shared-node
+launches require these ports and router port 8000 to be available. vLLM uses the pinned 0.32.0 image; the first node
 also installs `vllm-router==0.1.16` into job-local storage (requires package-index
 access). Its router on port 8000 registers every instance URL, uses `cache_aware`,
 and disables request retries. Clients use the router, not individual instances.

@@ -57,13 +57,15 @@ def test_shell_syntax():
 
 
 @pytest.mark.parametrize("nodes", [1, 2, 4])
-def test_routing_registers_every_independent_gpu(serving, config, nodes):
+@pytest.mark.parametrize("gpus", [4, 8])
+def test_routing_registers_every_independent_gpu(serving, config, nodes, gpus):
+    config["gpus"] = gpus
     config["hosts"] = [f"node-{i}" for i in range(nodes)]
-    backends = serving.instances(config["hosts"])
-    assert len(backends) == 8 * nodes
+    backends = serving.instances(config["hosts"], gpus)
+    assert len(backends) == gpus * nodes
     assert len({item["url"] for item in backends}) == len(backends)
     for host in config["hosts"]:
-        assert [b["port"] for b in backends if b["hostname"] == host] == list(range(8100, 8108))
+        assert [b["port"] for b in backends if b["hostname"] == host] == list(range(8100, 8100 + gpus))
     router = serving.router_command(config)
     assert all(item["url"] in router for item in backends)
     assert router[router.index("--policy") + 1] == "cache_aware"
@@ -88,7 +90,7 @@ def test_gpu_assignment_and_key_only_in_environment(serving, config, monkeypatch
 @pytest.mark.parametrize("devices", ["0,1", "0,1,2,3,4,5,6,6", ""])
 def test_invalid_allocated_gpus_rejected(serving, monkeypatch, devices):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", devices)
-    with pytest.raises(ValueError, match="eight distinct"):
+    with pytest.raises(ValueError, match="8 distinct"):
         serving.gpu_devices()
 
 
@@ -255,7 +257,9 @@ def test_authentication_against_fake_http_server(serving, accept_unauthorized):
 
 
 @pytest.mark.parametrize("nodes", [1, 2])
-def test_launch_fake_slurm_and_signal_cleanup(serving, tmp_path, monkeypatch, nodes):
+@pytest.mark.parametrize("gpus", [4, 8])
+def test_launch_fake_slurm_and_signal_cleanup(serving, tmp_path, monkeypatch, nodes, gpus):
+    monkeypatch.setenv("SLURM_GPUS_PER_NODE", str(gpus))
     run = tmp_path / "run with spaces"
     snapshot = tmp_path / "snapshot with spaces"
     run.mkdir()
@@ -293,6 +297,7 @@ def test_launch_fake_slurm_and_signal_cleanup(serving, tmp_path, monkeypatch, no
     assert error.value.code == 143
     assert len(calls) == nodes + 2  # staging step, one supervisor per node, one router
     assert all(command[0] == "srun" for command in calls)
+    assert all(f"--gpus-per-task={gpus}" in command for command in calls)
     assert f"--nodes={nodes}" in calls[0]
     assert all("--nodes=1" in command for command in calls[1:])
     assert "--nodelist=node-0" in calls[-1]
@@ -332,3 +337,10 @@ def test_stage_reuses_model_cache(serving, tmp_path, monkeypatch):
     serving.stage(config)
     assert len(copies) == 1 and copies[0][:3] == ["rsync", "-aL", "--"]
     assert (tmp_path / "job" / "gpu-7").is_dir()
+
+
+def test_four_allocated_devices_do_not_use_other_gpus(serving, monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-e,GPU-f,GPU-g,GPU-h")
+    assert serving.gpu_devices(4) == ["GPU-e", "GPU-f", "GPU-g", "GPU-h"]
+    with pytest.raises(ValueError, match="8 distinct"):
+        serving.gpu_devices(8)
