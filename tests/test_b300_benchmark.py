@@ -366,3 +366,20 @@ def test_quick_report_explicitly_uses_single_repetition(tmp_path):
     assert report["expected_cases"] == 21 and not report["coverage_complete"]
     assert report["best_measured_throughput"]["output_tokens_s"] == 320
     assert "1 error-free repetition" in report["note"]
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_cache_management_is_enabled_for_replay_servers_only(monkeypatch, reset):
+    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "unexpected-inherited-value")
+    monkeypatch.setenv("VLLM_API_KEY", "fake-key")
+    env = bench.server_environment(["0", "1", "2", "3"], 2, reset)
+    assert env["VLLM_SERVER_DEV_MODE"] == ("1" if reset else "0")
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert env["VLLM_API_KEY"] == "fake-key"
+
+
+def test_benchmark_management_api_binds_to_loopback():
+    command = bench.server_command("/model", "tp", 1, True, 8000, local_only=True)
+    assert command[command.index("--host") + 1] == "127.0.0.1"
+    serving = bench.server_command("/model", "tp", 1, True, 8000)
+    assert serving[serving.index("--host") + 1] == "0.0.0.0"

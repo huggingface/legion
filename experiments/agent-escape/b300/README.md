@@ -143,3 +143,7 @@ excluded from throughput summaries. The final report states measured coverage.
 For a live handoff, retain the current allocation, stop the old driver and its
 inference processes, and run the quick sweep as a replacement step. Preserve the
 old source snapshot and result directory; use a new output/source snapshot.
+
+On vLLM 0.32, replay benchmark servers set `VLLM_SERVER_DEV_MODE=1` to expose the
+cache-reset management endpoint. Normal serving and UltraChat stages leave that
+mode disabled. Omitting it produces a 404 before replay measurement starts.

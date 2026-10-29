@@ -96,10 +96,10 @@ async def run_stage(args, client, datasets, dataset, layout, gpus, visible):
     if not pending:
         return
     command = bench.server_command(
-        args.model_path, layout, gpus, dataset == "agent_escape", args.port
+        args.model_path, layout, gpus, dataset == "agent_escape", args.port, local_only=True
     )
     (directory / "command.json").write_text(json.dumps(command, indent=2))
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(visible[:gpus])}
+    env = bench.server_environment(visible, gpus, dataset == "agent_escape")
     proc = None
     try:
         with (directory / "server.log").open("w") as log:

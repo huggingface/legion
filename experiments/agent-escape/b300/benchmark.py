@@ -211,7 +211,16 @@ async def run_case(client, url, rows, concurrency, output, gpus):
     return summarize(results, time.perf_counter() - started, gpus)
 
 
-def server_command(model_path, layout, gpus, prefix_cache, port):
+def server_environment(visible, gpus, cache_reset=False):
+    """vLLM 0.32 gates cache management endpoints behind developer mode."""
+    return {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": ",".join(visible[:gpus]),
+        "VLLM_SERVER_DEV_MODE": "1" if cache_reset else "0",
+    }
+
+
+def server_command(model_path, layout, gpus, prefix_cache, port, *, local_only=False):
     return [
         "vllm",
         "serve",
@@ -219,7 +228,7 @@ def server_command(model_path, layout, gpus, prefix_cache, port):
         "--served-model-name",
         MODEL,
         "--host",
-        "0.0.0.0",
+        "127.0.0.1" if local_only else "0.0.0.0",
         "--port",
         str(port),
         "--dtype",
@@ -415,10 +424,17 @@ async def orchestrate(args):
                     directory = args.output / label
                     directory.mkdir(exist_ok=True)
                     command = server_command(
-                        args.model_path, layout, gpus, dataset == "agent_escape", args.port
+                        args.model_path,
+                        layout,
+                        gpus,
+                        dataset == "agent_escape",
+                        args.port,
+                        local_only=args.mode == "benchmark",
                     )
                     (directory / "command.json").write_text(json.dumps(command, indent=2))
-                    env["CUDA_VISIBLE_DEVICES"] = ",".join(visible[:gpus])
+                    env = server_environment(
+                        visible, gpus, dataset == "agent_escape" and args.mode == "benchmark"
+                    )
                     proc = None
                     begun = time.monotonic()
                     try:
