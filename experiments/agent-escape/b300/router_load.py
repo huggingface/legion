@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import hashlib
 import json
 import math
@@ -218,10 +219,25 @@ async def run(args):
             summaries.append(summary)
             (output / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
             print(json.dumps(summary), flush=True)
-    conclusion = {
+    conclusion = conclusion_for(summaries)
+    (output / "completion.json").write_text(json.dumps(conclusion, indent=2) + "\n")
+    print(json.dumps(conclusion), flush=True)
+
+
+def conclusion_for(summaries):
+    failures = {"http_error", "timeout", "stream_error", "stream_interrupted", "missing_usage"}
+    statuses = collections.Counter()
+    for summary in summaries:
+        statuses.update(summary["statuses"])
+    transport_clean = [s for s in summaries if not any(s["statuses"].get(k, 0) for k in failures)]
+    return {
         "requests": sum(s["requests"] for s in summaries),
         "completed": sum(s["completed"] for s in summaries),
-        "highest_tested_concurrency": max(levels),
+        "highest_tested_concurrency": max(s["concurrency"] for s in summaries),
+        "context_limited": statuses["context_limit"],
+        "transport_or_protocol_failures": sum(statuses[k] for k in failures),
+        "highest_transport_clean_concurrency": max(
+            (s["concurrency"] for s in transport_clean), default=None),
         "highest_zero_error_concurrency": max(
             (s["concurrency"] for s in summaries if s["error_rate"] == 0), default=None),
         "first_error_concurrency": next(
@@ -232,9 +248,6 @@ async def run(args):
         "note": "Finite client-concurrency ramp; inspect throughput, latency and server queues. "
                 "Repeated real prompts benefit from prefix caching; not a cold-cache benchmark.",
     }
-    (output / "completion.json").write_text(json.dumps(conclusion, indent=2) + "\n")
-    print(json.dumps(conclusion), flush=True)
-
 
 def main():
     parser = argparse.ArgumentParser(__doc__)

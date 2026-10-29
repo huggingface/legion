@@ -164,3 +164,20 @@ def test_low_client_descriptor_limit_rejected(load, monkeypatch):
     monkeypatch.setattr(load.resource, "getrlimit", lambda _: (128, 128))
     with pytest.raises(ValueError, match="file-descriptor hard limit"):
         load.ensure_file_limit(1024)
+
+
+def test_context_exhaustion_is_not_a_transport_concurrency_limit(load):
+    summaries = [
+        {"concurrency": 16, "requests": 10, "completed": 10, "error_rate": 0,
+         "statuses": {"completed": 10}, "output_tokens_s": 1000},
+        {"concurrency": 256, "requests": 10, "completed": 9, "error_rate": 0.1,
+         "statuses": {"completed": 9, "context_limit": 1}, "output_tokens_s": 2000},
+        {"concurrency": 512, "requests": 10, "completed": 8, "error_rate": 0.2,
+         "statuses": {"completed": 8, "http_error": 2}, "output_tokens_s": 3000},
+    ]
+    result = load.conclusion_for(summaries)
+    assert result["highest_zero_error_concurrency"] == 16
+    assert result["highest_transport_clean_concurrency"] == 256
+    assert result["context_limited"] == 1
+    assert result["transport_or_protocol_failures"] == 2
+    assert result["hard_limit_established"] is False

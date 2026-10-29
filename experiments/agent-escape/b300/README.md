@@ -122,8 +122,10 @@ and chunk gaps are omitted by default to keep the load driver light; use
 limit when possible and refuses a ramp that exceeds its hard limit.
 
 `completion.json` appears only after all levels finish. It reports the best
-measured throughput and largest tested zero-error concurrency, **not a proven
-hard limit**. Compare throughput plateaus, latency and queue growth to identify
+measured throughput, context-limit counts, transport/protocol failures, and the
+largest tested transport-clean concurrency, **not a proven hard limit**. A response
+ending at the context limit is not by itself a concurrency failure. Compare
+throughput plateaus, latency and queue growth to identify
 saturation. Inference interruptions remain visible as errors and are not retried.
 The script never cancels the serving allocation.
 
