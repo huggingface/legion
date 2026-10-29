@@ -34,7 +34,7 @@ JOB_LOCAL=$LOCAL_ROOT/jobs/$SLURM_JOB_ID
 mkdir -p "$JOB_LOCAL" "$LOCAL_ROOT/models"
 # One writer per node; retain model weights and JIT cache between sequential configurations.
 (
-    flock -x 9
+    /usr/bin/flock -x 9  # util-linux, not the project CLI on PATH
     if [[ ! -f $MODEL_LOCAL/.complete ]]; then
         mkdir -p "$MODEL_LOCAL"
         rsync -aL -- "$MODEL_SOURCE/" "$MODEL_LOCAL/"

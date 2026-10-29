@@ -265,3 +265,33 @@ def test_report_does_not_rank_incomplete_or_failed_groups(tmp_path):
     assert not result["coverage_complete"]
     assert result["best_measured_throughput"]["gpus"] == 1
     assert result["best_measured_four_agent_latency"] is None
+
+
+def test_model_staging_uses_system_lock_with_project_cli_on_path(tmp_path):
+    import os
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text('{"model_type": "test"}')
+    target = tmp_path / "staged"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_flock = fake_bin / "flock"
+    fake_flock.write_text('#!/bin/sh\necho "wrong flock CLI" >&2\nexit 77\n')
+    fake_flock.chmod(0o755)
+    script = (BASE / "serve.sbatch").read_text()
+    staging = script.split("# One writer per node;", 1)[1].split("\nsha256sum", 1)[0]
+    staging = staging.split("\n", 1)[1]
+    subprocess.run(
+        ["bash", "-eu", "-c", staging],
+        check=True,
+        env={
+            **os.environ,
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "MODEL_SOURCE": str(source),
+            "MODEL_LOCAL": str(target),
+            "LOCAL_ROOT": str(tmp_path),
+        },
+    )
+    assert (target / "config.json").read_bytes() == (source / "config.json").read_bytes()
+    assert (target / ".complete").exists()
