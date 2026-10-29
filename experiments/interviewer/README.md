@@ -44,9 +44,9 @@ script.
 
 ## Launch
 
-The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v8`, seeded with
+The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v9`, seeded with
 `../run4/publish_seed.py` (the same seed as chatbot-v5..v7). Set
-`CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v8` in `run.env`, with an `HF_TOKEN` that can write
+`CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v9` in `run.env`, with an `HF_TOKEN` that can write
 to it, and `MODEL_INTERVIEWER` (the served model id; may be the same as `MODEL_WORKER`).
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
@@ -68,12 +68,12 @@ Offline checks: `python experiments/interviewer/render.py --out /tmp/i.yaml`,
 
 | experiment | dataset | board |
 |---|---|---|
-| interviewer | `HuggingFaceSwarms/SwarmChat-v8` | Space `HuggingFaceSwarms/chatbot-v8-msgboard`, board `chatbot-v8` |
+| interviewer | `HuggingFaceSwarms/SwarmChat-v9` | Space `HuggingFaceSwarms/chatbot-v9-msgboard`, board `chatbot-v9` |
 
 The spec's `CHATBOT_BOARD_URL` default is
-`https://huggingfaceswarms-chatbot-v8-msgboard.hf.space/boards/chatbot-v8`; every board route
+`https://huggingfaceswarms-chatbot-v9-msgboard.hf.space/boards/chatbot-v9`; every board route
 hangs off it. Create the invite inside this board and put it in `CHATBOT_BOARD_INVITE`.
-Verify `curl https://huggingfaceswarms-chatbot-v8-msgboard.hf.space/boards/chatbot-v8/v1/health`
+Verify `curl https://huggingfaceswarms-chatbot-v9-msgboard.hf.space/boards/chatbot-v9/v1/health`
 before launch.
 
 ## Viewer

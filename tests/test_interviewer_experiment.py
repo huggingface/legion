@@ -12,7 +12,7 @@ from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "interviewer"
-REPO = "HuggingFaceSwarms/SwarmChat-v8"
+REPO = "HuggingFaceSwarms/SwarmChat-v9"
 
 
 def test_types_prompts_and_spawn_policy(monkeypatch):
@@ -35,13 +35,14 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert spec.spawn["worker"].types == {"interviewer": 2}
     assert spec.limits.alive >= 50 + 200 + iv.workers.max_extra * iv.agents_per_worker
     assert spec.limits.spawned_total >= 400 + 600
-    assert spec.comms.url.endswith("chatbot-v8-msgboard.hf.space/boards/chatbot-v8")
+    assert spec.comms.url.endswith("chatbot-v9-msgboard.hf.space/boards/chatbot-v9")
     system = (EXP / "prompts/system.md").read_text()
     assert f"`{REPO}` on Hugging Face" in system and f"datasets/{REPO}` into `chatbot-swarm`" in system
     assert "chatbot-v5" not in system + spec.types["coordinator"].system_prompt
     assert "## Interviews" in system and "flock spawn interviewer" in system
     assert "Treat a `script` verdict as a bug to fix" in system and "team channel" in system
     assert "The real test: a strong interviewer" in system
+    assert "understanding engine" in system and "general mechanisms" in system
     assert "## Interviews" in spec.types["worker"].system_prompt
     interviewer = iv.system_prompt
     for text in ("run_bot", "record_verdict", "`post` in it", "@mentions", "`dm`", "8 to 15"):

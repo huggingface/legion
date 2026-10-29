@@ -25,7 +25,7 @@ world:
 comms:
   kind: msgboard
   extended: true
-  url: ${CHATBOT_BOARD_URL:-https://huggingfaceswarms-chatbot-v8-msgboard.hf.space/boards/chatbot-v8}
+  url: ${CHATBOT_BOARD_URL:-https://huggingfaceswarms-chatbot-v9-msgboard.hf.space/boards/chatbot-v9}
   invite_env: CHATBOT_BOARD_INVITE
   channel: ${CHATBOT_CHANNEL:-general}
   wake: [mention, thread, dm, channel]
