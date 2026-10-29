@@ -455,6 +455,20 @@ def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
                     (tmp_path / "requests-2.jsonl").read_text().splitlines()) < 10:
                 assert time.monotonic() < deadline and proc.poll() is None
                 time.sleep(1)
+        if variant == "standin":
+            # The assertions below require finalized, positive costs for every interview.
+            # A world verdict precedes the final model response/usage; stopping at that
+            # point can intentionally interrupt an interview before its usage is reported.
+            deadline = time.monotonic() + 120
+            event_root = home / "repo/experiments/run3/.flock"
+            while True:
+                interviews = list(event_root.glob("*/controller/events/*/iv-*.jsonl"))
+                completed = sum(any(e["type"] == "turn_ended" for e in _jsonl(path))
+                                for path in interviews)
+                if completed >= cap:
+                    break
+                assert proc.poll() is None and time.monotonic() < deadline, completed
+                time.sleep(0.5)
         (bucket / "control" / "stop").write_text("stop\n")
         assert _wait(proc, 180) == 0, (tmp_path / "job.out").read_text()[-3000:]
     finally:
