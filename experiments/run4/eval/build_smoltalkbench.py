@@ -7,6 +7,9 @@
     uv run experiments/run4/eval/build_smoltalkbench.py            # build and print stats
     uv run experiments/run4/eval/build_smoltalkbench.py --push     # also push (private)
 
+This builds the `gold` config, whose references come from the source conversations. Variants
+with other reference models go in their own configs, keeping the same ids and instructions.
+
 Source: the everyday-conversations subset of HuggingFaceTB/smoltalk (train + test), written
 whole by Llama-3.1-70B-Instruct. Every conversation opens with a bare greeting and the same
 "How can I help you today?", so the prompt is the second user turn and the reference is the
@@ -28,6 +31,7 @@ SUBSET = "everyday-conversations"
 REVISION = "5feaf2fd3ffca7c237fc38d1861bc30365d48ffa"
 GENERATOR = "meta-llama/Meta-Llama-3.1-70B-Instruct"
 REPO = "HuggingFaceSwarms/SmolTalkBench"
+CONFIG = "gold"
 META = {"license": "apache-2.0", "language": ["en"], "pretty_name": "SmolTalkBench",
         "tags": ["chatbot", "evaluation", "alpaca-eval"]}
 
@@ -72,12 +76,27 @@ def stratified(rows, n, seed):
     return sorted(picked, key=lambda row: (row["source_split"] != "train", row["source_index"]))
 
 
-def card(n, seed, total):
+def card(repo, n, seed, total):
     return f"""# SmolTalkBench
 
 {n} single-turn everyday chat prompts with reference replies, for AlpacaEval-style pairwise
 win rates. Built to compare the rule-based chatbot from the run4 agent swarm
 (`cmpatino/chatbot-swarm`) at different commits, and small LMs, against one fixed reference.
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("{repo}", "{CONFIG}", split="test")
+```
+
+## Configs
+
+| config | reference replies (`output`) |
+|---|---|
+| `{CONFIG}` (default) | the source conversations' replies, by `{GENERATOR}` |
+
+Variants with other reference models go in their own configs, keeping the same `id`s and
+instructions so that results compare across them.
 
 ## Construction
 
@@ -126,12 +145,18 @@ def main():
     print("categories:", dict(Counter(r["category"] for r in picked).most_common()))
     if not args.push:
         return
-    Dataset.from_list(picked).push_to_hub(args.repo, split="test", private=not args.public)
+    Dataset.from_list(picked).push_to_hub(args.repo, config_name=CONFIG, split="test",
+                                          private=not args.public)
     # push_to_hub wrote the card's dataset_info and configs; keep them, add ours.
     pushed = DatasetCard.load(args.repo, repo_type="dataset")
     for key, value in META.items():
         pushed.data[key] = value
-    pushed.text = card(args.n, args.seed, len(rows))
+    # push_to_hub(set_default=True) drops or trips over the flag when re-pushing the default
+    # config (datasets 5.1), so make gold the default here.
+    for entry in pushed.data["configs"]:
+        if entry["config_name"] == CONFIG:
+            entry["default"] = True
+    pushed.text = card(args.repo, args.n, args.seed, len(rows))
     pushed.push_to_hub(args.repo, repo_type="dataset")
     print(f"pushed https://huggingface.co/datasets/{args.repo} @ "
           f"{HfApi().dataset_info(args.repo).sha}")
