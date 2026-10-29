@@ -6,12 +6,15 @@ import importlib.util
 import json
 import math
 import shutil
+import sys
 import threading
+import types
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -243,3 +246,35 @@ def test_swarmchat_revisions_sort_by_commit_time():
     assert earlier == "20261028T162718Z-fdef14e9f8e3"
     assert earlier < later
     assert evaluate.log_model_id("hf-inference-providers/org/model:fireworks-ai") == "org/model"
+
+
+def test_job_files_go_to_the_output_bucket_namespace(monkeypatch, capsys):
+    evaluate = load("evaluate")
+    calls = {}
+
+    class Api:
+        def __init__(self, token):
+            pass
+
+        def create_bucket(self, bucket, **kwargs):
+            calls["bucket"] = bucket
+
+        def sync_job_volume(self, source, mount_path, **kwargs):
+            calls["files"] = {p.relative_to(source).as_posix()
+                              for p in Path(source).rglob("*") if p.is_file()}
+            calls["volume_namespace"] = kwargs["namespace"]
+            return "volume"
+
+        def run_job(self, **kwargs):
+            calls["job_namespace"], calls["volumes"] = kwargs["namespace"], kwargs["volumes"]
+            return types.SimpleNamespace(url="https://huggingface.co/jobs/lewtun/1")
+
+    monkeypatch.setattr(evaluate, "HfApi", Api)
+    monkeypatch.setattr(evaluate, "get_token", lambda: "token")
+    monkeypatch.setattr(sys, "argv", ["evaluate.py", "--backend", "endpoint", "--model",
+                                      "hf-inference-providers/org/model", "--namespace", "lewtun"])
+    evaluate.main()
+    assert calls["bucket"] == "HuggingFaceSwarms/swarmchat-evals"
+    assert calls["volume_namespace"] == "HuggingFaceSwarms"
+    assert calls["job_namespace"] == "lewtun" and calls["volumes"] == ["volume"]
+    assert "experiments/run4/eval/hf_job.py" in calls["files"]

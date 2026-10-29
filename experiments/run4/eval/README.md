@@ -62,7 +62,8 @@ uv run experiments/run4/eval/evaluate.py --backend endpoint \
 - **Hub models.** Sampling defaults to the model's `generation_config.json`, and to pure
   sampling (temperature 1, top-p 1, no top-k) for whatever it leaves out. `--temperature`,
   `--top_p` and `--top_k` override it.
-- **Where Jobs run.** They run under the token's user, or under `--namespace`.
+- **Where Jobs run.** They run under the token's user, or under `--namespace`. The files
+  they need are uploaded to the `jobs-artifacts` bucket of the output bucket's namespace.
 - **SwarmChat revisions.** Each revision is named by its commit time and hash, e.g.
   `20261028T162718Z-fdef14e9f8e3`, so revisions sort in merge order.
 

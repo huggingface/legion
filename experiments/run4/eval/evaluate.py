@@ -138,8 +138,9 @@ def gpu_count(api: HfApi, flavor: str) -> int:
     return int(hardware.accelerator.quantity)
 
 
-def snapshot_volume(api: HfApi) -> Volume:
-    """Uploads the files the Job needs to a content-addressed folder of the jobs-artifacts bucket."""
+def snapshot_volume(api: HfApi, namespace: str) -> Volume:
+    """Uploads the files the Job needs to a content-addressed folder of `namespace`'s
+    jobs-artifacts bucket. A Job in another namespace can mount it."""
     completed = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
          "pyproject.toml", "uv.lock", EVAL_DIR],
@@ -154,7 +155,7 @@ def snapshot_volume(api: HfApi) -> Volume:
             destination = Path(staging_dir) / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / path, destination)
-        return api.sync_job_volume(staging_dir, JOB_ROOT,
+        return api.sync_job_volume(staging_dir, JOB_ROOT, namespace=namespace,
                                    remote_name=f"swarmchat-evals/{digest.hexdigest()[:16]}")
 
 
@@ -255,7 +256,8 @@ def main():
 
     api.create_bucket(args.bucket, private=True, exist_ok=True)
     disable_progress_bars()
-    volume = snapshot_volume(api)
+    # The Job's files sit beside its logs, in the output bucket's namespace
+    volume = snapshot_volume(api, args.bucket.split("/", 1)[0])
     for job in jobs:
         output_url = job.pop("output_url")
         job_info = api.run_job(**job, secrets=secrets, volumes=[volume])
