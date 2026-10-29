@@ -106,7 +106,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _safe_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
+    """A Job name: the Jobs API takes letters, digits, `_` and `-` only."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-")
 
 
 def swarmchat_revision(sha: str, committed: datetime) -> str:

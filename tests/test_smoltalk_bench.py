@@ -344,6 +344,8 @@ def test_swarmchat_revisions_sort_by_commit_time():
     assert earlier == "20261028T162718Z-fdef14e9f8e3"
     assert earlier < later
     assert evaluate.log_model_id("hf-inference-providers/org/model:fireworks-ai") == "org/model"
+    assert (evaluate._safe_name("smoltalk_bench_gold-HuggingFaceTB/SmolLM-1.7B-Instruct-main")
+            == "smoltalk_bench_gold-HuggingFaceTB-SmolLM-1-7B-Instruct-main")
 
 
 def test_job_files_go_to_the_output_bucket_namespace(monkeypatch, capsys):
