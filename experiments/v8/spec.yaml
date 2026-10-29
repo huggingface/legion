@@ -1,0 +1,87 @@
+# v8 (README): five lanes we define, one agent type each, ramped by the controller
+# (replicas_ramp). World, board, model and loop are run 4's (experiments/run4/spec.yaml); the
+# prompts, the lanes, the board rules and the world settings in run.env (README) differ.
+swarm: ${CHATBOT_RUN:-v8}                    # ${VAR:-default}: flock apply --env run.env (run 4 README)
+compute: local
+naming: words
+providers:
+  vllm:
+    type: openai_compat
+    base_urls: '${OPENAI_BASE_URLS:-https://your-vllm.example.invalid/v1}'  # comma-separated
+    api_key_env: OPENAI_API_KEY
+    self_hosted: true
+    timeout_s: 300
+    max_retries: 5
+    pricing: {"*": [0, 0, 0]}
+models:
+  worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
+world:
+  dir: ../../worlds/chatbot4
+  command: ['{python}', chatbot4.py, serve]
+  token_env: CHATBOT_WORLD_TOKEN
+comms:
+  kind: msgboard
+  extended: true
+  url: ${CHATBOT_BOARD_URL:-https://huggingfaceswarms-chatbot-v8-msgboard.hf.space}
+  invite_env: CHATBOT_BOARD_INVITE
+  channel: ${CHATBOT_CHANNEL:-general}
+  wake: [mention, thread, dm, channel]
+  rules:
+    min_post_gap: 10s
+    max_len: 1200                           # short posts (v4-v7 posts were ~1,500 chars)
+    threads: per_topic
+    no_group_mentions: true                 # agents' @all woke nobody and buried the channel
+    max_channels_per_agent: 3               # the lane channel, a team channel, one more
+    max_channels: 100
+  protocols: []
+types:
+  answers: &lane
+    harness: pi
+    model: worker-pi
+    replicas: 0                             # replicas_ramp raises it
+    replicas_ramp: {start: 12, add: 12, every: 10m, max: 120}
+    agents_per_worker: 12
+    system_prompt_file: prompts/system.md
+    system_prompt_append_file: prompts/lanes/answers.md
+    comms: true
+    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr', 'world:get_pr']
+    persist_workdir: true
+    secrets: [OPENAI_API_KEY]
+    env:                                    # git memory caps for agent clones (git -c via env)
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
+    max_turns: 150
+    turn_timeout: 2h
+    worker_lifetime: 54h
+    lifetime_jitter: 0s
+    resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
+    loop:
+      prompt_file: prompts/round.md
+      every: turn_end
+      notices: true
+      on: [comms.mention, comms.thread, comms.dm, comms.channel]
+      while: {until: 48h, max_rounds: 10000}
+      final: {prompt_file: prompts/final.md}
+  conversation:
+    <<: *lane
+    replicas_ramp: {start: 6, add: 6, every: 10m, max: 48}
+    system_prompt_append_file: prompts/lanes/conversation.md
+  routing:
+    <<: *lane
+    replicas_ramp: {start: 6, add: 6, every: 20m, max: 24}
+    system_prompt_append_file: prompts/lanes/routing.md
+  quality:
+    <<: *lane
+    replicas_ramp: {start: 6, add: 6, every: 15m, max: 36}
+    system_prompt_append_file: prompts/lanes/quality.md
+  safety:
+    <<: *lane
+    replicas_ramp: {start: 3, add: 3, every: 30m, max: 6}
+    system_prompt_append_file: prompts/lanes/safety.md
+# No spawn block: agents cannot start others. 33 agents at the start, 234 after 90 minutes.
+limits: {alive: 250}
