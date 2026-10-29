@@ -1,17 +1,17 @@
 """Evaluate SwarmChat or a Hub model on SmolTalkBench in a Hugging Face Job: one Job, one eval.
 
-`--model SwarmChat` serves commits of a swarm's chatbot, the dataset repo `--swarm_repo`, with
-swarmchat_server.py on a cpu-upgrade Job, one conversation per vCPU. The repo is the model ID and
-a commit is a revision, named by its commit's time and hash, e.g. 20261028T162718Z-fdef14e9f8e3,
-so revisions sort in merge order. A Hub repo ID is served with vLLM on a GPU Job, and with
+A model ID with SwarmChat in it, e.g. HuggingFaceSwarms/SwarmChat-v4, is a swarm's chatbot: a
+dataset repo whose commits are served with swarmchat_server.py on a cpu-upgrade Job, one
+conversation per vCPU (`--backend swarmchat` does the same for any repo). A commit is a revision,
+named by its commit's time and hash, e.g. 20261028T162718Z-fdef14e9f8e3, so revisions sort in
+merge order. Another Hub repo ID is served with vLLM on a GPU Job, and with
 `--backend endpoint` any Inspect model string is called from a CPU Job. Inspect logs and a
 `summary.json` go to a Storage Bucket, in `<model>/<revision>/<task>/<timestamp>/`.
 
 Usage:
 
-uv run experiments/run4/eval/evaluate.py --model SwarmChat
-uv run experiments/run4/eval/evaluate.py --model SwarmChat --swarm_repo HuggingFaceSwarms/SwarmChat-v5 \
-  --revision 62dbbb8f50a4
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceSwarms/SwarmChat-v4
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceSwarms/SwarmChat-v5 --revision 62dbbb8f50a4
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
 """
 
@@ -38,9 +38,9 @@ CPU_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
 DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
 # SwarmChat's replies are CPU-bound (about 0.6 s each), so it gets 8 vCPUs; endpoint only waits
 DEFAULT_FLAVORS = {"swarmchat": "cpu-upgrade", "vllm": "rtx-pro-6000", "endpoint": "cpu-basic"}
+# A model ID with this in it is a swarm's chatbot, a dataset repo like those of
+# https://huggingface.co/collections/HuggingFaceSwarms/chatbot-project
 SWARMCHAT = "SwarmChat"
-# A swarm's chatbot, from https://huggingface.co/collections/HuggingFaceSwarms/chatbot-project
-DEFAULT_SWARM_REPO = "HuggingFaceSwarms/SwarmChat-v4"
 TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # Prompt tokens reserved when deriving max_tokens from a Hub model's context length
@@ -75,14 +75,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True,
-                        help=f"{SWARMCHAT}, a Hub repo ID or an Inspect model string")
+                        help="a SwarmChat dataset repo, e.g. HuggingFaceSwarms/SwarmChat-v4, a "
+                             "Hub repo ID or an Inspect model string")
     parser.add_argument("--backend", choices=["swarmchat", "vllm", "endpoint"],
-                        help="default: swarmchat for SwarmChat, vllm otherwise")
+                        help=f"default: swarmchat for a model ID with {SWARMCHAT} in it, vllm "
+                             "otherwise")
     parser.add_argument("--revision", default="main",
-                        help="the commit of --swarm_repo for SwarmChat, or the Hub model revision "
-                             "for vllm")
-    parser.add_argument("--swarm_repo", default=DEFAULT_SWARM_REPO,
-                        help="the dataset repo of the swarm's chatbot, SwarmChat's model ID")
+                        help="the commit of a SwarmChat repo, or the Hub model revision for vllm")
     parser.add_argument("--task", choices=list(TASKS), default="smoltalk_bench_gold")
     parser.add_argument("--judge", default=JUDGE, help="Inspect model string of the judge")
     parser.add_argument("--bucket", default=DEFAULT_BUCKET, help="Storage Bucket for the logs")
@@ -189,9 +188,7 @@ def main():
         raise RuntimeError("HF Jobs need a Hugging Face token; run `hf auth login` first")
     api = HfApi(token=token)
     namespace = args.namespace or api.whoami()["name"]
-    backend = args.backend or ("swarmchat" if args.model == SWARMCHAT else "vllm")
-    if (backend == "swarmchat") != (args.model == SWARMCHAT):
-        raise ValueError(f"--backend swarmchat goes with --model {SWARMCHAT}")
+    backend = args.backend or ("swarmchat" if SWARMCHAT in args.model else "vllm")
     if backend == "endpoint" and args.revision != "main":
         raise ValueError("--revision does not apply to --backend endpoint")
     flavor = args.flavor or DEFAULT_FLAVORS[backend]
@@ -230,7 +227,7 @@ def main():
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
     commit = None
     if backend == "swarmchat":
-        info = api.dataset_info(args.swarm_repo, revision=args.revision)
+        info = api.dataset_info(args.model, revision=args.revision)
         commit, revision = info.sha, swarmchat_revision(info.sha, info.last_modified)
         # The repo's current name, should it have been renamed since
         model_id = info.id
@@ -260,13 +257,13 @@ def main():
     }
     eval_kwargs = {k: v for k, v in eval_kwargs.items() if v is not None}
     output_path = f"{model_id}/{revision}/{args.task}/{timestamp}"
-    command = ["python3", f"{JOB_ROOT}/{EVAL_DIR}/hf_job.py", "--model", args.model,
+    command = ["python3", f"{JOB_ROOT}/{EVAL_DIR}/hf_job.py",
+               "--model", model_id if backend == "swarmchat" else args.model,
                "--backend", backend, "--task", TASKS[args.task],
                "--output_dir", f"hf://buckets/{args.bucket}/{output_path}",
                "--eval_kwargs", json.dumps(eval_kwargs)]
     if commit:
-        command += ["--swarm_repo", model_id, "--revision", commit,
-                    "--workers", str(max_connections)]
+        command += ["--revision", commit, "--workers", str(max_connections)]
     if vllm_args:
         command += ["--vllm_args", *(f"{k}={v}" for k, v in vllm_args.items())]
     job = {

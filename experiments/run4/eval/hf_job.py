@@ -34,10 +34,10 @@ PRIMARY_METRIC, PRIMARY_METRIC_ERROR = "length_controlled_win_rate", "lc_standar
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True,
-                        help="SwarmChat, a Hub repo ID for vllm or an Inspect model string")
+                        help="a SwarmChat dataset repo for swarmchat, a Hub repo ID for vllm "
+                             "or an Inspect model string")
     parser.add_argument("--backend", choices=["swarmchat", "vllm", "endpoint"], required=True)
-    parser.add_argument("--swarm_repo", help="dataset repo of the swarm's chatbot for swarmchat")
-    parser.add_argument("--revision", help="commit of --swarm_repo for swarmchat")
+    parser.add_argument("--revision", help="commit of the SwarmChat repo for swarmchat")
     parser.add_argument("--task", required=True, help="Inspect task, e.g. smoltalk_bench.py@...")
     parser.add_argument("--output_dir", required=True, help="hf://buckets/... folder")
     parser.add_argument("--eval_kwargs", type=json.loads, required=True,
@@ -181,7 +181,7 @@ def main():
     try:
         model = args.model
         if args.backend == "swarmchat":
-            server = start_swarmchat(args.swarm_repo, args.revision, args.workers)
+            server = start_swarmchat(args.model, args.revision, args.workers)
             model = "openai-api/swarmchat/SwarmChat"
         elif args.backend == "vllm":
             server = start_vllm(args.model, args.vllm_args)

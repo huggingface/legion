@@ -3,7 +3,7 @@
 Each chatbot swarm builds a rule-based chatbot in a dataset repo of the
 [Chatbot Project](https://huggingface.co/collections/HuggingFaceSwarms/chatbot-project) collection,
 e.g. [`HuggingFaceSwarms/SwarmChat-v5`](https://huggingface.co/datasets/HuggingFaceSwarms/SwarmChat-v5).
-These scripts score any commit of one, as the model `SwarmChat`, and any Hub or API model, on
+These scripts score any commit of one, as a model called SwarmChat, and any Hub or API model, on
 [SmolTalkBench](https://huggingface.co/datasets/HuggingFaceSwarms/SmolTalkBench) (private): 1,000
 single-turn everyday chat prompts with reference replies.
 
@@ -48,11 +48,10 @@ logging in with `hf auth login`:
 ```sh
 # SwarmChat at the head of HuggingFaceSwarms/SwarmChat-v4, on a cpu-upgrade Job with one
 # conversation per vCPU
-uv run experiments/run4/eval/evaluate.py --model SwarmChat
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceSwarms/SwarmChat-v4
 
 # Another swarm's chatbot, at an earlier commit
-uv run experiments/run4/eval/evaluate.py --model SwarmChat \
-  --swarm_repo HuggingFaceSwarms/SwarmChat-v5 --revision 62dbbb8
+uv run experiments/run4/eval/evaluate.py --model HuggingFaceSwarms/SwarmChat-v5 --revision 62dbbb8
 
 # A Hub model, served with vLLM on an rtx-pro-6000 Job
 uv run experiments/run4/eval/evaluate.py --model HuggingFaceTB/SmolLM-135M-Instruct
@@ -70,10 +69,11 @@ uv run experiments/run4/eval/evaluate.py --backend endpoint \
   `--top_p` and `--top_k` override it.
 - **Where Jobs run.** They run under the token's user, or under `--namespace`. The files
   they need are uploaded to the `jobs-artifacts` bucket of the output bucket's namespace.
-- **SwarmChat.** `--swarm_repo` picks the swarm's chatbot, `HuggingFaceSwarms/SwarmChat-v4`
-  by default. Like a Hub model, the repo is the model ID and a commit is a revision. Each
-  revision is named by its commit time and hash, e.g. `20261028T214140Z-62dbbb8f50a4`, so
-  revisions sort in merge order.
+- **SwarmChat.** A model ID with `SwarmChat` in it is a swarm's chatbot, served with
+  `swarmchat_server.py`; `--backend swarmchat` does the same for a repo without it. Like a Hub
+  model, the repo is the model ID and a commit is a revision. Each revision is named by its
+  commit time and hash, e.g. `20261028T214140Z-62dbbb8f50a4`, so revisions sort in merge
+  order.
 
 Logs go to the private Storage Bucket `HuggingFaceSwarms/swarmchat-evals`, or to the bucket
 passed with `--bucket`:
