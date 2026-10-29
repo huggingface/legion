@@ -2009,7 +2009,9 @@ def test_metrics_report_prs_budget_outbox_and_saves(setup):
     assert set(m) == {"open_prs", "opens_last_hour", "merges_last_hour", "open_budget_limit",
                       "budget_refusals_last_hour", "parked_drafts", "stale_lease_adoptions_total",
                       "hub_busy_total", "hub_comments_rejected_total", "save_duration_s",
-                      "save_age_s", "state_bytes", "dirty_rows", *lanes}
+                      "save_age_s", "state_bytes", "dirty_rows", "verdicts_total",
+                      *(f"main_verdicts_last_hour_{v}" for v in ("human", "agent", "script")),
+                      *lanes}
     assert all(isinstance(v, int | float) for v in m.values())
     assert (m["open_prs"], m["opens_last_hour"], m["parked_drafts"]) == (1, 1, 0)
     assert m["state_bytes"] >= (world.ws / "state.db").stat().st_size > 0 and m["save_age_s"] < 60
@@ -2284,3 +2286,30 @@ def test_v2_with_an_unknown_base_asks_for_the_full_tree(setup, monkeypatch):
     monkeypatch.setattr(chatbot4, "apply_patch", lambda *a: pytest.fail("applied"))
     with pytest.raises(ToolError, match="budget"):
         world.call_workspace("open_pr", args, Agent("cedar"), capture_v2(clone.parent, clone.name))
+
+
+def test_record_verdict_round_trip_inbox_and_metrics(setup):
+    world, clone, _ = setup
+    rec = submit(world, clone)
+    target = f"pr:{rec['pr']}"
+    with pytest.raises(ToolError, match="main or pr"):
+        world.record_verdict(Agent("iv-owl"), "best", "script", 0.5, "x")
+    with pytest.raises(ToolError, match="no PR"):
+        world.record_verdict(Agent("iv-owl"), "pr:999", "script", 0.5, "x")
+    with pytest.raises(ToolError, match="confidence"):
+        world.record_verdict(Agent("iv-owl"), "main", "agent", 1.5, "x")
+    world.record_verdict(Agent("iv-owl"), "main", "agent", 0.7, "remembered my dog's name")
+    out = world.call("record_verdict", {"target": target, "verdict": "script", "confidence": 0.8,
+                                        "notes": "same reply twice"}, Agent("iv-fox"))
+    assert out["verdict"] == "script" and out["sha"] == rec["head_sha"]
+    inbox = world.call("list_prs", {}, Agent("cedar"))["inbox"]
+    assert any(f"interviewer iv-fox judged PR #{rec['pr']}: script (0.8)" in line for line in inbox)
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert [v["by"] for v in restarted.verdicts()["verdicts"]] == ["iv-fox", "iv-owl"]
+    assert [v["verdict"] for v in restarted.verdicts("main")["verdicts"]] == ["agent"]
+    assert len(restarted.verdicts(limit=1)["verdicts"]) == 1
+    m = restarted.metrics()
+    assert m["verdicts_total"] == 2 and m["main_verdicts_last_hour_agent"] == 1
+    assert m["main_verdicts_last_hour_script"] == 0
+    names = {t["name"]: t for t in world.manifest()["tools"]}
+    assert {"record_verdict", "verdicts"} <= set(names)

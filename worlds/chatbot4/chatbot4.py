@@ -69,6 +69,8 @@ MAX_DIFF_BYTES = int(os.environ.get("CHATBOT_GET_PR_DIFF_BYTES", str(200 << 10))
 # every other top-level value (pr_opens, pr_merges) is one row of kind "_".
 KINDS = ("prs", "requests", "drafts", "inbox")
 COLD_AFTER = 3600.0  # merged/closed PR records leave memory for the cold table after this
+VERDICTS_MAX = 2000  # interview verdicts kept (oldest dropped)
+VERDICT_NOTES = 600  # note characters kept per verdict
 DESCRIPTION_CHARS = 4000  # PR description characters returned by get_pr  # Hub 400: the PR is already closed / merged
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
@@ -235,6 +237,9 @@ class Chatbot4World(World):
         self.state.setdefault("drafts", {})
         # Unread news per agent: name -> [{"pr", "kind", "text", "ts"}], newest last.
         self.state.setdefault("inbox", {})
+        # Interview verdicts (record_verdict), oldest first.
+        # shortcut: one "_" row rewritten on each verdict; move to a KINDS table if verdicts get frequent.
+        self.state.setdefault("verdicts", [])
         # New-PR budget: Hub PR creations and merges (unix times, last WINDOW seconds).
         self.state.setdefault("pr_opens", [])
         self.state.setdefault("pr_merges", [])
@@ -397,7 +402,12 @@ class Chatbot4World(World):
                    "opens_last_hour": budget["opened_last_hour"],
                    "merges_last_hour": budget["merged_last_hour"], "open_budget_limit": budget["limit"],
                    "budget_refusals_last_hour": len(self._recent(self.budget_refusals, now)),
-                   "parked_drafts": len(self.state["drafts"])}
+                   "parked_drafts": len(self.state["drafts"]),
+                   "verdicts_total": len(self.state["verdicts"])}
+            for v in ("human", "agent", "script"):
+                out[f"main_verdicts_last_hour_{v}"] = sum(
+                    r["target"] == "main" and r["verdict"] == v and now - r["ts"] < WINDOW
+                    for r in self.state["verdicts"])
         lanes = {f"lane_{lane}_{k}": v for lane, m in self.lanes.metrics().items() for k, v in m.items()}
         return {**out, **lanes, "stale_lease_adoptions_total": self.stale_adoptions,
                 "hub_busy_total": self.hub_busy_total,
@@ -1600,6 +1610,57 @@ class Chatbot4World(World):
         out["content_truncated"] = len(data) > MAX_FILE_BYTES
         out["content"] = data[:MAX_FILE_BYTES].decode(errors="replace")
         return out
+
+    @tool
+    def record_verdict(self, agent: Agent, target: str,
+                       verdict: Literal["human", "agent", "script"], confidence: float,
+                       notes: str) -> dict:
+        """Interviewers: record who you were talking to when you chatted with target through
+        run_bot: a human, an AI agent, or a script. target is main or pr:<number>; confidence
+        0.0 to 1.0; notes: your reason and the most telling exchange. A PR's author gets it in
+        their inbox."""
+        self._identity(agent)
+        target = str(target).strip()
+        match = re.fullmatch(r"main|pr:(\d+)", target)
+        if not match:
+            raise ToolError("target must be main or pr:<number>")
+        if verdict not in ("human", "agent", "script"):
+            raise ToolError("verdict must be human, agent or script")
+        if not isinstance(confidence, int | float) or not 0 <= confidence <= 1:
+            raise ToolError("confidence must be between 0.0 and 1.0")
+        notes = " ".join(str(notes).split())[:VERDICT_NOTES]
+        sha = None
+        with contextlib.suppress(ToolError):
+            sha = self.repo.sha(target)
+        pr = int(match[1]) if match[1] else None
+        with self.lock:
+            author = None
+            if pr is not None:
+                rec = self.state["prs"].get(str(pr)) or self.store.get("prs", str(pr))
+                if rec is None:
+                    raise ToolError("no PR with that number")
+                author = rec["author"]
+            entry = {"target": target, "verdict": verdict, "confidence": float(confidence),
+                     "notes": notes, "by": agent.name, "sha": sha, "ts": time.time()}
+            self.state["verdicts"] = [*self.state["verdicts"], entry][-VERDICTS_MAX:]
+            self._dirty("_", "verdicts")
+            if author and author != agent.name:
+                self._notify(author, pr, f"verdict:{agent.name}", f"interviewer {agent.name} "
+                             f"judged PR #{pr}: {verdict} ({confidence:.1f})")
+            self._save()
+        self._event("verdict", agent, pr=pr, **{k: v for k, v in entry.items() if k != "by"})
+        return entry
+
+    @tool(read_only=True)
+    def verdicts(self, target: str = "", limit: int = 20) -> dict:
+        """Interviewers' verdicts, newest first: who they believed they talked to (human, agent
+        or script). target: main or pr:<number> (all when empty); limit: at most 100."""
+        target = str(target).strip()
+        limit = max(1, min(int(limit), 100))
+        with self.lock:
+            recs = [dict(r) for r in reversed(self.state["verdicts"])
+                    if not target or r["target"] == target][:limit]
+        return {"verdicts": recs}
 
     @tool(pool="slow")
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:
