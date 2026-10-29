@@ -104,6 +104,6 @@ The Inspect and AlpacaEval code needs the `evals` dependency group. Without it, 
 skipped:
 
 ```sh
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock" uv sync --all-extras --group evals
+uv sync --all-extras --group evals
 pytest tests/test_smoltalk_bench.py
 ```
