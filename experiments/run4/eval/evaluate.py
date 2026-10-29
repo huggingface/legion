@@ -37,7 +37,7 @@ DEFAULT_BUCKET = "HuggingFaceSwarms/swarmchat-evals"
 DEFAULT_FLAVORS = {"swarmchat": "cpu-upgrade", "vllm": "rtx-pro-6000", "endpoint": "cpu-basic"}
 SWARMCHAT = "SwarmChat"
 # SwarmChat's name in the bucket and the logs, with an org like a Hub model: run4's chatbot
-SWARMCHAT_ID = "HuggingFaceSwarms/SwarmChat-chatbot-v4"
+SWARMCHAT_ID = "HuggingFaceSwarms/SwarmChat-v4"
 SWARMCHAT_REPO = "cmpatino/chatbot-swarm"
 TASKS = {"smoltalk_bench_gold": "smoltalk_bench.py@smoltalk_bench_gold"}
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
