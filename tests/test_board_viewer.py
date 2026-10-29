@@ -260,3 +260,30 @@ def test_cache_cold_restart(published, tmp_path):
     second = BoardCache(hub, BUCKET, published[1].root)
     second.refresh()
     assert second.boards[RUN]["manifest"] == manifest
+
+
+def test_embedded_sign_in_uses_an_allowed_popup(viewer):
+    # HF's iframe allows escaping popups but forbids navigating the top window.
+    from html.parser import HTMLParser
+
+    class Links(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.links = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                self.links.append(dict(attrs))
+
+    client, _, _, _ = viewer
+    response = client.get("/")
+    assert response.status_code == 200
+    parser = Links()
+    parser.feed(response.text)
+    login = next(link for link in parser.links if link.get("href") == "/auth/login")
+    assert login["target"] == "_blank"
+    assert "noopener" in login["rel"].split()
+    # The new-tab entrypoint remains available before an authenticated session exists.
+    response = client.get(login["href"], follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://huggingface.co/oauth/authorize?")

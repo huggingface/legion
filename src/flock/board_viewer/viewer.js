@@ -4,7 +4,7 @@ let run = location.pathname.split('/')[2] || '', channel = '', thread = '', offs
 let query = new URLSearchParams(location.search);
 channel = query.get('channel') || ''; thread = query.get('thread') || '';
 const node = (tag, text, parent) => { const e = document.createElement(tag); e.textContent = text; if(parent) parent.append(e); return e; };
-async function api(path) { const r = await fetch(path); if(r.status===401){location.href='/auth/login'; throw Error('Sign-in required');} if(!r.ok) throw Error(r.status===403?'Organization membership required':'Could not refresh boards. The last loaded view is retained.'); return r.json(); }
+async function api(path) { const r = await fetch(path); if(r.status===401){location.href='/'; throw Error('Sign-in required');} if(!r.ok) throw Error(r.status===403?'Organization membership required':'Could not refresh boards. The last loaded view is retained.'); return r.json(); }
 function status() { const m=detail.manifest; const age=Math.max(0,Math.round((Date.now()-Date.parse(m.published_at))/1000)); $('status').textContent=`${m.swarm} · ${m.run_id.slice(0,8)} · ${m.completed?'Archived':'Live / last reported'} · Snapshot ${new Date(m.published_at).toLocaleString()} (${age}s ago)${detail.refresh_error || (!m.completed && age>90)?' · Updates delayed':''}`; }
 function url() { const q=new URLSearchParams(); if(channel)q.set('channel',channel); if(thread)q.set('thread',thread); history.replaceState(null,'',`/boards/${run}/?${q}`); }
 async function boards() {

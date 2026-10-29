@@ -80,7 +80,8 @@ def create_app(cache=None, access=None, *, refresh=True):
                 raise
             return HTMLResponse('<!doctype html><title>Flock boards</title><h1>Flock boards</h1>'
                 '<p>Organization access is required to view experiment conversations.</p>'
-                '<a href="/auth/login" target="_top">Sign in with Hugging Face</a>')
+                '<a href="/auth/login" target="_blank" rel="noopener noreferrer">Sign in with Hugging Face</a>'
+                '<p>Sign-in opens in a new tab so it works outside the embedded Space.</p>')
         return HTMLResponse(Path(__file__).with_name("index.html").read_text())
 
     protected = [Depends(access.require)]
