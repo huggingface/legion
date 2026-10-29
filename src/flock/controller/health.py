@@ -159,11 +159,11 @@ class Health:
 
     # ------------------------------------------------------------------ counters (post_events)
     def on_events(self, a: Row, evs: list[Event], now: float) -> None:
-        """Token usage by type and hour from `turn_ended`, with assistant `message` usage
-        counted only for turns that never got one (cut by a worker death or an interrupt) or
-        whose total is empty: a turn's message usage is held until its turn_ended (then
-        dropped: a non-empty turn total wins) or until the next turn_started /
-        turn_interrupted / session_* event (then counted)."""
+        """Token usage by type and hour from `turn_ended` / `turn_interrupted` totals, with
+        assistant `message` usage counted only for turns that never got one (cut by a worker
+        death) or whose total is empty: a turn's message usage is held until its turn_ended /
+        turn_interrupted (then dropped: a non-empty turn total wins) or until the next
+        turn_started / session_* event (then counted)."""
         with self._lock:
             self._last_event[a["name"]] = now
             for ev in evs:
@@ -187,23 +187,23 @@ class Health:
                 t["err"] += bool(m.get("isError"))
         elif ev.type == "error":
             r["errors"] += 1
-        elif ev.type == "turn_ended":
+        elif ev.type in ("turn_ended", "turn_interrupted"):
             p = d.get("data") or {}
-            r["turns"] += 1
-            r["tool_calls"] += int(p.get("tool_calls") or 0)
-            why = f"{p.get('reason') or ''} {p.get('subtype') or ''}"
-            out = ("max_turns" if hit_max_turns(p) else "max_budget" if "budget" in why
-                   else "error" if p.get("error") or p.get("status") not in (None, "completed")
-                   else "done")
-            r["out"][out] += 1
+            if ev.type == "turn_ended":
+                r["turns"] += 1
+                r["tool_calls"] += int(p.get("tool_calls") or 0)
+                why = f"{p.get('reason') or ''} {p.get('subtype') or ''}"
+                out = ("max_turns" if hit_max_turns(p) else "max_budget" if "budget" in why
+                       else "error" if p.get("error") or p.get("status") not in (None, "completed")
+                       else "done")
+                r["out"][out] += 1
             held = self._open.pop(name, {})
             tokens = {m: _tokens(u) for m, u in (p.get("tokens") or {}).items()}
             if not any(any(u.values()) for u in tokens.values()):
                 tokens = held  # no usage in the turn total (usage_missing): what messages had
             for model, u in tokens.items():
                 self._spend(a, model, u, now)
-        elif ev.type == "turn_started" or ev.type == "turn_interrupted" or ev.type.startswith(
-                "session_"):
+        elif ev.type == "turn_started" or ev.type.startswith("session_"):
             for model, u in self._open.pop(name, {}).items():
                 self._spend(a, model, u, now)
 
