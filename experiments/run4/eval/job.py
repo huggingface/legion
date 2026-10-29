@@ -194,6 +194,10 @@ def main():
     finally:
         if server is not None:
             stop(server)
+        # Keep empty files, such as a server log nothing was written to, out of the bucket
+        for path in LOG_DIR.glob("*"):
+            if path.is_file() and path.stat().st_size == 0:
+                path.unlink()
         if LOG_DIR.is_dir() and any(LOG_DIR.iterdir()):
             HfApi().sync_bucket(str(LOG_DIR), args.output_dir)
             print(f"Uploaded the Inspect log to {args.output_dir}")
