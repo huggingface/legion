@@ -71,7 +71,7 @@ def _json_object(value: str) -> dict:
     return parsed
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True,
@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
                         help="extra local environment variables to forward")
     parser.add_argument("--dry_run", action="store_true",
                         help="print the Jobs without uploading or submitting")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _safe_name(value: str) -> str:
@@ -181,13 +181,21 @@ def snapshot_volume(api: HfApi, namespace: str) -> Volume:
                                    remote_name=f"swarmchat-evals/{digest.hexdigest()[:16]}")
 
 
-def main():
-    args = parse_args()
-    token = get_token()
-    if token is None:
-        raise RuntimeError("HF Jobs need a Hugging Face token; run `hf auth login` first")
-    api = HfApi(token=token)
-    namespace = args.namespace or api.whoami()["name"]
+def job_secrets(token: str, names: list[str]) -> dict[str, str]:
+    """The Job's secrets: the HF token, the provider API keys that are set, and `names`."""
+    secrets = {"HF_TOKEN": token}
+    for name in names:
+        if name not in os.environ:
+            raise ValueError(f"--secrets {name} is not set in the local environment")
+    for name in (*PROVIDER_API_KEYS, *names):
+        if name in os.environ:
+            secrets[name] = os.environ[name]
+    return secrets
+
+
+def build_job(args: argparse.Namespace, api: HfApi, namespace: str) -> tuple[dict, str]:
+    """The `run_job` arguments of the Job that runs one eval, short of its secrets and volumes,
+    and the URL its logs will be at."""
     backend = args.backend or ("swarmchat" if SWARMCHAT in args.model else "vllm")
     if backend == "endpoint" and args.revision != "main":
         raise ValueError("--revision does not apply to --backend endpoint")
@@ -215,14 +223,6 @@ def main():
         max_connections = vcpu_count(api, flavor)
     else:
         max_connections = {"vllm": 128, "endpoint": 50}[backend]
-
-    secrets = {"HF_TOKEN": token}
-    for name in args.secrets:
-        if name not in os.environ:
-            raise ValueError(f"--secrets {name} is not set in the local environment")
-    for name in (*PROVIDER_API_KEYS, *args.secrets):
-        if name in os.environ:
-            secrets[name] = os.environ[name]
 
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
     commit = None
@@ -273,8 +273,18 @@ def main():
         "env": JOB_ENV | (VLLM_JOB_ENV if backend == "vllm" else {}),
         "flavor": flavor, "timeout": args.timeout, "namespace": namespace,
     }
-    output_url = f"https://huggingface.co/buckets/{args.bucket}/tree/{output_path}"
+    return job, f"https://huggingface.co/buckets/{args.bucket}/tree/{output_path}"
 
+
+def main():
+    args = parse_args()
+    token = get_token()
+    if token is None:
+        raise RuntimeError("HF Jobs need a Hugging Face token; run `hf auth login` first")
+    api = HfApi(token=token)
+    namespace = args.namespace or api.whoami()["name"]
+    secrets = job_secrets(token, args.secrets)
+    job, output_url = build_job(args, api, namespace)
     if args.dry_run:
         print(json.dumps(job | {"output_url": output_url}, indent=2))
         return
