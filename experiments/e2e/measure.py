@@ -8,8 +8,6 @@ the prompt sent at `sent`, and reports: time to first event after the prompt, tu
 (turn_started -> turn_ended), reply == codeword, tokens, controller cost vs Claude's estimate.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

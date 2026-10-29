@@ -8,8 +8,6 @@ line saying so). Any other `{name}`, and format specs such
 as `{cap:.2f}`, are left exactly as written.
 """
 
-from __future__ import annotations
-
 import re
 from datetime import datetime
 

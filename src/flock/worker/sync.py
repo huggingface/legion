@@ -50,8 +50,6 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   pushed (`_mark`).
 """
 
-from __future__ import annotations
-
 import asyncio
 import fnmatch
 import json
@@ -251,16 +249,16 @@ class BucketStore(Protocol):
     def list(self, prefix: str) -> list[str]: ...
     # optional: `list_info(prefix) -> list[tuple[str, float | None]]`, paths with their mtime
     # (POSIX seconds) when the store keeps one; restore uses it to set local mtimes
-    def download(self, files: list[tuple[str, Path]]) -> None: ...
+    def download(self, files: "list[tuple[str, Path]]") -> None: ...
     def sync_up(self, local: Path, prefix: str, *, delete: bool = True,
-                exclude: list[str] | None = None) -> None:
+                exclude: "list[str] | None" = None) -> None:
         """Upload new/changed files of a local directory to `prefix`; with `delete`, also
         delete remote files missing locally. `exclude`: fnmatch patterns on relative paths,
         neither uploaded nor deleted."""
         ...
 
     def sync_down(self, prefix: str, local: Path) -> None: ...
-    def delete(self, paths: list[str]) -> None:
+    def delete(self, paths: "list[str]") -> None:
         """Delete files (paths relative to the flock root). Used by the controller's state."""
         ...
 
@@ -294,7 +292,7 @@ class HubBucketStore:
     def list(self, prefix: str) -> list[str]:
         return [r for r, _ in self.list_info(prefix)]
 
-    def list_info(self, prefix: str) -> list[tuple[str, float | None]]:
+    def list_info(self, prefix: str) -> "list[tuple[str, float | None]]":
         from huggingface_hub import BucketFile
 
         self.stats.add("ops", "list_bucket_tree")
@@ -306,13 +304,13 @@ class HubBucketStore:
                 out.append((f.path[len(self.base):], mt))
         return out
 
-    def download(self, files: list[tuple[str, Path]]) -> None:
+    def download(self, files: "list[tuple[str, Path]]") -> None:
         self.stats.add("ops", "download_bucket_files")
         for _, local in files:
             local.parent.mkdir(parents=True, exist_ok=True)
         self.api.download_bucket_files(self.bucket_id, [(self.base + r, str(p)) for r, p in files])
 
-    def delete(self, paths: list[str]) -> None:
+    def delete(self, paths: "list[str]") -> None:
         for i in range(0, len(paths), UPLOAD_CHUNK):
             self.stats.add("ops", "batch_bucket_files")
             chunk = paths[i : i + UPLOAD_CHUNK]
@@ -322,7 +320,7 @@ class HubBucketStore:
         return f"hf://buckets/{self.bucket_id}/{self.base}{prefix}".rstrip("/")
 
     def sync_up(self, local: Path, prefix: str, *, delete: bool = True,
-                exclude: list[str] | None = None) -> None:
+                exclude: "list[str] | None" = None) -> None:
         self.stats.add("ops", "sync_bucket_up")
         self.api.sync_bucket(str(local), self._url(prefix), delete=delete, exclude=exclude or None,
                              quiet=True)
@@ -451,13 +449,13 @@ class BucketSync:
         self._mirror: dict[str, bool] = {}
         self._restoring: set[str] = set()  # agent prefixes with a restore in flight
 
-    def mirror_deletes(self, rt: AgentRuntime) -> bool:
+    def mirror_deletes(self, rt: "AgentRuntime") -> bool:
         return self._mirror.get(self.prefix(rt), True)
 
-    def prefix(self, rt: AgentRuntime) -> str:
+    def prefix(self, rt: "AgentRuntime") -> str:
         return f"{self.swarm}/{rt.type_name}/{rt.name}/"
 
-    def collect(self, rt: AgentRuntime) -> list[tuple[Path, str]]:
+    def collect(self, rt: "AgentRuntime") -> list[tuple[Path, str]]:
         """The agent's session-log, state and harness files, with their bucket paths."""
         pre = self.prefix(rt)
         out: list[tuple[Path, str]] = []
@@ -494,14 +492,14 @@ class BucketSync:
             except OSError:
                 pass
 
-    async def push(self, rt: AgentRuntime) -> int:
+    async def push(self, rt: "AgentRuntime") -> int:
         try:
             return await self._push(rt)
         except Exception:
             self.stats.add("errors", "push_failed")
             raise
 
-    async def _push(self, rt: AgentRuntime) -> int:
+    async def _push(self, rt: "AgentRuntime") -> int:
         pre = self.prefix(rt)
         if pre in self._restoring:  # never mirror a half-restored agent (module docstring)
             log.warning("%s: push skipped, its restore is still running", rt.name)
@@ -520,14 +518,14 @@ class BucketSync:
             self._mark(files)
         return len(files)
 
-    async def restore(self, rt: AgentRuntime) -> RestoreResult:
+    async def restore(self, rt: "AgentRuntime") -> RestoreResult:
         try:
             return await self._restore(rt)
         except Exception:
             self.stats.add("errors", "restore_failed")
             raise
 
-    async def _restore(self, rt: AgentRuntime) -> RestoreResult:
+    async def _restore(self, rt: "AgentRuntime") -> RestoreResult:
         pre = self.prefix(rt)
         self._mirror[pre] = False  # until this restore completes with every file
         self._restoring.add(pre)
@@ -538,7 +536,7 @@ class BucketSync:
         self._mirror[pre] = not res.failed
         return res
 
-    async def _restore_files(self, rt: AgentRuntime, pre: str) -> RestoreResult:
+    async def _restore_files(self, rt: "AgentRuntime", pre: str) -> RestoreResult:
         lister = getattr(self.store, "list_info", None)
         if lister is not None:  # raises: the caller starts fresh
             listed = await asyncio.to_thread(lister, pre)

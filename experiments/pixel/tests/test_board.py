@@ -1,7 +1,5 @@
 """run/board.py against a fake msgboard (join, post, reply, read, react, transcript)."""
 
-from __future__ import annotations
-
 import importlib.util
 import json
 import os

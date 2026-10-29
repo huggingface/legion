@@ -1,5 +1,4 @@
 """preflight.py: Hub errors become failed checks, and the archive path matches the world's."""
-from __future__ import annotations
 
 import httpx
 import pytest

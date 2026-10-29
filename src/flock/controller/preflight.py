@@ -12,8 +12,6 @@ sends them; a tool call the model writes as text (which the harness accepts) pas
 warning.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import time

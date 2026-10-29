@@ -3,8 +3,6 @@
 refusals) and the strict promotion gate, the compare round after the merge, and interviews by
 booking (separate quotas, the frozen copy, charged on the verdict, released when cut off)."""
 
-from __future__ import annotations
-
 import asyncio
 import importlib.util
 import json

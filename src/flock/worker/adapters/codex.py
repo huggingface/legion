@@ -19,8 +19,6 @@ $CODEX_HOME/config.toml keeps the shared, synced CODEX_HOME untouched. 0.162.1 r
 `wire_api = "chat"` ("no longer supported"), so the provider must serve the Responses API.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging

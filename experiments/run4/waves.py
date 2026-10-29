@@ -23,8 +23,6 @@ one JSON line in --log (default: <S>.waves.jsonl). The start time is kept in
 <S>.waves.json (`--start` epoch seconds overrides it). A type under `type_caps` (waves.yaml,
 e.g. agent-spawner: 20) has its own cap for `--type`, outside the schedule's `cap`."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

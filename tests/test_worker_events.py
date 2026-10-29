@@ -1,7 +1,5 @@
 """pi session format v3 on disk round-trips with the Event records sent to the controller."""
 
-from __future__ import annotations
-
 import itertools
 import json
 

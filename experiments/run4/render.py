@@ -1,5 +1,4 @@
 """Render a run-4 spec without starting services or contacting any API."""
-from __future__ import annotations
 
 import argparse
 import json

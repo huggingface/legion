@@ -1,8 +1,6 @@
 """run/leader.md, executed: its literal commands against a real canvas (REGION_ENFORCE=1) and a
 fake `flock` CLI whose spawned painters run the prompt's commands like a forced-tool agent."""
 
-from __future__ import annotations
-
 import os
 import re
 import socket

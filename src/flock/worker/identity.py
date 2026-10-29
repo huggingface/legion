@@ -13,8 +13,6 @@ name. One cache serves both users, so they never rotate each other's token:
 Swapping to an admin "create-or-get agent by name" endpoint later means replacing `join` only.
 """
 
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
 

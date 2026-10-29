@@ -4,8 +4,6 @@ Every public function with a docstring is a tool (docs/tools.md). `ctx` is fille
 never shown to the model. Raise ToolError for a refusal the model should read as is.
 """
 
-from __future__ import annotations
-
 import json
 import re
 import subprocess

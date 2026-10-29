@@ -7,8 +7,6 @@ agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT
 docs/spawn.md for what an agent may call.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import random

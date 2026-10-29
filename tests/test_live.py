@@ -3,8 +3,6 @@ folder watch, the grants API (checks, merge, events, the budget gate, what heart
 the runtime side (prompts and grants at the next turn boundary, with a note), the CLI commands
 against the in-process app, and `flock run --watch` in process."""
 
-from __future__ import annotations
-
 import asyncio
 import io
 import json

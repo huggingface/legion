@@ -5,7 +5,6 @@ The single polling task rotates identities on a `comms.poll_cycle_s` cycle (defa
 even on busy feeds.
 No service credential, per-agent poll tasks, or per-channel pollers are needed.
 """
-from __future__ import annotations
 
 import asyncio
 import contextlib

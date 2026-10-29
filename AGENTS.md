@@ -16,7 +16,8 @@ casually: controller, worker and CLI all import it.
 ## Conventions
 - Python 3.11+, pydantic v2, httpx, typer, FastAPI. Keep it small; no new frameworks.
 - Build the env with `uv sync --all-extras`.
-- Do not add `from __future__ import annotations` to new code; Python 3.11+ does not need it.
+- Do not use `from __future__ import annotations`; Python 3.11+ does not need it. Quote an
+  annotation that names something defined later or imported under `TYPE_CHECKING`.
 - `ruff check` and `pytest` must pass before pushing.
 - Always pass `namespace=` to every `huggingface_hub` jobs call (saves a `whoami` per call).
 - Never launch an HF Job from tests. Experiments launch jobs only on `cpu-basic` unless the operator approved otherwise.

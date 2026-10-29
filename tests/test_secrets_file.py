@@ -1,5 +1,4 @@
 """FLOCK_WORKER_SECRETS_FILE: worker credentials from a 0600 file instead of the exec environment."""
-from __future__ import annotations
 
 import os
 import subprocess

@@ -8,8 +8,6 @@ booking the interviewer never uses is released by the world. The interviewer typ
 flock removes each one when its session ends. The child is spawned without a prompt and
 prompted once its worker reports it (a prompt sent with the spawn can be dropped)."""
 
-from __future__ import annotations
-
 import json
 import re
 import time

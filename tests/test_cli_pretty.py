@@ -1,7 +1,5 @@
 """`flock events --pretty`: one readable line per event; raw JSONL stays the default."""
 
-from __future__ import annotations
-
 import json
 from datetime import UTC, datetime
 

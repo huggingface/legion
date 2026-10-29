@@ -5,8 +5,6 @@ calls it every few seconds in a thread (Hub calls block). A worker row is a stab
 (`<swarm>-<type>-wNNNN`); its job is replaced on restart, its agents never move.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os

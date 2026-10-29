@@ -1,7 +1,5 @@
 """`providers:` / `models:` in the spec: resolution, apply-time validation, pinning."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest

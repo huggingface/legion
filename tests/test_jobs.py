@@ -1,7 +1,5 @@
 """HubJobsClient launch arguments: bootstrap mode vs a prebuilt image."""
 
-from __future__ import annotations
-
 import subprocess
 
 import pytest

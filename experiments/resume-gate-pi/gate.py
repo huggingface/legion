@@ -12,8 +12,6 @@ Env: PI_CODING_AGENT_DIR (required), WORKDIR (default /work/agents/probe-0001), 
      SID_MAIN, SID_CUT (required), PI (default: pi on PATH).
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json

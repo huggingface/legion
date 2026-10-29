@@ -7,8 +7,6 @@ schema builder, runner and bundle code live in the submodules; this module stays
 the per-call subprocess starts fast.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar

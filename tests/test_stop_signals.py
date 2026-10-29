@@ -2,8 +2,6 @@
 controller and the world exactly like SIGTERM, once, also when signals repeat (docs/slurm.md).
 The worker's side is in test_worker_preempt.py."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os

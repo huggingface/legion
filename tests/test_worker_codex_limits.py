@@ -1,8 +1,6 @@
 """Codex `max_turns` / `max_budget_usd`: the mapper's counting on the recorded fixture, and the
 adapter against a fake app-server whose turns make one model call per step."""
 
-from __future__ import annotations
-
 import json
 import sys
 from pathlib import Path

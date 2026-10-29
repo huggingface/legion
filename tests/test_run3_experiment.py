@@ -4,8 +4,6 @@ bootstrap end to end with the fakes: 3 waves (0 -> 20 -> 40, the third capped), 
 gets the newcomer prompt first, promotion from the start, interviews booked without a quota,
 the stop marker, and the bundle in the bucket."""
 
-from __future__ import annotations
-
 import importlib.util
 import json
 import math

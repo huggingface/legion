@@ -1,8 +1,6 @@
 """`harness: llm`: the in-process chat-completions loop against tests/fake_openai.py (no real
 model calls), plus its pure helpers (text tool calls, compaction, repair) and spec checks."""
 
-from __future__ import annotations
-
 import asyncio
 import itertools
 import json

@@ -1,7 +1,5 @@
 """HF Jobs seam: a small protocol, the real `huggingface_hub` client, and a fake for tests."""
 
-from __future__ import annotations
-
 import os
 import shlex
 from collections import Counter

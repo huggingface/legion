@@ -5,8 +5,6 @@ stage, message, created/started/ended, flavor) to <out>/jobs.jsonl, and the log 
     python jobs_dump.py out [--no-logs] [--label experiment=flock-10k]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path

@@ -7,8 +7,6 @@ No HF token, bucket or network.
 2. A second terminal: plain `flock prompt` / `flock events` find the run through
    `.flock/current`; Ctrl-C (SIGINT) stops it cleanly."""
 
-from __future__ import annotations
-
 import json
 import os
 import signal

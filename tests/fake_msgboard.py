@@ -26,8 +26,6 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
 beyond one lock; fine for tests.
 """
 
-from __future__ import annotations
-
 import json
 import re
 import threading

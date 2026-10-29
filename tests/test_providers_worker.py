@@ -1,8 +1,6 @@
 """Worker side of `providers:`: the harness environment (no worker secrets leak), the provider
 key handed to the harness, and each adapter's provider configuration."""
 
-from __future__ import annotations
-
 import json
 import sys
 from pathlib import Path

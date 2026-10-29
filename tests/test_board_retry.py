@@ -1,5 +1,4 @@
 """Board client 429 handling: Retry-After (seconds or HTTP-date) plus jitter, capped."""
-from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime

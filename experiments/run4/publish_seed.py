@@ -3,7 +3,6 @@
 Default: print a read-only change plan. --apply requires the expected main SHA;
 Hub parent_commit prevents replacing concurrent changes. No service or job starts.
 """
-from __future__ import annotations
 
 import argparse
 import hashlib

@@ -21,8 +21,6 @@ a drain (in-flight turns finish within `grace` s, then the processes are killed)
 final event flush, writes the bundle and exits.
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json

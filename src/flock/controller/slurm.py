@@ -42,8 +42,6 @@ says SCHEDULING, so the reconcile loop waits for heartbeats and never counts a m
 external worker as a crash (reconcile.py).
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import re
@@ -440,7 +438,7 @@ class SlurmJobsClient:
         worker_id, _, log_dir = launched
         return str(Path(log_dir) / f"{worker_id}-{job_id}.out")
 
-    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> list[str]:
+    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> "list[str]":
         path_s = self.log_path(job_id)
         if path_s is None:  # launched by an earlier controller: look in the env's log dir
             log_dir = resolve(None, "", self.env).get("log_dir")
@@ -495,5 +493,5 @@ class ExternalJobsClient:
     def list(self, labels: dict[str, str], *, namespace: str = "") -> list[JobListing]:
         return []
 
-    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> list[str]:
+    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> "list[str]":
         return []

@@ -1,5 +1,4 @@
 """Run-4 configuration, all-node capacity guard and notification integration."""
-from __future__ import annotations
 
 import importlib.util
 import sys

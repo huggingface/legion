@@ -11,8 +11,6 @@ stay on disk for the worker's lifetime (bundles are small; a running call may st
 A fetch or install failure keeps the previous version and is reported in `Toolset.error`.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os

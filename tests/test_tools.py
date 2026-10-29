@@ -1,7 +1,5 @@
 """Tools folder: loader and schema builder, the subprocess runner, bundles, apply-time selection."""
 
-from __future__ import annotations
-
 import io
 import json
 import tarfile

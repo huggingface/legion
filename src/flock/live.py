@@ -2,8 +2,6 @@
 files `flock run --watch` polls, and the argument syntax of `flock grant` / `flock revoke`.
 No I/O to the controller here: the CLI and the local run do that."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any

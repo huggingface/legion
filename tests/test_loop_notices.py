@@ -2,8 +2,6 @@
 (`comms_mention`, `comms_thread_reply` from its worker) and names them in one line after the
 agent's next round prompt, then forgets them. Controller only: workers never see the key."""
 
-from __future__ import annotations
-
 import json
 
 import httpx

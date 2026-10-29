@@ -43,8 +43,6 @@ prompt_tokens 100 (+1 per message), 40 of them cached, completion_tokens 7.
 Every request is appended to the log as {"auth": <Authorization header>, "body": <request>}.
 """
 
-from __future__ import annotations
-
 import json
 import re
 import sys

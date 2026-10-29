@@ -12,8 +12,6 @@ Every request carries `X-World-Token`; a tool call also names the calling agent
 is pydantic-only, so the worker, the controller and a world written with `flock.world` share it.
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import re

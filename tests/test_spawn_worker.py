@@ -1,8 +1,6 @@
 """Worker side of spawn: the harness env carries the agent's identity and scoped token, never
 the worker's FLOCK_TOKEN; session_started names the parent."""
 
-from __future__ import annotations
-
 import asyncio
 
 from flock.controller.jobs import bootstrap_command

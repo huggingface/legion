@@ -1,7 +1,5 @@
 """Controller side of `providers:`: job secrets, pinned pricing, status, preflight."""
 
-from __future__ import annotations
-
 import json
 from datetime import timedelta
 

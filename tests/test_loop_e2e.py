@@ -6,8 +6,6 @@ gets the first prompt alone, exactly 3 loop prompts (rendered on the worker), th
 prompt; one turn per prompt (nothing stacked); swarm events in order. Run twice: the worker
 re-prompts (no `max_working`), and the controller re-prompts (`max_working: 3`)."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import random

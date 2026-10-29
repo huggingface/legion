@@ -1,8 +1,6 @@
 """`loop:` in the spec (docs/loop.md): validation, the `while` alias on the wire, prompt files
 inlined by `flock apply`, and world-backed settings accepted by the model but refused at apply."""
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 

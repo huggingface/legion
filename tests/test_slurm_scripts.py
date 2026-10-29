@@ -1,8 +1,6 @@
 """experiments/run3/slurm: the scripts parse, and worker.sbatch (bare mode) runs flock-worker
 from the env file and the secrets file, forwards TERM/USR1 once and returns its exit code."""
 
-from __future__ import annotations
-
 import os
 import signal
 import subprocess

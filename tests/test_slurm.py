@@ -1,8 +1,6 @@
 """`compute: slurm` and `compute: external` (controller/slurm.py), against shell stubs of
 sbatch/squeue/sacct/scancel (tests/fixtures/slurm_stubs) that keep job states in a temp dir."""
 
-from __future__ import annotations
-
 import os
 import random
 import stat

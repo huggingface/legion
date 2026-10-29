@@ -9,8 +9,6 @@ Phases of the harness process: none -> starting -> running -> (stopping) -> none
 The worker never schedules or queues beyond the startup buffer.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os
@@ -122,13 +120,13 @@ class AgentRuntime:
         work_root: Path,
         adapter: HarnessAdapter,
         outbox: Outbox,
-        sync: BucketSync | None = None,
-        identities: Identities | None = None,
+        sync: "BucketSync | None" = None,
+        identities: "Identities | None" = None,
         working_count: Callable[[], int] | None = None,
         secret_source: Mapping[str, str] | None = None,
         toolbox: Callable[[], Toolset] | None = None,
-        comms: CommsHub | None = None,
-        world: WorldHub | None = None,
+        comms: "CommsHub | None" = None,
+        world: "WorldHub | None" = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
         # Live changes (docs/live.md): `spec` is `base_spec` (the type spec as applied) with the

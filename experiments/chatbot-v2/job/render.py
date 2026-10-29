@@ -10,8 +10,6 @@ settings in effect (JSON, one line) or nothing.
 
 usage: render.py <experiment dir> [--first]"""
 
-from __future__ import annotations
-
 import json
 import os
 import sys

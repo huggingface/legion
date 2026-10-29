@@ -1,7 +1,5 @@
 """200 agents painting at once through the real ASGI stack: no lost writes, consistent score."""
 
-from __future__ import annotations
-
 import json
 import threading
 

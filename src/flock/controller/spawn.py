@@ -12,8 +12,6 @@ worker, a re-sent assign). Removing the agent deletes the row, which revokes the
 rotating FLOCK_TOKEN invalidates every agent token until the next assign re-issues it.
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import logging

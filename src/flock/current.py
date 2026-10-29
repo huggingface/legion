@@ -5,8 +5,6 @@ pid of the `flock run` process. Written when the controller is up, removed at ex
 pid is gone is ignored. No controller dependencies: the plain CLI reads it.
 """
 
-from __future__ import annotations
-
 import contextlib
 import json
 import os

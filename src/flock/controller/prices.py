@@ -16,8 +16,6 @@ this table for that type's model id. Cache writes are billed at the input price 
 servers report none; vLLM's Anthropic endpoint has no cache-write tier).
 """
 
-from __future__ import annotations
-
 import json
 import os
 from dataclasses import dataclass

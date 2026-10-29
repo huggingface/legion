@@ -1,7 +1,5 @@
 """`spawn:`, `workers:` and `limits:` in the spec: parsing, defaults and apply-time checks."""
 
-from __future__ import annotations
-
 import pytest
 from pydantic import ValidationError
 

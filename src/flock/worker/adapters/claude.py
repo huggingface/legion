@@ -25,8 +25,6 @@ and CLAUDE_CODE_MAX_RETRIES (names present in the 2.1.296 binary). `reasoning` m
 `effort` (low/medium/high) or `thinking={"type": "disabled"}` (off).
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging

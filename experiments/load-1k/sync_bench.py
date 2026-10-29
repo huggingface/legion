@@ -7,8 +7,6 @@ Each agent: workdir/CLAUDE.md + notes.md, sessions/<name>.jsonl + .state.json, o
 harness transcript. Prints seconds and bucket calls per phase (BucketStats).
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json

@@ -21,8 +21,6 @@ the agent's instructions.
   first prompt on this worker, `turn` at each turn end, `agent_done` at unassign. Best effort.
 """
 
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import hmac

@@ -12,8 +12,6 @@ ack status and latency, server timestamps of the first event / turn_started / tu
 reply, tokens, worker, and HTTP errors seen. Needs FLOCK_URL and FLOCK_TOKEN.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json

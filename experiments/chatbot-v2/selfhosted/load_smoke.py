@@ -10,8 +10,6 @@ It sends real requests to the endpoint (no other network: the board is in memory
 local). Run it from the repo root with flock installed. Output: a table on stdout and
 <out>/load-smoke.md + results.json."""
 
-from __future__ import annotations
-
 import argparse
 import itertools
 import json

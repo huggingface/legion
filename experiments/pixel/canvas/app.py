@@ -1,7 +1,5 @@
 """FastAPI app. Endpoints are sync (run in the threadpool); World holds one lock."""
 
-from __future__ import annotations
-
 import threading
 import uuid
 from contextlib import asynccontextmanager

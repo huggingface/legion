@@ -3,8 +3,6 @@ agent-facing tool descriptions, promotion open from the start behind the qualify
 beat-best gate (ties refused), interviews by booking without a quota (frozen copy, charged on
 the verdict, released when cut off), the bucket mirror of best/ and the bot-run pool."""
 
-from __future__ import annotations
-
 import asyncio
 import importlib.util
 import json

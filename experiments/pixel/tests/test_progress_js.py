@@ -1,7 +1,5 @@
 """progress/app.js replays the gzipped paint log to the same frames as the service (needs node)."""
 
-from __future__ import annotations
-
 import gzip
 import json
 import random

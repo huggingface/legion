@@ -1,7 +1,5 @@
 """The ``canvas`` CLI against a real uvicorn server (stdlib HTTP client)."""
 
-from __future__ import annotations
-
 import json
 import socket
 import threading

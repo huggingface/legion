@@ -6,8 +6,6 @@ folder, replicas); a grant takes `add` and `bash` away from one agent. Each chan
 the agents at their next turn, with a one-line note in that prompt, without a worker
 restart; grants survive `flock update`."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import textwrap

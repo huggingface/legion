@@ -6,8 +6,6 @@ slot is recreated (also across controller restarts: the reservation is in the st
 `naming_seed` the words are a function of (seed, swarm, reservation number), so the same spec
 gives the same names; without it they are random."""
 
-from __future__ import annotations
-
 import random
 import re
 

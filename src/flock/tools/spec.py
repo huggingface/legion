@@ -1,7 +1,5 @@
 """Apply-time glue between a swarm spec and its tools folder (docs/tools.md, "Selection")."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 from flock.models import CommsSpec, SwarmSpec, TypeSpec, comms_name, comms_tools

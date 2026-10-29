@@ -1,5 +1,4 @@
 """Cluster review regressions using fake commands, virtual time and no cluster access."""
-from __future__ import annotations
 
 import asyncio
 import importlib

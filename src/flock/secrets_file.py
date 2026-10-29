@@ -16,7 +16,6 @@ optional leading `export `; a value wrapped in matching single or double quotes 
 No variable expansion, escapes or multi-line values. `FLOCK_WORKER_SECRETS_FILE_UNLINK=1`
 deletes the file after reading it.
 """
-from __future__ import annotations
 
 import os
 import re

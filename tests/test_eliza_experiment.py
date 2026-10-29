@@ -7,8 +7,6 @@ The world starts as a child process and stops with the run; write_file outside t
 dir is refused; run_bot talks to the seeded bot; promote_best puts it at best/bot.py; the
 bundle has run.json with the loops and budget summaries."""
 
-from __future__ import annotations
-
 import json
 import shutil
 import subprocess

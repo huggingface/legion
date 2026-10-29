@@ -27,8 +27,6 @@ picks the loops up where they were. Swarm-level events go to the stream `_swarm.
 (`GET /swarms/{swarm}/events`); per-agent ones (`final_round`) also to the agent's stream.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging

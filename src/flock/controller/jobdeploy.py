@@ -9,8 +9,6 @@ scripts/deploy-job.sh; stdlib plus huggingface_hub only, so it runs from a bare 
         next controller in the group starts empty
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import shlex

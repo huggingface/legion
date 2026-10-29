@@ -1,8 +1,6 @@
 """`POST /swarms/{swarm}/prompts` and `flock prompt --swarm S --type T`: one request prompts
 every agent of a type; prompts are held and admitted exactly as single prompts are."""
 
-from __future__ import annotations
-
 import json
 
 import yaml

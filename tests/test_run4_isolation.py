@@ -1,5 +1,4 @@
 """Namespace boundary checks. Cluster dry run requires the kernel checks; never launches jobs."""
-from __future__ import annotations
 
 import json
 import os

@@ -26,8 +26,6 @@ Observed with 1.2.0 (tests/fixtures/pi_rpc.jsonl, recorded against tests/fake_op
   session and survives, so `stop` kills the descendants it saw before killing Pi.
 """
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json

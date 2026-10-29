@@ -1,5 +1,4 @@
 """Contract runner: isolated interpreter, bounded resources, no bot I/O except stdio/imports."""
-from __future__ import annotations
 
 import os
 import signal

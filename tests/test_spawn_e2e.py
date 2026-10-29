@@ -7,8 +7,6 @@ uses the FLOCK_AGENT_TOKEN the worker put into that agent's harness env, as `flo
 prompts its parent; removing the analyst takes the helper with it on the workers too; scaling
 the leader to 0 takes the remaining analysts."""
 
-from __future__ import annotations
-
 import asyncio
 import random
 from datetime import UTC, datetime

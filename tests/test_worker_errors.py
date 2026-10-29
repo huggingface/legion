@@ -1,8 +1,6 @@
 """`flock workers` shows why a worker last failed: the job's status and its log tail on a crash,
 the exception on a failed launch (newcomer run, F3: a wheel download 401 was only in the logs)."""
 
-from __future__ import annotations
-
 import json
 
 from fastapi.testclient import TestClient

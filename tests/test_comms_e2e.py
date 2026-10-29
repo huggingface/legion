@@ -5,8 +5,6 @@ LLMAdapter talks to tests/fake_openai.py, whose model posts, is refused for a fa
 reads, gets mentioned (a controller comms event), and searches. Then the protocols and rules
 change, `flock apply` runs again, and the running agents get both without a restart."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 

@@ -3,8 +3,6 @@ controller's apply (start, health check, refusals), the worker hub (calls, gatew
 hooks, secret). The example world (worlds/taskboard) and a recording world are served in
 process with uvicorn on 127.0.0.1; no network beyond loopback."""
 
-from __future__ import annotations
-
 import asyncio
 import importlib.util
 import json

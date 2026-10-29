@@ -12,8 +12,6 @@ If neither CANVAS_TOKEN nor CANVAS_ADMIN_TOKEN is set the service is open (dev o
 the name comes from ``X-Flock-Agent``.
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import json

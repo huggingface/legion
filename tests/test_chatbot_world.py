@@ -2,8 +2,6 @@
 refused before the merge, open after), the operator's /operator/phase route behind the world
 token, the bucket mirror (huggingface_hub faked) and the `!` probe keywords."""
 
-from __future__ import annotations
-
 import asyncio
 import importlib.util
 import json

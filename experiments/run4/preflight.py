@@ -1,5 +1,4 @@
 """Read-only run4 preparation checks; --online queries metadata, never inference or jobs."""
-from __future__ import annotations
 
 import argparse
 import json
