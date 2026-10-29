@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from flock.cli import load_spec
+from flock.models import ALL_COMMS_TOOLS, comms_tools
 
 from .test_hierarchy_experiment import module
 
@@ -28,10 +29,16 @@ def test_six_lanes_are_run4_agents_with_their_own_ramp_and_prompt():
     spec = load_spec(str(EXP / "spec.yaml"))
     run4 = load_spec(str(ROOT / "experiments/run4/spec.yaml")).types["agent"]
     assert set(spec.types) == set(LANES) and not spec.spawn
-    skip = {"system_prompt": True, "system_prompt_append_file": True, "replicas_ramp": True}
+    skip = {"system_prompt": True, "system_prompt_append_file": True, "replicas_ramp": True,
+            "tools": True, "loop": {"on"}}
+    board = [t for t in ALL_COMMS_TOOLS if t not in ("comms:dm", "comms:read_dms", "comms:votes")]
     for name, (start, add, every, top) in LANES.items():
         lane = spec.types[name]
         assert lane.model_dump(exclude=skip) == run4.model_dump(exclude=skip), name
+        # no DMs: everything is public, and nothing wakes on one
+        assert sorted(comms_tools(lane, spec.comms)) == sorted(board), name
+        assert lane.tools[:len(run4.tools)] == run4.tools
+        assert lane.loop.on == ["comms.mention", "comms.thread", "comms.channel"], name
         ramp = lane.replicas_ramp
         assert (ramp.start, ramp.add, ramp.every, ramp.max) == (start, add, every, top)
         assert lane.system_prompt_append_file == f"prompts/lanes/{name}.md"
@@ -40,6 +47,7 @@ def test_six_lanes_are_run4_agents_with_their_own_ramp_and_prompt():
     assert not (EXP / "waves.yaml").exists()  # controller.sbatch: replicas_ramp, no waves runner
     rules = spec.comms.rules
     assert rules.no_group_mentions and rules.max_len == 1200 and rules.max_channels == 100
+    assert spec.comms.wake == ["mention", "thread", "channel"]
     assert spec.comms.url == "https://huggingfaceswarms-chatbot-v8-msgboard.hf.space"
 
 
@@ -54,7 +62,7 @@ def test_the_prompts_name_the_repo_and_lanes_and_hide_the_eval():
     assert "prefer general mechanisms" in text and "millions of lines" not in text
     for path in [EXP / "prompts/system.md", *sorted((EXP / "prompts/lanes").glob("*.md"))]:
         lower = path.read_text().lower()
-        for word in (*HIDDEN, "chatbot-v", "spawn", "vote", "@all"):
+        for word in (*HIDDEN, "chatbot-v", "spawn", "vote", "@all", "read_dms", " dm,", "dms promptly"):
             assert word not in lower, (path.name, word)
 
 

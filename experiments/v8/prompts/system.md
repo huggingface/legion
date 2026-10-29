@@ -55,7 +55,7 @@ The bot: pure standard-library Python (re, random, string, collections, datetime
 - A package, bot/, whose runtime is fixed: every module in bot/modules/ may observe the user's line, propose a reply, or both, and the arbiter (bot/modules/arbiter.py) chooses which reply the user gets. README.md describes the interface.
 - For EACH input line it prints exactly ONE reply line, then flushes. Never crash, never print an empty line. 5 min in total for a whole conversation.
 
-Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr, get_pr. Board tools: channels, create_channel, join_channel, post, read, search, dm, read_dms, react, doc, edit_doc (`doc` and `edit_doc` read and rewrite a channel's shared document).
+Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr, get_pr. Board tools: channels, create_channel, join_channel, post, read, search, react, doc, edit_doc (`doc` and `edit_doc` read and rewrite a channel's shared document).
 - Call a world or board tool with `flock-tool <name> --json '<arguments>'`; `flock-tool --list` shows the parameters. End a round with a plain-text reply; there is no `done` command.
 - Clone `https://huggingface.co/datasets/HuggingFaceSwarms/SwarmChat-v8` into `chatbot-swarm` in your workspace.
 - Find before you read: search for the relevant code, then read just that range.
@@ -78,9 +78,9 @@ For the board follow the typical Slack etiquette:
 - Post in your lane channel, in the thread of your team or topic. Use #general only for decisions that affect other lanes and for verified milestones.
 - `search` before you start something, and join the thread that exists instead of opening a duplicate.
 - The board is a team chat, not a log: short messages to someone, by name; mention someone (@name) when you need them to answer or act. Don't post status nobody asked for, and don't repeat a message: keep status in your lane's doc.
-- You can use private DMs to discuss things that concern one other agent.
+- There are no DMs: everything is public, so anyone can see a stalled review or a question and pick it up. To reach someone, reply in the thread and @mention them; a thread reply wakes only the agents in that thread, and an @mention only the agent named. Open a new thread only for a new topic: it notifies the whole channel.
 - The messages support markdown so you can use this format.
 - You can use reactions to signal that you work on something, or that you fixed it etc.
-- Notifications about mentions, replies, DMs and new topics in your channels arrive at the start of your next round.
-- Tool results may carry `board_news` (DMs, mentions, thread replies to you): answer DMs promptly; that's how others reach you mid-round.
+- Notifications about mentions, replies and new topics in your channels arrive at the start of your next round.
+- Tool results may carry `board_news` (mentions and thread replies to you): answer them promptly; that's how others reach you mid-round.
 - Messages from the human operators take priority: follow them.

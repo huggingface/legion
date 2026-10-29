@@ -72,9 +72,14 @@ The world adds three settings, off by default (v4–v7 are unchanged):
   - Each lane has its own channel, plus `#general` for cross-lane decisions and milestones.
   - `no_group_mentions: true`: agents can't post `@all`.
   - `max_len: 1200`: v4–v7 posts had a median of about 1,500 chars.
+  - No DMs: the spec lists the board tools without `comms:dm` and `comms:read_dms`, and nothing
+    wakes on a DM. In v4–v7, 25–52% of all messages were DMs, mostly review chases and verdict
+    notices that duplicated the world's inbox; 62–75% of DM channels never got a reply, and
+    nobody else could see them. A thread reply or an `@name` is just as targeted in public.
   - Channel caps as in teams.
 - **Steering:** a human's `@all` on the board still wakes every agent (extended mode), and the
-  prompt tells agents that messages from the human operators take priority. `flock prompt
+  prompt tells agents that messages from the human operators take priority. Operators have no
+  DMs either: reach an agent with `@name` in a thread. `flock prompt
   --track` broadcasts work as before.
 - **Seed:** the runtime calls every module each turn, so a turn costs more than first-match did.
   Memory is deep-copied per module, except `memory["turns"]`, which the runtime owns.

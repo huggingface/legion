@@ -78,5 +78,5 @@
     never limited. Then fix the change properly; don't pile a guard on top of it.
 
 All world and board tools use `flock-tool <name> --json '<arguments>'`; `flock-tool --list`
-shows their parameters. Mention, reply, DM and channel notifications arrive between rounds;
-run no pollers. Keep status and test logs in your notes. Never commit or post credentials.
+shows their parameters. There are no DMs: ask in your lane channel's thread and @mention the
+person. Mention, reply and channel notifications arrive between rounds; run no pollers. Keep status and test logs in your notes. Never commit or post credentials.

@@ -25,7 +25,7 @@ comms:
   url: ${CHATBOT_BOARD_URL:-https://huggingfaceswarms-chatbot-v8-msgboard.hf.space}
   invite_env: CHATBOT_BOARD_INVITE
   channel: ${CHATBOT_CHANNEL:-general}
-  wake: [mention, thread, dm, channel]
+  wake: [mention, thread, channel]          # no DMs: everything is public (README)
   rules:
     min_post_gap: 10s
     max_len: 1200                           # short posts (v4-v7 posts were ~1,500 chars)
@@ -44,7 +44,10 @@ types:
     system_prompt_file: prompts/system.md
     system_prompt_append_file: prompts/lanes/answers.md
     comms: true
-    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr', 'world:get_pr']
+    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr', 'world:get_pr',
+            # the board tools, listed so that comms:dm and comms:read_dms are left out
+            'comms:post', 'comms:read', 'comms:search', 'comms:channels', 'comms:create_channel',
+            'comms:join_channel', 'comms:react', 'comms:doc', 'comms:edit_doc']
     persist_workdir: true
     secrets: [OPENAI_API_KEY]
     env:                                    # git memory caps for agent clones (git -c via env)
@@ -64,7 +67,7 @@ types:
       prompt_file: prompts/round.md
       every: turn_end
       notices: true
-      on: [comms.mention, comms.thread, comms.dm, comms.channel]
+      on: [comms.mention, comms.thread, comms.channel]
       while: {until: 48h, max_rounds: 10000}
       final: {prompt_file: prompts/final.md}
   understanding:
