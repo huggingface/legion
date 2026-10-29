@@ -232,8 +232,14 @@ class ManagedBoard:
                 self.bucket.check()
             except BucketStorageError as exc:
                 raise ManagedBoardError(str(exc)) from None
-        if self.proc is None or self.proc.poll() is not None:
-            raise ManagedBoardError(f"Managed msgboard exited; see {self.log_path}")
+        if self.proc is None:
+            raise ManagedBoardError(f"Managed msgboard is not started; see {self.log_path}")
+        if (code := self.proc.poll()) is not None:
+            cause = f"exit code {code}"
+            if code < 0:
+                with contextlib.suppress(ValueError):
+                    cause = signal.Signals(-code).name
+            raise ManagedBoardError(f"Managed msgboard exited ({cause}); see {self.log_path}")
 
     def _wait_ready(self) -> None:
         import httpx
@@ -293,6 +299,7 @@ class ManagedBoard:
     def metadata(self) -> dict:
         return {"managed": True, "url": self.url,
                 "pid": self.proc.pid if self.proc is not None else None,
+                "exit_code": self.proc.poll() if self.proc is not None else None,
                 "running": self.proc is not None and self.proc.poll() is None,
                 "configuration": self._details, "snapshot_at": self._snapshot_at,
                 "operator_token_file": str(self.operator_token_path),
@@ -468,9 +475,12 @@ def _init_bucket(data_dir: str) -> int:
 
 def _serve(data_dir: str, fd: int, parent: int) -> None:
     """Child process entry point: the socket belongs to us; the operator token stays on disk."""
+    import faulthandler
+
     import uvicorn
     from msgboard.server import Board, create_app
 
+    faulthandler.enable()  # Keep native SQLite/FUSE crash traces in msgboard.log.
     board = Board(Path(data_dir))
 
     class Server(uvicorn.Server):

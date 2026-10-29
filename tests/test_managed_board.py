@@ -441,3 +441,16 @@ def test_long_run_name_still_provisions_invite(tmp_path, monkeypatch):
         board.stop()
         if board.local is not None:
             shutil.rmtree(board.local, ignore_errors=True)
+
+
+
+@pytest.mark.parametrize(("code", "cause"), [(-7, "SIGBUS"), (-9, "SIGKILL"), (1, "exit code 1")])
+def test_board_exit_diagnostics_retain_signal(tmp_path, code, cause):
+    from types import SimpleNamespace
+
+    board = ManagedBoard(tmp_path / "failed")
+    board.proc = SimpleNamespace(pid=123, poll=lambda: code)
+    with pytest.raises(ManagedBoardError, match=cause):
+        board.check()
+    assert board.metadata()["exit_code"] == code
+    assert board.metadata()["running"] is False
