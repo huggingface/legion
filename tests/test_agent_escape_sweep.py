@@ -356,3 +356,24 @@ async def test_late_first_arrival_does_not_open_expired_barrier(tmp_path, monkey
         assert (await client.get("/health")).json()["barrier_opened"] is None
         await client.post("/close")
         assert (await client.post("/v1/chat/completions", json=body, headers=headers)).status_code == 200
+
+
+def test_plot_ranges_include_all_trials_and_error_bars(sweep):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = [{"difficulty": d, "agents": n, "normalized_tokens": v * 10 ** i,
+             "success": True, "measurement_valid": True}
+            for i, d in enumerate(sweep.DIFFICULTIES)
+            for n in sweep.COUNTS for v in [1, 2, 30]]
+    fig = sweep.plot_results(rows)
+    try:
+        for i, ax in enumerate(fig.axes):
+            low, high = ax.get_ylim()
+            assert low <= 0
+            assert high > 30 * 10 ** i
+            assert len(ax.get_xticks()) == 5
+        assert fig.axes[-1].get_ylim()[1] > fig.axes[0].get_ylim()[1] * 1000
+    finally:
+        plt.close(fig)

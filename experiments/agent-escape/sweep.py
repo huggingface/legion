@@ -305,31 +305,74 @@ def analyze(manifest):
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4.8), sharex=True, sharey=True)
-    for ax, difficulty in zip(axes, DIFFICULTIES, strict=True):
-        for n in COUNTS:
-            values = [r["normalized_tokens"] for r in rows if r["difficulty"] == difficulty
-                      and r["agents"] == n and r["success"]]
-            if values:
-                mean = statistics.mean(values)
-                sd = statistics.stdev(values) if len(values) > 1 else None
-                ax.errorbar(n, mean, yerr=sd, fmt="o", color="tab:blue", capsize=4)
-            ax.text(n, .98, f"{len(values)}/3", transform=ax.get_xaxis_transform(),
-                    ha="center", va="top", fontsize=8)
-        ax.set_title(f"Difficulty {difficulty}")
-        ax.set_xticks(COUNTS)
-        ax.set_xlabel("Number of agents")
-        ax.grid(alpha=.2)
-        ax.set_ylim(bottom=0)
-    axes[0].set_ylabel("Total tokens / configured agents")
-    fig.suptitle("Pi · Qwen3.8-27B · scenario 0 · successful trials: mean ± sample SD")
-    fig.tight_layout()
+    fig = plot_results(rows)
     for suffix in ("png", "svg", "pdf"):
-        fig.savefig(root / f"normalized-tokens.{suffix}", dpi=180)
+        fig.savefig(root / f"normalized-tokens.{suffix}", dpi=180, facecolor="white")
     plt.close(fig)
     print(json.dumps({"runs": len(rows), "successes": sum(r["success"] for r in rows),
                       "output": str(root)}))
     return 0
+
+
+def plot_results(rows):
+    """Plot valid successes with independent, fully expanded difficulty scales."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FuncFormatter
+
+    blue, ink, muted = "#217dc0", "#1e293b", "#64748b"
+    fig, axes = plt.subplots(1, 5, figsize=(22, 6.5))
+    fig.subplots_adjust(left=.055, right=.985, top=.69, bottom=.23, wspace=.36)
+    for ax, difficulty in zip(axes, DIFFICULTIES, strict=True):
+        means, bounds = [], [0]
+        for x, n in enumerate(COUNTS):
+            group = [r for r in rows if r["difficulty"] == difficulty and r["agents"] == n]
+            values = [r["normalized_tokens"] for r in group
+                      if r["success"] and r["measurement_valid"]]
+            mean = statistics.mean(values) if values else float("nan")
+            means.append(mean)
+            if values:
+                sd = statistics.stdev(values) if len(values) > 1 else 0
+                bounds.extend([*values, mean - sd, mean + sd])
+                ax.errorbar(x, mean, yerr=sd if len(values) > 1 else None,
+                            fmt="o", color=blue, capsize=4, linewidth=1.8, zorder=4)
+                offsets = [(i - (len(values) - 1) / 2) * .09 for i in range(len(values))]
+                ax.scatter([x + dx for dx in offsets], values, s=24,
+                           color="#8998aa", alpha=.8, zorder=3)
+            ax.text(x, 1.035, f"{len(values)}/{len(group)}", ha="center",
+                    transform=ax.get_xaxis_transform(), fontsize=9, color=muted)
+        ax.plot(range(len(COUNTS)), means, color=blue, linewidth=2.4, zorder=2)
+        low, high = min(bounds), max(bounds)
+        span = max(high - low, 1)
+        ax.set_ylim(low - .05 * span if low < 0 else 0, high + .15 * span)
+        ax.set_xlim(-.35, len(COUNTS) - .65)
+        ax.set_xticks(range(len(COUNTS)), COUNTS)
+        ax.set_title(f"Difficulty {difficulty}", loc="left", fontsize=16,
+                     weight="bold", pad=30, color=ink)
+        ax.set_xlabel("Number of agents", color=muted, labelpad=10)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f}"))
+        ax.tick_params(colors=muted, labelsize=9)
+        ax.grid(axis="y", color="#dde5ef")
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#cbd5e1")
+    axes[0].set_ylabel("Total tokens / configured agents", color=muted, labelpad=10)
+    fig.suptitle("AgentEscapeBench: tokens per agent", x=.055, y=.96,
+                 ha="left", fontsize=25, weight="bold", color=ink)
+    fig.text(.055, .875, "Pi · Qwen3.8-27B · low reasoning · scenario 0",
+             fontsize=12, color=muted)
+    fig.legend(handles=[
+        Line2D([0], [0], color=blue, marker="o", linewidth=2.4, label="Mean ± sample SD"),
+        Line2D([0], [0], color="#8998aa", marker="o", linestyle="none",
+               label="Individual successful trials")],
+        loc="upper left", bbox_to_anchor=(.05, .84), ncols=2, frameon=False, fontsize=11)
+    fig.text(.055, .12, "Independent y-scales per difficulty. Counts above each point: "
+             "valid successes / planned trials. No SD for a single success.",
+             fontsize=10, color=muted)
+    fig.text(.055, .075, "Only verified successes with complete token accounting are included. "
+             "Totals include shutdown/draining; failed attempts are excluded.",
+             fontsize=10, color=muted)
+    return fig
 
 
 def main():
