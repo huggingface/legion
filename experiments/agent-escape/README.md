@@ -204,3 +204,46 @@ Validation on 2026-10-29: job **284602**, CPU node `ip-10-53-88-29`, completed b
 scenario-0 puzzles against `http://ip-10-53-199-100:8000/v1`. Difficulty 5 solved in
 31.3 seconds; difficulty 10 in 97.5 seconds. Both boards were verified and exported
 for the private viewer. See `RESULTS.md` for token accounting.
+
+## Difficulty-20 communication ablation
+
+`--communication off` on `run.py` or `slurm.py submit` removes the managed board,
+all communication tools, and communication instructions in the system prompt,
+initial prompt, world description, and action reminders. Agents retain independent
+puzzle sessions and the first verified solution stops the run. No board bucket
+credential is needed. `on` remains the default and preserves existing behavior.
+
+The gated comparison runs scenario 0 at 2/4/8/16/32 agents, three trials each:
+
+```sh
+.venv/bin/python experiments/agent-escape/ablation.py submit \
+  --server-run .flock/b300-qwen/serving/20261030T080924.904831Z/server \
+  --baseline-results .flock/agent-escape-sweeps/20261029T201803Z-barrier-repair-3c46fba4/results.json
+```
+
+This freezes the 15 baseline slots (11 valid successes, four missing measurements)
+and all 15 new configs. An 8-agent trial runs first and counts as one of the 15.
+Its validation requires complete accounting, clean shutdown, the full agent roster,
+exactly the five puzzle tools in upstream requests, no communication calls/events,
+and no board process or collaboration reminders. A clean unsolved trial passes;
+model success is not a prerequisite for inclusion or launching the remaining trials.
+A passing pilot submits the remaining 14 with concurrency eight and a dependent
+finalizer. Submission intents prevent blind duplicate submission after a crash.
+The `advance ROOT` command can finish a validated pilot's orchestration after an
+interruption; ambiguous scheduler submissions require reconciliation first.
+
+Each Slurm allocation is 90 minutes. Model/work settings match the historical
+baseline: Pi, Qwen3.8-27B, low reasoning, 64k context, 16k output per request,
+200 calls per agent and 60 minutes of work after the initial-request barrier opens.
+Run names include `comm-off`, difficulty, scenario, agent count, trial and timestamp.
+Communication-off reports use `persistence_status: not_applicable`.
+
+The finalizer writes per-trial and aggregate JSON/CSV and a three-panel PNG/SVG/PDF:
+generated output tokens per agent, success rate, and time to first solution.
+Token totals include shutdown/draining, but exclude every input token. Solution
+time starts at the recorded barrier opening, excluding board/worker startup.
+Token/time means and sample SD use successful valid trials; success rate uses all
+valid trials. Labels also show coverage out of three planned trials. Infrastructure
+failures and missing accounting remain distinct from unsolved puzzles and are never
+counted as zero cost. This is a single-scenario historical comparison, not a paired
+trial design; router load, sampling, and success selection can affect comparisons.

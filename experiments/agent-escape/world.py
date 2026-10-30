@@ -22,7 +22,15 @@ class EscapeWorld(World):
         "your environment. Only submit_answer can confirm victory."
     )
 
-    def __init__(self, client=None, case_file=None, output=None, run_id=None, agents=None):
+    def __init__(self, client=None, case_file=None, output=None, run_id=None, agents=None, communication=None):
+        self.communication = (communication if communication is not None else
+                              os.environ.get("ESCAPE_COMMUNICATION", "on"))
+        if self.communication not in {"on", "off"}:
+            raise ValueError("communication must be on or off")
+        if self.communication == "off":
+            self.description = (
+                "Solve your independent copy of an escape-room puzzle. Start with "
+                "get_observation. Only submit_answer can confirm victory.")
         self.client = client or httpx.Client(base_url=os.environ["ESCAPE_SERVER_URL"], timeout=20)
         self.case_file = case_file or os.environ["ESCAPE_CASE_FILE"]
         self.output = Path(output or os.environ["ESCAPE_OUTPUT"])
@@ -97,7 +105,8 @@ class EscapeWorld(World):
             }
         result = self._request(f"/env/{session['case_id']}/{action}", json=args)
         self.action_counts[agent.name] = self.action_counts.get(agent.name, 0) + 1
-        if self.action_counts[agent.name] % 3 == 0 and not result.get("is_win"):
+        if (self.communication == "on" and self.action_counts[agent.name] % 3 == 0
+                and not result.get("is_win")):
             result = {
                 **result,
                 "collaboration_reminder": (

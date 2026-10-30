@@ -66,6 +66,41 @@ def agent_transport_failures(output: Path) -> list[dict]:
     return failures
 
 
+def configure_communication(spec, mode):
+    """Remove every communication capability for the independent-agent condition."""
+    if mode not in {"on", "off"}:
+        raise ValueError("communication must be on or off")
+    if mode == "off":
+        spec.pop("comms", None)
+        for definition in spec["types"].values():
+            definition["comms"] = False
+            definition["tools"] = [t for t in definition.get("tools", [])
+                                   if not t.startswith("comms:")]
+            definition["system_prompt_file"] = str(HERE / "prompt-pi-no-comms.md")
+            for key in ("FLOCK_COMMS_RATE", "FLOCK_COMMS_AGENT_RATE"):
+                definition.get("env", {}).pop(key, None)
+
+
+def initial_prompt(mode):
+    if mode == "off":
+        return (
+            "Call get_observation to inspect your room and the win_node_id target. "
+            "Solve your independent puzzle using the available puzzle tools. "
+            "Preserve exact discovered values, investigate required inputs, and reproduce "
+            "all prerequisites in your own room. Submit the victory string with "
+            "submit_answer; do not stop before verified success or limits."
+        )
+    return (
+        "First post a short introduction on general in thread 1 and read(n=12). "
+        "Remember the highest message ID read. Then get_observation and claim an "
+        "unclaimed branch. Every three puzzle actions, read(n=12, since=LAST_READ_ID) "
+        "and update the cursor from returned messages only. Share only new verified "
+        "findings, failed inputs, or requests in thread 1, at most 500 characters. "
+        "Acknowledge teammate message IDs when reusing findings. Submit the victory "
+        "string with submit_answer; do not stop before verified success or limits."
+    )
+
+
 def main():
     def interrupted(signum, frame):
         raise KeyboardInterrupt
@@ -81,6 +116,7 @@ def main():
     parser.add_argument("--agents", type=int, default=None)
     parser.add_argument("--trial", type=int, default=1)
     parser.add_argument("--attempt-number", type=int, default=1)
+    parser.add_argument("--communication", choices=["on", "off"], default="on")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -110,6 +146,7 @@ def main():
     output.mkdir(parents=True, mode=0o700)
     spec_path = args.spec.resolve()
     spec = yaml.safe_load(spec_path.read_text())
+    configure_communication(spec, args.communication)
     workers = spec.get("types", {}).get("worker", {})
     agents = args.agents if args.agents is not None else workers.get("replicas", 4)
     if not 1 <= agents <= 32:
@@ -119,9 +156,11 @@ def main():
         provider["max_working"] = agents
     stamp = time.strftime("%Y%m%dt%H%M%Sz", time.gmtime())
     spec["swarm"] = (f"escape-{workers['harness']}-qwen27b-d{args.difficulty}-s{args.scenario_index:02d}"
-                     f"-n{agents:02d}-r{args.trial:02d}-a{args.attempt_number:02d}-{stamp}-{run_id[:8]}")
-    spec["comms"]["kickoff"] = (f"{agents} workers have independent copies of the same puzzle. "
-                                "Share exact discoveries and inputs in general.")
+                     f"-n{agents:02d}-r{args.trial:02d}-a{args.attempt_number:02d}"
+                     f"{'-comm-off' if args.communication == 'off' else ''}-{stamp}-{run_id[:8]}")
+    if args.communication == "on":
+        spec["comms"]["kickoff"] = (f"{agents} workers have independent copies of the same puzzle. "
+                                    "Share exact discoveries and inputs in general.")
     if (
         set(spec.get("types", {})) != {"worker"}
         or workers.get("replicas", 0) < 1
@@ -148,6 +187,7 @@ def main():
     url = f"http://127.0.0.1:{port}"
     env.update(
         ESCAPE_AGENTS=str(agents),
+        ESCAPE_COMMUNICATION=args.communication,
         ESCAPE_SERVER_URL=url,
         ESCAPE_CASE_FILE=str(case_file),
         ESCAPE_OUTPUT=str(output),
@@ -167,6 +207,7 @@ def main():
         "agents": agents,
         "trial": args.trial,
         "attempt_number": args.attempt_number,
+        "communication": args.communication,
         "harness": workers["harness"],
         "upstream": upstream,
         **selection,
@@ -249,15 +290,7 @@ def main():
                     "--until",
                     "idle",
                     "--prompt",
-                    (
-                        "First post a short introduction on general in thread 1 and read(n=12). "
-                        "Remember the highest message ID read. Then get_observation and claim an "
-                        "unclaimed branch. Every three puzzle actions, read(n=12, since=LAST_READ_ID) "
-                        "and update the cursor from returned messages only. Share only new verified "
-                        "findings, failed inputs, or requests in thread 1, at most 500 characters. "
-                        "Acknowledge teammate message IDs when reusing findings. Submit the victory "
-                        "string with submit_answer; do not stop before verified success or limits."
-                    ),
+                    initial_prompt(args.communication),
                 ],
                 cwd=ROOT,
                 env=env,
@@ -322,6 +355,7 @@ def main():
             "agents": agents,
             "trial": args.trial,
             "attempt_number": args.attempt_number,
+            "communication": args.communication,
             "harness": workers["harness"],
             "reason": reason,
             "startup": startup,
@@ -376,7 +410,10 @@ def main():
             report["infrastructure_outcome"] = "model_transport_failure"
         report["measurement_valid"] = bool(report.get("accounting", {}).get("complete"))
         report["persistence_status"] = ("verified" if report.get("board", {}).get("verified_at")
-                                        else "unverified")
+                                        else "not_applicable" if args.communication == "off" else "unverified")
+        if report["success"] and startup.get("barrier_opened"):
+            report["work_time_to_success_seconds"] = (
+                report["success"]["time"] - startup["barrier_opened"])
         if report["success"]:
             report["time_to_success_seconds"] = report["success"]["time"] - metadata["started"]
         (output / "result.json").write_text(json.dumps(report, indent=2))

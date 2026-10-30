@@ -188,3 +188,22 @@ def test_invalid_selection_fails_before_writing_artifacts(launcher, submission, 
     with pytest.raises(ValueError, match="scenario"):
         launcher.prepare(args)
     assert not args.output.exists()
+
+
+def test_no_communication_preparation_needs_no_bucket_token(launcher, submission, monkeypatch):
+    args, _ = submission
+    args.communication = 'off'
+    args.spec = ROOT / 'experiments/agent-escape/spec-router-pi.yaml'
+    loader = importlib.util.spec_from_file_location('ablation_run', args.spec.with_name('run.py'))
+    runner = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(runner)
+    monkeypatch.setattr(runner, 'select_case', lambda *a: None)
+    monkeypatch.setattr(launcher, 'load_launcher', lambda: runner)
+    monkeypatch.delenv('HF_TOKEN')
+    output = launcher.prepare(args)
+    import yaml
+    spec = yaml.safe_load((output / 'spec.yaml').read_text())
+    assert spec.get('comms') is None
+    assert spec['types']['worker']['comms'] is False
+    assert launcher.read_secrets(output / 'secrets.json') == {'LOCAL_KEY': 'private-server-token'}
+    assert launcher.read_json(output / 'config.json')['communication'] == 'off'

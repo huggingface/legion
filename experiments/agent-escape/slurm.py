@@ -53,7 +53,8 @@ def prepare(args):
         raise ValueError("Timeout must be positive")
     endpoint = read_json(args.server_run / "endpoint.json")
     key = (args.server_run / "api-key").read_text().strip()
-    if not key or not os.environ.get("HF_TOKEN"):
+    communication = getattr(args, "communication", "on")
+    if not key or (communication == "on" and not os.environ.get("HF_TOKEN")):
         raise ValueError("Server api-key and HF_TOKEN are required")
     spec = yaml.safe_load(args.spec.read_text())
     spec["providers"]["local"]["base_url"] = endpoint["base_url"]
@@ -61,7 +62,10 @@ def prepare(args):
     for definition in spec["types"].values():
         definition["system_prompt_file"] = str(
             (args.spec.parent / definition["system_prompt_file"]).resolve())
-    spec["comms"]["storage"]["mount_root"] = f"/tmp/flock-boards-{os.getuid()}"
+    if communication == "off":
+        launcher.configure_communication(spec, communication)
+    elif spec.get("comms", {}).get("storage"):
+        spec["comms"]["storage"]["mount_root"] = f"/tmp/flock-boards-{os.getuid()}"
     SwarmSpec.model_validate(spec)
     if not 1 <= getattr(args, "agents", 4) <= 32:
         raise ValueError("Agent count must be between 1 and 32")
@@ -69,8 +73,12 @@ def prepare(args):
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8])
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     (output / "spec.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
-    write_json(output / "secrets.json", {"HF_TOKEN": os.environ["HF_TOKEN"], "LOCAL_KEY": key})
+    secrets = {"LOCAL_KEY": key}
+    if communication == "on":
+        secrets["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    write_json(output / "secrets.json", secrets)
     sources = [HERE / name for name in ["run.py", "world.py", "prompt.md", "slurm.py", "run.slurm", "usage_proxy.py", "prompt-pi.md"]]
+    sources += [HERE / "prompt-pi-no-comms.md"]
     sources += sorted((ROOT / "src/flock").rglob("*.py"))
     sources += [ROOT / "src/flock/worker/adapters/pi_tools.mjs", output / "spec.yaml"]
     config = {"output": str(output), "spec": str(output / "spec.yaml"),
@@ -78,6 +86,7 @@ def prepare(args):
               "scenario_index": args.scenario_index, "timeout": args.timeout,
               "agents": getattr(args, "agents", 4), "trial": getattr(args, "trial", 1),
               "attempt_number": getattr(args, "attempt_number", 1),
+              "communication": communication,
               "secrets_file": str(output / "secrets.json"),
               "source_sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
               "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"],
@@ -184,7 +193,8 @@ def run(config_path):
                            str(config["scenario_index"]), "--timeout", str(config["timeout"]),
                            "--agents", str(config.get("agents", 4)),
                            "--trial", str(config.get("trial", 1)),
-                           "--attempt-number", str(config.get("attempt_number", 1))]
+                           "--attempt-number", str(config.get("attempt_number", 1)),
+                           "--communication", config.get("communication", "on")]
                 attempt = None
                 print(f"START difficulty={difficulty} scenario={config['scenario_index']}", flush=True)
                 with (output / f"{label}.log").open("w") as log, (
@@ -246,6 +256,7 @@ def main():
     s.add_argument("--scenario-index", type=int, default=0)
     s.add_argument("--agents", type=int, default=4)
     s.add_argument("--trial", type=int, default=1)
+    s.add_argument("--communication", choices=["on", "off"], default="on")
     s.add_argument("--timeout", type=int, default=900)
     s.add_argument("--partition", default="hopper-cpu")
     s.add_argument("--cpus", type=int, default=8)

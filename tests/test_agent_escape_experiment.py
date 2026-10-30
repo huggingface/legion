@@ -199,7 +199,8 @@ def test_selection_errors(runner, tmp_path):
             runner.select_case(tmp_path, 10, index)
 
 
-@pytest.mark.parametrize("flags", [[], ["--difficulty", "20", "--scenario-index", "1"]])
+@pytest.mark.parametrize("flags", [[], ["--difficulty", "20", "--scenario-index", "1"],
+    ["--difficulty", "20", "--scenario-index", "1", "--communication", "off"]])
 def test_launcher_passes_selection_and_records_metadata(runner, tmp_path, monkeypatch, flags):
     import hashlib
     from unittest.mock import Mock
@@ -243,6 +244,13 @@ def test_launcher_passes_selection_and_records_metadata(runner, tmp_path, monkey
         assert record["case"] == selected.relative_to(source).as_posix()
         assert record["case_sha256"] == hashlib.sha256(selected.read_bytes()).hexdigest()
         assert record["benchmark_revision"] == runner.REVISION
+        assert record['communication'] == ('off' if '--communication' in flags else 'on')
+    if '--communication' in flags:
+        assert record['persistence_status'] == 'not_applicable'
+        metadata = json.loads((output / 'metadata.json').read_text())
+        assert metadata['spec'].get('comms') is None
+        assert '-comm-off-' in metadata['spec']['swarm']
+        assert launch.call_args_list[1].kwargs['env']['ESCAPE_COMMUNICATION'] == 'off'
 
 
 @pytest.mark.parametrize("flags, message", [
@@ -291,3 +299,41 @@ def test_transport_failure_detected_even_when_flock_exits_idle(runner, tmp_path)
     event_file.write_text("\n".join(map(json.dumps, rows)))
     assert runner.agent_transport_failures(tmp_path) == [
         {"agent": "worker-0000", "reason": "model_transport"}]
+
+
+def test_no_communication_world_preserves_isolation_and_stop(world, monkeypatch, tmp_path):
+    monkeypatch.setenv('ESCAPE_COMMUNICATION', 'off')
+    off = module.EscapeWorld(client=world.client, case_file='case', output=tmp_path / 'off',
+                            run_id='off', agents=2)
+    a, b = Agent('worker-0000'), Agent('worker-0001')
+    assert off.get_observation(a) == world.get_observation(a)
+    assert 'message board' not in off.description
+    for n in range(1, 7):
+        assert off.investigate(a, 'visible') == {'progress': n}
+    assert off.investigate(b, 'visible') == {'progress': 1}
+    assert off.sessions[a.name]['case_id'] != off.sessions[b.name]['case_id']
+    assert off.submit_answer(a, 'correct')['is_win']
+    assert off.investigate(b, 'visible')['swarm_solved']
+
+
+def test_no_communication_spec_has_only_puzzle_capabilities(runner):
+    import copy
+
+    import yaml
+
+    from flock.models import SwarmSpec, comms_tools
+
+    original = yaml.safe_load(MODULE.with_name('spec-router-pi.yaml').read_text())
+    unchanged = copy.deepcopy(original)
+    runner.configure_communication(unchanged, 'on')
+    assert unchanged == original
+    runner.configure_communication(original, 'off')
+    parsed = SwarmSpec.model_validate(original)
+    assert parsed.comms is None
+    assert comms_tools(parsed.types['worker'], parsed.comms) == []
+    assert parsed.types['worker'].pi_tools_only
+    prompt = Path(original['types']['worker']['system_prompt_file']).read_text()
+    for text in [prompt, runner.initial_prompt('off')]:
+        for forbidden in ['read(n=', 'post(', 'teammate', 'message board', 'thread 1']:
+            assert forbidden not in text
+    assert 'FLOCK_COMMS_RATE' not in original['types']['worker']['env']
