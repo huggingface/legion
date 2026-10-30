@@ -133,9 +133,11 @@ uv run experiments/run4/eval/sync.py --schedule "*/5 * * * *"
 ```
 
 The scheduled Job and its evals run the eval code as it was when the schedule was created; rerun
-`--schedule` after changing it, which replaces the old schedule. After a change of primary
-metric, `rescore.py` gives the summaries already in the bucket the new one, from the
-preferences and lengths in their logs, without new Jobs or judge calls:
+`--schedule` after changing it, which replaces the old schedule. `hf jobs scheduled ps`,
+`hf jobs scheduled suspend <id>` and `hf jobs scheduled delete <id>` list, pause and remove it.
+
+After a change of primary metric, `rescore.py` gives the summaries already in the bucket the
+new one, from the preferences and lengths in their logs, without new Jobs or judge calls:
 
 ```sh
 # The first 20 changes, without writing them
@@ -143,8 +145,7 @@ uv run --group evals experiments/run4/eval/rescore.py --limit 20
 
 # Rewrite every summary, on a cpu-xl Job
 uv run --group evals experiments/run4/eval/rescore.py --job
-``` `hf jobs scheduled ps`,
-`hf jobs scheduled suspend <id>` and `hf jobs scheduled delete <id>` list, pause and remove it.
+```
 
 ## SwarmChat
 

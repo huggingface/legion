@@ -372,6 +372,30 @@ def test_rescore_makes_the_length_penalised_win_rate_primary(tmp_path, monkeypat
     assert rescore.rescore("bucket", *paths) is None
 
 
+def test_rescore_job_keeps_the_limit_and_workers(monkeypatch):
+    pytest.importorskip("inspect_ai")
+    load("smoltalk_bench")  # puts the eval code on sys.path
+    rescore = load("rescore")
+    monkeypatch.setattr(rescore.evaluate, "snapshot_volume", lambda api, namespace: "volume")
+
+    class FakeApi:
+        def run_job(self, **kwargs):
+            self.job = kwargs
+            return types.SimpleNamespace(url="https://huggingface.co/jobs/ns/1")
+
+    def launched(*argv):
+        api = FakeApi()
+        monkeypatch.setattr(sys, "argv", ["rescore.py", "--job", "--namespace", "ns", *argv])
+        rescore.launch(api, "token", rescore.parse_args())
+        assert api.job["namespace"] == "ns" and api.job["volumes"] == ["volume"]
+        return api.job["command"][-1].split(" && ")[-1]
+
+    assert launched("--limit", "20").endswith(
+        "rescore.py --write --bucket HuggingFaceSwarms/swarmchat-evals --limit 20")
+    assert launched("--workers", "4").endswith("--workers 4")
+    assert "--limit" not in launched() and "--workers" not in launched()
+
+
 def test_a_sample_that_errors_still_counts(tmp_path):
     pytest.importorskip("inspect_ai")
     from inspect_ai import Task

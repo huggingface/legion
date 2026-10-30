@@ -15,7 +15,7 @@ uv run --group evals experiments/run4/eval/rescore.py --job        # --write, on
 import argparse
 import json
 import math
-import os
+import shlex
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path, PurePosixPath
@@ -36,9 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bucket", default=evaluate.DEFAULT_BUCKET)
     parser.add_argument("--write", action="store_true", help="rewrite the summaries")
     parser.add_argument("--limit", type=int, help="only the first N summaries")
-    parser.add_argument("--workers", type=int, default=os.cpu_count())
+    parser.add_argument("--workers", type=int, help="processes (default: one per CPU)")
     parser.add_argument("--job", action="store_true",
-                        help=f"run with --write on a {JOB_FLAVOR} Job instead")
+                        help=f"run with --write on a {JOB_FLAVOR} Job instead, with the same "
+                             "--limit and --workers")
     parser.add_argument("--namespace", help="who runs the Job (default: the token's user)")
     return parser.parse_args()
 
@@ -88,12 +89,17 @@ def rescore(bucket: str, summary_path: str, log_path: str) -> tuple[dict, dict] 
 
 
 def launch(api: HfApi, token: str, args: argparse.Namespace) -> None:
-    """Runs this script with --write on a Job, from a snapshot of this checkout's eval code."""
+    """Runs this script with --write and the same --limit and --workers on a Job, from a
+    snapshot of this checkout's eval code."""
     namespace = args.namespace or api.whoami()["name"]
     volume = evaluate.snapshot_volume(api, args.bucket.split("/", 1)[0])
+    rescore = [".venv/bin/python", f"{evaluate.EVAL_DIR}/rescore.py", "--write",
+               "--bucket", args.bucket]
+    for option in ("limit", "workers"):
+        if getattr(args, option) is not None:
+            rescore += [f"--{option}", str(getattr(args, option))]
     script = (f"cp -r {evaluate.JOB_ROOT} /tmp/flock && cd /tmp/flock && "
-              f"uv sync --frozen --only-group evals && "
-              f".venv/bin/python {evaluate.EVAL_DIR}/rescore.py --write --bucket {args.bucket}")
+              f"uv sync --frozen --only-group evals && {shlex.join(rescore)}")
     job = api.run_job(image=evaluate.CPU_IMAGE, command=["bash", "-c", script],
                       flavor=JOB_FLAVOR, timeout="3h", secrets={"HF_TOKEN": token},
                       env=evaluate.JOB_ENV, volumes=[volume], namespace=namespace)
