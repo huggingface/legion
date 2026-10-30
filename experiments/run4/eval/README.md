@@ -14,8 +14,10 @@ single-turn everyday chat prompts with reference replies.
 | [`swarmchat_server.py`](swarmchat_server.py) | serves a bot checkout as an OpenAI-compatible endpoint |
 | [`evaluate.py`](evaluate.py), [`hf_job.py`](hf_job.py) | launch the eval on Hugging Face Jobs, adapted from Carbon-X |
 | [`sync.py`](sync.py) | evaluates every new `main` commit of the SwarmChat repos, as a scheduled Job |
+| [`rescore.py`](rescore.py) | recomputes the LC win rate of the summaries in the bucket |
 
-The script that builds the dataset lives in the dataset repo, as `scripts/create_dataset.py`.
+The scripts that build the dataset live in the dataset repo: `scripts/create_dataset.py` for the
+`gold` config, and `scripts/create_gold_gamed.py` for its gamed baselines.
 
 ## Scoring
 
@@ -30,9 +32,14 @@ The scoring follows AlpacaEval 2.0's default annotator (`weighted_alpaca_eval_gp
 - **The metrics:**
   - `win_rate`, with its `standard_error`;
   - `discrete_win_rate`;
-  - `length_controlled_win_rate`, the primary metric. It uses AlpacaEval's
-    `length_controlled_minimal` GLM, because the default GLM needs instruction difficulties
-    fitted on AlpacaEval's own prompts. Its `lc_standard_error` is a bootstrap.
+  - `length_controlled_win_rate`, the primary metric, with a bootstrap `lc_standard_error`.
+    It uses AlpacaEval's default `length_controlled_v1` GLM, without the instruction
+    difficulties, which are only fitted for AlpacaEval's own prompts. The GLM is calibrated
+    with the `gold_gamed` config: Llama-3.1-70B-Instruct told to answer briefly, concisely or
+    in detail, judged against the gold references. These gamed baselines set how much length
+    alone moves the judge. Without them, a bot that said "Hello!" to every prompt scored 50%,
+    since the GLM put all its losses down to length. The LC win rate is null for an eval by
+    another judge, which the gamed baselines don't calibrate.
 
 All numbers are percentages against the gold references, which are Llama-3.1-70B-Instruct's
 replies in smoltalk. `tests/test_smoltalk_bench.py` checks the port against values computed
@@ -116,7 +123,18 @@ uv run experiments/run4/eval/sync.py --schedule "*/5 * * * *"
 ```
 
 The scheduled Job and its evals run the eval code as it was when the schedule was created; rerun
-`--schedule` after changing it, which replaces the old schedule. `hf jobs scheduled ps`,
+`--schedule` after changing it, which replaces the old schedule. After a change to the LC win
+rate, `rescore.py` recomputes it for the summaries already in the bucket, from the preferences
+in their logs, without new Jobs or judge calls:
+
+```sh
+# The first 20 changes, without writing them
+uv run --group evals experiments/run4/eval/rescore.py --limit 20
+
+# Rewrite every summary on a cpu-xl Job; the first rewrite keeps the old one as
+# summary.minimal.json
+uv run --group evals experiments/run4/eval/rescore.py --job
+``` `hf jobs scheduled ps`,
 `hf jobs scheduled suspend <id>` and `hf jobs scheduled delete <id>` list, pause and remove it.
 
 ## SwarmChat

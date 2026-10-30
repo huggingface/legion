@@ -97,6 +97,67 @@ def test_length_controlled_win_rate_matches_alpaca_eval():
     assert 0 < lc["lc_standard_error"] < 20
 
 
+def synthetic_gamed():
+    """Two gamed baselines on synthetic()'s prompts, shorter and longer than the reference,
+    that win more the longer they are."""
+    _, _, ref = synthetic()
+    gamed = []
+    for k, scale in enumerate((0.4, 2.5)):
+        out = [int(r * scale) + (i * 29 + k * 7) % 60 for i, r in enumerate(ref)]
+        prefs = [1 + min(1.0, max(0.0, 0.5 + (o - r) / 800 + 0.2 * math.cos(i + k)))
+                 for i, (o, r) in enumerate(zip(out, ref, strict=True))]
+        gamed.append((prefs, out, ref))
+    return gamed
+
+
+def test_length_controlled_win_rate_with_gamed_baselines_matches_alpaca_eval():
+    pytest.importorskip("sklearn")
+    # alpaca_eval's length_controlled_v1 GLM without instruction_difficulty, given these gamed
+    # baselines as its df_gamed.csv
+    lc = judge.length_controlled(*synthetic(), gamed=synthetic_gamed(), bootstrap=20)
+    assert lc["length_controlled_win_rate"] == pytest.approx(31.9843184044, abs=1e-6)
+    assert 0 < lc["lc_standard_error"] < 20
+
+
+def test_gamed_baselines_stop_length_taking_every_loss():
+    pytest.importorskip("sklearn")
+    # SwarmChat-v8 at 9ab8b98 said "Hello!" to 997 prompts and won the 3 it answered
+    bot = json.loads((ROOT / "tests" / "fixtures" / "smoltalk_hello_bot.json").read_text())
+    args = bot["preferences"], bot["output_lengths"], bot["reference_lengths"]
+    # Its length column is nearly the intercept's, so the minimal GLM puts every loss down to
+    # length
+    assert judge.length_controlled(*args, bootstrap=5)["length_controlled_win_rate"] == \
+        pytest.approx(50)
+    ref = bot["reference_lengths"]
+    gamed = []
+    for scale in (0.3, 3.0):
+        out = [round(r * scale) for r in ref]
+        gamed.append(([1 + min(1.0, max(0.0, 0.5 + 0.3 * math.tanh((o - r) / 200)))
+                       for o, r in zip(out, ref, strict=True)], out, ref))
+    lc = judge.length_controlled(*args, gamed=gamed, bootstrap=5)
+    assert lc["length_controlled_win_rate"] < 1 and lc["lc_standard_error"] < 1
+
+
+def test_gamed_baselines_calibrate_their_judge_only(monkeypatch):
+    pytest.importorskip("inspect_ai")
+    pytest.importorskip("sklearn")
+    from inspect_ai.scorer import SampleScore, Score
+
+    bench = load("smoltalk_bench")
+    monkeypatch.setattr(bench, "gamed_baselines",
+                        lambda config: ("mockllm/judge", synthetic_gamed()))
+
+    def scores(judge_model):
+        return [SampleScore(sample_id=i, score=Score(value=p - 1, metadata={
+            "preference": p, "output_length": o, "reference_length": r, "judge": judge_model}))
+            for i, (p, o, r) in enumerate(zip(*synthetic(), strict=True))]
+
+    metrics = bench.alpaca_eval_win_rates(bench.GAMED)
+    assert metrics(scores("mockllm/judge"))["length_controlled_win_rate"] == pytest.approx(
+        31.9843184044, abs=1e-6)
+    assert math.isnan(metrics(scores("mockllm/other"))["length_controlled_win_rate"])
+
+
 def test_length_controlled_win_rate_without_wins_or_losses():
     pytest.importorskip("sklearn")
     lengths, reference = list(range(10, 1010)), [500] * 1000
@@ -278,6 +339,7 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     scores = {s.id: s.scores["alpaca_eval_judge"] for s in log.samples}
     assert scores["hi"].value == pytest.approx(0.9) and scores["hi"].metadata["switched"]
     assert scores["egg"].value == pytest.approx(0.1) and not scores["egg"].metadata["switched"]
+    assert scores["hi"].metadata["judge"] == "mockllm/judge"
     summary = hf_job.build_summary(log)
     assert summary["metrics"]["win_rate"] == pytest.approx(50)
     assert summary["metrics"]["n_total"] == 2
@@ -287,6 +349,75 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     assert summary["metadata"] | {"judged_samples": 2, "model_id": "mock",
                                   "model_roles": {"grader": "mockllm/judge"}} == summary["metadata"]
     json.dumps(summary)
+
+
+def test_rescore_gives_a_summary_the_gamed_baselines_lc_win_rate(tmp_path, monkeypatch):
+    pytest.importorskip("inspect_ai")
+    pytest.importorskip("sklearn")
+    from inspect_ai import eval as inspect_eval
+    from inspect_ai.dataset import MemoryDataset, Sample
+    from inspect_ai.log import read_eval_log
+    from inspect_ai.model import (
+        ChatCompletionChoice,
+        ChatMessageAssistant,
+        Logprob,
+        Logprobs,
+        ModelOutput,
+        TopLogprob,
+        get_model,
+    )
+
+    bench, hf_job = load("smoltalk_bench"), load("hf_job")
+    rescore = load("rescore")  # after smoltalk_bench, which puts the eval code on sys.path
+    verdicts = []
+    for i in range(12):
+        p_m = 0.05 + 0.075 * i
+        top = [TopLogprob(token="m", logprob=math.log(p_m)),
+               TopLogprob(token="M", logprob=math.log(1 - p_m))]
+        verdicts.append(ModelOutput(model="judge", choices=[ChatCompletionChoice(
+            message=ChatMessageAssistant(content="m"), stop_reason="max_tokens",
+            logprobs=Logprobs(content=[Logprob(token="m", logprob=math.log(p_m),
+                                               top_logprobs=top)]))]))
+    grader = get_model("mockllm/judge", custom_outputs=verdicts)
+    dataset = MemoryDataset([Sample(id=f"q{i}", input=f"Question {i}?", target="x" * (20 + 9 * i))
+                             for i in range(12)])
+    log = inspect_eval(bench.smoltalk_bench(dataset), model="mockllm/model",
+                       model_roles={"grader": grader}, log_dir=str(tmp_path / "logs"),
+                       display="none")[0]
+    log = read_eval_log(log.location)
+    run = tmp_path / "bucket" / "m" / "r" / "smoltalk_bench_gold" / "t"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(json.dumps(hf_job.build_summary(log)))
+    shutil.copy(log.location, run / "log.eval")
+
+    class FakeApi:
+        def download_bucket_files(self, bucket, files):
+            for remote, local in files:
+                shutil.copy(tmp_path / bucket / remote, local)
+
+    monkeypatch.setattr(rescore, "HfApi", FakeApi)
+    monkeypatch.setattr(rescore.smoltalk_bench, "gamed_baselines",
+                        lambda config: ("mockllm/judge", synthetic_gamed()))
+    paths = "m/r/smoltalk_bench_gold/t/summary.json", "m/r/smoltalk_bench_gold/t/log.eval"
+    old, new = rescore.rescore("bucket", *paths)
+    meta = [s.scores["alpaca_eval_judge"].metadata for s in log.samples]
+    expected = judge.length_controlled([m["preference"] for m in meta],
+                                       [m["output_length"] for m in meta],
+                                       [m["reference_length"] for m in meta],
+                                       gamed=synthetic_gamed())
+    assert new["primary_metric"] == {"name": "length_controlled_win_rate",
+                                      "value": expected["length_controlled_win_rate"],
+                                      "standard_error": expected["lc_standard_error"]}
+    assert new["metrics"] == old["metrics"] | expected
+    assert new["metadata"] == old["metadata"] | {"lc_gamed": rescore.GAMED}
+    # Done once: a rescored summary is left alone
+    (run / "summary.json").write_text(json.dumps(new))
+    assert rescore.rescore("bucket", *paths) is None
+    # Another judge's eval isn't calibrated by these gamed baselines
+    (run / "summary.json").write_text(json.dumps(old))
+    monkeypatch.setattr(rescore.smoltalk_bench, "gamed_baselines",
+                        lambda config: ("other/judge", synthetic_gamed()))
+    assert rescore.rescore("bucket", *paths)[1]["primary_metric"]["value"] is None
 
 
 def test_a_sample_that_errors_still_counts(tmp_path):
