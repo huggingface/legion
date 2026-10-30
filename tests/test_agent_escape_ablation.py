@@ -32,7 +32,8 @@ def attempt(ablation, tmp_path):
     write(tmp_path / 'summary.json', [{'attempt': str(tmp_path), 'result': report}])
     write(tmp_path / 'metadata.json', {'spec': {'types': {'worker': {'comms': False}}}})
     journal = [{'event': 'barrier_opened', 'time': 100},
-               {'event': 'start', 'tools': sorted(ablation.PUZZLE_TOOLS)}]
+               {'event': 'start', 'session_id': 'a', 'tools': sorted(ablation.PUZZLE_TOOLS)},
+               {'event': 'start', 'session_id': 'b', 'tools': sorted(ablation.PUZZLE_TOOLS)}]
     (tmp_path / 'model-requests.jsonl').write_text('\n'.join(map(json.dumps, journal)))
     (tmp_path / 'trajectory.jsonl').write_text('\n'.join(json.dumps({
         'agent': a, 'action': 'initialize', 'result': {}}) for a in ['a', 'b']))
@@ -79,3 +80,21 @@ def test_metrics_output_only_and_barrier_time(ablation, attempt):
     assert result['generated_tokens_per_agent'] is None
     assert result['work_time_to_success_seconds'] is None
     assert not result['valid_trial']
+
+
+def test_gate_allows_tool_free_compaction_but_requires_puzzle_requests(ablation, attempt):
+    task, _, root = attempt
+    path = root / 'model-requests.jsonl'
+    with path.open('a') as stream:
+        stream.write('\n' + json.dumps({'event': 'start', 'session_id': 'a', 'tools': []}))
+    assert ablation.validate_attempt(task) == []
+    path.write_text(json.dumps({'event': 'start', 'session_id': 'a', 'tools': []}))
+    assert 'unexpected offered tools' in ablation.validate_attempt(task)
+
+
+def test_gate_requires_puzzle_tools_for_every_agent(ablation, attempt):
+    task, _, root = attempt
+    path = root / 'model-requests.jsonl'
+    rows = [r for r in ablation.records(path) if r.get('session_id') != 'b']
+    path.write_text('\n'.join(map(json.dumps, rows)))
+    assert 'unexpected offered tools' in ablation.validate_attempt(task)

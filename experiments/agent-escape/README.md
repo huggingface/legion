@@ -224,7 +224,8 @@ The gated comparison runs scenario 0 at 2/4/8/16/32 agents, three trials each:
 This freezes the 15 baseline slots (11 valid successes, four missing measurements)
 and all 15 new configs. An 8-agent trial runs first and counts as one of the 15.
 Its validation requires complete accounting, clean shutdown, the full agent roster,
-exactly the five puzzle tools in upstream requests, no communication calls/events,
+the five puzzle tools in each agent’s normal upstream requests (tool-free Pi
+compaction requests are allowed), no communication calls/events,
 and no board process or collaboration reminders. A clean unsolved trial passes;
 model success is not a prerequisite for inclusion or launching the remaining trials.
 A passing pilot submits the remaining 14 with concurrency eight and a dependent

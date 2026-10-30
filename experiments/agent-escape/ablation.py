@@ -57,7 +57,12 @@ def validate_attempt(task):
         problems.append('communication was configured')
     journal = records(attempt / 'model-requests.jsonl')
     starts = [r for r in journal if r.get('event') == 'start']
-    if not starts or any(set(r.get('tools', [])) != PUZZLE_TOOLS for r in starts):
+    # Pi compaction requests intentionally have no tools. Every agent must still
+    # make a normal puzzle request, and no request may offer any other toolset.
+    puzzle_sessions = {r.get('session_id') for r in starts
+                       if set(r.get('tools', [])) == PUZZLE_TOOLS}
+    if (not starts or any(set(r.get('tools', [])) not in (set(), PUZZLE_TOOLS) for r in starts)
+            or puzzle_sessions != set(accounting.get('session_ids', []))):
         problems.append('unexpected offered tools')
     if any(r.get('event') == 'barrier_timeout' for r in journal):
         problems.append('startup barrier timeout')
