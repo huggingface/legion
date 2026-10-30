@@ -1,0 +1,20 @@
+version: 1
+execution_profile: profile-pi.yaml
+seed: 42
+agent_counts: [1, 2]
+repetitions: 1
+tasks:
+  - benchmark: agent_escape
+    difficulty: 5
+    scenario_index: 0
+  - benchmark: terminal_bench
+    task_id: db-wal-recovery
+limits:
+  wall_seconds: 1800
+  setup_timeout_s: 600
+  grading_timeout_s: 300
+slurm:
+  partition: hopper-cpu
+  cpus: 8
+  memory: 16G
+  time: '01:15:00'

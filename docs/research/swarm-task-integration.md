@@ -2,8 +2,27 @@
 
 Design proposal, 2026-10-29. Companion to the
 [task landscape](swarm-task-landscape.md), covering all 27 candidates.
-This document proposes implementation; the interfaces, commands and configuration examples
-marked proposed do not exist yet. No benchmark integration or workload is launched here.
+Sections 1–10 retain the original broad proposal; interfaces and examples marked proposed
+remain unimplemented unless identified in the pilot update below. No inference workload has
+been launched as part of the pilot implementation.
+
+## Inference-only OpenEnv pilot (2026-10-30)
+
+The first implementation is now [experiments/benchmarks](../../experiments/benchmarks/README.md).
+It narrows the proposal below to inference and evaluation: Flock + Pi own the agent loop,
+an authenticated World API v1 bridge owns one OpenEnv session per trial, and native task
+engines own execution and scoring. No TRL integration or training-specific capture is included.
+
+The pilot covers Agent Escape with shared team state and Terminal-Bench 2.0 through Harbor's
+Docker sandbox/verifier APIs. Agent Escape's previous independent-copy runner is unchanged.
+The runner prepares immutable task selections and timestamped boards, manages local or serial
+Slurm-array execution, and records native outcomes and token-accounting completeness. Pi
+pilot configurations are prepared for review; implementation validation does not launch inference.
+
+The broader 27-task roadmap below remains a proposal. In particular, application/simulation
+adapters beyond these two tasks, distributed execution, hard aggregate token admission and
+training interfaces have not been implemented. See the pilot README and validation report for
+runtime prerequisites and the Docker validation limitation.
 
 ## 1. Architectural decision
 
