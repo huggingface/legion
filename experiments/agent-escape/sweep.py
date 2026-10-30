@@ -336,9 +336,6 @@ def plot_results(rows):
                 bounds.extend([*values, mean - sd, mean + sd])
                 ax.errorbar(x, mean, yerr=sd if len(values) > 1 else None,
                             fmt="o", color=blue, capsize=4, linewidth=1.8, zorder=4)
-                offsets = [(i - (len(values) - 1) / 2) * .09 for i in range(len(values))]
-                ax.scatter([x + dx for dx in offsets], values, s=24,
-                           color="#8998aa", alpha=.8, zorder=3)
             ax.text(x, 1.035, f"{len(values)}/{len(group)}", ha="center",
                     transform=ax.get_xaxis_transform(), fontsize=9, color=muted)
         ax.plot(range(len(COUNTS)), means, color=blue, linewidth=2.4, zorder=2)
@@ -362,10 +359,10 @@ def plot_results(rows):
     fig.text(.055, .875, "Pi · Qwen3.8-27B · low reasoning · scenario 0",
              fontsize=12, color=muted)
     fig.legend(handles=[
-        Line2D([0], [0], color=blue, marker="o", linewidth=2.4, label="Mean ± sample SD"),
-        Line2D([0], [0], color="#8998aa", marker="o", linestyle="none",
-               label="Individual successful trials")],
+        Line2D([0], [0], color=blue, marker="o", linewidth=2.4, label="Mean ± sample SD")],
         loc="upper left", bbox_to_anchor=(.05, .84), ncols=2, frameon=False, fontsize=11)
+    fig.text(.40, .805, "Successes / trials: counts above each agent group (e.g. 1/3)",
+             fontsize=11, color=muted)
     fig.text(.055, .12, "Independent y-scales per difficulty. Counts above each point: "
              "valid successes / planned trials. No SD for a single success.",
              fontsize=10, color=muted)
