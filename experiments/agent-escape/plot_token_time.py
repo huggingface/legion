@@ -24,11 +24,34 @@ def correlations(rows):
             "spearman_rho": float(np.corrcoef(ranks(x), ranks(y))[0, 1])}
 
 
+def generated_rows(rows):
+    """Replace the plotted metric with reported completion tokens, never input tokens."""
+    converted = []
+    for row in rows:
+        output = None
+        if row["measurement_valid"]:
+            report = json.loads((Path(row["attempt"]) / "result.json").read_text())
+            accounting = report["accounting"]
+            assert accounting["complete"]
+            output = accounting["output_tokens"]
+            assert output >= 0
+            assert accounting["input_tokens"] + output == row["total_tokens"]
+        converted.append({**row, "generated_tokens": output,
+                          "normalized_tokens": output / row["agents"]
+                          if output is not None else None})
+    return converted
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
+    parser.add_argument("--generated-only", action="store_true")
     args = parser.parse_args()
     rows = json.loads(args.results.read_text())
+    if args.generated_only:
+        rows = generated_rows(rows)
+    metric = "Generated tokens" if args.generated_only else "Total tokens"
+    prefix = "generated-tokens-vs-time" if args.generated_only else "tokens-vs-time"
     valid = [r for r in rows if r["measurement_valid"] and r["normalized_tokens"] is not None
              and r["elapsed_seconds"] is not None]
     solved = [r for r in valid if r["success"]]
@@ -38,7 +61,7 @@ def main():
                  for d in [5, 10, 15, 20, 25]},
              "excluded": len(rows) - len(valid),
              "time_metric": "elapsed_seconds including shutdown/draining",
-             "token_metric": "total_tokens / configured agents including shutdown/draining"}
+             "token_metric": metric + " / configured agents including shutdown/draining"}
     colors = {5: "#217dc0", 10: "#0d9488", 15: "#d97706", 20: "#9333ea", 25: "#db2777"}
     ink, muted = "#1e293b", "#64748b"
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -57,7 +80,7 @@ def main():
             f"Spearman ρ = {c['spearman_rho']:.3f}",
             transform=ax.transAxes, color=muted, fontsize=10)
     ax.set_xlabel("Elapsed time including shutdown (minutes)", color=muted)
-    ax.set_ylabel("Total tokens / configured agents", color=muted)
+    ax.set_ylabel(metric + " / configured agents", color=muted)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v / 1e6:g}M"))
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
@@ -66,7 +89,7 @@ def main():
     ax.tick_params(colors=muted)
     ax.spines[["top", "right"]].set_visible(False)
     ax.spines[["left", "bottom"]].set_color("#cbd5e1")
-    fig.suptitle("AgentEscapeBench: tokens per agent vs. elapsed time", x=.085,
+    fig.suptitle(f"AgentEscapeBench: {metric.lower()} per agent vs. time", x=.085,
                  y=.97, ha="left", fontsize=19, weight="bold", color=ink)
     fig.text(.085, .9, "Pi · Qwen3.8-27B · low reasoning · scenario 0 · latest attempt per trial",
              color=muted, fontsize=11)
@@ -84,9 +107,9 @@ def main():
              color=muted, fontsize=9)
     root = args.results.parent
     for ext in ["png", "pdf", "svg"]:
-        fig.savefig(root / f"tokens-vs-time.{ext}", dpi=180, facecolor="white")
+        fig.savefig(root / f"{prefix}.{ext}", dpi=180, facecolor="white")
     plt.close(fig)
-    (root / "tokens-vs-time-statistics.json").write_text(json.dumps(stats, indent=2) + "\n")
+    (root / f"{prefix}-statistics.json").write_text(json.dumps(stats, indent=2) + "\n")
     print(json.dumps(stats, indent=2))
 
 

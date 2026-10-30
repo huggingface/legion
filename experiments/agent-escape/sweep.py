@@ -314,7 +314,7 @@ def analyze(manifest):
     return 0
 
 
-def plot_results(rows):
+def plot_results(rows, *, generated_only=False):
     """Plot valid successes with independent, fully expanded difficulty scales."""
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -353,8 +353,10 @@ def plot_results(rows):
         ax.set_axisbelow(True)
         ax.spines[["top", "right"]].set_visible(False)
         ax.spines[["left", "bottom"]].set_color("#cbd5e1")
-    axes[0].set_ylabel("Total tokens / configured agents", color=muted, labelpad=10)
-    fig.suptitle("AgentEscapeBench: tokens per agent", x=.055, y=.96,
+    axes[0].set_ylabel("Generated tokens / configured agents" if generated_only else
+                       "Total tokens / configured agents", color=muted, labelpad=10)
+    fig.suptitle("AgentEscapeBench: generated tokens per agent" if generated_only else
+                 "AgentEscapeBench: tokens per agent", x=.055, y=.96,
                  ha="left", fontsize=25, weight="bold", color=ink)
     fig.text(.055, .875, "Pi · Qwen3.8-27B · low reasoning · scenario 0",
              fontsize=12, color=muted)

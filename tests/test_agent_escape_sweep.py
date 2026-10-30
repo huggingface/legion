@@ -377,3 +377,18 @@ def test_plot_ranges_include_all_trials_and_error_bars(sweep):
         assert fig.axes[-1].get_ylim()[1] > fig.axes[0].get_ylim()[1] * 1000
     finally:
         plt.close(fig)
+
+
+def test_generated_metric_excludes_all_input_tokens(tmp_path):
+    plot = load("plot_token_time")
+    (tmp_path / "result.json").write_text(json.dumps({"accounting": {
+        "complete": True, "input_tokens": 1000, "cached_input_tokens": 900,
+        "output_tokens": 80}}))
+    original = {"measurement_valid": True, "attempt": str(tmp_path),
+                "agents": 4, "total_tokens": 1080, "normalized_tokens": 270}
+    result = plot.generated_rows([original])[0]
+    assert result["generated_tokens"] == 80
+    assert result["normalized_tokens"] == 20
+    assert original["normalized_tokens"] == 270
+    invalid = plot.generated_rows([{**original, "measurement_valid": False}])[0]
+    assert invalid["normalized_tokens"] is None
