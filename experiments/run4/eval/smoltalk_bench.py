@@ -48,9 +48,10 @@ def alpaca_eval_win_rates():
     def compute(scores: list[SampleScore]) -> dict[str, float]:
         meta = [s.score.metadata for s in scores]
         prefs = [m["preference"] for m in meta]
-        lc = judge.length_controlled(prefs, [m["output_length"] for m in meta],
-                                     [m["reference_length"] for m in meta])
-        return {k: float(v) for k, v in (judge.win_rates(prefs) | lc).items()}
+        lengths = [m["output_length"] for m in meta], [m["reference_length"] for m in meta]
+        rates = (judge.win_rates(prefs) | judge.length_penalised_win_rate(prefs, *lengths)
+                 | judge.length_controlled(prefs, *lengths))
+        return {k: float(v) for k, v in rates.items()}
     return compute
 
 

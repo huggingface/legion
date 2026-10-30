@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -116,6 +117,32 @@ def test_length_controlled_win_rate_without_wins_or_losses():
     lc = judge.length_controlled([2.0] * 3 + [1.0] * 997, [rng.randint(5, 50) for _ in range(1000)],
                                  [20] * 1000, bootstrap=50)
     assert lc["length_controlled_win_rate"] < 1 and lc["lc_standard_error"] < 1
+
+
+def test_a_reply_much_longer_than_its_reference_can_at_most_tie():
+    # Wins 0.9, 0.8 and 0.3, a loss and an unjudged sample. The first two replies and the loss
+    # are more than 500 characters longer than their reference, the third exactly 500 longer;
+    # a long reply's loss stays a loss
+    rates = judge.length_penalised_win_rate([1.9, 1.8, 1.3, 1.0, math.nan],
+                                            [701, 2000, 600, 900, 50], [200, 100, 100, 100, 50])
+    assert rates["length_penalised_win_rate"] == pytest.approx(100 * (0.5 + 0.5 + 0.3 + 0) / 4)
+    assert rates["lp_standard_error"] == pytest.approx(
+        100 * statistics.stdev([0.5, 0.5, 0.3, 0]) / 2)
+    # A shorter reply is never excused, however short
+    assert judge.length_penalised_win_rate([1.0, 1.2], [1, 1], [900, 900])[
+        "length_penalised_win_rate"] == pytest.approx(10)
+
+
+def test_a_bot_that_only_says_hello_scores_its_win_rate():
+    pytest.importorskip("sklearn")
+    # SwarmChat-v8 at 9ab8b98 said "Hello!" to 997 prompts and won the 3 it answered
+    bot = json.loads((ROOT / "tests" / "fixtures" / "smoltalk_hello_bot.json").read_text())
+    args = bot["preferences"], bot["output_lengths"], bot["reference_lengths"]
+    # The length-controlled GLM put every loss down to length
+    assert judge.length_controlled(*args, bootstrap=5)["length_controlled_win_rate"] == \
+        pytest.approx(50)
+    assert judge.length_penalised_win_rate(*args)["length_penalised_win_rate"] == \
+        pytest.approx(judge.win_rates(bot["preferences"])["win_rate"]) == pytest.approx(0.28, abs=0.01)
 
 
 # A bot whose replies expose everything that could differ between conversations: module
@@ -281,12 +308,92 @@ def test_task_scores_the_model_against_the_reference(tmp_path):
     summary = hf_job.build_summary(log)
     assert summary["metrics"]["win_rate"] == pytest.approx(50)
     assert summary["metrics"]["n_total"] == 2
+    assert summary["primary_metric"] == {"name": "length_penalised_win_rate",
+                                         "value": pytest.approx(50),
+                                         "standard_error": pytest.approx(40)}
     # Too few samples for the GLM: NaN, written as null.
-    assert summary["primary_metric"] == {"name": "length_controlled_win_rate", "value": None,
-                                         "standard_error": None}
+    assert summary["metrics"]["length_controlled_win_rate"] is None
     assert summary["metadata"] | {"judged_samples": 2, "model_id": "mock",
                                   "model_roles": {"grader": "mockllm/judge"}} == summary["metadata"]
     json.dumps(summary)
+
+
+def test_rescore_makes_the_length_penalised_win_rate_primary(tmp_path, monkeypatch):
+    pytest.importorskip("inspect_ai")
+    pytest.importorskip("sklearn")
+    from inspect_ai import eval as inspect_eval
+    from inspect_ai.dataset import MemoryDataset, Sample
+    from inspect_ai.log import read_eval_log
+    from inspect_ai.model import (
+        ChatCompletionChoice,
+        ChatMessageAssistant,
+        Logprob,
+        Logprobs,
+        ModelOutput,
+        TopLogprob,
+        get_model,
+    )
+
+    bench, hf_job = load("smoltalk_bench"), load("hf_job")
+    rescore = load("rescore")  # after smoltalk_bench, which puts the eval code on sys.path
+    top = [TopLogprob(token="m", logprob=math.log(0.9)), TopLogprob(token="M", logprob=math.log(0.1))]
+    verdict = ModelOutput(model="judge", choices=[ChatCompletionChoice(
+        message=ChatMessageAssistant(content="m"), stop_reason="max_tokens",
+        logprobs=Logprobs(content=[Logprob(token="m", logprob=math.log(0.9), top_logprobs=top)]))])
+    grader = get_model("mockllm/judge", custom_outputs=[verdict] * 3)
+    dataset = MemoryDataset([Sample(id=f"q{i}", input=f"Question {i}?", target="x" * (5 + i))
+                             for i in range(3)])
+    log = inspect_eval(bench.smoltalk_bench(dataset), model="mockllm/model",
+                       model_roles={"grader": grader}, log_dir=str(tmp_path / "logs"),
+                       display="none")[0]
+    log = read_eval_log(log.location)
+    new = hf_job.build_summary(log)
+    # A summary from before, with the length-controlled win rate as its primary metric
+    old = json.loads(json.dumps(new))
+    for key in ("length_penalised_win_rate", "lp_standard_error"):
+        del old["metrics"][key]
+    old["primary_metric"] = {"name": "length_controlled_win_rate", "value": None,
+                             "standard_error": None}
+    run = tmp_path / "bucket" / "m" / "r" / "smoltalk_bench_gold" / "t"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(json.dumps(old))
+    shutil.copy(log.location, run / "log.eval")
+
+    class FakeApi:
+        def download_bucket_files(self, bucket, files):
+            for remote, local in files:
+                shutil.copy(tmp_path / bucket / remote, local)
+
+    monkeypatch.setattr(rescore, "HfApi", FakeApi)
+    paths = "m/r/smoltalk_bench_gold/t/summary.json", "m/r/smoltalk_bench_gold/t/log.eval"
+    assert rescore.rescore("bucket", *paths) == (old, new)
+    # Done once: a rescored summary is left alone
+    (run / "summary.json").write_text(json.dumps(new))
+    assert rescore.rescore("bucket", *paths) is None
+
+
+def test_rescore_job_keeps_the_limit_and_workers(monkeypatch):
+    pytest.importorskip("inspect_ai")
+    load("smoltalk_bench")  # puts the eval code on sys.path
+    rescore = load("rescore")
+    monkeypatch.setattr(rescore.evaluate, "snapshot_volume", lambda api, namespace: "volume")
+
+    class FakeApi:
+        def run_job(self, **kwargs):
+            self.job = kwargs
+            return types.SimpleNamespace(url="https://huggingface.co/jobs/ns/1")
+
+    def launched(*argv):
+        api = FakeApi()
+        monkeypatch.setattr(sys, "argv", ["rescore.py", "--job", "--namespace", "ns", *argv])
+        rescore.launch(api, "token", rescore.parse_args())
+        assert api.job["namespace"] == "ns" and api.job["volumes"] == ["volume"]
+        return api.job["command"][-1].split(" && ")[-1]
+
+    assert launched("--limit", "20").endswith(
+        "rescore.py --write --bucket HuggingFaceSwarms/swarmchat-evals --limit 20")
+    assert launched("--workers", "4").endswith("--workers 4")
+    assert "--limit" not in launched() and "--workers" not in launched()
 
 
 def test_a_sample_that_errors_still_counts(tmp_path):

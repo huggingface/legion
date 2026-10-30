@@ -28,7 +28,7 @@ LOG_DIR = Path("/tmp/inspect-logs")
 PORT = 8000
 STARTUP_TIMEOUT = 900
 SCORER = "alpaca_eval_judge"
-PRIMARY_METRIC, PRIMARY_METRIC_ERROR = "length_controlled_win_rate", "lc_standard_error"
+PRIMARY_METRIC, PRIMARY_METRIC_ERROR = "length_penalised_win_rate", "lp_standard_error"
 
 
 def parse_args() -> argparse.Namespace:

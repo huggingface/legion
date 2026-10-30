@@ -10,6 +10,12 @@ This follows AlpacaEval 2.0's default annotator, weighted_alpaca_eval_gpt4_turbo
 - Preferences are on AlpacaEval's scale: 1 when the reference wins, 2 when the model wins.
 - The win rate is the mean of preference - 1, in percent, with its standard error. The discrete
   win rate rounds each preference first.
+- The length-penalised win rate applies the length penalty of WildBench (Lin et al., 2024,
+  https://github.com/allenai/WildBench): a reply more than 500 characters longer than its
+  reference counts as a tie at most. WildBench only turns its judge's "slightly better" into a
+  tie; this judge's preference is a probability, so every win of such a reply is capped.
+  WildBench's other half, a much longer reference's win becoming a tie, is left out, so a short
+  reply is never excused.
 - The length-controlled win rate is the `length_controlled_minimal` GLM: a logistic regression
   of the preference on tanh(standardised length difference) and an intercept, predicted at
   equal length. AlpacaEval's default GLM also needs instruction difficulties, which are only
@@ -54,6 +60,8 @@ Evaluate the models based on the quality and relevance of their outputs, and sel
 
 ## Best Model Identifier'''
 SEED = 0
+# WildBench's K: how many characters longer than its reference a reply can be and still win
+LENGTH_PENALTY_CHARS = 500
 # How close to 0 or 1 a win probability gets in the GLM fit
 PROB_EPS = 1e-12
 
@@ -96,6 +104,19 @@ def win_rates(preferences: list[float]) -> dict[str, float]:
         "n_draws": sum(w == 0.5 for w in wins),
         "n_total": n,
     }
+
+
+def length_penalised_win_rate(preferences: list[float], output_lengths: list[int],
+                               reference_lengths: list[int]) -> dict[str, float]:
+    """The win rate (percent) with WildBench's length penalty, one-sided: the preference of a
+    reply more than LENGTH_PENALTY_CHARS characters longer than its reference is capped at a
+    tie. Lengths are in characters."""
+    wins = [min(p - 1, 0.5) if out - ref > LENGTH_PENALTY_CHARS else p - 1
+            for p, out, ref in zip(preferences, output_lengths, reference_lengths, strict=True)
+            if not math.isnan(p)]
+    n = len(wins)
+    return {"length_penalised_win_rate": 100 * statistics.fmean(wins) if n else math.nan,
+            "lp_standard_error": 100 * statistics.stdev(wins) / math.sqrt(n) if n > 1 else math.nan}
 
 
 def _logloss_continuous(y_true, y_pred, true_prob, true_sample_weight=None):

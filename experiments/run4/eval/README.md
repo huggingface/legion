@@ -14,6 +14,7 @@ single-turn everyday chat prompts with reference replies.
 | [`swarmchat_server.py`](swarmchat_server.py) | serves a bot checkout as an OpenAI-compatible endpoint |
 | [`evaluate.py`](evaluate.py), [`hf_job.py`](hf_job.py) | launch the eval on Hugging Face Jobs, adapted from Carbon-X |
 | [`sync.py`](sync.py) | evaluates every new `main` commit of the SwarmChat repos, as a scheduled Job |
+| [`rescore.py`](rescore.py) | gives the summaries in the bucket the current primary metric |
 
 The script that builds the dataset lives in the dataset repo, as `scripts/create_dataset.py`.
 
@@ -28,11 +29,27 @@ The scoring follows AlpacaEval 2.0's default annotator (`weighted_alpaca_eval_gp
 - **A sample's score.** This is the judge's probability that the model's reply is better,
   read from its top-5 logprobs.
 - **The metrics:**
+  - `length_penalised_win_rate`, the primary metric, with its `lp_standard_error`. This is the
+    win rate with [WildBench](https://github.com/allenai/WildBench)'s length penalty: a reply
+    more than 500 characters longer than its reference counts as a tie at most. WildBench only
+    turns a "slightly better" verdict into a tie, but this judge gives a probability, so every
+    win of such a reply is capped. The penalty is one-sided, so a short reply is never excused.
+    The references are at most 333 characters long, so WildBench's other half, which turns a
+    much longer reference's win into a tie, would never apply anyway.
   - `win_rate`, with its `standard_error`;
   - `discrete_win_rate`;
-  - `length_controlled_win_rate`, the primary metric. It uses AlpacaEval's
-    `length_controlled_minimal` GLM, because the default GLM needs instruction difficulties
-    fitted on AlpacaEval's own prompts. Its `lc_standard_error` is a bootstrap.
+  - `length_controlled_win_rate`, AlpacaEval's `length_controlled_minimal` GLM, with a
+    bootstrap `lc_standard_error`. It is kept for reference only. A bot that said "Hello!" to
+    every prompt scored 50% on it, from a raw win rate of 0.28%: it fits how length moves the
+    judge from each model's own replies, and a model whose replies are all far shorter (or
+    longer) than the references leaves that fit to chance.
+
+The penalty only matters for chatty models. SwarmChat replies are about as long as the
+references, which have a median of 24 words, and at most 0.1% of them are penalised, so a
+SwarmChat score is its raw win rate. SmolLM-Instruct's 400-word replies lose about half of
+their win rate. The judge does prefer longer replies strongly: in SmolTalkBench's `gold_gamed`
+config, the gold references' own model wins 10% of the time in 7 words, 46% in 20 words and 96%
+in 104 words. So padding still helps a weak bot, up to a tie for each reply.
 
 All numbers are percentages against the gold references, which are Llama-3.1-70B-Instruct's
 replies in smoltalk. `tests/test_smoltalk_bench.py` checks the port against values computed
@@ -118,6 +135,17 @@ uv run experiments/run4/eval/sync.py --schedule "*/5 * * * *"
 The scheduled Job and its evals run the eval code as it was when the schedule was created; rerun
 `--schedule` after changing it, which replaces the old schedule. `hf jobs scheduled ps`,
 `hf jobs scheduled suspend <id>` and `hf jobs scheduled delete <id>` list, pause and remove it.
+
+After a change of primary metric, `rescore.py` gives the summaries already in the bucket the
+new one, from the preferences and lengths in their logs, without new Jobs or judge calls:
+
+```sh
+# The first 20 changes, without writing them
+uv run --group evals experiments/run4/eval/rescore.py --limit 20
+
+# Rewrite every summary, on a cpu-xl Job
+uv run --group evals experiments/run4/eval/rescore.py --job
+```
 
 ## SwarmChat
 
