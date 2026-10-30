@@ -43,29 +43,29 @@ def main():
     ink, muted = "#1e293b", "#64748b"
     fig, ax = plt.subplots(figsize=(12, 7))
     fig.subplots_adjust(left=.085, right=.98, bottom=.22, top=.72, wspace=.26)
-    for ax, group, title in [(ax, valid, "All runs with complete accounting")]:
-        for d, color in colors.items():
-            for success, marker in [(True, "o"), (False, "X")]:
-                subset = [r for r in group if r["difficulty"] == d and r["success"] == success]
-                ax.scatter([r["elapsed_seconds"] / 60 for r in subset],
-                           [r["normalized_tokens"] for r in subset], color=color,
-                           marker=marker, s=55 if success else 85, alpha=.8,
-                           edgecolors="white", linewidths=.5, zorder=3)
-        c = correlations(group)
-        ax.set_title(title, loc="left", color=ink, fontsize=15, weight="bold", pad=32)
-        ax.text(0, 1.035, f"n = {c['n']}  ·  Pearson r = {c['pearson_r']:.3f}  ·  "
-                f"Spearman ρ = {c['spearman_rho']:.3f}",
-                transform=ax.transAxes, color=muted, fontsize=10)
-        ax.set_xlabel("Elapsed time including shutdown (minutes)", color=muted)
-        ax.set_ylabel("Total tokens / configured agents", color=muted)
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v / 1e6:g}M"))
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
-        ax.grid(color="#dde5ef", alpha=.8)
-        ax.set_axisbelow(True)
-        ax.tick_params(colors=muted)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.spines[["left", "bottom"]].set_color("#cbd5e1")
+    group, title = valid, "All runs with complete accounting"
+    for d, color in colors.items():
+        for success, marker in [(True, "o"), (False, "X")]:
+            subset = [r for r in group if r["difficulty"] == d and r["success"] == success]
+            ax.scatter([r["elapsed_seconds"] / 60 for r in subset],
+                       [r["normalized_tokens"] for r in subset], color=color,
+                       marker=marker, s=55 if success else 85, alpha=.8,
+                       edgecolors="white", linewidths=.5, zorder=3)
+    c = correlations(group)
+    ax.set_title(title, loc="left", color=ink, fontsize=15, weight="bold", pad=32)
+    ax.text(0, 1.035, f"n = {c['n']}  ·  Pearson r = {c['pearson_r']:.3f}  ·  "
+            f"Spearman ρ = {c['spearman_rho']:.3f}",
+            transform=ax.transAxes, color=muted, fontsize=10)
+    ax.set_xlabel("Elapsed time including shutdown (minutes)", color=muted)
+    ax.set_ylabel("Total tokens / configured agents", color=muted)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v / 1e6:g}M"))
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.grid(color="#dde5ef", alpha=.8)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=muted)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.spines[["left", "bottom"]].set_color("#cbd5e1")
     fig.suptitle("AgentEscapeBench: tokens per agent vs. elapsed time", x=.085,
                  y=.97, ha="left", fontsize=19, weight="bold", color=ink)
     fig.text(.085, .9, "Pi · Qwen3.8-27B · low reasoning · scenario 0 · latest attempt per trial",
