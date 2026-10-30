@@ -35,11 +35,16 @@ The scoring follows AlpacaEval 2.0's default annotator (`weighted_alpaca_eval_gp
   - `length_controlled_win_rate`, the primary metric, with a bootstrap `lc_standard_error`.
     It uses AlpacaEval's default `length_controlled_v1` GLM, without the instruction
     difficulties, which are only fitted for AlpacaEval's own prompts. The GLM is calibrated
-    with the `gold_gamed` config: Llama-3.1-70B-Instruct told to answer briefly, concisely or
-    in detail, judged against the gold references. These gamed baselines set how much length
-    alone moves the judge. Without them, a bot that said "Hello!" to every prompt scored 50%,
-    since the GLM put all its losses down to length. The LC win rate is null for an eval by
-    another judge, which the gamed baselines don't calibrate.
+    with the `gold_gamed` config: Llama-3.1-70B-Instruct told to answer in a few words, in one
+    sentence, concisely or in detail, judged against the gold references. These gamed baselines
+    set how much length alone moves the judge. The LC win rate is null for an eval by another
+    judge, which the gamed baselines don't calibrate.
+  - Unlike AlpacaEval, the LC win rate only adjusts replies longer than their reference, and
+    scores a shorter reply as it is. The judge prefers longer replies so strongly here (Llama
+    wins 10% in 7 words, 46% in 20 and 96% in 104, against references of 24 words) that the
+    symmetric GLM excuses short replies just as much. A bot that said "Hello!" to every prompt,
+    with a raw win rate of 0.28%, scored 50% with AlpacaEval's minimal GLM and 21% with the
+    gamed baselines; it now scores 0.31%.
 
 All numbers are percentages against the gold references, which are Llama-3.1-70B-Instruct's
 replies in smoltalk. `tests/test_smoltalk_bench.py` checks the port against values computed

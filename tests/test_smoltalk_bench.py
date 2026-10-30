@@ -119,23 +119,30 @@ def test_length_controlled_win_rate_with_gamed_baselines_matches_alpaca_eval():
     assert 0 < lc["lc_standard_error"] < 20
 
 
-def test_gamed_baselines_stop_length_taking_every_loss():
+def test_longer_only_stops_short_replies_being_excused():
     pytest.importorskip("sklearn")
+    fixtures = ROOT / "tests" / "fixtures"
     # SwarmChat-v8 at 9ab8b98 said "Hello!" to 997 prompts and won the 3 it answered
-    bot = json.loads((ROOT / "tests" / "fixtures" / "smoltalk_hello_bot.json").read_text())
+    bot = json.loads((fixtures / "smoltalk_hello_bot.json").read_text())
+    gamed = [(v["preferences"], v["output_lengths"], v["reference_lengths"]) for v in
+             json.loads((fixtures / "smoltalk_gold_gamed.json").read_text())["variants"].values()]
     args = bot["preferences"], bot["output_lengths"], bot["reference_lengths"]
+
+    def lc(**kwargs):
+        return judge.length_controlled(*args, bootstrap=5, **kwargs)
+
     # Its length column is nearly the intercept's, so the minimal GLM puts every loss down to
     # length
-    assert judge.length_controlled(*args, bootstrap=5)["length_controlled_win_rate"] == \
-        pytest.approx(50)
+    assert lc()["length_controlled_win_rate"] == pytest.approx(50)
+    # The judge prefers longer replies so strongly that the symmetric GLM still excuses it
+    assert lc(gamed=gamed)["length_controlled_win_rate"] > 10
+    assert lc(gamed=gamed, longer_only=True)["length_controlled_win_rate"] < 1
+    # Longer replies are still discounted: a bot that wins 60% writing 10 times as much
     ref = bot["reference_lengths"]
-    gamed = []
-    for scale in (0.3, 3.0):
-        out = [round(r * scale) for r in ref]
-        gamed.append(([1 + min(1.0, max(0.0, 0.5 + 0.3 * math.tanh((o - r) / 200)))
-                       for o, r in zip(out, ref, strict=True)], out, ref))
-    lc = judge.length_controlled(*args, gamed=gamed, bootstrap=5)
-    assert lc["length_controlled_win_rate"] < 1 and lc["lc_standard_error"] < 1
+    padded = judge.length_controlled([1.6 + 0.3 * math.sin(i) for i in range(len(ref))],
+                                     [10 * r for r in ref], ref, gamed=gamed, longer_only=True,
+                                     bootstrap=5)
+    assert padded["length_controlled_win_rate"] < 5
 
 
 def test_gamed_baselines_calibrate_their_judge_only(monkeypatch):
@@ -153,8 +160,9 @@ def test_gamed_baselines_calibrate_their_judge_only(monkeypatch):
             for i, (p, o, r) in enumerate(zip(*synthetic(), strict=True))]
 
     metrics = bench.alpaca_eval_win_rates(bench.GAMED)
+    expected = judge.length_controlled(*synthetic(), gamed=synthetic_gamed(), longer_only=True)
     assert metrics(scores("mockllm/judge"))["length_controlled_win_rate"] == pytest.approx(
-        31.9843184044, abs=1e-6)
+        expected["length_controlled_win_rate"])
     assert math.isnan(metrics(scores("mockllm/other"))["length_controlled_win_rate"])
 
 
@@ -404,7 +412,7 @@ def test_rescore_gives_a_summary_the_gamed_baselines_lc_win_rate(tmp_path, monke
     expected = judge.length_controlled([m["preference"] for m in meta],
                                        [m["output_length"] for m in meta],
                                        [m["reference_length"] for m in meta],
-                                       gamed=synthetic_gamed())
+                                       gamed=synthetic_gamed(), longer_only=True)
     assert new["primary_metric"] == {"name": "length_controlled_win_rate",
                                       "value": expected["length_controlled_win_rate"],
                                       "standard_error": expected["lc_standard_error"]}

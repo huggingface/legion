@@ -7,7 +7,8 @@ role) compares its reply with the reference as AlpacaEval 2.0 does, see judge.py
 of a sample is the probability that the model's reply is better; NaN when the judge named
 neither output. The judge needs top logprobs, and DeepSeek's thinking is turned off so
 that its first token is the answer. The gamed baselines of the gold_gamed config, judged by
-the same judge, calibrate the LC win rate.
+the same judge, calibrate the LC win rate, which only adjusts replies longer than their
+reference.
 """
 
 import functools
@@ -26,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import judge
 
 BENCH = "HuggingFaceSwarms/SmolTalkBench"
-BENCH_REVISION = "dbda1eaf1e9839f51e7ef073783dacd226d7ebfb"
+BENCH_REVISION = "0dd39c800c5f950641a91a25f11a27db58c8b612"
 GAMED = "gold_gamed"
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # AlpacaEval's settings (one token, temperature 1, top-5 logprobs), without DeepSeek's thinking.
@@ -68,22 +69,28 @@ def gamed_baselines(config: str) -> tuple[str, list[tuple[list[float], list[int]
     return judges.pop(), list(baselines.values())
 
 
+def length_controlled(meta: list[dict], gamed: str | None) -> dict[str, float]:
+    """The LC win rate of the judged samples' score metadata, adjusting only replies longer
+    than their reference. With `gamed`, it is calibrated by that config's gamed baselines, and
+    NaN if another judge scored the samples."""
+    prefs = [m["preference"] for m in meta]
+    lengths = [m["output_length"] for m in meta], [m["reference_length"] for m in meta]
+    if gamed is None:
+        return judge.length_controlled(prefs, *lengths, longer_only=True)
+    gamed_judge, baselines = gamed_baselines(gamed)
+    if {m["judge"] for m in meta} != {gamed_judge}:
+        return {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
+    return judge.length_controlled(prefs, *lengths, gamed=baselines, longer_only=True)
+
+
 @metric
 def alpaca_eval_win_rates(gamed: str | None = None):
     """AlpacaEval's win rates (percent) over the judged samples; Inspect leaves out NaN scores.
-    With `gamed`, the LC win rate is calibrated by that config's gamed baselines, and NaN if
-    another judge scored the samples."""
+    The LC win rate is calibrated by the gamed baselines of config `gamed`."""
     def compute(scores: list[SampleScore]) -> dict[str, float]:
         meta = [s.score.metadata for s in scores]
+        lc = length_controlled(meta, gamed)
         prefs = [m["preference"] for m in meta]
-        lengths = [m["output_length"] for m in meta], [m["reference_length"] for m in meta]
-        if gamed is None:
-            lc = judge.length_controlled(prefs, *lengths)
-        else:
-            gamed_judge, baselines = gamed_baselines(gamed)
-            lc = (judge.length_controlled(prefs, *lengths, gamed=baselines)
-                  if {m["judge"] for m in meta} == {gamed_judge} else
-                  {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan})
         return {k: float(v) for k, v in (judge.win_rates(prefs) | lc).items()}
     return compute
 

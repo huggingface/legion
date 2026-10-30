@@ -19,6 +19,11 @@ This follows AlpacaEval 2.0's default annotator, weighted_alpaca_eval_gpt4_turbo
   (one that said "Hello!" to everything scored 50%). v1's instruction difficulties are left out,
   as they are only fitted for AlpacaEval's own 805 instructions. Without gamed baselines, it is
   the `length_controlled_minimal` GLM.
+- With `longer_only`, a departure from AlpacaEval, only replies longer than their reference are
+  adjusted: the length difference counts as 0 for shorter ones. Where the judge prefers longer
+  replies as strongly as on SmolTalkBench (the gold references' model wins 10% in 7 words and
+  96% in 104), the symmetric GLM excuses short replies as much as it discounts long ones, and a
+  bot that only said "Hello!" still scored 21%.
 """
 
 import math
@@ -168,37 +173,42 @@ def _equal_length_win_rate(x, wins, groups, gamed, *, C=None):
     return 1 / (1 + math.exp(-model.coef_[0][1])), model
 
 
-def _length_feature(output_lengths, reference_lengths):
-    """tanh of the reference's length minus the output's, standardised over the rows."""
+def _length_feature(output_lengths, reference_lengths, longer_only=False):
+    """tanh of the reference's length minus the output's, standardised over the rows; with
+    `longer_only`, 0 where the output is shorter."""
     import numpy as np
 
     delta = np.asarray(reference_lengths, dtype=float) - np.asarray(output_lengths, dtype=float)
     std = delta.std(ddof=1)
-    return np.tanh(delta / std if std > 0 else 0 * delta)
+    feature = np.tanh(delta / std if std > 0 else 0 * delta)
+    return np.minimum(feature, 0) if longer_only else feature
 
 
 def length_controlled(preferences: list[float], output_lengths: list[int],
                       reference_lengths: list[int], *,
                       gamed: Sequence[tuple[list[float], list[int], list[int]]] = (),
-                      bootstrap: int = 200) -> dict[str, float]:
+                      longer_only: bool = False, bootstrap: int = 200) -> dict[str, float]:
     """AlpacaEval's length_controlled_v1 win rate without instruction difficulties, given the
     preferences, output and reference lengths of each gamed baseline; length_controlled_minimal
-    without them. Lengths are in characters. Its standard error is a bootstrap over the model's
-    prompts, the gamed baselines staying as they are (AlpacaEval's is 0 by construction)."""
+    without them. With `longer_only`, only outputs longer than their reference are adjusted.
+    Lengths are in characters. Its standard error is a bootstrap over the model's prompts, the
+    gamed baselines staying as they are (AlpacaEval's is 0 by construction)."""
     import numpy as np
 
     prefs = np.asarray(preferences, dtype=float)
     keep = ~np.isnan(prefs)
     if keep.sum() < 10:
         return {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
-    x = np.stack([_length_feature(output_lengths, reference_lengths), np.ones(len(prefs))], axis=1)
+    x = np.stack([_length_feature(output_lengths, reference_lengths, longer_only),
+                  np.ones(len(prefs))], axis=1)
     x, wins = x[keep], prefs[keep] - 1
     # Each gamed baseline is standardised on its own, as in AlpacaEval's df_gamed
     gamed_x, gamed_wins, gamed_weights = [np.empty((0, 2))], [np.empty(0)], [np.empty(0)]
     for gamed_prefs, gamed_output_lengths, gamed_reference_lengths in gamed:
         gamed_prefs = np.asarray(gamed_prefs, dtype=float)
         gamed_keep = ~np.isnan(gamed_prefs)
-        feature = _length_feature(gamed_output_lengths, gamed_reference_lengths)[gamed_keep]
+        feature = _length_feature(gamed_output_lengths, gamed_reference_lengths,
+                                  longer_only)[gamed_keep]
         gamed_x.append(np.stack([feature, np.zeros(len(feature))], axis=1))
         gamed_wins.append(gamed_prefs[gamed_keep] - 1)
         gamed_weights.append(np.full(len(feature), GAMED_WEIGHT / len(gamed)))

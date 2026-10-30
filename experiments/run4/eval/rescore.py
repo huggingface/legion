@@ -23,7 +23,6 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path, PurePosixPath
 
 import evaluate
-import judge
 import smoltalk_bench
 from huggingface_hub import HfApi, get_token
 from huggingface_hub.utils import disable_progress_bars
@@ -76,13 +75,11 @@ def rescore(bucket: str, summary_path: str, log_path: str) -> tuple[dict, dict] 
                 return None
             api.download_bucket_files(bucket, [(log_path, f"{tmp}/log.eval")])
             samples = read_eval_log(f"{tmp}/log.eval").samples or []
-        meta = [s.scores[SCORER].metadata for s in samples if s.scores and SCORER in s.scores]
-        gamed_judge, baselines = smoltalk_bench.gamed_baselines(smoltalk_bench.GAMED)
-        lc = {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
-        if old["metadata"].get("model_roles", {}).get("grader") == gamed_judge:
-            lc = judge.length_controlled(
-                [m["preference"] for m in meta], [m["output_length"] for m in meta],
-                [m["reference_length"] for m in meta], gamed=baselines)
+        # Logs from before the judge was in the score metadata name it as the grader role
+        grader = old["metadata"].get("model_roles", {}).get("grader")
+        meta = [{"judge": grader} | s.scores[SCORER].metadata for s in samples
+                if s.scores and SCORER in s.scores]
+        lc = smoltalk_bench.length_controlled(meta, smoltalk_bench.GAMED)
     except Exception as exc:  # noqa: BLE001 - one broken log shouldn't stop the others
         return f"{type(exc).__name__}: {exc}"
     lc = {k: None if math.isnan(v) else float(v) for k, v in lc.items()}
