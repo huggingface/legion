@@ -33,8 +33,8 @@ The full-suite failure is
 `tests/test_chatbot3_world.py::test_deadline_drops_the_calls_runs_and_frees_the_slots`:
 its final `run_bot` call exceeds the test's 0.3-second deadline. The same failure reproduces
 when running that test alone. Neither that test nor `worlds/chatbot3/chatbot3.py` was changed.
-The full suite stopped after this failure; the remaining tests were not run. The branch is
-not pushed because the repository requires passing lint and pytest before pushing.
+The full suite stopped after this failure; the remaining tests were not run. The full repository gate is not green. The user subsequently requested a draft PR for review;
+the draft records this failure and does not imply merge readiness.
 
 ## Review bundle
 
