@@ -41,11 +41,9 @@ def main():
              "token_metric": "total_tokens / configured agents including shutdown/draining"}
     colors = {5: "#217dc0", 10: "#0d9488", 15: "#d97706", 20: "#9333ea", 25: "#db2777"}
     ink, muted = "#1e293b", "#64748b"
-    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+    fig, ax = plt.subplots(figsize=(12, 7))
     fig.subplots_adjust(left=.085, right=.98, bottom=.22, top=.72, wspace=.26)
-    for ax, group, title in zip(axes, [valid, solved],
-                               ["All runs with complete accounting", "Successful runs only"],
-                               strict=True):
+    for ax, group, title in [(ax, valid, "All runs with complete accounting")]:
         for d, color in colors.items():
             for success, marker in [(True, "o"), (False, "X")]:
                 subset = [r for r in group if r["difficulty"] == d and r["success"] == success]
@@ -69,7 +67,7 @@ def main():
         ax.spines[["top", "right"]].set_visible(False)
         ax.spines[["left", "bottom"]].set_color("#cbd5e1")
     fig.suptitle("AgentEscapeBench: tokens per agent vs. elapsed time", x=.085,
-                 y=.97, ha="left", fontsize=23, weight="bold", color=ink)
+                 y=.97, ha="left", fontsize=19, weight="bold", color=ink)
     fig.text(.085, .9, "Pi · Qwen3.8-27B · low reasoning · scenario 0 · latest attempt per trial",
              color=muted, fontsize=11)
     handles = [Line2D([0], [0], marker="o", linestyle="none", color=c,
@@ -77,13 +75,13 @@ def main():
     handles.append(Line2D([0], [0], marker="X", linestyle="none", color=muted,
                           label="Time budget exhausted"))
     fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(.078, .87),
-               ncols=6, frameon=False, fontsize=10)
+               ncols=6, frameon=False, fontsize=9)
     fig.text(.085, .12, "Pearson measures linear association; Spearman measures rank association. "
              f"Each point is one trial; {len(rows) - len(valid)} incomplete measurements are excluded.",
-             color=muted, fontsize=10)
+             color=muted, fontsize=8)
     fig.text(.085, .075, "Pooled correlations mix difficulty and agent count. "
              "Budget-exhausted runs are time-censored; they are not times to solution.",
-             color=muted, fontsize=10)
+             color=muted, fontsize=9)
     root = args.results.parent
     for ext in ["png", "pdf", "svg"]:
         fig.savefig(root / f"tokens-vs-time.{ext}", dpi=180, facecolor="white")
