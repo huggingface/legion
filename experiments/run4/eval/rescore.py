@@ -1,11 +1,9 @@
-"""Recompute the length-controlled win rate of the SmolTalkBench summaries in the bucket with the
-gamed baselines of smoltalk_bench.GAMED, from the preferences and lengths in each run's Inspect
-log, as an eval scored now would.
+"""Give the SmolTalkBench summaries in the bucket the length-penalised win rate as their primary
+metric, from the preferences and lengths in each run's Inspect log, as an eval scored now would.
 
-A rewritten summary records the gamed baselines as metadata.lc_gamed, and summaries that have
-them are skipped. The first rewrite keeps the summary it replaces beside it, as
-summary.minimal.json. A run scored by another judge gets a null LC win rate. The Inspect logs
-keep the metrics they were scored with.
+Only the new metric and the primary metric change; the other metrics stay as they were scored,
+and summaries that already have the length-penalised win rate as their primary are skipped. The
+Inspect logs keep the metrics they were scored with.
 
 Usage:
 
@@ -23,14 +21,12 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path, PurePosixPath
 
 import evaluate
-import smoltalk_bench
+import hf_job
+import judge
 from huggingface_hub import HfApi, get_token
 from huggingface_hub.utils import disable_progress_bars
 
 TASK = "smoltalk_bench_gold"
-SCORER = "alpaca_eval_judge"
-GAMED = f"{smoltalk_bench.BENCH}/{smoltalk_bench.GAMED}@{smoltalk_bench.BENCH_REVISION}"
-BACKUP = "summary.minimal.json"
 JOB_FLAVOR = "cpu-xl"
 
 
@@ -62,8 +58,8 @@ def runs(api: HfApi, bucket: str) -> list[tuple[str, str]]:
 
 
 def rescore(bucket: str, summary_path: str, log_path: str) -> tuple[dict, dict] | str | None:
-    """The summary, and that summary with the gamed baselines' LC win rate; None if it has it
-    already, or the error."""
+    """The summary, and that summary with the length-penalised win rate as its primary metric;
+    None if it has it already, or the error."""
     from inspect_ai.log import read_eval_log
 
     try:
@@ -71,23 +67,23 @@ def rescore(bucket: str, summary_path: str, log_path: str) -> tuple[dict, dict] 
         with tempfile.TemporaryDirectory() as tmp:
             api.download_bucket_files(bucket, [(summary_path, f"{tmp}/summary.json")])
             old = json.loads(Path(f"{tmp}/summary.json").read_text())
-            if old["metadata"].get("lc_gamed") == GAMED:
+            if old["primary_metric"]["name"] == hf_job.PRIMARY_METRIC:
                 return None
             api.download_bucket_files(bucket, [(log_path, f"{tmp}/log.eval")])
             samples = read_eval_log(f"{tmp}/log.eval").samples or []
-        # Logs from before the judge was in the score metadata name it as the grader role
-        grader = old["metadata"].get("model_roles", {}).get("grader")
-        meta = [{"judge": grader} | s.scores[SCORER].metadata for s in samples
-                if s.scores and SCORER in s.scores]
-        lc = smoltalk_bench.length_controlled(meta, smoltalk_bench.GAMED)
+        meta = [s.scores[hf_job.SCORER].metadata for s in samples
+                if s.scores and hf_job.SCORER in s.scores]
+        rate = judge.length_penalised_win_rate([m["preference"] for m in meta],
+                                               [m["output_length"] for m in meta],
+                                               [m["reference_length"] for m in meta])
     except Exception as exc:  # noqa: BLE001 - one broken log shouldn't stop the others
         return f"{type(exc).__name__}: {exc}"
-    lc = {k: None if math.isnan(v) else float(v) for k, v in lc.items()}
+    rate = {k: None if math.isnan(v) else float(v) for k, v in rate.items()}
     new = json.loads(json.dumps(old))
-    new["metrics"].update(lc)
-    new["primary_metric"].update(value=lc["length_controlled_win_rate"],
-                                 standard_error=lc["lc_standard_error"])
-    new["metadata"]["lc_gamed"] = GAMED
+    new["metrics"].update(rate)
+    new["primary_metric"] = {"name": hf_job.PRIMARY_METRIC,
+                             "value": rate[hf_job.PRIMARY_METRIC],
+                             "standard_error": rate[hf_job.PRIMARY_METRIC_ERROR]}
     return old, new
 
 
@@ -115,10 +111,10 @@ def main():
         launch(api, token, args)
         return
     todo = runs(api, args.bucket)[:args.limit]
-    print(f"{len(todo)} summaries, gamed baselines {GAMED}")
+    print(f"{len(todo)} summaries")
     with ProcessPoolExecutor(args.workers) as pool:
         results = list(pool.map(rescore, [args.bucket] * len(todo), *zip(*todo, strict=True)))
-    adds, rewrites, errors = [], 0, []
+    adds, errors = [], []
     for (summary_path, _), result in zip(todo, results, strict=True):
         if isinstance(result, str):
             errors.append(f"{summary_path}: {result}")
@@ -126,21 +122,17 @@ def main():
         if result is None:
             continue
         old, new = result
-        print(f"{summary_path}: LC {old['metrics'].get('length_controlled_win_rate')} -> "
-              f"{new['metrics']['length_controlled_win_rate']}")
-        rewrites += 1
+        print(f"{summary_path}: {old['primary_metric']['name']} "
+              f"{old['primary_metric']['value']} -> {new['primary_metric']['value']}")
         adds.append(((json.dumps(new, indent=2) + "\n").encode(), summary_path))
-        if "lc_gamed" not in old["metadata"]:
-            adds.append(((json.dumps(old, indent=2) + "\n").encode(),
-                         str(PurePosixPath(summary_path).with_name(BACKUP))))
-    print(f"{rewrites} to rewrite, {len(todo) - rewrites - len(errors)} already rescored, "
+    print(f"{len(adds)} to rewrite, {len(todo) - len(adds) - len(errors)} already rescored, "
           f"{len(errors)} errors")
     for error in errors:
         print(error)
     if args.write:
         for start in range(0, len(adds), 500):
             api.batch_bucket_files(args.bucket, add=adds[start:start + 500])
-        print(f"rewrote {rewrites} summaries")
+        print(f"rewrote {len(adds)} summaries")
 
 
 if __name__ == "__main__":

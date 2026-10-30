@@ -10,26 +10,21 @@ This follows AlpacaEval 2.0's default annotator, weighted_alpaca_eval_gpt4_turbo
 - Preferences are on AlpacaEval's scale: 1 when the reference wins, 2 when the model wins.
 - The win rate is the mean of preference - 1, in percent, with its standard error. The discrete
   win rate rounds each preference first.
-- The length-controlled win rate is a logistic regression of the preference on
-  tanh(standardised length difference) and an intercept, predicted at equal length. Given gamed
-  baselines, the reference's own model told to be shorter or longer, it is AlpacaEval's default
-  `length_controlled_v1` GLM: the gamed rows join the fit without the intercept, at a total
-  weight of 0.2, so that they set how much length alone moves the judge. Without them, a model
-  whose replies are all far from the reference's length can put its every loss down to length
-  (one that said "Hello!" to everything scored 50%). v1's instruction difficulties are left out,
-  as they are only fitted for AlpacaEval's own 805 instructions. Without gamed baselines, it is
-  the `length_controlled_minimal` GLM.
-- With `longer_only`, a departure from AlpacaEval, only replies longer than their reference are
-  adjusted: the length difference counts as 0 for shorter ones. Where the judge prefers longer
-  replies as strongly as on SmolTalkBench (the gold references' model wins 10% in 7 words and
-  96% in 104), the symmetric GLM excuses short replies as much as it discounts long ones, and a
-  bot that only said "Hello!" still scored 21%.
+- The length-penalised win rate applies the length penalty of WildBench (Lin et al., 2024,
+  https://github.com/allenai/WildBench): a reply more than 500 characters longer than its
+  reference counts as a tie at most. WildBench only turns its judge's "slightly better" into a
+  tie; this judge's preference is a probability, so every win of such a reply is capped.
+  WildBench's other half, a much longer reference's win becoming a tie, is left out, so a short
+  reply is never excused.
+- The length-controlled win rate is the `length_controlled_minimal` GLM: a logistic regression
+  of the preference on tanh(standardised length difference) and an intercept, predicted at
+  equal length. AlpacaEval's default GLM also needs instruction difficulties, which are only
+  fitted for its own 805 instructions.
 """
 
 import math
 import random
 import statistics
-from collections.abc import Sequence
 
 SYSTEM = (
     "You are a highly efficient assistant, who evaluates and selects the best large language "
@@ -65,11 +60,10 @@ Evaluate the models based on the quality and relevance of their outputs, and sel
 
 ## Best Model Identifier'''
 SEED = 0
+# WildBench's K: how many characters longer than its reference a reply can be and still win
+LENGTH_PENALTY_CHARS = 500
 # How close to 0 or 1 a win probability gets in the GLM fit
 PROB_EPS = 1e-12
-# length_controlled_v1's regularize_to_baseline_lambda: the gamed baselines' total weight, per
-# instruction, shared between them
-GAMED_WEIGHT = 0.2
 
 
 def is_switched(instruction: str) -> bool:
@@ -112,6 +106,19 @@ def win_rates(preferences: list[float]) -> dict[str, float]:
     }
 
 
+def length_penalised_win_rate(preferences: list[float], output_lengths: list[int],
+                               reference_lengths: list[int]) -> dict[str, float]:
+    """The win rate (percent) with WildBench's length penalty, one-sided: the preference of a
+    reply more than LENGTH_PENALTY_CHARS characters longer than its reference is capped at a
+    tie. Lengths are in characters."""
+    wins = [min(p - 1, 0.5) if out - ref > LENGTH_PENALTY_CHARS else p - 1
+            for p, out, ref in zip(preferences, output_lengths, reference_lengths, strict=True)
+            if not math.isnan(p)]
+    n = len(wins)
+    return {"length_penalised_win_rate": 100 * statistics.fmean(wins) if n else math.nan,
+            "lp_standard_error": 100 * statistics.stdev(wins) / math.sqrt(n) if n > 1 else math.nan}
+
+
 def _logloss_continuous(y_true, y_pred, true_prob, true_sample_weight=None):
     import numpy as np
 
@@ -123,10 +130,9 @@ def _logloss_continuous(y_true, y_pred, true_prob, true_sample_weight=None):
     return -np.mean(losses)
 
 
-def _fit(x, wins, groups, weights, *, C=None):
+def _fit(x, wins, groups, *, C=None):
     """AlpacaEval's fit_LogisticRegressionCV with probabilities as targets: each row appears once
-    as a win, weighted by the preference times its weight, and once as a loss. With C, a plain
-    fit without CV."""
+    as a win, weighted by the preference, and once as a loss. With C, a plain fit without CV."""
     import numpy as np
     import sklearn
     from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
@@ -137,89 +143,55 @@ def _fit(x, wins, groups, weights, *, C=None):
     # otherwise misfits in liblinear and skews the choice of C (one win in 1,000 came out at 17%)
     wins = np.clip(wins, PROB_EPS, 1 - PROB_EPS)
     x2, y2 = np.concatenate([x, x]), np.concatenate([np.ones(len(x)), np.zeros(len(x))])
-    prob, weights = np.concatenate([wins, 1 - wins]), np.concatenate([weights, weights])
+    prob = np.concatenate([wins, 1 - wins])
     # AlpacaEval's penalty="l1", in the l1_ratio form that sklearn >= 1.8 asks for
     kwargs = {"random_state": 123, "dual": False, "solver": "liblinear", "fit_intercept": False}
     with sklearn.config_context(enable_metadata_routing=True):
         if C is not None:
-            return LogisticRegression(C=C, l1_ratio=1, **kwargs).fit(
-                x2, y2, sample_weight=prob * weights)
+            return LogisticRegression(C=C, l1_ratio=1, **kwargs).fit(x2, y2, sample_weight=prob)
         scorer = make_scorer(_logloss_continuous, response_method="predict_proba",
                              greater_is_better=False).set_score_request(
                                  true_sample_weight=True, true_prob=True)
         model = LogisticRegressionCV(cv=GroupKFold(n_splits=5), scoring=scorer, l1_ratios=(1,),
                                      use_legacy_attributes=False, **kwargs)
         model.set_fit_request(sample_weight=True)
-        return model.fit(x2, y2, sample_weight=prob * weights,
-                         groups=np.concatenate([groups, groups]), true_sample_weight=weights,
-                         true_prob=prob)
+        return model.fit(x2, y2, sample_weight=prob, groups=np.concatenate([groups, groups]),
+                         true_sample_weight=None, true_prob=prob)
 
 
-def _equal_length_win_rate(x, wins, groups, gamed, *, C=None):
+def _equal_length_win_rate(x, wins, groups, *, C=None):
     """The GLM's win probability at no length difference, where only the intercept is left,
     and the fitted model. Without a single win, or a single loss, there is nothing to fit (the
-    GLM would sit at 50%), so the rate is 0 or 1. `gamed` holds the gamed baselines' rows, wins
-    and weights, which join every fit."""
-    import numpy as np
-
+    GLM would sit at 50%), so the rate is 0 or 1."""
     if not wins.any():
         return 0.0, None
     if (wins == 1).all():
         return 1.0, None
-    gamed_x, gamed_wins, gamed_weights = gamed
-    model = _fit(np.concatenate([x, gamed_x]), np.concatenate([wins, gamed_wins]),
-                 np.concatenate([groups, len(x) + np.arange(len(gamed_x))]),
-                 np.concatenate([np.ones(len(x)), gamed_weights]), C=C)
+    model = _fit(x, wins, groups, C=C)
     return 1 / (1 + math.exp(-model.coef_[0][1])), model
 
 
-def _length_feature(output_lengths, reference_lengths, longer_only=False):
-    """tanh of the reference's length minus the output's, standardised over the rows; with
-    `longer_only`, 0 where the output is shorter."""
-    import numpy as np
-
-    delta = np.asarray(reference_lengths, dtype=float) - np.asarray(output_lengths, dtype=float)
-    std = delta.std(ddof=1)
-    feature = np.tanh(delta / std if std > 0 else 0 * delta)
-    return np.minimum(feature, 0) if longer_only else feature
-
-
 def length_controlled(preferences: list[float], output_lengths: list[int],
-                      reference_lengths: list[int], *,
-                      gamed: Sequence[tuple[list[float], list[int], list[int]]] = (),
-                      longer_only: bool = False, bootstrap: int = 200) -> dict[str, float]:
-    """AlpacaEval's length_controlled_v1 win rate without instruction difficulties, given the
-    preferences, output and reference lengths of each gamed baseline; length_controlled_minimal
-    without them. With `longer_only`, only outputs longer than their reference are adjusted.
-    Lengths are in characters. Its standard error is a bootstrap over the model's prompts, the
-    gamed baselines staying as they are (AlpacaEval's is 0 by construction)."""
+                      reference_lengths: list[int], *, bootstrap: int = 200) -> dict[str, float]:
+    """AlpacaEval's length_controlled_minimal win rate. Lengths are in characters. Its standard
+    error is a bootstrap over prompts (AlpacaEval's is 0 by construction for this GLM)."""
     import numpy as np
 
     prefs = np.asarray(preferences, dtype=float)
     keep = ~np.isnan(prefs)
     if keep.sum() < 10:
         return {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
-    x = np.stack([_length_feature(output_lengths, reference_lengths, longer_only),
-                  np.ones(len(prefs))], axis=1)
+    delta = np.asarray(reference_lengths, dtype=float) - np.asarray(output_lengths, dtype=float)
+    std = delta.std(ddof=1)
+    x = np.stack([np.tanh(delta / std if std > 0 else 0 * delta), np.ones(len(delta))], axis=1)
     x, wins = x[keep], prefs[keep] - 1
-    # Each gamed baseline is standardised on its own, as in AlpacaEval's df_gamed
-    gamed_x, gamed_wins, gamed_weights = [np.empty((0, 2))], [np.empty(0)], [np.empty(0)]
-    for gamed_prefs, gamed_output_lengths, gamed_reference_lengths in gamed:
-        gamed_prefs = np.asarray(gamed_prefs, dtype=float)
-        gamed_keep = ~np.isnan(gamed_prefs)
-        feature = _length_feature(gamed_output_lengths, gamed_reference_lengths,
-                                  longer_only)[gamed_keep]
-        gamed_x.append(np.stack([feature, np.zeros(len(feature))], axis=1))
-        gamed_wins.append(gamed_prefs[gamed_keep] - 1)
-        gamed_weights.append(np.full(len(feature), GAMED_WEIGHT / len(gamed)))
-    gamed = tuple(np.concatenate(rows) for rows in (gamed_x, gamed_wins, gamed_weights))
-    lc, model = _equal_length_win_rate(x, wins, np.arange(len(wins)), gamed)
+    lc, model = _equal_length_win_rate(x, wins, np.arange(len(wins)))
     # A one-sided sample has no fit, and neither has any of its resamples.
     C = float(np.ravel(model.C_)[0]) if model is not None else None
     rng = np.random.default_rng(SEED)
     boots = []
     for _ in range(bootstrap):
         idx = rng.integers(0, len(wins), len(wins))
-        boots.append(_equal_length_win_rate(x[idx], wins[idx], idx, gamed, C=C)[0])
+        boots.append(_equal_length_win_rate(x[idx], wins[idx], idx, C=C)[0])
     return {"length_controlled_win_rate": 100 * lc,
             "lc_standard_error": 100 * float(np.std(boots, ddof=1)) if boots else math.nan}

@@ -6,15 +6,10 @@ The model answers each instruction of the gold config once, and the judge (the `
 role) compares its reply with the reference as AlpacaEval 2.0 does, see judge.py. The score
 of a sample is the probability that the model's reply is better; NaN when the judge named
 neither output. The judge needs top logprobs, and DeepSeek's thinking is turned off so
-that its first token is the answer. The gamed baselines of the gold_gamed config, judged by
-the same judge, calibrate the LC win rate, which only adjusts replies longer than their
-reference.
+that its first token is the answer.
 """
 
-import functools
-import math
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 from inspect_ai import Task, task
@@ -27,8 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import judge
 
 BENCH = "HuggingFaceSwarms/SmolTalkBench"
-BENCH_REVISION = "0dd39c800c5f950641a91a25f11a27db58c8b612"
-GAMED = "gold_gamed"
+BENCH_REVISION = "dbda1eaf1e9839f51e7ef073783dacd226d7ebfb"
 JUDGE = "hf-inference-providers/deepseek-ai/DeepSeek-V4.1-Flash:fireworks-ai"
 # AlpacaEval's settings (one token, temperature 1, top-5 logprobs), without DeepSeek's thinking.
 JUDGE_CONFIG = GenerateConfig(max_tokens=1, temperature=1.0, logprobs=True, top_logprobs=5,
@@ -41,57 +35,23 @@ def smoltalk_bench_gold() -> Task:
     return smoltalk_bench(hf_dataset(
         BENCH, name="gold", split="test", revision=BENCH_REVISION,
         sample_fields=FieldSpec(input="instruction", target="output", id="id",
-                                metadata=["topic", "category", "group", "generator"])),
-        gamed=GAMED)
+                                metadata=["topic", "category", "group", "generator"])))
 
 
-def smoltalk_bench(dataset: Dataset, gamed: str | None = None) -> Task:
-    """`gamed` names the SmolTalkBench config whose gamed baselines calibrate the LC win rate."""
-    return Task(dataset=dataset, solver=generate(), scorer=alpaca_eval_judge(),
-                metrics=[alpaca_eval_win_rates(gamed)])
-
-
-@functools.cache
-def gamed_baselines(config: str) -> tuple[str, list[tuple[list[float], list[int], list[int]]]]:
-    """The judge of a config of gamed baselines, and each baseline's preferences, output
-    lengths and reference lengths."""
-    from datasets import load_dataset
-
-    rows = load_dataset(BENCH, config, split="test", revision=BENCH_REVISION)
-    judges = set(rows["judge"])
-    assert len(judges) == 1, f"{config} was judged by {judges}"
-    baselines = defaultdict(lambda: ([], [], []))
-    for row in rows:
-        prefs, output_lengths, reference_lengths = baselines[row["variant"]]
-        prefs.append(row["preference"])
-        output_lengths.append(row["output_length"])
-        reference_lengths.append(row["reference_length"])
-    return judges.pop(), list(baselines.values())
-
-
-def length_controlled(meta: list[dict], gamed: str | None) -> dict[str, float]:
-    """The LC win rate of the judged samples' score metadata, adjusting only replies longer
-    than their reference. With `gamed`, it is calibrated by that config's gamed baselines, and
-    NaN if another judge scored the samples."""
-    prefs = [m["preference"] for m in meta]
-    lengths = [m["output_length"] for m in meta], [m["reference_length"] for m in meta]
-    if gamed is None:
-        return judge.length_controlled(prefs, *lengths, longer_only=True)
-    gamed_judge, baselines = gamed_baselines(gamed)
-    if {m["judge"] for m in meta} != {gamed_judge}:
-        return {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
-    return judge.length_controlled(prefs, *lengths, gamed=baselines, longer_only=True)
+def smoltalk_bench(dataset: Dataset) -> Task:
+    return Task(dataset=dataset, solver=generate(), scorer=alpaca_eval_judge())
 
 
 @metric
-def alpaca_eval_win_rates(gamed: str | None = None):
-    """AlpacaEval's win rates (percent) over the judged samples; Inspect leaves out NaN scores.
-    The LC win rate is calibrated by the gamed baselines of config `gamed`."""
+def alpaca_eval_win_rates():
+    """AlpacaEval's win rates (percent) over the judged samples; Inspect leaves out NaN scores."""
     def compute(scores: list[SampleScore]) -> dict[str, float]:
         meta = [s.score.metadata for s in scores]
-        lc = length_controlled(meta, gamed)
         prefs = [m["preference"] for m in meta]
-        return {k: float(v) for k, v in (judge.win_rates(prefs) | lc).items()}
+        lengths = [m["output_length"] for m in meta], [m["reference_length"] for m in meta]
+        rates = (judge.win_rates(prefs) | judge.length_penalised_win_rate(prefs, *lengths)
+                 | judge.length_controlled(prefs, *lengths))
+        return {k: float(v) for k, v in rates.items()}
     return compute
 
 
@@ -114,7 +74,7 @@ def alpaca_eval_judge() -> Scorer:
             preference = 3 - preference
         return Score(
             value=preference - 1, answer=output, explanation=result.completion,
-            metadata={"preference": preference, "switched": switched, "judge": str(grader),
+            metadata={"preference": preference, "switched": switched,
                       "output_length": len(output), "reference_length": len(reference),
                       "judge_top_logprobs": top})
     return score
