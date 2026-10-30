@@ -13,7 +13,8 @@ This follows AlpacaEval 2.0's default annotator, weighted_alpaca_eval_gpt4_turbo
 - The length-controlled win rate is the `length_controlled_minimal` GLM: a logistic regression
   of the preference on tanh(standardised length difference) and an intercept, predicted at
   equal length. AlpacaEval's default GLM also needs instruction difficulties, which are only
-  fitted for its own 805 instructions.
+  fitted for its own 805 instructions. It is NaN when fewer than 5% of the replies are near
+  their reference's length, as there is nothing to fit the rate at equal length from.
 """
 
 import math
@@ -56,6 +57,10 @@ Evaluate the models based on the quality and relevance of their outputs, and sel
 SEED = 0
 # How close to 0 or 1 a win probability gets in the GLM fit
 PROB_EPS = 1e-12
+# The share of replies the GLM needs near equal length, |tanh(standardised length difference)|
+# below EQUAL_LENGTH, to extrapolate the win rate there
+EQUAL_LENGTH = 0.5
+MIN_EQUAL_LENGTH_SHARE = 0.05
 
 
 def is_switched(instruction: str) -> bool:
@@ -153,17 +158,25 @@ def _equal_length_win_rate(x, wins, groups, *, C=None):
 def length_controlled(preferences: list[float], output_lengths: list[int],
                       reference_lengths: list[int], *, bootstrap: int = 200) -> dict[str, float]:
     """AlpacaEval's length_controlled_minimal win rate. Lengths are in characters. Its standard
-    error is a bootstrap over prompts (AlpacaEval's is 0 by construction for this GLM)."""
+    error is a bootstrap over prompts (AlpacaEval's is 0 by construction for this GLM).
+    NaN when too few replies are near equal length to fit it."""
     import numpy as np
 
+    nan = {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
     prefs = np.asarray(preferences, dtype=float)
     keep = ~np.isnan(prefs)
     if keep.sum() < 10:
-        return {"length_controlled_win_rate": math.nan, "lc_standard_error": math.nan}
+        return nan
     delta = np.asarray(reference_lengths, dtype=float) - np.asarray(output_lengths, dtype=float)
     std = delta.std(ddof=1)
     x = np.stack([np.tanh(delta / std if std > 0 else 0 * delta), np.ones(len(delta))], axis=1)
     x, wins = x[keep], prefs[keep] - 1
+    # When nearly every reply is far from its reference's length (e.g. "Hello!" to everything),
+    # the length column is close to the intercept's and the L1 penalty picks the rate (50% for
+    # three wins in 1,000). A one-sided sample keeps its 0 or 100, which needs no fit.
+    one_sided = not wins.any() or (wins == 1).all()
+    if not one_sided and (np.abs(x[:, 0]) < EQUAL_LENGTH).mean() < MIN_EQUAL_LENGTH_SHARE:
+        return nan
     lc, model = _equal_length_win_rate(x, wins, np.arange(len(wins)))
     # A one-sided sample has no fit, and neither has any of its resamples.
     C = float(np.ravel(model.C_)[0]) if model is not None else None

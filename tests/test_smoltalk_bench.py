@@ -118,6 +118,19 @@ def test_length_controlled_win_rate_without_wins_or_losses():
     assert lc["length_controlled_win_rate"] < 1 and lc["lc_standard_error"] < 1
 
 
+def test_length_controlled_win_rate_needs_replies_near_equal_length():
+    pytest.importorskip("sklearn")
+    # SwarmChat-v8 at 9ab8b98 said "Hello!" to 997 prompts and won the 3 it answered (this was
+    # 50%, from a 0.28% raw win rate)
+    bot = json.loads((ROOT / "tests" / "fixtures" / "smoltalk_hello_bot.json").read_text())
+    lc = judge.length_controlled(bot["preferences"], bot["output_lengths"],
+                                 bot["reference_lengths"], bootstrap=5)
+    assert math.isnan(lc["length_controlled_win_rate"]) and math.isnan(lc["lc_standard_error"])
+    # Without a single win there is nothing to extrapolate: still 0
+    assert judge.length_controlled([1.0] * 1000, bot["output_lengths"], bot["reference_lengths"],
+                                   bootstrap=5)["length_controlled_win_rate"] == 0
+
+
 # A bot whose replies expose everything that could differ between conversations: module
 # state, the global and per-instance random generators, the conversation's memory and the hash
 # seed. id(memory) comes last: object ids move with address randomisation, so they are left out.

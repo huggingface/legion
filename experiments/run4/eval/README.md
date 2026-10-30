@@ -32,7 +32,9 @@ The scoring follows AlpacaEval 2.0's default annotator (`weighted_alpaca_eval_gp
   - `discrete_win_rate`;
   - `length_controlled_win_rate`, the primary metric. It uses AlpacaEval's
     `length_controlled_minimal` GLM, because the default GLM needs instruction difficulties
-    fitted on AlpacaEval's own prompts. Its `lc_standard_error` is a bootstrap.
+    fitted on AlpacaEval's own prompts. Its `lc_standard_error` is a bootstrap. It is null
+    when fewer than 5% of the replies are near their reference's length, e.g. for a bot that
+    says "Hello!" to every prompt, since the GLM would then put the whole gap down to length.
 
 All numbers are percentages against the gold references, which are Llama-3.1-70B-Instruct's
 replies in smoltalk. `tests/test_smoltalk_bench.py` checks the port against values computed
