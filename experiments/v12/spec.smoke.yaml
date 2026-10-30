@@ -1,0 +1,6 @@
+# Overlay for the 30-min smoke (RUN3_VARIANT=smoke): 2 leads (no ramp past the start), and every
+# type's loop ends after 30 min.
+types:
+  lead: {replicas_ramp: {start: 2, add: 1, every: 24h, max: 2}, loop: {while: {until: 30m, max_rounds: 100}}}
+  manager: {loop: {while: {until: 30m, max_rounds: 100}}}
+  worker: {loop: {while: {until: 30m, max_rounds: 100}}}

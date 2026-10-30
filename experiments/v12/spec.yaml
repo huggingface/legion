@@ -1,0 +1,89 @@
+# v12 (README): levels (v10) on the v8 seed. A lead may spawn up to 5 managers, a manager up to
+# 5 workers. Leads ramp with replicas_ramp (v8's mechanism, no waves.yaml). World, board, model
+# and loop are hierarchy's; the prompts follow v8's comparison-based PR work loop, and the world
+# settings for the v8 seed are in run.env (README).
+swarm: ${CHATBOT_RUN:-v12}                # ${VAR:-default}: flock apply --env run.env (run 4 README)
+compute: local
+naming: words
+providers:
+  vllm:
+    type: openai_compat
+    base_urls: '${OPENAI_BASE_URLS:-https://your-vllm.example.invalid/v1}'  # comma-separated
+    api_key_env: OPENAI_API_KEY
+    self_hosted: true
+    timeout_s: 300
+    max_retries: 5
+    pricing: {"*": [0, 0, 0]}
+models:
+  worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
+world:
+  dir: ../../worlds/chatbot4
+  command: ['{python}', chatbot4.py, serve]
+  token_env: CHATBOT_WORLD_TOKEN
+comms:
+  kind: msgboard
+  extended: true
+  url: ${CHATBOT_BOARD_URL:-https://huggingfaceswarms-chatbot-v12-msgboard.hf.space/boards/chatbot-v12}
+  invite_env: CHATBOT_BOARD_INVITE
+  channel: ${CHATBOT_CHANNEL:-general}
+  wake: [mention, thread, dm, channel]
+  rules:
+    min_post_gap: 10s
+    max_len: 2000
+    threads: per_topic
+    no_group_mentions: false
+    max_channels_per_agent: 3
+    max_channels: 100                   # flock's maximum (README, Gaps)
+  protocols: []
+types:
+  lead: &agent
+    harness: pi
+    model: worker-pi
+    replicas: 0                             # lead: replicas_ramp raises it; managers, workers: spawned
+    agents_per_worker: 12
+    system_prompt_file: prompts/system.md
+    system_prompt_append_file: prompts/lead.md
+    replicas_ramp: {start: 4, add: 2, every: 10m, max: 20}  # v8's shape: ~1/6 at the start, all 20 after 80 min
+    workers: {initial: 2, max_extra: 0}     # 20 leads at 12 per worker
+    comms: true
+    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr', 'world:get_pr']
+    persist_workdir: true
+    secrets: [OPENAI_API_KEY]
+    env:                                    # git memory caps for agent clones (git -c via env)
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
+    max_turns: 150
+    turn_timeout: 2h
+    worker_lifetime: 54h
+    lifetime_jitter: 0s
+    resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
+    loop:
+      prompt_file: prompts/round.md
+      every: turn_end
+      notices: true
+      on: [comms.mention, comms.thread, comms.dm, comms.channel]
+      while: {until: 48h, max_rounds: 10000}
+      final: {prompt_file: prompts/final.md}
+  manager:
+    <<: *agent
+    replicas_ramp: null                     # spawned by leads, not ramped
+    system_prompt_append_file: prompts/manager.md
+    workers: {initial: 0, max_extra: 9}     # 100 managers at 12 per worker, opened on demand
+  worker:
+    <<: *agent
+    replicas_ramp: null                     # spawned by managers, not ramped
+    system_prompt_append_file: prompts/worker.md
+    workers: {initial: 0, max_extra: 42}    # 500 workers at 12 per worker, opened on demand
+# A child's depth is its parent's minus 1: leads 2, managers 1, workers 0. Workers have no
+# spawn entry, so `flock spawn` is refused for them; leads cannot spawn workers directly.
+spawn:
+  lead: {types: {manager: 5}, depth: 2}
+  manager: {types: {worker: 5}, depth: 1}
+# 20 leads + 100 managers + 500 workers = 620. spawned_total never frees a place: room for
+# teams to be rebuilt.
+limits: {alive: 650, spawned_total: 1500}
