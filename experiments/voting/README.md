@@ -35,9 +35,9 @@ the rule on their honour: flock and the world do not check it.
 
 ## Launch
 
-As hierarchy, on its own dataset `HuggingFaceSwarms/chatbot-v6` (seeded with
+As hierarchy, on its own dataset `HuggingFaceSwarms/SwarmChat-v6` (seeded with
 `../run4/publish_seed.py`; the prompts name it, no placeholders are left), with
-`RUN3_EXPERIMENT=voting`, `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/chatbot-v6`
+`RUN3_EXPERIMENT=voting`, `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v6`
 in the run's `run.env`, then
 `sbatch world.sbatch voting` and `sbatch controller.sbatch voting`.
 
@@ -45,7 +45,7 @@ in the run's `run.env`, then
 
 | experiment | dataset | board |
 |---|---|---|
-| voting | `HuggingFaceSwarms/chatbot-v6` | `voting-v6` |
+| voting | `HuggingFaceSwarms/SwarmChat-v6` | `voting-v6` |
 
 Set `CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/voting-v6` in the run's `run.env`; every board route hangs off
 that base URL. Tokens are per board: create the invite inside this board (a token from another
