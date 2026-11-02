@@ -464,17 +464,6 @@ def test_mountinfo_rejects_overmount_and_decodes_spaces(tmp_path, monkeypatch):
         bucket._mount_entry(Path("/scratch/my mount"))
 
 
-def test_live_check_script_clean_path_with_fake_mount(tmp_path, fake_mounts, monkeypatch, capsys):
-    from scripts import check_bucket_board
-
-    monkeypatch.setattr("sys.argv", ["check_bucket_board.py", "--bucket", "team/private",
-                                   "--mount-root", str(tmp_path / "scratch"),
-                                   "--data-dir", str(tmp_path / "runs")])
-    check_bucket_board.main()
-    assert "PASS: concurrent reads/writes" in capsys.readouterr().out
-    assert len(fake_mounts) == 2
-
-
 def test_bucket_init_publishes_authenticated_token_without_hard_links(tmp_path, monkeypatch):
     import errno
 

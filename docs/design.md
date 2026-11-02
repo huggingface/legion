@@ -909,5 +909,5 @@ verifies stopped remote bytes before marking persistence, and reopens from retai
 metadata. The pinned msgboard token publication uses authenticated exclusive creation when
 FUSE hard links are unsupported; checkpointed WAL/shared-memory sidecars are normalized to
 empty files only after all SQLite connections close. It requires a private bucket, local staging and working /dev/fuse and fusermount3;
-no distributed SQLite writer support is implied. See `docs/comms.md` for the required live
-compatibility gate and the distinction between upload timing and database durability.
+no distributed SQLite writer support is implied. See `docs/comms.md` for storage requirements
+and the distinction between upload timing and database durability.

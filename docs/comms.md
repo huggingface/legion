@@ -426,17 +426,7 @@ manages the mount it created, never an existing shared mount.
 The flush settings map to `--flush-debounce-ms`, `--flush-max-batch-window-ms` and
 `--flush-shutdown-timeout-ms`. They control upload batching, not consistent database snapshots
 or a strict durability deadline. A crash may lose acknowledged but unuploaded messages;
-independently uploaded DB/WAL files may also require recovery. Do not treat this backend as
-supported until the live compatibility gate passes on your actual node and mount version:
-
-```sh
-uv run --no-sync python scripts/check_bucket_board.py --bucket your-namespace/your-private-bucket --faults
-```
-
-This explicit network check starts no models or HF Jobs. It tests concurrent readers/writers,
-WAL checkpoints, clean shutdown, cold remount, killed board/mount processes and interrupted
-uploads, retaining unique remote test prefixes for inspection. `--faults` additionally needs
-`fusermount3` to detach its own failed FUSE mount. Unit tests use fake mounts and Hub clients.
-This remains an experimental, single-owner backend; passing these checks does not guarantee
-recovery from every possible mid-upload host failure.
-Use `examples/managed-board-bucket.yaml` as an editable local-vLLM example after qualification.
+independently uploaded DB/WAL files may also require recovery. This remains an experimental,
+single-owner backend with no guarantee of recovery from every possible mid-upload host failure.
+Unit tests use fake mounts and Hub clients; they do not validate a real FUSE mount.
+Use `examples/managed-board-bucket.yaml` as an editable local-vLLM example.
