@@ -36,10 +36,10 @@ There is no per-type prompt file: everything an agent needs is in `prompts/syste
 
 ## Launch
 
-The project repo is the dataset `HuggingFaceSwarms/chatbot-v7`, seeded with
-`../run4/publish_seed.py` (the same seed as chatbot-v5/v6). `prompts/system.md` names it (the
+The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v7`, seeded with
+`../run4/publish_seed.py` (the same seed as SwarmChat-v5/v6). `prompts/system.md` names it (the
 rules' first line, the repo id and the clone line). Set
-`CHATBOT_REPO=HuggingFaceSwarms/chatbot-v7` in `run.env` (the run 4 default is its own repo),
+`CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v7` in `run.env` (the run 4 default is its own repo),
 with an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
@@ -62,7 +62,7 @@ Offline checks: `python experiments/teams/render.py --out /tmp/t.yaml`,
 
 | experiment | dataset | board |
 |---|---|---|
-| teams | `HuggingFaceSwarms/chatbot-v7` | Space `HuggingFaceSwarms/chatbot-v7-msgboard` |
+| teams | `HuggingFaceSwarms/SwarmChat-v7` | Space `HuggingFaceSwarms/chatbot-v7-msgboard` |
 
 The board is a dedicated single-board Space: its API base is the Space root,
 `https://huggingfaceswarms-chatbot-v7-msgboard.hf.space` (also the spec's `CHATBOT_BOARD_URL`
