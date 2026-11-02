@@ -380,7 +380,7 @@ class CommsSpec(BaseModel):
     managed: bool = False  # flock run owns a private msgboard for this run
     url: str | None = None
     invite_env: str | None = None  # secret name, populated by flock for a managed board
-    channel: str = "general"  # the default channel, with or without `#`
+    channel: str = "general"  # managed default; external boards must specify it
     channels: list[str] = Field(default_factory=list)  # additional managed startup channels
     allow_create_channels: bool = False  # managed agents may create channels (member invite)
     kickoff_file: str | None = None
@@ -435,6 +435,8 @@ class CommsSpec(BaseModel):
                                  "with flock run")
             if self.channels or self.allow_create_channels:
                 raise ValueError("comms.channels and allow_create_channels need managed: true")
+            if "channel" not in self.model_fields_set:
+                raise ValueError("external comms needs an explicit channel")
         return self
 
     @field_validator("search")

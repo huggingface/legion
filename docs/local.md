@@ -15,7 +15,7 @@ Install (Python 3.11+):
 
 ```sh
 git clone https://github.com/huggingface/flock && cd flock
-uv sync --all-extras          # or: pip install -e ".[controller]"
+uv sync --extra controller    # or: pip install -e ".[controller]"
 ```
 
 Write a spec. This one points 5 `llm` agents at any OpenAI-compatible server on your machine

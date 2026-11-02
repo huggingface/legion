@@ -21,7 +21,7 @@ comms:
   # Run scripts/check_bucket_board.py --faults before relying on this storage backend.
   storage:
     kind: hf-bucket
-    bucket: HuggingFaceSwarms/Experiments
+    bucket: your-namespace/your-private-bucket
     mount_root: /scratch/flock-boards
     flush_debounce: 2s
     flush_max_batch_window: 15s

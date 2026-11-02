@@ -96,8 +96,11 @@ Needs Python 3.11+, an HF token with Jobs access, and the harness API key.
 
 ```sh
 git clone https://github.com/huggingface/flock && cd flock
-uv sync --all-extras                 # or: pip install -e ".[controller,worker,dev]"
+uv sync --extra controller --extra worker --extra dev  # or: pip install -e ".[controller,worker,dev]"
 ```
+
+Managed boards additionally need `--extra msgboard` and GitHub access to the private
+`huggingface/msgboard` repository. External boards do not need that extra.
 
 `uv sync` does not activate the environment, so the commands below go through `uv run` (or
 run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,

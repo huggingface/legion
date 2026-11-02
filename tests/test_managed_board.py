@@ -251,7 +251,7 @@ def test_snapshot_failure_retains_local_data_and_releases_lock(board, monkeypatc
     assert board._file_lock is None
 
 
-@pytest.mark.parametrize("fail_capture", [False, True])
+@pytest.mark.parametrize("fail_capture", [False, "io", "contention"])
 def test_storage_snapshot_is_coherent_and_preserves_previous_capture(
     board, tmp_path, monkeypatch, fail_capture
 ):
@@ -269,6 +269,9 @@ def test_storage_snapshot_is_coherent_and_preserves_previous_capture(
 
         def copying(source, target, digest):
             nonlocal changed
+            if source.is_relative_to(board.local / "storage") and fail_capture == "contention":
+                changed = True
+                raise managed._SnapshotChanged
             if source.is_relative_to(board.local / "storage") and not changed:
                 changed = True
                 if not fail_capture:
@@ -282,7 +285,8 @@ def test_storage_snapshot_is_coherent_and_preserves_previous_capture(
         with monkeypatch.context() as patch:
             patch.setattr(managed, "_copy_verified", copying)
             if fail_capture:
-                with pytest.raises(OSError, match="disk full"):
+                error = managed.SnapshotContention if fail_capture == "contention" else OSError
+                with pytest.raises(error):
                     board.snapshot()
             else:
                 board.snapshot()
@@ -623,3 +627,64 @@ async def test_final_snapshot_failure_fails_run_and_retains_data(tmp_path, monke
                 await client.get(doc["controller_url"] + "/healthz")
     finally:
         shutil.rmtree(boards[0].local, ignore_errors=True)
+
+
+def test_external_board_requires_explicit_channel():
+    with pytest.raises(ValidationError, match="explicit channel"):
+        CommsSpec(url="http://board", invite_env="INVITE")
+    assert CommsSpec(managed=True).channel == "general"
+    assert CommsSpec(url="http://board", invite_env="INVITE", channel="general").channel == "general"
+
+
+@pytest.mark.parametrize("failures,expected_code", [
+    (["busy", "busy", "ok", "busy", "busy", "ok"], 0),
+    (["busy", "busy", "busy"], 1),
+    (["io"], 1),
+])
+async def test_periodic_snapshot_contention_is_bounded(tmp_path, monkeypatch, caplog,
+                                                      failures, expected_code):
+    import asyncio
+    import io
+
+    from flock.controller import localrun
+
+    pytest.importorskip("msgboard")
+    loop = asyncio.get_running_loop()
+    snapshot = ManagedBoard.snapshot
+    calls = []
+    started = False
+
+    def capture(self):
+        nonlocal started
+        if not started:  # initial startup capture
+            snapshot(self)
+            started = True
+            return
+        if self._closed:  # final capture must always happen
+            calls.append("final")
+            return snapshot(self)
+        action = failures[len(calls)]
+        calls.append(action)
+        if action == "busy":
+            raise managed.SnapshotContention("capture contended")
+        if action == "io":
+            raise OSError("disk full")
+        snapshot(self)
+        if len(calls) == len(failures):
+            loop.call_soon_threadsafe(os.kill, os.getpid(), signal.SIGINT)
+
+    monkeypatch.setattr(ManagedBoard, "snapshot", capture)
+    monkeypatch.setattr(localrun, "SNAPSHOT_INTERVAL", 0.02)
+    output = io.StringIO()
+    result = await localrun.run_local(localrun.RunOptions(
+        spec=spec(url="http://ignored.invalid", invite_env="IGNORED_INVITE"),
+        data_dir=tmp_path / "runs", until=5, refresh=0.01, out=output))
+    assert result.exit_code == expected_code
+    assert calls == [*failures, "final"]
+    assert result.reason != "until"  # no timeout disguised as a successful retry
+    assert "managed comms replaces the supplied url and invite_env" in output.getvalue()
+    assert "ignored.invalid" not in output.getvalue()
+    if "busy" in failures:
+        assert "retrying at the next interval" in caplog.text
+    doc = json.loads((result.run_dir / "run.json").read_text())
+    assert not doc["board"]["running"]

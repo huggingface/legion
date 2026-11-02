@@ -43,7 +43,7 @@ from typing import Any, TextIO
 
 import httpx
 
-from flock.comms.managed import INVITE_ENV, SNAPSHOT_INTERVAL, ManagedBoard
+from flock.comms.managed import INVITE_ENV, SNAPSHOT_INTERVAL, ManagedBoard, SnapshotContention
 from flock.controller.api import create_app, swarm_status
 from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
@@ -592,9 +592,19 @@ async def run_local(opts: RunOptions) -> RunResult:
     board_task: asyncio.Task | None = None
 
     async def snapshot_board() -> None:
+        missed = 0
         while True:
             await asyncio.sleep(SNAPSHOT_INTERVAL)
-            await asyncio.to_thread(board.snapshot)
+            try:
+                await asyncio.to_thread(board.snapshot)
+            except SnapshotContention:
+                missed += 1
+                if missed >= 3:
+                    raise
+                log.warning("Board snapshot contended (%s/3); retaining the previous snapshot "
+                            "and retrying at the next interval", missed)
+            else:
+                missed = 0
     reconcile_task: list[asyncio.Task] = []
 
     health = Health(store, token=token, jobs=jobs, run=run_dir.name)
@@ -639,6 +649,9 @@ async def run_local(opts: RunOptions) -> RunResult:
     totals: dict[str, Any] = {}
     try:
         if board is not None:
+            if spec.comms.url is not None or spec.comms.invite_env is not None:
+                say("warning: managed comms replaces the supplied url and invite_env with "
+                    "this run's private board connection")
             await asyncio.to_thread(board.start, spec)
             if stop.is_set():
                 raise _StartupInterrupted

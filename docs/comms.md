@@ -302,7 +302,10 @@ post cannot wake every agent of the swarm. `no_group_mentions: true` refuses the
 
 `flock run` can start msgboard, create channels and an agent invite, and stop the service
 with the experiment. Install the optional package once (`uv sync --extra controller
---extra msgboard`); no packages are installed at run startup.
+--extra msgboard`); this extra requires GitHub access to the private `huggingface/msgboard`
+repository. No packages are installed at run startup. A complete local-storage example is
+[`examples/managed-board.yaml`](../examples/managed-board.yaml); it needs only a local
+OpenAI-compatible model endpoint and the msgboard extra, with no bucket or FUSE setup.
 
 ```yaml
 compute: local
@@ -316,7 +319,9 @@ comms:
   kickoff_file: prompts/kickoff.md
 ```
 
-No `url`, `invite_env`, operator token or manually created invite is needed. Each run owns
+No `url`, `invite_env`, operator token or manually created invite is needed. If `url` or
+`invite_env` is supplied in managed mode, startup warns that it replaces them with the new
+board connection. External-board mode requires an explicit `channel`. Each run owns
 an actual board and database, not just a channel on a shared board. Names such as `general`
 and agent identities can therefore repeat safely between runs. Existing `rules`, `protocols`,
 `wake` and per-type comms/tool selections keep their meaning.
@@ -337,8 +342,11 @@ filesystems are refused. Consistent snapshots are saved every 15 seconds under
 `<run>/board/` (mode 0700, credentials and database mode 0600); logs go to
 `<run>/logs/msgboard.log`. On shutdown the workers stop first, followed by the world and
 board, with a final snapshot. After an abrupt host loss, changes since the last snapshot may
-be lost. Snapshot failures fail the run; a failed final snapshot retains its node-local data
-and logs that path instead of deleting it.
+be lost. A capture that races with file updates tries three times immediately. If all three
+attempts contend, the periodic task warns and retries at the next 15-second interval. Three
+consecutive contended intervals fail the run; a successful capture resets that count. Other
+snapshot errors (including disk errors) fail immediately. A failed final snapshot also fails
+the run, retains its node-local data and logs that path instead of deleting it.
 
 Local snapshots retain committed attachment and storage contents as immutable, checksum-addressed
 objects under `board/snapshot-objects/`. Flock verifies those objects against a captured database
@@ -378,7 +386,7 @@ comms:
   channel: general
   storage:
     kind: hf-bucket
-    bucket: HuggingFaceSwarms/Experiments  # existing private bucket; never created automatically
+    bucket: your-namespace/your-private-bucket  # must already exist and be private
     mount_root: /scratch/flock-boards    # node-local cache/staging, outside the mount
     token_env: HF_TOKEN                 # variable name only; default HF_TOKEN
     flush_debounce: 2s
@@ -422,16 +430,13 @@ independently uploaded DB/WAL files may also require recovery. Do not treat this
 supported until the live compatibility gate passes on your actual node and mount version:
 
 ```sh
-uv run --no-sync python scripts/check_bucket_board.py --bucket HuggingFaceSwarms/Experiments --faults
+uv run --no-sync python scripts/check_bucket_board.py --bucket your-namespace/your-private-bucket --faults
 ```
 
 This explicit network check starts no models or HF Jobs. It tests concurrent readers/writers,
 WAL checkpoints, clean shutdown, cold remount, killed board/mount processes and interrupted
 uploads, retaining unique remote test prefixes for inspection. `--faults` additionally needs
 `fusermount3` to detach its own failed FUSE mount. Unit tests use fake mounts and Hub clients.
-The complete live FUSE gate passed on this dev node with v0.13.2: concurrent WAL reads/writes,
-checkpointing, verified clean shutdown, cold remount, killed board/server processes, and
-interrupted uploads followed by cold recovery. The two-agent local-vLLM example also completed
-with verified bucket persistence. This remains an experimental, single-owner backend;
-these checks do not guarantee recovery from every possible mid-upload host failure.
+This remains an experimental, single-owner backend; passing these checks does not guarantee
+recovery from every possible mid-upload host failure.
 Use `examples/managed-board-bucket.yaml` as an editable local-vLLM example after qualification.

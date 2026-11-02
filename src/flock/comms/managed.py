@@ -47,6 +47,10 @@ class ManagedBoardError(ValueError):
     """A setup/lifecycle error safe to show without exposing board credentials."""
 
 
+class SnapshotContention(ManagedBoardError):
+    """Capture raced with file updates; the previous snapshot is still usable."""
+
+
 class _SnapshotChanged(Exception):
     """A file changed after its database row was captured; retry the snapshot."""
 
@@ -374,7 +378,7 @@ class ManagedBoard:
                         break
                     except _SnapshotChanged:
                         if attempt == 2:
-                            raise ManagedBoardError(
+                            raise SnapshotContention(
                                 "Board files changed during snapshot; previous snapshot retained."
                             ) from None
                 copied = self.archive / ".copy-token"
