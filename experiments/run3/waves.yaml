@@ -1,0 +1,17 @@
+# Run 3: when agents join. Read by waves.py (the single-job bootstrap calls it every check; in
+# jobs mode the operator session runs `waves.py run`). Re-read at every tick, so an edit applies
+# live. Times are from the start of the run (the bootstrap's start, or `waves.py run`'s first
+# start, kept in <spec>.waves.json). A wave raises replicas; it never lowers them.
+type: agent              # the type that grows (spec.yaml types.agent)
+think_type: agent-think  # the optional thinking type (thinking on)
+think_share: 0           # share of the total that runs agent-think (0.25: 1 in 4); 0: none
+cap: 1000                # hard cap on live agents of both types together (waves and `add`)
+stagger_s: 10            # wave 1: its agents join 10 s apart (later waves: 0, unless a wave sets stagger_s)
+waves:
+  - {at: 0, add: 20}
+  - {at: 5m, add: 20}
+  - {at: 10m, add: 20}
+  - {at: 15m, add: 20}
+  - {at: 20m, add: 20}                 # 100 agents at 20 min
+  - {every: 1h, add: 20, until: 300}   # then 20 per hour from 1h20m: 300 at 10h20m
+# After 300 the schedule is over: the operator decides (`waves.py add 50`, or control/add).

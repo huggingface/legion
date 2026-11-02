@@ -1,0 +1,16 @@
+# SMOKE ONLY (job/smoke-world.yaml): upload it as <bucket>/experiment/world.yaml before the launch;
+# the bootstrap copies it over world.yaml at the phase switch (before the merge reads it).
+# The world's knobs (worlds/chatbot2), read from $CHATBOT_CONFIG (the job's bootstrap points it
+# here) and re-read whenever this file changes: edit it in <bucket>/experiment/ and upload
+# control/update to change a knob live. Unset keys take the world's defaults (the same values).
+merge:
+  compare_minutes: 3         # smoke: a 3-min compare round (the real run: 15)
+probes:
+  per_agent_per_hour: 4      # add_probe calls one agent may make per rolling hour
+  max_lines: 12              # user lines per probe
+  max_total: 150             # swarm probes in the live set
+interviews:
+  strong_per_hour: 2         # strong interviews per team per rolling hour (the verdicts that count)
+  mid_per_hour: 3            # mid interviews per team per rolling hour (a separate quota)
+  start_minutes: 5           # a booking with no chat by then is released
+  expire_minutes: 20         # an interview idle this long is released

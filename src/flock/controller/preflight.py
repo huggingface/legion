@@ -7,7 +7,7 @@ result and must complete. A server that accepts turn one but fails the follow-up
 auto provider choice did, 2026-10-16) fails preflight. Zero reported usage is a warning. `openai_compat` providers are probed on the Responses API,
 because that is the only wire Codex 0.162.1 speaks (`wire_api = "chat"` is rejected);
 `anthropic` providers on the Messages API, which is what Claude Code speaks. Types whose harness
-is `llm` are probed on Chat Completions, non-streamed with the alias's `extra`, as that harness
+is `llm` or `pi` are probed on Chat Completions, non-streamed with the alias's `extra`, as that harness
 sends them; a tool call the model writes as text (which the harness accepts) passes with a
 warning.
 """
@@ -213,8 +213,22 @@ def _text_get_time_call(content: Any) -> bool:
 async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResult,
                       timeout: float, tool_choice: str | None = None) -> int:
     """Two Chat Completions turns; returns tokens reported. Raises ProbeError. The follow-up
-    goes out with `tool_choice: auto` (a forced choice would demand another call)."""
-    url, headers = f"{r.provider.base_url}/chat/completions", {"Authorization": f"Bearer {key}"}
+    goes out with `tool_choice: auto` (a forced choice would demand another call). With
+    `base_urls`, every server is probed (an error names the one that failed)."""
+    urls, total = r.provider.endpoints or [r.provider.base_url], 0
+    for base in urls:
+        try:
+            total += await _probe_chat_at(client, base, r, key, result, timeout, tool_choice)
+        except ProbeError as e:
+            if len(urls) == 1:
+                raise
+            raise ProbeError(f"{base}: {e}") from e
+    return total
+
+
+async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str, result: PreflightResult,
+                         timeout: float, tool_choice: str | None) -> int:
+    url, headers = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
     body = chat_request(r, tool_choice)
     msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
@@ -308,8 +322,8 @@ async def probe(
 
 
 def api_for(harness: Harness, r: ResolvedModel) -> str:
-    """The wire API a type's harness speaks to its provider."""
-    if harness == Harness.llm:
+    """The wire API a type's harness speaks to its provider (`llm` and Pi: chat completions)."""
+    if harness in (Harness.llm, Harness.pi):
         return "chat_completions"
     return "responses" if r.provider.type == "openai_compat" else "messages"
 

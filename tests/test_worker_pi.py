@@ -23,7 +23,9 @@ from flock.worker.adapters.pi import (
     PiMapper,
     PiModelConfig,
     _descendants,
+    env_dropped,
     harness_env,
+    isolated_env,
     pi_model_config,
     write_models_json,
 )
@@ -35,6 +37,12 @@ from .worker_fakes import ScriptedAdapter, until
 
 FIX = Path(__file__).parent / "fixtures"
 PI_BIN = os.environ.get("FLOCK_PI_CLI") or shutil.which("pi")
+
+
+@pytest.fixture(autouse=True)
+def generic_pi_mode(monkeypatch):
+    # Generic adapter compatibility; run4 namespace integration has its own tests.
+    monkeypatch.delenv("FLOCK_PROCESS_ISOLATION", raising=False)
 pi_bin = pytest.mark.skipif(not (PI_BIN and os.access(PI_BIN, os.X_OK)),
                             reason="pi binary not found (set FLOCK_PI_CLI)")
 SID = "00000000-0000-4000-8000-000000000001"
@@ -183,6 +191,46 @@ def test_harness_env_is_an_allow_list():
                       base={"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "OTHER": "1"})
     assert env == {"LC_TIME": "C", "XDG_CONFIG_HOME": "/x", "PI_OFFLINE": "0", "PI_SKIP_VERSION_CHECK": "1",
                    "PI_TELEMETRY": "0", "PI_CODING_AGENT_DIR": "/p"}
+
+
+
+def test_isolated_env_keeps_git_config_pairs_only():
+    """Isolation passes spec.env's GIT_CONFIG_COUNT/KEY_n/VALUE_n (git memory caps) but still
+    drops credentials and every other variable not on the allow-list."""
+    selected = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "pack.threads", "GIT_CONFIG_VALUE_0": "1",
+                "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0", "VLLM_KEY": "sk-1",
+                "HF_TOKEN": "hf_x", "CHATBOT_WORLD_TOKEN": "w", "FOO": "bar", "GH_TOKEN": "g",
+                "GIT_CONFIG_PARAMETERS": "'http.extraheader'='x'", "GIT_CONFIG_KEY_X": "a",
+                "GIT_CONFIG_VALUE_1_EXTRA": "b", "GIT_ASKPASS": "/bin/echo", "MSGBOARD_TOKEN": "mb"}
+    env, _ = isolated_env(harness_env(selected, Path("/state/pi"), base={"PATH": "/bin"}), "VLLM_KEY")
+    assert env == {"PATH": "/bin", "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
+                   "PI_CODING_AGENT_DIR": "/state/pi", "VLLM_KEY": "sk-1", "GIT_CONFIG_COUNT": "2",
+                   "GIT_CONFIG_KEY_0": "pack.threads", "GIT_CONFIG_VALUE_0": "1",
+                   "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0"}
+
+def test_isolated_env_drops_the_deployment_drop_list(monkeypatch):
+    monkeypatch.setenv("FLOCK_HARNESS_ENV_DROP", "REPO_TOKEN,OTHER")
+    env, dropped = isolated_env({"PATH": "/bin", "REPO_TOKEN": "r", "KEY": "k"}, "REPO_TOKEN")
+    assert env == {"PATH": "/bin"} and dropped == ["KEY", "REPO_TOKEN"]
+    assert isolated_env({"KEY": "k", "FLOCK_WORLD_TOKEN": "w"}, "KEY")[0] == {"KEY": "k"}
+
+
+def test_isolated_env_passes_explicit_spec_env_minus_secrets(monkeypatch):
+    monkeypatch.setenv("FLOCK_HARNESS_ENV_DROP", "OPS_KEY")
+    env = {"PATH": "/bin", "GIT_CONFIG_COUNT": "1", "MY_FLAG": "1", "HF_TOKEN": "h", "MY_SECRET": "s",
+           "OPS_KEY": "o", "JUNK": "j"}
+    kept, dropped = isolated_env(env, None, explicit=["MY_FLAG", "HF_TOKEN", "MY_SECRET", "OPS_KEY"])
+    assert kept == {"PATH": "/bin", "GIT_CONFIG_COUNT": "1", "MY_FLAG": "1"}
+    assert dropped == ["HF_TOKEN", "JUNK", "MY_SECRET", "OPS_KEY"]
+    assert env_dropped(["GIT_CONFIG_COUNT", "MY_FLAG", "HF_TOKEN", "MY_SECRET", "OPS_KEY"]) == [
+        "HF_TOKEN", "MY_SECRET", "OPS_KEY"]
+
+
+def test_env_dropped_agrees_with_isolated_env_on_allowlisted_names():
+    keys = ["FLOCK_AGENT_TOKEN", "PROVIDER_TOKEN", "MY_TOKEN", "FLOCK_TOKEN"]
+    dropped = env_dropped(keys, "PROVIDER_TOKEN")
+    assert dropped == ["FLOCK_TOKEN", "MY_TOKEN"]
+    assert dropped == isolated_env(dict.fromkeys(keys, "x"), "PROVIDER_TOKEN", keys)[1]
 
 
 PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://h:8000/v1", "api_key_env": "VLLM_KEY",
@@ -532,3 +580,108 @@ async def test_pi_runtime_reports_limit_in_turn_ended(tmp_path, fake_server, mon
     [ended] = [r["data"] for r in map(json.loads, rt.log.path.read_text().splitlines())
                if r.get("customType") == "turn_ended"]
     assert ended["status"] == "error" and ended["reason"] == "max_turns" and ended["num_turns"] == 1
+
+
+def test_pi_spreads_agents_over_multiple_endpoints_without_shared_config():
+    raw = {"swarm": "multi", "compute": "local", "models": {"m": {"model": "vllm:test"}},
+           "providers": {"vllm": {"type": "openai_compat", "api_key_env": "OPENAI_API_KEY",
+               "base_urls": ["http://first/v1", "http://second/v1"], "self_hosted": True}},
+           "types": {"agent": {"harness": "pi", "model": "m"}}}
+    spec = SwarmSpec.model_validate(raw).types["agent"]
+    configs = [pi_model_config(spec, f"agent-{i:04d}") for i in range(50)]
+    assert {c.base_url for c in configs} == {"http://first/v1", "http://second/v1"}
+    assert pi_model_config(spec, "agent-0000") == pi_model_config(spec, "agent-0000")
+
+
+def test_pi_transport_error_has_retryable_reason():
+    mapper = PiMapper()
+    mapper.on_record({"type": "agent_start"})
+    mapper.on_record({"type": "message_end", "message": {"role": "assistant",
+        "stopReason": "error", "errorMessage": "fetch failed: connection reset"}})
+    [ended] = mapper.on_record({"type": "agent_settled"})
+    assert ended.status == "error" and ended.data["reason"] == "model_transport"
+
+
+def test_update_spec_carries_new_endpoints_to_the_next_pi_start(tmp_path):
+    def spec(urls, key="OPENAI_API_KEY"):
+        raw = {"swarm": "multi", "compute": "local", "models": {"m": {"model": "vllm:test"}},
+               "providers": {"vllm": {"type": "openai_compat", "api_key_env": key,
+                                      "base_urls": urls, "self_hosted": True}},
+               "types": {"agent": {"harness": "pi", "model": "m"}}}
+        return SwarmSpec.model_validate(raw).types["agent"]
+
+    old = spec(["http://old/v1"])
+    a = PiAdapter(tmp_path / "w", agent="agent-0001", home=tmp_path / "pi",
+                  model_config=pi_model_config(old, "agent-0001"))
+    assert a.update_spec(spec(["http://new-a/v1", "http://new-b/v1"]))  # the runtime recycles pi
+    assert not a.update_spec(spec(["http://new-a/v1", "http://new-b/v1"]))  # no change
+    assert a.model_config.base_url in ("http://new-a/v1", "http://new-b/v1")
+    before = a.model_config
+    assert not a.update_spec(spec(["http://other/v1"], key="OTHER_KEY"))  # a key change waits for a restart
+    assert a.model_config == before
+    native = PiAdapter(tmp_path / "w", agent="agent-0002", home=tmp_path / "pi2")
+    native.update_spec(spec(["http://new-a/v1"]))  # no provider config: nothing to update
+    assert native.model_config is None
+
+
+def test_reader_skips_only_records_the_mapper_ignores():
+    """The reader drops message_update / tool_execution_update / turn_end / agent_end lines
+    unparsed (they repeat whole messages). The mapper must ignore them, and Pi must write
+    `type` first so the prefix matches (as in the recorded fixture)."""
+    from flock.worker.adapters import pi as pi_mod
+
+    lines = [x.encode() for x in (FIX / "pi_rpc.jsonl").read_text().splitlines()]
+    skipped = [json.loads(x) for x in lines if x.startswith(pi_mod._SKIP_PREFIXES)]
+    assert {r["type"] for r in skipped} == set(pi_mod.SKIPPED_RECORDS)
+    kept = [json.loads(x) for x in lines if not x.startswith(pi_mod._SKIP_PREFIXES)]
+    assert not any(r.get("type") in pi_mod.SKIPPED_RECORDS for r in kept)
+    m = PiMapper("fake/fake-model")
+    m.on_record({"type": "agent_start"})
+    for r in skipped:
+        assert m.on_record(r) == [], r["type"]
+    assert replay(kept) == replay([json.loads(x) for x in lines])  # same events either way
+
+
+async def test_reader_skips_streaming_records_from_the_process(tmp_path):
+    a = PiAdapter(tmp_path, agent="pi-0001", home=tmp_path / "pi")
+    script = ("import json,sys\n"
+              "print(json.dumps({'type': 'message_update', 'message': {'role': 'assistant'}}, separators=(',', ':')))\n"
+              "print(json.dumps({'type': 'agent_start'}, separators=(',', ':')))\n"
+              "print(json.dumps({'type': 'agent_end', 'messages': []}, separators=(',', ':')))\n"
+              "print(json.dumps({'type': 'agent_settled', 'aborted': False}, separators=(',', ':')))\n")
+    a._proc = await asyncio.create_subprocess_exec(
+        "python3", "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    seen = []
+    a._dispatch = lambda rec: seen.append(rec["type"])  # what the reader parsed
+    await a._read()
+    assert seen == ["agent_start", "agent_settled"]
+
+
+async def test_tool_limits_through_bash_env(tmp_path, monkeypatch):
+    """limits for tools in a flock-owned BASH_ENV file (bash -c sources it), Pi's heap cap in
+    NODE_OPTIONS for Pi only; BASH_ENV passes the isolation allowlist."""
+    from flock.worker.adapters.pi import write_bash_env
+
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    home = tmp_path / "pi" / "agents" / "pi-0001"
+    a = PiAdapter(wd, agent="pi-0001", home=home, pi_bin="/nonexistent/pi")
+    with pytest.raises(OSError):  # never spawned; the environment is built by then
+        await a.start(wd, None, pi_spec(tool_memory_mb=512, node_heap_mb=2048))
+    path = Path(a.env["BASH_ENV"])
+    assert path == tmp_path / "pi" / "agents" / "pi-0001.bash_env"  # outside the writable home
+    assert path.read_text().splitlines()[1:] == ["ulimit -d 524288", "unset NODE_OPTIONS"]
+    assert path.stat().st_mode & 0o777 == 0o444
+    assert a.env["NODE_OPTIONS"] == "--max-old-space-size=2048"
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "-c", "ulimit -d; echo ${NODE_OPTIONS:-none}", stdout=asyncio.subprocess.PIPE,
+        env={"PATH": os.environ["PATH"], **a.env})
+    out = (await proc.communicate())[0].decode()
+    assert out.split() == ["524288", "none"]
+    assert write_bash_env(path, None).read_text().splitlines()[1:] == ["unset NODE_OPTIONS"]
+    assert isolated_env({"BASH_ENV": str(path), "OTHER": "x"}, None)[0] == {"BASH_ENV": str(path)}
+
+    plain = PiAdapter(wd, agent="pi-0002", home=tmp_path / "pi2", pi_bin="/nonexistent/pi")
+    with pytest.raises(OSError):
+        await plain.start(wd, None, pi_spec())
+    assert "BASH_ENV" not in plain.env and "NODE_OPTIONS" not in plain.env

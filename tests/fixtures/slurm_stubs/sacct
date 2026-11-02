@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake sacct: `-j ID -X -n -P -o State,ExitCode`; a job with a `lag` file is not in sacct yet.
+set -eu
+S="$SLURM_STUB_DIR"
+echo "sacct $*" >> "$S/calls"
+job=""; prev=""
+for a in "$@"; do [ "$prev" = "-j" ] && job="$a"; prev="$a"; done
+[ -f "$S/jobs/$job.state" ] && [ ! -f "$S/jobs/$job.lag" ] || exit 0
+echo "$(cat "$S/jobs/$job.state")|$(cat "$S/jobs/$job.exit")"

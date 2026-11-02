@@ -64,6 +64,7 @@ async def test_stuck_on_turn_timeout(tmp_path):
     assert adapter.stops == 1
     interrupted = [e for e in rt.outbox._q if e.type == "turn_interrupted"]
     assert interrupted[0].data["data"]["reason"] == "timeout" and interrupted[0].turn_id == "t-1"
+    assert interrupted[0].data["data"]["tokens"] == {}  # the cut turn's usage, as turn_ended
     # cleared by the next turn
     adapter.hang = False
     await rt.prompt("again")
@@ -243,3 +244,47 @@ async def test_inline_system_prompt_wins_over_file(tmp_path):
     await rt.prompt("hi")
     await until(lambda: adapter.sent == ["hi"])
     assert (rt.workdir / "CLAUDE.md").read_text() == "Keep notes.md."
+
+
+async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
+    """A drain, preemption or unassign that lands while setup() still restores leaves the
+    bucket copy as it is: nothing is pushed for that agent."""
+    from .worker_fakes import GatedStore
+
+    store = GatedStore()
+    pre = "sw/researcher/researcher-0001/"
+    store.files = {pre + "workdir/a.txt": b"A", pre + "workdir/b.txt": b"B"}
+    before = dict(store.files)
+    sync = RecordingSync(store)
+    rt, _ = runtime(tmp_path, sync=sync)
+    setup = asyncio.create_task(rt.setup(restore=True))
+    try:
+        await until(lambda: store.waiting > 0)
+        await rt.sync_now("preempt")
+        await rt.drain()
+        await rt.unassign()
+        assert sync.pushed == [] and store.files == before
+        assert await sync.push(rt) == 0 and store.files == before  # BucketSync refuses too
+    finally:
+        store.gate.set()
+    await setup
+    assert rt.setup_done
+    await rt.sync_now("after")
+    assert sync.pushed == ["researcher-0001", "researcher-0001"]
+    assert store.files[pre + "workdir/a.txt"] == b"A"
+
+
+async def test_turn_events_carry_prompt_ids(tmp_path):
+    """Tracked broadcasts (docs/live.md): the turn a prompt started or joined names it."""
+    adapter = ScriptedAdapter(tmp_path / "home", start_delay=0.05, turn_time=0.3)
+    rt, _ = runtime(tmp_path, adapter=adapter)
+    await rt.setup(restore=False)
+    await rt.prompt("a", prompt_id="b-1")
+    await until(lambda: rt.turn_id == "t-1")
+    await rt.prompt("b", prompt_id="b-2")  # joins the turn in flight
+    await until(lambda: rt.state.turns == 1)
+    evs = {e.type: e.data.get("data", e.data) for e in rt.outbox._q
+           if e.type in ("turn_started", "turn_ended")}
+    assert evs["turn_started"]["prompt_id"] == "b-1"
+    assert evs["turn_ended"]["prompt_id"] == "b-2"
+    assert evs["turn_ended"]["prompt_ids"] == ["b-1", "b-2"]

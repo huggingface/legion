@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,23 +136,68 @@ def read_session(path: Path, agent: str) -> tuple[dict[str, Any], list[Event]]:
     return header, events
 
 
-class Outbox:
-    """Events waiting to be POSTed to the controller. Bounded: drops the oldest when full."""
+OUTBOX_MAX_EVENTS = 50_000
+OUTBOX_MAX_BYTES = 256 * 1024 * 1024  # FLOCK_OUTBOX_MAX_BYTES
 
-    def __init__(self, maxlen: int = 50_000) -> None:
+
+def event_size(ev: Event) -> int:
+    """About what the event costs in the outbox: its entry's JSON length."""
+    try:
+        return len(json.dumps(ev.data, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return 1024
+
+
+class Outbox:
+    """Events waiting to be POSTed to the controller. Bounded by count and by size (a message
+    entry can carry a large tool result, and a controller that falls behind would otherwise let
+    50k of them pile up in the worker): drops the oldest when either bound is reached."""
+
+    def __init__(self, maxlen: int = OUTBOX_MAX_EVENTS, max_bytes: int | None = None) -> None:
         self._q: deque[Event] = deque(maxlen=maxlen)
+        self._sizes: deque[int] = deque()
+        self.bytes = 0
+        if max_bytes is None:
+            max_bytes = int(os.environ.get("FLOCK_OUTBOX_MAX_BYTES") or OUTBOX_MAX_BYTES)
+        self.max_bytes = max_bytes
+        self.dropped = 0
+
+    def _drop_oldest(self) -> None:
+        self._q.popleft()
+        self.bytes -= self._sizes.popleft()
+        self.dropped += 1
 
     def add(self, ev: Event) -> None:
-        if len(self._q) == self._q.maxlen:
-            log.warning("event outbox full; dropping oldest event")
+        size = event_size(ev)
+        if len(self._q) == self._q.maxlen or (self._q and self.bytes + size > self.max_bytes):
+            log.warning("event outbox full (%d events, %d bytes); dropping oldest event",
+                        len(self._q), self.bytes)
+        while self._q and (len(self._q) >= (self._q.maxlen or 0)
+                           or self.bytes + size > self.max_bytes):
+            self._drop_oldest()
         self._q.append(ev)
+        self._sizes.append(size)
+        self.bytes += size
 
     def take(self, n: int = 500) -> list[Event]:
-        return [self._q.popleft() for _ in range(min(n, len(self._q)))]
+        out = []
+        for _ in range(min(n, len(self._q))):
+            out.append(self._q.popleft())
+            self.bytes -= self._sizes.popleft()
+        return out
 
     def put_back(self, events: list[Event]) -> None:
+        """Failed batch back at the front. Bounded too: what does not fit (newer events came
+        in meanwhile) is dropped from the batch's oldest end."""
         for ev in reversed(events):
+            size = event_size(ev)
+            if len(self._q) >= (self._q.maxlen or 0) or (self._q and self.bytes + size > self.max_bytes):
+                self.dropped += 1
+                log.warning("event outbox full; dropping a re-queued event")
+                continue
             self._q.appendleft(ev)
+            self._sizes.appendleft(size)
+            self.bytes += size
 
     def __len__(self) -> int:
         return len(self._q)

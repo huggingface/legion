@@ -42,6 +42,10 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   same type). The adapter writes `/state/pi/models.json` atomically on every start: one provider
   (the flock provider name), `api: openai-completions`, `apiKey: "$<VAR>"`. The key is read from the
   environment at request time; it never lands on disk (`auth.json` stays `{}`).
+  With multiple provider `base_urls`, each agent selects an endpoint by a stable
+  name hash and uses `/state/pi/agents/<name>` as its own config home. This prevents
+  different agents from overwriting each other's endpoint in models.json; session
+  files are still synced relative to the adapter's home for restore.
 - **System prompt**: `AGENTS.md` in the workdir. Pi also reads AGENTS.md/CLAUDE.md from parent
   directories and its agent dir, so `/work`, `/work/agents` and `/state/pi` must not have one.
 - **Prompts**: `prompt` with `streamingBehavior: "steer"`. Idle: starts a run
@@ -79,6 +83,88 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   type's `secrets`, the provider's key variable, the type's `env` and the msgboard identity.
   `PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0` unless set; `PI_CODING_AGENT_DIR`.
   `FLOCK_TOKEN` is always removed, even when listed.
+  With isolation on, the allow-list applies to the inherited worker environment only: the
+  type's `env` keys pass as written, except names ending in `TOKEN` or `SECRET`, `HF_TOKEN`,
+  `FLOCK_TOKEN`, `FLOCK_WORLD_TOKEN` and the worker's `FLOCK_HARNESS_ENV_DROP` (put credentials in
+  `secrets`, which stay allow-listed). The dropped names (never values) are logged and emitted
+  once per agent per spec revision as an `env_dropped {names}` event, and `flock update` warns
+  `types.<T>.env.<KEY>: dropped by pi isolation` for the type's `env` keys that would be dropped
+  (by the same function; names only the worker's `FLOCK_HARNESS_ENV_DROP` lists are not previewed).
+- **Controller calls**: Pi's `flock` CLI (`flock spawn`, `flock prompt`, ...) goes through the
+  worker gateway named in the pin file (`FLOCK_TOOLS_PIN`), not to `FLOCK_URL`: the worker
+  sends it with the agent's token to wherever the controller is now, so a controller move no
+  longer breaks a Pi that started before it (docs/spawn.md, "CLI inside an agent").
+  `FLOCK_URL` and `FLOCK_AGENT_TOKEN` are still in Pi's environment for the direct fallback;
+  they can be dropped once every worker opens the gateway.
+
+## Memory
+
+A Pi process otherwise lives as long as the agent stays on the worker (a loop's next prompt
+arrives before `idle_grace`), so its heap, session and sandbox root grow for the whole job.
+
+- **Recycle**: the runtime restarts Pi at a turn boundary, resuming the same session
+  (`--session-id`): the next prompt goes to a fresh process, the event is
+  `harness_recycled {reason, pss_mb}`, and no turn is interrupted. Reasons: `turns`, `hours`,
+  `pss_mb` from the type's `recycle_after: {turns, hours, pss_mb}` (counted from the process
+  start, checked at each turn end; Pi's PSS is sampled every 15 s), `memory` from the worker's
+  relief ladder (docs/slurm.md "Memory"), and `endpoint`: a live change of the model endpoint,
+  model id or reasoning level (`PiAdapter.update_spec`) applies within one turn.
+- **OOM**: a Pi SIGKILLed mid-turn (exit -9/137: the OOM killer) ends the turn
+  `turn_interrupted {reason: oom_killed}`; a loop retries it as a transient failure (backoff,
+  not counted toward the three failed turns).
+- **Tool limits**: with `tool_memory_mb` (or `node_heap_mb`) set, the adapter writes a
+  read-only file `<pi home>/../<agent>.bash_env` (bound read-only inside the sandbox) and
+  passes it as `BASH_ENV`, which every non-interactive bash (Pi's bash tool) sources:
+  `ulimit -d <tool_memory_mb × 1024>` (RLIMIT_DATA: V8 and Python reserve far more virtual
+  memory than they use, so not `-v`) and `unset NODE_OPTIONS`. Every tool command and its
+  children (git, pytest, node) inherit the limit; Pi does not. `BASH_ENV` passes the isolation
+  allow-list.
+- **Pi's heap**: `node_heap_mb` sets `NODE_OPTIONS=--max-old-space-size=<MB>` for Pi only.
+- **OOM order**: the sandbox writes 800 to `/proc/self/oom_score_adj` before exec (raising
+  needs no privilege; the worker keeps its own score), so the kernel kills a tool or a Pi
+  before the worker. Under `memory.oom.group=1` the kernel kills the whole cgroup anyway.
+- **Per-agent cgroups**: not used. Under cgroup v2 they need the worker to move itself into a
+  leaf cgroup first.
+
+## Workdir
+
+The workdir is mirrored to the bucket and restored whenever the agent moves to another worker,
+so its size is restore time. Regenerable trees are never synced (`node_modules/`, `.venv/`,
+`venv/`, `.cache/`, `.tox/`, `.nox/`, `.gradle/`, `.next/`, `.ipynb_checkpoints/`,
+`__pycache__/`, `*.pyc`, `*.o`, ...; `.git/` and worktrees are). The type's `workdir:` block
+gives the agent feedback instead of refusing anything:
+
+```yaml
+types:
+  coder:
+    workdir:
+      soft_files: 50000   # default; above it (or soft_mb) the agent's next prompt starts with
+      soft_mb: 2048       # "your workspace has 182k files, 3100 MB; largest: snaps/ 140k, ...
+                          # (soft limit 50k files, 2048 MB); delete clones you no longer need",
+                          # at most hourly
+      max_files: null     # default 5 x soft: above it (or max_mb) a `workdir_over_quota
+      max_mb: null        # {files, bytes, top_dirs}` event too, same hourly limit
+      ephemeral: [scratch/]
+      base: false             # true: restore from a tar plus per-file deltas (below)
+      base_interval_s: 3600   # a new base at most this old ...
+      base_delta_files: 5000  # ... or when this many files changed or were deleted since
+```
+
+The workdir still syncs above every limit. `ephemeral` lists directories relative to the
+workdir that are never synced nor restored, and are emptied (or created) at every agent setup,
+so a move or a worker restart starts them empty. Tell the agents in their system prompt, e.g.
+"clone repositories you only need for this session into `scratch/`; it is not saved when you
+move". A loop prompt can show the current size with `{workspace}` (docs/loop.md).
+
+A restore downloads every mirrored file, about 85 files/s per agent in run 4, so a 100k-file
+workdir took around 20 minutes. With `base: true` the worker keeps a tar of the workdir
+(`workdir.base.tar`, with modes, symlinks and mtimes) plus only the files changed since it, and a
+restore downloads the tar, then those files. Periodic syncs refresh the tar hourly or after 5000
+changed files; drain and preempt syncs only send the changes, as before. Agents whose bucket has
+no tar yet restore file by file and get one at their first periodic sync; turning `base` off
+again goes back to the plain mirror at the next sync. The tar is written to local disk before
+upload and downloaded before extraction, so a worker needs free disk for one workdir's size per
+agent being synced or restored. Details: `flock.worker.sync`.
 
 ## Event mapping
 

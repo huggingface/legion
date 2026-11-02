@@ -42,6 +42,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from flock.home import home
 from flock.models import TokenUsage, TypeSpec
 from flock.worker.adapters.base import (
     AdapterEvent,
@@ -61,7 +62,7 @@ _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9]")
 
 
 def claude_home() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or home() / ".claude")
 
 
 def _simple_hash(s: str) -> str:

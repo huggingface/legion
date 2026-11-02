@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake sbatch for tests: records argv, prints a job id, the job starts PENDING.
+set -eu
+S="$SLURM_STUB_DIR"
+mkdir -p "$S/jobs"
+n=$(( $(cat "$S/next" 2>/dev/null || echo 1000) + 1 ))
+echo "$n" > "$S/next"
+printf '%s\n' "$@" > "$S/jobs/$n.argv"
+env > "$S/jobs/$n.environ"
+name=""; comment=""
+prev=""
+for a in "$@"; do
+  case "$prev" in -J) name="$a" ;; esac
+  case "$a" in --comment=*) comment="${a#--comment=}" ;; esac
+  prev="$a"
+done
+echo "$name" > "$S/jobs/$n.name"
+echo "$comment" > "$S/jobs/$n.comment"
+echo PENDING > "$S/jobs/$n.state"
+echo "0:0" > "$S/jobs/$n.exit"
+echo "$n"

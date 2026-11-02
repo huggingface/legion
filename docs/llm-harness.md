@@ -61,8 +61,19 @@ types:
   the summary as the final assistant message (calls after `done` in the same reply are skipped).
   `max_turns` still caps model calls (`reason: max_turns`); with no `max_turns`, a forced turn
   with `done` is capped at 50 calls so a model that never calls `done` cannot loop until
-  `turn_timeout`. `tool_choice: bash` offers only `bash` (one action per prompt) unless
-  `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too.
+  `turn_timeout`. If a reply in such a turn has no tool call at all (a provider dropped it: an
+  empty assistant message, seen with Qwen3.5-9B right after a tool result), the harness adds one
+  user message, "Reply with exactly one tool call.", and asks again. The retry is a model call
+  and counts toward `max_turns`. A second miss in a row ends the turn `completed`, as before.
+  `tool_choice: bash` offers only `bash` (one action per prompt) unless
+  `done_tool: true`. A `{"tool": "done", ...}` reply written as text counts too. With the type's
+  `loop.stop_when: {all_agents_done: true}` (docs/loop.md), `done` is offered whatever the
+  `tool_choice` (unless `done_tool: false`, which `flock apply` refuses with it) and takes
+  `finished?: boolean`: `done(finished: true)` takes the agent out of its loop.
+- `bash` (`llm` only; default on): `false` takes the `bash` tool away, leaving the folder and
+  comms tools (and `done`); the preamble then says the agent has no shell. Usually switched
+  live with `flock grant <target> bash=off` ([docs/live.md](live.md)); refused with
+  `tool_choice: bash`.
 - `response_format` goes in `extra` and is sent as is, nested objects included. A JSON schema
   shaped like `{"tool": "bash", "command": ...}` makes every reply a call through the text
   fallback below; any other schema'd reply is the turn's final answer.
@@ -111,7 +122,7 @@ any steered prompts. It stops when a reply has no tool call and nothing was stee
 | `turn_started` | the loop takes a prompt while idle |
 | `message` (pi format) | each user prompt, assistant reply (`toolCall` blocks, `thinking` from `reasoning_content` or `<think>`) and `toolResult` |
 | `usage` | after every model call, per call (not cumulative); `input` excludes cached prompt tokens, keyed by the model id |
-| `turn_ended completed` | a reply without tool calls and no queued prompt; a `done` call (its summary is emitted first as the final assistant message, `fromDoneTool: true`); or, forced `tool_choice` without `done`, after the forced call's tool ran. `data.num_turns` = model calls |
+| `turn_ended completed` | a reply without tool calls and no queued prompt; a `done` call (its summary is emitted first as the final assistant message, `fromDoneTool: true`); or, forced `tool_choice` without `done`, after the forced call's tool ran. `data.num_turns` = model calls; `data.repeated_calls` when any (see Repeated calls) |
 | `turn_ended error`, `reason: max_turns` / `max_budget_usd` | before a call past a limit (the last tool results are kept; the next prompt continues the transcript) |
 | `turn_ended error`, `reason: api_error` | a 4xx, or retries exhausted |
 | `turn_ended error`, `reason: context_overflow` | a context-length 400 that compaction plus one retry could not fix |
@@ -134,6 +145,20 @@ workdir, stdin closed, stdout and stderr combined, output truncated to `tool_out
 killed on timeout or stop. Its environment is the shared allow-list (`PATH`, `HOME`, locale,
 proxies, ...) plus what the worker passes (the type's `secrets`, `env`, msgboard identity,
 `FLOCK_AGENT*`), minus `FLOCK_TOKEN` and minus the provider key.
+
+### Repeated calls
+
+A small model that is stuck often makes the same call again and again inside one turn. The loop
+counts calls by tool name and arguments, per turn (`done` is not counted):
+
+- the 3rd, 4th and 5th identical call still run, but their result starts with
+  `This is the third identical call in this turn. Are you stuck? Try a different action or call done.`;
+- from the 6th on, the call is not run: its result is that nudge plus
+  `[not run: the same call was made N times already this turn]` (`isError`).
+
+`turn_ended` carries `data.repeated_calls` (calls from the 3rd identical one on) when there were
+any. A command whose effect changes between runs (a counter, a poll) is still "identical"; vary
+it (e.g. add a `sleep`) or end the turn.
 
 Small models often write the call as text instead of `tool_calls`. The loop accepts a reply
 that is only (after stripping a code fence or `<tool_call>` / `<|tool_call_start|>` tags):
@@ -187,6 +212,29 @@ shrink a single long turn: it only dropped whole earlier prompts. Now:
    retried once. If that is impossible or fails again, the turn ends `error` with reason
    **`context_overflow`**. Other 4xx still end with `api_error`.
 5. **Capped tool output.** Tool output is capped at `tool_output_chars` before it is stored.
+
+## Several servers of one model (`base_urls`)
+
+```yaml
+providers:
+  vllm: {type: openai_compat, base_urls: ["https://gpu-1.example.org/v1", "https://gpu-2.example.org/v1"],
+         api_key_env: VLLM_API_KEY, self_hosted: true}
+```
+
+- **Pinning.** Each agent talks to one server, chosen by rendezvous hashing of its name and the
+  URL (the highest `sha256(agent, url)`). It keeps that server while it stays in the list, so its
+  prefix cache stays warm. A hash spreads agents roughly evenly (the share per server varies by a
+  few percent at hundreds of agents); there is no load-based placement.
+- **Live changes** (`flock update`), at each agent's next turn start:
+  - a server added: agents keep the one they have; new agents (a wave) spread over the whole list;
+  - a server removed: its agents re-hash onto the remaining ones; the others stay.
+- **Events.** `turn_ended` carries `endpoint: <host:port>` (and `endpoint_from` on the turn that
+  moved), so a viewer can show the load per server.
+- `base_url` is the one-element form (with `base_urls` it defaults to the first). Preflight
+  probes every server. Only the `llm` harness spreads; other harnesses use `base_url`.
+- The choice lives in the running adapter: an agent restarted on another worker re-hashes,
+  which lands on its hashed server (only agents that had stayed on a server across an add can
+  move then).
 
 ## Preflight
 

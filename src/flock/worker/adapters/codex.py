@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from flock.controller.prices import Price, price_for, type_price_table
+from flock.home import home
 from flock.models import REASONING_EFFORT, TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
 
@@ -38,7 +39,7 @@ log = logging.getLogger(__name__)
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    return Path(os.environ.get("CODEX_HOME") or home() / ".codex")
 
 
 def find_rollout(home: Path, thread_id: str) -> Path | None:

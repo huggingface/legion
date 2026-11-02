@@ -94,12 +94,24 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
                 and e["data"]["message"].get("role") == "toolResult"]
         assert tool and f"hi-from-{name}" in json.dumps(tool[0]), tool  # its own bash ran
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    merged = [e for e in merged if e["agent"]]  # the swarm stream: control-plane events
     assert {e["agent"] for e in merged} == set(AGENTS)
     assert len(merged) == sum(len(_bundle_events(run, a)) for a in AGENTS)
     for log in (run / "logs").glob("hello-writer-w*.log"):
         assert "drained; exiting" in log.read_text()  # drained, not killed
     assert not (tmp_path / ".flock" / "current").exists()
     assert "Authorization" not in (run / "run.json").read_text()
+    # health (docs/health.md): the last snapshot, the hour's rollups and the viewer's run.json
+    ctl = run / "controller"
+    latest = json.loads((ctl / "metrics" / "hello" / "latest.json").read_text())
+    assert latest["body"]["types"]["writer"]["by_state"], latest
+    assert sum(t["input"] for t in latest["body"]["tokens"]["by_type"].values()) > 0
+    turns: dict[str, int] = {}  # summed: the run may straddle an hour
+    for hour in (ctl / "rollups" / "hello").glob("*.jsonl"):
+        for x in map(json.loads, hour.read_text().splitlines()):
+            turns[x["agent"]] = turns.get(x["agent"], 0) + x["turns"]
+    assert turns == dict.fromkeys(AGENTS, 1)
+    assert json.loads((ctl / "run.json").read_text())["status"] == "ended"
 
 
 def test_flock_run_second_terminal_and_ctrl_c(tmp_path, fake_server):
@@ -277,7 +289,8 @@ def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_s
     run = _run_dir(tmp_path)
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
     swarm = [e for e in merged if e["agent"] == ""]
-    kinds = [e["type"] for e in swarm if e["type"] != "loop_tick"]
+    kinds = [e["type"] for e in swarm
+             if e["type"].startswith(("loop_", "final_", "budget_")) and e["type"] != "loop_tick"]
     assert kinds == ["loop_started", "loop_stopped", "final_done"], kinds
     assert [e["type"] for e in merged].count("final_round") == 2  # once per agent, not twice
     stamps = [datetime.fromisoformat(e["ts"]) for e in merged]
@@ -287,6 +300,7 @@ def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_s
     lp = doc["loops"]["writer"]
     assert (lp["state"], lp["reason"], lp["rounds_total"], lp["final_sent"], lp["final_done"]) == (
         "done", "max_rounds", 4, 2, 2), lp
+    assert lp["wakes_total"] == 0  # wake prompts are counted apart from rounds (none here)
     assert doc["budget"] == {"budget_usd": 1.0, "final_reserve_usd": 0.0, "cost_usd": 0.0,
                              "stop": None}
 

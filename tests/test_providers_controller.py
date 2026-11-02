@@ -372,6 +372,21 @@ async def test_preflight_probes_chat_completions_for_llm_types(preflight_client)
     assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
 
 
+def test_api_for_pi_speaks_chat_completions_on_openai_compat():
+    from flock.controller.preflight import api_for, models_to_probe
+    from flock.models import Harness
+    spec = pspec(preflight_providers(), **{h: {"harness": h, "model": "gpu1:Qwen/Small"}
+                                           for h in ("llm", "pi", "codex")})
+    rm = spec.types["pi"].resolved_model
+    assert [api_for(Harness(h), rm) for h in ("llm", "pi", "codex")] == [
+        "chat_completions", "chat_completions", "responses"]
+    probes = {tuple(types): (api, choice) for _, types, api, choice in models_to_probe(spec)}
+    assert probes == {("llm", "pi"): ("chat_completions", None), ("codex",): ("responses", None)}
+    anth = pspec({"anth": {**PROVIDERS["anth"], "base_url": "http://fake"}},
+                 a={"harness": "claude", "model": "anth:claude-x"})
+    assert api_for(Harness.claude, anth.types["a"].resolved_model) == "messages"
+
+
 async def test_preflight_llm_accepts_a_tool_call_written_as_text(preflight_client):
     spec = pspec(preflight_providers(), pixel={"harness": "llm", "model": "gpu1:Qwen/Small"})
     fake, seen = fake_provider(text_call=True)

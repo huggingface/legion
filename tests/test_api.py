@@ -284,6 +284,33 @@ async def test_parked_poll_of_a_finished_job_gets_nothing_from_its_replacement(
     assert r.status_code == 409
 
 
+async def test_heartbeat_telemetry_reaches_the_worker_and_agent_status(client, clock, tick):
+    await apply(client, make_spec(researcher={"replicas": 1}))
+    tick()
+    body = hb_body(clock, W0, [AgentHeartbeat(name="researcher-0000", state="idle",
+                                              rev="r2", start_rev="r1")])
+    body.update(mem={"current_mb": 5000, "limit_mb": 11264, "nonreclaim_mb": 3000,
+                     "slope_mb_h": 120, "eta_limit_s": 82000, "psi_some_avg10": 0.5,
+                     "oom_kills": 0},
+                restore={"agents": 2, "files_done": 10, "files_total": 40,
+                         "started": "2026-10-28T10:00:00Z"},
+                tools={"open_pr": {"n": 3, "err": 1, "refused": 1, "timeouts": 0,
+                                   "sum_s": 4.5, "max_s": 3.0}},
+                knobs_rev="abc")
+    assert (await client.post(f"/workers/{W0}/heartbeat", json=body)).status_code == 200
+    w = (await client.get(f"/workers/{W0}")).json()
+    assert w["mem"]["nonreclaim_mb"] == 3000 and w["mem"]["eta_limit_s"] == 82000
+    assert w["restore"]["files_total"] == 40 and w["tools"]["open_pr"]["refused"] == 1
+    assert w["knobs_rev"] == "abc"
+    assert (await client.get("/workers", params={"swarm": "demo"})).json()[0]["knobs_rev"] == "abc"
+    a = (await client.get("/agents/researcher-0000")).json()
+    assert (a["rev"], a["start_rev"]) == ("r2", "r1")
+    # a worker that sends none of it clears the last values
+    await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, []))
+    w = (await client.get(f"/workers/{W0}")).json()
+    assert w["mem"] is None and w["tools"] is None and w["knobs_rev"] is None
+
+
 async def test_heartbeat_missing_assigned_agents_requeues_their_assign(client, store, clock, tick):
     await apply(client, make_spec(researcher={"replicas": 2}))
     tick()

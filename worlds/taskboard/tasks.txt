@@ -1,0 +1,4 @@
+# Seed tasks: `name: description`, one per line. Read once, when the board is empty.
+greeting: reply to hello, hi and good morning
+farewell: reply to bye and see you
+small talk: keep a conversation about the weather going for three turns

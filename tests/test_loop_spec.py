@@ -43,12 +43,17 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "every": "0s"}, "duration > 0"),
     ({"prompt": "x", "on": ["board.mention"]}, "expected comms.<name>"),
     ({"prompt": "x", "while": {"max_rounds": 0}}, ">= 1"),
-    ({"prompt": "x", "while": {"until": "soon"}}, "bad duration"),
+    ({"prompt": "x", "while": {"until": "soon"}}, "bad until"),
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'claude-opus-5-5'"),
+    ({"prompt": "x", "wake": {"min_gap": "soon"}}, "bad duration"),
+    ({"prompt": "x", "wake": {"window": "0s"}}, "window must be a duration > 0"),
+    ({"prompt": "x", "wake": {"max": -1}}, ">= 0"),
+    ({"prompt": "x", "wake": {"gap": "5s"}}, "Extra inputs"),
+    ({"prompt": "x", "stop_when": {"all_done": True}}, "Extra inputs"),
 ])
 def test_bad_loops_are_rejected(loop, msg):
     with pytest.raises(ValidationError, match=msg):
@@ -179,3 +184,46 @@ def test_documented_examples_load_with_an_unquoted_on_key(heading, tmp_path):
 def test_spec_yaml_keeps_yes_no_on_off_as_strings():
     raw = load_spec_yaml("on: [a]\noff: 1\nyes: no\nflag: true\nOther: False\n")
     assert raw == {"on": ["a"], "off": 1, "yes": "no", "flag": True, "Other": False}
+
+
+def test_wake_and_stop_when_defaults_and_refusal():
+    lp = LoopSpec.model_validate({"prompt": "x"})
+    assert lp.wake.model_dump() == {"min_gap": "30s", "max": 10, "window": None,
+                                    "counts_as_round": False}
+    assert lp.stop_when.all_agents_done is False
+    lp = LoopSpec.model_validate({"prompt": "x", "wake": {"min_gap": "0s", "max": None, "window": "10m",
+                                                          "counts_as_round": True},
+                                  "stop_when": {"all_agents_done": True}})
+    assert (lp.wake.max, lp.wake.window, lp.stop_when.all_agents_done) == (None, "10m", True)
+    # `finished` is an argument of the llm harness's `done` tool
+    s = spec_with({"prompt": "x", "stop_when": {"all_agents_done": True}})
+    assert loop_refusals(s) == [
+        "types.researcher.loop.stop_when.all_agents_done needs harness llm with the done tool"]
+
+
+def test_until_takes_a_duration_or_a_clock_time():
+    from datetime import UTC, datetime
+
+    from flock.models import until_deadline
+    t = datetime(2026, 10, 28, 20, tzinfo=UTC).timestamp()
+    assert until_deadline("2h", 1000.0) == 8200.0
+    for v in ("2026-10-28T20:00Z", "2026-10-28T20:00", "2026-10-28T22:00+02:00"):
+        assert until_deadline(v, 5.0) == t  # naive = UTC; started_at is ignored
+        assert LoopSpec.model_validate({"prompt": "x", "while": {"until": v}}).while_.until == v
+    for bad in ("soon", "2026-13-40", "25"):
+        with pytest.raises(ValidationError):
+            LoopSpec.model_validate({"prompt": "x", "while": {"until": bad}})
+
+
+def test_until_accepts_unquoted_yaml_times():
+    from datetime import UTC, datetime
+
+    import yaml
+
+    from flock.models import until_deadline
+    for text, t in (("2026-10-28T20:00:00Z", datetime(2026, 10, 28, 20, tzinfo=UTC)),
+                    ("2026-10-28", datetime(2026, 10, 28, tzinfo=UTC))):
+        w = yaml.safe_load(f"prompt: x\nwhile: {{until: {text}}}\n")
+        assert not isinstance(w["while"]["until"], str)  # YAML parsed it
+        until = LoopSpec.model_validate(w).while_.until
+        assert until_deadline(until, 5.0) == t.timestamp()

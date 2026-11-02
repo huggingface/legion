@@ -211,6 +211,7 @@ def test_job_timeout_is_planned_restart(store, jobs, clock, tick):
     clock.advance(100)
     actions = tick()
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
+    assert "planned_restart" in [e["type"] for e in store.read_events("_swarm.demo", 0)]
     w = store.get_worker(W0)
     assert w["consecutive_crashes"] == 0 and w["crashes"] == 0
     (cmd,) = queued(store, W0)
@@ -250,6 +251,12 @@ def test_repeated_crashes_back_off_then_crashloop(store, jobs, clock, tick):
         tick()
     assert backoffs == [30, 60, 120, 240, 480]
     assert store.type_health("demo", "researcher") == "crashlooping"
+    evs = store.read_events("_swarm.demo", 0)
+    types = [e["type"] for e in evs]
+    assert types.count("crash") == CRASHLOOP_THRESHOLD and types[-1] == "crashloop"
+    assert "launch" in types and "assign" not in types
+    crash = next(e for e in evs if e["type"] == "crash")
+    assert crash["data"] == {"target": W0, "detail": "ERROR: boom; backoff 30s"}
     n = len(jobs.launches)
     assert n == CRASHLOOP_THRESHOLD  # first launch + 4 relaunches; the 5th crash stops it
     clock.advance(3600)
@@ -413,6 +420,21 @@ def test_store_migrates_workers_table_without_incarnation(tmp_path):
     assert s.get_worker("w")["incarnation"] == "abc"
 
 
+def test_store_migrates_swarms_to_generation_1(tmp_path):
+    import sqlite3
+
+    (tmp_path / "old").mkdir()
+    db = sqlite3.connect(tmp_path / "old" / "controller.db")
+    db.execute("CREATE TABLE swarms (name TEXT PRIMARY KEY, spec TEXT NOT NULL, "
+               "applied_at REAL NOT NULL, removing INTEGER NOT NULL DEFAULT 0)")
+    db.execute("INSERT INTO swarms VALUES ('demo', ?, 0, 0)", [make_spec().model_dump_json()])
+    db.commit()
+    db.close()
+    s = Store(tmp_path / "old")
+    assert s.generation("demo") == 1 and s.spec_history("demo") == []
+    assert s.record_spec(make_spec(), 5, {}, ["x: 1 -> 2"], new=False) == 2
+
+
 class _HubError(Exception):
     """Shaped like huggingface_hub's HfHubHTTPError: carries the response."""
 
@@ -499,3 +521,64 @@ def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, ti
     assert assign.agent == "researcher-0000" and assign.resume_prompt is None
     (held,) = store.prompts_for_worker(W0)
     assert held["agent"] == "researcher-0000" and '"text":"go on"' in held["body"]
+
+
+def test_memory_rotation_drains_smallest_eta_within_budget(store, jobs, settings, clock, tick):
+    from flock.controller.reconcile import swarm_stream
+    from flock.models import DrainCommand, WorkerMem
+
+    store.put_swarm(make_spec(researcher={"replicas": 6, "agents_per_worker": 2}), 0)
+    tick()
+    w2 = "demo-researcher-w0002"
+
+    def hb(wid, i, eta=None, **kw):
+        h = WorkerHeartbeat(worker=wid, deadline=clock() + timedelta(hours=24),
+                            agents=[AgentHeartbeat(name=f"researcher-000{j}", state="idle")
+                                    for j in (2 * i, 2 * i + 1)],
+                            wants_rotation=eta is not None,
+                            mem=WorkerMem(limit_mb=10000, nonreclaim_mb=8000, eta_limit_s=eta), **kw)
+        assert record_heartbeat(store, wid, h, clock())
+
+    def drains(wid):
+        return [c for c in queued(store, wid) if isinstance(c, DrainCommand)]
+
+    hb(W0, 0)
+    hb(W1, 1, eta=7200)
+    hb(w2, 2, eta=3600)
+    tick()  # budget max(1, 10% of 3 slots) = 1: only the nearest to its limit
+    assert drains(w2) == [DrainCommand()] and drains(W1) == []
+    events = [e for e in store.read_events(swarm_stream("demo"), 0) if e["type"] == "memory_rotation"]
+    assert [e["data"] for e in events] == [{"worker": w2, "nonreclaim_mb": 8000.0,
+                                            "eta_limit_s": 3600.0}]
+    tick()  # w2 is draining: the budget is used up
+    assert drains(W1) == []
+
+    hb(w2, 2, draining=True)  # its drain ends in a planned restart
+    jobs.set_stage(jobs.job_for(w2), "COMPLETED")
+    clock.advance(20)
+    for wid, i in ((W0, 0), (W1, 1)):
+        hb(wid, i, eta=7200 if wid == W1 else None)
+    assert "planned_restart" in kinds(tick())
+    tick()
+    assert drains(W1) == []  # w2's relaunch (restoring) still uses the budget
+    settings.max_rotating = 2
+    tick()
+    assert drains(W1) == [DrainCommand()]
+
+
+def test_a_stale_heartbeat_does_not_undo_a_rotation_drain(store, jobs, settings, clock, tick):
+    from flock.controller.reconcile import swarm_stream
+    from flock.models import DrainCommand, WorkerMem
+
+    store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 2}), 0)
+    tick()
+    hb = WorkerHeartbeat(worker=W0, deadline=clock() + timedelta(hours=24), wants_rotation=True,
+                         agents=[AgentHeartbeat(name=f"researcher-000{j}", state="idle") for j in (0, 1)],
+                         mem=WorkerMem(limit_mb=10000, nonreclaim_mb=8000, eta_limit_s=600))
+    assert record_heartbeat(store, W0, hb, clock())
+    tick()
+    assert record_heartbeat(store, W0, hb, clock())  # sent before the worker polled the drain
+    tick()
+    drains = [c for c in queued(store, W0) if isinstance(c, DrainCommand)]
+    rotations = [e for e in store.read_events(swarm_stream("demo"), 0) if e["type"] == "memory_rotation"]
+    assert len(drains) == 1 and len(rotations) == 1

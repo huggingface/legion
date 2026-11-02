@@ -442,8 +442,9 @@ async def test_stop_mid_tool_interrupts_and_kills_the_tool(tmp_path, fake_server
     await a.stop()
     evs = [e async for e in a.events()]
     assert [e.status for e in evs if e.kind == "turn_ended"] == ["interrupted"] and evs[-1].kind == "exited"
-    await asyncio.sleep(0.2)
-    assert not Path(f"/proc/{pid}").exists() or "Z" in Path(f"/proc/{pid}/stat").read_text().split()[2]
+    from flock.controller.local import _alive
+
+    await until(lambda: not _alive(pid), timeout=10)  # killed; a loaded host reaps it late
     lines = [json.loads(x) for x in a.session_path(sid).read_text().splitlines()]
     assert lines[-1]["role"] == "tool" and "interrupted" in lines[-1]["content"]  # repaired
     with pytest.raises(RuntimeError):
@@ -644,6 +645,13 @@ STEP = ('n=$(( $(cat c 2>/dev/null || echo 0) + 1 )); echo $n > c; '
         'for i in range(30)]}))"; [ $n -ge 12 ] && echo DONE-NOW; true')
 
 
+def no_repeat_guard(monkeypatch) -> None:
+    import flock.worker.adapters.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "REPEAT_NUDGE_AT", 1000)
+    monkeypatch.setattr(llm_mod, "REPEAT_SKIP_AFTER", 1000)
+
+
 def test_compaction_drops_old_steps_inside_one_turn(tmp_path):
     def call(i):
         return {"role": "assistant", "content": None, "tool_calls": [
@@ -669,6 +677,7 @@ def tokens_sent(srv) -> list[int]:
 async def test_growing_turn_is_compacted_before_the_bound(tmp_path, fake_server, monkeypatch):
     """Run 3: ~600-char JSON tool results at ~2 chars/token; a chars/4 estimate let a 3000-token
     budget reach 7.9k and overflow 8192. Projection from the server's count keeps it bounded."""
+    no_repeat_guard(monkeypatch)  # STEP is one stateful command repeated on purpose
     a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", context_tokens=2500,
                        max_turns=20)
     await a.start(wd, None, spec, env={KEY_ENV: "k"})
@@ -685,6 +694,7 @@ async def test_growing_turn_is_compacted_before_the_bound(tmp_path, fake_server,
 
 
 async def test_context_error_compacts_and_retries_once(tmp_path, fake_server, monkeypatch):
+    no_repeat_guard(monkeypatch)  # STEP is one stateful command repeated on purpose
     a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=30,
                        context_tokens=100_000)  # no proactive compaction: the server is the bound
     await a.start(wd, None, spec, env={KEY_ENV: "k"})
@@ -726,3 +736,106 @@ async def test_calibration_and_settings(tmp_path, fake_server, monkeypatch):
                                   "types": {"a": {"harness": "codex", "model": "m", "chars_per_token": 2}}})
     with pytest.raises(ValueError, match="tool_output_chars must be >= 200"):
         llm_spec(tool_output_chars=10)
+
+
+async def test_forced_empty_reply_gets_one_nudge(tmp_path, fake_server, monkeypatch):
+    """A provider that drops the tool call (an empty assistant message) under a forcing
+    tool_choice with `done`: one user nudge, counted as a model call; it then calls done."""
+    from flock.worker.adapters.llm import NUDGE
+
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=12)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("empty! please")
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 2  # empty + done
+    users = [e.message for e in evs if e.kind == "message" and e.message["role"] == "user"]
+    assert users[-1]["content"] == [{"type": "text", "text": NUDGE}]
+    final = [e.message for e in evs if e.kind == "message"][-1]
+    assert final["content"] == [{"type": "text", "text": "nudged"}]
+    # a script that drops the call after a tool result (what Qwen3.5-9B did after a verdict)
+    await a.send('script: [["bash", {"command": "echo v"}], ["EMPTY", {}]]')
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 3  # bash, empty, done
+    # still empty after the nudge: the turn ends as before (no second nudge)
+    await a.send("empty-always! now")
+    evs = await turn(a)
+    assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 2
+    assert sum(e.kind == "message" and e.message["role"] == "user"
+               and e.message["content"][0]["text"] == NUDGE for e in evs) == 1
+    await a.stop()
+
+
+async def test_forced_empty_reply_nudge_counts_toward_max_turns(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required", max_turns=1)
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("empty! please")
+    end = (await turn(a))[-1]
+    assert end.status == "error" and end.data["reason"] == "max_turns" and end.data["num_turns"] == 1
+    await a.stop()
+
+
+async def test_repeated_identical_calls_are_nudged_then_not_run(tmp_path, fake_server, monkeypatch):
+    """A model stuck repeating one call: from the third identical call in a turn its result starts
+    with a nudge; after the fifth the call is not run. `repeated_calls` counts them."""
+    from flock.worker.adapters.llm import REPEAT_NUDGE
+
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required")
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo x >> rep.txt done after 7")  # the same bash call 7 times, then done
+    evs = await turn(a)
+    end = evs[-1]
+    assert end.status == "completed" and end.data["num_turns"] == 8
+    assert end.data["repeated_calls"] == 5  # calls 3 to 7
+    results = [e.message for e in evs if e.kind == "message" and e.message["role"] == "toolResult"]
+    texts = [r["content"][0]["text"] for r in results[:7]]
+    assert [t.startswith(REPEAT_NUDGE) for t in texts] == [False, False, True, True, True, True, True]
+    assert texts[2] == f"{REPEAT_NUDGE}\n[exit code 0]" and not results[2]["isError"]
+    assert "[not run: the same call was made 5 times already" in texts[5] and results[5]["isError"]
+    assert (wd / "rep.txt").read_text().count("x") == 5  # the 6th and 7th were not run
+    sent = requests_seen(fake_server)[3]["body"]["messages"][-1]
+    assert sent["role"] == "tool" and sent["content"].startswith(REPEAT_NUDGE)
+    await a.send("bash: echo y >> rep.txt done after 2")  # a new turn counts afresh
+    end = (await turn(a))[-1]
+    assert end.status == "completed" and "repeated_calls" not in end.data
+    await a.stop()
+
+
+async def test_two_identical_calls_are_not_nudged(tmp_path, fake_server, monkeypatch):
+    a, wd, spec = make(tmp_path, fake_server, monkeypatch, tool_choice="required")
+    await a.start(wd, None, spec, env={KEY_ENV: "k"})
+    await a.send("bash: echo x >> r.txt\ndone after 2")
+    end = (await turn(a))[-1]
+    assert "repeated_calls" not in end.data
+    await a.send("bash: echo y >> r.txt\ndone after 3")  # a third identical call: nudged
+    evs = await turn(a)
+    assert evs[-1].data["repeated_calls"] == 1
+    assert (wd / "r.txt").read_text() == "x\nx\ny\ny\ny\n"
+    await a.stop()
+
+
+async def test_loop_turn_at_max_turns_sets_an_unfinished_summary(tmp_path, fake_server, monkeypatch):
+    """The worker loop with the llm harness: a round that stops at max_turns (no `done`) makes
+    the next round's `{last_summary}` say so instead of repeating the previous summary."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from flock.models import LoopMeta, LoopStartCommand
+
+    monkeypatch.setenv(KEY_ENV, "k")
+    spec = llm_spec(fake_server.url, tool_choice="required", max_turns=2)
+    a = LLMAdapter(tmp_path / "work" / "llm-0001", agent="llm-0001", home=tmp_path / "llm")
+    rt = AgentRuntime("llm-0001", "llm", spec, swarm="sw", work_root=tmp_path / "work",
+                      adapter=a, outbox=Outbox())
+    await rt.setup(restore=False)
+    rt.state.last_summary = "stale summary from hours ago"
+    rt.start_loop(LoopStartCommand(
+        agent="llm-0001", text="bash: echo r{round}\nlast: {last_summary}", max_rounds=2,
+        run=uuid.uuid4().hex[:12],
+        meta=LoopMeta(kind="loop", type="llm", round=0, why="turn_end", started_at=datetime.now(UTC))))
+    await until(lambda: rt.state.turns == 2, timeout=20)
+    await rt.stop()
+    prompts = [m["content"] for r in requests_seen(fake_server) for m in r["body"]["messages"]
+               if m["role"] == "user" and m["content"].startswith("bash: echo r")]
+    assert prompts[0] == "bash: echo r1\nlast: stale summary from hours ago"
+    assert prompts[-1] == ("bash: echo r2\nlast: previous turn ended (max_turns) after 2 tool call(s) "
+                           "without finishing (last calls: bash, bash)")

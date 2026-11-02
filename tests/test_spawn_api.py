@@ -40,7 +40,7 @@ def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
 
 
 async def apply(client, spec: SwarmSpec) -> None:
-    r = await client.put(f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    r = await client.put(f"/swarms/{spec.swarm}", params={"replicas": "spec"}, json=spec.model_dump(mode="json"))
     assert r.status_code == 200, r.text
 
 
@@ -466,3 +466,52 @@ async def test_apply_refuses_a_cap_below_workers_in_use(client, store, tick):
     await client.delete(f"/agents/{kids[2]}")
     r = await client.put("/swarms/demo", json=with_extra(1).model_dump(mode="json"))
     assert r.status_code == 200, r.text
+
+
+async def test_ephemeral_children_are_removed_after_their_session(client, store, clock, tick):
+    """docs/spawn.md "Ephemeral types": a heartbeat that reports an ephemeral child idle (or
+    stuck: a turn that hit max_turns, its budget or an error ends the same way) after a turn,
+    with nothing pending, removes it: unassign to its worker, child_removed (reason ephemeral)
+    on the parent, its cost kept, its place under the parent's cap freed; the next spawn is a
+    new agent."""
+    from datetime import timedelta
+
+    from flock.models import AgentHeartbeat, UnassignCommand, WorkerHeartbeat
+
+    spec = spawn_spec(spawn={"leader": {"types": ["analyst"], "max": 1}},
+                      analyst={"ephemeral": True})
+    await apply(client, spec)
+    tick()
+    first = (await spawn(client, LEADER, "analyst", prompt="interview x")).json()["name"]
+    assert (await reason(await spawn(client, LEADER, "analyst"))) == "max_children"
+    tick()
+    wid = store.get_agent(first)["worker"]
+
+    async def hb(**a):
+        body = WorkerHeartbeat(worker=wid, deadline=clock() + timedelta(hours=1),
+                               agents=[AgentHeartbeat(name=first, **a)])
+        r = await client.post(f"/workers/{wid}/heartbeat", json=body.model_dump(mode="json"))
+        assert r.status_code == 200, r.text
+
+    await hb(state="idle")  # placed, prompt still pending, no turn yet: kept
+    got = (await client.get(f"/workers/{wid}/commands", params={"wait": 0})).json()
+    assert any(c["kind"] == "prompt" for c in got["commands"])  # delivered: none pending
+    await hb(state="working", turns=0)
+    await hb(state="working", turns=1)  # a second turn running: kept
+    assert store.get_agent(first) is not None
+    store.update_agent(first, cost=0.25)
+    await hb(state="stuck", turns=1)  # its turn ended (here: killed at turn_timeout)
+    assert store.get_agent(first) is None
+    cmds = [CMD.validate_json(c["body"]) for c in store.commands_for(wid)]
+    assert UnassignCommand(agent=first) in cmds
+    evs = (await client.get(f"/agents/{LEADER}/events")).json()["events"]
+    assert evs[-1]["type"] == "child_removed"
+    assert evs[-1]["data"] == {"child": first, "type": "analyst", "reason": "ephemeral"}
+    assert store.get_swarm("demo")["removed_cost"] == pytest.approx(0.25)
+    second = await spawn(client, LEADER, "analyst")  # the cap is free again: a new agent
+    assert second.status_code == 201 and second.json()["name"] != first
+
+
+def test_ephemeral_is_for_spawned_types_only():
+    with pytest.raises(ValueError, match="ephemeral: true is for spawned agents only"):
+        spawn_spec(analyst={"ephemeral": True, "replicas": 1})

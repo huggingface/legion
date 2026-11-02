@@ -3,7 +3,8 @@
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
 FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
 a live `flock run` in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
-agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; see
+agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; when the
+agent's pin file (FLOCK_TOOLS_PIN) names a worker gateway, calls go through it instead. See
 docs/spawn.md for what an agent may call.
 """
 
@@ -12,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
+import subprocess
 import time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -19,9 +22,11 @@ from typing import Annotated, Any
 
 import httpx
 import typer
+import yaml
 from pydantic import ValidationError
 
-from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, load_spec_yaml, loop_refusals
+from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, loop_refusals
+from flock.specrender import at_ref, render
 
 app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
 
@@ -127,7 +132,50 @@ def _request(c: httpx.Client, method: str, path: str, **kw) -> httpx.Response:
     raise AssertionError("unreachable")
 
 
+def _gateway(env=os.environ) -> tuple[str, str, str] | None:
+    """(address, key, agent) of the worker gateway named in the agent's pin file
+    (FLOCK_TOOLS_PIN), or None outside an agent or on a worker without one."""
+    from flock.tools.toolset import PIN_ENV, read_pin
+
+    if not (pin := env.get(PIN_ENV)):
+        return None
+    try:
+        ts, agent, _ = read_pin(pin)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return (ts.gateway, ts.gateway_key or "", agent) if ts.gateway else None
+
+
+def _call_gateway(gw: tuple[str, str, str], method: str, path: str, timeout: float | None,
+                  **kw) -> Any:
+    """One controller call through the worker (`controller:request`): the worker sends it with
+    this agent's token to wherever the controller is now, retrying there."""
+    import asyncio
+
+    from flock.tools.toolset import gateway_call
+
+    address, key, agent = gw
+    args = {"method": method, "path": path, "params": kw.get("params"), "json": kw.get("json")}
+    r = asyncio.run(gateway_call(address, key, agent, "controller:request", args,
+                                 timeout=(timeout or 60) + 120))
+    try:
+        out = json.loads(r.output)
+    except ValueError:
+        out = {}
+    if not isinstance(out, dict) or "status" not in out:
+        err = out.get("error") if isinstance(out, dict) else None
+        typer.echo(f"error: {err or r.output}", err=True)
+        raise typer.Exit(1)
+    if out["status"] >= 400:
+        body = out["body"] if isinstance(out["body"], str) else json.dumps(out["body"])
+        typer.echo(f"error {out['status']}: {body}", err=True)
+        raise typer.Exit(1)
+    return out["body"]
+
+
 def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
+    if (gw := _gateway()) is not None:  # inside an agent: through its worker (docs/spawn.md)
+        return _call_gateway(gw, method, path, timeout, **kw)
     if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
         kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
     with client() as c:
@@ -139,16 +187,42 @@ def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
 
 
 def _as_agent() -> bool:
-    """Running inside an agent with its scoped token: names are agents, never swarms."""
-    return bool(os.environ.get("FLOCK_AGENT_TOKEN"))
+    """Running inside an agent (its scoped token or its worker's gateway): names are agents,
+    never swarms."""
+    return bool(os.environ.get("FLOCK_AGENT_TOKEN") or _gateway())
 
 
 def _is_swarm(name: str) -> bool:
-    """Only a name shaped like an agent's (`...-NNNN`) costs a lookup."""
-    if not AGENT_NAME_RE.match(name):
+    """A swarm, unless it names an agent: a numeric agent name (`...-NNNN`) that is not a
+    swarm, or any other name (`naming: words`, e.g. `amber-otter`) that is an agent and not a
+    swarm. A name without a hyphen is no agent's: no lookup."""
+    if "-" not in name:
         return True
     with client() as c:
-        return _request(c, "GET", f"/swarms/{name}").status_code == 200
+        if _request(c, "GET", f"/swarms/{name}").status_code == 200:
+            return True
+        if AGENT_NAME_RE.match(name):
+            return False
+        return _request(c, "GET", f"/agents/{name}").status_code != 200
+
+
+def source_header(spec_file: str | Path | None) -> dict[str, str]:
+    """`X-Flock-Source` for an apply (`flock history`): who applied it and, when the spec's
+    folder is in a git repo, its commit, branch and whether the folder has local changes."""
+    src: dict[str, Any] = {"by": os.environ.get("USER")}
+    if spec_file is not None:
+        d = str(Path(spec_file).resolve().parent)
+        try:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=False,
+                                            capture_output=True, text=True, timeout=10)
+            head = git("rev-parse", "HEAD")
+            if head.returncode == 0:
+                src["git_sha"] = head.stdout.strip()
+                src["ref"] = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+                src["dirty"] = bool(git("status", "--porcelain", "--", ".").stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass  # no git: `by` only
+    return {"X-Flock-Source": json.dumps(src)}
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -166,6 +240,7 @@ def _print_status(st: dict) -> None:
     typer.echo(
         f"{st['swarm']}  agents={st['agents_total']} workers={st['workers_total']} "
         f"pending={st['pending_prompts']} cost=${st['cost_usd']:.2f}"
+        + (f" gen {st['generation']}" if st.get("generation") else "")
     )
     rows = [
         [
@@ -179,6 +254,11 @@ def _print_status(st: dict) -> None:
         for t in st["types"].values()
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
+    held = st.get("held") or {}
+    for kind in ("types", "agents"):
+        for name, h in (held.get(kind) or {}).items():
+            typer.echo(f"HELD {kind[:-1]} {name}: {h['reason'] or '-'} (by {h['by']}"
+                       f"{', auto' if h.get('auto') else ''}, since {h['since'][:19]}Z)")
     for t in st["types"].values():
         if t.get("loop"):
             typer.echo(_loop_line(t["loop"]))
@@ -213,6 +293,15 @@ def _loop_line(lp: dict) -> str:
     return line
 
 
+class SpecError(Exception):
+    """A spec that cannot be applied: the lines say why (printed to stderr by the CLI, shown in
+    the `flock run --watch` view)."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__("; ".join(lines))
+        self.lines = lines
+
+
 def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
     """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
     name = getattr(holder, field)
@@ -221,30 +310,52 @@ def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
     src = Path(name)
     src = src if src.is_absolute() else base / src
     if not src.is_file():
-        typer.echo(f"{where}: {field} {src} not found", err=True)
-        raise typer.Exit(1)
+        raise SpecError([f"{where}: {field} {src} not found"])
     setattr(holder, target, src.read_text(encoding="utf-8"))
 
 
-def load_spec(spec_file: str) -> SwarmSpec:
-    """Read a spec and inline each type's system_prompt_file and loop prompt files (relative
-    to the spec file)."""
+def load_spec(spec_file: str, env_files=(), overlays=()) -> SwarmSpec:
+    """`read_spec`, exiting 1 with the reasons on stderr."""
+    try:
+        return read_spec(spec_file, env_files, overlays)
+    except SpecError as e:
+        for line in e.lines:
+            typer.echo(line, err=True)
+        raise typer.Exit(1) from None
+
+
+def read_spec(spec_file: str, env_files=(), overlays=()) -> SwarmSpec:
+    """Read a spec (its --overlay files merged, then ${VAR} from --env files and the
+    environment substituted: flock.specrender) and inline each type's system_prompt_file (plus
+    system_prompt_append_file) and loop prompt files, and the comms kickoff and protocol files
+    (relative to the spec file). Raises SpecError."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(load_spec_yaml(path.read_text(encoding="utf-8")))
+        spec = SwarmSpec.model_validate(render(path, env_files, overlays))
     except ValidationError as e:
+        lines = []
         for err in e.errors():
             where = ".".join(str(x) for x in err["loc"])
-            typer.echo(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}", err=True)
-        raise typer.Exit(1) from None
+            lines.append(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}")
+        raise SpecError(lines) from None
+    except ValueError as e:  # an unset ${VAR}, a bad --env line
+        raise SpecError([f"{spec_file}: {e}"]) from None
+    except (OSError, yaml.YAMLError) as e:  # unreadable file, broken YAML (a save in progress)
+        raise SpecError([f"{spec_file}: {' '.join(str(e).split())}"]) from None
     for name, ts in spec.types.items():
         if ts.system_prompt_file and ts.system_prompt is None:
             src = Path(ts.system_prompt_file)
             src = src if src.is_absolute() else path.parent / src
             if not src.is_file():
-                typer.echo(f"type {name}: system_prompt_file {src} not found", err=True)
-                raise typer.Exit(1)
+                raise SpecError([f"type {name}: system_prompt_file {src} not found"])
             ts.system_prompt = src.read_text(encoding="utf-8")
+        if ts.system_prompt_append_file:
+            src = Path(ts.system_prompt_append_file)
+            src = src if src.is_absolute() else path.parent / src
+            if not src.is_file():
+                raise SpecError([f"type {name}: system_prompt_append_file {src} not found"])
+            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n"
+                                + src.read_text(encoding="utf-8")).lstrip("\n")
         if ts.loop is not None:
             _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
             if ts.loop.final is not None:
@@ -255,13 +366,19 @@ def load_spec(spec_file: str) -> SwarmSpec:
             src = Path(rel)
             src = src if src.is_absolute() else path.parent / src
             if not src.is_file():
-                typer.echo(f"comms.{what}: {src} not found", err=True)
-                raise typer.Exit(1)
+                raise SpecError([f"comms.{what}: {src} not found"])
             return src.read_text(encoding="utf-8")
 
         if c.kickoff_file:
             c.kickoff = read(c.kickoff_file, "kickoff_file")
         c.protocols_text = [read(f, "protocols") for f in c.protocols]
+    w = spec.world
+    if w is not None and w.command is not None:  # the world runs in its dir (docs/world.md)
+        d = Path(w.dir or ".")
+        w.dir = str((d if d.is_absolute() else path.parent / d).resolve())
+        if not Path(w.dir).is_dir():
+            typer.echo(f"world.dir: {w.dir} not found", err=True)
+            raise typer.Exit(1)
     return spec
 
 
@@ -282,16 +399,23 @@ def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
     return None
 
 
+def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
+    """(refusals, warnings): loop settings this version cannot run, and `on:` sources that
+    have no feeder."""
+    refused = [f"refused: {r}" for r in loop_refusals(spec)]
+    warnings = [f"warning: type {name}: loop.on {src}: {why}"
+                for name, ts in spec.types.items() for src in (ts.loop.on if ts.loop else [])
+                if (why := _unfed(spec, ts, src))]
+    return refused, warnings
+
+
 def _check_loops(spec: SwarmSpec) -> None:
     """Refuse loop settings this version cannot run; say which `on:` sources have no feeder."""
-    if refused := loop_refusals(spec):
-        for r in refused:
-            typer.echo(f"refused: {r}", err=True)
+    refused, warnings = loop_problems(spec)
+    for line in refused or warnings:
+        typer.echo(line, err=True)
+    if refused:
         raise typer.Exit(1)
-    for name, ts in spec.types.items():
-        for src in ts.loop.on if ts.loop else []:
-            if why := _unfed(spec, ts, src):
-                typer.echo(f"warning: type {name}: loop.on {src}: {why}", err=True)
 
 
 def _provider_backed(spec: SwarmSpec) -> bool:
@@ -303,11 +427,21 @@ def _provider_backed(spec: SwarmSpec) -> bool:
 EXTRA_NOT_SENT = frozenset({"claude", "codex", "pi"})
 
 
+def extra_warnings(spec: SwarmSpec) -> list[str]:
+    from flock.worker.adapters.pi import env_dropped
+
+    return [f"warning: types.{name}.env.{k}: dropped by pi isolation (use `secrets`)"
+            for name, ts in spec.types.items() if ts.harness.value == "pi"
+            for k in env_dropped(ts.env, ts.resolved_model and ts.resolved_model.provider.api_key_env)] + [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
+            f"{ts.harness.value} harness (docs/open-models.md)"
+            for name, ts in spec.types.items()
+            if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
+            and ts.resolved_model.extra]
+
+
 def _warn_extra(spec: SwarmSpec) -> None:
-    for name, ts in spec.types.items():
-        if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None and ts.resolved_model.extra:
-            typer.echo(f"warning: type {name}: `extra` is kept in the spec but not sent by the "
-                       f"{ts.harness.value} harness (docs/open-models.md)", err=True)
+    for line in extra_warnings(spec):
+        typer.echo(line, err=True)
 
 
 def _warn_unverified(models: list[str], why: str) -> None:
@@ -348,6 +482,27 @@ def _preflight(spec: SwarmSpec, strict: bool) -> bool:
     return bool(rep["ok"]) and not (strict and unverified)
 
 
+ENV_OPT = typer.Option(None, "--env", help="NAME=value file for ${VAR} in the spec (repeatable; "
+                       "later files win, the process environment wins over all).")
+OVERLAY_OPT = typer.Option(None, "--overlay", help="YAML deep-merged over the spec (repeatable): "
+                           "mappings merge, lists replace, null deletes a key.")
+REF_OPT = typer.Option(None, "--ref", metavar="GIT_REF[:PATH]",
+                       help="Apply the folder as committed at GIT_REF (git archive); PATH is "
+                            "repo-relative, default the given folder's own path.")
+
+
+def _at_ref(spec_file: str, ref: str | None, overlays: list[str] | None):
+    """(spec_file, overlays, X-Flock-Source header or None) for --ref; exit 1 on a bad ref."""
+    if ref is None:
+        return spec_file, overlays or [], None
+    try:
+        spec, overlays, header = at_ref(spec_file, ref, overlays or [])
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    return str(spec), overlays, header
+
+
 @app.command()
 def apply(
     spec_file: str,
@@ -356,12 +511,16 @@ def apply(
         help="Probe provider-backed models before applying (default: on when the spec has any)."),
     strict: bool = typer.Option(
         False, "--strict", help="Treat models that were not probed (unverified) as failures."),
+    env_files: list[str] | None = ENV_OPT,
+    overlays: list[str] | None = OVERLAY_OPT,
+    ref: str | None = REF_OPT,
 ) -> None:
     """Apply a swarm spec (YAML). Refuses when a provider-backed model fails preflight; a model
     that could not be probed is reported as unverified and applied anyway unless --strict.
     A tools folder (docs/tools.md) is checked, uploaded and named in the spec by its hash;
     re-applying with a changed folder switches running agents at their next turn."""
-    spec = load_spec(spec_file)
+    spec_file, overlays, ref_header = _at_ref(spec_file, ref, overlays)
+    spec = load_spec(spec_file, env_files or (), overlays)
     _check_loops(spec)
     _warn_extra(spec)
     bundle = _tools_bundle(spec, spec_file)
@@ -384,8 +543,230 @@ def apply(
         spec.tools_version = up["version"]
         names = ", ".join(up["tools"]) or "none"
         typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
-    st = _call("PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    st = _call("PUT", f"/swarms/{spec.swarm}", params={"replicas": "spec"},
+               json=spec.model_dump(mode="json"), headers=ref_header or source_header(spec_file))
     _print_status(st)
+
+
+def _detail(r: httpx.Response) -> str:
+    try:
+        d = r.json().get("detail")
+    except ValueError:
+        d = None
+    return d if isinstance(d, str) else r.text
+
+
+def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = None,
+                 strict: bool = False, replicas: str = "keep", check: bool = False,
+                 env_files=(), overlays=(), source: dict[str, str] | None = None) -> list[str]:
+    """Re-read the experiment folder and apply it to the running swarm (docs/live.md): the
+    spec, its prompt files and the tools folder, as `flock apply` reads them. Returns the
+    lines to show (warnings, then what changed, or "no changes"); raises SpecError with the
+    refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
+    by default only when the spec names a provider-backed model the running one does not.
+    `replicas="keep"` keeps the live counts of existing types; `check` runs the controller's
+    validation (dry run) and stores nothing. `env_files`/`overlays` as in `read_spec`; `source`
+    replaces the `X-Flock-Source` header (--ref)."""
+    from flock.live import diff_specs, keep_replicas, world_tool_changes
+    from flock.tools.loader import ToolsError
+    from flock.tools.spec import prepare
+
+    spec = read_spec(spec_file, env_files, overlays)
+    refused, warnings = loop_problems(spec)
+    if refused:
+        raise SpecError(refused)
+    warnings += extra_warnings(spec)
+    try:
+        bundle = prepare(spec, spec_file)
+    except ToolsError as e:
+        raise SpecError([f"{spec_file}: tools: {e}"]) from None
+    r = _request(c, "GET", f"/swarms/{spec.swarm}")
+    if r.status_code == 404:
+        raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
+                          "with `flock run` (compute: local) or `flock apply`")])
+    if r.status_code >= 400:
+        raise SpecError([f"error {r.status_code}: {_detail(r)}"])
+    old = SwarmSpec.model_validate(r.json()["spec"])
+    if preflight is None:
+        preflight = bool(set(_unprobed(spec)) - set(_unprobed(old)))
+    if preflight:
+        r = _request(c, "POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
+                     extensions={"timeout": httpx.Timeout(300).as_dict()})
+        if r.status_code >= 400:
+            raise SpecError([f"preflight error {r.status_code}: {_detail(r)}"])
+        rep = r.json()
+        bad = [f"preflight {x['model']}: {'unverified' if x.get('unverified') else 'FAIL'}"
+               + (f" ({x['error']})" if x.get("error") else "")
+               for x in rep["results"] if not x["ok"] and (strict or not x.get("unverified"))]
+        if bad:
+            raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
+                                    "--skip-preflight)")])
+    spec.tools_version = None
+    names: tuple[list[str], list[str]] | None = None
+    if bundle is not None:
+        r = _request(c, "POST", f"/swarms/{spec.swarm}/tools", content=bundle.data,
+                     headers={"content-type": "application/gzip"},
+                     extensions={"timeout": httpx.Timeout(120).as_dict()})
+        if r.status_code >= 400:
+            raise SpecError([f"refused: tools upload ({r.status_code}): {_detail(r)}"])
+        spec.tools_version = r.json()["version"]
+        if spec.tools_version != old.tools_version:
+            listed = _request(c, "GET", f"/swarms/{spec.swarm}/tools").json().get("bundles", [])
+            before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
+            names = (before, r.json()["tools"])
+    kept = keep_replicas(old, spec) if replicas == "keep" else []
+    lines = diff_specs(old, spec, names)
+    if not lines and not check:
+        return [*warnings, *kept, "no changes"]
+    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
+                 params={"replicas": "spec", **({"dry_run": 1} if check else {})},
+                 headers=source or source_header(spec_file))
+    if r.status_code >= 400:
+        raise SpecError([f"refused: {_detail(r)}"])
+    if check:  # the stored spec is untouched: the new manifest is in the reply
+        new = SwarmSpec.model_validate(r.json()["spec"])
+    else:
+        new = SwarmSpec.model_validate(_request(c, "GET", f"/swarms/{spec.swarm}").json()["spec"])
+    wt = world_tool_changes(old, new)
+    return [*warnings, *kept, *lines, *([wt] if wt else []),
+            *(["check ok: nothing was applied"] if check else [])]
+
+
+@app.command()
+def update(
+    target: str = typer.Argument(..., metavar="FOLDER_OR_SPEC"),
+    preflight: bool = typer.Option(
+        None, "--preflight/--skip-preflight",
+        help="Probe provider-backed models first (default: only when the update adds one)."),
+    strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
+    replicas: str = typer.Option(
+        "keep", "--replicas", help="`keep` (default): the running replica counts; `spec`: the file's."),
+    check: bool = typer.Option(
+        False, "--check", help="Run every check and print the diff; apply nothing (exit 1 if refused)."),
+    env_files: list[str] | None = ENV_OPT,
+    overlays: list[str] | None = OVERLAY_OPT,
+    ref: str | None = REF_OPT,
+) -> None:
+    """Re-read an experiment folder (spec.yaml, prompts, tools/) and apply what changed to the
+    running swarm (docs/live.md): new tools version, prompts, loop and comms settings, limits,
+    replicas. Running agents take tools, prompts and grants at their next turn boundary.
+    Prints what changed; a refused change applies nothing."""
+    path = Path(target)
+    spec_file, overlays, ref_header = _at_ref(
+        str(path / "spec.yaml" if path.is_dir() else path), ref, overlays)
+    try:
+        with client() as c:
+            if replicas not in ("keep", "spec"):
+                raise SpecError([f"--replicas {replicas!r}: use keep or spec"])
+            lines = update_swarm(c, spec_file, preflight=preflight, strict=strict,
+                                 replicas=replicas, check=check, env_files=env_files or (),
+                                 overlays=overlays, source=ref_header)
+    except SpecError as e:
+        for line in e.lines:
+            typer.echo(line, err=True)
+        raise typer.Exit(1) from None
+    for line in lines:
+        typer.echo(line, err=line.startswith("warning:"))
+
+
+def _grant_swarm(target: str, swarm: str | None) -> str:
+    """The swarm a grant target is in: --swarm, else the agent's swarm, else the one swarm
+    with a type of that name."""
+    if swarm:
+        return swarm
+    with client() as c:
+        if AGENT_NAME_RE.match(target) or "-" in target:  # numeric or words agent names
+            r = _request(c, "GET", f"/agents/{target}")
+            if r.status_code == 200:
+                return r.json()["swarm"]
+        r = _request(c, "GET", "/swarms")
+    if r.status_code >= 400:
+        typer.echo(f"error {r.status_code}: {r.text}", err=True)
+        raise typer.Exit(1)
+    found = [st["swarm"] for st in r.json() if target in st["types"]]
+    if len(found) != 1:
+        typer.echo(f"{target!r}: no agent of that name and {len(found)} swarms with such a type; "
+                   "pass --swarm", err=True)
+        raise typer.Exit(1)
+    return found[0]
+
+
+def _current_grant(swarm: str, target: str):
+    from flock.models import Grant
+
+    rows = _call("GET", f"/swarms/{swarm}/grants")["grants"]
+    row = next((g for g in rows if g["target"] == target), None)
+    return Grant.model_validate(row["grant"]) if row else Grant()
+
+
+def _print_grant(ack: dict) -> None:
+    from flock.models import Grant
+
+    g = Grant.model_validate(ack["grant"])
+    what = "revoked" if g.empty() else g.describe()
+    typer.echo(f"{ack['kind']} {ack['target']}: {what} (from each agent's next turn)")
+
+
+@app.command()
+def grant(
+    target: str = typer.Argument(..., help="a type (every agent of it) or one agent"),
+    capabilities: Annotated[list[str] | None, typer.Argument(metavar="CAPABILITY[=VALUE]...")] = None,
+    swarm: str = typer.Option(None, "--swarm", help="default: the swarm of the target"),
+) -> None:
+    """Grant capabilities to a running type or agent, from each agent's next turn
+    (docs/live.md): `tools=+name,-name` (folder or comms tools; `+name` alone works too),
+    `comms.post=on|off`, `bash=on|off` (llm harness), `limits.max_turns=N`,
+    `limits.budget_usd=X`. Grants are an overlay on the spec: `flock update` keeps them."""
+    from flock.live import grant_patch
+
+    if not capabilities:
+        typer.echo("usage: flock grant TARGET CAPABILITY[=VALUE]... (e.g. tools=+mul bash=off)",
+                   err=True)
+        raise typer.Exit(2)
+    swarm = _grant_swarm(target, swarm)
+    try:
+        g = grant_patch(_current_grant(swarm, target), capabilities)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from None
+    _print_grant(_call("PUT", f"/swarms/{swarm}/grants/{target}", json=g.model_dump(mode="json")))
+
+
+@app.command()
+def revoke(
+    target: str,
+    capabilities: Annotated[list[str] | None, typer.Argument(metavar="[CAPABILITY]...")] = None,
+    swarm: str = typer.Option(None, "--swarm", help="default: the swarm of the target"),
+) -> None:
+    """Take back a target's grant (all of it, or the named capabilities: `tools`,
+    `tools=name`, `comms.post`, `bash`, `limits`, `limits.max_turns`, `limits.budget_usd`)."""
+    from flock.live import revoke_patch
+
+    swarm = _grant_swarm(target, swarm)
+    if not capabilities:
+        _call("DELETE", f"/swarms/{swarm}/grants/{target}")
+        typer.echo(f"{target}: all grants revoked (from each agent's next turn)")
+        return
+    try:
+        g = revoke_patch(_current_grant(swarm, target), capabilities)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from None
+    _print_grant(_call("PUT", f"/swarms/{swarm}/grants/{target}", json=g.model_dump(mode="json")))
+
+
+@app.command()
+def grants(swarm: str = typer.Argument(None, help="default: every swarm")) -> None:
+    """List the grants in force (docs/live.md)."""
+    from flock.models import Grant
+
+    names = [swarm] if swarm else [st["swarm"] for st in _call("GET", "/swarms")]
+    rows = [[sw, g["kind"], g["target"], Grant.model_validate(g["grant"]).describe()]
+            for sw in names for g in _call("GET", f"/swarms/{sw}/grants")["grants"]]
+    if not rows:
+        typer.echo("no grants")
+        return
+    _table(rows, ["swarm", "kind", "target", "grant"])
 
 
 @app.command()
@@ -405,6 +786,12 @@ def run(
     strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
     grace: float = typer.Option(10.0, "--grace",
                                 help="Seconds in-flight turns get to finish at stop."),
+    watch: bool = typer.Option(
+        False, "--watch",
+        help="Watch the experiment folder (spec, prompts, tools/) and apply each saved change "
+             "to the running swarm, as `flock update` does (docs/live.md)."),
+    env_files: list[str] | None = ENV_OPT,
+    overlays: list[str] | None = OVERLAY_OPT,
 ) -> None:
     """Run a `compute: local` swarm on this machine: controller on 127.0.0.1, workers as
     subprocesses, a live view in the terminal, a run bundle at the end (docs/local.md). Other
@@ -419,7 +806,8 @@ def run(
         typer.echo(f"flock run needs the controller extra (pip install 'flock[controller]'): {e}",
                    err=True)
         raise typer.Exit(1) from None
-    spec = load_spec(spec_file)
+    env_files, overlays = env_files or [], overlays or []
+    spec = load_spec(spec_file, env_files, overlays)
     if spec.compute.kind != "local":
         typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}; `flock run` runs "
                    "`compute: local` specs. For hf-jobs, deploy a controller and use "
@@ -443,7 +831,9 @@ def run(
         _warn_unverified(unprobed, "preflight skipped")
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
-                      tools=bundle.data if bundle is not None else None)
+                      tools=bundle.data if bundle is not None else None,
+                      watch=Path(spec_file) if watch else None, env_files=env_files,
+                      overlays=overlays)
     result = asyncio.run(run_local(opts))
     raise typer.Exit(result.exit_code)
 
@@ -476,13 +866,22 @@ def preflight_cmd(
 
 
 @app.command()
-def status(swarm: str = typer.Argument(None)) -> None:
+def status(
+    swarm: str = typer.Argument(None),
+    watch: Annotated[bool, typer.Option("--watch", help="Health view, refreshed every 10 s "
+                                        "(docs/health.md).")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Status and newest health snapshot "
+                                          "as JSON.")] = False,
+) -> None:
     """Swarm status: counts by type and state. Given an agent name (or inside an agent), that
     agent's status as JSON."""
     if not swarm and _as_agent():
         swarm = os.environ.get("FLOCK_AGENT")
     if swarm and (_as_agent() or not _is_swarm(swarm)):
         typer.echo(json.dumps(_call("GET", f"/agents/{swarm}"), indent=2))
+        return
+    if watch or as_json:
+        _health_view(swarm, as_json=as_json, watch=watch)
         return
     if swarm:
         _print_status(_call("GET", f"/swarms/{swarm}")["status"])
@@ -493,6 +892,157 @@ def status(swarm: str = typer.Argument(None)) -> None:
     for st in swarms:
         _print_status(st)
         typer.echo("")
+
+
+def _health_of(swarm: str) -> dict | None:
+    with client() as c:
+        r = _request(c, "GET", f"/swarms/{swarm}/health")
+    return r.json() if r.status_code == 200 else None
+
+
+def _health_view(swarm: str | None, *, as_json: bool, watch: bool) -> None:
+    while True:
+        sts = [_call("GET", f"/swarms/{swarm}")["status"]] if swarm else _call("GET", "/swarms")
+        docs = [{"status": st, "health": _health_of(st["swarm"])} for st in sts]
+        if as_json:
+            typer.echo(json.dumps(docs if not swarm else docs[0], indent=2))
+        else:
+            if watch:
+                typer.echo("\x1b[H\x1b[J", nl=False)
+            for d in docs:
+                _print_health(d["status"], d["health"])
+                typer.echo("")
+        if not watch:
+            return
+        try:
+            time.sleep(10)
+        except KeyboardInterrupt:
+            return
+
+
+def _num(v: Any, fmt: str = "{:.0f}") -> str:
+    return "-" if v is None else fmt.format(v)
+
+
+def _print_health(st: dict, h: dict | None) -> None:
+    """`flock status --watch`: world, generation, alerts; workers by time to memory limit;
+    restores; tool rates; provider queues; world metrics; stuck agents; recent events."""
+    if h is None:
+        _print_status(st)
+        typer.echo("health: no snapshot yet")
+        return
+    b = h["body"]
+    w = b.get("world")
+    world = "no world" if not w else (
+        f"world {'up' if w['up'] else 'DOWN'} {_num(w.get('manifest_ms'))} ms"
+        + (f" slurm {w['slurm_state']}" if w.get("slurm_state") else ""))
+    age = time.time() - h["ts"]
+    typer.echo(f"{st['swarm']}  gen {h.get('generation')}  {world}  agents={st['agents_total']} "
+               f"workers={st['workers_total']} cost=${st['cost_usd']:.2f}  "
+               f"alerts {len(b['alerts'])}  (snapshot {age:.0f} s old)")
+    for a in b["alerts"]:
+        typer.echo(f"  ! {a['msg']}")
+    for name, t in b["types"].items():
+        gens = " ".join(f"{r[:8]}:{n}" for r, n in sorted(t["gens"].items(), key=lambda x: -x[1]))
+        typer.echo(f"type {name}: {_states(t['by_state'])}  revs {gens or '-'}")
+    workers = sorted(b["workers"].items(), key=lambda x: (x[1].get("eta_limit_s") is None,
+                                                          x[1].get("eta_limit_s") or 0))
+    if workers:
+        typer.echo("workers (by time to memory limit):")
+        _table([[wid, f"{_num(wk['mem'].get('current_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
+                 _num(wk.get("slope_mb_h")), _num(wk.get("eta_limit_s"), "{:.0f}s"),
+                 wk.get("relaunches", 0)] for wid, wk in workers[:15]],
+               ["worker", "mem MB", "MB/h", "to limit", "relaunches"])
+    restores = [(wid, wk["restore"]) for wid, wk in workers if wk.get("restore")]
+    if restores:
+        typer.echo("restores:")
+        _table([[wid, r.get("agents"), f"{r.get('files_done')}/{r.get('files_total')}",
+                 _num(r.get("eta_s"), "{:.0f}s")] for wid, r in restores],
+               ["worker", "agents", "files", "eta"])
+    if b["tools"]:
+        typer.echo("world tools:")
+        _table([[n, _num(t["rate_per_min"], "{:.1f}"), _num(t["err_pct"], "{:.1f}"),
+                 _num(t["refused_pct"], "{:.1f}"), _num(t["max_s"], "{:.1f}")]
+                for n, t in sorted(b["tools"].items())],
+               ["tool", "/min", "err %", "refused %", "max s"])
+    m = (w or {}).get("metrics") or {}
+    if m:
+        bits = [f"loop lag {_num(m.get('loop_lag_s'), '{:.3f}')} s",
+                f"429s {_num(m.get('overloaded_429_total'))}"]
+        bits += [f"{p} queue {_num(q.get('queue_wait_oldest_s'), '{:.1f}')} s"
+                 for p, q in (m.get("pools") or {}).items()]
+        wm = {k: v for k, v in (m.get("world") or {}).items() if isinstance(v, (int, float))}
+        if "lane_comment_outbox_depth" in wm:
+            bits.append(f"comment outbox {wm.pop('lane_comment_outbox_depth'):g} (oldest "
+                        f"{_num(wm.pop('lane_comment_outbox_oldest_age_s', None))} s)")
+        lanes: dict[str, dict[str, float]] = {}
+        for k in list(wm):
+            if mt := re.match(r"lane_(.+)_(tripped|paused|effective_slots|in_flight)$", k):
+                lanes.setdefault(mt[1], {})[mt[2]] = wm.pop(k)
+        bits += [f"{k} {v:g}" for k, v in sorted(wm.items())]  # any world's own numbers
+        typer.echo("world metrics: " + ", ".join(bits))
+        for lane, lv in sorted(lanes.items()):
+            st = "TRIPPED" if lv.get("tripped") else "paused" if lv.get("paused") else "ok"
+            typer.echo(f"  lane {lane}: {st} slots {_num(lv.get('effective_slots'))} "
+                       f"in flight {_num(lv.get('in_flight'))}")
+    for p, q in b["providers"].items():
+        typer.echo(f"provider {p}: waiting {_num(q.get('waiting'))} running "
+                   f"{_num(q.get('running'))} kv {_num(q.get('kv'), '{:.0%}')}")
+    stuck = sorted(((s, t) for t, ty in b["types"].items() for s in ty["stuck"]),
+                   key=lambda x: -x[0]["silent_s"])[:10]
+    if stuck:
+        typer.echo("stuck or silent (top 10):")
+        _table([[s["agent"], t, s["state"], f"{s['silent_s'] / 60:.0f} min"] for s, t in stuck],
+               ["agent", "type", "state", "silent"])
+    if h.get("recent_events"):
+        typer.echo("control-plane events (last 10):")
+        _table([[e["ts"][:19].replace("T", " "), e["type"],
+                 e["data"].get("target") or e["data"].get("generation") or "",
+                 str(e["data"].get("detail") or e["data"].get("error") or "")[:80]]
+                for e in h["recent_events"]], ["time (UTC)", "event", "target", "detail"])
+
+
+@app.command()
+def usage(
+    swarm: str,
+    by: Annotated[str, typer.Option("--by", help="type (all hours) or hour (UTC hour x type)")
+                  ] = "type",
+) -> None:
+    """Tokens a swarm used, from turn ends (docs/health.md)."""
+    if by not in ("type", "hour"):
+        raise typer.BadParameter("--by type or --by hour")
+    rows = _call("GET", f"/swarms/{swarm}/usage", params={"by": by})["rows"]
+    keys = ["input", "output", "cache_read", "cache_write", "reasoning"]
+    head = (["hour"] if by == "hour" else []) + ["type", *keys]
+    _table([([r["hour"]] if by == "hour" else []) + [r["type"], *(r.get(k, 0) for k in keys)]
+            for r in rows], head)
+
+
+@app.command()
+def history(
+    swarm: str,
+    diff: Annotated[tuple[int, int] | None, typer.Option(
+        "--diff", metavar="A B", help="What changed from generation A to generation B.")] = None,
+) -> None:
+    """A swarm's spec generations (docs/live.md): when each apply that changed the spec ran, who
+    ran it, from which commit, and what it changed. --diff A B diffs two stored specs."""
+    if diff is not None:
+        from flock.live import diff_specs
+
+        a, b = (SwarmSpec.model_validate(_call("GET", f"/swarms/{swarm}/history/{g}")["spec"])
+                for g in diff)
+        for line in diff_specs(a, b) or ["no changes"]:
+            typer.echo(line)
+        return
+    rows = []
+    for h in _call("GET", f"/swarms/{swarm}/history"):
+        src, changes = h["source"], h["diff_summary"]
+        git = " ".join(x for x in (src.get("git_sha", "")[:8] + ("+dirty" if src.get("dirty")
+                                                                   else ""), src.get("ref")) if x)
+        more = f" (+{len(changes) - 1} more)" if len(changes) > 1 else ""
+        rows.append([h["generation"], h["ts"][:19].replace("T", " "), src.get("by") or "-",
+                     git or "-", (changes[0] if changes else "-") + more])
+    _table(rows, ["gen", "applied (UTC)", "by", "git", "changes"])
 
 
 @app.command()
@@ -552,6 +1102,8 @@ def prompt(
     children: bool = typer.Option(
         False, "--children", help="prompt the direct children of --parent (one request)"),
     parent: str = typer.Option(None, "--parent", help="with --children; default: $FLOCK_AGENT"),
+    track: bool = typer.Option(
+        False, "--track", help="with --type: one prompt id for all, counted by `flock broadcasts`"),
 ) -> None:
     """Send a prompt to an agent (`prompt NAME TEXT`), to every agent of a type
     (`prompt --swarm S --type T [--state idle] TEXT`) or to your children
@@ -574,11 +1126,14 @@ def prompt(
         if swarm is None or len(args) != 1:
             typer.echo("usage: flock prompt --swarm S --type T [--state STATE] TEXT", err=True)
             raise typer.Exit(2)
-        body.update(type=type, state=state, text=args[0])
+        body.update(type=type, state=state, text=args[0], track=track)
         if skip_pending is not None:
             body["skip_pending"] = skip_pending
         typer.echo(json.dumps(_call("POST", f"/swarms/{swarm}/prompts", json=body)))
         return
+    if track:
+        typer.echo("--track needs --swarm S --type T", err=True)
+        raise typer.Exit(2)
     if swarm is not None or state is not None or len(args) != 2:
         typer.echo("usage: flock prompt NAME TEXT (or --swarm S --type T TEXT)", err=True)
         raise typer.Exit(2)
@@ -640,9 +1195,10 @@ def events(
     --pretty prints time, turn, kind and the text or a summary instead of JSON. Given a swarm,
     its swarm-level stream (loop_started, loop_tick, loop_stopped, final_round, budget_stop)."""
     deadline = time.monotonic() + timeout
-    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes
+    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes; other
+    # names (`naming: words`) are agents unless a swarm has that name
     route = (f"/agents/{name}/events" if _as_agent() or AGENT_NAME_RE.match(name)
-             else f"/swarms/{name}/events")
+             or not _is_swarm(name) else f"/swarms/{name}/events")
     while True:
         poll = follow or wait
         page = _call("GET", route, params={"after": after, "wait": 25 if poll else 0})
@@ -694,7 +1250,8 @@ def scale(swarm: str, type: str, replicas: int) -> None:
         typer.echo(f"no type {type!r} in swarm {swarm!r}", err=True)
         raise typer.Exit(1)
     spec.types[type].replicas = replicas
-    _print_status(_call("PUT", f"/swarms/{swarm}", json=spec.model_dump(mode="json")))
+    _print_status(_call("PUT", f"/swarms/{swarm}", params={"replicas": "spec"},
+                        json=spec.model_dump(mode="json"), headers=source_header(None)))
 
 
 @app.command()
@@ -735,27 +1292,246 @@ def whoami() -> None:
 def workers(swarm: str) -> None:
     """List a swarm's workers."""
     found = _call("GET", "/workers", params={"swarm": swarm})
+
+    def state(w: dict) -> str:  # compute external: a slot with no worker yet is waiting for one
+        waiting = str(w["job_id"] or "").startswith("external-") and w["state"] == "launching"
+        return "external" if waiting else w["state"]
+
     rows = [
         [
             w["id"],
             w["type"],
-            w["state"],
+            state(w),
             w["job_id"],
             len(w["agents"]),
             w["crashes"],
             w["deadline"],
             w["last_heartbeat"],
+            w.get("knobs_rev") or "",
             w.get("last_error") or "",
         ]
         for w in found
     ]
     _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
-                  "last_error"])
+                  "knobs", "last_error"])
     if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
         typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
+    elif any(str(w["job_id"] or "").startswith("external-") for w in found):
+        typer.echo("compute external: job `external-...` = a slot waiting for (or served by) a "
+                   "worker started outside flock; env files in the compute launch_dir", err=True)
+    elif any(str(w["job_id"] or "").isdigit() for w in found):  # compute slurm
+        typer.echo("full job logs: <compute log_dir>/<worker id>-<job>.out", err=True)
     else:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
+def add_pause_commands(app: typer.Typer) -> None:
+    """`flock pause` / `flock resume` (docs/loop.md "Pause and resume")."""
+
+    def _body(type_: list[str] | None, agent: list[str] | None) -> dict:
+        return {"types": type_ or None, "agents": agent or None}
+
+    def _show(r: dict) -> None:
+        h = r["held"]
+        held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
+        typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
+
+    @app.command()
+    def pause(
+        swarm: str,
+        reason: Annotated[str, typer.Option("--reason", help="why (shown in status and events)")],
+        type_: Annotated[list[str] | None, typer.Option("--type", help="a type to hold "
+                                                         "(repeatable; default: every type)")] = None,
+        agent: Annotated[list[str] | None, typer.Option("--agent", help="an agent to hold "
+                                                         "(repeatable)")] = None,
+        interrupt: Annotated[bool, typer.Option("--interrupt", help="also stop the turns in "
+                                                "flight")] = False,
+    ) -> None:
+        """Hold types or agents: no new prompts or loop rounds reach them (queued ones wait),
+        rounds are not counted, until `flock resume`. Not `flock loop --stop`. To pause world
+        lanes instead, see `flock world pause`."""
+        _show(_call("POST", f"/swarms/{swarm}/pause", json={
+            **_body(type_, agent), "interrupt": interrupt, "reason": reason}))
+
+    @app.command()
+    def resume(
+        swarm: str,
+        type_: Annotated[list[str] | None, typer.Option("--type", help="a type to resume "
+                                                         "(repeatable)")] = None,
+        agent: Annotated[list[str] | None, typer.Option("--agent", help="an agent to resume "
+                                                         "(repeatable)")] = None,
+    ) -> None:
+        """Lift holds (default: every hold); queued prompts and wakes go out."""
+        _show(_call("POST", f"/swarms/{swarm}/resume", json=_body(type_, agent)))
+
+
+add_pause_commands(app)
+
+
+world_app = typer.Typer(help="Worlds: shared state behind tools (docs/world.md).",
+                        no_args_is_help=True)
+app.add_typer(world_app, name="world")
+
+
+@world_app.command("serve")
+def world_serve(
+    target: str = typer.Argument(..., help="module:Class, imported from the current directory."),
+    host: str = typer.Option(None, "--host", help="Default: $FLOCK_WORLD_HOST or 127.0.0.1."),
+    port: int = typer.Option(None, "--port", help="Default: $FLOCK_WORLD_PORT or 8765."),
+    token_env: str = typer.Option("FLOCK_WORLD_TOKEN", "--token-env",
+                                  help="The variable holding the shared secret (X-World-Token)."),
+    insecure: bool = typer.Option(False, "--insecure", help="Serve without a secret."),
+) -> None:
+    """Serve a flock.world.World subclass over HTTP (World API v1). A world flock starts gets
+    its port and secret in the environment."""
+    try:
+        from flock.home import cache_defaults
+        from flock.world.server import serve
+
+        cache_defaults()  # no usable HOME (a container): $FLOCK_HOMELESS_ROOT, else the temp dir
+    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
+        typer.echo(f"flock world serve needs the controller extra: {e}", err=True)
+        raise typer.Exit(1) from None
+    serve(target, host=host, port=port, token_env=token_env, insecure=insecure)
+
+
+
+@world_app.command("doctor")
+def world_doctor(
+    url: str = typer.Argument(..., help="The world's URL."),
+    token: str = typer.Option(None, "--token", envvar="FLOCK_WORLD_TOKEN", help="The world secret."),
+    calls: int = typer.Option(0, "--calls", help="Concurrent calls of each read-only tool (0: none)."),
+) -> None:
+    """Check a world against the author checklist (docs/world.md); non-zero on a hard failure."""
+    from flock.world.doctor import doctor
+
+    lines, failed = doctor(url, token, calls)
+    typer.echo("\n".join(lines))
+    raise typer.Exit(1 if failed else 0)
+
+
+# -- the world's admin API through the controller (docs/world.md, "Admin API") ----------------
+
+@world_app.command("knobs")
+def world_knobs(swarm: str) -> None:
+    """The world's knobs (value, default, range) and paused lanes."""
+    out = _call("GET", f"/swarms/{swarm}/world/knobs")
+    rows = [[n, json.dumps(k["value"]), json.dumps(k["default"]), k["type"],
+             f"{'' if k['min'] is None else k['min']}..{'' if k['max'] is None else k['max']}",
+             k["doc"]] for n, k in out["knobs"].items()]
+    _table(rows, ["knob", "value", "default", "type", "range", "doc"])
+    if out.get("parked"):
+        typer.echo("world is parked (not built yet; it retries)")
+    for lane, why in out.get("paused", {}).items():
+        typer.echo(f"paused: {lane}{f' ({why})' if why else ''}")
+
+
+@world_app.command("set")
+def world_set(
+    swarm: str,
+    assignments: Annotated[list[str], typer.Argument(help="name=value (JSON, else a string)")],
+    reason: str = typer.Option("", "--reason", help="Recorded in the swarm's events."),
+) -> None:
+    """Set world knobs at runtime; the world keeps them across restarts."""
+    values = {}
+    for a in assignments:
+        name, eq, raw = a.partition("=")
+        if not eq or not name:
+            typer.echo(f"expected name=value, got {a!r}", err=True)
+            raise typer.Exit(2)
+        try:
+            values[name] = json.loads(raw)
+        except ValueError:
+            values[name] = raw
+    out = _call("PATCH", f"/swarms/{swarm}/world/knobs", json=values, params={"reason": reason},
+                headers=source_header(None))
+    for c in out["changes"]:
+        typer.echo(f"{c['name']}: {json.dumps(c['old'])} -> {json.dumps(c['new'])}")
+
+
+@world_app.command("pause")
+def world_pause(
+    swarm: str,
+    lanes: Annotated[list[str], typer.Argument(help="Lanes the world names (e.g. push open merge).")],
+    reason: str = typer.Option("", "--reason", help="Shown with the pause; recorded in events."),
+) -> None:
+    """Pause world lanes (the world refuses or defers that kind of work). To hold agents
+    instead, see `flock pause`."""
+    out = _call("POST", f"/swarms/{swarm}/world/pause", json={"lanes": lanes, "reason": reason},
+                headers=source_header(None))
+    typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
+
+
+@world_app.command("resume")
+def world_resume(swarm: str, lanes: Annotated[list[str], typer.Argument()]) -> None:
+    """Resume paused world lanes."""
+    out = _call("POST", f"/swarms/{swarm}/world/resume", json={"lanes": lanes},
+                headers=source_header(None))
+    typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
+
+
 if __name__ == "__main__":
     app()
+
+
+# -- steering (docs/policies.md, docs/live.md) -------------------------------------------------
+
+policy_app = typer.Typer(help="Policies: alerts and automatic actions (docs/policies.md).",
+                         no_args_is_help=True)
+app.add_typer(policy_app, name="policy")
+
+
+def _show_policies(out: dict) -> None:
+    typer.echo(f"mode {out['mode']}{' (built-in rules)' if out['builtin'] else ''}; "
+               f"actions in the last hour {out['actions_last_hour']}/{out['max_actions_per_hour']}")
+    rows = [[r["name"], f"{r['metric']} {r['op']} {r['value']:g}", r["for"],
+             ", ".join(next(iter(a)) for a in r["do"]) or "-", r["effective_mode"],
+             "muted" if r["muted"] else "", ", ".join(r["firing"])] for r in out["rules"]]
+    _table(rows, ["rule", "when", "for", "do", "mode", "muted", "firing"])
+
+
+@policy_app.command("list")
+def policy_list(swarm: str) -> None:
+    """The swarm's rules, their mode, mutes and what fires now."""
+    _show_policies(_call("GET", f"/swarms/{swarm}/policies"))
+
+
+@policy_app.command("mute")
+def policy_mute(swarm: str, rule: str,
+                for_: str = typer.Option(None, "--for", help="e.g. 2h; default: until unmuted")) -> None:
+    """Mute a rule: no alerts, no actions (its state keeps updating)."""
+    _show_policies(_call("POST", f"/swarms/{swarm}/policies/{rule}/mute", json={"for": for_}))
+
+
+@policy_app.command("unmute")
+def policy_unmute(swarm: str, rule: str) -> None:
+    _show_policies(_call("POST", f"/swarms/{swarm}/policies/{rule}/unmute", json={}))
+
+
+notice_app = typer.Typer(help="Banner line on top of every loop prompt (docs/loop.md).",
+                         no_args_is_help=True)
+app.add_typer(notice_app, name="notice")
+
+
+@notice_app.command("set")
+def notice_set(swarm: str, text: str,
+               type: str = typer.Option(None, "--type", help="default: every type")) -> None:
+    """Add TEXT as the first line of every loop prompt of the type until `notice clear`."""
+    typer.echo(json.dumps(_call("PUT", f"/swarms/{swarm}/notice",
+                                json={"type": type, "text": text}), indent=2))
+
+
+@notice_app.command("clear")
+def notice_clear(swarm: str, type: str = typer.Option(None, "--type")) -> None:
+    typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}/notice",
+                                params={"type": type} if type else {}), indent=2))
+
+
+@app.command()
+def broadcasts(swarm: str, limit: int = typer.Option(10, "--limit")) -> None:
+    """Tracked prompts (`flock prompt --track`): how many agents acted on each."""
+    rows = [[b["id"], time.strftime("%m-%d %H:%M", time.gmtime(b["ts"])), b["type"],
+             f"{b['finished']}/{b['targets']} acted", f"{b['delivered']} delivered",
+             f"{b['started']} started", _short(b["text"], 50)]
+            for b in _call("GET", f"/swarms/{swarm}/broadcasts", params={"limit": limit})]
+    _table(rows, ["id", "sent", "type", "acted", "delivered", "started", "text"])

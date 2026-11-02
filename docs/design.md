@@ -327,6 +327,8 @@ types:
     tool_choice: null          # llm harness only: auto | required | none | bash
     done_tool: null            # llm harness only: offer `done` (default: on for tool_choice required)
     persist_workdir: true
+    workdir: {soft_files: 50000, soft_mb: 2048, ephemeral: [scratch/]}  # docs/pi.md "Workdir"
+    worker: {sync_interval_s: 180, restore_threads: 4}   # live worker knobs, docs/slurm.md
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
     tools: [ws_write, run_bot] # functions from the tools folder, or `all` (docs/tools.md)
@@ -346,7 +348,9 @@ types:
 in the workdir, not a flag, so it survives resume. `flock apply` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
-caller's files (added in the e2e run).
+caller's files (added in the e2e run). `system_prompt_append_file` (optional) is appended
+after a blank line, so several types can share one prompt plus a section of their own
+(experiments/run4's spawner and child types).
 
 Tools folder (docs/tools.md): `tools_dir` (top level, default `tools/` next to the spec file)
 holds Python functions; `types.<t>.tools` selects them. `flock apply` packs the folder,
@@ -492,8 +496,10 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
-| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`. Controller token only |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`, `skipped_budget` (a granted `limits.budget_usd` reached, docs/live.md). Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
+| GET | `/swarms/{swarm}/grants` | live grants in force (docs/live.md) |
+| PUT, DELETE | `/swarms/{swarm}/grants/{target}` | set (replace) or revoke a type's or an agent's grant: `tools` on/off, `bash`, `limits.max_turns`, `limits.budget_usd`; an overlay kept across re-applies. Controller token only |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |
 | POST | `/workers/{id}/heartbeat` | batched heartbeat (worker token) |
@@ -539,6 +545,33 @@ One POST per worker every 30 s, random phase:
 
 About 100 bytes per agent. 10k agents on 1,000 workers is about 33 requests/s
 at the controller.
+
+The worker also sends `spec_rev`, a hash of the type spec it has. The response carries
+`tools` and `comms` (docs/tools.md, docs/comms.md), `type_spec` and `spec_rev` when the type
+spec changed, and `grants` (per agent of that worker, when any is in force). The worker applies
+a new type spec and grants at each agent's next turn boundary (docs/live.md).
+
+Telemetry, all optional (older workers send none; the controller stores the last values and
+`GET /workers`, `GET /agents/{name}` return them):
+
+- `mem` `{current_mb, limit_mb, nonreclaim_mb, slope_mb_h, eta_limit_s, psi_some_avg10,
+  oom_kills}`: the worker's cgroup, sampled every 15 s (`flock.worker.cgroup`). The limit is the
+  smallest `memory.max` up the tree, else `FLOCK_MEMORY_LIMIT_MB`; `nonreclaim_mb` is anon +
+  shmem + slab_unreclaimable + kernel_stack + pagetables; the slope is over the last hour.
+- `restore` `{agents, files_done, files_total, started}`: restores in flight, else null.
+- `tools` `{name: {n, err, refused, timeouts, sum_s, max_s}}`: world tool calls since the worker
+  process started; `refused` is an HTTP 429 or a busy/budget error code.
+- `knobs_rev`: a hash of the worker's own settings (drain budget, sync interval, comms rates,
+  sync excludes).
+- `wants_rotation`: nonreclaimable memory passed `FLOCK_MEM_ROTATE` of the limit; the controller
+  drains the worker within its rotation budget (docs/slurm.md "Memory").
+- per agent `rev` (the type spec revision applied at its last turn boundary) and `start_rev` (the
+  one its running harness process started with).
+
+Each push also writes `<agent>/meta.json` `{files, bytes, ts}` in the bucket when the workdir's
+size changed, and every FLOCK_MEMORY_LOG_S (600 s) the worker logs one memory line per agent and
+an `agent_memory` event (`pi_pss_mb`, `tools_pss_mb`, `tools_by_comm`, `tmpfs_root_mb`, `tmp_mb`,
+`workdir_files`).
 
 `tokens` are cumulative per agent across workers (the worker restores them from the bucket
 state). An empty map means "not known yet", for an agent still restoring on a relaunched
@@ -824,3 +857,24 @@ the worker renders (`PromptCommand.loop`, `{round}`, `{spend}`, `{last_summary}`
 reserves loops stop, pending prompts are dropped and final rounds run; at `budget_usd` every
 agent is stopped and prompts are refused. World-backed settings (`every: rounds`, `score_*`,
 `on: world.*`, `context:`) are in the model and refused at apply until a world exists.
+
+### Run-4 additive contracts (2026-10-26)
+
+`comms.extended` adds optional channel-aware tools and per-identity private-message
+polling. Legacy specs retain their default tools and event payloads. The rule
+fields `max_channels_per_agent` and `max_channels` bound channel creation (the
+board count check is advisory across workers: with W workers creating at the same moment
+the total can exceed `max_channels` by at most W-1). In extended mode a group mention
+(`@all`, `@agents`, ...) counts as a mention only when a human posts it. See [comms.md](comms.md).
+
+Worlds advertising `workspace-upload-v1` receive worker-captured clone snapshots
+outside the model's arguments. Other World API v1 worlds keep their dispatch and
+timeouts. See [world.md](world.md). Pi selects an endpoint per agent by the same
+stable hash used by the llm harness; multi-endpoint Pi workers use separate agent
+config directories so models.json cannot race between different endpoints.
+
+Transport failures (`model_transport`) and turn timeouts retry without incrementing
+the loop's consecutive error count, after 2 s doubling to 120 s with jitter; after 20 in a
+row each further one counts as an ordinary error. Ordinary errors still stop after three failed
+turns; intentional interruptions retain their existing behavior. Controller state
+sync uploads changed event files incrementally after its first complete sync.

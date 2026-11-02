@@ -6,7 +6,7 @@ controller) on 127.0.0.1 with a generated token; the reconcile loop launches wor
 
     controller/   the controller's SQLite store and raw event streams
     agents/       agent workdirs (WORK_ROOT)     state/   harness state (FLOCK_LLM_HOME)
-    logs/         controller.log, <worker>.log
+    logs/         controller.log, <worker>.log, world-<swarm>.log (a started world)
     run.json      the bundle: spec (secret-looking env values redacted), totals, per agent,
                   each type's loop and the budget
     events.jsonl  every agent's events and the swarm-level ones (loop_*, final_*, budget_*),
@@ -44,17 +44,21 @@ from typing import Any, TextIO
 import httpx
 
 from flock.controller.api import create_app, swarm_status
+from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
+from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.reconcile import Settings, agent_state, run_reconciler, worker_state
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
 from flock.models import DrainCommand, SwarmSpec, SwarmStatus, TokenUsage
+from flock.world.host import WorldHost
 
 log = logging.getLogger("flock.run")
 
 SECRET_NAME = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL)", re.IGNORECASE)
 RECENT_EVENTS = 8
+RECENT_UPDATES = 6  # `--watch`: update lines kept in the view
 # Event types too chatty for the "recent events" pane.
 QUIET_EVENTS = frozenset({"sync"})
 
@@ -76,6 +80,13 @@ class RunOptions:
     tty: bool | None = None  # None: out.isatty()
     worker_command: list[str] | None = None  # tests
     tools: bytes | None = None  # the packed tools folder (docs/tools.md), uploaded before the PUT
+    # `--watch` (docs/live.md): the spec file whose folder is polled; a settled change runs
+    # `flock update` on the live swarm
+    watch: Path | None = None
+    watch_interval: float = 1.0  # s between polls of the folder's files
+    watch_quiet: float = 1.0  # s without a further change before the update runs
+    env_files: list[str] = field(default_factory=list)  # `--env` / `--overlay`, for --watch
+    overlays: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -178,7 +189,12 @@ class Tracker:
     def read_events(self) -> None:
         from flock.cli import pretty_event
 
-        for a in self.store.list_agents(self.swarm):
+        agents = self.store.list_agents(self.swarm)
+        # a removed agent (an ephemeral child, docs/spawn.md) can leave a turn open here when
+        # its last turn_ended was not read before its row went: it never blocks `idle`
+        live = {a["name"] for a in agents}
+        self.open_turns = {n: t for n, t in self.open_turns.items() if n in live}
+        for a in agents:
             name = a["name"]
             after = self.cursor.get(name, 0)
             evs = self.store.read_events(name, after, limit=5000)
@@ -225,6 +241,7 @@ class Tracker:
             "completed": sum(self.completed.values()),
             "cost": self.store.swarm_cost(self.swarm),
             "tokens": tokens,
+            "grants": len(self.store.list_grants(self.swarm)),
         }
 
     def idle(self, snap: dict[str, Any]) -> bool:
@@ -241,13 +258,17 @@ class Tracker:
 
 
 def render(spec: SwarmSpec, snap: dict[str, Any], *, elapsed: float, url: str,
-           current: Path, recent: list[str], note: str = "", width: int = 120) -> str:
+           current: Path, recent: list[str], note: str = "", width: int = 120,
+           updates: list[str] | None = None, watching: Path | None = None) -> str:
     st = snap["status"]
     agent_states = Counter(snap["states"].values())
     worker_states = Counter(snap["workers"].values())
     toks = " ".join(f"{m} in={u.input} out={u.output}" for m, u in snap["tokens"].items())
+    live = "".join([f" · tools {spec.tools_version[:8]}" if spec.tools_version else "",
+                    f" · {snap['grants']} grant{'s' * (snap['grants'] != 1)}"
+                    if snap.get("grants") else ""])
     lines = [
-        f"flock run · {spec.swarm} · compute local · {_clock(elapsed)} · {url}",
+        f"flock run · {spec.swarm} · compute local · {_clock(elapsed)} · {url}{live}",
         "",
         f"agents   {len(snap['agents']):<4} {_counts(agent_states)}",
         f"workers  {len(snap['workers']):<4} {_counts(worker_states)}",
@@ -268,6 +289,10 @@ def render(spec: SwarmSpec, snap: dict[str, Any], *, elapsed: float, url: str,
     cut = max(40, width - 3)
     lines += ["", "recent events"] + (
         [f"  {x if len(x) <= cut else x[: cut - 1] + '…'}" for x in recent] or ["  (none yet)"])
+    if watching is not None:
+        lines += ["", f"live updates (watching {watching.parent}/)"] + (
+            [f"  {x if len(x) <= cut else x[: cut - 1] + '…'}" for x in updates or []]
+            or ["  (no change yet)"])
     lines += ["", f"second terminal: {cli_hint(current.parent)}"]
     lines.append(note or "Ctrl-C stops the run (twice: force)")
     return "\n".join(lines)
@@ -310,6 +335,32 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
             "cost_usd": a["cost"], "tokens": {m: u.model_dump() for m, u in toks.items()},
             "events": len(evs), "events_file": f"events/{a['name']}.jsonl",
         })
+
+    # Removed agents (spawned children, ephemeral ones: docs/spawn.md) keep their events; their
+    # cost is in the swarm's total (removed_cost) and, per agent, priced from their turns' tokens.
+    removed = []
+    for name in sorted(set(store.event_agents(spec.swarm)) - {a["name"] for a in per_agent}
+                       - {swarm_stream(spec.swarm)}):
+        evs = store.read_events(name, 0, limit=10**9)
+        with (ev_dir / f"{name}.jsonl").open("w", encoding="utf-8") as f:
+            for i, ev in enumerate(evs):
+                f.write(json.dumps(ev) + "\n")
+                merged.append((str(ev.get("ts", "")), i, ev))
+        # its cost from its turns' tokens (the store keeps only the swarm's removed total)
+        rtoks: dict[str, TokenUsage] = {}
+        for ev in evs:
+            data = (ev.get("data") or {}).get("data") if ev.get("type") in (
+                "turn_ended", "turn_interrupted") else None  # a turn cut by the stop costs too
+            for model, u in ((data or {}).get("tokens") or {}).items():
+                with contextlib.suppress(ValueError, TypeError):
+                    rtoks[model] = rtoks.get(model, TokenUsage()) + TokenUsage(**u)
+        rtype = (store.reserved_name(name) or {}).get("type") or max(  # words, else numeric
+            (t for t in spec.types if f"-{t}-" in name), key=len, default=None)
+        removed.append({"name": name, "type": rtype, "events": len(evs),
+                        "events_file": f"events/{name}.jsonl",
+                        "cost_usd": cost_usd(rtoks, type_price_table(spec.types.get(rtype)))
+                        if rtype else None,
+                        "tokens": {m: u.model_dump() for m, u in rtoks.items()}})
 
     # The swarm-level stream (docs/loop.md "Events"). Its per-agent events (`final_round`) are
     # also on the agent's stream, so only the swarm's own (agent "") are added.
@@ -359,6 +410,7 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         "loops": loops,
         "budget": budget,
         "agents": per_agent,
+        "removed_agents": removed,
         "workers": [{"id": w["id"], "type": w["type"], "crashes": w["crashes"],
                      "last_error": w.get("last_error"), "log": f"logs/{w['id']}.log"}
                     for w in workers.values()],
@@ -440,7 +492,10 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
         spec.tools_version = up["version"]
         say(f"tools: version {up['version']} ({len(opts.tools)} bytes): "
             f"{', '.join(up['tools']) or 'none'}")
-    r = await http.put(f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"))
+    from flock.cli import source_header
+
+    r = await http.put(f"/swarms/{spec.swarm}", params={"replicas": "spec"},
+                       json=spec.model_dump(mode="json"), headers=source_header(opts.watch))
     if r.status_code >= 400:
         say(f"apply refused ({r.status_code}): {r.text}")
         return False
@@ -457,6 +512,41 @@ async def _prompt_all(http: httpx.AsyncClient, opts: RunOptions, store: Store,
             return False
     tracker.prompted = {a["name"] for a in store.list_agents(opts.spec.swarm)}
     return True
+
+
+async def _watch(opts: RunOptions, url: str, token: str, post) -> None:
+    """`--watch` (docs/live.md): poll the experiment folder; once a change settled, run
+    `flock update` against this run's controller and post its lines (what changed, or the
+    refusal: the running spec then stays as it was)."""
+    from flock.cli import SpecError, read_spec, update_swarm
+    from flock.live import FolderWatch
+
+    assert opts.watch is not None
+    spec_file = opts.watch
+    watch = FolderWatch(spec_file, opts.spec, quiet=opts.watch_quiet)
+
+    def update() -> tuple[list[str], SwarmSpec | None]:
+        with httpx.Client(base_url=url, headers={"X-Flock-Token": token}, timeout=60) as c:
+            lines = update_swarm(c, str(spec_file), strict=opts.strict,
+                                 env_files=opts.env_files, overlays=opts.overlays)
+        return lines, read_spec(str(spec_file), opts.env_files, opts.overlays)
+
+    while True:
+        await asyncio.sleep(opts.watch_interval)
+        if not watch.poll(time.monotonic()):
+            continue
+        try:
+            lines, spec = await asyncio.to_thread(update)
+        except SpecError as e:
+            lines, spec = [*e.lines, "not applied: the swarm keeps running as it was"], None
+        except Exception as e:  # the run goes on whatever an update does
+            log.exception("update failed")
+            lines, spec = [f"update failed: {type(e).__name__}: {e}"], None
+        if spec is not None:
+            watch.retarget(spec)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        for line in lines:
+            post(f"{stamp} {line}")
 
 
 async def run_local(opts: RunOptions) -> RunResult:
@@ -484,17 +574,26 @@ async def run_local(opts: RunOptions) -> RunResult:
     settings = Settings(public_url=url, token=token)
     reconcile_task: list[asyncio.Task] = []
 
+    health = Health(store, token=token, jobs=jobs, run=run_dir.name)
+    health_every = float(os.environ.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
+
     async def background(notifier) -> None:
         reconcile_task.append(asyncio.current_task())
+        if health_every > 0:  # cancelled with the reconciler (_stop_workers)
+            reconcile_task.append(asyncio.create_task(health.run(health_every)))
         await run_reconciler(store, jobs, settings, opts.reconcile_interval,
                              wake=lambda t: notifier.wait("reconcile:", t))
 
+    worlds = WorldHost(log_dir=run_dir / "logs")  # a spec's `world.command` (docs/world.md)
     app = create_app(store, token, background=background, compute="local",
-                     stats=lambda: {"mode": "local", "public_url": url})
+                     stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds,
+                     health=health)
     server = _Server(app, sock)
     started = datetime.now(UTC)
     t0 = time.monotonic()
     tracker = Tracker(store, spec.swarm)
+    updates: deque[str] = deque(maxlen=RECENT_UPDATES)
+    watcher: asyncio.Task | None = None
     stop = asyncio.Event()
     force = asyncio.Event()
     reason = "error"
@@ -527,6 +626,13 @@ async def run_local(opts: RunOptions) -> RunResult:
             elif opts.prompt and not await _prompt_all(http, opts, store, tracker, say):
                 reason, code = "prompt_failed", 1
                 stop.set()
+        if opts.watch is not None and not stop.is_set():
+            def post(line: str) -> None:
+                updates.append(line)
+                if not tty:
+                    say(f"update: {line}")
+
+            watcher = asyncio.create_task(_watch(opts, url, token, post), name="watch")
         idle_streak = 0
         while not stop.is_set():
             elapsed = time.monotonic() - t0
@@ -535,7 +641,8 @@ async def run_local(opts: RunOptions) -> RunResult:
             if tty:
                 frame = render(spec, snap, elapsed=elapsed, url=url, current=current,
                                recent=list(tracker.recent),
-                               width=shutil.get_terminal_size((120, 24)).columns)
+                               width=shutil.get_terminal_size((120, 24)).columns,
+                               updates=list(updates), watching=opts.watch)
                 opts.out.write("\x1b[H\x1b[J" + frame + "\n")
                 opts.out.flush()
                 tracker.new_lines.clear()
@@ -560,6 +667,8 @@ async def run_local(opts: RunOptions) -> RunResult:
         else:
             if reason == "error":
                 reason = "interrupted"
+        if watcher is not None:
+            watcher.cancel()
         if jobs.alive():
             say(f"stopping ({reason}): draining workers, up to {opts.grace:g} s for in-flight "
                 "turns (Ctrl-C again to force)")
@@ -570,14 +679,21 @@ async def run_local(opts: RunOptions) -> RunResult:
         reason, code = "error", 1
         await _stop_workers(store, jobs, spec, reconcile_task, 0, force)
     finally:
+        if watcher is not None:
+            watcher.cancel()
         for sig in handled:
             loop.remove_signal_handler(sig)
         try:
+            try:  # controller/run.json, metrics/ and rollups/ for the viewer (docs/health.md)
+                await asyncio.to_thread(health.close, time.time())
+            except Exception:
+                log.exception("health close failed")
             spec = active_spec(store, spec)
             totals = write_bundle(run_dir, store, spec, started=started,
                                   ended=datetime.now(UTC), reason=reason, url=url,
                                   tracker=tracker)
         finally:
+            await asyncio.to_thread(worlds.stop_all)  # after the workers, before the server
             # parked long-polls of exited workers are cancelled at shutdown: not an error
             uv_log = logging.getLogger("uvicorn.error")
             level = uv_log.level

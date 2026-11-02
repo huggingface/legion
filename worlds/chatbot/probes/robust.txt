@@ -1,0 +1,7 @@
+# Odd input: never crash, never an empty line, no therapy-speak.
+?
+asdkjh qwe zzz
+ok
+lol
+I'm feeling a bit tired today => tired|sleep|rest|long day|coffee|!why do you feel|!how does that make you feel
+yes

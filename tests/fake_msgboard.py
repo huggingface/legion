@@ -20,7 +20,14 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
 - GET /v1/search?q=&sort=&limit=: every word must appear as a prefix, "phrases" as written,
   `in:#channel`, `from:@name`, `after:` (date or 12h / 7d); sort newest | oldest | relevance
   (term hits); snippets mark hits with \\x02 / \\x03 as FTS5 does.
-- PUT /v1/channels/{id}/messages/{mid}/reactions/{emoji}
+- PUT /v1/channels/{id}/messages/{mid}/reactions/{emoji}: idempotent per principal; messages carry
+  `reactions: [{emoji, count, by: [principal]}]` like the real board.
+- GET/PUT /v1/channels/{id}/doc {body, base_version}: a stale base_version is 409 doc_conflict with
+  `details.current`; `docs = False` makes the routes a code-less 404 (a board without channel documents).
+
+`serve(prefix="/boards/x")` mounts the board under a path prefix like the multi-board Space:
+`raw_paths` records every request path as sent, and a path outside the prefix is a 404.
+A token is read from `X-Msgboard-Token`, else `Authorization: Bearer`, like the real board.
 
 `requests` records (method, path, query, principal name) for assertions. Not thread-safe
 beyond one lock; fine for tests.
@@ -47,6 +54,7 @@ class Board:
         self.invite = invite
         self.channels = dict(channels or {12: "flock-test"})
         self.invites = dict(invites) if invites is not None else {invite: list(self.channels)}
+        self.dms = {}
         self.private = set(private or ())
         self.archived = set(archived or ())
         self.lock = threading.Condition()
@@ -58,6 +66,10 @@ class Board:
         self.idem: dict[tuple[int, str], dict] = {}
         self.requests: list[tuple[str, str, dict, str | None]] = []
         self.joins: list[str] = []
+        self.doc: dict[int, tuple[int, str]] = {}  # channel -> (version, body)
+        self.docs = True
+        self.raw_paths: list[str] = []
+        self.token_headers: list[str] = []  # which header carried each request's token
         self._n = 0
 
     # ------------------------------------------------------------------ state helpers
@@ -83,6 +95,8 @@ class Board:
             return tok
 
     def visible(self, pid: int, channel: int) -> bool:
+        if channel in self.dms:
+            return pid in self.members[channel]
         return channel in self.channels and (channel not in self.private or pid in self.members[channel])
 
     def names(self) -> set[str]:
@@ -124,8 +138,12 @@ class Board:
                 x["thread_id"] for x in self.msgs if x["sender"]["id"] == me and x["thread_id"]}
             out["reason"] = ("mention" if any(x["id"] == me for x in m["mentions"])
                              else "reply" if m["thread_id"] in mine else "channel")
-            out["channel"] = {"id": m["channel_id"], "name": self.channels[m["channel_id"]],
-                              "kind": "public"}
+            cid = m["channel_id"]
+            out["channel"] = {"id": cid, "name": self.channels[cid],
+                              "kind": "dm" if cid in self.dms else "public"}
+            if cid in self.dms:
+                out["channel"]["members"] = [self.principals[p] for p in self.members[cid]]
+                out["reason"] = "dm"
         return out
 
     # ------------------------------------------------------------------ search
@@ -178,7 +196,7 @@ class Board:
                 "total": len(out), "next_offset": None}
 
 
-def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
+def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]:
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -203,11 +221,19 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
             return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
         def who(self) -> int | None:
+            if direct := self.headers.get("X-Msgboard-Token"):
+                board.token_headers.append("X-Msgboard-Token")
+                return board.tokens.get(direct.strip())
             auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                board.token_headers.append("Authorization")
             return board.tokens.get(auth[7:]) if auth.startswith("Bearer ") else None
 
         def route(self, method: str) -> None:
-            u = urlparse(self.path)
+            board.raw_paths.append(self.path)
+            if not self.path.startswith(prefix + "/"):
+                return self.send(404, {"detail": "Not Found"})
+            u = urlparse(self.path[len(prefix):])
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             body = self.body() if method in ("POST", "PUT", "PATCH") else {}
             me = self.who()
@@ -231,8 +257,25 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                                                            "created": created})
             if me is None:
                 return self.fail(401, "unauthorized")
+            if method == "GET" and u.path == "/v1/principals":
+                return self.send(200, {"principals": list(board.principals.values())})
+            if method == "POST" and u.path in ("/v1/channels", "/v1/dms"):
+                with board.lock:
+                    pair = frozenset((me, body.get("with")))
+                    cid = next((c for c, p in board.dms.items() if p == pair), None) if u.path == "/v1/dms" else None
+                    if cid is None:
+                        cid = max(board.channels, default=0) + 1
+                        board.channels[cid] = body.get("name") or f"dm-{cid}"
+                        board.seq[cid] = 0
+                        board.members[cid] = set(pair) if u.path == "/v1/dms" else {me}
+                        if u.path == "/v1/dms":
+                            board.dms[cid] = pair
+                    result = {"id": cid, "name": board.channels[cid], "kind": "dm" if cid in board.dms else "public"}
+                    if cid in board.dms:
+                        result["members"] = [board.principals[p] for p in pair]
+                return self.send(201, result)
             if method == "GET" and u.path == "/v1/channels":
-                out = [{"id": c, "name": n, "kind": "public", "member": me in board.members[c],
+                out = [{"id": c, "name": n, "kind": "dm" if c in board.dms else "public", "member": me in board.members[c],
                         "last_seq": board.seq[c], "archived": c in board.archived}
                        for c, n in board.channels.items()
                        if q.get("name") in (None, n) and board.visible(me, c)]
@@ -288,6 +331,8 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                 return self.send(200, {"messages": out, "next_cursor": cursor, "has_more": more})
             if method == "GET" and u.path == "/v1/activity":
                 follow = [int(x) for x in (q.get("channels") or "").split(",") if x.strip().isdigit()]
+                if q.get("channels") == "joined":
+                    follow = [c for c in board.channels if me in board.members[c]]
                 if any(not board.visible(me, c) for c in follow):
                     return self.fail(404, "not_found", "channel not found")
                 wait = float(q.get("wait") or 0)
@@ -300,6 +345,7 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                     def mine() -> list[dict]:
                         return [board._view(x, me, reason=True) for x in board.msgs
                                 if x["id"] > after and x["sender"]["id"] != me
+                                and board.visible(me, x["channel_id"])
                                 and (x["channel_id"] in follow
                                      or any(y["id"] == me for y in x["mentions"]))]
 
@@ -319,9 +365,30 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
                     msg = next((x for x in board.msgs if x["id"] == int(m.group(2))), None)
                     if msg is None:
                         return self.fail(404, "not_found")
-                    msg["reactions"].append({"emoji": unquote(m.group(3)),
-                                             "by": board.principals[me]["external_id"]})
+                    emoji = unquote(m.group(3))
+                    r = next((x for x in msg["reactions"] if x["emoji"] == emoji), None)
+                    if r is None:
+                        msg["reactions"].append(r := {"emoji": emoji, "count": 0, "by": []})
+                    if all(p["id"] != me for p in r["by"]):
+                        r["by"].append(dict(board.principals[me]))
+                        r["count"] += 1
                 return self.send(200, board._view(msg))
+            if board.docs and (m := re.fullmatch(r"/v1/channels/(\d+)/doc", u.path)):
+                ch = int(m.group(1))
+                if not board.visible(me, ch):
+                    return self.fail(404, "not_found", "channel not found")
+                with board.lock:
+                    version, text = board.doc.get(ch, (0, ""))
+                    if method == "PUT":
+                        if body.get("base_version") != version:
+                            return self.send(409, {"error": {"code": "doc_conflict", "message": "someone saved",
+                                                             "details": {"current": {"version": version, "body": text}}}})
+                        if body["body"] != text:
+                            version, text = version + 1, body["body"]
+                            board.doc[ch] = (version, text)
+                return self.send(200, {"channel_id": ch, "version": version, "body": text})
+            if u.path.endswith("/doc"):  # board.docs is False: the route does not exist
+                return self.send(404, {"detail": "Not Found"})
             return self.fail(404, "not_found")
 
         def do_GET(self) -> None:
@@ -339,10 +406,10 @@ def make_handler(board: Board) -> type[BaseHTTPRequestHandler]:
     return H
 
 
-def serve(board: Board | None = None) -> tuple[Board, ThreadingHTTPServer, str]:
-    """Start on a free port in a daemon thread: (board, server, base url)."""
+def serve(board: Board | None = None, prefix: str = "") -> tuple[Board, ThreadingHTTPServer, str]:
+    """Start on a free port in a daemon thread: (board, server, base url, with `prefix`)."""
     board = board or Board()
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(board))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(board, prefix))
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return board, srv, f"http://127.0.0.1:{srv.server_port}"
+    return board, srv, f"http://127.0.0.1:{srv.server_port}{prefix}"

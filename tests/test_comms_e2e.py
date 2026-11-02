@@ -209,9 +209,64 @@ async def test_mention_on_the_board_wakes_the_mentioned_agent_once(tmp_path, mon
         await until(lambda: evs(MW, "comms_mention") and evs(NW, "comms_mention"), timeout=10)
         await until(lambda: len(evs(MW, "turn_ended")) == 2, timeout=10)
         await asyncio.sleep(3)  # past the 2 s debounce: nothing more comes
-        assert users(MW) == ["bash: echo round 1 start", "bash: echo round 2 wake: comms.mention"]
+        # a wake is not a round by default: it carries round 1 again
+        assert users(MW) == ["bash: echo round 1 start", "bash: echo round 1 wake: comms.mention"]
+        assert [e["data"]["reason"] for e in evs(MW, "loop_wake")] == ["comms.mention"]
+        assert evs(NW, "loop_wake") == []
         assert users(NW) == ["bash: echo round 1 start"]
         assert len(evs(MW, "comms_mention")) == 1 and len(evs(NW, "comms_mention")) == 1
+    finally:
+        await sw.close()
+        srv.shutdown()
+        bsrv.shutdown()
+        await asyncio.sleep(0)
+
+
+async def test_board_reads_are_idle_rounds(tmp_path, monkeypatch):
+    """`idle_rounds` counts state-changing calls only: an agent whose every round is a board
+    `read` (read-only) leaves the loop after `idle_rounds: 2`; one that runs `bash` each round
+    goes on to `max_rounds`."""
+    monkeypatch.setenv(KEY_ENV, "sk-e2e")
+    board, bsrv, board_url = fake_msgboard.serve()
+    monkeypatch.setenv(INVITE_ENV, board.invite)
+    srv = fake_openai.serve(0, str(tmp_path / "requests.jsonl"))
+    llm_url = f"http://127.0.0.1:{srv.server_port}/v1"
+    sw = Swarm(tmp_path)
+    sw.settings.secret_source = {INVITE_ENV: board.invite}
+    sw.app = create_app(sw.store, TOKEN, secret_source={INVITE_ENV: board.invite}, loop_interval=0)
+    import httpx
+    sw.transport = httpx.ASGITransport(app=sw.app)
+    monkeypatch.setattr(cli, "client",
+                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    raw = wake_spec(llm_url, board_url)
+    # `turn_end` under `max_working`: the controller counts a round's turn before it sends the
+    # next (`every: 1s` could send round 3 before a slow round 2 was counted idle)
+    raw["providers"]["gpu"]["max_working"] = 2
+    loop = {"every": "turn_end", "while": {"max_rounds": 3, "idle_rounds": 2}}
+    raw["types"]["mw"]["loop"] = {**loop, "prompt": "call: read {}"}
+    raw["types"]["nw"]["loop"] = {**loop, "prompt": "bash: echo round {round}"}
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(raw))
+
+    async def ticker():
+        while True:
+            sw.app.state.loops.tick()
+            await asyncio.sleep(0.1)
+
+    def loop(t: str) -> dict:
+        st = sw.app.state.loops.status("wk", t)
+        return st.model_dump() if st else {"state": None}
+
+    try:
+        await apply(spec_file)
+        sw.tick()
+        sw.tasks.append(asyncio.create_task(ticker()))
+        await until(lambda: all(loop(t)["state"] == "done" for t in ("mw", "nw")), timeout=20)
+        mw, nw = loop("mw"), loop("nw")
+        assert (mw["reason"], mw["rounds_max"]) == ("idle_rounds", 2)
+        assert (nw["reason"], nw["rounds_max"]) == ("max_rounds", 3)
+        ended = [e["data"]["data"] for e in sw.store.read_events("mw-0000", 0) if e["type"] == "turn_ended"]
+        assert [(d["tool_calls"], d["state_calls"]) for d in ended] == [(1, 0), (1, 0)]
     finally:
         await sw.close()
         srv.shutdown()

@@ -1,0 +1,6 @@
+{
+ "every": "60s",
+ "while": {"until": "12m", "max_rounds": 2, "agent_usd": {"deepseek": 0.15, "glm": 0.08}},
+ "reserve_usd": 0.05,
+ "limits": {"budget_usd": 1.0, "spawned_total": 4}
+}

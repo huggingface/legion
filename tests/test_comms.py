@@ -89,8 +89,10 @@ class Team:
             rt = self.agents[n]
             await rt.setup(restore=False)
             await rt.prompt("hello")
+        # comms_joined comes after the whole join, including the extended mode's "now" cursor:
+        # a message posted before that is history, not news, and is never delivered.
         await until(lambda: all(self.hub.members.get(n) and self.hub.members[n].ident
-                                for n in names or self.agents))
+                                and custom(self.agents[n], "comms_joined") for n in names or self.agents))
 
     async def call(self, agent, tool, **args):
         r = await self.hub.call(agent, f"comms:{tool}", args)
@@ -357,7 +359,7 @@ async def test_read_defaults_to_the_run_since_the_kickoff(tmp_path, board):
         out, err = await t.call("dev-0000", "read")
         assert not err and [m["text"] for m in out["messages"]] == ["kickoff", "new 1"]
         assert out["since"] == kickoff and "truncated" not in out and "since:" in out["note"]
-        out, err = await t.call("dev-0000", "read", since=f"#{old[1]}")
+        out, err = await t.call("dev-0000", "read", since=f"#{old[0]}")  # strictly newer
         assert not err and [m["text"] for m in out["messages"]] == ["old 1", "old 2", "kickoff", "new 1"]
         assert "truncated" not in out and "note" not in out
         out, err = await t.call("dev-0000", "read", n=1)
@@ -831,3 +833,68 @@ async def test_normalised_board_urls_are_idempotent_and_build_clients(url, want)
         assert board.url == want and same_board(board.url, url)
     finally:
         await board.aclose()
+
+
+async def test_read_since_is_exclusive_and_says_caught_up(tmp_path, board):
+    """Polling with `since: <last id seen>` returns only newer messages, and an explicit
+    "caught up" note when there are none (it used to return the `since` message itself, so a
+    poll was never empty)."""
+    kickoff = board.post("sw-host", CH, "kickoff")["id"]
+    t = Team(tmp_path, board, ["dev-0000"])
+    t.spec.kickoff_id = kickoff
+    try:
+        await t.start()
+        first = board.post("ds-1", CH, "one", reply_to=kickoff)["id"]
+        out, err = await t.call("dev-0000", "read", since=kickoff)
+        assert not err and [m["text"] for m in out["messages"]] == ["one"]
+        out, err = await t.call("dev-0000", "read", since=first)
+        assert not err and out["messages"] == []
+        assert out["note"] == f"caught up: nothing newer than {first}"
+        board.post("ds-1", CH, "two")
+        out, err = await t.call("dev-0000", "read", since=first)
+        assert not err and [m["text"] for m in out["messages"]] == ["two"] and "note" not in out
+    finally:
+        await t.close()
+
+
+def test_full_jitter_envelope_and_retry_after(monkeypatch):
+    from flock.worker import comms as comms_mod
+
+    monkeypatch.setattr(comms_mod.random, "uniform", lambda a, b: b)
+    assert [comms_mod.full_jitter(n, 30.0, 600.0) for n in (1, 2, 3, 6, 9)] == \
+        [30.0, 60.0, 120.0, 600.0, 600.0]
+    monkeypatch.setattr(comms_mod.random, "uniform", lambda a, b: a)
+    assert comms_mod.full_jitter(4, 30.0, 600.0) == 0.0
+    assert comms_mod.full_jitter(4, 30.0, 600.0, retry_after=45.0) == 45.0
+    assert comms_mod.full_jitter(4, 30.0, 600.0, floor=1.0) == 1.0
+
+
+async def test_a_rate_limited_join_waits_at_least_retry_after_and_backs_off(monkeypatch):
+    from flock.worker import comms as comms_mod
+
+    now = [1000.0]
+    monkeypatch.setattr(comms_mod.random, "uniform", lambda a, b: b)
+
+    def handler(request):
+        if request.url.path == "/v1/join":
+            return httpx.Response(429, headers={"retry-after": "90"})
+        return httpx.Response(200, json={})
+
+    hub = CommsHub(swarm="sw", env={"INV": "code"}, transport=httpx.MockTransport(handler),
+                   clock=lambda: now[0])
+    hub.configure(CommsSpec(url="http://b.invalid", invite_env="INV", channel="team", channel_id=12),
+                  list(COMMS_TOOLS))
+    try:
+        await hub.on_prompt("dev-0000", "llm")
+        m = hub.members["dev-0000"]
+        assert m.join_failures == 1 and m.retry_at - now[0] == 90.0  # Retry-After beats 30 s
+        with pytest.raises(BoardError, match="not on the board yet"):
+            await hub._member("dev-0000")
+        now[0] = m.retry_at + 1
+        await hub.on_prompt("dev-0000", "llm")
+        assert m.join_failures == 2 and m.retry_at - now[0] == 90.0  # 60 s envelope < 90 s
+        now[0] = m.retry_at + 1
+        await hub.on_prompt("dev-0000", "llm")
+        assert m.join_failures == 3 and m.retry_at - now[0] == 120.0  # the envelope grew
+    finally:
+        await hub.aclose()

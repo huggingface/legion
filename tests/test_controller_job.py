@@ -554,3 +554,88 @@ def test_down_dry_run_and_stuck_controller_leave_the_state(tmp_path, monkeypatch
 def test_down_needs_a_wheel_or_state_url():
     with pytest.raises(SystemExit):
         jobdeploy.main(["--down", "--group", "g", "--namespace", "me"], {})
+
+
+def test_subsequent_state_push_uploads_only_changed_event_files(tmp_path):
+    bucket = FakeBucket(tmp_path / "bucket")
+    store = Store(tmp_path / "data")
+    sync = StateSync(bucket, tmp_path / "data")
+    store.put_swarm(make_spec(), 1.0)
+    for i in range(3):
+        name = f"researcher-{i:04d}"
+        store.insert_agent(name, "demo", "researcher", i, 1.0)
+        store.append_events("demo", name, [_event(name, 0)])
+    assert sync.push(store) == 4
+    store.append_events("demo", "researcher-0001", [_event("researcher-0001", 1)])
+    assert sync.push(store) == 2  # DB and one changed agent, not the whole event tree
+    assert bucket.ops == ["upload", "sync_up", "upload", "upload"]
+    restored_dir = tmp_path / "restored"
+    assert StateSync(bucket, restored_dir).restore()
+    restored = Store(restored_dir)
+    assert restored.event_count("researcher-0001") == 2
+    assert restored.event_count("researcher-0000") == 1
+    restored.close()
+    store.close()
+
+
+def test_final_push_uploads_only_appended_event_bytes_and_restore_merges_them(tmp_path):
+    bucket = FakeBucket(tmp_path / "bucket")
+    store = Store(tmp_path / "data")
+    sync = StateSync(bucket, tmp_path / "data")
+    store.put_swarm(make_spec(), 1.0)
+    names = [f"researcher-{i:04d}" for i in range(3)]
+    for i, name in enumerate(names):
+        store.insert_agent(name, "demo", "researcher", i, 1.0)
+        store.append_events("demo", name, [_event(name, n) for n in range(50)])
+    assert sync.push(store) == 4
+    base = (tmp_path / "bucket/events/demo/researcher-0001.jsonl").read_bytes()
+    store.append_events("demo", "researcher-0001", [_event("researcher-0001", 50)])
+    store.append_events("demo", "researcher-0002", [_event("researcher-0002", 50)])
+    bucket.ops.clear()
+    assert sync.push(store, force=True, final=True) == 3  # DB + two tails
+    assert bucket.ops == ["upload", "upload"]
+    tail = tmp_path / f"bucket/events/demo/researcher-0001.jsonl.tail/{len(base):016d}"
+    assert tail.read_bytes() == (tmp_path / "data/events/demo/researcher-0001.jsonl").read_bytes()[len(base):]
+    assert (tmp_path / "bucket/events/demo/researcher-0001.jsonl").read_bytes() == base  # untouched
+    assert sync.push(store, force=True, final=True) == 1  # nothing appended since: the DB only
+
+    # A restarted controller merges the tails; its first push is incremental, not a full sync.
+    again = tmp_path / "again"
+    sync2 = StateSync(bucket, again)
+    assert sync2.restore()
+    restored = Store(again)
+    assert restored.repair_events() == 0
+    assert [restored.event_count(n) for n in names] == [50, 51, 51]
+    assert not list(again.rglob("*.tail"))
+    bucket.ops.clear()
+    assert sync2.push(restored, force=True) == 1
+    assert "sync_up" not in bucket.ops
+    # A periodic push re-uploads a changed file whole and drops its tails from the bucket.
+    restored.append_events("demo", "researcher-0001", [_event("researcher-0001", 51)])
+    assert sync2.push(restored) == 2
+    assert not (tmp_path / "bucket/events/demo/researcher-0001.jsonl.tail").exists() or \
+        not list((tmp_path / "bucket/events/demo/researcher-0001.jsonl.tail").iterdir())
+    assert (tmp_path / "bucket/events/demo/researcher-0002.jsonl.tail").is_dir()
+    third = tmp_path / "third"
+    assert StateSync(bucket, third).restore()
+    final = Store(third)
+    assert [final.event_count(n) for n in names] == [50, 52, 51]
+    assert final.repair_events() == 0
+    for s in (final, restored, store):
+        s.close()
+
+
+def test_final_push_uploads_a_rewritten_event_file_whole(tmp_path):
+    bucket = FakeBucket(tmp_path / "bucket")
+    store = Store(tmp_path / "data")
+    sync = StateSync(bucket, tmp_path / "data")
+    store.put_swarm(make_spec(), 1.0)
+    store.insert_agent("researcher-0000", "demo", "researcher", 0, 1.0)
+    store.append_events("demo", "researcher-0000", [_event("researcher-0000", n) for n in range(5)])
+    sync.push(store)
+    path = tmp_path / "data/events/demo/researcher-0000.jsonl"
+    path.write_bytes(b"x" * (path.stat().st_size + 10))  # same prefix length, other bytes
+    assert sync.push(store, force=True, final=True) == 2
+    assert (tmp_path / "bucket/events/demo/researcher-0000.jsonl").read_bytes() == path.read_bytes()
+    assert not (tmp_path / "bucket/events/demo/researcher-0000.jsonl.tail").exists()
+    store.close()

@@ -140,7 +140,7 @@ shows $0 today.
 makes the controller probe each distinct provider-backed model the way a harness starts: two
 turns, streamed on the Responses API for `openai_compat` (shaped like Codex's requests:
 `store: false`, encrypted reasoning, parallel tool calls), non-streamed Chat Completions with
-`extra` for types on the `llm` harness (a tool call written as text passes with a warning,
+`extra` for types on the `llm` or `pi` harness (a tool call written as text passes with a warning,
 since that harness accepts it), or the Messages API for `anthropic`.
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
@@ -202,3 +202,8 @@ escape hatch: report only, no queueing.
 - Codex with model ids it has no built-in metadata for (context window, auto-compaction).
 - Cost of Codex on the HF router: the working router providers stream zero usage, so it shows
   as $0 with the zero-usage warning.
+
+
+Pi also supports `base_urls` for multiple servers of one model. Agents are spread
+by a stable name hash, and their model config directories are separate when more
+than one endpoint is configured. See [pi.md](pi.md).

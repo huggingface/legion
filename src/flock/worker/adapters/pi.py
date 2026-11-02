@@ -33,16 +33,29 @@ import contextlib
 import json
 import logging
 import os
+import re
+import shutil
 import signal
+import tempfile
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from flock.controller.prices import Price, price_for
+from flock.home import home
+from flock.isolation import command as isolate_command
+from flock.isolation import enabled as isolation_enabled
 from flock.models import TokenUsage, TypeSpec
-from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError, minimal_env
+from flock.worker.adapters.base import (
+    BASE_ENV,
+    BASE_ENV_PREFIXES,
+    AdapterEvent,
+    EventQueue,
+    ResumeError,
+    minimal_env,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +64,19 @@ ENV_DENY = ("FLOCK_TOKEN",)
 # Network extras off; the image sets the same values.
 PI_ENV_DEFAULTS = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
 PI_FLAGS = ("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-approve")
+HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b", re.IGNORECASE)
 RPC_TIMEOUT = 60.0
+# Records PiMapper ignores that carry whole messages: each `message_update` repeats the partial
+# message so far (per token), `tool_execution_update` the output so far, `turn_end` and
+# `agent_end` the turn's / run's messages again. The reader skips them unparsed (Pi writes
+# `type` first), which spares the worker most of the JSON it would decode and drop.
+SKIPPED_RECORDS = ("message_update", "tool_execution_update", "turn_end", "agent_end")
+_SKIP_PREFIXES = tuple(f'{{"type":"{t}"'.encode() for t in SKIPPED_RECORDS)
 STOP_GRACE = 5.0
 
 
 def pi_home() -> Path:
-    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or home() / ".pi" / "agent")
 
 
 @dataclass(frozen=True)
@@ -85,13 +105,16 @@ class PiModelConfig:
                                               "apiKey": f"${self.api_key_env}", "models": [model]}}}
 
 
-def pi_model_config(spec: TypeSpec) -> PiModelConfig | None:
+def pi_model_config(spec: TypeSpec, agent: str = "") -> PiModelConfig | None:
     """Pi's endpoint for a provider-backed type (`spec.resolved_model`). None: a harness-native
     model, passed to Pi as given (one of Pi's built-in providers, e.g. `anthropic/claude-...`)."""
     r = spec.resolved_model
     if r is None:
         return None
-    return PiModelConfig(base_url=r.provider.base_url or "", api_key_env=r.provider.api_key_env,
+    from flock.worker.adapters.llm import pick_endpoint
+
+    endpoint = pick_endpoint(agent, r.provider.endpoints) if agent else r.provider.base_url
+    return PiModelConfig(base_url=endpoint or "", api_key_env=r.provider.api_key_env,
                          model_id=r.model_id, provider=r.provider_name,
                          reasoning=spec.effective_reasoning)
 
@@ -134,6 +157,60 @@ def harness_env(env: Mapping[str, str] | None, home: Path,
         out.pop(k, None)
     out["PI_CODING_AGENT_DIR"] = str(home)
     return out
+
+
+# Git's env-based config (`git -c` for every git under Pi, e.g. a type's pack memory caps in
+# spec.env). Only the count and numbered key/value pairs: GIT_CONFIG_PARAMETERS and the rest stay out.
+GIT_CONFIG_ENV = re.compile(r"GIT_CONFIG_COUNT|GIT_CONFIG_(?:KEY|VALUE)_\d+")
+
+
+ISOLATED_DENY = frozenset({"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN"})
+DROP_VAR = "FLOCK_HARNESS_ENV_DROP"  # comma-separated names a deployment also keeps from Pi
+
+
+# Explicit spec.env keys pass isolation unless they look like credentials (those belong in spec.secrets).
+SECRET_NAME = re.compile(r".*(TOKEN|SECRET)$", re.IGNORECASE)
+
+
+def env_dropped(keys: Iterable[str], provider_key: str | None = None) -> list[str]:
+    """The spec.env names Pi isolation drops: `isolated_env` itself (`flock update` warns with
+    it). FLOCK_HARNESS_ENV_DROP is read here from this process, not the worker's."""
+    keys = list(keys)
+    return isolated_env(dict.fromkeys(keys, ""), provider_key, keys)[1]
+
+
+def isolated_env(env: dict[str, str], provider_key: str | None,
+                 explicit: Iterable[str] = ()) -> tuple[dict[str, str], list[str]]:
+    """(env, dropped names). The allow-list covers the inherited environment: the provider key,
+    agent-scoped tool/controller routing and git's GIT_CONFIG_* pairs. Names in `explicit`
+    (spec.env) pass too, except `env_dropped` ones. ISOLATED_DENY and the worker's
+    FLOCK_HARNESS_ENV_DROP never pass."""
+    allowed = BASE_ENV | set(PI_ENV_DEFAULTS) | {"PI_CODING_AGENT_DIR", "FLOCK_TOOLS_PIN",
+              "FLOCK_URL", "FLOCK_AGENT", "FLOCK_PARENT", "FLOCK_AGENT_TOKEN", "BASH_ENV",
+              provider_key}
+    explicit = set(explicit)
+    kept = {k: v for k, v in env.items()
+            if (k in explicit and not SECRET_NAME.fullmatch(k) or k in allowed
+                or k.startswith(BASE_ENV_PREFIXES) or GIT_CONFIG_ENV.fullmatch(k))
+            and k not in ISOLATED_DENY
+            and k not in set(filter(None, os.environ.get(DROP_VAR, "").split(",")))}
+    return kept, sorted(set(env) - set(kept))
+
+
+def write_bash_env(path: Path, tool_memory_mb: int | None) -> Path:
+    """The flock-owned file Pi's bash tool sources (BASH_ENV: every non-interactive bash): an
+    RLIMIT_DATA cap inherited by each tool command and its children, never by Pi, and no
+    NODE_OPTIONS (Pi's heap cap is not for node tools). Read-only (0444, and a read-only
+    bind inside the sandbox)."""
+    lines = ["# written by flock at each Pi start (docs/pi.md \"Memory\")"]
+    if tool_memory_mb:
+        lines.append(f"ulimit -d {tool_memory_mb * 1024}")  # KiB; data segment, not virtual size
+    lines.append("unset NODE_OPTIONS")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o444)
+    return path
 
 
 def _usage(u: dict[str, Any] | None) -> TokenUsage:
@@ -238,7 +315,12 @@ class PiMapper:
             if rec.get("aborted"):
                 return [AdapterEvent("turn_ended", status="interrupted", raw=rec)]
             if last.get("stopReason") == "error":
-                return [AdapterEvent("turn_ended", status="error", error=last.get("errorMessage"), raw=rec)]
+                message = str(last.get("errorMessage") or "")
+                transient = bool(HTTP_TRANSIENT.search(message)) or any(x in message.lower() for x in (
+                    "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
+                    "connection refused", "socket", "abort"))
+                return [AdapterEvent("turn_ended", status="error", error=message, raw=rec,
+                                     data={"reason": "model_transport"} if transient else {})]
             return [AdapterEvent("turn_ended", status="completed", raw=rec)]
         if t == "auto_retry_end" and not rec.get("success", True):
             return [AdapterEvent("error", error=str(rec.get("finalError") or rec.get("error") or
@@ -255,14 +337,14 @@ class RpcError(RuntimeError):
     pass
 
 
-def _descendants(pid: int) -> list[tuple[int, str]]:
-    """(pid, start time) of every live descendant of `pid`, from /proc (Linux; [] elsewhere)."""
+def process_tree() -> tuple[dict[int, list[int]], dict[int, str]]:
+    """One /proc walk: parent pid -> children, and pid -> start time (Linux; empty elsewhere)."""
     children: dict[int, list[int]] = {}
     starts: dict[int, str] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return []
+        return children, starts
     for d in entries:
         if not d.isdigit():
             continue
@@ -273,6 +355,14 @@ def _descendants(pid: int) -> list[tuple[int, str]]:
         fields = stat[stat.rfind(")") + 2:].split()
         children.setdefault(int(fields[1]), []).append(int(d))
         starts[int(d)] = fields[19]
+    return children, starts
+
+
+def _descendants(pid: int, tree: tuple[dict[int, list[int]], dict[int, str]] | None = None
+                 ) -> list[tuple[int, str]]:
+    """(pid, start time) of every live descendant of `pid`, from `tree` (process_tree) or a
+    fresh /proc walk."""
+    children, starts = tree or process_tree()
     out, todo = [], [pid]
     while todo:
         for c in children.get(todo.pop(), []):
@@ -304,13 +394,14 @@ class PiAdapter:
                  prices: dict[str, Price] | None = None) -> None:
         self.workdir = Path(workdir)
         self.agent = agent or self.workdir.name
-        self.home = Path(home) if home else pi_home()
+        self.home = Path(home) if home else (pi_home() / "agents" / self.agent if isolation_enabled() else pi_home())
         self.pi_bin = pi_bin or os.environ.get("FLOCK_PI_CLI") or "pi"
         self.model_config = model_config
         self.prices = prices  # for max_budget_usd; None: the global table
         self.session_id: str | None = None
         self.session_file: Path | None = None
         self.env: dict[str, str] = {}
+        self.env_dropped_names: list[str] = []
         self.argv: list[str] = []
         self._proc: asyncio.subprocess.Process | None = None
         self._queue = EventQueue()
@@ -319,7 +410,38 @@ class PiAdapter:
         self._next_id = 0
         self._tasks: list[asyncio.Task] = []
         self._stderr: list[str] = []
+        self._isolation_dir: tempfile.TemporaryDirectory | None = None
         self._seen: list[tuple[int, str]] = []
+
+    def update_spec(self, spec: TypeSpec) -> bool:
+        """A live `flock update` (docs/live.md): a new endpoint list (vLLM base_urls), model id
+        or reasoning level takes effect at Pi's next start, where models.json is rewritten.
+        True when it changed: the runtime then recycles Pi at the turn boundary, so the change
+        applies within a turn. A change of the provider's key variable waits for a worker
+        restart, since the key is set up with the process environment."""
+        if self.model_config is None:
+            return False
+        new = pi_model_config(spec, self.agent)
+        if new is None or new.api_key_env != self.model_config.api_key_env or new == self.model_config:
+            return False
+        log.info("%s: pi model config updated (endpoint %s); recycling pi", self.agent, new.base_url)
+        self.model_config = new
+        return True
+
+    def scratch_env(self) -> dict[str, str]:
+        """Isolated Pi's HOME, TMPDIR and tool caches: under its own agent dir (disk-backed,
+        private to this agent, not synced), not in the in-memory root where npm, uv or test
+        caches would fill the tmpfs. TMPDIR starts empty on every start; HOME and its caches
+        are kept for the agent's next start on this worker."""
+        home, tmp = self.home / "home", self.home / "tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        for d in (home, tmp):
+            d.mkdir(parents=True, exist_ok=True)
+            d.chmod(0o700)
+        cache = home / ".cache"
+        return {"HOME": str(home), "TMPDIR": str(tmp), "XDG_CACHE_HOME": str(cache),
+                "UV_CACHE_DIR": str(cache / "uv"), "npm_config_cache": str(cache / "npm"),
+                "PIP_CACHE_DIR": str(cache / "pip")}
 
     @property
     def session_dir(self) -> Path:
@@ -368,6 +490,8 @@ class PiAdapter:
         assert self._proc and self._proc.stdout
         try:
             while line := await self._proc.stdout.readline():
+                if line.startswith(_SKIP_PREFIXES):
+                    continue
                 try:
                     rec = json.loads(line)
                 except ValueError:
@@ -439,12 +563,39 @@ class PiAdapter:
         if cfg is not None and cfg.reasoning:
             self.argv += ["--thinking", cfg.reasoning]
         self.env = harness_env(env, self.home)
+        bash_env = None
+        if spec.tool_memory_mb or spec.node_heap_mb:  # outside the agent's writable dirs
+            bash_env = write_bash_env(self.home.parent / f"{self.agent}.bash_env", spec.tool_memory_mb)
+            self.env["BASH_ENV"] = str(bash_env)
+        launch = self.argv
+        if isolation_enabled():
+            self.env, self.env_dropped_names = isolated_env(
+                self.env, cfg.api_key_env if cfg else None, spec.env)
+            # Private directories prevent a sibling from reading this agent's gateway key.
+            pin = self.env.get("FLOCK_TOOLS_PIN")
+            readonly = [bash_env] if bash_env else []
+            if pin:
+                pin_path = Path(pin)
+                if pin_path.parent.name != self.agent:
+                    raise RuntimeError("isolated Pi requires an agent-private tools pin directory")
+                pin_path.parent.mkdir(parents=True, exist_ok=True)
+                readonly.append(pin_path.parent)
+            self.env.update(self.scratch_env())
+            self._isolation_dir = tempfile.TemporaryDirectory(prefix="flock-pi-root-")
+            # The root is a size-capped tmpfs (RAM); its /tmp is this agent's disk-backed TMPDIR,
+            # so files a tool writes to a literal /tmp never accumulate in memory.
+            launch = isolate_command(self.argv, Path(self._isolation_dir.name), cwd=self.workdir,
+                                     readonly=readonly, writable=[self.workdir, self.home], network=True,
+                                     tmp=self.home / "tmp")
+        if spec.node_heap_mb:  # Pi only: the BASH_ENV file unsets it for tools
+            self.env["NODE_OPTIONS"] = f"--max-old-space-size={spec.node_heap_mb}"
         self._queue = EventQueue()
         self._mapper = PiMapper(cfg.model_ref if cfg else spec.model, max_turns=spec.max_turns,
                                 max_budget_usd=spec.max_budget_usd, prices=self.prices)
         self._stderr = []
         self._proc = await asyncio.create_subprocess_exec(
-            *self.argv, cwd=str(self.workdir), env=self.env, limit=64 * 1024 * 1024,
+            *launch, cwd=str(self.workdir), env=self.env, limit=64 * 1024 * 1024,
+            start_new_session=isolation_enabled(),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._drain_stderr())]
         try:
@@ -509,6 +660,9 @@ class PiAdapter:
             except (TimeoutError, asyncio.CancelledError):
                 t.cancel()
         self._tasks = []
+        if self._isolation_dir is not None:
+            self._isolation_dir.cleanup()
+            self._isolation_dir = None
 
     async def events(self) -> AsyncIterator[AdapterEvent]:
         async for ev in self._queue:

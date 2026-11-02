@@ -59,6 +59,10 @@ uv run flock run examples/local.yaml --prompt "Introduce yourself in one sentenc
   at stop; `--data-dir .flock` is where runs go.
 - A `tools/` folder next to the spec ([tools.md](tools.md)) is checked, uploaded and named in
   the spec by its hash before the run starts, as `flock apply` does.
+- `--watch` applies each saved change to the experiment folder (spec, prompt files, tools) to
+  the running swarm, as `flock update` does; a broken save is shown and not applied. From a
+  second terminal, `flock update <folder>` and `flock grant <target> ...` work the same way
+  ([live.md](live.md)).
 
 ## What you see
 
@@ -137,6 +141,10 @@ A long-lived local controller without the terminal view also exists:
 `FLOCK_TOKEN=... FLOCK_COMPUTE=local uv run flock-controller`, then `flock apply` a `local` spec.
 
 ## What differs locally
+
+- Agent names follow the spec's `naming:` as on HF Jobs: `<type>-NNNN` by default,
+  `<adjective>-<noun>` with `naming: words` (docs/spawn.md "Names"); the run bundle's
+  `events/<name>.jsonl` and `agents/<name>/` use the same names.
 
 Same code as on jobs: the spec, the API and CLI, the reconcile loop and placement
 (`agents_per_worker`, `workers:`), heartbeats and agent states, prompt admission
