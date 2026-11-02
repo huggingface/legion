@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -18,6 +20,7 @@ import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from flock.comms import managed
 from flock.comms.managed import INVITE_ENV, ManagedBoard, ManagedBoardError
 from flock.controller.api import create_app
 from flock.live import diff_specs
@@ -246,6 +249,137 @@ def test_snapshot_failure_retains_local_data_and_releases_lock(board, monkeypatc
         board.stop()
     assert board.proc.poll() is not None and local.exists()
     assert board._file_lock is None
+
+
+@pytest.mark.parametrize("fail_capture", [False, True])
+def test_storage_snapshot_is_coherent_and_preserves_previous_capture(
+    board, tmp_path, monkeypatch, fail_capture
+):
+    board.start(spec())
+    copy_verified = managed._copy_verified
+    with httpx.Client(base_url=board.url,
+                      headers={"Authorization": "Bearer " + board._operator}) as c:
+        handle = c.get("/v1/me").json()["external_id"]
+        path = f"/v1/storage/{handle}/result.txt"
+        c.put(path, content=b"old version").raise_for_status()
+        if fail_capture:
+            board.snapshot()
+            c.put(path, content=b"new version").raise_for_status()
+        changed = False
+
+        def copying(source, target, digest):
+            nonlocal changed
+            if source.is_relative_to(board.local / "storage") and not changed:
+                changed = True
+                if not fail_capture:
+                    c.put(path, content=b"new version").raise_for_status()
+                copy_verified(source, target, digest)
+                if fail_capture:
+                    raise OSError("snapshot disk full")
+                return
+            return copy_verified(source, target, digest)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(managed, "_copy_verified", copying)
+            if fail_capture:
+                with pytest.raises(OSError, match="disk full"):
+                    board.snapshot()
+            else:
+                board.snapshot()
+        assert changed
+    shutil.copytree(board.archive, tmp_path / "retained" / "board")
+    restored = ManagedBoard(tmp_path / "retained")
+    try:
+        restored.start(restore=True)
+        with httpx.Client(base_url=restored.url,
+                          headers={"Authorization": "Bearer " + board._operator}) as c:
+            metadata = c.get(path + "?info=true").json()
+            response = c.get(path)
+            assert response.status_code == 200
+            assert response.content == (b"old version" if fail_capture else b"new version")
+            assert hashlib.sha256(response.content).hexdigest() == metadata["sha256"]
+    finally:
+        restored.stop()
+
+
+def test_snapshot_retries_attachment_deleted_after_database_capture(board, monkeypatch):
+    board.start(spec())
+    copy_verified = managed._copy_verified
+    with httpx.Client(base_url=board.url,
+                      headers={"Authorization": "Bearer " + board._operator}) as c:
+        channel = c.get("/v1/channels").json()["channels"][0]["id"]
+        response = c.put(f"/v1/channels/{channel}/attachments/deleted-during-snapshot",
+                         headers={"X-Filename": "test.txt"}, content=b"attachment")
+        response.raise_for_status()
+        posted = c.post(f"/v1/channels/{channel}/messages",
+                        headers={"Idempotency-Key": "deleted-during-snapshot"},
+                        json={"body": "file", "attachments": [response.json()["id"]]})
+        posted.raise_for_status()
+        message = posted.json()
+        deleted = False
+
+        def copying(source, target, digest):
+            nonlocal deleted
+            if source.is_relative_to(board.local / "blobs") and not deleted:
+                deleted = True
+                c.delete(f"/v1/channels/{channel}/messages/{message['id']}").raise_for_status()
+            return copy_verified(source, target, digest)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(managed, "_copy_verified", copying)
+            board.snapshot()
+        assert deleted
+    with sqlite3.connect(board.archive / "board.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM attachments").fetchone() == (0,)
+
+
+def test_legacy_snapshot_restores_hash_verified_storage(board, tmp_path):
+    board.start(spec())
+    with httpx.Client(base_url=board.url,
+                      headers={"Authorization": "Bearer " + board._operator}) as c:
+        handle = c.get("/v1/me").json()["external_id"]
+        path = f"/v1/storage/{handle}/legacy.txt"
+        c.put(path, content=b"legacy content").raise_for_status()
+    board.snapshot()
+    legacy = tmp_path / "legacy" / "board"
+    shutil.copytree(board.archive, legacy)
+    shutil.rmtree(legacy / managed.OBJECTS_DIR)
+    shutil.copytree(board.local / "storage", legacy / "storage")
+    restored = ManagedBoard(legacy.parent)
+    try:
+        restored.start(restore=True)
+        r = httpx.get(restored.url + path,
+                      headers={"Authorization": "Bearer " + board._operator})
+        assert r.status_code == 200 and r.content == b"legacy content"
+    finally:
+        restored.stop()
+
+
+async def test_interrupt_during_provisioning_never_launches_workers(tmp_path, monkeypatch):
+    import io
+
+    from flock.controller.local import LocalJobsClient
+    from flock.controller.localrun import RunOptions, run_local
+
+    pytest.importorskip("msgboard")
+    provision = ManagedBoard._provision
+    launches = []
+
+    def interrupted(self, spec):
+        os.kill(os.getpid(), signal.SIGINT)
+        assert self._cancel_start.wait(5)
+        provision(self, spec)
+
+    monkeypatch.setattr(ManagedBoard, "_provision", interrupted)
+    monkeypatch.setattr(LocalJobsClient, "launch", lambda *args, **kwargs: launches.append(args))
+    s = spec()
+    s.types["worker"].replicas = 1
+    result = await run_local(RunOptions(spec=s, data_dir=tmp_path / "runs", until=0.2,
+                                       refresh=0.05, out=io.StringIO()))
+    assert result.reason == "interrupted" and result.exit_code == 0
+    assert launches == []
+    doc = json.loads((result.run_dir / "run.json").read_text())
+    assert not doc["board"]["running"]
 
 
 def test_apply_update_and_scaling_reuse_board(board, store):

@@ -548,6 +548,20 @@ def test_persistence_manifest_excludes_transient_probe(stopped_board):
     assert set(manifest) == {"board.db", "operator.token"}
 
 
+@pytest.mark.parametrize("name", ["requirements.lock", "result-wal", "result-shm",
+                                  "server.lock", ".flock-write-check-user-file"])
+def test_bucket_verifies_user_files_with_reserved_suffixes(stopped_board, name):
+    m, _ = stopped_board
+    artifact = m.mount / "storage" / "1" / name
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"retained user artifact")
+    assert artifact.relative_to(m.mount).as_posix() in m._manifest()
+    # The fake drain uploads only root files, simulating a missing user-file upload.
+    with pytest.raises(BucketStorageError, match="verify"):
+        m.stop(verify=True)
+    assert m.verified_at is None and m.cache.exists()
+
+
 @pytest.mark.parametrize("replaced", [False, True])
 def test_dead_fuse_cleanup_detaches_only_owned_mount(stopped_board, monkeypatch, replaced):
     m, _ = stopped_board

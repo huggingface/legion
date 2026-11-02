@@ -98,6 +98,10 @@ class RunResult:
     totals: dict[str, Any]
 
 
+class _StartupInterrupted(Exception):
+    """Stop before applying a swarm when startup was interrupted."""
+
+
 # --------------------------------------------------------------------------- helpers
 
 
@@ -636,6 +640,8 @@ async def run_local(opts: RunOptions) -> RunResult:
     try:
         if board is not None:
             await asyncio.to_thread(board.start, spec)
+            if stop.is_set():
+                raise _StartupInterrupted
             runtime_secrets[INVITE_ENV] = board.invite
             say(f"board: {board.url}; operator token: {board.operator_token_path}")
             if board.periodic_snapshots:
@@ -647,6 +653,8 @@ async def run_local(opts: RunOptions) -> RunResult:
         say(f"second terminal: {cli_hint(data_dir)} (URL and token in {current})")
         headers = {"X-Flock-Token": token}
         async with httpx.AsyncClient(base_url=url, headers=headers, timeout=60) as http:
+            if stop.is_set():
+                raise _StartupInterrupted
             if not await _apply(http, opts, say):
                 reason, code = "apply_failed", 1
                 stop.set()
@@ -704,6 +712,9 @@ async def run_local(opts: RunOptions) -> RunResult:
             say(f"stopping ({reason}): draining workers, up to {opts.grace:g} s for in-flight "
                 "turns (Ctrl-C again to force)")
         await _stop_workers(store, jobs, spec, reconcile_task, opts.grace, force)
+    except _StartupInterrupted:
+        reason, code = "interrupted", 0
+        await _stop_workers(store, jobs, spec, reconcile_task, 0, force)
     except Exception as exc:  # always stop the workers and write the bundle
         log.exception("flock run failed")
         say(f"flock run failed: {type(exc).__name__}: {exc}")

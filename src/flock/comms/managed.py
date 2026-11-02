@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import json
 import logging
@@ -38,11 +39,69 @@ INVITE_ENV = "FLOCK_MANAGED_BOARD_INVITE"
 SNAPSHOT_INTERVAL = 15.0
 DB_NAME = "board.db"
 TOKEN_FILE = "operator.token"
+OBJECTS_DIR = "snapshot-objects"
 INSTALL_HINT = "Managed boards need msgboard: install the 'msgboard' extra (uv sync --extra msgboard)."
 
 
 class ManagedBoardError(ValueError):
     """A setup/lifecycle error safe to show without exposing board credentials."""
+
+
+class _SnapshotChanged(Exception):
+    """A file changed after its database row was captured; retry the snapshot."""
+
+
+def _data_files(conn: sqlite3.Connection):
+    """Only committed files from the pinned msgboard schema belong to this DB snapshot."""
+    for owner, path, digest in conn.execute("SELECT owner_id, path, sha256 FROM storage_files"):
+        relative = Path("storage") / str(owner) / path
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ManagedBoardError("Invalid storage path in board snapshot.")
+        yield relative, digest
+    for key, digest in conn.execute(
+        "SELECT storage_key, sha256 FROM attachments WHERE state = 'ready'"
+    ):
+        relative = Path("blobs") / "objects" / key
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ManagedBoardError("Invalid attachment path in board snapshot.")
+        yield relative, digest
+
+
+def _file_digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _copy_verified(source: Path, target: Path, digest: str) -> None:
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ManagedBoardError("Invalid file checksum in board snapshot.")
+    if target.is_file() and _file_digest(target) == digest:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=".copy-", dir=target.parent)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        try:
+            shutil.copyfile(source, tmp)
+        except FileNotFoundError:
+            raise _SnapshotChanged from None
+        if _file_digest(tmp) != digest:
+            raise _SnapshotChanged
+        with tmp.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(tmp, target)
+        _fsync_dir(target.parent)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _signature(comms: CommsSpec) -> tuple:
@@ -123,14 +182,7 @@ class ManagedBoard:
                     root.mkdir(parents=True, exist_ok=True)
                     self.local = Path(tempfile.mkdtemp(prefix="flock-board-", dir=root))
                     if restore:
-                        for p in self.archive.iterdir():
-                            if p.name.startswith(".") or p.name == "metadata.json":
-                                continue
-                            dest = self.local / p.name
-                            if p.is_dir():
-                                shutil.copytree(p, dest)
-                            else:
-                                shutil.copy2(p, dest)
+                        self._restore_snapshot()
                 if restore:
                     self._details = retained.get("configuration", {})
                 elif (self.archive / DB_NAME).exists():
@@ -299,7 +351,7 @@ class ManagedBoard:
         os.replace(meta, self.archive / "metadata.json")
 
     def snapshot(self) -> None:
-        """Atomic online SQLite backup; copy attachments and credentials before publishing it."""
+        """Publish a DB only after its hash-verified, immutable file objects are retained."""
         with self._lock:
             if self.bucket:
                 self._save_metadata()
@@ -309,31 +361,56 @@ class ManagedBoard:
             tmp = self.archive / ".board.snapshot"
             tmp.touch(mode=0o600, exist_ok=True)
             try:
-                with contextlib.closing(sqlite3.connect(
-                    (self.local / DB_NAME).as_uri() + "?mode=ro", uri=True, timeout=5
-                )) as src, contextlib.closing(sqlite3.connect(tmp)) as dst:
-                    src.backup(dst)
-                for p in self.local.iterdir():
-                    if (p.name.startswith(DB_NAME) or "lock" in p.name
-                            or p.name == "storage-cache"):
-                        continue
-                    # Upload staging and the download cache are transient: the board may
-                    # rename/delete their files at any time. Only retain committed blobs.
-                    if p.name == "blobs":
-                        p = p / "objects"
-                    dest = self.archive / p.relative_to(self.local)
-                    if p.is_dir():
-                        shutil.copytree(p, dest, dirs_exist_ok=True)
-                    elif p.is_file():
-                        copied = self.archive / (".copy-" + p.name)
-                        shutil.copy2(p, copied)
-                        copied.chmod(0o600)
-                        os.replace(copied, dest)
+                for attempt in range(3):
+                    with contextlib.closing(sqlite3.connect(
+                        (self.local / DB_NAME).as_uri() + "?mode=ro", uri=True, timeout=5
+                    )) as src, contextlib.closing(sqlite3.connect(tmp)) as dst:
+                        src.backup(dst)
+                        files = list(_data_files(dst))
+                    try:
+                        for relative, digest in files:
+                            _copy_verified(self.local / relative,
+                                           self.archive / OBJECTS_DIR / digest, digest)
+                        break
+                    except _SnapshotChanged:
+                        if attempt == 2:
+                            raise ManagedBoardError(
+                                "Board files changed during snapshot; previous snapshot retained."
+                            ) from None
+                copied = self.archive / ".copy-token"
+                shutil.copyfile(self.local / TOKEN_FILE, copied)
+                copied.chmod(0o600)
+                with copied.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                os.replace(copied, self.archive / TOKEN_FILE)
+                # Old objects are deliberately retained: a failed capture must not change
+                # any file referenced by the previously published database.
+                _fsync_dir(self.archive)
                 os.replace(tmp, self.archive / DB_NAME)
+                _fsync_dir(self.archive)
                 self._snapshot_at = datetime.now(UTC).isoformat()
                 self._save_metadata()
             finally:
                 tmp.unlink(missing_ok=True)
+
+    def _restore_snapshot(self) -> None:
+        assert self.local is not None
+        for name in (DB_NAME, TOKEN_FILE):
+            shutil.copy2(self.archive / name, self.local / name)
+        with contextlib.closing(sqlite3.connect(self.local / DB_NAME)) as conn:
+            files = list(_data_files(conn))
+        for relative, digest in files:
+            # Accept pre-object-store snapshots, but never restore mismatched file bytes.
+            candidates = (self.archive / OBJECTS_DIR / digest, self.archive / relative,
+                          self.archive / "storage-cache" / digest)
+            for source in candidates:
+                try:
+                    _copy_verified(source, self.local / relative, digest)
+                    break
+                except _SnapshotChanged:
+                    continue
+            else:
+                raise ManagedBoardError("A retained board file is missing or has the wrong checksum.")
 
     def _terminate(self) -> None:
         if self.proc is not None and self.proc.poll() is None:

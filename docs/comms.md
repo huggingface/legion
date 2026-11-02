@@ -340,6 +340,14 @@ board, with a final snapshot. After an abrupt host loss, changes since the last 
 be lost. Snapshot failures fail the run; a failed final snapshot retains its node-local data
 and logs that path instead of deleting it.
 
+Local snapshots retain committed attachment and storage contents as immutable, checksum-addressed
+objects under `board/snapshot-objects/`. Flock verifies those objects against a captured database
+before atomically publishing the database, retrying if files changed during the capture. Upload
+staging and download caches are excluded. Older objects are kept so a failed capture cannot corrupt
+the previous snapshot; keep this directory with the database when archiving the run. Reopening
+reconstructs the live file paths from the database and verifies their checksums. Legacy snapshots
+with files at their original paths are still accepted after checksum verification.
+
 Reopen history without starting agents:
 
 ```sh

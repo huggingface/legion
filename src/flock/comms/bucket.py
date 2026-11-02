@@ -217,8 +217,9 @@ class BucketMount:
                 os.fsync(stream.fileno())
         return {p.relative_to(self.mount).as_posix(): _digest(p)
                 for p in self.mount.rglob("*") if p.is_file()
-                and not (p.name.endswith((".lock", "-shm", "-wal"))
-                         or p.name.startswith(".flock-write-check-"))}
+                and not (p.parent == self.mount
+                         and (p.name in {"server.lock", "board.db-shm", "board.db-wal"}
+                              or p.name.startswith(".flock-write-check-")))}
 
     def _detach_failed_mount(self) -> None:
         entry = _mount_entry(self.mount)
