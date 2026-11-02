@@ -1,0 +1,8 @@
+# Coordinators only; each spawns its own workers and interviewers. Change `add`, `every` and `until`/`cap` here
+# (and types.coordinator.workers.initial / limits in spec.yaml when going past 60 coordinators).
+type: coordinator
+cap: 50
+stagger_s: 10
+waves:
+  - {at: 0, add: 10}
+  - {every: 10m, add: 10, until: 50}
