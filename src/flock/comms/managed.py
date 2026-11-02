@@ -314,9 +314,14 @@ class ManagedBoard:
                 )) as src, contextlib.closing(sqlite3.connect(tmp)) as dst:
                     src.backup(dst)
                 for p in self.local.iterdir():
-                    if p.name.startswith(DB_NAME) or "lock" in p.name:
+                    if (p.name.startswith(DB_NAME) or "lock" in p.name
+                            or p.name == "storage-cache"):
                         continue
-                    dest = self.archive / p.name
+                    # Upload staging and the download cache are transient: the board may
+                    # rename/delete their files at any time. Only retain committed blobs.
+                    if p.name == "blobs":
+                        p = p / "objects"
+                    dest = self.archive / p.relative_to(self.local)
                     if p.is_dir():
                         shutil.copytree(p, dest, dirs_exist_ok=True)
                     elif p.is_file():

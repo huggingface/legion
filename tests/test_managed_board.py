@@ -173,6 +173,69 @@ def test_cannot_reopen_active_board(board):
     board.check()
 
 
+def test_snapshot_during_upload_skips_transient_files(board, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    board.start(spec())
+    finish, uploaded = Event(), Event()
+    original_copyfile = shutil.copyfile
+    transient_copies = []
+
+    def body():
+        yield b"first chunk"
+        assert finish.wait(10)
+        yield b"last chunk"
+
+    def upload():
+        try:
+            with httpx.Client(base_url=board.url, timeout=15,
+                              headers={"Authorization": "Bearer " + board._operator}) as c:
+                channel = c.get("/v1/channels").json()["channels"][0]["id"]
+                r = c.put(f"/v1/channels/{channel}/attachments/snapshot-race",
+                          headers={"X-Filename": "test.txt"}, content=body())
+                assert r.status_code == 201, r.text
+                return r.json()["id"]
+        finally:
+            uploaded.set()
+
+    def copyfile(src, dst, *args, **kwargs):
+        if Path(src).parent == board.local / "blobs" / "tmp":
+            # Complete the real upload after copytree has scanned its staging file.
+            # The board moves it into objects, so copying it would now fail with ENOENT.
+            transient_copies.append(src)
+            finish.set()
+            assert uploaded.wait(10)
+        return original_copyfile(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+    with ThreadPoolExecutor() as pool:
+        future = pool.submit(upload)
+        try:
+            deadline = time.monotonic() + 10
+            while not list((board.local / "blobs" / "tmp").iterdir()):
+                assert time.monotonic() < deadline, "upload did not start"
+                time.sleep(0.01)
+            (board.local / "storage-cache" / "evictable").write_bytes(b"cache")
+            board.snapshot()
+        finally:
+            finish.set()
+        attachment = future.result(timeout=10)
+    assert not transient_copies
+    assert not (board.archive / "blobs" / "tmp").exists()
+    assert not (board.archive / "storage-cache").exists()
+    monkeypatch.setattr(shutil, "copyfile", original_copyfile)
+    board.stop()
+    restored = ManagedBoard(board.run_dir)
+    try:
+        restored.start(restore=True)
+        r = httpx.get(f"{restored.url}/v1/attachments/{attachment}",
+                      headers={"Authorization": "Bearer " + board._operator})
+        assert r.status_code == 200 and r.content == b"first chunklast chunk"
+    finally:
+        restored.stop()
+
+
 def test_snapshot_failure_retains_local_data_and_releases_lock(board, monkeypatch):
     board.start(spec())
     local = board.local
