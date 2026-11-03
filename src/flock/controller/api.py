@@ -46,7 +46,6 @@ from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
 from flock.live import diff_specs, keep_replicas
 from flock.models import (
-    COMMS_TOOLS,
     AgentState,
     AgentStatus,
     BulkPromptAck,
@@ -56,7 +55,6 @@ from flock.models import (
     CommandBatch,
     Event,
     EventBatch,
-    Grant,
     Harness,
     LoopRequest,
     LoopStatus,
@@ -74,7 +72,6 @@ from flock.models import (
     WorkerStatus,
     comms_tools,
     loop_refusals,
-    merge_grants,
     type_spec_rev,
     worker_type_spec,
     world_tools,
@@ -249,7 +246,6 @@ def agent_status(
     pending: int,
     now: float,
     children: list[str] | None = None,
-    grant: Grant | None = None,
 ):
     ts = spec.types.get(a["type"]) if spec else None
     return AgentStatus(
@@ -278,7 +274,6 @@ def agent_status(
         parent=a["parent"],
         children=children or [],
         depth=agent_depth(spec, a),
-        grants=grant.compact() if grant is not None else None,
         rev=a.get("rev"),
         start_rev=a.get("start_rev"),
     )
@@ -1040,105 +1035,6 @@ def create_app(
             raise HTTPException(404, f"no tools bundle {version!r} for swarm {swarm!r}")
         return Response(b["body"], media_type="application/gzip")
 
-    # ------------------------------------------------------------- grants (docs/live.md)
-
-    def agent_grant(a: Row) -> Grant | None:
-        """The grant in force for agent row `a`: its type's, then its own on top."""
-        types, agents = store.agent_grants(a["swarm"])
-        return merge_grants(types.get(a["type"]), agents.get(a["name"]))
-
-    def over_budget(a: Row, g: Grant | None) -> bool:
-        return g is not None and g.limits.budget_usd is not None and a["cost"] >= g.limits.budget_usd
-
-    def grant_event(swarm: str, kind: str, target: str, data: dict) -> None:
-        ev = Event(type=kind, ts=clock(), agent="", data={"target": target, **data})
-        store.append_events(swarm, swarm_stream(swarm), [ev])
-        if data.get("kind") == "agent":
-            store.append_events(swarm, target, [ev.model_copy(update={"agent": target})])
-
-    def grant_target(swarm: str, spec: SwarmSpec, target: str) -> tuple[str, str]:
-        """(kind, type name) of a grant target: a type of the swarm, or one of its agents."""
-        if target in spec.types:
-            return "type", target
-        a = store.get_agent(target)
-        if a is None or a["swarm"] != swarm:
-            raise HTTPException(404, f"no type or agent {target!r} in swarm {swarm!r}")
-        if a["type"] not in spec.types:
-            raise HTTPException(409, f"agent {target!r}: its type {a['type']!r} is no longer in "
-                                     "the spec")
-        return "agent", a["type"]
-
-    def check_grant(swarm: str, spec: SwarmSpec, type_name: str, g: Grant) -> Grant:
-        """Refuse what the workers cannot enforce; comms tools come back as `comms:<name>`."""
-        ts = spec.types[type_name]
-        bundle = (store.get_tool_bundle(swarm, spec.tools_version, body=False)
-                  if spec.tools_version else None)
-        folder = bundle["tools"] if bundle else []
-        on_board = comms_tools(ts, spec.comms)
-        refused: list[str] = []
-        tools: dict[str, bool] = {}
-        for name, on in g.tools.items():
-            entry = name if name.startswith("comms:") else f"comms:{name}"
-            if name in folder:
-                tools[name] = on
-            elif entry in COMMS_TOOLS:
-                tools[entry] = on
-                if not on:
-                    continue
-                if spec.comms is None:
-                    refused.append(f"tools: +{name}: the swarm has no comms block")
-                elif not on_board:
-                    refused.append(f"tools: +{name}: type {type_name} has no comms tools, so its "
-                                   "workers hold no board invite; give it `comms: true` or a "
-                                   "comms tool in the spec")
-                elif entry == "comms:search" and not spec.comms.search:
-                    refused.append(f"tools: +{name}: comms.search is off in the spec")
-            else:
-                where = (f"bundle {spec.tools_version} has: {', '.join(folder) or 'none'}"
-                         if bundle else "the swarm has no tools folder")
-                refused.append(f"tools: unknown tool {name!r}; {where}; comms tools: post, read, "
-                               "search")
-        if g.bash is not None and ts.harness != Harness.llm:
-            refused.append(f"bash: only the llm harness has a bash tool to switch (type "
-                           f"{type_name} is {ts.harness.value})")
-        if g.bash is False and ts.tool_choice == "bash":
-            refused.append(f"bash: off contradicts type {type_name}'s tool_choice: bash")
-        if refused:
-            raise HTTPException(400, "; ".join(refused))
-        return g.model_copy(update={"tools": tools})
-
-    @api.get("/swarms/{swarm}/grants")
-    def list_grants(swarm: str) -> dict:
-        spec_or_404(swarm)
-        return {"swarm": swarm, "grants": [
-            {"target": r["target"], "kind": r["kind"], "grant": r["grant"].compact(),
-             "updated_at": _dt(r["updated_at"])} for r in store.list_grants(swarm)]}
-
-    @api.put("/swarms/{swarm}/grants/{target}")
-    def put_grant(swarm: str, target: str, grant: Grant) -> dict:
-        """Set (replace) the grant of a type or an agent; an empty body revokes it. It is an
-        overlay on the spec: `flock update` / `flock apply` keep it. Workers merge it in at
-        each agent's next turn boundary."""
-        spec = spec_or_404(swarm)["spec"]
-        kind, type_name = grant_target(swarm, spec, target)
-        grant = check_grant(swarm, spec, type_name, grant)
-        store.put_grant(swarm, target, kind, grant, clock().timestamp())
-        if grant.empty():
-            grant_event(swarm, "grant_revoked", target, {"kind": kind})
-        else:
-            grant_event(swarm, "grant", target, {"kind": kind, "grant": grant.compact()})
-        return {"swarm": swarm, "target": target, "kind": kind, "grant": grant.compact()}
-
-    @api.delete("/swarms/{swarm}/grants/{target}")
-    def delete_grant(swarm: str, target: str) -> dict:
-        spec_or_404(swarm)
-        row = next((r for r in store.list_grants(swarm) if r["target"] == target), None)
-        if row is None:
-            raise HTTPException(404, f"no grant for {target!r} in swarm {swarm!r}")
-        store.put_grant(swarm, target, row["kind"], Grant(), clock().timestamp())
-        grant_event(swarm, "grant_revoked", target, {"kind": row["kind"]})
-        return {"swarm": swarm, "target": target, "kind": row["kind"], "revoked": True}
-
     @api.post("/swarms/{swarm}/preflight")
     async def preflight(
         swarm: str, spec: Annotated[SwarmSpec | None, Body()] = None
@@ -1183,15 +1079,13 @@ def create_app(
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         pending = store.pending_counts(swarm)
         kids = store.children_by_parent(swarm)
-        type_grants, agent_grants = store.agent_grants(swarm)
         out: list[AgentStatus] = []
         rows = sorted(store.list_agents(swarm, type, parent=parent), key=lambda a: a["name"])
         for a in rows:
             if cursor is not None and a["name"] <= cursor:
                 continue
             st = agent_status(a, workers.get(a["worker"]), spec, pending.get(a["name"], 0), now,
-                              kids.get(a["name"]), merge_grants(type_grants.get(a["type"]),
-                                                                agent_grants.get(a["name"])))
+                              kids.get(a["name"]))
             if state is None or st.state == state:
                 out.append(st)
             if len(out) >= max(1, limit):
@@ -1211,8 +1105,7 @@ def create_app(
         w = store.get_worker(a["worker"]) if a["worker"] else None
         pending = store.pending_counts(a["swarm"]).get(name, 0)
         kids = [c["name"] for c in store.list_agents(parent=name)]
-        return agent_status(a, w, row["spec"] if row else None, pending, clock().timestamp(), kids,
-                            agent_grant(a))
+        return agent_status(a, w, row["spec"] if row else None, pending, clock().timestamp(), kids)
 
     @api.post("/agents/{name}/spawn", status_code=201)
     def spawn(name: str, req: SpawnRequest) -> SpawnAck:
@@ -1263,10 +1156,6 @@ def create_app(
     def prompt(name: str, req: PromptRequest) -> PromptAck:
         a = agent_or_404(name)
         not_budget_stopped(a["swarm"])
-        if over_budget(a, g := agent_grant(a)):
-            raise HTTPException(409, f"agent {name!r} reached its granted limits.budget_usd "
-                                     f"(${a['cost']:.4f} of ${g.limits.budget_usd:g}); grant more "
-                                     f"or revoke it (docs/live.md)")
         cmd = PromptCommand(
             agent=name,
             prompt_id=uuid.uuid4().hex,
@@ -1321,7 +1210,6 @@ def create_app(
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
         pending = store.pending_counts(swarm) if skip_pending else {}
-        type_grants, agent_grants = store.agent_grants(swarm)
         rows: list[tuple[str, str]] = []
         # `track` (docs/live.md "Broadcasts"): one prompt id for all, counted as turns report it
         bid = f"b-{uuid.uuid4().hex[:12]}" if getattr(req, "track", False) else None
@@ -1336,9 +1224,6 @@ def create_app(
                 continue
             if pending.get(a["name"]):
                 ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
-                continue
-            if over_budget(a, merge_grants(type_grants.get(a["type"]), agent_grants.get(a["name"]))):
-                ack.skipped_budget += 1
                 continue
             cmd = build(a) if build else PromptCommand(
                 agent=a["name"], prompt_id=bid or uuid.uuid4().hex, text=req.text,
@@ -1706,17 +1591,11 @@ def create_app(
                 out["world"]["down_since"] = _dt(down).isoformat()  # the hub refuses at once
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
-            # docs/live.md: a changed type spec (prompts, limits, ...) and the grants in force
-            # reach the worker here; it applies them at each agent's next turn boundary
+            # docs/live.md: a changed type spec (prompts, limits, ...) reaches the worker here; it applies them at each agent's next turn boundary
             wts = worker_type_spec(ts)  # never `loop.notices` (controller only)
             rev = type_spec_rev(wts)
             if hb.spec_rev != rev:
                 out["type_spec"], out["spec_rev"] = wts.model_dump(mode="json"), rev
-            type_grants, agent_grants = store.agent_grants(w["swarm"])
-            grants = {a.name: g.compact() for a in hb.agents
-                      if (g := merge_grants(type_grants.get(w["type"]), agent_grants.get(a.name)))}
-            if grants:  # absent: no grant in force for any of this worker's agents
-                out["grants"] = grants
         return out
 
     @api.post("/workers/{worker_id}/events")

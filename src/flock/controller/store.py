@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from flock.models import Event, Grant, SwarmSpec, TokenUsage
+from flock.models import Event, SwarmSpec, TokenUsage
 
 DB_NAME = "controller.db"
 
@@ -144,14 +144,6 @@ CREATE INDEX IF NOT EXISTS loop_agents_by_type ON loop_agents (swarm, type);
 CREATE TABLE IF NOT EXISTS swarm_flags (
   swarm TEXT PRIMARY KEY,
   body TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS grants (
-  swarm TEXT NOT NULL,
-  target TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  body TEXT NOT NULL,
-  updated_at REAL NOT NULL,
-  PRIMARY KEY (swarm, target)
 );
 CREATE TABLE IF NOT EXISTS spawn_keys (
   parent TEXT NOT NULL,
@@ -429,39 +421,11 @@ class Store:
             self._x("DELETE FROM loops WHERE swarm = ?", [name])
             self._x("DELETE FROM loop_agents WHERE swarm = ?", [name])
             self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
-            self._x("DELETE FROM grants WHERE swarm = ?", [name])
             self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
             self._x("DELETE FROM spec_history WHERE swarm = ?", [name])
             self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
             self._x("DELETE FROM controls WHERE swarm = ?", [name])
-
-    # ----------------------------------------------------------------- grants (docs/live.md)
-
-    def put_grant(self, swarm: str, target: str, kind: str, grant: Grant, now: float) -> None:
-        """Set (replace) the grant of a type or an agent; an empty grant deletes it."""
-        if grant.empty():
-            self._x("DELETE FROM grants WHERE swarm = ? AND target = ?", [swarm, target])
-            return
-        self._x("INSERT INTO grants (swarm, target, kind, body, updated_at) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(swarm, target) DO UPDATE SET kind = excluded.kind, "
-                "body = excluded.body, updated_at = excluded.updated_at",
-                [swarm, target, kind, grant.model_dump_json(exclude_defaults=True), now])
-
-    def list_grants(self, swarm: str) -> list[Row]:
-        rows = self._q("SELECT target, kind, body, updated_at FROM grants WHERE swarm = ? "
-                       "ORDER BY kind DESC, target", [swarm])
-        for row in rows:
-            row["grant"] = Grant.model_validate_json(row.pop("body"))
-        return rows
-
-    def agent_grants(self, swarm: str) -> tuple[dict[str, Grant], dict[str, Grant]]:
-        """(type grants, agent grants) of a swarm, by target."""
-        types: dict[str, Grant] = {}
-        agents: dict[str, Grant] = {}
-        for row in self.list_grants(swarm):
-            (types if row["kind"] == "type" else agents)[row["target"]] = row["grant"]
-        return types, agents
 
     # ----------------------------------------------------------------- tools bundles (docs/tools.md)
 
@@ -625,7 +589,6 @@ class Store:
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
         self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
-        self._x("DELETE FROM grants WHERE kind = 'agent' AND target = ?", [name])
 
     def mark_removing(self, name: str) -> None:
         """First phase of a cascade removal: refuse new children, revoke the token."""

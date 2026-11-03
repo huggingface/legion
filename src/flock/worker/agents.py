@@ -27,12 +27,10 @@ from pydantic import BaseModel, Field
 from flock.models import (
     AgentHeartbeat,
     Event,
-    Grant,
     LoopMeta,
     LoopStartCommand,
     TokenUsage,
     TypeSpec,
-    granted_spec,
     hit_max_turns,
     parse_duration,
     type_spec_rev,
@@ -79,7 +77,6 @@ def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float
     return base * (0.5 + 0.5 * rng())
 # Interruptions that are a decision (stop, drain, unassign), not a failure: no re-prompt.
 _DECIDED = ("stop", "drain", "unassign", "abandoned", "draining", "drain_deadline")
-_UNSET: Any = object()  # set_live: "no news" for the grant (None means revoked)
 
 
 class AgentState(BaseModel):
@@ -134,15 +131,11 @@ class AgentRuntime:
         world: WorldHub | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
-        # Live changes (docs/live.md): `spec` is `base_spec` (the type spec as applied) with the
-        # agent's grant on top. A newer type spec or grant from the controller waits in
-        # `_next_*` until the agent's next turn boundary; `_notes` go in front of that prompt.
-        self.base_spec: TypeSpec = spec
-        self.grant: Grant | None = None
+        # Live changes (docs/live.md): a newer type spec from the controller waits in
+        # `_next_spec` until the agent's next turn boundary; `_notes` go in front of that prompt.
         self._next_spec: TypeSpec | None = None
-        self._next_grant: Any = _UNSET
         self._notes: dict[str, None] = {}
-        # type_spec_rev of base_spec at the last turn boundary, and the one the harness started on
+        # type_spec_rev of spec at the last turn boundary, and the one the harness started on
         self.rev: str | None = None
         self.start_rev: str | None = None
         self.workdir_files: int | None = None  # files in the workdir at the last push
@@ -309,32 +302,20 @@ class AgentRuntime:
             self.emit("env_dropped", {"names": names})
 
     # ------------------------------------------------------------------ live changes (docs/live.md)
-    def set_live(self, *, spec: TypeSpec | None = None, grant: Any = _UNSET) -> None:
-        """A changed type spec, or the grant now in force (None: none), from the controller.
-        Held until the agent's next turn boundary; the latest wins."""
-        if spec is not None:
-            self._next_spec = spec
-        if grant is not _UNSET:
-            self._next_grant = grant
-
-    def _grant_now(self) -> Grant | None:
-        return self.grant if self._next_grant is _UNSET else self._next_grant
+    def set_live(self, spec: TypeSpec) -> None:
+        """A changed type spec from the controller. Held until the agent's next turn boundary;
+        the latest wins."""
+        self._next_spec = spec
 
     def _apply_live(self) -> None:
-        """At a turn boundary: take the pending type spec and grant. A changed system prompt
+        """At a turn boundary: take the pending type spec. A changed system prompt
         rewrites CLAUDE.md / AGENTS.md (the llm harness rebuilds its system message from it at
         the turn start); an agent that already had a turn gets a one-line note in its next
         prompt for each kind of change."""
         spec, self._next_spec = self._next_spec, None
-        grant, self._next_grant = self._next_grant, _UNSET
-        before = (self.base_spec.system_prompt, self.base_spec.system_prompt_file)
-        self.base_spec = spec or self.base_spec
-        self.rev = type_spec_rev(self.base_spec)
-        regrant = grant is not _UNSET and grant != self.grant
-        if regrant:
-            self.grant = grant
-        budget = self.grant is not None and self.grant.limits.budget_usd is not None
-        self.spec = granted_spec(self.base_spec, self.grant, self.spend_usd() if budget else 0.0)
+        before = (self.spec.system_prompt, self.spec.system_prompt_file)
+        self.spec = spec or self.spec
+        self.rev = type_spec_rev(self.spec)
         if (self.spec.system_prompt, self.spec.system_prompt_file) != before:
             if self._instructions_written:
                 self._instructions_written = False
@@ -343,10 +324,6 @@ class AgentRuntime:
             harness = self.spec.harness.value
             self._note("your system prompt changed" if harness == "llm" else
                        f"your instructions in {INSTRUCTIONS_FILE[harness]} changed; re-read them")
-        if regrant:
-            self._note(f"your grants changed: {self.grant.describe() if self.grant else 'all revoked'}")
-        if self.comms is not None:
-            self.comms.set_grant(self.name, self.grant.tools if self.grant else None)
         if (update := getattr(self.adapter, "update_spec", None)) and update(self.spec):
             self.recycle("endpoint")  # the new models.json needs a fresh process
 
@@ -359,13 +336,6 @@ class AgentRuntime:
             return text
         notes, self._notes = "; ".join(self._notes), {}
         return f"[flock] Since your last turn: {notes}.\n\n{text}"
-
-    def _over_budget(self) -> float | None:
-        """The granted limits.budget_usd when the agent's cost reached it, else None."""
-        g = self._grant_now()
-        if g is None or g.limits.budget_usd is None:
-            return None
-        return g.limits.budget_usd if self.spend_usd() >= g.limits.budget_usd else None
 
     # ------------------------------------------------------------------ lifecycle
     async def setup(self, restore: bool = True, resume_prompt: str | None = None) -> None:
@@ -394,10 +364,6 @@ class AgentRuntime:
                      loop: LoopMeta | None = None) -> None:
         if loop is not None:
             text = self._loop_prompt(text, loop)
-        if (budget := self._over_budget()) is not None:
-            self.emit("prompt_deferred", {"prompt_id": prompt_id, "text": text, "reason": "budget",
-                                          "budget_usd": budget, **self._loop_untaken()})
-            return
         if timeout:
             self._next_timeout = parse_duration(timeout).total_seconds()
         if prompt_id:  # joins the turn in flight, or starts the next one
@@ -553,7 +519,7 @@ class AgentRuntime:
             if self._working_count and self._working_count() > self.spec.max_working_per_worker:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
-            self._apply_live()  # the harness starts on the newest type spec and grant
+            self._apply_live()  # the harness starts on the newest type spec
             if self.comms is not None:  # join the board at the first prompt, not at assign
                 await self.comms.on_prompt(self.name, self.spec.harness.value)
             if self.world is not None:  # open the gateway for flock-tool; agent_start hook

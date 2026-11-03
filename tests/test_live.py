@@ -1,6 +1,5 @@
-"""Live changes (docs/live.md): the `flock update` diff, the `flock grant` argument syntax, the
-folder watch, the grants API (checks, merge, events, the budget gate, what heartbeats carry),
-the runtime side (prompts and grants at the next turn boundary, with a note), the CLI commands
+"""Live changes (docs/live.md): the `flock update` diff, the folder watch, what heartbeats
+carry, the runtime side (prompts at the next turn boundary, with a note), the CLI commands
 against the in-process app, and `flock run --watch` in process."""
 
 from __future__ import annotations
@@ -22,25 +21,17 @@ from flock.controller import localrun
 from flock.live import (
     FolderWatch,
     diff_specs,
-    grant_patch,
     keep_replicas,
-    revoke_patch,
     world_tool_changes,
 )
 from flock.models import (
     AgentHeartbeat,
-    CommsSpec,
-    Grant,
-    GrantLimits,
     Harness,
     SwarmSpec,
-    granted_spec,
-    merge_grants,
     type_spec_rev,
 )
 from flock.tools.bundle import pack
 from flock.tools.toolset import Toolset
-from flock.worker.comms import CommsHub
 
 from .test_cli import _wire
 from .worker_fakes import runtime, spec, until
@@ -132,39 +123,6 @@ def test_keep_replicas_copies_live_counts_of_existing_types():
     assert (new.types["calc"].replicas, new.types["fresh"].replicas) == (2, 7)
 
 
-# --------------------------------------------------------------------------- grant arguments
-
-
-def test_grant_and_revoke_arguments():
-    g = grant_patch(Grant(), ["tools=+mul,-add", "comms.post=off", "+search", "bash=off",
-                              "limits.max_turns=5", "limits.budget_usd=$0.5"])
-    assert g.tools == {"mul": True, "add": False, "comms:post": False, "comms:search": True}
-    assert (g.bash, g.limits.max_turns, g.limits.budget_usd) == (False, 5, 0.5)
-    assert g.describe() == ("tools -add -comms:post +comms:search +mul, bash off, "
-                            "limits.max_turns 5, limits.budget_usd 0.5")
-    assert grant_patch(g, ["comms.post"]).tools["comms:post"] is True  # bare switch: on
-    for bad in (["nope"], ["bash=maybe"], ["limits.max_turns=x"], ["tools="]):
-        with pytest.raises(ValueError):
-            grant_patch(Grant(), bad)
-    r = revoke_patch(g, ["tools=mul", "comms.post", "limits.max_turns", "bash"])
-    assert r.tools == {"add": False, "comms:search": True}
-    assert (r.bash, r.limits.max_turns, r.limits.budget_usd) == (None, None, 0.5)
-    assert revoke_patch(g, ["tools", "limits", "bash"]).empty()
-
-
-def test_merge_and_granted_spec():
-    t = Grant(tools={"add": False, "mul": True}, bash=False, limits=GrantLimits(max_turns=9))
-    a = Grant(tools={"add": True}, limits=GrantLimits(budget_usd=1.0))
-    m = merge_grants(t, a)
-    assert m.tools == {"add": True, "mul": True} and m.bash is False
-    assert (m.limits.max_turns, m.limits.budget_usd) == (9, 1.0)
-    assert merge_grants(None, Grant()) is None and merge_grants(t, None) is t
-    ts = SwarmSpec.model_validate(raw()).types["calc"]
-    eff = granted_spec(ts.model_copy(update={"max_budget_usd": 0.5}), m, spent_usd=0.75)
-    assert (eff.max_turns, eff.bash, eff.max_budget_usd) == (9, False, 0.25)
-    assert granted_spec(ts, None) is ts
-
-
 # --------------------------------------------------------------------------- the folder watch
 
 
@@ -199,7 +157,7 @@ def test_folder_watch_settles_and_follows_the_spec(tmp_path):
     assert not w.poll(11.0) and w.poll(12.1)
 
 
-# --------------------------------------------------------------------------- grants API
+# --------------------------------------------------------------------------- the API
 
 
 async def applied(client, tmp_path, tick, top: dict | None = None, **types) -> SwarmSpec:
@@ -221,76 +179,7 @@ def _tools(root: Path, src: str) -> Path:
     return d
 
 
-async def test_grants_are_checked_merged_evented_and_survive_apply(client, store, tick, tmp_path):
-    spec = await applied(client, tmp_path, tick)
-    r = await client.put("/swarms/demo/grants/calc", json={"tools": {"add": False}, "bash": False})
-    assert r.status_code == 200, r.text
-    assert r.json() == {"swarm": "demo", "target": "calc", "kind": "type",
-                        "grant": {"tools": {"add": False}, "bash": False}}
-    r = await client.put("/swarms/demo/grants/calc-0000",
-                         json={"tools": {"add": True, "mul": True}, "limits": {"max_turns": 3}})
-    assert r.status_code == 200 and r.json()["kind"] == "agent"
-    a0 = (await client.get("/agents/calc-0000")).json()
-    a1 = (await client.get("/agents/calc-0001")).json()
-    assert a0["grants"] == {"tools": {"add": True, "mul": True}, "limits": {"max_turns": 3},
-                            "bash": False}
-    assert a1["grants"] == {"tools": {"add": False}, "bash": False}
-    assert (await client.get("/agents/researcher-0000")).json()["grants"] is None
-    listed = (await client.get("/swarms/demo/agents", params={"type": "calc"})).json()["agents"]
-    assert [x["grants"] for x in listed] == [a0["grants"], a1["grants"]]
-
-    for target, body, want in [
-        ("calc", {"tools": {"nope": True}}, "unknown tool 'nope'; bundle"),
-        ("researcher", {"bash": False}, "only the llm harness has a bash tool"),
-        ("calc", {"tools": {"post": True}}, "+post: the swarm has no comms block"),
-        ("calc", {"limits": {"max_turns": 0}}, "max_turns must be >= 1"),
-        ("calc", {"mystery": 1}, "Extra inputs are not permitted"),
-    ]:
-        r = await client.put(f"/swarms/demo/grants/{target}", json=body)
-        assert r.status_code in (400, 422) and want in r.text, (target, r.text)
-    assert (await client.put("/swarms/demo/grants/ghost", json={})).status_code == 404
-
-    rows = (await client.get("/swarms/demo/grants")).json()["grants"]
-    assert [(g["kind"], g["target"]) for g in rows] == [("type", "calc"), ("agent", "calc-0000")]
-    # grants are an overlay: a re-apply (what `flock update` does) keeps them
-    spec.types["calc"].replicas = 3
-    assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
-    assert len((await client.get("/swarms/demo/grants")).json()["grants"]) == 2
-
-    assert (await client.delete("/swarms/demo/grants/calc")).json()["revoked"] is True
-    assert (await client.delete("/swarms/demo/grants/calc")).status_code == 404
-    r = await client.put("/swarms/demo/grants/calc-0000", json={})  # empty: revoked too
-    assert r.status_code == 200 and r.json()["grant"] == {}
-    assert (await client.get("/swarms/demo/grants")).json()["grants"] == []
-    evs = (await client.get("/swarms/demo/events")).json()["events"]
-    kinds = [(e["type"], e["data"]["target"]) for e in evs if e["type"].startswith("grant")]
-    assert kinds == [("grant", "calc"), ("grant", "calc-0000"), ("grant_revoked", "calc"),
-                     ("grant_revoked", "calc-0000")]
-    mine = (await client.get("/agents/calc-0000/events")).json()["events"]
-    assert [e["type"] for e in mine] == ["grant", "grant_revoked"]
-
-
-async def test_comms_tools_can_be_granted_only_to_a_type_on_the_board(client, store, tick,
-                                                                      tmp_path, monkeypatch):
-    import flock.controller.api as api_mod
-
-    monkeypatch.setattr(api_mod, "comms_resolve", lambda spec, prev, env, **kw: None)
-    comms = {"url": "http://board.invalid", "invite_env": "INV", "channel": "team",
-             "channel_id": 7, "search": None}
-    await applied(client, tmp_path, tick, {"comms": comms},
-                  calc={"harness": "llm", "model": "gpu:m", "replicas": 1,
-                        "tools": ["add", "comms:read"]})
-    r = await client.put("/swarms/demo/grants/calc", json={"tools": {"post": True}})
-    assert r.status_code == 200 and r.json()["grant"] == {"tools": {"comms:post": True}}
-    r = await client.put("/swarms/demo/grants/researcher", json={"tools": {"comms:post": True}})
-    assert r.status_code == 400 and "has no comms tools" in r.text
-    r = await client.put("/swarms/demo/grants/calc", json={"tools": {"search": True}})
-    assert r.status_code == 400 and "comms.search is off" in r.text
-    r = await client.put("/swarms/demo/grants/researcher", json={"tools": {"comms:read": False}})
-    assert r.status_code == 200  # taking away is always possible
-
-
-async def test_heartbeat_carries_a_changed_type_spec_and_the_grants(client, store, tick, tmp_path):
+async def test_heartbeat_carries_a_changed_type_spec(client, store, tick, tmp_path):
     spec = await applied(client, tmp_path, tick)
     w = next(w for w in store.list_workers("demo") if w["type"] == "calc")
     store.update_worker(w["id"], job_id="job-1", incarnation="inc-1")
@@ -306,32 +195,13 @@ async def test_heartbeat_carries_a_changed_type_spec_and_the_grants(client, stor
         return r.json()
 
     out = await beat(rev)
-    assert "type_spec" not in out and "grants" not in out
+    assert "type_spec" not in out
     spec.types["calc"].system_prompt = "You are calc v2."
     assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
     out = await beat(rev)
     assert out["type_spec"]["system_prompt"] == "You are calc v2."
     assert out["spec_rev"] == type_spec_rev(spec.types["calc"]) != rev
     assert "type_spec" not in await beat(out["spec_rev"])
-    await client.put("/swarms/demo/grants/calc", json={"bash": False})
-    await client.put("/swarms/demo/grants/calc-0001", json={"limits": {"max_turns": 2}})
-    out = await beat(out["spec_rev"])
-    assert out["grants"] == {"calc-0000": {"bash": False},
-                             "calc-0001": {"bash": False, "limits": {"max_turns": 2}}}
-
-
-async def test_a_granted_budget_gates_prompts(client, store, tick, tmp_path):
-    await applied(client, tmp_path, tick)
-    store.update_agent("calc-0000", cost=0.6)
-    r = await client.put("/swarms/demo/grants/calc-0000", json={"limits": {"budget_usd": 0.5}})
-    assert r.status_code == 200
-    r = await client.post("/agents/calc-0000/prompt", json={"text": "hi"})
-    assert r.status_code == 409 and "reached its granted limits.budget_usd" in r.text
-    assert (await client.post("/agents/calc-0001/prompt", json={"text": "hi"})).status_code == 200
-    r = await client.post("/swarms/demo/prompts", json={"type": "calc", "text": "all"})
-    assert r.json()["skipped_budget"] == 1 and r.json()["matched"] == 2
-    await client.put("/swarms/demo/grants/calc-0000", json={"limits": {"budget_usd": 1}})
-    assert (await client.post("/agents/calc-0000/prompt", json={"text": "hi"})).status_code == 200
 
 
 async def test_apply_refuses_a_harness_change_for_a_running_type(client, store, tick, tmp_path):
@@ -413,32 +283,6 @@ async def test_a_new_system_prompt_applies_at_the_next_turn_with_a_note(tmp_path
     await rt.stop()
 
 
-async def test_grants_apply_at_the_boundary_and_a_budget_defers(tmp_path):
-    rt, adapter = runtime(tmp_path, max_turns=20)
-    await rt.setup(restore=False)
-    await rt.prompt("one")
-    await until(lambda: rt.state.turns == 1)
-    rt.set_live(grant=Grant(limits=GrantLimits(max_turns=3)))
-    assert rt.spec.max_turns == 20  # not before the boundary
-    await rt.prompt("two")
-    await until(lambda: adapter.sent[-1].endswith("two"))
-    assert rt.spec.max_turns == 3 and rt.base_spec.max_turns == 20
-    assert adapter.sent[-1].startswith("[flock] Since your last turn: your grants changed: "
-                                       "limits.max_turns 3.")
-    await until(lambda: rt.state.turns == 2)
-    rt.set_live(grant=None)
-    await rt.prompt("three")
-    await until(lambda: adapter.sent[-1].endswith("three"))
-    assert rt.spec.max_turns == 20 and "all revoked" in adapter.sent[-1]
-    await until(lambda: rt.state.turns == 3)
-    rt.set_live(grant=Grant(limits=GrantLimits(budget_usd=0)))  # spent >= 0: no new turn
-    await rt.prompt("four", prompt_id="p4")
-    deferred = [e.data.get("data", e.data) for e in rt.outbox._q if e.type == "prompt_deferred"]
-    assert deferred and deferred[-1]["reason"] == "budget"
-    assert deferred[-1]["prompt_id"] == "p4" and adapter.sent[-1].endswith("three")
-    await rt.stop()
-
-
 async def test_cli_harness_gets_a_tools_note_when_its_tools_change(tmp_path):
     tools = [tool_def("comms:read")]
 
@@ -471,9 +315,6 @@ async def test_a_changed_board_section_gets_a_note(tmp_path):
         def section(self, agent):
             return self.text
 
-        def set_grant(self, agent, tools):
-            pass
-
         def deny_env(self):
             return []
 
@@ -491,23 +332,6 @@ async def test_a_changed_board_section_gets_a_note(tmp_path):
     assert adapter.sent[-1] == ("[flock] Since your last turn: the Team board section of "
                                 "CLAUDE.md changed; re-read it.\n\ntwo")
     await rt.stop()
-
-
-def test_comms_hub_applies_an_agents_grant():
-    hub = CommsHub(swarm="sw", env={})
-    hub.configure(CommsSpec(url="http://b.invalid", invite_env="INV", channel="team",
-                            channel_id=7), ["comms:read", "comms:post"])
-    hub.set_grant("a-0001", {"comms:post": False, "mul": True})
-    hub.set_grant("a-0002", {"comms:search": True})
-    assert hub.entries_for("a-0000") == ["comms:read", "comms:post"]
-    assert hub.entries_for("a-0001") == ["comms:read"]
-    assert hub.entries_for("a-0002") == ["comms:read", "comms:post", "comms:search"]
-    assert [d.name for d in hub.tooldefs("a-0001")] == ["read"]
-    assert "`post`" not in hub.section("a-0001") and "`post`" in hub.section("a-0000")
-    res = asyncio.run(hub.call("a-0001", "comms:post", {"text": "x", "thread": "new"}))
-    assert res.error and "not enabled" in res.output
-    hub.set_grant("a-0001", None)
-    assert hub.entries_for("a-0001") == ["comms:read", "comms:post"]
 
 
 # --------------------------------------------------------------------------- the CLI
@@ -606,40 +430,6 @@ async def test_put_replicas_keep_and_dry_run(client, store):
     assert r.status_code == 200 and store.get_swarm("demo")["spec"].types["calc"].replicas == 2
     assert (await client.put("/swarms/demo", json=body)).status_code == 200  # default: spec
     assert store.get_swarm("demo")["spec"].types["calc"].replicas == 5
-
-
-def test_cli_grant_revoke_and_list(tmp_path, monkeypatch, app, store, tick):
-    _wire(monkeypatch, app)
-    f = _experiment(tmp_path / "exp", tools=TOOLS_V2)
-    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
-    tick()
-    r = runner.invoke(cli.app, ["grant", "researcher", "tools=-add"])
-    assert r.exit_code == 0 and r.output.strip() == (
-        "type researcher: tools -add (from each agent's next turn)"), r.output
-    r = runner.invoke(cli.app, ["grant", "researcher-0000", "+mul", "limits.max_turns=4"])
-    assert r.exit_code == 0 and "agent researcher-0000: tools +mul, limits.max_turns 4" in r.output
-    r = runner.invoke(cli.app, ["grant", "researcher-0000", "limits.budget_usd=2"])
-    assert "tools +mul, limits.max_turns 4, limits.budget_usd 2" in r.output  # merged
-    r = runner.invoke(cli.app, ["grants"])
-    assert r.exit_code == 0
-    assert r.output.splitlines()[1:] == [
-        "demo   type   researcher       tools -add",
-        "demo   agent  researcher-0000  tools +mul, limits.max_turns 4, limits.budget_usd 2"]
-    st = json.loads(runner.invoke(cli.app, ["agent", "researcher-0000"]).output)
-    assert st["grants"] == {"tools": {"add": False, "mul": True},
-                            "limits": {"max_turns": 4, "budget_usd": 2.0}}
-    r = runner.invoke(cli.app, ["revoke", "researcher-0000", "limits"])
-    assert r.exit_code == 0 and "agent researcher-0000: tools +mul (" in r.output
-    r = runner.invoke(cli.app, ["revoke", "researcher"])
-    assert r.exit_code == 0 and "all grants revoked" in r.output
-    r = runner.invoke(cli.app, ["grant", "researcher", "bash=off"])
-    assert r.exit_code == 1 and "only the llm harness" in r.output
-    r = runner.invoke(cli.app, ["grant", "researcher", "bogus"])
-    assert r.exit_code == 2 and "unknown capability" in r.output
-    r = runner.invoke(cli.app, ["grant", "nobody", "+mul"])
-    assert r.exit_code == 1 and "pass --swarm" in r.output
-    runner.invoke(cli.app, ["revoke", "researcher-0000"])
-    assert runner.invoke(cli.app, ["grants", "demo"]).output.strip() == "no grants"
 
 
 # --------------------------------------------------------------------------- flock run --watch

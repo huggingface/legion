@@ -649,7 +649,7 @@ def update(
 ) -> None:
     """Re-read an experiment folder (spec.yaml, prompts, tools/) and apply what changed to the
     running swarm (docs/live.md): new tools version, prompts, loop and comms settings, limits,
-    replicas. Running agents take tools, prompts and grants at their next turn boundary.
+    replicas. Running agents take tools and prompts at their next turn boundary.
     Prints what changed; a refused change applies nothing."""
     path = Path(target)
     spec_file, overlays, ref_header = _at_ref(
@@ -667,106 +667,6 @@ def update(
         raise typer.Exit(1) from None
     for line in lines:
         typer.echo(line, err=line.startswith("warning:"))
-
-
-def _grant_swarm(target: str, swarm: str | None) -> str:
-    """The swarm a grant target is in: --swarm, else the agent's swarm, else the one swarm
-    with a type of that name."""
-    if swarm:
-        return swarm
-    with client() as c:
-        if AGENT_NAME_RE.match(target) or "-" in target:  # numeric or words agent names
-            r = _request(c, "GET", f"/agents/{target}")
-            if r.status_code == 200:
-                return r.json()["swarm"]
-        r = _request(c, "GET", "/swarms")
-    if r.status_code >= 400:
-        typer.echo(f"error {r.status_code}: {r.text}", err=True)
-        raise typer.Exit(1)
-    found = [st["swarm"] for st in r.json() if target in st["types"]]
-    if len(found) != 1:
-        typer.echo(f"{target!r}: no agent of that name and {len(found)} swarms with such a type; "
-                   "pass --swarm", err=True)
-        raise typer.Exit(1)
-    return found[0]
-
-
-def _current_grant(swarm: str, target: str):
-    from flock.models import Grant
-
-    rows = _call("GET", f"/swarms/{swarm}/grants")["grants"]
-    row = next((g for g in rows if g["target"] == target), None)
-    return Grant.model_validate(row["grant"]) if row else Grant()
-
-
-def _print_grant(ack: dict) -> None:
-    from flock.models import Grant
-
-    g = Grant.model_validate(ack["grant"])
-    what = "revoked" if g.empty() else g.describe()
-    typer.echo(f"{ack['kind']} {ack['target']}: {what} (from each agent's next turn)")
-
-
-@app.command()
-def grant(
-    target: str = typer.Argument(..., help="a type (every agent of it) or one agent"),
-    capabilities: Annotated[list[str] | None, typer.Argument(metavar="CAPABILITY[=VALUE]...")] = None,
-    swarm: str = typer.Option(None, "--swarm", help="default: the swarm of the target"),
-) -> None:
-    """Grant capabilities to a running type or agent, from each agent's next turn
-    (docs/live.md): `tools=+name,-name` (folder or comms tools; `+name` alone works too),
-    `comms.post=on|off`, `bash=on|off` (llm harness), `limits.max_turns=N`,
-    `limits.budget_usd=X`. Grants are an overlay on the spec: `flock update` keeps them."""
-    from flock.live import grant_patch
-
-    if not capabilities:
-        typer.echo("usage: flock grant TARGET CAPABILITY[=VALUE]... (e.g. tools=+mul bash=off)",
-                   err=True)
-        raise typer.Exit(2)
-    swarm = _grant_swarm(target, swarm)
-    try:
-        g = grant_patch(_current_grant(swarm, target), capabilities)
-    except ValueError as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(2) from None
-    _print_grant(_call("PUT", f"/swarms/{swarm}/grants/{target}", json=g.model_dump(mode="json")))
-
-
-@app.command()
-def revoke(
-    target: str,
-    capabilities: Annotated[list[str] | None, typer.Argument(metavar="[CAPABILITY]...")] = None,
-    swarm: str = typer.Option(None, "--swarm", help="default: the swarm of the target"),
-) -> None:
-    """Take back a target's grant (all of it, or the named capabilities: `tools`,
-    `tools=name`, `comms.post`, `bash`, `limits`, `limits.max_turns`, `limits.budget_usd`)."""
-    from flock.live import revoke_patch
-
-    swarm = _grant_swarm(target, swarm)
-    if not capabilities:
-        _call("DELETE", f"/swarms/{swarm}/grants/{target}")
-        typer.echo(f"{target}: all grants revoked (from each agent's next turn)")
-        return
-    try:
-        g = revoke_patch(_current_grant(swarm, target), capabilities)
-    except ValueError as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(2) from None
-    _print_grant(_call("PUT", f"/swarms/{swarm}/grants/{target}", json=g.model_dump(mode="json")))
-
-
-@app.command()
-def grants(swarm: str = typer.Argument(None, help="default: every swarm")) -> None:
-    """List the grants in force (docs/live.md)."""
-    from flock.models import Grant
-
-    names = [swarm] if swarm else [st["swarm"] for st in _call("GET", "/swarms")]
-    rows = [[sw, g["kind"], g["target"], Grant.model_validate(g["grant"]).describe()]
-            for sw in names for g in _call("GET", f"/swarms/{sw}/grants")["grants"]]
-    if not rows:
-        typer.echo("no grants")
-        return
-    _table(rows, ["swarm", "kind", "target", "grant"])
 
 
 @app.command()

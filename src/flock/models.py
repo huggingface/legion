@@ -649,7 +649,7 @@ class TypeSpec(BaseModel):
     # required. With it a forced turn runs several steps; without it, one action per prompt.
     done_tool: bool | None = None
     # harness llm only: false takes the `bash` tool away (the agent keeps its folder and comms
-    # tools); None: on. Usually set live with `flock grant <target> bash=off` (docs/live.md).
+    # tools); None: on.
     bash: bool | None = None
     # harness llm only: starting chars/token for the size estimate (calibrated online from the
     # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
@@ -1499,91 +1499,6 @@ class TokenUsage(BaseModel):
         )
 
 
-# --------------------------------------------------------------------------- grants (docs/live.md)
-
-
-class GrantLimits(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    max_turns: int | None = None  # per prompt, as `types.<type>.max_turns`
-    budget_usd: float | None = None  # the agent's total cost; at or above it no new turn starts
-
-    @field_validator("max_turns")
-    @classmethod
-    def _turns(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("max_turns must be >= 1")
-        return v
-
-    @field_validator("budget_usd")
-    @classmethod
-    def _usd(cls, v: float | None) -> float | None:
-        if v is not None and v < 0:
-            raise ValueError("budget_usd must be >= 0")
-        return v
-
-
-class Grant(BaseModel):
-    """A live overlay on the spec for one type or one agent (`flock grant`, docs/live.md). The
-    controller stores it apart from the spec, so `flock update` and `flock apply` keep it; the
-    worker merges it in at the agent's next turn boundary. An agent's grant wins over its
-    type's, key by key."""
-
-    model_config = {"extra": "forbid"}
-
-    # tool name -> on (added) / off (taken away): folder tools by name, comms tools as comms:post
-    tools: dict[str, bool] = Field(default_factory=dict)
-    limits: GrantLimits = Field(default_factory=GrantLimits)
-    bash: bool | None = None  # harness llm: the bash tool on / off
-
-    def empty(self) -> bool:
-        return not self.tools and self.limits == GrantLimits() and self.bash is None
-
-    def compact(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude_defaults=True)
-
-    def describe(self) -> str:
-        """One line: `tools +mul -comms:post, bash off, limits.max_turns 5`."""
-        parts = []
-        if self.tools:
-            parts.append("tools " + " ".join(f"{'+' if on else '-'}{n}"
-                                             for n, on in sorted(self.tools.items())))
-        if self.bash is not None:
-            parts.append(f"bash {'on' if self.bash else 'off'}")
-        for k in ("max_turns", "budget_usd"):
-            if (v := getattr(self.limits, k)) is not None:
-                parts.append(f"limits.{k} {v:g}")
-        return ", ".join(parts) or "none"
-
-
-def merge_grants(type_grant: Grant | None, agent_grant: Grant | None) -> Grant | None:
-    """The grant in force for one agent: its type's, then its own on top, key by key."""
-    if type_grant is None or agent_grant is None:
-        g = type_grant or agent_grant
-        return None if g is None or g.empty() else g
-    limits = {k: v if (v := getattr(agent_grant.limits, k)) is not None
-              else getattr(type_grant.limits, k) for k in GrantLimits.model_fields}
-    g = Grant(tools={**type_grant.tools, **agent_grant.tools}, limits=GrantLimits(**limits),
-              bash=agent_grant.bash if agent_grant.bash is not None else type_grant.bash)
-    return None if g.empty() else g
-
-
-def granted_spec(ts: TypeSpec, g: Grant | None, spent_usd: float = 0.0) -> TypeSpec:
-    """`ts` with a grant's limits and bash switch applied (tools are applied to the toolset).
-    A budget becomes the per-prompt cap `max_budget_usd` of what is left of it."""
-    if g is None:
-        return ts
-    upd: dict[str, Any] = {}
-    if g.limits.max_turns is not None:
-        upd["max_turns"] = g.limits.max_turns
-    if g.limits.budget_usd is not None:
-        left = max(0.0, g.limits.budget_usd - spent_usd)
-        upd["max_budget_usd"] = left if ts.max_budget_usd is None else min(ts.max_budget_usd, left)
-    if g.bash is not None and ts.harness == Harness.llm:
-        upd["bash"] = g.bash
-    return ts.model_copy(update=upd) if upd else ts
-
-
 def type_spec_rev(ts: TypeSpec) -> str:
     """A short content hash of a type spec: the heartbeat sends a type spec only when the
     worker's revision differs (docs/live.md)."""
@@ -1845,7 +1760,6 @@ class BulkPromptAck(BaseModel):
     skipped_state: int = 0  # not in the requested state
     skipped_removing: int = 0  # being removed (spawn cascade)
     skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
-    skipped_budget: int = 0  # reached its granted limits.budget_usd (docs/live.md)
     prompt_id: str | None = None  # `track`: the broadcast id
 
 
@@ -1889,8 +1803,6 @@ class AgentStatus(BaseModel):
     parent: str | None = None  # spawning agent; None for a replica
     children: list[str] = Field(default_factory=list)
     depth: int = 0  # generations this agent may still spawn below itself
-    # `flock grant` overlays in force for this agent (type grant + agent grant, docs/live.md)
-    grants: dict[str, Any] | None = None
     rev: str | None = None  # AgentHeartbeat.rev / start_rev
     start_rev: str | None = None
 

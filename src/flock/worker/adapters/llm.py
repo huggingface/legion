@@ -157,7 +157,7 @@ DONE_TOOL_FINISHED: dict[str, Any] = {"type": "function", "function": {
 DONE_PREAMBLE = "\nWhen the task is done, call the `done` tool with a one-line summary."
 TOOLS_PREAMBLE = ("\nBesides `bash` you have task tools, offered as functions next to it; their "
                   "descriptions say what they do. Call them directly, not through bash.")
-# `bash: false` (usually `flock grant <target> bash=off`, docs/live.md)
+# `bash: false` (the type spec)
 NO_BASH_PREAMBLE = """You are {agent}, an agent working in the directory {workdir}.
 You have no shell. Use the tools offered as functions; their descriptions say what they do.
 When the task is done, reply in plain text without a tool call."""
@@ -509,7 +509,7 @@ class LLMAdapter:
 
     @property
     def bash_enabled(self) -> bool:
-        """The `bash` tool is offered (the type's `bash`, a `flock grant` switch; default on)."""
+        """The `bash` tool is offered (the type's `bash`; default on)."""
         return self._spec is None or self._spec.bash is not False
 
     def update_spec(self, spec: TypeSpec) -> None:

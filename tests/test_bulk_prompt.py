@@ -35,7 +35,7 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
     assert r.status_code == 200, r.text
     assert r.json() == {"swarm": "demo", "type": "researcher", "parent": None, "matched": 3, "queued": 1, "pending": 0,
                         "skipped_state": 2, "skipped_removing": 0,
-                        "skipped_pending": 0, "skipped_budget": 0, "prompt_id": None}
+                        "skipped_pending": 0, "prompt_id": None}
     [p] = await _prompts(client, W0)
     assert p["agent"] == "researcher-0000" and p["text"] == "go" and p["reply_to"] == "pixel"
 

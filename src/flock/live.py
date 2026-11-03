@@ -1,6 +1,5 @@
 """Live changes to a running swarm (docs/live.md): the short diff `flock update` prints, the
-files `flock run --watch` polls, and the argument syntax of `flock grant` / `flock revoke`.
-No I/O to the controller here: the CLI and the local run do that."""
+files `flock run --watch` polls. No I/O to the controller here: the CLI and the local run do that."""
 
 from __future__ import annotations
 
@@ -8,8 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flock.models import ALL_COMMS_TOOLS as COMMS_TOOLS
-from flock.models import Grant, GrantLimits, SwarmSpec
+from flock.models import SwarmSpec
 
 # Keys whose values are prompt text: reported as "prompts changed", never printed.
 PROMPT_KEYS = ("system_prompt", "prompt", "first", "kickoff", "protocols_text")
@@ -200,84 +198,3 @@ class FolderWatch:
             self._dirty_at = None
             return True
         return False
-
-
-# --------------------------------------------------------------------------- grant arguments
-
-ON, OFF = ("on", "true", "yes", "1"), ("off", "false", "no", "0")
-
-
-def _switch(cap: str, value: str | None) -> bool:
-    v = (value or "on").lower()
-    if v not in ON + OFF:
-        raise ValueError(f"{cap}={value}: use on or off")
-    return v in ON
-
-
-def _tool_name(name: str) -> str:
-    """`post` / `comms:post` -> `comms:post`; anything else is a folder tool name."""
-    return f"comms:{name}" if f"comms:{name}" in COMMS_TOOLS else name
-
-
-def grant_patch(g: Grant, args: list[str]) -> Grant:
-    """`g` with `flock grant` arguments applied: `tools=+a,-b` (or `+a` / `-b` alone),
-    `comms.post[=on|off]` (the same as tools +post / -post), `bash[=on|off]`,
-    `limits.max_turns=N`, `limits.budget_usd=X`."""
-    tools, limits, bash = dict(g.tools), g.limits.model_dump(), g.bash
-    for arg in args:
-        cap, _, value = arg.partition("=")
-        cap, value = cap.strip(), value.strip() if "=" in arg else None
-        if cap[:1] in "+-" and value is None:
-            cap, value = "tools", cap
-        if cap == "tools":
-            if not value:
-                raise ValueError("tools=+name,-name: name the tools to add (+) or take away (-)")
-            for item in value.split(","):
-                item = item.strip()
-                on = not item.startswith("-")
-                name = item.lstrip("+-")
-                if not name:
-                    raise ValueError(f"tools: empty name in {value!r}")
-                tools[_tool_name(name)] = on
-        elif cap.startswith("comms.") and f"comms:{cap[6:]}" in COMMS_TOOLS:
-            tools[f"comms:{cap[6:]}"] = _switch(cap, value)
-        elif cap == "bash":
-            bash = _switch(cap, value)
-        elif cap in ("limits.max_turns", "limits.budget_usd"):
-            if value is None:
-                raise ValueError(f"{cap}=<value>: give a number")
-            key = cap.split(".", 1)[1]
-            try:
-                limits[key] = int(value) if key == "max_turns" else float(value.lstrip("$"))
-            except ValueError:
-                raise ValueError(f"{cap}={value}: not a number") from None
-        else:
-            raise ValueError(f"unknown capability {cap!r}; grantable: tools=+a,-b, comms.post, "
-                             "comms.read, comms.search, bash, limits.max_turns, limits.budget_usd")
-    return Grant(tools=tools, limits=GrantLimits(**limits), bash=bash)
-
-
-def revoke_patch(g: Grant, args: list[str]) -> Grant:
-    """`g` without the named capabilities: `tools` (all), `tools=a,b`, `comms.post`, `bash`,
-    `limits` (both), `limits.max_turns`, `limits.budget_usd`."""
-    tools, limits, bash = dict(g.tools), g.limits.model_dump(), g.bash
-    for arg in args:
-        cap, _, value = arg.partition("=")
-        if cap[:1] in "+-" and not value:
-            cap, value = "tools", cap
-        if cap == "tools" and not value:
-            tools = {}
-        elif cap == "tools":
-            for name in value.split(","):
-                tools.pop(_tool_name(name.strip().lstrip("+-")), None)
-        elif cap.startswith("comms.") and f"comms:{cap[6:]}" in COMMS_TOOLS:
-            tools.pop(f"comms:{cap[6:]}", None)
-        elif cap == "bash":
-            bash = None
-        elif cap == "limits":
-            limits = {}
-        elif cap in ("limits.max_turns", "limits.budget_usd"):
-            limits[cap.split(".", 1)[1]] = None
-        else:
-            raise ValueError(f"unknown capability {cap!r}")
-    return Grant(tools=tools, limits=GrantLimits(**limits), bash=bash)
