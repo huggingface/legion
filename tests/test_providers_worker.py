@@ -275,3 +275,24 @@ async def test_env_dropped_event_once_per_spec_rev(tmp_path):
     rt._report_env_dropped()
     evs = [e for e in rt.outbox._q if e.type == "env_dropped"]
     assert len(evs) == 1 and evs[0].data["data"]["names"] == ["JUNK", "MY_TOKEN"]
+
+
+def test_heartbeat_carries_the_pinned_server(tmp_path):
+    from flock.worker.adapters.llm import pick_endpoint
+
+    ts = SwarmSpec.model_validate({
+        "swarm": "s", "namespace": "n", "bucket": "b", "providers": {"v": {
+            "type": "openai_compat", "base_urls": ["http://g1:8000/v1", "http://g2:8000/v1"],
+            "api_key_env": "K", "self_hosted": True}},
+        "types": {"w": {"harness": "pi", "model": "v:Qwen/Q"}}}).types["w"]
+    adapter = ScriptedAdapter(tmp_path / "home")
+    rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents",
+                      adapter=adapter, outbox=Outbox(), secret_source={})
+    want = pick_endpoint("w-0001", ["http://g1:8000/v1", "http://g2:8000/v1"])
+    assert rt.heartbeat().endpoint == want.split("/")[2]  # before any turn: where it will go
+    adapter._endpoint = "http://g1:8000/v1"  # the llm adapter: where its last turn went
+    assert rt.heartbeat().endpoint == "g1:8000"
+    native = AgentRuntime("w-0002", "w", TypeSpec(harness="codex", model="gpt-5.5-codex"),
+                          swarm="s", work_root=tmp_path / "a2", adapter=ScriptedAdapter(tmp_path / "h2"),
+                          outbox=Outbox(), secret_source={})
+    assert native.heartbeat().endpoint is None

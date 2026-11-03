@@ -136,7 +136,7 @@ it.
 
 ## Control-plane events
 
-Besides `spec_applied`, the swarm stream (`flock events <swarm>`) carries what the reconcile
+Besides `spec_applied`, the swarm stream (`flock status <swarm> --events`, names in docs/health.md "Events") carries what the reconcile
 loop does, as `{target, detail}`: `launch`, `launch_failed`, `launch_refused`, `crash`
 (detail: stage, message, backoff), `crashloop`, `planned_restart` (job timeout, drain,
 preemption), `cancel`, `retire`, `remove_worker`. Per-agent placement

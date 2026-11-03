@@ -29,11 +29,11 @@ export FLOCK_URL=https://<you>-flock.hf.space
 until curl -fsS "$FLOCK_URL/healthz" >/dev/null; do sleep 10; done
 uv run flock launch examples/first-spawn.yaml
 # 2. apply returns before reconcile creates the leader: wait for its row (a few seconds)
-until uv run flock agents first-spawn | grep -q '^leader-0000 '; do sleep 5; done
+until uv run flock status leader-0000 >/dev/null 2>&1; do sleep 5; done
 uv run flock prompt leader-0000 "Start: spawn the 5 analyst children now."
 # 3. follow the leader (its worker boots first, ~40 s): spawned x5, then "spawned 5"; Ctrl-C
-uv run flock events leader-0000 --follow --pretty
-uv run flock agents first-spawn             # repeat until the children are idle
+uv run flock status leader-0000 --events --follow
+uv run flock status first-spawn --parent leader-0000   # repeat until the children are idle
 ```
 
 The children show `unknown` with `pending 1` for about 50 s: the first spawn of a type with no
@@ -41,23 +41,23 @@ agents boots its worker (a job launch). That is normal. Then each child answers,
 leader (the reports arrive as the leader's turns t-2, t-3, ...), and idles:
 
 ```text
-$ uv run flock agents first-spawn   # about 1 min after the prompt; last_heartbeat cut
+$ uv run flock status first-spawn --parent leader-0000   # about 1 min after the prompt; columns cut
 name                      state  worker                     turns  pending  cost
 leader-0000               idle   first-spawn-leader-w0000   1      0        $0.0030
 leader-0000-analyst-0001  idle   first-spawn-analyst-w0000  1      0        $0.0021
 ...
 leader-0000-analyst-0005  idle   first-spawn-analyst-w0000  1      0        $0.0019
-$ uv run flock events leader-0000-analyst-0003 --pretty
-08:55:31     - session_started session_id=… resumed=False parent=leader-0000
+$ uv run flock status leader-0000-analyst-0003 --events
+08:55:31     - agent.session_started session_id=… resumed=False parent=leader-0000
 08:55:31   t-1 user     Capital of France? One word.
 08:55:34   t-1 assistant Paris
 08:55:35   t-1 assistant [Bash {"command": "flock prompt \"$FLOCK_PARENT\" \"leader-0000-analyst-0003: Paris\"…]
-08:55:36   t-1 turn_ended completed claude-haiku-5-5 in=… out=…
+08:55:36   t-1 agent.turn_ended completed claude-haiku-5-5 in=… out=…
 ```
 
 `turns` and `state` come from worker heartbeats (every 30 s), so they lag the event stream. An
-agent's answer is the text of its `assistant` messages; `turn_ended` only says the turn is over.
-If a worker never gets past `launching`/`dead`, `uv run flock workers first-spawn` shows its
+agent's answer is the text of its `assistant` messages; `agent.turn_ended` only says the turn is over.
+If a worker never gets past `launching`/`dead`, `uv run flock status first-spawn` shows its
 `last_error` (status and log tail); `hf jobs logs <job>` has the rest. A 401 there usually means
 `HF_TOKEN` is missing from the type's `secrets`.
 
@@ -256,7 +256,7 @@ connection error, and retries there. So a controller that moved host is reached 
 address; `FLOCK_URL` in the harness environment, fixed when the harness started, is not used.
 The controller still checks the token's scope (below). A call that still fails after the
 retries (unreachable, or 5xx) is an error for the CLI and a `controller_call_failed {path,
-error}` event on the agent's stream (`flock events <agent>`).
+error}` event on the agent's stream (`flock status <agent> --events`).
 
 **Directly.** Without a gateway (the `llm` harness, or no pin file) the CLI reads `FLOCK_URL`
 and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in the harness
@@ -267,7 +267,7 @@ flock-agent spawn analyst --prompt "..." --key a1   # prints the child's name; s
 flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
 flock prompt --children --state idle "text"   # all your idle children, one request
 flock status [<agent>]                     # JSON; yourself by default
-flock events <agent> --after N --wait      # blocks until something new (or --timeout, 600 s)
+flock status <agent> --events --after N --wait   # blocks until something new (600 s at most)
 flock-agent remove <agent>                    # a descendant and its subtree
 ```
 
@@ -276,7 +276,7 @@ The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connec
 agents calling it through a Space edge do not fail on throttling.
 
 For the operator (controller token), `flock-agent spawn <type> --parent <agent>` spawns on an agent's
-behalf, `flock agents <swarm> --parent <agent>` lists children, and `status` / `remove` take an
+behalf, `flock status <swarm> --parent <agent>` lists children, and `status` / `remove` take an
 agent name when the name is not a swarm.
 
 ## Snippet for a leader's system prompt
@@ -289,8 +289,8 @@ keeps them until removed; it does nothing until prompted.
 
 - `flock-agent spawn <type> --prompt "<task>" --key <short-unique-key>` creates a child and prints
   its name. Reusing a key returns the same child, so retrying is safe.
-- `flock events <child> --after <N> --wait` blocks until the child does something; the cursor for
-  the next call is printed on stderr. A `turn_ended` event means it finished a turn.
+- `flock status <child> --events --after <N> --wait` blocks until the child does something; the
+  cursor for the next call is printed on stderr. An `agent.turn_ended` event means it finished a turn.
 - `flock prompt <child> "<text>"` sends a follow-up; `flock status <child>` shows its state.
 - `flock-agent remove <child>` removes it and everything it spawned. Remove children you no longer
   need: you have a fixed number of places.

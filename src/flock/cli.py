@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,6 +15,7 @@ import typer
 from typer.core import TyperGroup
 
 from flock import ops, rundir
+from flock import status as flock_status
 from flock.client import Client, ClientError, local_run
 from flock.models import SwarmSpec
 from flock.ops import SpecError, check_spec, read_spec, source_header
@@ -441,88 +443,164 @@ def update_lines(done: dict, check: bool = False) -> list[str]:
 
 @app.command()
 def status(
-    swarm: str = typer.Argument(None),
-    watch: Annotated[bool, typer.Option("--watch", help="Health view, refreshed every 10 s "
-                                        "(docs/health.md).")] = False,
-    as_json: Annotated[bool, typer.Option("--json", help="Status and newest health snapshot "
-                                          "as JSON.")] = False,
+    swarm: str = typer.Argument(None, help="A swarm (default: all), or an agent's name."),
+    agent: str = typer.Option(None, "--agent", help="That agent's status (JSON)."),
+    type_: str = typer.Option(None, "--type", help="List that type's agents, with its "
+                              "per-agent loop rows."),
+    state: str = typer.Option(None, "--state", help="List the agents in this state (idle, "
+                              "working, stuck, ...; idle as `prompt --state idle` means it)."),
+    parent: str = typer.Option(None, "--parent", help="List the children of this agent."),
+    events: bool = typer.Option(False, "--events", help="Print the event stream of SWARM (or "
+                                "--agent) instead, one line per event (docs/health.md)."),
+    only: str = typer.Option("", "--only", metavar="PREFIX",
+                             help="With --events: only names starting with PREFIX, e.g. agent."),
+    after: int = typer.Option(0, "--after", help="With --events: start after this cursor."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="With --events: keep printing."),
+    wait: bool = typer.Option(False, "--wait", help="With --events: return once something new "
+                              "arrived (600 s at most); the last line on stderr is the next "
+                              "--after."),
+    watch: bool = typer.Option(False, "--watch", help="Reprint every 10 s."),
+    as_json: bool = typer.Option(False, "--json", help="Everything, as JSON."),
 ) -> None:
-    """Swarm status: counts by type and state. Given an agent name (or inside an agent), that
-    agent's status as JSON."""
+    """The operator view of a swarm (docs/health.md): a verdict line first (ok, degraded,
+    failing and why; exit 1 on failing), then counts, holds, world, model servers, workers,
+    loops, ramps and alerts. A filter lists agents; --events prints the event stream. Inside
+    an agent: your own status, or with --parent your children."""
     api = Client()
-    if not swarm and api.as_agent:
-        swarm = os.environ.get("FLOCK_AGENT")
-    if swarm and (api.as_agent or not api.is_swarm(swarm)):
-        typer.echo(json.dumps(api.agent(swarm), indent=2))
+    if events:
+        _print_events(api, agent or swarm or os.environ.get("FLOCK_AGENT", ""), only, after,
+                      follow, wait, as_json)
         return
-    if watch or as_json:
-        _health_view(api, swarm, as_json=as_json, watch=watch)
+    if api.as_agent:
+        me = agent or swarm or os.environ.get("FLOCK_AGENT")
+        if not (type_ or state or parent):
+            typer.echo(json.dumps(api.agent(me), indent=2))
+            return
+        sw = swarm or api.agent(os.environ.get("FLOCK_AGENT", ""))["swarm"]
+        _print_agents(api.agents(sw, type=type_, state=state, parent=parent))
         return
-    if swarm:
-        _print_status(api.swarm(swarm)["status"])
+    if agent or (swarm and not api.is_swarm(swarm)):
+        typer.echo(json.dumps(api.agent(agent or swarm), indent=2))
         return
-    swarms = api.swarms()
-    if not swarms:
-        typer.echo("no swarms")
-    for st in swarms:
-        _print_status(st)
-        typer.echo("")
-
-
-def _health_view(api: Client, swarm: str | None, *, as_json: bool, watch: bool) -> None:
     while True:
-        sts = [api.swarm(swarm)["status"]] if swarm else api.swarms()
-        docs = [{"status": st, "health": api.health(st["swarm"])} for st in sts]
+        names = [swarm] if swarm else [s["swarm"] for s in api.swarms()]
+        views = [flock_status.view(api, n, type=type_, state=state, parent=parent) for n in names]
         if as_json:
-            typer.echo(json.dumps(docs if not swarm else docs[0], indent=2))
+            typer.echo(json.dumps(views[0] if swarm else views, indent=2))
         else:
             if watch:
                 typer.echo("\x1b[H\x1b[J", nl=False)
-            for d in docs:
-                _print_health(d["status"], d["health"])
+            for v in views:
+                _print_view(v)
                 typer.echo("")
+            if not views:
+                typer.echo("no swarms")
         if not watch:
-            return
+            break
         try:
             time.sleep(10)
         except KeyboardInterrupt:
             return
+    if any(v["verdict"]["level"] == "failing" for v in views):
+        raise typer.Exit(1)
+
+
+def _print_events(api: Client, name: str, only: str, after: int, follow: bool, wait: bool,
+                  as_json: bool) -> None:
+    if not name:
+        _fail(["--events needs a swarm or --agent"])
+    for page in flock_status.events(api, name, after=after, follow=follow or wait, prefix=only,
+                                    timeout=600 if wait else None):
+        for ev in page["events"]:
+            typer.echo(json.dumps(ev) if as_json else pretty_event(ev))
+        after = page["next"]
+        if wait and page["events"]:
+            break
+    if wait:
+        typer.echo(f"next: {after}", err=True)
+
+
+def _print_agents(rows: list[dict]) -> None:
+    _table([[a["name"], a["state"], a["type"], a["worker"], a["turns"], a["pending"],
+             f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
+             (a.get("endpoint") or "-") + (" DEAD" if a.get("on_dead_server") else ""),
+             a["last_heartbeat"]] for a in rows],
+           ["name", "state", "type", "worker", "turns", "pending", "cost", "server",
+            "last_heartbeat"])
 
 
 def _num(v: Any, fmt: str = "{:.0f}") -> str:
     return "-" if v is None else fmt.format(v)
 
 
-def _print_health(st: dict, h: dict | None) -> None:
-    """`flock status --watch`: world, generation, alerts; workers by time to memory limit;
-    restores; tool rates; provider queues; world metrics; stuck agents; recent events."""
+def _hhmm(epoch: float | None) -> str:
+    return "-" if epoch is None else time.strftime("%H:%M", time.gmtime(epoch)) + "Z"
+
+
+def _print_view(v: dict) -> None:
+    """`flock status SWARM`: `flock_status.view` as text, the verdict first."""
+    vd, st, h = v["verdict"], v["status"], v["health"]
+    typer.echo(vd["level"].upper() + (": " + "; ".join(vd["reasons"]) if vd["reasons"] else ""))
+    _print_status(st)
+    _print_health(h, v["workers"])
+    if "agents" in v:
+        _print_agents(v["agents"])
+    if per := (v.get("loop") or {}).get("per_agent"):
+        _table([[n, r["phase"], r["rounds"], r.get("done_reason") or "", r["final"] or "",
+                 r["errors"], r["wakes"]] for n, r in per.items()],
+               ["agent", "phase", "rounds", "done", "final", "errors", "wakes"])
+
+
+def _print_health(h: dict | None, workers: list[dict]) -> None:
+    """The snapshot's sections: world, model servers, workers (pending reasons, memory,
+    restores, problems), tool rates, world metrics, ramps, alerts, stuck agents, recent
+    control-plane events."""
+    pend = Counter(w["pending_reason"] for w in workers if w.get("pending_reason"))
+    if workers:
+        typer.echo("workers: " + _states(Counter(w["state"] for w in workers))
+                   + "".join(f"; {n} {why}" for why, n in sorted(pend.items())))
+    bad = [w for w in workers if w["crashes"] or w.get("last_error")]
+    if bad:
+        _table([[w["id"], w["state"], w["job_id"], w["crashes"], (w.get("last_error") or "")[:100]]
+                for w in bad], ["worker", "state", "job", "crashes", "last_error"])
+        typer.echo("  full logs: " + (
+            "<run dir>/logs/<worker id>.log" if any(str(w["job_id"] or "").startswith("local-")
+                                                   for w in bad)
+            else "<compute log_dir>/<worker id>-<job>.out" if any(
+                str(w["job_id"] or "").isdigit() for w in bad) else "hf jobs logs <job>"))
     if h is None:
-        _print_status(st)
         typer.echo("health: no snapshot yet")
         return
     b = h["body"]
     w = b.get("world")
-    world = "no world" if not w else (
-        f"world {'up' if w['up'] else 'DOWN'} {_num(w.get('manifest_ms'))} ms"
-        + (f" slurm {w['slurm_state']}" if w.get("slurm_state") else ""))
-    age = time.time() - h["ts"]
-    typer.echo(f"{st['swarm']}  gen {h.get('generation')}  {world}  agents={st['agents_total']} "
-               f"workers={st['workers_total']} cost=${st['cost_usd']:.2f}  "
-               f"alerts {len(b['alerts'])}  (snapshot {age:.0f} s old)")
+    typer.echo(f"snapshot {time.time() - h['ts']:.0f} s old, generation {h.get('generation')}; "
+               + ("no world" if not w else f"world {'up' if w['up'] else 'DOWN'} "
+                  f"{_num(w.get('manifest_ms'))} ms"
+                  + (f" slurm {w['slurm_state']}" if w.get("slurm_state") else "")))
+    for p, servers in b["providers"].items():
+        for host, s in sorted(servers.items()):
+            typer.echo(f"vllm {p} {host}: " + (
+                f"waiting {_num(s.get('waiting'))} running {_num(s.get('running'))} "
+                f"kv {_num(s.get('kv'), '{:.0%}')}" if s["up"] else f"DOWN ({s.get('error')})")
+                + f", {s.get('agents', 0)} agents")
+    for t, r in (b.get("ramps") or {}).items():
+        nxt = f", next +{r['next_add']} at {_hhmm(r['next_at'])}" if r["next_add"] else ""
+        typer.echo(f"ramp {t}: step {r['step']}/{r['steps']} ({r['replicas']} of max "
+                   f"{r['max']}){nxt}" + (f", held {r['holds']}x" if r["holds"] else ""))
     for a in b["alerts"]:
         typer.echo(f"  ! {a['msg']}")
     for name, t in b["types"].items():
         gens = " ".join(f"{r[:8]}:{n}" for r, n in sorted(t["gens"].items(), key=lambda x: -x[1]))
         typer.echo(f"type {name}: {_states(t['by_state'])}  revs {gens or '-'}")
-    workers = sorted(b["workers"].items(), key=lambda x: (x[1].get("eta_limit_s") is None,
-                                                          x[1].get("eta_limit_s") or 0))
-    if workers:
+    ws = sorted(b["workers"].items(), key=lambda x: (x[1].get("eta_limit_s") is None,
+                                                     x[1].get("eta_limit_s") or 0))
+    if ws:
         typer.echo("workers (by time to memory limit):")
         _table([[wid, f"{_num(wk['mem'].get('current_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
                  _num(wk.get("slope_mb_h")), _num(wk.get("eta_limit_s"), "{:.0f}s"),
-                 wk.get("relaunches", 0)] for wid, wk in workers[:15]],
+                 wk.get("relaunches", 0)] for wid, wk in ws[:15]],
                ["worker", "mem MB", "MB/h", "to limit", "relaunches"])
-    restores = [(wid, wk["restore"]) for wid, wk in workers if wk.get("restore")]
+    restores = [(wid, wk["restore"]) for wid, wk in ws if wk.get("restore")]
     if restores:
         typer.echo("restores:")
         _table([[wid, r.get("agents"), f"{r.get('files_done')}/{r.get('files_total')}",
@@ -554,9 +632,6 @@ def _print_health(st: dict, h: dict | None) -> None:
             st = "TRIPPED" if lv.get("tripped") else "paused" if lv.get("paused") else "ok"
             typer.echo(f"  lane {lane}: {st} slots {_num(lv.get('effective_slots'))} "
                        f"in flight {_num(lv.get('in_flight'))}")
-    for p, q in b["providers"].items():
-        typer.echo(f"provider {p}: waiting {_num(q.get('waiting'))} running "
-                   f"{_num(q.get('running'))} kv {_num(q.get('kv'), '{:.0%}')}")
     stuck = sorted(((s, t) for t, ty in b["types"].items() for s in ty["stuck"]),
                    key=lambda x: -x[0]["silent_s"])[:10]
     if stuck:
@@ -565,32 +640,10 @@ def _print_health(st: dict, h: dict | None) -> None:
                ["agent", "type", "state", "silent"])
     if h.get("recent_events"):
         typer.echo("control-plane events (last 10):")
-        _table([[e["ts"][:19].replace("T", " "), e["type"],
+        _table([[e["ts"][:19].replace("T", " "), flock_status.event_name(e["type"], "swarm"),
                  e["data"].get("target") or e["data"].get("generation") or "",
                  str(e["data"].get("detail") or e["data"].get("error") or "")[:80]]
                 for e in h["recent_events"]], ["time (UTC)", "event", "target", "detail"])
-
-
-@app.command()
-def agents(
-    swarm: str,
-    type: str = typer.Option(None, "--type"),
-    state: str = typer.Option(None, "--state"),
-    parent: str = typer.Option(None, "--parent", help="only the children of this agent"),
-) -> None:
-    """List a swarm's agents."""
-    rows = [[a["name"], a["state"], a.get("provider") or "-", a["worker"], a["turns"],
-             a["pending"], f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
-             a["last_heartbeat"]]
-            for a in Client().agents(swarm, type=type, state=state, parent=parent)]
-    _table(rows, ["name", "state", "provider", "worker", "turns", "pending", "cost",
-                  "last_heartbeat"])
-
-
-@app.command()
-def agent(name: str) -> None:
-    """One agent's status as JSON."""
-    typer.echo(json.dumps(Client().agent(name), indent=2))
 
 
 @app.command()
@@ -654,80 +707,24 @@ def _blocks_text(content: Any) -> str:
 
 
 def pretty_event(ev: dict) -> str:
-    """One line per event: time, turn, kind, then the text or a summary (`events --pretty`)."""
-    ts = str(ev.get("ts", ""))[11:19]
-    turn = ev.get("turn_id") or "-"
-    data = ev.get("data") or {}
-    kind = ev.get("type", "?")
-    if kind == "message":
-        m = data.get("message") or {}
+    """One line per normalised event (`flock.status.normalise`): time, turn, name, then the
+    text or a summary (`status --events`)."""
+    ts, name, d = str(ev.get("ts", ""))[11:19], ev["name"], ev["data"]
+    turn = d.get("turn_id") or "-"
+    if name == "agent.message":
+        m = d.get("message") or {}
         role = m.get("role", "?")
         if role == "toolResult":
             return f"{ts} {turn:>5} tool     {m.get('toolName', '')}: {_short(_blocks_text(m.get('content')), 120)}"
         return f"{ts} {turn:>5} {role:<8} {_short(_blocks_text(m.get('content')))}"
-    detail = data.get("data", data) if isinstance(data.get("data"), dict) else data
-    if kind == "turn_ended":
-        toks = detail.get("tokens") or {}
+    if name == "agent.turn_ended":
         used = " ".join(f"{model} in={u.get('input', 0)} out={u.get('output', 0)}"
-                        for model, u in toks.items())
-        return f"{ts} {turn:>5} {kind:<8} {detail.get('status')} {used}".rstrip()
-    keep = {k: v for k, v in detail.items() if v is not None}
-    summary = " ".join(f"{k}={_short(v, 60)}" for k, v in keep.items())
-    return f"{ts} {turn:>5} {kind:<8} {summary}".rstrip()
-
-
-@app.command()
-def events(
-    name: str,
-    after: int = typer.Option(0, "--after"),
-    follow: bool = typer.Option(False, "--follow", "-f"),
-    wait: bool = typer.Option(False, "--wait", help="block until an event after --after"),
-    timeout: float = typer.Option(600, "--timeout", help="seconds --wait blocks at most"),
-    pretty: bool = typer.Option(False, "--pretty", help="one readable line per event"),
-) -> None:
-    """Print an agent's event stream (JSONL); --follow keeps long-polling; --wait returns once
-    something new arrived (the last line on stderr is the cursor for the next --after);
-    --pretty prints time, turn, kind and the text or a summary instead of JSON. Given a swarm,
-    its swarm-level stream (loop_started, loop_tick, loop_stopped, final_round, budget_stop)."""
-    for page in Client().events(name, after=after, follow=follow or wait,
-                                timeout=timeout if wait else None):
-        for ev in page["events"]:
-            typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
-        after = page["next"]
-        if wait and page["events"]:
-            break
-    if wait:
-        typer.echo(f"next: {after}", err=True)
-
-
-@app.command()
-def workers(swarm: str) -> None:
-    """List a swarm's workers."""
-    found = Client().workers(swarm)
-
-    rows = [
-        [
-            w["id"],
-            w["type"],
-            w["state"],
-            w["job_id"],
-            len(w["agents"]),
-            w["crashes"],
-            w["deadline"],
-            w["last_heartbeat"],
-            w.get("knobs_rev") or "",
-            w.get("last_error") or "",
-        ]
-        for w in found
-    ]
-    _table(rows, ["id", "type", "state", "job", "agents", "crashes", "deadline", "last_heartbeat",
-                  "knobs", "last_error"])
-    if any(str(w["job_id"] or "").startswith("local-") for w in found):  # compute local
-        typer.echo("full worker logs: <run dir>/logs/<worker id>.log", err=True)
-    elif any(str(w["job_id"] or "").isdigit() for w in found):  # compute slurm
-        typer.echo("full job logs: <compute log_dir>/<worker id>-<job>.out", err=True)
-    else:
-        typer.echo("full job logs: hf jobs logs <job>", err=True)
+                        for model, u in (d.get("tokens") or {}).items())
+        return f"{ts} {turn:>5} {name} {d.get('status')} {used}".rstrip()
+    who = "" if name.startswith("agent.") else ev.get("agent") or ev.get("worker") or ""
+    summary = " ".join(f"{k}={_short(v, 60)}" for k, v in d.items()
+                       if v is not None and k != "turn_id")
+    return " ".join(x for x in (ts, f"{turn:>5}", name, who, summary) if x)
 
 
 agent_app = typer.Typer(cls=_Group, help="Inside an agent (FLOCK_AGENT_TOKEN): spawn and remove "

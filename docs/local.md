@@ -3,8 +3,8 @@
 One spec from a laptop to 1k agents. `compute: local` runs the swarm on your machine:
 `flock launch spec.yaml` starts the controller on 127.0.0.1 and launches each worker as a
 subprocess, both in the background (detached; output in `.flock/launch.log`, the run directory
-under `.flock/<swarm>-<UTC time>/`), then returns. `flock status`, `flock agents`, `flock prompt`,
-`flock events`, `flock update` and `flock stop` find the run through `.flock/current` in the same
+under `.flock/<swarm>-<UTC time>/`), then returns. `flock status`, `flock prompt`,
+`flock update` and `flock stop` find the run through `.flock/current` in the same
 directory. The controller writes a run bundle when it ends. The
 controller is the same code as on HF Jobs (reconcile loop, placement, heartbeats, admission,
 prompts, events); only the backend that starts workers differs. `compute: hf-jobs` (the
@@ -77,10 +77,10 @@ same directory:
 
 ```sh
 uv run flock status
-uv run flock agents hello
+uv run flock status hello --type writer
 uv run flock prompt writer-0001 "Now write a haiku."
 uv run flock prompt --swarm hello --type writer --state idle "Next round."
-uv run flock events writer-0001 --pretty --follow
+uv run flock status writer-0001 --events --follow
 ```
 
 From elsewhere: `FLOCK_CURRENT=/path/to/.flock/current flock status`, or set `FLOCK_URL` and
@@ -101,7 +101,7 @@ budget check, the view and the bundle use the spec as currently applied, so a
                        `loops` (per type: state, stop reason, rounds, final round) and `budget`
                        (budget_usd, final reserve, cost, which budget stop fired)
   events.jsonl         every agent's events and the swarm-level ones (loop_*, final_done,
-                       budget_stop; agent ""), merged by time (pi session format v3, as `flock events`)
+                       budget_stop; agent ""), merged by time (pi session format v3)
   events/<agent>.jsonl one file per agent
   agents/<agent>/      agent workdirs        state/llm/   llm harness sessions
   logs/                controller.log, <worker>.log      controller/  the controller's SQLite state
@@ -160,7 +160,7 @@ Different:
    (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. `flock stop --delete` makes the
    controller drain and stop the workers itself. A local worker handles SIGTERM by
    interrupting its turns (a job worker keeps the default behaviour).
-7. **Logs are files.** `<run>/logs/<worker>.log` instead of `hf jobs logs`; `flock workers`
+7. **Logs are files.** `<run>/logs/<worker>.log` instead of `hf jobs logs`; `flock status`
    says so.
 8. **No sandbox.** Agents' `bash` runs as you, on your machine, starting in the agent's workdir
    but not confined to it. Use a container or a throwaway user for untrusted tasks.

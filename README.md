@@ -189,14 +189,14 @@ export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
 uv run flock launch demo.yaml
 uv run flock status demo                 # counts by type and state, cost
 uv run flock prompt scribe-0007 "Summarize your workdir."
-uv run flock events scribe-0007 --follow # JSONL: turn_started, turn_ended, ...
+uv run flock status scribe-0007 --events --follow  # agent.turn_started, agent.turn_ended, ...
 uv run flock stop demo --release      # drain, sync every agent, free the workers
 uv run flock launch demo              # resume
 uv run flock stop demo --delete
 ```
 
-Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
-`workers <swarm>`, `stop <swarm> [--release|--final]`, `update <folder> [--check]`. `launch`
+Other commands: `status <swarm> [--type --state --parent --agent --events --watch --json]`
+(docs/health.md), `stop <swarm> [--release|--final]`, `update <folder> [--check]`. `launch`
 runs the preflight first when the spec has provider-backed models (`--skip-preflight` to
 bypass); `update --check` runs it alone.
 

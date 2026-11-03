@@ -157,7 +157,7 @@ types:
 ```
 
 Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` when set, else `FLOCK_COMMS_POLL_CYCLE_S`, else 300. Each heartbeat carries `knobs_rev`,
-a hash of the settings in force, and `flock workers` shows it (`knobs`), so workers running
+a hash of the settings in force, and `flock status --json` shows it (`knobs_rev` per worker), so workers running
 an older configuration stand out.
 
 The controller: `FLOCK_COMPUTE=slurm`. An unknown `FLOCK_COMPUTE` stops it at
@@ -181,7 +181,7 @@ its sbatch is still SCHEDULING).
 
 flock's own cancels are remembered in `<launch_dir>/cancelled/<job id>`, so a restarted
 controller still tells them from a reclaim. The job's log path is kept on the slot row: a
-crash's last log lines reach `last_error` (`flock workers`) also after a controller restart.
+crash's last log lines reach `last_error` (`flock status`) also after a controller restart.
 
 ## Preemption (Spot)
 

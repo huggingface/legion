@@ -466,9 +466,9 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     assert {p["loop"]["round"] for p in got.values()} == {1}  # a new run of the loop: from round 1
     (lp,) = Client()._call("GET", "/swarms/demo/loop")
     assert lp["per_agent"][A0]["phase"] == "looping"
-    r = run.invoke(cli.app, ["events", "demo"])
-    got = [json.loads(x)["type"] for x in r.output.splitlines()]
-    assert [k for k in got if k.startswith("loop_")][:2] == ["loop_started", "loop_tick"]
+    r = run.invoke(cli.app, ["status", "demo", "--events", "--only", "loop.", "--json"])
+    got = [json.loads(x)["name"] for x in r.output.splitlines()]
+    assert got[:2] == ["loop.started", "loop.tick"]
 
 
 async def test_live_change_and_removal(sim):

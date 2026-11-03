@@ -966,4 +966,15 @@ class AgentRuntime:
             msgboard_principal=self.identities.principal(self.name) if self.identities else None,
             rev=self.rev,
             start_rev=self.start_rev,
+            endpoint=self.endpoint(),
         )
+
+    def endpoint(self) -> str | None:
+        """`host:port` of the model server this agent is pinned to (`base_urls`, by
+        `pick_endpoint`): the one its last turn used, else the one it will use."""
+        from flock.worker.adapters.llm import endpoint_host, pick_endpoint
+
+        r = self.spec.resolved_model
+        urls = r.provider.endpoints if r is not None else []
+        return endpoint_host(getattr(self.adapter, "_endpoint", None)
+                             or pick_endpoint(self.name, urls))

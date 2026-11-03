@@ -76,9 +76,11 @@ def test_agent_spawns_prompts_and_removes(agent_cli):
     st = json.loads(r.output)
     assert st["parent"] == LEADER and st["pending"] == 1
 
-    r = run("events", LEADER, "--wait", "--timeout", "0")
+    r = run("status", LEADER, "--events", "--wait", "--json")
     assert r.exit_code == 0, r.output
-    assert json.loads(r.stdout.splitlines()[-1])["type"] == "spawned"
+    assert json.loads(r.stdout.splitlines()[-1])["name"] == "agent.spawned"
+    r = run("status", "--parent", LEADER)  # in-agent: your children (swarm from yourself)
+    assert r.exit_code == 0 and child in r.output, r.output
 
     r = run("spawn", "leader")
     assert r.exit_code == 1 and "type_not_allowed" in r.output
@@ -115,7 +117,7 @@ def test_operator_names_swarms_or_agents(agent_cli):
     assert r.exit_code == 0 and child.startswith("leader-0000-analyst-")
     assert "leader" in run("status", "demo").output  # a swarm: the table
     assert json.loads(run("status", child).output)["parent"] == LEADER  # not a swarm: an agent
-    r = run("agents", "demo", "--parent", LEADER)
+    r = run("status", "demo", "--parent", LEADER)
     assert child in r.output and "leader-0000 " not in r.output
     assert run("spawn", "analyst").exit_code == 1  # no FLOCK_AGENT, no --parent
     assert json.loads(run("remove", child).output) == {"removed": [child]}

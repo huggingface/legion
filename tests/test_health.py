@@ -78,7 +78,8 @@ async def test_probe_world_metrics_slurm_and_vllm(store):
     assert w["up"] and w["manifest_ms"] is not None and w["slurm_state"] == "RUNNING"
     assert w["metrics"] == {"loop_lag_s": 0.01, "world": {"open_prs": 4}}
     assert set(world.seen_tokens) == {"s3cret"}
-    assert h.providers["demo"] == {"v": {"waiting": 6.0, "running": 10.0, "kv": 0.42}}
+    up = {"up": True, "waiting": 3.0, "running": 5.0, "kv": 0.42}
+    assert h.providers["demo"] == {"v": {"g1": up, "g2": up}}  # per server, never summed
     vllm = store.get_control("demo", "vllm")  # per server, for the ramp's hold_if
     assert {k: [x[1:] for x in v] for k, v in vllm.items()} == {
         "http://g1": [[3.0, 5.0, 0.0]], "http://g2": [[3.0, 5.0, 0.0]]}
@@ -338,7 +339,8 @@ async def test_health_endpoints(app, store, client):
     _seed_app(app, store)
     r = (await client.get("/swarms/demo/health")).json()
     assert r["ts"] == T + 30 and r["generation"] == 1
-    assert set(r["body"]) == {"world", "workers", "types", "tools", "providers", "tokens", "alerts"}
+    assert set(r["body"]) == {"world", "workers", "types", "tools", "providers", "ramps", "tokens",
+                             "alerts"}
     assert [e["type"] for e in r["recent_events"]] == ["crash"]
     hist = (await client.get("/swarms/demo/health/history", params={"since": T + 1})).json()
     assert [x["ts"] for x in hist] == [T + 30]
@@ -394,17 +396,26 @@ def test_watch_shows_world_metrics_and_provider_queues(capsys):
                    "lane_push_effective_slots": 2, "lane_push_in_flight": 0, "note": "text"}}
     body = {"world": {"up": False, "manifest_ms": None, "slurm_state": "PENDING", "metrics": m},
             "workers": {}, "types": {}, "tools": {}, "tokens": {"by_type": {}},
-            "providers": {"v": {"waiting": 3.0, "running": 5.0, "kv": 0.42}},
+            "providers": {"v": {"g1:8000": {"up": True, "waiting": 3.0, "running": 5.0,
+                                            "kv": 0.42, "agents": 4},
+                                "g2:8000": {"up": False, "error": "ConnectError: refused",
+                                            "agents": 2, "dead_agents": ["a-0001", "a-0002"]}}},
+            "ramps": {"w": {"step": 2, "steps": 5, "replicas": 30, "max": 100, "next_add": 20,
+                            "next_at": T + 600, "holds": 0}},
             "alerts": [{"kind": "world_down", "msg": "world does not answer (Slurm job PENDING: "
                         "waiting for a node, not a crash)"}]}
-    st = {"swarm": "demo", "agents_total": 0, "workers_total": 0, "cost_usd": 0.0}
-    cli._print_health(st, {"ts": T, "generation": 3, "body": body})
+    workers = [{"id": f"w{i}", "state": "launching", "job_id": str(i), "crashes": 0,
+                "pending_reason": "PENDING (Resources)"} for i in range(2)]
+    cli._print_health({"ts": T, "generation": 3, "body": body}, workers)
     out = capsys.readouterr().out
     for want in ("world DOWN - ms slurm PENDING", "waiting for a node", "loop lag 0.012 s",
                  "429s 7", "slow queue 12.0 s", "open_prs 41",
                  "comment outbox 3 (oldest 95 s)", "lane merge: TRIPPED slots 1 in flight 1",
                  "lane push: paused slots 2 in flight 0", "lane_push_wait_s_total 12.5",
-                 "provider v: waiting 3 running 5 kv 42%"):
+                 "vllm v g1:8000: waiting 3 running 5 kv 42%, 4 agents",
+                 "vllm v g2:8000: DOWN (ConnectError: refused), 2 agents",
+                 "workers: launching:2; 2 PENDING (Resources)",
+                 "ramp w: step 2/5 (30 of max 100), next +20 at 14:"):
         assert want in out, (want, out)
 
 

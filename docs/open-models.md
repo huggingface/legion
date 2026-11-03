@@ -188,7 +188,7 @@ escape hatch: report only, no queueing.
 
 ## Status
 
-`GET /agents/{name}` and `flock agents` show the provider of a provider-backed agent;
+`GET /agents/{name}` and `flock status --agent` show the provider of a provider-backed agent;
 `session_started` events carry `provider` and `model_id`.
 
 ## Not verified yet

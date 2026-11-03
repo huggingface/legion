@@ -135,9 +135,9 @@ def test_launch_in_background_release_resume_delete(tmp_path, fake_server):
         assert r.returncode == 0, r.stdout + r.stderr
         end = time.monotonic() + 40
         while True:
-            r = flock("events", "writer-0001", "--pretty")
+            r = flock("status", "writer-0001", "--events")
             assert r.returncode == 0, r.stderr
-            if "turn_ended" in r.stdout:
+            if "agent.turn_ended" in r.stdout:
                 break
             assert time.monotonic() < end, r.stdout
             time.sleep(0.5)

@@ -190,6 +190,7 @@ class Tracker:
 
     def read_events(self) -> None:
         from flock.cli import pretty_event
+        from flock.status import normalise
 
         agents = self.store.list_agents(self.swarm)
         # a removed agent (an ephemeral child, docs/spawn.md) can leave a turn open here when
@@ -212,7 +213,7 @@ class Tracker:
                         self.completed[name] += 1
                 if kind in QUIET_EVENTS:
                     continue
-                line = f"{name:<16} {pretty_event(ev)}"
+                line = f"{name:<16} {pretty_event(normalise(ev, self.swarm, a))}"
                 self.new_lines.append(line)
 
     def snapshot(self, spec: SwarmSpec, now: float) -> dict[str, Any]:

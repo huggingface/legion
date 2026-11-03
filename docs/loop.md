@@ -255,7 +255,7 @@ key never reaches workers (`worker_type_spec`): one older than it would refuse t
 
 ### Events
 
-Swarm stream (`GET /swarms/{s}/events`, `flock events <swarm>`): `loop_started {type, mode,
+Swarm stream (`GET /swarms/{s}/events`, `flock status <swarm> --events`): `loop_started {type, mode,
 every, restart}`, `loop_tick {type, prompted, rounds}` (only on ticks that sent
 something), `loop_updated {type}`, `loop_stopped {type, reason, rounds_total, dropped}`,
 `final_round {type, agent}`, `final_done {type, sent, done, skipped}`,
@@ -291,7 +291,7 @@ prompts, so wakes and cadence rounds are apart; the same fields are in `run.json
 flock stop eliza-v1 --final --type ds                # stop now, then the final round
 # no final round, or starting a stopped loop again: POST /swarms/eliza-v1/loop (no CLI command)
 flock status eliza-v1                                # adds: loop ds: running (controller, every 120s), rounds 3-5, 0/3 agents done
-flock events eliza-v1                                # the swarm stream
+flock status eliza-v1 --events                       # the swarm stream
 ```
 
 `--start` begins a new run of the loop: the clock (`until`, `{elapsed}`) and the round counters

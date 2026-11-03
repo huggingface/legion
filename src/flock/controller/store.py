@@ -231,10 +231,12 @@ class Store:
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
-        if "last_error" not in cols:  # last launch failure or crash, shown by `flock workers`
+        if "last_error" not in cols:  # last launch failure or crash, shown by `flock status`
             self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
         if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
             self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
+        if "pending_reason" not in cols:  # the scheduler's word while queued, e.g. Slurm's %r
+            self._x("ALTER TABLE workers ADD COLUMN pending_reason TEXT")
         if "log_path" not in cols:  # the current job's log file (compute slurm)
             self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
         if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
@@ -252,7 +254,7 @@ class Store:
         self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
         if "removing" not in cols:  # set while a cascade removal is in flight
             self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
-        for col in ("rev", "start_rev"):  # type spec revs from the last heartbeat
+        for col in ("rev", "start_rev", "endpoint"):  # from the last heartbeat (endpoint: host:port)
             if col not in cols:
                 self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
         # stuck-agent nudges (reconcile._nudge_stuck); each column on its own guard

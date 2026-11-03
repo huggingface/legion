@@ -454,8 +454,7 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     # Placement: fill live slots in order, never move a placed agent, open new slots as needed.
     if ts is not None and not released:
         _place(p, spec, type_name, ts)
-        if ts.resume_prompt:
-            _nudge_stuck(p, spec.swarm, type_name, ts.resume_prompt)
+        _nudge_stuck(p, spec.swarm, type_name, ts.resume_prompt)
 
     # Empty workers drain and are cancelled after a grace period.
     counts = Counter(a["worker"] for a in store.list_agents(spec.swarm, type_name))
@@ -530,8 +529,9 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
         fill(store.get_worker(wid))
 
 
-def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str) -> None:
-    """An agent stuck (its turn timed out) for NUDGE_AFTER gets the type's resume_prompt, at
+def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None:
+    """A newly stuck agent (its turn timed out) gets an `agent.stuck` event. One stuck for
+    NUDGE_AFTER gets the type's resume_prompt (when it has one), at
     most every NUDGE_EVERY, NUDGE_MAX times until it completes a turn, and only with no prompt
     pending, no pause hold, no budget stop and its loop (if any) not done."""
     store, pending = p.store, None
@@ -540,10 +540,12 @@ def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str) -> None:
         stuck = a["hb_state"] == AgentState.stuck.value and not a["removing"] and agent_state(
             a, store.get_worker(a["worker"]) if a["worker"] else None, p.now) == AgentState.stuck
         since = (a["stuck_since"] or p.now) if stuck else None
+        if stuck and a["stuck_since"] is None:
+            p.act("stuck", a["name"], "turn timed out")  # `agent.stuck` on the swarm stream
         nudges = 0 if a["hb_state"] == AgentState.idle.value else a["nudges"]  # turn completed
         if since != a["stuck_since"] or nudges != a["nudges"]:
             store.update_agent(a["name"], stuck_since=since, nudges=nudges)
-        if (since is None or p.now - since < NUDGE_AFTER or nudges >= NUDGE_MAX
+        if (not text or since is None or p.now - since < NUDGE_AFTER or nudges >= NUDGE_MAX
                 or (a["nudged_at"] is not None and p.now - a["nudged_at"] < NUDGE_EVERY)
                 or flags.get("budget_stop") or store.held(a, flags)
                 or (loops.get(a["name"]) or {}).get("phase") == "done"):
@@ -619,7 +621,8 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
         p.act("cancel", w["id"], w["job_id"])
         _job_ended(p, spec, w, ts, JobState("CANCELED", "unresponsive"))
         return
-    p.store.update_worker(w["id"], state=worker_state(w, p.now).value)
+    p.store.update_worker(w["id"], state=worker_state(w, p.now).value,
+                          pending_reason=st.message if st.stage == "SCHEDULING" else None)
 
 
 def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobState) -> None:
@@ -881,6 +884,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
                 "msgboard_principal": ah.msgboard_principal,
                 "rev": ah.rev,
                 "start_rev": ah.start_rev,
+                "endpoint": ah.endpoint,
                 "last_heartbeat": t,
             },
             ah.tokens,

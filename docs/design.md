@@ -196,7 +196,7 @@ is never "in" a process; the process is a view of files on disk.
 
 One Python package, three entry points: `flock` (CLI/library),
 `flock-controller`, `flock-worker`. Commands: `launch`,
-`stop`, `update`, `prompt`, `status`, `events`, `remove`.
+`init`, `stop`, `update`, `prompt`, `status` (also the event stream, `--events`).
 
 ## 4. Agent lifecycle
 

@@ -54,13 +54,13 @@ def test_update_replicas_agents_workers_remove(tmp_path, monkeypatch, app, store
     r = runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"])
     assert r.exit_code == 0, r.output
     tick()
-    r = runner.invoke(cli.app, ["agents", "demo", "--type", "researcher"])
-    assert r.exit_code == 0 and r.output.count("researcher-000") == 5
-    r = runner.invoke(cli.app, ["workers", "demo"])
-    assert r.exit_code == 0 and "demo-researcher-w0002" in r.output and "knobs" in r.output
-    r = runner.invoke(cli.app, ["agent", "researcher-0004"])
+    r = runner.invoke(cli.app, ["status", "demo", "--type", "researcher"])
+    assert r.exit_code == 0 and r.output.count("researcher-000") == 5, r.output
+    r = runner.invoke(cli.app, ["status", "demo", "--json"])
+    assert "demo-researcher-w0002" in [w["id"] for w in json.loads(r.output)["workers"]]
+    r = runner.invoke(cli.app, ["status", "--agent", "researcher-0004"])
     assert json.loads(r.output)["worker"] == "demo-researcher-w0002"
-    r = runner.invoke(cli.app, ["events", "researcher-0004"])
+    r = runner.invoke(cli.app, ["status", "researcher-0004", "--events"])
     assert r.exit_code == 0 and r.output == ""
     r = runner.invoke(cli.app, ["stop", "demo", "--delete", "--yes"])
     assert r.exit_code == 0 and json.loads(r.output)["removing"] is True
@@ -127,12 +127,18 @@ def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, stor
     assert r.exit_code == 1 and "preflight gpu1:Qwen/Q: FAIL" in r.output
 
 
+def _fake_status(monkeypatch, st):
+    monkeypatch.setattr(Client, "_call", lambda _, m, path, **k: [] if path == "/workers"
+                        else {"status": st})
+    monkeypatch.setattr(Client, "health", lambda *_: None)
+
+
 def test_status_prints_zero_usage_warning(monkeypatch):
     st = {"swarm": "op", "agents_total": 1, "workers_total": 1, "pending_prompts": 0, "cost_usd": 0,
           "types": {}, "providers": {"hf": {"name": "hf", "type": "openai_compat", "self_hosted": False,
                                             "types": ["w"], "working": 0, "max_working": None,
                                             "zero_usage_agents": 2}}}
-    monkeypatch.setattr(Client, "_call", lambda *a, **k: {"status": st})
+    _fake_status(monkeypatch, st)
     r = runner.invoke(cli.app, ["status", "op"])
     assert r.exit_code == 0 and "2 agents finished turns with zero reported tokens" in r.output
 
@@ -144,7 +150,7 @@ def test_status_prints_launch_errors(monkeypatch):
     st = {"swarm": "op", "agents_total": 2, "workers_total": 2, "pending_prompts": 0, "cost_usd": 0,
           "types": {"a": t("a", "launch_refused", "BadRequestError: bad flavor"),
                     "b": t("b", "ok", "HfHubHTTPError: 503")}}
-    monkeypatch.setattr(Client, "_call", lambda *a, **k: {"status": st})
+    _fake_status(monkeypatch, st)
     r = runner.invoke(cli.app, ["status", "op"])
     assert "type a: launch refused, not retrying until the next apply: BadRequestError" in r.output
     assert "type b: last launch error, retrying: HfHubHTTPError: 503" in r.output
@@ -264,7 +270,7 @@ def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 5"))
     assert runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"]).exit_code == 0
     r = runner.invoke(cli.app, ["status", "demo"])
-    assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[0], r.output
+    assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[1], r.output
     assert store.spec_history("demo")[1]["source"]["by"] == "carlos"
 
 
