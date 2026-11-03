@@ -9,6 +9,7 @@ from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import (
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
+    NUDGE_MAX,
     agent_state,
     rebuild_from_jobs,
     reconcile,
@@ -616,40 +617,63 @@ def test_launch_timeout_without_queue_state_counts_from_launch(store, jobs, cloc
     assert "cancel" in kinds(tick()) and job in jobs.cancels
 
 
-def test_stuck_agent_gets_resume_prompt_after_two_passes_once_per_30_min(store, jobs, clock, tick):
-    store.put_swarm(make_spec(researcher={"replicas": 1, "resume_prompt": "go on"}), 0)
+def _stuck_tick(store, clock, tick, dt, state="stuck"):
+    clock.advance(dt)
+    heartbeat(store, clock, W0, [("researcher-0000", state, None)])
+    return kinds(tick())
+
+
+def _nudge_spec():
+    return make_spec(researcher={"replicas": 1, "resume_prompt": "go on"})
+
+
+def test_stuck_agent_gets_resume_prompt_after_60s_once_per_30_min(store, jobs, clock, tick):
+    store.put_swarm(_nudge_spec(), 0)
     tick()
-    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
-    assert "nudge" not in kinds(tick())
-    clock.advance(5)
-    assert "nudge" in kinds(tick())
+    assert "nudge" not in _stuck_tick(store, clock, tick, 1)
+    assert "nudge" not in _stuck_tick(store, clock, tick, 30)  # stuck 30 s
+    assert "nudge" in _stuck_tick(store, clock, tick, 30)  # stuck 60 s
     (p,) = store.prompts_for_worker(W0)
     assert '"text":"go on"' in p["body"]
-    clock.advance(5)
-    assert "nudge" not in kinds(tick())  # one pending already
     store.delete_prompts([p["id"]])
-    for _ in range(3):  # still stuck, prompt delivered: not again within 30 min
-        clock.advance(30)
-        heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
-        assert "nudge" not in kinds(tick())
-    clock.advance(NUDGE_EVERY)
-    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
-    assert "nudge" in kinds(tick())
+    for _ in range(3):  # still stuck: not again within 30 min
+        assert "nudge" not in _stuck_tick(store, clock, tick, 60)
+    assert "nudge" in _stuck_tick(store, clock, tick, NUDGE_EVERY)
 
 
-def test_stuck_agent_streak_resets_and_needs_a_resume_prompt(store, jobs, clock, tick):
-    store.put_swarm(make_spec(researcher={"replicas": 1, "resume_prompt": "go on"}), 0)
+def test_stuck_nudges_cap_until_a_turn_completes(store, jobs, clock, tick):
+    store.put_swarm(_nudge_spec(), 0)
     tick()
-    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
-    tick()
-    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
-    tick()
-    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
-    assert "nudge" not in kinds(tick())  # not two passes in a row
+    _stuck_tick(store, clock, tick, 1)
+    for _ in range(NUDGE_MAX):  # each nudge starts a turn that times out again
+        assert "nudge" in _stuck_tick(store, clock, tick, NUDGE_EVERY)
+        store.delete_prompts([p["id"] for p in store.prompts_for_worker(W0)])
+        _stuck_tick(store, clock, tick, 1, "working")
+        _stuck_tick(store, clock, tick, 1)
+    assert "nudge" not in _stuck_tick(store, clock, tick, NUDGE_EVERY)  # 4th episode
+    _stuck_tick(store, clock, tick, 1, "idle")  # a completed turn resets the count
+    _stuck_tick(store, clock, tick, 1)
+    assert "nudge" in _stuck_tick(store, clock, tick, 60)
 
-    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)  # no resume_prompt: nothing
+
+def test_no_nudge_under_budget_stop_hold_or_done_loop(store, jobs, clock, tick):
+    store.put_swarm(_nudge_spec(), 0)
+    tick()
+    _stuck_tick(store, clock, tick, 1)
+    store.put_swarm_flags("demo", {"budget_stop": "final_reserve"})
+    assert "nudge" not in _stuck_tick(store, clock, tick, 60)
+    store.put_swarm_flags("demo", {"holds": {"agents": {"researcher-0000": {}}}})
+    assert "nudge" not in _stuck_tick(store, clock, tick, 60)
+    store.put_swarm_flags("demo", {})
+    store.put_loop_agent("researcher-0000", "demo", "researcher", {"phase": "done"})
+    assert "nudge" not in _stuck_tick(store, clock, tick, 60)
+    store.put_loop_agent("researcher-0000", "demo", "researcher", {"phase": "looping"})
+    assert "nudge" in _stuck_tick(store, clock, tick, 60)
+
+
+def test_no_nudge_when_type_has_no_resume_prompt(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
     for _ in range(3):
-        clock.advance(5)
-        heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
-        assert "nudge" not in kinds(tick())
+        assert "nudge" not in _stuck_tick(store, clock, tick, 60)
     assert store.prompts_for_worker(W0) == []

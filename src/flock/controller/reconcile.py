@@ -62,7 +62,9 @@ INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh w
 INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
 LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
 LAUNCH_TIMEOUT = 900.0  # s, a RUNNING job that never heartbeats in this long is a crash
+NUDGE_AFTER = 60.0  # s stuck before a stuck agent gets its type's resume_prompt
 NUDGE_EVERY = 1800.0  # s, min gap between resume prompts to one stuck agent
+NUDGE_MAX = 3  # resume prompts to one agent until it completes a turn
 RETIRE_GRACE = 120.0  # s, an emptied worker gets this long to drain before it is cancelled
 STABLE_AFTER = 600.0  # s, a heartbeat this long after launch resets the crash streak
 # Not written to the swarm stream: per agent, or repeated every pass while the condition holds.
@@ -444,24 +446,30 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
 
 
 def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str) -> None:
-    """An agent stuck (its turn timed out) for two passes in a row gets the type's
-    resume_prompt, at most every NUDGE_EVERY and only with no prompt pending for it."""
+    """An agent stuck (its turn timed out) for NUDGE_AFTER gets the type's resume_prompt, at
+    most every NUDGE_EVERY, NUDGE_MAX times until it completes a turn, and only with no prompt
+    pending, no pause hold, no budget stop and its loop (if any) not done."""
     store, pending = p.store, None
+    flags, loops = store.swarm_flags(swarm), store.loop_agents(swarm, type_name)
     for a in store.list_agents(swarm, type_name):
         stuck = a["hb_state"] == AgentState.stuck.value and not a["removing"] and agent_state(
             a, store.get_worker(a["worker"]) if a["worker"] else None, p.now) == AgentState.stuck
-        n = min(a["stuck_passes"] + 1, 2) if stuck else 0
-        if n != a["stuck_passes"]:
-            store.update_agent(a["name"], stuck_passes=n)
-        if n < 2 or (a["nudged_at"] is not None and p.now - a["nudged_at"] < NUDGE_EVERY):
+        since = (a["stuck_since"] or p.now) if stuck else None
+        nudges = 0 if a["hb_state"] == AgentState.idle.value else a["nudges"]  # turn completed
+        if since != a["stuck_since"] or nudges != a["nudges"]:
+            store.update_agent(a["name"], stuck_since=since, nudges=nudges)
+        if (since is None or p.now - since < NUDGE_AFTER or nudges >= NUDGE_MAX
+                or (a["nudged_at"] is not None and p.now - a["nudged_at"] < NUDGE_EVERY)
+                or flags.get("budget_stop") or store.held(a, flags)
+                or (loops.get(a["name"]) or {}).get("phase") == "done"):
             continue
         pending = store.pending_counts(swarm) if pending is None else pending
         if pending.get(a["name"]):
             continue
         prompt = PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=text)
         store.add_prompt(a["name"], prompt.model_dump_json(), p.now)
-        store.update_agent(a["name"], nudged_at=p.now)
-        p.act("nudge", a["name"], "stuck: resume_prompt queued")
+        store.update_agent(a["name"], nudged_at=p.now, nudges=nudges + 1)
+        p.act("nudge", a["name"], f"stuck: resume_prompt queued ({nudges + 1}/{NUDGE_MAX})")
 
 
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec,

@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS agents (
   last_sync REAL,
   msgboard_principal TEXT,
   resume_pending INTEGER NOT NULL DEFAULT 0,
-  stuck_passes INTEGER NOT NULL DEFAULT 0,
+  stuck_since REAL,
+  nudges INTEGER NOT NULL DEFAULT 0,
   nudged_at REAL,
   created_at REAL NOT NULL,
   last_heartbeat REAL
@@ -262,9 +263,11 @@ class Store:
         for col in ("rev", "start_rev"):  # type spec revs from the last heartbeat
             if col not in cols:
                 self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
-        if "stuck_passes" not in cols:  # reconcile passes seen stuck (capped at 2), last nudge
-            self._x("ALTER TABLE agents ADD COLUMN stuck_passes INTEGER NOT NULL DEFAULT 0")
-            self._x("ALTER TABLE agents ADD COLUMN nudged_at REAL")
+        # stuck-agent nudges (reconcile._nudge_stuck); each column on its own guard
+        for col, ddl in (("stuck_since", "REAL"), ("nudges", "INTEGER NOT NULL DEFAULT 0"),
+                         ("nudged_at", "REAL")):
+            if col not in cols:
+                self._x(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
         cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
