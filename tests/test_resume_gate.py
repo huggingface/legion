@@ -1,6 +1,7 @@
 """Resume gate: specs of runs we already have must still load after spec fields are deleted.
-Regenerate the stored fixtures with `uv run python tests/test_resume_gate.py` (hermetic: shell
-${VAR}s are ignored, only spec defaults apply; the repo path is written as `<repo>`)."""
+Existing fixtures are frozen (they stand for swarms already stored); `uv run python
+tests/test_resume_gate.py` only writes missing ones (hermetic: shell ${VAR}s are ignored, only
+spec defaults apply; the repo path is written as `<repo>`)."""
 
 from __future__ import annotations
 
@@ -73,6 +74,8 @@ if __name__ == "__main__":
     os.environ.clear()  # identical fixtures for everyone: no shell ${VAR}s
     FIXTURES.mkdir(parents=True, exist_ok=True)
     for d in EXPERIMENTS:
+        if (FIXTURES / f"{d.name}.json").exists():  # frozen: regenerating would hide a deletion
+            continue
         text = stored_json(load_experiment(d)).replace(str(ROOT), "<repo>")
         (FIXTURES / f"{d.name}.json").write_text(text + "\n")
         print(FIXTURES / f"{d.name}.json")
