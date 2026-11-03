@@ -27,12 +27,10 @@ from pydantic import BaseModel, Field
 from flock.models import (
     AgentHeartbeat,
     Event,
-    Grant,
     LoopMeta,
     LoopStartCommand,
     TokenUsage,
     TypeSpec,
-    granted_spec,
     hit_max_turns,
     parse_duration,
     type_spec_rev,
@@ -79,7 +77,6 @@ def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float
     return base * (0.5 + 0.5 * rng())
 # Interruptions that are a decision (stop, drain, unassign), not a failure: no re-prompt.
 _DECIDED = ("stop", "drain", "unassign", "abandoned", "draining", "drain_deadline")
-_UNSET: Any = object()  # set_live: "no news" for the grant (None means revoked)
 
 
 class AgentState(BaseModel):
@@ -134,15 +131,11 @@ class AgentRuntime:
         world: WorldHub | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
-        # Live changes (docs/live.md): `spec` is `base_spec` (the type spec as applied) with the
-        # agent's grant on top. A newer type spec or grant from the controller waits in
-        # `_next_*` until the agent's next turn boundary; `_notes` go in front of that prompt.
-        self.base_spec: TypeSpec = spec
-        self.grant: Grant | None = None
+        # Live changes (docs/live.md): a newer type spec from the controller waits in
+        # `_next_spec` until the agent's next turn boundary; `_notes` go in front of that prompt.
         self._next_spec: TypeSpec | None = None
-        self._next_grant: Any = _UNSET
         self._notes: dict[str, None] = {}
-        # type_spec_rev of base_spec at the last turn boundary, and the one the harness started on
+        # type_spec_rev of spec at the last turn boundary, and the one the harness started on
         self.rev: str | None = None
         self.start_rev: str | None = None
         self.workdir_files: int | None = None  # files in the workdir at the last push
@@ -175,8 +168,6 @@ class AgentRuntime:
         # process on the same session. Not _stop_req: the burst's finally must restart.
         self._recycle_pending: str | None = None
         self.pss_mb: float | None = None  # the harness's PSS, set by the worker's memory loop
-        self._burst_started = 0.0
-        self._burst_turns = 0
         self._exit_code: int | None = None  # the harness's exit status (`exited` event)
         self._burst: asyncio.Task | None = None
         self._ready = asyncio.Event()
@@ -184,7 +175,7 @@ class AgentRuntime:
         # only then may anything push this agent (flock.worker.sync, "Push safety")
         self.setup_done = False
         self._turn_started_at = 0.0
-        # prompt ids for the turn events (tracked broadcasts): the next turn's, the current one's
+        # prompt ids for the turn events: the next turn's, the current one's
         self._pids: list[str] = []
         self._turn_pids: list[str] = []
         self._last_activity = 0.0
@@ -209,8 +200,6 @@ class AgentRuntime:
         self._loop_transient = 0  # consecutive timeout / model_transport turns
         self._loop_task: asyncio.Task | None = None
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
-        self._turn_state_calls = 0  # of those, the ones that are not read-only (idle_rounds)
-        self._turn_finished = False  # `done(finished: true)` this turn (stop_when.all_agents_done)
         self._turn_call_names: list[str] = []  # their tool names, in order
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
@@ -309,32 +298,20 @@ class AgentRuntime:
             self.emit("env_dropped", {"names": names})
 
     # ------------------------------------------------------------------ live changes (docs/live.md)
-    def set_live(self, *, spec: TypeSpec | None = None, grant: Any = _UNSET) -> None:
-        """A changed type spec, or the grant now in force (None: none), from the controller.
-        Held until the agent's next turn boundary; the latest wins."""
-        if spec is not None:
-            self._next_spec = spec
-        if grant is not _UNSET:
-            self._next_grant = grant
-
-    def _grant_now(self) -> Grant | None:
-        return self.grant if self._next_grant is _UNSET else self._next_grant
+    def set_live(self, spec: TypeSpec) -> None:
+        """A changed type spec from the controller. Held until the agent's next turn boundary;
+        the latest wins."""
+        self._next_spec = spec
 
     def _apply_live(self) -> None:
-        """At a turn boundary: take the pending type spec and grant. A changed system prompt
+        """At a turn boundary: take the pending type spec. A changed system prompt
         rewrites CLAUDE.md / AGENTS.md (the llm harness rebuilds its system message from it at
         the turn start); an agent that already had a turn gets a one-line note in its next
         prompt for each kind of change."""
         spec, self._next_spec = self._next_spec, None
-        grant, self._next_grant = self._next_grant, _UNSET
-        before = (self.base_spec.system_prompt, self.base_spec.system_prompt_file)
-        self.base_spec = spec or self.base_spec
-        self.rev = type_spec_rev(self.base_spec)
-        regrant = grant is not _UNSET and grant != self.grant
-        if regrant:
-            self.grant = grant
-        budget = self.grant is not None and self.grant.limits.budget_usd is not None
-        self.spec = granted_spec(self.base_spec, self.grant, self.spend_usd() if budget else 0.0)
+        before = (self.spec.system_prompt, self.spec.system_prompt_file)
+        self.spec = spec or self.spec
+        self.rev = type_spec_rev(self.spec)
         if (self.spec.system_prompt, self.spec.system_prompt_file) != before:
             if self._instructions_written:
                 self._instructions_written = False
@@ -343,10 +320,6 @@ class AgentRuntime:
             harness = self.spec.harness.value
             self._note("your system prompt changed" if harness == "llm" else
                        f"your instructions in {INSTRUCTIONS_FILE[harness]} changed; re-read them")
-        if regrant:
-            self._note(f"your grants changed: {self.grant.describe() if self.grant else 'all revoked'}")
-        if self.comms is not None:
-            self.comms.set_grant(self.name, self.grant.tools if self.grant else None)
         if (update := getattr(self.adapter, "update_spec", None)) and update(self.spec):
             self.recycle("endpoint")  # the new models.json needs a fresh process
 
@@ -359,13 +332,6 @@ class AgentRuntime:
             return text
         notes, self._notes = "; ".join(self._notes), {}
         return f"[flock] Since your last turn: {notes}.\n\n{text}"
-
-    def _over_budget(self) -> float | None:
-        """The granted limits.budget_usd when the agent's cost reached it, else None."""
-        g = self._grant_now()
-        if g is None or g.limits.budget_usd is None:
-            return None
-        return g.limits.budget_usd if self.spend_usd() >= g.limits.budget_usd else None
 
     # ------------------------------------------------------------------ lifecycle
     async def setup(self, restore: bool = True, resume_prompt: str | None = None) -> None:
@@ -394,10 +360,6 @@ class AgentRuntime:
                      loop: LoopMeta | None = None) -> None:
         if loop is not None:
             text = self._loop_prompt(text, loop)
-        if (budget := self._over_budget()) is not None:
-            self.emit("prompt_deferred", {"prompt_id": prompt_id, "text": text, "reason": "budget",
-                                          "budget_usd": budget, **self._loop_untaken()})
-            return
         if timeout:
             self._next_timeout = parse_duration(timeout).total_seconds()
         if prompt_id:  # joins the turn in flight, or starts the next one
@@ -553,7 +515,7 @@ class AgentRuntime:
             if self._working_count and self._working_count() > self.spec.max_working_per_worker:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
-            self._apply_live()  # the harness starts on the newest type spec and grant
+            self._apply_live()  # the harness starts on the newest type spec
             if self.comms is not None:  # join the board at the first prompt, not at assign
                 await self.comms.on_prompt(self.name, self.spec.harness.value)
             if self.world is not None:  # open the gateway for flock-tool; agent_start hook
@@ -583,7 +545,6 @@ class AgentRuntime:
             self.state.session_id = sid
             self.start_rev = self.rev
             self._recycle_pending, self._exit_code = None, None
-            self._burst_started, self._burst_turns = self._now(), 0
             self.save_state()
             self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
@@ -677,12 +638,10 @@ class AgentRuntime:
                     extra["usage_missing"] = True
                 if self._turn_tools is not None:
                     extra["tools_version"] = self._turn_tools
-                if self._turn_finished:
-                    extra["finished"] = True
                 extra.update(self._pid_fields())
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
                                          "tool_calls": self._turn_tool_calls,
-                                         "state_calls": self._turn_state_calls, **extra,
+                                         **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 if self.world is not None:  # the `turn` hook (docs/world.md)
                     self.world.on_turn(self.name, self.turn_id,
@@ -693,13 +652,7 @@ class AgentRuntime:
                     summary = self._unfinished_summary(ev.data)  # not a stale or half-way text
                 if summary:
                     self.state.last_summary = summary
-                finished = self._turn_finished
                 self._end_turn()
-                self._burst_turns += 1
-                self._check_recycle_after()
-                lp = self.spec.loop
-                if finished and self.loop is not None and lp is not None and lp.stop_when.all_agents_done:
-                    self._loop_end("done")  # no next round; the controller takes it out too
                 self._after_turn(ev.status or "completed",
                                  "max_turns" if hit_max_turns(ev.data) else ev.data.get("reason"))
         elif k == "error":
@@ -749,7 +702,6 @@ class AgentRuntime:
                 data["tools_error"] = ts.error
         self._turn_tools = data.get("tools_version")
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
-        self._turn_state_calls, self._turn_finished = 0, False
         self._turn_call_names = []
         self._loop_inflight = None
         self._turn_pids, self._pids = self._pids, []
@@ -797,9 +749,7 @@ class AgentRuntime:
 
     # ------------------------------------------------------------------ loop (docs/loop.md)
     def _note_message(self, m: dict[str, Any]) -> None:
-        """Per turn: tool calls (not `done`), those that are not read-only (the `llm` adapter
-        marks a call `readonly` from the tools version it ran with: comms read/search,
-        `readonly` folder tools), `done`'s summary and the last assistant text."""
+        """Per turn: tool calls (not `done`), `done`'s summary and the last assistant text."""
         if m.get("role") != "assistant":
             return
         content = m.get("content")
@@ -811,9 +761,6 @@ class AgentRuntime:
         calls = [b for b in blocks if isinstance(b, dict)
                  and b.get("type") == "toolCall" and b.get("name") != "done"]
         self._turn_tool_calls += len(calls)
-        self._turn_state_calls += sum(1 for b in calls if b.get("readonly") is not True)
-        if m.get("fromDoneTool") and m.get("finished") is True:
-            self._turn_finished = True
         self._turn_call_names += [str(b.get("name")) for b in calls]
         if m.get("fromDoneTool") and text:
             self._turn_summary = text
@@ -837,7 +784,6 @@ class AgentRuntime:
             self._loop_end("final")
         self._loop_inflight = meta
         self.emit("loop_prompt", {"kind": meta.kind, "round": meta.round, "why": meta.why,
-                                  **({"add_tools": meta.add_tools} if meta.add_tools else {}),
                                   **({} if meta.counted else {"counted": False}),
                                   **({"wake": True} if meta.wake else {})})
         return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,
@@ -940,18 +886,6 @@ class AgentRuntime:
             return False
         self._recycle_pending = reason
         return True
-
-    def _check_recycle_after(self) -> None:
-        """`recycle_after` (TypeSpec), checked at each turn end."""
-        ra = self.spec.recycle_after
-        if ra is None:
-            return
-        if ra.turns and self._burst_turns >= ra.turns:
-            self.recycle("turns")
-        elif ra.hours and self._now() - self._burst_started >= ra.hours * 3600:
-            self.recycle("hours")
-        elif ra.pss_mb and self.pss_mb is not None and self.pss_mb >= ra.pss_mb:
-            self.recycle("pss_mb")
 
     async def stop(self, reason: str = "stop") -> None:
         """Kill the harness process if any (interrupting a turn); the agent stays assigned."""

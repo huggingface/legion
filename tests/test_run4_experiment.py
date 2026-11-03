@@ -30,7 +30,7 @@ def test_spec_fixed_prompt_and_waves():
     assert agent.harness.value == "pi" and agent.agents_per_worker == 12
     assert agent.max_turns == 150 and agent.turn_timeout == "2h"
     assert agent.worker_lifetime == "54h"
-    assert agent.loop.first is None and agent.loop.notices
+    assert agent.loop.notices
     assert agent.loop.prompt.strip() == "Continue your work."
     assert "Keep the seed's input/output interface fixed" in agent.system_prompt
     assert "5 min in total" in agent.system_prompt

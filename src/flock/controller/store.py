@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from flock.models import Event, Grant, SwarmSpec, TokenUsage
+from flock.models import Event, SwarmSpec, TokenUsage
 
 DB_NAME = "controller.db"
 
@@ -145,14 +145,6 @@ CREATE TABLE IF NOT EXISTS swarm_flags (
   swarm TEXT PRIMARY KEY,
   body TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS grants (
-  swarm TEXT NOT NULL,
-  target TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  body TEXT NOT NULL,
-  updated_at REAL NOT NULL,
-  PRIMARY KEY (swarm, target)
-);
 CREATE TABLE IF NOT EXISTS spawn_keys (
   parent TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -199,6 +191,14 @@ def _tokens(raw: str) -> dict[str, TokenUsage]:
 
 def _dump_tokens(tokens: dict[str, TokenUsage]) -> str:
     return json.dumps({k: v.model_dump() for k, v in tokens.items()}, sort_keys=True)
+
+
+def _loop_agent(body: str) -> dict[str, Any]:
+    """A loop agent's state; phase `first` (loop.first, removed) reads as `looping`."""
+    st = json.loads(body)
+    if st.get("phase") == "first":
+        st["phase"] = "looping"
+    return st
 
 
 def agent_tokens(row: Row) -> dict[str, TokenUsage]:
@@ -429,39 +429,11 @@ class Store:
             self._x("DELETE FROM loops WHERE swarm = ?", [name])
             self._x("DELETE FROM loop_agents WHERE swarm = ?", [name])
             self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
-            self._x("DELETE FROM grants WHERE swarm = ?", [name])
             self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
             self._x("DELETE FROM spec_history WHERE swarm = ?", [name])
             self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
             self._x("DELETE FROM controls WHERE swarm = ?", [name])
-
-    # ----------------------------------------------------------------- grants (docs/live.md)
-
-    def put_grant(self, swarm: str, target: str, kind: str, grant: Grant, now: float) -> None:
-        """Set (replace) the grant of a type or an agent; an empty grant deletes it."""
-        if grant.empty():
-            self._x("DELETE FROM grants WHERE swarm = ? AND target = ?", [swarm, target])
-            return
-        self._x("INSERT INTO grants (swarm, target, kind, body, updated_at) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(swarm, target) DO UPDATE SET kind = excluded.kind, "
-                "body = excluded.body, updated_at = excluded.updated_at",
-                [swarm, target, kind, grant.model_dump_json(exclude_defaults=True), now])
-
-    def list_grants(self, swarm: str) -> list[Row]:
-        rows = self._q("SELECT target, kind, body, updated_at FROM grants WHERE swarm = ? "
-                       "ORDER BY kind DESC, target", [swarm])
-        for row in rows:
-            row["grant"] = Grant.model_validate_json(row.pop("body"))
-        return rows
-
-    def agent_grants(self, swarm: str) -> tuple[dict[str, Grant], dict[str, Grant]]:
-        """(type grants, agent grants) of a swarm, by target."""
-        types: dict[str, Grant] = {}
-        agents: dict[str, Grant] = {}
-        for row in self.list_grants(swarm):
-            (types if row["kind"] == "type" else agents)[row["target"]] = row["grant"]
-        return types, agents
 
     # ----------------------------------------------------------------- tools bundles (docs/tools.md)
 
@@ -625,7 +597,6 @@ class Store:
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
         self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
-        self._x("DELETE FROM grants WHERE kind = 'agent' AND target = ?", [name])
 
     def mark_removing(self, name: str) -> None:
         """First phase of a cascade removal: refuse new children, revoke the token."""
@@ -911,11 +882,11 @@ class Store:
     def loop_agents(self, swarm: str, type_name: str) -> dict[str, dict[str, Any]]:
         rows = self._q("SELECT agent, body FROM loop_agents WHERE swarm = ? AND type = ?",
                        [swarm, type_name])
-        return {r["agent"]: json.loads(r["body"]) for r in rows}
+        return {r["agent"]: _loop_agent(r["body"]) for r in rows}
 
     def get_loop_agent(self, agent: str) -> dict[str, Any] | None:
         row = self._one("SELECT body FROM loop_agents WHERE agent = ?", [agent])
-        return json.loads(row["body"]) if row else None
+        return _loop_agent(row["body"]) if row else None
 
     def put_loop_agent(self, agent: str, swarm: str, type_name: str, body: dict[str, Any]) -> None:
         self._x(
@@ -944,34 +915,18 @@ class Store:
         h = (self.swarm_flags(a["swarm"]) if flags is None else flags).get("holds") or {}
         return a["type"] in h.get("types", {}) or a["name"] in h.get("agents", {})
 
-    # ------------------------------------------------- steering controls (docs/policies.md)
-    # Operator and controller settings kept across restarts: `notice:<type>` banners,
-    # `broadcast:<id>` prompt tracking, `ramp:<type>` start times, `policy_mutes`.
+    # ----------------------------------------------------------------- controls
+    # Controller settings kept across restarts: `ramp:<type>` start times. Rows of removed
+    # features (`notice:`, `broadcast:`, `policy_mutes`) may linger in old databases; unread.
 
     def get_control(self, swarm: str, key: str) -> Any:
         row = self._one("SELECT body FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
         return json.loads(row["body"]) if row else None
 
     def put_control(self, swarm: str, key: str, body: Any) -> None:
-        if key.startswith("broadcast:") and isinstance(body, dict) and "ts" in body:  # expire after 7 days
-            self._x("DELETE FROM controls WHERE swarm = ? AND key LIKE 'broadcast:%' "
-                    "AND json_extract(body, '$.ts') < ?", [swarm, body["ts"] - 7 * 86400])
         self._x("INSERT INTO controls (swarm, key, body) VALUES (?, ?, ?) "
                 "ON CONFLICT(swarm, key) DO UPDATE SET body = excluded.body",
                 [swarm, key, json.dumps(body, sort_keys=True)])
-
-    def delete_control(self, swarm: str, key: str) -> None:
-        self._x("DELETE FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
-
-    def controls(self, swarm: str, prefix: str) -> dict[str, Any]:
-        rows = self._q("SELECT key, body FROM controls WHERE swarm = ? AND key LIKE ?",
-                       [swarm, prefix + "%"])
-        return {r["key"]: json.loads(r["body"]) for r in rows}
-
-    def pending_with(self, needle: str) -> int:
-        """Undelivered prompts whose command contains `needle` (a broadcast's prompt id)."""
-        return self._one("SELECT COUNT(*) AS n FROM pending_prompts WHERE body LIKE ?",
-                         [f"%{needle}%"])["n"]
 
     # ----------------------------------------------------------------- launch budget
 

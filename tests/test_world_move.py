@@ -49,8 +49,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
         monkeypatch.setenv("FLOCK_WORLD_HOST_FILE", str(host_file))
         monkeypatch.setenv("WORLD_TOKEN", SECRET)
         spec = SwarmSpec.model_validate({
-            "swarm": "demo", "bucket": "hf://buckets/ns/sh",
-            "compute": {"kind": "external"},
+            "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "world": {"url": TEMPLATE, "token_env": "WORLD_TOKEN"},
             "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5",
                                      "replicas": 1, "world_tools": True}},
@@ -76,10 +75,10 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
             store.update_swarm_spec(new)
 
             # a worker gets the new endpoint with its next heartbeat
+            from flock.controller.jobs import FakeJobsClient
             from flock.controller.reconcile import reconcile
-            from flock.controller.slurm import ExternalJobsClient
 
-            reconcile(store, ExternalJobsClient(env={}), clock(), _settings())
+            reconcile(store, FakeJobsClient(), clock(), _settings())
             wid = "demo-researcher-w0000"
             hb = WorkerHeartbeat(worker=wid, deadline=clock(), agents=[])
             r = await c.post(f"/workers/{wid}/heartbeat", json=hb.model_dump(mode="json"))

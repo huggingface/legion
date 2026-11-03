@@ -43,7 +43,7 @@ async def test_leader_prompts_its_idle_children_once(client, app, store, tick, c
         ack = (await c.post(f"/agents/{LEADER}/children/prompts", json=body)).json()
         assert ack == {"swarm": "demo", "type": "analyst", "parent": LEADER, "matched": 3,
                        "queued": 2, "pending": 0, "skipped_state": 0, "skipped_removing": 0,
-                       "skipped_pending": 1, "skipped_budget": 0, "prompt_id": None}
+                       "skipped_pending": 1}
         again = (await c.post(f"/agents/{LEADER}/children/prompts", json=body)).json()
         assert (again["queued"], again["skipped_pending"]) == (0, 3)  # nothing stacks
         everyone = (await c.post(f"/agents/{LEADER}/children/prompts",

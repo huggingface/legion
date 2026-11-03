@@ -1,4 +1,4 @@
-"""`compute: slurm` and `compute: external` (controller/slurm.py), against shell stubs of
+"""`compute: slurm` (controller/slurm.py), against shell stubs of
 sbatch/squeue/sacct/scancel (tests/fixtures/slurm_stubs) that keep job states in a temp dir."""
 
 from __future__ import annotations
@@ -10,13 +10,10 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from flock import cli
 from flock.controller.reconcile import Settings, reconcile, record_heartbeat
 from flock.controller.slurm import (
     PREEMPT_EXIT,
-    ExternalJobsClient,
     SlurmJobsClient,
     env_file_text,
     read_env_file,
@@ -116,9 +113,6 @@ def test_compute_spec_keys_and_resolution(tmp_path):
         SwarmSpec.model_validate({"swarm": "d", "compute": "slurm", "types": {}})
     with pytest.raises(ValueError, match="unknown types"):
         slurm_spec(tmp_path, types={"nope": {"cpus": 1}})
-    ext = SwarmSpec.model_validate({"swarm": "d", "bucket": "hf://buckets/n/b",
-                                    "compute": "external", "types": {}})
-    assert ext.compute == ComputeSpec(kind="external")
 
 
 # --------------------------------------------------------------------------- client
@@ -259,72 +253,12 @@ def test_preempted_job_relaunches_same_name_without_backoff(tmp_path, slurm, sto
     assert argv[argv.index("-J") + 1] == W0 and "-c" in argv and argv[argv.index("-c") + 1] == "2"
 
 
-# --------------------------------------------------------------------------- external
-
-
-def test_external_waits_without_backoff(tmp_path, store, clock, caplog):
-    spec = SwarmSpec.model_validate({
-        "swarm": "demo", "bucket": "hf://buckets/ns/sh",
-        "compute": {"kind": "external", "launch_dir": str(tmp_path / "launch"),
-                    "host_file": "/fsx/ctl.host"},
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5",
-                                 "replicas": 2, "agents_per_worker": 2}},
-    })
-    store.put_swarm(spec, 0)
-    jobs, s = ExternalJobsClient(env={}), settings()
-    caplog.set_level("INFO", logger="flock.slurm")
-    reconcile(store, jobs, clock(), s)
-    w = store.get_worker(W0)
-    assert w["job_id"].startswith("external-")
-    assert "waiting for an external start of " + W0 in caplog.text
-    (path,) = (tmp_path / "launch").glob(f"{W0}-*.env")
-    env = read_env_file(path)
-    assert env["WORKER_ID"] == W0 and env["FLOCK_URL"] == "http://${CTL_HOST}:7860"
-    assert path.name == f"{W0}-{env['WORKER_INCARNATION']}.env"
-    assert TOKEN not in path.read_text()
-    # hours without a worker: still waiting, never a crash
-    for _ in range(5):
-        clock.advance(3600)
-        kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
-        assert "crash" not in kinds and "cancel" not in kinds
-    assert store.get_worker(W0)["job_id"] == w["job_id"]
-    # a worker shows up, then goes away: the slot waits again, no backoff or crash count
-    heartbeat(store, clock, W0)
-    clock.advance(200)
-    kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
-    assert "external_wait" in kinds and "planned_restart" in kinds and "crash" not in kinds
-    w2 = store.get_worker(W0)
-    assert w2["consecutive_crashes"] == 0 and w2["job_id"] != w["job_id"]  # new env file
-
-
-def test_flock_workers_shows_external(monkeypatch, store, clock, tmp_path):
-    from fastapi.testclient import TestClient
-
-    from flock.controller.api import create_app
-
-    spec = SwarmSpec.model_validate({
-        "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": "external",
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 1}},
-    })
-    store.put_swarm(spec, 0)
-    reconcile(store, ExternalJobsClient(env={}), clock(), settings())
-    app = create_app(store, TOKEN, clock=clock)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
-    r = CliRunner().invoke(cli.app, ["workers", "demo"])
-    assert r.exit_code == 0, r.output
-    assert "external" in r.output.split(W0)[1].splitlines()[0]
-
-
 def test_controller_build_selects_backend(tmp_path):
     from flock.controller.main import build
 
     env = {"FLOCK_TOKEN": TOKEN, "FLOCK_DATA": str(tmp_path / "d"), "FLOCK_COMPUTE": "slurm"}
     b = build(env)
     assert isinstance(b.jobs, SlurmJobsClient)
-    b.store.close()
-    b = build({**env, "FLOCK_COMPUTE": "external", "FLOCK_DATA": str(tmp_path / "e")})
-    assert isinstance(b.jobs, ExternalJobsClient)
     b.store.close()
 
 

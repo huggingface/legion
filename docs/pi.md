@@ -104,9 +104,7 @@ arrives before `idle_grace`), so its heap, session and sandbox root grow for the
 
 - **Recycle**: the runtime restarts Pi at a turn boundary, resuming the same session
   (`--session-id`): the next prompt goes to a fresh process, the event is
-  `harness_recycled {reason, pss_mb}`, and no turn is interrupted. Reasons: `turns`, `hours`,
-  `pss_mb` from the type's `recycle_after: {turns, hours, pss_mb}` (counted from the process
-  start, checked at each turn end; Pi's PSS is sampled every 15 s), `memory` from the worker's
+  `harness_recycled {reason, pss_mb}`, and no turn is interrupted. Reasons: `memory` from the worker's
   relief ladder (docs/slurm.md "Memory"), and `endpoint`: a live change of the model endpoint,
   model id or reasoning level (`PiAdapter.update_spec`) applies within one turn.
 - **OOM**: a Pi SIGKILLed mid-turn (exit -9/137: the OOM killer) ends the turn

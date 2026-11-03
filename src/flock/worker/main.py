@@ -55,7 +55,6 @@ from flock.models import (
     CommsSpec,
     DrainCommand,
     EventBatch,
-    Grant,
     LoopStartCommand,
     LoopStopCommand,
     PromptCommand,
@@ -620,13 +619,11 @@ class Worker:
 
     def _toolbox(self, agent: str) -> Callable[[], Toolset]:
         """What a turn of `agent` may call: the folder tools of the current version plus the
-        agent's built-in comms and world tools, with the agent's grant applied (docs/live.md)."""
+        agent's built-in comms and world tools."""
 
         def toolset() -> Toolset:
-            rt = self.agents.get(agent)
-            grant = rt.grant.tools if rt is not None and rt.grant is not None else None
             ts = self.world.toolset_for(
-                agent, self.comms.toolset_for(agent, self.tools.current(grant)), self.comms)
+                agent, self.comms.toolset_for(agent, self.tools.current()), self.comms)
             if ts.gateway is None and self.comms.address is not None:  # `flock` CLI calls
                 ts = dataclasses.replace(ts, gateway=self.comms.address,
                                          gateway_key=self.comms.key(agent))
@@ -737,7 +734,7 @@ class Worker:
     async def _unassign(self, rt: AgentRuntime) -> None:
         try:
             await rt.unassign()
-            if rt.base_spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
+            if rt.spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
                 rt.purge()
         finally:
             self.comms.forget(rt.name)
@@ -834,8 +831,7 @@ class Worker:
         self.comms.configure(spec, tools if isinstance(tools, list) else [])
 
     def _live_from(self, resp: dict) -> None:
-        """A changed type spec and the grants in force (docs/live.md): every agent takes them at
-        its next turn boundary."""
+        """A changed type spec (docs/live.md): every agent takes it at its next turn boundary."""
         raw = resp.get("type_spec")
         if isinstance(raw, dict):
             try:
@@ -846,15 +842,7 @@ class Worker:
                 self.spec_rev = resp.get("spec_rev") or type_spec_rev(spec)
                 self.apply_knobs(spec.worker)
                 for rt in self.agents.values():
-                    rt.set_live(spec=spec)
-        grants = resp.get("grants")
-        if not isinstance(grants, dict):
-            grants = {}
-        for name, rt in self.agents.items():
-            try:
-                rt.set_live(grant=Grant.model_validate(grants[name]) if name in grants else None)
-            except ValueError as e:
-                log.warning("heartbeat: unreadable grant for %s: %s", name, e)
+                    rt.set_live(spec)
 
     async def heartbeat_loop(self) -> None:
         await asyncio.sleep(random.random() * self.cfg.heartbeat_interval)
@@ -991,8 +979,7 @@ class Worker:
         limit = mem.limit_mb if mem is not None and self.cgroup.armed else None
         # the per-agent /proc walk only when something can act on it
         scan = (limit and nonreclaim is not None and nonreclaim / limit >= th.rotate) or (
-            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb) or any(
-            rt.spec.recycle_after and rt.spec.recycle_after.pss_mb for rt in self.agents.values())
+            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb)
         if scan and any(rt.live for rt in self.agents.values()):
             for rt, data in await asyncio.to_thread(self.agent_memory, False):
                 rt.pss_mb = data.get("pi_pss_mb")

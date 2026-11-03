@@ -49,8 +49,7 @@ stream is tailed by byte offset.
 - `stuck`: agents in `stuck`, or in `working` with no event for more than 30 min
   (`FLOCK_STUCK_MIN`). After a controller restart the clock starts at its first sample.
 - `gens`: agents by the type spec revision they run (`rev` in the agent heartbeat).
-- `hb` is the worker's last heartbeat time and `ts` the world probe's time. Policies use them
-  to skip stale samples ([policies.md](policies.md)).
+- `hb` is the worker's last heartbeat time and `ts` the world probe's time.
 - Alerts: world down, a worker within 1 h of its memory limit, stuck agents, a tool with
   20 % or more errors or refusals over the last sample.
 
@@ -123,7 +122,5 @@ with a prompt queued).
 - `flock status --watch` also shows the world's `/metrics`: event-loop lag, 429s, each pool's
   oldest queue wait, `lane_<lane>_tripped/paused/effective_slots/in_flight` per lane, the
   comment outbox depth and age, and any other number under `world`.
-- `GET /swarms/{s}/usage?by=type|hour`: token rows.
-- `flock status [swarm] --watch` (every 10 s), `flock status [swarm] --json`,
-  `flock usage <swarm> [--by type|hour]`.
+- `flock status [swarm] --watch` (every 10 s), `flock status [swarm] --json`.
 - The `/` status page has one health line per swarm: aggregates only, no agent names.

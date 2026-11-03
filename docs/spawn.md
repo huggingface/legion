@@ -173,7 +173,6 @@ children alike.
 
 ```yaml
 naming: words
-naming_seed: 3          # optional: the same spec gives the same names; unset: random
 types:
   interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
 ```
@@ -264,7 +263,6 @@ and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in
 environment for that fallback; with the gateway they are not needed and can be dropped.
 
 ```sh
-flock whoami                               # name, parent, depth, children
 flock spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
 flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
 flock prompt --children --state idle "text"   # all your idle children, one request

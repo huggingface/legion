@@ -1,5 +1,5 @@
 """Single-agent recycle (docs/pi.md "Memory"): a fresh harness process on the same session at a
-turn boundary, from `recycle_after`, the memory watchdog or a changed model endpoint; and a
+turn boundary, from the memory watchdog or a changed model endpoint; and a
 harness SIGKILLed mid-turn (the OOM killer) as a transient failure."""
 
 from __future__ import annotations
@@ -9,20 +9,7 @@ import asyncio
 from flock.worker.adapters.base import AdapterEvent
 
 from .test_loop_worker import custom, start
-from .worker_fakes import ScriptedAdapter, event_types, runtime, until
-
-
-async def test_recycle_after_turns_restarts_on_the_same_session(tmp_path):
-    rt, ad = runtime(tmp_path, idle_grace="5s", recycle_after={"turns": 2})
-    await rt.setup(restore=False)
-    rt.start_loop(start(max_rounds=5))
-    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
-    assert len(ad.sent) == 5 and rt.state.turns == 5
-    # rounds 1-2, 3-4 and 5 each on a fresh process; the same session throughout
-    assert ad.starts == [None, "s-1", "s-1"]
-    types = event_types(rt)
-    assert "turn_interrupted" not in types
-    assert [d["reason"] for d in custom(rt, "harness_recycled")] == ["turns", "turns"]
+from .worker_fakes import ScriptedAdapter, runtime, until
 
 
 async def test_recycle_now_ends_an_idle_process(tmp_path):

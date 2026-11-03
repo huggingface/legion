@@ -1,5 +1,5 @@
 """The flock CLI as an agent runs it: FLOCK_AGENT_TOKEN, FLOCK_AGENT, spawn/status/events/
-prompt/remove/whoami."""
+prompt/remove."""
 
 from __future__ import annotations
 
@@ -61,10 +61,6 @@ def test_client_prefers_the_agent_token(monkeypatch):
 
 def test_agent_spawns_prompts_and_removes(agent_cli):
     agent_cli(LEADER)
-    r = run("whoami")
-    assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["name"] == LEADER
-
     r = run("spawn", "analyst", "--prompt", "count the files", "--key", "a1")
     assert r.exit_code == 0, r.output
     child = r.output.strip()

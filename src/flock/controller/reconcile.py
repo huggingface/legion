@@ -12,14 +12,12 @@ import json
 import logging
 import os
 import random
-import threading
 import time
 import uuid
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from flock.controller import naming
 from flock.controller import spawn as spawning
@@ -256,11 +254,6 @@ def _record(p: _Pass, swarm: str, actions: list[Action]) -> None:
         p.store.append_events(swarm, swarm_stream(swarm), evs)
 
 
-# The reconcile pass and the health tick (policies) run in different threads: the room check
-# and the drain it allows happen under this lock in both.
-ROTATE_LOCK = threading.Lock()
-
-
 def rotation_room(store: Store, swarm: str, max_rotating: int | None, now: float) -> int:
     """Drains the rotation budget allows now: `max_rotating` (default 10% of the swarm's
     worker slots, at least 1) minus the workers restoring (launched, or a restore in flight)
@@ -273,13 +266,13 @@ def rotation_room(store: Store, swarm: str, max_rotating: int | None, now: float
     return budget - busy
 
 
-def rotate_worker(store: Store, swarm: str, w: Row, now: float, **why: Any) -> None:
+def rotate_worker(store: Store, swarm: str, w: Row, now: float) -> None:
     """Drain one worker for a memory rotation (ends in a planned restart): `memory_rotation`."""
     mem = json.loads(w.get("telemetry") or "{}").get("mem") or {}
     store.enqueue_command(w["id"], DrainCommand().model_dump_json())
     store.update_worker(w["id"], draining=1)  # counted as draining from now on
     data = {"worker": w["id"], "nonreclaim_mb": mem.get("nonreclaim_mb"),
-            "eta_limit_s": mem.get("eta_limit_s"), **why}
+            "eta_limit_s": mem.get("eta_limit_s")}
     log.info("memory rotation: %s", data)
     store.append_events(swarm, swarm_stream(swarm), [Event(
         type="memory_rotation", ts=datetime.fromtimestamp(now, UTC), agent="", data=data)])
@@ -295,19 +288,17 @@ def _rotate(p: _Pass, spec: SwarmSpec) -> None:
     `wants_rotation` are drained, the smallest `eta_limit_s` first, while fewer than
     `max_rotating` workers are restoring (launched, or a restore in flight) or draining. The
     drain ends in a planned restart. A worker's own drain or preemption at its hard
-    thresholds never waits for this budget (a preempted slot has already ended here). The
-    `drain_worker` policy action (docs/policies.md) takes slots from the same budget."""
+    thresholds never waits for this budget (a preempted slot has already ended here)."""
     workers = p.store.list_workers(spec.swarm)
     tel = {w["id"]: json.loads(w.get("telemetry") or "{}") for w in workers}
     want = [w for w in workers if tel[w["id"]].get("wants_rotation") and rotatable(w, p.now)]
     if not want:
         return
     eta = {w["id"]: (tel[w["id"]].get("mem") or {}).get("eta_limit_s") for w in want}
-    with ROTATE_LOCK:
-        room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
-        for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)
-                        )[:max(0, room)]:
-            rotate_worker(p.store, spec.swarm, w, p.now)
+    room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
+    for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)
+                    )[:max(0, room)]:
+        rotate_worker(p.store, spec.swarm, w, p.now)
 
 
 def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
@@ -513,8 +504,7 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
         # docs/slurm.md: the worker's last heartbeat said it was preempted and has synced.
         # End the slot without waiting for the scheduler (squeue/sacct lag, a watcher that
         # cancels 30 s later): the relaunch registers a fresh incarnation and restores.
-        if not getattr(p.jobs, "external", False):
-            p.cancel(w["job_id"], spec.namespace)
+        p.cancel(w["job_id"], spec.namespace)
         _job_ended(p, spec, w, ts, JobState("ERROR", "preempted: worker reported it",
                                             preempted=True))
         return
@@ -530,13 +520,6 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     silent = seen is not None and p.now - seen > _DEAD  # no heartbeat, poll or event post
     start = w["started_at"] or w["launched_at"]
     never = hb is None and st.stage != "SCHEDULING" and p.now - start > LAUNCH_TIMEOUT
-    if silent and getattr(p.jobs, "external", False):
-        # compute external: nobody to cancel and nothing crashed on our side; the slot gets a
-        # fresh env file and waits for the next external start, without backoff
-        p.act("external_wait", w["id"], "worker silent; waiting for an external start")
-        _job_ended(p, spec, w, ts, JobState("CANCELED", "external worker silent",
-                                            preempted=True))
-        return
     if silent or never:
         p.cancel(w["job_id"], spec.namespace)
         p.act("cancel", w["id"], w["job_id"])
@@ -676,7 +659,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     p.budget -= 1
     store.record_launch(p.now)
     try:
-        # backends configured per swarm (compute slurm/external) get the spec's compute block
+        # backends configured per swarm (compute slurm) get the spec's compute block
         extra = {"compute": spec.compute} if getattr(p.jobs, "uses_compute_spec", False) else {}
         job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace,
                                **extra)

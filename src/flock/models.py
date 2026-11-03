@@ -280,11 +280,21 @@ def comms_name(entry: str) -> str:
 
 log = logging.getLogger(__name__)
 
-# Keys deleted from an extra=forbid spec model, by class name: dropped with one warning (per
-# key, per process) instead of refused, so a spec stored before the deletion still loads on
+# Keys deleted from an extra=forbid spec model, by class name: dropped, with one warning (per
+# key, per process) when it holds a value, instead of refused, so a spec stored before the deletion still loads on
 # resume. Any other unknown key is still refused. e.g. {"LoopSpec": {"stagger"}}
-REMOVED: dict[str, set[str]] = {}
+REMOVED: dict[str, set[str]] = {
+    "LoopSpec": {"first", "context", "stagger", "stop_when"},
+    "LoopWhile": {"idle_rounds", "score"},
+    "LoopFinal": {"add_tools"},
+}
 _warned: set[tuple[str, str]] = set()
+
+
+def _is_set(v: Any) -> bool:
+    """A removed key worth a warning: a stored spec's dump carries every default (`first: null`,
+    `stop_when: {all_agents_done: false}`), which says nothing."""
+    return any(_is_set(x) for x in v.values()) if isinstance(v, dict) else bool(v)
 
 
 class _Removable(BaseModel):
@@ -297,7 +307,7 @@ class _Removable(BaseModel):
         if not gone:
             return data
         for k in sorted(gone):
-            if (cls.__name__, k) not in _warned:
+            if _is_set(data[k]) and (cls.__name__, k) not in _warned:
                 _warned.add((cls.__name__, k))
                 log.warning("spec: %s.%s was removed from flock; ignoring it", cls.__name__, k)
         return {k: v for k, v in data.items() if k not in gone}
@@ -502,17 +512,6 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     return world.manifest.names() if world.manifest is not None else []
 
 
-class RecycleAfter(_Removable):
-    """`recycle_after`: restart an agent's harness process (same session) at the first turn
-    boundary past any of these, counted from the process start (docs/pi.md "Memory")."""
-
-    model_config = {"extra": "forbid"}
-
-    turns: int | None = None
-    hours: float | None = None
-    pss_mb: float | None = None  # the harness process's PSS, sampled every 15 s
-
-
 class WorkdirSpec(_Removable):
     """Workdir size feedback and throwaway dirs (docs/pi.md "Workdir"). Sizes count what the
     bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
@@ -649,7 +648,7 @@ class TypeSpec(BaseModel):
     # required. With it a forced turn runs several steps; without it, one action per prompt.
     done_tool: bool | None = None
     # harness llm only: false takes the `bash` tool away (the agent keeps its folder and comms
-    # tools); None: on. Usually set live with `flock grant <target> bash=off` (docs/live.md).
+    # tools); None: on.
     bash: bool | None = None
     # harness llm only: starting chars/token for the size estimate (calibrated online from the
     # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
@@ -659,10 +658,8 @@ class TypeSpec(BaseModel):
     workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
     worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
-    # Memory (docs/pi.md "Memory"): restart the harness process at a turn boundary, keeping the
-    # session; RLIMIT_DATA (MB) on every tool command of a Pi agent (through BASH_ENV); Pi's
-    # V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
-    recycle_after: RecycleAfter | None = None
+    # Memory (docs/pi.md "Memory"): RLIMIT_DATA (MB) on every tool command of a Pi agent
+    # (through BASH_ENV); Pi's V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
     tool_memory_mb: int | None = None
     node_heap_mb: int | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -829,17 +826,16 @@ class SlurmResources(_Removable):
 class ComputeSpec(_Removable):
     """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
     `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
-    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md). `external`: flock
-    launches nothing; workers started by someone else register with FLOCK_URL/FLOCK_TOKEN.
+    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
-    The other keys are for `slurm` (and `launch_dir`/`host_file` for `external`); unset keys
+    The other keys are for `slurm`; unset keys
     fall back to the controller's FLOCK_SLURM_* env, then to built-in defaults. `types` sets
     per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["hf-jobs", "local", "slurm", "external"] = "hf-jobs"
+    kind: Literal["hf-jobs", "local", "slurm"] = "hf-jobs"
     partition: str | None = None
     account: str | None = None
     cpus: int | None = Field(default=None, ge=1)
@@ -873,127 +869,6 @@ class ComputeSpec(_Removable):
     max_mem: str = "54G"
 
 
-# ---------------------------------------------------------------- policies (docs/policies.md)
-
-# Metric paths a rule may read from the health snapshot (docs/health.md); `worker.*` is
-# evaluated per worker, the rest once per swarm.
-POLICY_METRICS = (
-    r"worker\.(nonreclaim_frac|eta_limit_s|slope_mb_h)",
-    r"world\.(up|manifest_ms)",
-    r"world\.metrics\.[\w.-]+",
-    r"tools\.[^.]+\.(rate_per_min|err_pct|refused_pct|max_s)",
-    r"types\.[^.]+\.(stuck_n|working|idle|stuck|starting|stopped|unknown)",
-    r"providers\.[^.]+\.(waiting|running|kv)",
-)
-POLICY_ACTIONS = ("notify", "drain_worker", "pause_type", "resume_type", "prompt", "world_knob",
-                  "world_pause", "world_resume")
-_SINK_RE = re.compile(r"(webhook:https?://\S+|file:(?!/)(?!.*\.\.)\S+)")
-
-
-def _sinks(v: list[str]) -> list[str]:
-    for s in v:
-        if not _SINK_RE.fullmatch(s):
-            raise ValueError(f"sink {s!r}: use webhook:<http(s) url> or file:<path under the "
-                             "state dir> (relative, no '..')")
-    return v
-
-
-def _actions(v: Any) -> list[dict[str, Any]]:
-    """`do` / `clear_do`: one action or a list; an action is a name or {name: argument}."""
-    out = []
-    for a in v if isinstance(v, list) else [] if v is None else [v]:
-        a = {a: None} if isinstance(a, str) else a
-        if not isinstance(a, dict) or len(a) != 1 or next(iter(a)) not in POLICY_ACTIONS:
-            raise ValueError(f"action {a!r}: one of {', '.join(POLICY_ACTIONS)} "
-                             "(a name, or {name: argument})")
-        out.append(a)
-    return out
-
-
-class PolicyRule(_Removable):
-    """One rule: `metric op value` on `for` consecutive fresh samples fires (`alert`, then
-    `do`); `metric op clear` failing clears it (`alert_cleared`, then `clear_do`)."""
-
-    model_config = {"extra": "forbid", "populate_by_name": True}
-
-    name: str
-    metric: str
-    op: Literal[">", ">=", "<", "<=", "==", "!="]
-    value: float
-    for_: str = Field(default="0s", alias="for")
-    clear: float | None = None  # None: clears as soon as `op value` no longer holds
-    do: list[dict[str, Any]] = Field(default_factory=list)
-    clear_do: list[dict[str, Any]] = Field(default_factory=list)
-    cooldown: str = "30m"  # per rule and target, between two enforced episodes
-    max_concurrent: int | None = Field(default=None, ge=1)  # targets acted on and still firing
-    max_per_hour: int | None = Field(default=None, ge=1)
-    mode: Literal["alert", "enforce"] | None = None  # None: the block's mode
-
-    @field_validator("do", "clear_do", mode="before")
-    @classmethod
-    def _norm(cls, v: Any) -> list[dict[str, Any]]:
-        return _actions(v)
-
-    @field_validator("metric")
-    @classmethod
-    def _metric(cls, v: str) -> str:
-        if not any(re.fullmatch(p, v) for p in POLICY_METRICS):
-            raise ValueError(f"metric {v!r} is not one of the snapshot paths (docs/policies.md)")
-        return v
-
-    @field_validator("for_", "cooldown")
-    @classmethod
-    def _duration(cls, v: str) -> str:
-        parse_duration(v)
-        return v
-
-
-class PolicySpec(_Removable):
-    """The spec's `policies:` block (docs/policies.md). Without it the built-in rules run in
-    alert mode."""
-
-    model_config = {"extra": "forbid"}
-
-    mode: Literal["alert", "enforce"] = "alert"
-    rules: list[PolicyRule] = Field(default_factory=list)
-    sinks: list[str] = Field(default_factory=list)  # for `notify`
-
-    @field_validator("sinks")
-    @classmethod
-    def _valid_sinks(cls, v: list[str]) -> list[str]:
-        return _sinks(v)
-
-    @field_validator("rules")
-    @classmethod
-    def _unique(cls, v: list[PolicyRule]) -> list[PolicyRule]:
-        names = [r.name for r in v]
-        if len(set(names)) != len(names):
-            raise ValueError("rule names must be unique")
-        return v
-
-
-class ReportSpec(_Removable):
-    """The spec's `report:` block: a short digest from the latest health snapshot every
-    `every`, to each sink (docs/policies.md "Digest")."""
-
-    model_config = {"extra": "forbid"}
-
-    every: str = "1h"
-    sinks: list[str] = Field(default_factory=list)
-
-    @field_validator("sinks")
-    @classmethod
-    def _valid_sinks(cls, v: list[str]) -> list[str]:
-        return _sinks(v)
-
-    @field_validator("every")
-    @classmethod
-    def _every(cls, v: str) -> str:
-        if parse_duration(v).total_seconds() <= 0:
-            raise ValueError("every must be > 0")
-        return v
-
-
 class SwarmSpec(BaseModel):
     swarm: str
     # HF namespace jobs are launched under, and the bucket agents sync to (e.g.
@@ -1015,10 +890,8 @@ class SwarmSpec(BaseModel):
     world: WorldSpec | None = None
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
     # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
-    # reserved and never reused while the swarm exists). `naming_seed` makes the words
-    # deterministic for the swarm; unset, they are random.
+    # reserved and never reused while the swarm exists).
     naming: Literal["numeric", "words"] = "numeric"
-    naming_seed: int | None = None
 
     @field_validator("tools_version")
     @classmethod
@@ -1120,8 +993,6 @@ class SwarmSpec(BaseModel):
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
     limits: LimitsSpec = Field(default_factory=lambda: LimitsSpec())
     compute: ComputeSpec = Field(default_factory=ComputeSpec)
-    policies: PolicySpec | None = None  # controller only (docs/policies.md)
-    report: ReportSpec | None = None  # controller only: the periodic digest
 
     @field_validator("compute", mode="before")
     @classmethod
@@ -1136,7 +1007,7 @@ class SwarmSpec(BaseModel):
             if missing:
                 raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
                                  "(or set `compute: local`, docs/local.md)")
-        elif kind in ("slurm", "external") and not self.bucket:
+        elif kind == "slurm" and not self.bucket:
             # agent state goes to an HF bucket on every remote backend, never to a shared disk
             raise ValueError(f"bucket is required for compute {kind}")
         if kind != "local" and self.world is not None and self.world.url is None:
@@ -1349,9 +1220,7 @@ _LOOP_SOURCE_RE = re.compile(r"^(comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 class LoopWhile(_Removable):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
-    `agent_usd` (the agent's cost; a map is keyed by model alias or model id), `idle_rounds`
-    (that many loop turns in a row without a tool call). `score_<op>: {metric: value}`
-    conditions are kept under `score` and need a world (refused at apply in this version)."""
+    `agent_usd` (the agent's cost; a map is keyed by model alias or model id)."""
 
     model_config = {"extra": "forbid"}
 
@@ -1359,19 +1228,6 @@ class LoopWhile(_Removable):
     max_rounds: int | None = None
     budget_usd: float | None = None
     agent_usd: float | dict[str, float] | None = None
-    idle_rounds: int | None = None
-    score: dict[str, dict[str, float]] = Field(default_factory=dict)  # op -> {metric: value}
-
-    @model_validator(mode="before")
-    @classmethod
-    def _score_keys(cls, data: Any) -> Any:
-        if isinstance(data, dict) and any(str(k).startswith("score_") for k in data):
-            data = dict(data)
-            score = dict(data.pop("score", None) or {})
-            for k in [k for k in data if str(k).startswith("score_")]:
-                score[k.removeprefix("score_")] = data.pop(k)
-            data["score"] = score
-        return data
 
     @field_validator("until", mode="before")
     @classmethod
@@ -1386,7 +1242,7 @@ class LoopWhile(_Removable):
             until_deadline(v, 0.0)
         return v
 
-    @field_validator("max_rounds", "idle_rounds")
+    @field_validator("max_rounds")
     @classmethod
     def _positive(cls, v: int | None) -> int | None:
         if v is not None and v < 1:
@@ -1411,15 +1267,13 @@ class LoopWhile(_Removable):
 
 class LoopFinal(_Removable):
     """One last prompt per live agent when the loop stops (any reason but `--no-final`).
-    `reserve_usd` is held back from `limits.budget_usd` for it. `add_tools` are tool names the
-    final prompt unlocks; carried in the prompt and its events for the tools layer."""
+    `reserve_usd` is held back from `limits.budget_usd` for it."""
 
     model_config = {"extra": "forbid"}
 
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
     reserve_usd: float = 0.0
-    add_tools: list[str] = Field(default_factory=list)
 
     @field_validator("reserve_usd")
     @classmethod
@@ -1464,36 +1318,21 @@ class LoopWake(_Removable):
         return v
 
 
-class LoopStopWhen(_Removable):
-    """Extra ways for a loop to end. `all_agents_done`: an agent that calls `done` with
-    `finished: true` (the `llm` harness offers that argument then) leaves the loop, and the
-    loop stops once every live agent has left it."""
-
-    model_config = {"extra": "forbid"}
-
-    all_agents_done: bool = False
-
-
 class LoopSpec(_Removable):
-    """A type's prompting loop (docs/loop.md). `first` goes alone to each agent; the loop
-    prompt follows once that turn ended, then on every `every` (`turn_end`: re-sent by the
-    worker when a turn completes; a duration: the controller prompts idle agents that long
-    after their last loop prompt; `rounds` needs a world) and on each `on` wake-up, while
-    `while` holds. Then `final`, once per live agent, then idle."""
+    """A type's prompting loop (docs/loop.md). The loop prompt goes on every `every`
+    (`turn_end`: re-sent by the worker when a turn completes; a duration: the controller
+    prompts idle agents that long after their last loop prompt) and on each `on` wake-up,
+    while `while` holds. Then `final`, once per live agent, then idle."""
 
     model_config = {"extra": "forbid", "populate_by_name": True}
 
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
-    first: str | None = None
     every: str = "turn_end"
     on: list[str] = Field(default_factory=list)  # comms.mention, comms.thread, world.event:*
-    context: list[str] = Field(default_factory=list)  # needs comms / artifacts / a world
-    stagger: str | None = None  # agent i gets its first prompt i * stagger after the start
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
     wake: LoopWake = Field(default_factory=LoopWake)
-    stop_when: LoopStopWhen = Field(default_factory=LoopStopWhen)
     # Controller only: one line after the rendered loop prompt naming the board notifications
     # (mentions, replies in the agent's threads) since its last round. Never sent to workers.
     notices: bool = False
@@ -1510,18 +1349,11 @@ class LoopSpec(_Removable):
     @field_validator("every")
     @classmethod
     def _every(cls, v: str) -> str:
-        if v not in ("turn_end", "rounds") and parse_duration(v).total_seconds() <= 0:
-            raise ValueError("every must be turn_end, rounds or a duration > 0")
+        if v != "turn_end" and parse_duration(v).total_seconds() <= 0:
+            raise ValueError("every must be turn_end or a duration > 0")
         return v
 
-    @field_validator("stagger")
-    @classmethod
-    def _stagger(cls, v: str | None) -> str | None:
-        if v is not None:
-            parse_duration(v)
-        return v
-
-    @field_validator("on", "context")
+    @field_validator("on")
     @classmethod
     def _sources(cls, v: list[str]) -> list[str]:
         for x in v:
@@ -1538,7 +1370,7 @@ class LoopSpec(_Removable):
     @property
     def every_s(self) -> float | None:
         """Seconds between loop prompts for a duration `every`, else None."""
-        if self.every in ("turn_end", "rounds"):
+        if self.every == "turn_end":
             return None
         return parse_duration(self.every).total_seconds()
 
@@ -1570,51 +1402,19 @@ def agent_cap(ts: TypeSpec) -> float | None:
 
 
 def loop_refusals(spec: SwarmSpec) -> list[str]:
-    """Loop settings this version accepts in the model but cannot run: world-backed ones, and
-    context sources whose feeders are not built yet. `flock apply` and the controller refuse a
-    spec with any of them."""
+    """Loop settings this version accepts in the model but cannot run: world-backed wakes and
+    prompt files not inlined. `flock apply` and the controller refuse a spec with any of them."""
     out: list[str] = []
     for name, ts in spec.types.items():
         lp = ts.loop
         if lp is None:
             continue
         where = f"types.{name}.loop"
-        if lp.every == "rounds":
-            out.append(f"{where}.every: rounds {NEEDS_WORLD}")
-        for op in lp.while_.score:
-            out.append(f"{where}.while.score_{op} {NEEDS_WORLD}")
         out += [f"{where}.on: {x} {NEEDS_WORLD}" for x in lp.on if x.startswith("world.")]
-        for x in lp.context:
-            why = NEEDS_WORLD if x.startswith("world.") else "is not in this version"
-            out.append(f"{where}.context: {x} {why}")
         if lp.prompt is None:
             out.append(f"{where}.prompt_file: not inlined (use `flock apply`, which reads it)")
         if lp.final is not None and lp.final.prompt is None:
             out.append(f"{where}.final.prompt_file: not inlined (use `flock apply`, which reads it)")
-        if lp.stop_when.all_agents_done and (ts.harness != Harness.llm or ts.done_tool is False):
-            out.append(f"{where}.stop_when.all_agents_done needs harness llm with the done tool")
-    return out
-
-
-def policy_refusals(spec: SwarmSpec) -> list[str]:
-    """Policy rules naming what the spec does not have: a type, provider or (when the world's
-    tools are known) tool in a metric path, or a type in pause_type / resume_type."""
-    if spec.policies is None:
-        return []
-    out: list[str] = []
-    tools = {t for ts in spec.types.values() for t in world_tools(ts, spec.world)}
-    for r in spec.policies.rules:
-        head, _, rest = r.metric.partition(".")
-        name = rest.rpartition(".")[0]
-        known = {"types": spec.types, "providers": spec.providers, "tools": tools}.get(head)
-        if known is not None and (known or head != "tools") and name not in known:
-            out.append(f"policies.{r.name}.metric: no {head[:-1]} {name!r} in the spec")
-        for a in r.do + r.clear_do:
-            (act, arg), = a.items()
-            if act in ("pause_type", "resume_type") and arg is not None:
-                for t in arg if isinstance(arg, list) else [arg]:
-                    if t not in spec.types:
-                        out.append(f"policies.{r.name}.{act}: no type {t!r} in the spec")
     return out
 
 
@@ -1642,91 +1442,6 @@ class TokenUsage(BaseModel):
             cache_write=self.cache_write + other.cache_write,
             reasoning=self.reasoning + other.reasoning,
         )
-
-
-# --------------------------------------------------------------------------- grants (docs/live.md)
-
-
-class GrantLimits(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    max_turns: int | None = None  # per prompt, as `types.<type>.max_turns`
-    budget_usd: float | None = None  # the agent's total cost; at or above it no new turn starts
-
-    @field_validator("max_turns")
-    @classmethod
-    def _turns(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("max_turns must be >= 1")
-        return v
-
-    @field_validator("budget_usd")
-    @classmethod
-    def _usd(cls, v: float | None) -> float | None:
-        if v is not None and v < 0:
-            raise ValueError("budget_usd must be >= 0")
-        return v
-
-
-class Grant(BaseModel):
-    """A live overlay on the spec for one type or one agent (`flock grant`, docs/live.md). The
-    controller stores it apart from the spec, so `flock update` and `flock apply` keep it; the
-    worker merges it in at the agent's next turn boundary. An agent's grant wins over its
-    type's, key by key."""
-
-    model_config = {"extra": "forbid"}
-
-    # tool name -> on (added) / off (taken away): folder tools by name, comms tools as comms:post
-    tools: dict[str, bool] = Field(default_factory=dict)
-    limits: GrantLimits = Field(default_factory=GrantLimits)
-    bash: bool | None = None  # harness llm: the bash tool on / off
-
-    def empty(self) -> bool:
-        return not self.tools and self.limits == GrantLimits() and self.bash is None
-
-    def compact(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude_defaults=True)
-
-    def describe(self) -> str:
-        """One line: `tools +mul -comms:post, bash off, limits.max_turns 5`."""
-        parts = []
-        if self.tools:
-            parts.append("tools " + " ".join(f"{'+' if on else '-'}{n}"
-                                             for n, on in sorted(self.tools.items())))
-        if self.bash is not None:
-            parts.append(f"bash {'on' if self.bash else 'off'}")
-        for k in ("max_turns", "budget_usd"):
-            if (v := getattr(self.limits, k)) is not None:
-                parts.append(f"limits.{k} {v:g}")
-        return ", ".join(parts) or "none"
-
-
-def merge_grants(type_grant: Grant | None, agent_grant: Grant | None) -> Grant | None:
-    """The grant in force for one agent: its type's, then its own on top, key by key."""
-    if type_grant is None or agent_grant is None:
-        g = type_grant or agent_grant
-        return None if g is None or g.empty() else g
-    limits = {k: v if (v := getattr(agent_grant.limits, k)) is not None
-              else getattr(type_grant.limits, k) for k in GrantLimits.model_fields}
-    g = Grant(tools={**type_grant.tools, **agent_grant.tools}, limits=GrantLimits(**limits),
-              bash=agent_grant.bash if agent_grant.bash is not None else type_grant.bash)
-    return None if g.empty() else g
-
-
-def granted_spec(ts: TypeSpec, g: Grant | None, spent_usd: float = 0.0) -> TypeSpec:
-    """`ts` with a grant's limits and bash switch applied (tools are applied to the toolset).
-    A budget becomes the per-prompt cap `max_budget_usd` of what is left of it."""
-    if g is None:
-        return ts
-    upd: dict[str, Any] = {}
-    if g.limits.max_turns is not None:
-        upd["max_turns"] = g.limits.max_turns
-    if g.limits.budget_usd is not None:
-        left = max(0.0, g.limits.budget_usd - spent_usd)
-        upd["max_budget_usd"] = left if ts.max_budget_usd is None else min(ts.max_budget_usd, left)
-    if g.bash is not None and ts.harness == Harness.llm:
-        upd["bash"] = g.bash
-    return ts.model_copy(update=upd) if upd else ts
 
 
 def type_spec_rev(ts: TypeSpec) -> str:
@@ -1841,7 +1556,7 @@ class LoopMeta(BaseModel):
     """What the worker needs to render a loop prompt (docs/loop.md): it fills the
     LOOP_PLACEHOLDERS from these plus its own spend and last `done` summary."""
 
-    kind: Literal["first", "loop", "final"]
+    kind: Literal["first", "loop", "final"]  # "first": only so queues from before its removal parse
     type: str
     round: int | None = None  # None: the worker numbers it (its own next round)
     started_at: datetime | None = None  # when the loop started, for {elapsed}
@@ -1852,7 +1567,6 @@ class LoopMeta(BaseModel):
     # current round and does not advance the worker's round counter
     counted: bool = True
     wake: bool = False  # a wake prompt (`on:`), counted or not: a deferral gives back its wake
-    add_tools: list[str] = Field(default_factory=list)  # final round: tools it unlocks
 
 
 class PromptCommand(BaseModel):
@@ -1961,9 +1675,6 @@ class BulkPromptRequest(BaseModel):
     # Skip agents that already have a pending (undelivered) prompt. Default: on with
     # state=idle ("only if idle and empty": repeated calls never stack prompts), off otherwise.
     skip_pending: bool | None = None
-    # One prompt id for every agent, counted as their turns start and end
-    # (`GET /swarms/{swarm}/broadcasts`, docs/live.md "Broadcasts").
-    track: bool = False
 
 
 class ChildrenPromptRequest(BaseModel):
@@ -1990,8 +1701,6 @@ class BulkPromptAck(BaseModel):
     skipped_state: int = 0  # not in the requested state
     skipped_removing: int = 0  # being removed (spawn cascade)
     skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
-    skipped_budget: int = 0  # reached its granted limits.budget_usd (docs/live.md)
-    prompt_id: str | None = None  # `track`: the broadcast id
 
 
 class SpawnRequest(BaseModel):
@@ -2034,8 +1743,6 @@ class AgentStatus(BaseModel):
     parent: str | None = None  # spawning agent; None for a replica
     children: list[str] = Field(default_factory=list)
     depth: int = 0  # generations this agent may still spawn below itself
-    # `flock grant` overlays in force for this agent (type grant + agent grant, docs/live.md)
-    grants: dict[str, Any] | None = None
     rev: str | None = None  # AgentHeartbeat.rev / start_rev
     start_rev: str | None = None
 
@@ -2072,7 +1779,7 @@ class LoopStatus(BaseModel):
     stopped_at: datetime | None = None
     reason: str | None = None  # why it stopped
     agents: int = 0
-    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors, done)
+    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, errors)
     rounds_min: int = 0
     rounds_max: int = 0
     rounds_total: int = 0
@@ -2122,7 +1829,7 @@ class SwarmStatus(BaseModel):
     # pause holds (docs/loop.md "Pause and resume"): {types: {T: {since, reason, by, auto}},
     # agents: {A: ...}}; None when nothing is held
     held: dict[str, dict[str, dict[str, Any]]] | None = None
-    # bumped by every apply that changes the spec (docs/live.md, `flock history`)
+    # bumped by every apply that changes the spec (docs/live.md)
     generation: int | None = None
 
 

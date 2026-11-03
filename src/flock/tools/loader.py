@@ -49,8 +49,7 @@ class ToolDef:
     is_async: bool = False
     # A built-in served by the worker itself, not the folder (`comms:post`, docs/comms.md).
     builtin: str | None = None
-    # Changes nothing (`@flock.tools.readonly`): a loop turn of only such calls is idle for
-    # `while.idle_rounds` (docs/loop.md). In the manifest only when true.
+    # Changes nothing (`@flock.tools.readonly`; informational). In the manifest only when true.
     readonly: bool = False
 
     def openai(self) -> dict[str, Any]:

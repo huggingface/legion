@@ -36,10 +36,9 @@ from typing import Any
 
 import httpx
 
-from flock.controller.policy import Policies, digest, send
 from flock.controller.reconcile import agent_state, swarm_stream
 from flock.controller.store import Row, Store
-from flock.models import Event, SwarmSpec, hit_max_turns, parse_duration, world_tools
+from flock.models import Event, SwarmSpec, hit_max_turns, world_tools
 from flock.world.host import world_token
 from flock.world.protocol import TOKEN_HEADER
 
@@ -156,9 +155,6 @@ class Health:
         self._closed: list[dict[str, dict[str, Any]]] = []  # closed hours not yet written
         self._rollups_at = 0.0  # when the open hour's files were last written
         self._run_gens: dict[str, int] | None = None  # generations run.json was written for
-        self.interval = SAMPLE_S  # set by `run`; policies count `for:` in samples of it
-        self.policies = Policies(store, secrets=secrets)  # docs/policies.md
-        self._digest_at: dict[str, float] = {}  # swarm -> last digest (or first tick)
         self._buckets: dict[str, dict[tuple[str, str, str], dict]] = {}  # hour -> (swarm, b, agent) -> line
 
     # ------------------------------------------------------------------ counters (post_events)
@@ -409,25 +405,6 @@ class Health:
                 path = self.store.data_dir / "metrics" / spec.swarm / name
                 with path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts": now, "body": small}, sort_keys=True) + "\n")
-            try:
-                self.policies.evaluate(spec, body, now, self.interval)
-            except Exception:  # a policy never stops the snapshots
-                log.exception("policies of %s failed", spec.swarm)
-            self._report(spec, body, now)
-
-    def _report(self, spec: SwarmSpec, body: dict[str, Any], now: float) -> None:
-        """`report: {every, sinks}`: the digest to each sink and as a `digest` event."""
-        if spec.report is None:
-            return
-        every = parse_duration(spec.report.every).total_seconds()
-        last = self._digest_at.setdefault(spec.swarm, now)  # the first one after `every`
-        if now - last < every:
-            return
-        self._digest_at[spec.swarm] = now
-        text = digest(spec.swarm, body, list(self.policies.recent.get(spec.swarm, ())), now, every)
-        self._event(spec.swarm, now, "digest", {"text": text})
-        send(self.store, spec.report.sinks, {"swarm": spec.swarm, "ts": now, "text": text},
-             text, self.policies.transport)
 
     def latest(self, swarm: str) -> dict[str, Any] | None:
         """The newest 30 s sample, else (after a restart) the newest stored slim one."""
@@ -546,7 +523,6 @@ class Health:
 
     async def run(self, interval: float = SAMPLE_S) -> None:
         """Probe, then snapshot, every `interval` s, until cancelled."""
-        self.interval = interval
         while True:
             now = time.time()
             try:
@@ -625,7 +601,7 @@ class Health:
         held = (self.store.swarm_flags(spec.swarm).get("holds") or {}).get("types", {})
         if since is None:
             if up and any(h.get("auto") and h.get("reason") == "world_down"
-                          for h in held.values()):  # a policy's holds are its own to lift
+                          for h in held.values()):
                 self.loops.resume(spec.swarm, by="controller", auto_only=True,
                                   reason="world_down")
             return

@@ -50,20 +50,6 @@ board, bsrv, burl = fake_msgboard.serve(fake_msgboard.Board(channels={12: "run3-
 model_url = f"http://127.0.0.1:{srv.server_port}/v1"
 
 ME = 'ME=$(basename "$PWD"); '
-BOT = 'import sys\\nfor line in sys.stdin:\\n    print(\\"hello there\\", flush=True)\\n'
-steps = [
-    ["bash", {"command": ME + "flock-tool write_file --json - <<EOF\n"
-              '{"path": "agents/$ME/bot.py", "content": "' + BOT + '"}\nEOF'}],
-    ["bash", {"command": ME + "flock-tool run_bot --json - <<EOF\n"
-              '{"path": "agents/$ME/bot.py", "lines": ["hi", "how are you?"]}\nEOF'}],
-    ["bash", {"command": ME + "flock-tool add_probe --json - <<EOF\n"
-              '{"lines": ["hi", "how are you?"], "check": "not_repeat", '
-              '"evidence": "hello there", "path": "agents/$ME/bot.py"}\nEOF'}],
-    ["bash", {"command": ME + "flock-tool post --json - <<EOF\n"
-              '{"text": "[pi-smoke] $ME here: my bot repeats itself, anyone on greetings?", '
-              '"thread": "new"}\nEOF'}],
-]
-SCRIPT = "script: " + json.dumps(steps)
 ROUNDS = int(os.environ.get("PI_SMOKE_ROUNDS", "20"))
 ROUND = "script: " + json.dumps([  # every round: two world calls, then a plain-text end
     ["bash", {"command": "flock-tool best_status --json '{}'"}],
@@ -84,9 +70,9 @@ for name, t in d["types"].items():
         t["replicas"] = N
         lp = t["loop"]
         lp.pop("prompt_file", None)
-        # the real Pi first prompt, then the fake model's script
-        t["loop"] = {**lp, "first": lp["first"] + "\n" + SCRIPT, "prompt": "Round {round}. " + ROUND,
-                     "every": "turn_end", "stagger": "1s",
+        # the fake model's script for every round (`first` and its setup script were removed)
+        t["loop"] = {**lp, "prompt": "Round {round}. " + ROUND,
+                     "every": "turn_end",
                      "while": {"until": "10m", "max_rounds": ROUNDS}, "final": {"prompt": "bye"}}
 (exp / "spec.pi.yaml").write_text(yaml.safe_dump(d, sort_keys=False, width=100))
 

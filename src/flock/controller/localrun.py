@@ -241,7 +241,6 @@ class Tracker:
             "completed": sum(self.completed.values()),
             "cost": self.store.swarm_cost(self.swarm),
             "tokens": tokens,
-            "grants": len(self.store.list_grants(self.swarm)),
         }
 
     def idle(self, snap: dict[str, Any]) -> bool:
@@ -264,9 +263,7 @@ def render(spec: SwarmSpec, snap: dict[str, Any], *, elapsed: float, url: str,
     agent_states = Counter(snap["states"].values())
     worker_states = Counter(snap["workers"].values())
     toks = " ".join(f"{m} in={u.input} out={u.output}" for m, u in snap["tokens"].items())
-    live = "".join([f" · tools {spec.tools_version[:8]}" if spec.tools_version else "",
-                    f" · {snap['grants']} grant{'s' * (snap['grants'] != 1)}"
-                    if snap.get("grants") else ""])
+    live = f" · tools {spec.tools_version[:8]}" if spec.tools_version else ""
     lines = [
         f"flock run · {spec.swarm} · compute local · {_clock(elapsed)} · {url}{live}",
         "",

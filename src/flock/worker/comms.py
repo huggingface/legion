@@ -57,7 +57,6 @@ from flock.comms.tools import (
     thread_of,
     tool_def,
 )
-from flock.models import ALL_COMMS_TOOLS as COMMS_TOOLS
 from flock.models import CommsSpec, comms_name, normalize_board_url
 from flock.secrets_file import secret_env
 from flock.tools.runner import Result, check_args
@@ -200,9 +199,6 @@ class CommsHub(ExtendedComms):
         self.backoff_s = backoff_s
         self.spec: CommsSpec | None = None
         self.entries: list[str] = []
-        # `flock grant` per agent (docs/live.md): comms entry -> on / off on top of `entries`,
-        # set by the agent's runtime at its turn boundaries
-        self.grants: dict[str, dict[str, bool]] = {}
         # one client per board url; a credential is only ever sent through its own board's
         # client (and AsyncBoard refuses a credential issued by another board)
         self._boards: dict[str, AsyncBoard] = {}
@@ -309,25 +305,10 @@ class CommsHub(ExtendedComms):
                                            limiter=self.limiter)
         return self._boards[key]
 
-    def entries_for(self, agent: str) -> list[str]:
-        """The type's comms tools with the agent's grant applied."""
-        g = self.grants.get(agent)
-        if not g:
-            return list(self.entries)
-        out = [e for e in self.entries if g.get(e, True)]
-        return out + [e for e in COMMS_TOOLS if g.get(e) and e not in out]
-
-    def set_grant(self, agent: str, tools: dict[str, bool] | None) -> None:
-        g = {k: v for k, v in (tools or {}).items() if k in COMMS_TOOLS}
-        if g:
-            self.grants[agent] = g
-        else:
-            self.grants.pop(agent, None)
-
     def tooldefs(self, agent: str | None = None) -> tuple:
         if not self.active:
             return ()
-        return tuple(tool_def(e) for e in (self.entries if agent is None else self.entries_for(agent)))
+        return tuple(tool_def(e) for e in self.entries)
 
     def deny_env(self) -> list[str]:
         """Variables a tool call never inherits: the comms invite (and MSGBOARD_TOKEN, the
@@ -354,11 +335,11 @@ class CommsHub(ExtendedComms):
     def section(self, agent: str) -> str:
         """The comms section of the agent's instructions: who it is on the board, the tools,
         the rules in force, then the protocol files (`comms.protocols`)."""
-        if not self.active or not self.entries_for(agent):
+        if not self.active or not self.entries:
             return ""
         c = self.spec
         assert c is not None
-        names = [f"`{comms_name(e)}`" for e in self.entries_for(agent)]
+        names = [f"`{comms_name(e)}`" for e in self.entries]
         r = c.rules
         rules = []
         if r.min_post_gap:
@@ -508,7 +489,6 @@ class CommsHub(ExtendedComms):
         """The agent left this worker (unassign)."""
         self.members.pop(agent, None)
         self._keys.pop(agent, None)
-        self.grants.pop(agent, None)
         self._agent_limits.pop(agent, None)
         self._tool_cache.pop(agent, None)
         self.identities.forget(agent)
@@ -748,7 +728,7 @@ class CommsHub(ExtendedComms):
         """One built-in comms call by `agent` (the llm harness in process, flock-tool through the
         gateway). Never raises: errors and refusals are results the model reads."""
         t0 = time.monotonic()
-        if not self.active or entry not in self.entries_for(agent):
+        if not self.active or entry not in self.entries:
             return _err(f"{entry} is not enabled for this agent", t0)
         if err := check_args(tool_def(entry).parameters, args):
             return _err(f"{comms_name(entry)}: {err}", t0)

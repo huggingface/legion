@@ -59,16 +59,8 @@ types:
     tool_output_chars: 32000                   # read_file of a whole bot
     context_tokens: 64000                      # compaction threshold
     loop: &loop-a
-      first: |
-        Start (round 0). One tool call per reply:
-        1. Call `read` (no arguments) to see the kickoff.
-        2. If you are ds-a-0000: call `post` with thread "new" and this text, then go to step 3:
-           "[team-a] Team A thread (ds-a-0000, ds-a-0001, glm-a-0000, glm-a-0001). No lead: first agree on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>."
-           Everyone else: do not post now.
-        3. Call `done` with summary "started".
       prompt_file: prompts/round-a.md
       every: 90s
-      stagger: 4s
       on: [comms.mention, comms.thread]        # board wake-ups (2 s debounce)
       wake: {min_gap: 30s, max: 3, window: 30m}  # at most 3 wake prompts per agent per 30 min
       # PLACEHOLDER caps, per agent by model alias: set them before the run
@@ -82,13 +74,6 @@ types:
     system_prompt_file: prompts/system-b.md
     loop:
       <<: *loop-a
-      first: |
-        Start (round 0). One tool call per reply:
-        1. Call `read` (no arguments) to see the kickoff.
-        2. If you are ds-b-0000: call `post` with thread "new" and this text, then go to step 3:
-           "[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>."
-           Everyone else: do not post now.
-        3. Call `done` with summary "started".
       prompt_file: prompts/round-b.md
   glm-b:
     <<: *team-b

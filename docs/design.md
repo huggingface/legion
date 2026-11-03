@@ -496,10 +496,8 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
-| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`, `skipped_budget` (a granted `limits.budget_usd` reached, docs/live.md). Controller token only |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`. Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
-| GET | `/swarms/{swarm}/grants` | live grants in force (docs/live.md) |
-| PUT, DELETE | `/swarms/{swarm}/grants/{target}` | set (replace) or revoke a type's or an agent's grant: `tools` on/off, `bash`, `limits.max_turns`, `limits.budget_usd`; an overlay kept across re-applies. Controller token only |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |
 | POST | `/workers/{id}/heartbeat` | batched heartbeat (worker token) |
@@ -548,8 +546,8 @@ at the controller.
 
 The worker also sends `spec_rev`, a hash of the type spec it has. The response carries
 `tools` and `comms` (docs/tools.md, docs/comms.md), `type_spec` and `spec_rev` when the type
-spec changed, and `grants` (per agent of that worker, when any is in force). The worker applies
-a new type spec and grants at each agent's next turn boundary (docs/live.md).
+spec changed. The worker applies a new type spec at each agent's next turn boundary
+(docs/live.md).
 
 Telemetry, all optional (older workers send none; the controller stores the last values and
 `GET /workers`, `GET /agents/{name}` return them):
@@ -845,8 +843,8 @@ no agents pays the worker's boot time; pre-warming is a possible later feature.
 
 Added 2026-10-21 (worlds design note §9 and §13). User guide: [loop.md](loop.md).
 
-A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: `first`
-alone, then the loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
+A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: the
+loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
 `final` prompt per live agent. The controller's loop engine (`controller/loop.py`) ticks once a
 second and sends every prompt through the bulk-prompt path with `state: idle, skip_pending:
 true`, so loops never stack prompts and stay under `max_working` admission. `every: turn_end` on
@@ -855,8 +853,8 @@ re-prompts when a turn completes), under `max_working` on the controller. Prompt
 the worker renders (`PromptCommand.loop`, `{round}`, `{spend}`, `{last_summary}`, ...).
 `limits.budget_usd` becomes a stop, not only a spawn check: at `budget_usd` minus the final
 reserves loops stop, pending prompts are dropped and final rounds run; at `budget_usd` every
-agent is stopped and prompts are refused. World-backed settings (`every: rounds`, `score_*`,
-`on: world.*`, `context:`) are in the model and refused at apply until a world exists.
+agent is stopped and prompts are refused. World-backed wakes (`on: world.*`) are in the
+model and refused at apply until a world exists.
 
 ### Run-4 additive contracts (2026-10-26)
 

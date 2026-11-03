@@ -386,7 +386,7 @@ class Shop(World):
 
     @tool
     def push(self) -> str:
-        if self.paused("push"):  # an operator ran `flock world pause <swarm> push`
+        if self.paused("push"):  # paused through POST /admin/pause
             raise ToolError("pushes are paused; keep working locally", "paused")
         return f"pushing with {self.knobs['hub.push.slots']} slots"
 ```
@@ -410,8 +410,8 @@ The manifest lists the knob names under `knobs` and adds the capability `admin-v
 `$FLOCK_WORLD_ADMIN_TOKEN` in the world's environment; unset, `/admin` answers `403`. It is
 never derived from the world secret, which every worker holds. Bodies are capped at 64 KB, and
 admission control never applies to `/admin`. Operators go through the controller, which sends
-the same secret and records each change as a swarm event (`world_knob {name, old, new, by,
-reason}`, `world_pause {lanes, reason, by}`, `world_resume {lanes, by}`):
+the same secret and records each knob change as a swarm event (`world_knob {name, old, new,
+by, reason}`):
 
 - a world flock starts (`command`, `compute: local`): the controller derives the secret from
   its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
@@ -422,8 +422,6 @@ reason}`, `world_pause {lanes, reason, by}`, `world_resume {lanes, by}`):
 ```bash
 flock world knobs <swarm>                                   # values, defaults, ranges, paused lanes
 flock world set <swarm> pr.open_floor=10 --reason "hub 429s"
-flock world pause <swarm> open push --reason "hub outage"
-flock world resume <swarm> open push
 ```
 
 chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`

@@ -18,7 +18,7 @@ from flock.tools.loader import ToolDef
 
 BUILTIN_MODULE = "flock:comms"
 READONLY = frozenset({"comms:read", "comms:search", "comms:channels", "comms:read_dms",
-                      "comms:votes", "comms:doc"})  # change nothing: idle for `idle_rounds`
+                      "comms:votes", "comms:doc"})  # change nothing
 GROUP_RE = re.compile(r"(?<![\w@/])@(all|agents|humans|everyone|people)(?![\w-])", re.IGNORECASE)
 VARIANT_RE = re.compile("[\ufe0f\U0001F3FB-\U0001F3FF]")  # emoji presentation selector, skin tones
 GROUP_NAMES = frozenset({"all", "agents", "humans", "everyone", "people"})
