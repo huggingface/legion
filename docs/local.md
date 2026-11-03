@@ -174,8 +174,9 @@ Different:
    a type's `env: {HEARTBEAT_INTERVAL: ...}` overrides it).
 5. **The controller is in-process.** 127.0.0.1 on a free port, a new random token per run, no
    status port, no jobs proxy auth. The controller state syncs to `FLOCK_STATE_URL`, by
-   default `<bucket>/controller/<swarm>` when the spec has a bucket (a checkpoint `flock
-   launch --adopt` can take over; it needs `HF_TOKEN`); `FLOCK_STATE_URL=` turns it off. Each `flock run` is a new run
+   default `<bucket>/controller/<swarm>` when the spec has a bucket and an HF token is found
+   (HF_TOKEN or the saved one; else off, said at start). A checkpoint `flock
+   launch --adopt` can take over; `FLOCK_STATE_URL=` turns it off. Each `flock run` is a new run
    directory: a run does not resume a previous one.
 6. **Workers die with the controller.** A worker exits when the `flock run` process is gone
    (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. Ctrl-C reaches only

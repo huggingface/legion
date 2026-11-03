@@ -109,13 +109,21 @@ def run_name(swarm: str, data_dir: Path, now: datetime | None = None) -> str:
     return name
 
 
-def state_env(env, spec: SwarmSpec) -> dict[str, str]:
-    """The env the run's checkpoint is read from (`launch --adopt`): FLOCK_STATE_URL, by
-    default <bucket>/controller/<swarm> when the spec has a bucket; `FLOCK_STATE_URL=` is off."""
+def state_env(env, spec: SwarmSpec, token=None) -> tuple[dict[str, str], str | None]:
+    """The env the run's checkpoint is read from (`launch --adopt`) and a line to print when
+    it is off: FLOCK_STATE_URL, by default <bucket>/controller/<swarm> when the spec has a
+    bucket and an HF token is found (HF_TOKEN or the saved one, as HubBucketStore finds it);
+    `FLOCK_STATE_URL=` is off. `token()` finds the token (tests)."""
     env = dict(env)
-    if env.get("FLOCK_STATE_URL") is None and spec.bucket:
-        env["FLOCK_STATE_URL"] = f"{spec.bucket.rstrip('/')}/controller/{spec.swarm}"
-    return env
+    if env.get("FLOCK_STATE_URL") is not None or not spec.bucket:
+        return env, None
+    if token is None:
+        from huggingface_hub import get_token as token
+    if not (env.get("HF_TOKEN") or token()):
+        return env, ("checkpoint: off (no HF token for the bucket; set HF_TOKEN or "
+                     "FLOCK_STATE_URL to checkpoint for `flock launch --adopt`)")
+    env["FLOCK_STATE_URL"] = f"{spec.bucket.rstrip('/')}/controller/{spec.swarm}"
+    return env, None
 
 
 def redacted_spec(spec: SwarmSpec) -> dict[str, Any]:
@@ -582,7 +590,8 @@ async def run_local(opts: RunOptions) -> RunResult:
 
     health = Health(store, token=token, jobs=jobs, run=run_dir.name)
     health_every = float(os.environ.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
-    state = state_sync_from_env(state_env(os.environ, spec), run_dir / "controller")
+    state_vars, state_note = state_env(os.environ, spec)
+    state = state_sync_from_env(state_vars, run_dir / "controller")
 
     async def checkpoint() -> None:
         while True:
@@ -634,6 +643,8 @@ async def run_local(opts: RunOptions) -> RunResult:
         write_current(data_dir, {"url": url, "token": token, "run_dir": str(run_dir),
                                  "swarm": spec.swarm, "pid": os.getpid()})
         say(f"flock run: {spec.swarm} at {url}; run dir {run_dir}")
+        if state_note:
+            say(state_note)
         say(f"second terminal: {cli_hint(data_dir)} (URL and token in {current})")
         headers = {"X-Flock-Token": token}
         async with httpx.AsyncClient(base_url=url, headers=headers, timeout=60) as http:

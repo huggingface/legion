@@ -409,9 +409,14 @@ def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, cloc
 def test_local_runs_checkpoint_to_the_bucket_by_default():
     from flock.controller.localrun import state_env
 
-    spec_ = make_spec()
-    assert state_env({}, spec_)["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
-    assert state_env({"FLOCK_STATE_URL": ""}, spec_)["FLOCK_STATE_URL"] == ""  # off
-    assert state_env({"FLOCK_STATE_URL": "hf://x/y"}, spec_)["FLOCK_STATE_URL"] == "hf://x/y"
+    spec_, saved, none = make_spec(), lambda: "hf_saved", lambda: None
+    env, note = state_env({}, spec_, saved)  # the saved hub token is enough
+    assert env["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo" and note is None
+    env, _ = state_env({"HF_TOKEN": "t"}, spec_, none)
+    assert env["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
+    env, note = state_env({}, spec_, none)  # a laptop without a token: off, said once
+    assert "FLOCK_STATE_URL" not in env and note.startswith("checkpoint: off (no HF token")
+    assert state_env({"FLOCK_STATE_URL": ""}, spec_, saved)[0]["FLOCK_STATE_URL"] == ""  # off
+    assert state_env({"FLOCK_STATE_URL": "hf://x/y"}, spec_, none)[0]["FLOCK_STATE_URL"] == "hf://x/y"
     nob = make_spec().model_copy(update={"bucket": ""})
-    assert "FLOCK_STATE_URL" not in state_env({}, nob)
+    assert state_env({}, nob, saved) == ({}, None)
