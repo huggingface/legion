@@ -6,7 +6,8 @@
 set -euo pipefail
 SWARM=${1:?swarm}; OUT=${2:?out.jsonl}
 : > "$OUT"
-flock agents "$SWARM" | awk 'NR > 1 {print $1}' |
+python3 -c "import sys; from flock.client import Client
+print('\\n'.join(a['name'] for a in Client().agents(sys.argv[1])))" "$SWARM" |
   xargs -P 25 -I{} bash -c '
     cw="{}-$(python3 -c "import secrets;print(secrets.token_hex(3))")"
     t=$(date +%s.%N)

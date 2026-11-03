@@ -151,7 +151,7 @@ one prompt per burst, never while it is working, at most one per `loop.wake.min_
 `loop.wake.max` (10) per run, not a round by default; each one is a `loop_wake` event;
 docs/loop.md "Wake queue"). A type without that
 `on:` entry, or without a running loop, is not prompted by a message; the events are in
-`flock events` either way. `create_app(..., on_comms=fn)` also hands each one to
+`flock status <agent> --events` either way. `create_app(..., on_comms=fn)` also hands each one to
 `fn(agent, reason, data)` with reason `mention` or `thread` and
 `data = {agent, msg_id, thread, from}` (an observer; tests use it).
 

@@ -247,6 +247,7 @@ def agent_status(
     pending: int,
     now: float,
     children: list[str] | None = None,
+    state: AgentState | None = None,
 ):
     ts = spec.types.get(a["type"]) if spec else None
     return AgentStatus(
@@ -257,7 +258,7 @@ def agent_status(
         model=ts.model if ts else "unknown",
         provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},
-        state=agent_state(a, w, now),
+        state=state or agent_state(a, w, now),
         idle_since=_dt(a["idle_since"]),
         turn_id=a["turn_id"],
         worker=a["worker"],
@@ -277,6 +278,7 @@ def agent_status(
         depth=agent_depth(spec, a),
         rev=a.get("rev"),
         start_rev=a.get("start_rev"),
+        endpoint=a.get("endpoint"),
     )
 
 
@@ -293,6 +295,7 @@ def worker_status(w: Row, agents: list[str], now: float) -> WorkerStatus:
         launched_at=_dt(w["launched_at"] or w["created_at"]),
         crashes=w["crashes"],
         last_error=w.get("last_error"),
+        pending_reason=w.get("pending_reason"),
         **json.loads(w.get("telemetry") or "{}"),
     )
 
@@ -1087,8 +1090,9 @@ def create_app(
         for a in rows:
             if cursor is not None and a["name"] <= cursor:
                 continue
-            st = agent_status(a, workers.get(a["worker"]), spec, pending.get(a["name"], 0), now,
-                              kids.get(a["name"]))
+            w = workers.get(a["worker"])  # state: the bulk prompt's (`turn_state`), one `idle`
+            st = agent_status(a, w, spec, pending.get(a["name"], 0), now, kids.get(a["name"]),
+                              turn_state(a, w, now))
             if state is None or st.state == state:
                 out.append(st)
             if len(out) >= max(1, limit):
@@ -1108,7 +1112,9 @@ def create_app(
         w = store.get_worker(a["worker"]) if a["worker"] else None
         pending = store.pending_counts(a["swarm"]).get(name, 0)
         kids = [c["name"] for c in store.list_agents(parent=name)]
-        return agent_status(a, w, row["spec"] if row else None, pending, clock().timestamp(), kids)
+        now = clock().timestamp()
+        return agent_status(a, w, row["spec"] if row else None, pending, now, kids,
+                            turn_state(a, w, now))
 
     @api.post("/agents/{name}/spawn", status_code=201)
     def spawn(name: str, req: SpawnRequest) -> SpawnAck:
@@ -1334,8 +1340,9 @@ def create_app(
     def turn_state(a: Row, w: Row | None, now: float) -> AgentState:
         """`agent_state`, with working/idle corrected by what the controller learned since the
         heartbeat (`live`): a prompt just handed out makes it working, a turn_ended event idle.
-        Used by the bulk prompt's `state` filter so it neither re-prompts an agent whose turn
-        is starting nor waits a heartbeat for one whose turn just ended."""
+        The one meaning of an agent's state for the bulk prompt's `state` filter and the
+        agents routes (`flock status --state`, `flock prompt --state`): it neither re-prompts an
+        agent whose turn is starting nor waits a heartbeat for one whose turn just ended."""
         st = agent_state(a, w, now)
         seen = live.get(a["name"])
         if seen is None or st not in (AgentState.idle, AgentState.working):

@@ -59,7 +59,7 @@ def run_context(run_dir: str | Path) -> tuple[dict[str, str], list[str]]:
     hosts/controller.host (else FLOCK_CURRENT for a local run's .flock/current there),
     FLOCK_TOKEN from run.env, and run.env as the first --env file."""
     d = Path(run_dir)
-    env: dict[str, str] = {}
+    env: dict[str, str] = {"FLOCK_RUN_DIR": str(d)}  # for `client.unreachable`
     host = d / "hosts" / "controller.host"
     h = host.read_text(encoding="utf-8").strip() if host.is_file() else ""
     if h:

@@ -1537,6 +1537,7 @@ class AgentHeartbeat(BaseModel):
     msgboard_principal: str | None = None
     rev: str | None = None  # `type_spec_rev` the agent applied at its last turn boundary
     start_rev: str | None = None  # the one its running harness process started with
+    endpoint: str | None = None  # `host:port` of the model server it is pinned to (base_urls)
 
 
 class WorkerMem(BaseModel):
@@ -1816,6 +1817,7 @@ class AgentStatus(BaseModel):
     depth: int = 0  # generations this agent may still spawn below itself
     rev: str | None = None  # AgentHeartbeat.rev / start_rev
     start_rev: str | None = None
+    endpoint: str | None = None  # AgentHeartbeat.endpoint
 
 
 class WorkerStatus(BaseModel):
@@ -1830,6 +1832,7 @@ class WorkerStatus(BaseModel):
     launched_at: datetime
     crashes: int = 0
     last_error: str | None = None  # last launch failure or crash: job status, log tail
+    pending_reason: str | None = None  # while queued: the scheduler's word, e.g. "PENDING (Resources)"
     # from the last heartbeat (WorkerHeartbeat)
     mem: WorkerMem | None = None
     restore: RestoreProgress | None = None

@@ -337,12 +337,16 @@ class SlurmJobsClient:
                  cfg["mem"], cfg["partition"])
         return job_id
 
-    def _squeue_state(self, job_id: str) -> str | None:
-        r = self._call("squeue", ["squeue", "-h", "-j", job_id, "-o", "%T"])
+    def _squeue_state(self, job_id: str) -> tuple[str, str] | None:
+        """(state, pending reason) from squeue, or None once the job left it."""
+        r = self._call("squeue", ["squeue", "-h", "-j", job_id, "-o", "%T|%r"])
         if r.returncode != 0:
             return None  # "Invalid job id": purged from squeue, ask sacct
-        out = (r.stdout or "").strip().split()
-        return out[0] if out else None
+        out = (r.stdout or "").strip().splitlines()
+        if not out:
+            return None
+        state, _, reason = out[0].partition("|")
+        return state.strip(), reason.strip()
 
     def _sacct_state(self, job_id: str) -> tuple[str, str] | None:
         r = self._call("sacct", ["sacct", "-j", job_id, "-X", "-n", "-P", "-o", "State,ExitCode"])
@@ -364,11 +368,12 @@ class SlurmJobsClient:
         states = (r.stdout or "").split()
         return "RUNNING" if "RUNNING" in states else (states[0] if states else None)
 
-    def map_state(self, job_id: str, state: str, exit_code: str = "") -> JobState:
+    def map_state(self, job_id: str, state: str, exit_code: str = "", reason: str = "") -> JobState:
         word = state.split()[0].rstrip("+") if state else ""
         code = exit_code.split(":")[0] if exit_code else ""
-        if word in SCHEDULING:
-            return JobState("SCHEDULING", word)
+        if word in SCHEDULING:  # with squeue's pending reason, e.g. "PENDING (Resources)"
+            return JobState("SCHEDULING", f"{word} ({reason})" if reason not in ("", "None")
+                            else word)
         if word in RUNNING:
             return JobState("RUNNING")
         if word == "COMPLETED":
@@ -387,14 +392,15 @@ class SlurmJobsClient:
         return JobState("ERROR", f"{word or 'UNKNOWN'} exit {code}".strip())
 
     def inspect(self, job_id: str, *, namespace: str = "") -> JobState:
-        state = self._squeue_state(job_id)
-        if state is not None:
+        found = self._squeue_state(job_id)
+        if found is not None:
+            state, reason = found
             if state in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
                          "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"):
                 acct = self._sacct_state(job_id)  # the exit code lives in sacct
                 if acct is not None:
                     return self.map_state(job_id, *acct)
-            return self.map_state(job_id, state)
+            return self.map_state(job_id, state, reason=reason)
         acct = self._sacct_state(job_id)
         if acct is not None:
             return self.map_state(job_id, *acct)
@@ -419,7 +425,7 @@ class SlurmJobsClient:
             log.warning("scancel %s: %s", job_id, (r.stderr or "").strip()[:200])
 
     def list(self, labels: dict[str, str], *, namespace: str = "") -> list[JobListing]:
-        r = self._call("squeue", ["squeue", "--me", "-h", "-o", "%i|%j|%k|%T"])
+        r = self._call("squeue", ["squeue", "--me", "-h", "-o", "%i|%j|%k|%T|%r"])
         if r.returncode != 0:
             raise RuntimeError(f"squeue exit {r.returncode}: {(r.stderr or '').strip()[:200]}")
         out = []
@@ -428,12 +434,13 @@ class SlurmJobsClient:
             if len(parts) < 4:
                 continue
             job_id, name, comment, state = (p.strip() for p in parts[:4])
+            reason = parts[4].strip() if len(parts) > 4 else ""
             have = _parse_comment(comment)
             if not all(have.get(k) == v for k, v in labels.items()):
                 continue
             launch_dir = self._dirs.get(job_id) or resolve(None, "", self.env).get("launch_dir")
             env = latest_env(launch_dir, name) if launch_dir else {}
-            st = self.map_state(job_id, state)
+            st = self.map_state(job_id, state, reason=reason)
             out.append(JobListing(job_id, have, st.stage, env, st.message))
         return out
 

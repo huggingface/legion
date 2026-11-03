@@ -57,7 +57,7 @@ def test_cli_retries_429_then_succeeds(monkeypatch, sleeps):
 def test_cli_gives_up_after_five_attempts(monkeypatch, sleeps):
     seen, handler = _edge([(429, {})] * 10)
     _edge_client(monkeypatch, handler)
-    r = runner.invoke(cli.app, ["agent", "leader-0000"])
+    r = runner.invoke(cli.app, ["status", "--agent", "leader-0000"])
     assert r.exit_code == 1 and "error 429" in r.output
     assert len(seen) == flock_client.RETRY_ATTEMPTS == 5 and len(sleeps) == 4
 

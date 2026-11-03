@@ -18,6 +18,7 @@ import os
 import random
 import time
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,19 @@ def auth_headers(url: str, env: Mapping[str, str] = os.environ) -> dict[str, str
     else:
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def unreachable(url: str, env: Mapping[str, str] = os.environ) -> str:
+    """The line for a controller that does not answer: with a run dir (`--run`,
+    FLOCK_RUN_DIR) also what its hosts/controller.host says and when it was written (the
+    controller's last start, not a heartbeat)."""
+    line = f"controller unreachable at {url}"
+    host = Path(env.get("FLOCK_RUN_DIR") or "") / "hosts" / "controller.host"
+    if env.get("FLOCK_RUN_DIR") and host.is_file():
+        t = datetime.fromtimestamp(host.stat().st_mtime, UTC)
+        line += (f"; hosts/controller.host says {host.read_text(encoding='utf-8').strip()}, "
+                 f"written at {t:%Y-%m-%d %H:%M:%S}Z")
+    return line
 
 
 CURRENT_FILE = Path(".flock") / "current"  # written by a local run (docs/local.md)
@@ -195,17 +209,23 @@ class Client:
             return _call_gateway(gw, method, path, timeout, **kw)
         if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
             kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
-        with connect(self.env) as c:
-            r = _request(c, method, path, **kw)
+        r = self._send(method, path, **kw)
         if r.status_code >= 400:
             raise ClientError(f"error {r.status_code}: {r.text}", r.status_code, r.text)
         return r.json()
 
     def _found(self, path: str) -> dict | None:
         """GET `path` straight to the controller: the reply, or None on any error."""
-        with connect(self.env) as c:
-            r = _request(c, "GET", path)
+        r = self._send("GET", path)
         return r.json() if r.status_code == 200 else None
+
+    def _send(self, method: str, path: str, **kw) -> httpx.Response:
+        """One request (retried); no answer at all raises `ClientError(unreachable(...))`."""
+        with connect(self.env) as c:
+            try:
+                return _request(c, method, path, **kw)
+            except httpx.TransportError:
+                raise ClientError(unreachable(str(c.base_url).rstrip("/"), self.env)) from None
 
     @property
     def as_agent(self) -> bool:
@@ -300,6 +320,10 @@ class Client:
 
     def workers(self, swarm: str) -> list[dict]:
         return self._call("GET", "/workers", params={"swarm": swarm})
+
+    def loops(self, swarm: str) -> list[dict]:
+        """Each type's loop with its per-agent rows (`per_agent`)."""
+        return self._call("GET", f"/swarms/{swarm}/loop")
 
     # -- agents ---------------------------------------------------------------------------------
 

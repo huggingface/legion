@@ -286,7 +286,8 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
     run = tmp_path / "r"
     (run / "hosts").mkdir(parents=True)
     (run / "run.env").write_text("FLOCK_TOKEN=run-tok\n")
-    assert rundir.run_context(run) == ({"FLOCK_TOKEN": "run-tok"}, [str(run / "run.env")])
+    assert rundir.run_context(run) == ({"FLOCK_RUN_DIR": str(run), "FLOCK_TOKEN": "run-tok"},
+                                       [str(run / "run.env")])
     (run / ".flock").mkdir()
     (run / ".flock" / "current").write_text("{}")
     assert rundir.run_context(run)[0]["FLOCK_CURRENT"] == str(run / ".flock" / "current")

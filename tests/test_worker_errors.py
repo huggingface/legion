@@ -30,7 +30,7 @@ def test_crash_records_status_and_log_tail(store, jobs, clock, tick, app, monkey
 
     monkeypatch.setattr("flock.client.connect",
                         lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
-    r = CliRunner().invoke(cli.app, ["workers", "demo"])
+    r = CliRunner().invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "401 Unauthorized" in r.output and "last_error" in r.output
     assert json.loads(TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
                       .get(f"/workers/{W0}").text)["last_error"] == err
