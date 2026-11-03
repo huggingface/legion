@@ -1,4 +1,4 @@
-"""Spec rendering: ${VAR} substitution, overlays and --ref (flock.specrender)."""
+"""Spec rendering: ${VAR} substitution, value sources, overlays and --ref (flock.specrender)."""
 from __future__ import annotations
 
 import json
@@ -39,7 +39,7 @@ def test_unset_variables_are_listed():
         substitute({"x": "${B}", "y": ["${A}", "${C:-ok}", "${A}"]}, {})
 
 
-def test_env_files_and_process_environment_precedence(tmp_path, monkeypatch):
+def test_env_files_win_over_the_process_environment(tmp_path, monkeypatch):
     one, two = tmp_path / "one.env", tmp_path / "two.env"
     one.write_text("# run\nA=1\nB='from one'\nexport C=\"c\"\n\n")
     two.write_text("A=2\n")
@@ -48,7 +48,9 @@ def test_env_files_and_process_environment_precedence(tmp_path, monkeypatch):
     spec.write_text("a: ${A}\nb: ${B}\nc: ${C}\n")
     monkeypatch.delenv("A", raising=False)
     monkeypatch.setenv("C", "env")
-    assert render(spec, [one, two]) == {"a": 2, "b": "from one", "c": "env"}
+    monkeypatch.setenv("D", "shell")
+    spec.write_text("a: ${A}\nb: ${B}\nc: ${C}\nd: ${D}\n")
+    assert render(spec, [one, two]) == {"a": 2, "b": "from one", "c": "c", "d": "shell"}
     (tmp_path / "bad.env").write_text("A=1\nnot a line\n")
     with pytest.raises(ValueError, match="bad.env:2: expected NAME=value"):
         read_env_file(tmp_path / "bad.env")
@@ -65,23 +67,48 @@ def test_overlay_merges_maps_replaces_lists_and_null_deletes():
     assert base["world"]["dir"] == "w"  # the base is not modified
 
 
-def test_cli_apply_with_env_and_overlay(tmp_path, monkeypatch, app, store):
+def test_cli_apply_with_env_files_and_no_overlay(tmp_path, monkeypatch, app, store):
     _wire(monkeypatch, app)
+    monkeypatch.delenv("NS", raising=False)
     data = make_spec().model_dump(mode="json")
     data["types"]["researcher"]["replicas"] = "${REPLICAS:-1}"
+    data["namespace"] = "${NS}"
     spec = tmp_path / "spec.yaml"
     spec.write_text(yaml.safe_dump(data))
     (tmp_path / "run.env").write_text("REPLICAS=4\n")
-    (tmp_path / "over.yaml").write_text("namespace: ${NS}\n")
-    r = runner.invoke(cli.app, ["apply", str(spec), "--overlay", str(tmp_path / "over.yaml")])
+    r = runner.invoke(cli.app, ["apply", str(spec)])
     assert r.exit_code == 1 and "unset variables without a default: NS" in r.output
     (tmp_path / "ns.env").write_text("NS=other\n")
     r = runner.invoke(cli.app, ["apply", str(spec), "--env", str(tmp_path / "run.env"),
-                                "--env", str(tmp_path / "ns.env"),
-                                "--overlay", str(tmp_path / "over.yaml")])
+                                "--env", str(tmp_path / "ns.env")])
     assert r.exit_code == 0, r.output
     stored = store.get_swarm("demo")["spec"]
     assert stored.types["researcher"].replicas == 4 and stored.namespace == "other"
+    for cmd in ("apply", "update"):  # one spec per run: no overlays on the live path
+        r = runner.invoke(cli.app, [cmd, str(spec), "--overlay", str(spec)])
+        assert r.exit_code == 2 and "--overlay" in r.output
+
+
+def test_value_sources_lines_env_files_defaults(tmp_path, monkeypatch):
+    from flock.specrender import source_of
+
+    monkeypatch.setenv("MEM", "shell")
+    monkeypatch.delenv("CPUS", raising=False)
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("swarm: s\ncompute:\n  cpus: ${CPUS:-4}\n  mem: ${MEM}\n"
+                    "types:\n  a: &a\n    tools: [x]\n  b:\n    <<: *a\n    model: m\n")
+    (tmp_path / "run.env").write_text("MEM=7G\n")
+    src: dict[str, str] = {}
+    render(spec, [tmp_path / "run.env"], sources=src)
+    assert source_of(src, "compute.cpus") == "spec.yaml:3 default of CPUS"
+    assert source_of(src, "compute.mem") == "run.env MEM"
+    assert source_of(src, "types.b.tools") == "spec.yaml:7"  # merged from the anchor
+    assert source_of(src, "types.b.model") == "spec.yaml:10"
+    assert source_of(src, "types.b.loop.while_.until") == "spec.yaml:9"  # nearest parent
+    assert source_of(src, "limits.alive") == "default"
+    src.clear()
+    render(spec, [], sources=src)
+    assert source_of(src, "compute.mem") == "env MEM"
 
 
 def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, store):
@@ -95,25 +122,23 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
                                     capture_output=True, text=True).stdout.strip()
     git("init", "-q", "-b", "main")
     data = make_spec().model_dump(mode="json")
+    data["namespace"] = "committed"
     (exp / "spec.yaml").write_text(yaml.safe_dump(data))
-    (exp / "over.yaml").write_text("namespace: committed\n")
     git("add", ".")
     git("commit", "-qm", "v1")
     git("tag", "v1")
     sha = git("rev-parse", "HEAD")
     data["types"]["researcher"]["replicas"] = 9  # uncommitted: --ref must not see it
+    data["namespace"] = "working-tree"
     (exp / "spec.yaml").write_text(yaml.safe_dump(data))
-    (exp / "over.yaml").write_text("namespace: working-tree\n")
-    r = runner.invoke(cli.app, ["apply", str(exp / "spec.yaml"), "--ref", "v1",
-                                "--overlay", str(exp / "over.yaml")])
+    r = runner.invoke(cli.app, ["apply", str(exp / "spec.yaml"), "--ref", "v1"])
     assert r.exit_code == 0, r.output
     (gen1,) = store.spec_history("demo")
     assert gen1["source"] == {"git_sha": sha, "ref": "v1", "dirty": False, "by": "carlos"}
     stored = store.get_swarm("demo")["spec"]
     assert stored.types["researcher"].replicas == 3 and stored.namespace == "committed"
     # update --check with REF:PATH (the positional only names the repo); nothing stored
-    r = runner.invoke(cli.app, ["update", str(repo), "--ref", "main:exp", "--check",
-                                "--overlay", str(exp / "over.yaml")])
+    r = runner.invoke(cli.app, ["update", str(repo), "--ref", "main:exp", "--check"])
     assert r.exit_code == 0 and "check ok" in r.output, r.output
     assert len(store.spec_history("demo")) == 1
     r = runner.invoke(cli.app, ["update", str(exp), "--ref", "nope"])

@@ -405,6 +405,14 @@ def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, s
     r = runner.invoke(cli.app, ["update", str(exp), "--replicas", "spec"])
     assert r.exit_code == 0 and "types.researcher.replicas: 4 -> 2" in r.output, r.output
     assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 2
+    # --check names where each changed value came from
+    (exp / "run.env").write_text("APW=3\n")
+    _experiment(exp, replicas=2, prompt="v2", agents_per_worker="${APW:-2}", max_turns=7)
+    r = runner.invoke(cli.app, ["update", str(exp), "--check", "--env", str(exp / "run.env")])
+    assert r.exit_code == 0, r.output
+    assert "types.researcher.agents_per_worker: 2 -> 3 (run.env APW)" in r.output
+    assert "types.researcher.max_turns: - -> 7 (spec.yaml:" in r.output, r.output
+    _experiment(exp, replicas=2, prompt="v2")
     # --check exits 1 on what the controller refuses (a tool the bundle lacks)
     d = yaml.safe_load(f.read_text())
     d["types"]["researcher"]["tools"] = ["add", "nope"]

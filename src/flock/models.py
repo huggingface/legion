@@ -897,8 +897,8 @@ class ComputeSpec(_Removable):
     (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
-    The other keys are for `slurm`; unset keys
-    fall back to the controller's FLOCK_SLURM_* env, then to built-in defaults. `types` sets
+    The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
+    fills unset keys (then built-in defaults). `types` sets
     per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
 
     model_config = {"extra": "forbid"}

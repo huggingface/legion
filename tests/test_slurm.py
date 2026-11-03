@@ -103,11 +103,14 @@ def heartbeat(store, clock, wid, preempted=False):
 def test_compute_spec_keys_and_resolution(tmp_path):
     spec = slurm_spec(tmp_path, types={"researcher": {"cpus": 2, "mem": "3500M"}})
     assert spec.compute.kind == "slurm" and spec.namespace == ""
-    cfg = resolve(spec.compute, "researcher", {"FLOCK_SLURM_PARTITION": "other",
-                                               "FLOCK_SLURM_CPUS": "8"})
-    # defaults < spec < FLOCK_SLURM_* env < per-type entry
-    assert cfg["partition"] == "other" and cfg["cpus"] == "2" and cfg["mem"] == "3500M"
-    assert cfg["time"] == "29:00:00" and cfg["account"] == "acct"
+    env = {"FLOCK_SLURM_PARTITION": "other", "FLOCK_SLURM_CPUS": "8", "FLOCK_SLURM_TIME": "1:00:00",
+           "FLOCK_SLURM_MAX_CPUS": "64"}
+    cfg = resolve(spec.compute, "researcher", env)
+    # defaults < FLOCK_SLURM_* env < spec < per-type entry: the spec wins
+    assert cfg["partition"] == "cpu" and cfg["cpus"] == "2" and cfg["mem"] == "3500M"
+    assert cfg["time"] == "1:00:00" and cfg["account"] == "acct"  # unset in the spec: env
+    assert cfg["max_cpus"] == "64"  # the spec's default is not a value it sets
+    assert resolve(spec.compute, "other", env)["cpus"] == "8"
     assert resolve(None, "x", {})["partition"] == "hopper-cpu"
     with pytest.raises(ValueError, match="bucket is required"):
         SwarmSpec.model_validate({"swarm": "d", "compute": "slurm", "types": {}})
