@@ -712,7 +712,7 @@ async def test_finish_never_resends_a_fetched_final(sim):
     await sim.turn(A0, fin[A0])  # A0 ran it; A1's is still running
     await sim.apply({"prompt": "round", "every": "30s"})
     sim.tick()
-    sim.tick(60)
+    sim.tick(1)
     assert await sim.commands() == []
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
     assert (st["state"], st["final_done"]) == ("done", 1)
@@ -870,3 +870,48 @@ async def test_transport_stalls_do_not_exhaust_controller_loop(sim):
         assert A0 in got
     state = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
     assert (state["phase"], state["errors"]) == ("looping", 0)
+
+
+async def test_a_queued_first_prompt_from_before_its_removal_is_delivered(sim):
+    await sim.apply()
+    await sim.heartbeat()
+    cmd = {"kind": "prompt", "agent": A0, "prompt_id": "p-old", "text": "set up",
+           "loop": {"kind": "first", "type": "researcher", "round": 0, "why": "first"}}
+    sim.store.add_prompt(A0, json.dumps(cmd), sim.clock().timestamp())
+    got = prompts(await sim.commands())
+    assert got[A0]["text"] == "set up" and got[A0]["loop"]["kind"] == "first"
+
+
+async def test_agents_stored_in_phase_first_go_on_looping(sim):
+    from flock.controller.loop import _new_agent
+
+    await sim.apply({"prompt": "p", "every": "5s", "while": {"max_rounds": 1}})
+    for a in (A0, A1):  # as `loop.first` left them before its removal
+        sim.store.put_loop_agent(a, "demo", "researcher",
+                                 {**_new_agent(), "phase": "first", "first_delivered": True})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    assert set(got) == {A0, A1} and got[A0]["loop"]["round"] == 1
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick()
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert (st["state"], st["reason"]) == ("done", "max_rounds")
+
+
+async def test_a_loop_hashed_before_the_field_deletions_resumes_quietly(sim):
+    await sim.apply({"prompt": "p"})  # turn_end on the worker: loop_start commands
+    await sim.heartbeat()
+    sim.tick()
+    assert {c["kind"] for c in await sim.commands()} == {"loop_start"}
+    L = sim.store.get_loops("demo")["researcher"]
+    L.pop("hv")
+    L["hash"] = "0123456789ab"  # the full-dump hash of the spec with first/stagger/... in it
+    sim.store.put_loop("demo", "researcher", L)
+    before = len(sim.swarm_events())
+    sim.tick()
+    sim.tick(1)
+    assert await sim.commands() == []
+    assert "loop_updated" not in [k for k, _ in sim.swarm_events()[before:]]
+    assert sim.store.get_loops("demo")["researcher"]["hv"] == 1

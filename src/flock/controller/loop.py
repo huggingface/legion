@@ -82,7 +82,8 @@ def _ts(t: float) -> datetime:
 
 
 def _spec_hash(lp: LoopSpec) -> str:
-    return hashlib.sha256(lp.model_dump_json().encode()).hexdigest()[:12]
+    """Defaults left out: deleting a field (or adding one with a default) keeps the hash."""
+    return hashlib.sha256(lp.model_dump_json(exclude_defaults=True).encode()).hexdigest()[:12]
 
 
 def _custom(ev: Event) -> dict[str, Any]:
@@ -556,8 +557,11 @@ class LoopEngine:
                 continue
             if L is None:
                 L = self._start(spec, type_name, ts, now)
-            elif (L.get("hash") != _spec_hash(ts.loop)
-                  or L.get("mode") != self._mode(spec, type_name, ts.loop)):
+            elif not L.get("hv"):  # stored under the old full-dump hash: re-hash, not a change
+                L["hash"], L["hv"] = _spec_hash(ts.loop), 1
+                self.store.put_loop(spec.swarm, type_name, L)
+            if (L.get("hash") != _spec_hash(ts.loop)
+                    or L.get("mode") != self._mode(spec, type_name, ts.loop)):
                 self._updated(spec, type_name, ts, L, now)
             if L["state"] == "final" and ts.loop.final is None:  # final removed by a re-apply
                 self._finish(spec.swarm, type_name, L, now, "final removed from the spec")
@@ -685,7 +689,7 @@ class LoopEngine:
         lp = ts.loop
         assert lp is not None
         return {"state": "running", "mode": self._mode(spec, type_name, lp), "every": lp.every,
-                "started_at": now, "stopped_at": None, "reason": None, "hash": _spec_hash(lp),
+                "started_at": now, "stopped_at": None, "reason": None, "hash": _spec_hash(lp), "hv": 1,
                 "final_at": None, "run": uuid.uuid4().hex[:12]}
 
     def _start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, now: float,
@@ -711,7 +715,7 @@ class LoopEngine:
         workers take over. Worker loops that stay worker loops get a fresh `loop_start`."""
         assert ts.loop is not None
         old, new = L.get("mode"), self._mode(spec, type_name, ts.loop)
-        L["hash"], L["mode"], L["every"] = _spec_hash(ts.loop), new, ts.loop.every
+        L["hash"], L["hv"], L["mode"], L["every"] = _spec_hash(ts.loop), 1, new, ts.loop.every
         self.store.put_loop(spec.swarm, type_name, L)
         self._event(spec.swarm, "loop_updated", {"type": type_name, "mode": new,
                                                  "every": ts.loop.every, "previous_mode": old})

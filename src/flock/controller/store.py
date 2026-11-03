@@ -193,6 +193,14 @@ def _dump_tokens(tokens: dict[str, TokenUsage]) -> str:
     return json.dumps({k: v.model_dump() for k, v in tokens.items()}, sort_keys=True)
 
 
+def _loop_agent(body: str) -> dict[str, Any]:
+    """A loop agent's state; phase `first` (loop.first, removed) reads as `looping`."""
+    st = json.loads(body)
+    if st.get("phase") == "first":
+        st["phase"] = "looping"
+    return st
+
+
 def agent_tokens(row: Row) -> dict[str, TokenUsage]:
     """Total tokens for an agent: earlier incarnations (base) plus the current one (last)."""
     total = _tokens(row["tokens_base"])
@@ -874,11 +882,11 @@ class Store:
     def loop_agents(self, swarm: str, type_name: str) -> dict[str, dict[str, Any]]:
         rows = self._q("SELECT agent, body FROM loop_agents WHERE swarm = ? AND type = ?",
                        [swarm, type_name])
-        return {r["agent"]: json.loads(r["body"]) for r in rows}
+        return {r["agent"]: _loop_agent(r["body"]) for r in rows}
 
     def get_loop_agent(self, agent: str) -> dict[str, Any] | None:
         row = self._one("SELECT body FROM loop_agents WHERE agent = ?", [agent])
-        return json.loads(row["body"]) if row else None
+        return _loop_agent(row["body"]) if row else None
 
     def put_loop_agent(self, agent: str, swarm: str, type_name: str, body: dict[str, Any]) -> None:
         self._x(
