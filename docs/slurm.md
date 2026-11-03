@@ -6,6 +6,37 @@ differs (`controller/slurm.py`). Agent state, the controller's state, the world'
 and the run bundle stay in HF buckets; the shared disk holds only code, the venv or image,
 the secrets file, host files, env files and logs.
 
+## Deploying
+
+One run directory per run. `flock init` prepares it; the jobs and every later command read it.
+
+```sh
+flock init runs/hierarchy --from experiments/hierarchy --secrets secrets.env
+#   logs/ hosts/                 the jobs' logs and host files (controller.host, world.host)
+#   experiment/                  a copy of the folder (links followed): what is launched
+#   run.env (mode 600)           every ${VAR} the spec reads (commented: the spec's default),
+#                                the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
+$EDITOR runs/hierarchy/run.env   # fill what the checks report; then rerun `flock init runs/hierarchy`
+sbatch world.sbatch hierarchy && sbatch controller.sbatch hierarchy   # or `flock launch` on a running controller
+flock --run runs/hierarchy status                                    # or export FLOCK_RUN_DIR=runs/hierarchy
+```
+
+`init` creates only what is missing. It never changes a set `run.env` key or an edited copy;
+it reports how they differ. `--secrets FILE` (mode 600) fills missing keys and prints names
+only. Running it again is the doctor: it exits 1 when a check fails. None needs a controller:
+the spec loads and validates with `run.env`; planned agents (ramp `max`, spawn caps) fit the
+worker slots; the bucket is writable (skipped without an HF token; a note when it already holds
+the swarm's data, which `flock launch` refuses); the tokens are set and the spec's
+`world.token_env` equals `FLOCK_WORLD_TOKEN`; each provider-backed model answers a tool call
+(the launch preflight); the board invite joins (no kickoff posted); `FLOCK_SLURM_VENV` (else
+this Python) imports `flock.worker`; the world passes `python -m flock.world doctor` when it is
+up (`hosts/world.host`).
+
+`--run RUN_DIR` (or `FLOCK_RUN_DIR`) points any command at a run: `run.env` is the first `--env`
+file (an explicit `--env` wins), the controller URL comes from `hosts/controller.host`
+(`host` means port 7860; `host:port` as written), else a local run's `RUN_DIR/.flock/current`,
+and the token from `run.env`. `--run` beats an exported `FLOCK_URL`; `FLOCK_RUN_DIR` loses to it.
+
 ## The launch contract
 
 For each worker slot the controller writes `<launch_dir>/<worker id>-<incarnation>.env`

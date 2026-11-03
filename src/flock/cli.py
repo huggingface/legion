@@ -13,7 +13,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
-from flock import ops
+from flock import ops, rundir
 from flock.client import Client, ClientError, local_run
 from flock.models import SwarmSpec
 from flock.ops import SpecError, check_spec, read_spec, source_header
@@ -33,6 +33,24 @@ class _Group(TyperGroup):
 
 app = typer.Typer(cls=_Group, help="Host coding-harness agent swarms on HF Jobs.",
                   no_args_is_help=True)
+_RUN_ENV_FILES: list[str] = []  # --run / FLOCK_RUN_DIR: the run's run.env, before any --env
+
+
+@app.callback()
+def _main(run: str = typer.Option(
+        None, "--run", metavar="RUN_DIR",
+        help="Run every command against RUN_DIR (`flock init`): its run.env as the first --env "
+             "file, its controller (hosts/controller.host) and token. Also FLOCK_RUN_DIR, which "
+             "an exported FLOCK_URL beats; --run beats FLOCK_URL.")) -> None:
+    run_dir = run or os.environ.get("FLOCK_RUN_DIR")
+    _RUN_ENV_FILES[:] = []
+    if not run_dir:
+        return
+    env, _RUN_ENV_FILES[:] = rundir.run_context(run_dir)
+    if run is not None or not os.environ.get("FLOCK_URL"):
+        if "FLOCK_CURRENT" in env:
+            os.environ.pop("FLOCK_URL", None)
+        os.environ.update(env)
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -188,6 +206,34 @@ def _fail(lines: list[str]) -> None:
 
 
 @app.command()
+def init(
+    run_dir: str = typer.Argument(..., metavar="RUN_DIR"),
+    from_: str = typer.Option(None, "--from", metavar="EXPERIMENT_FOLDER",
+                              help="The experiment folder to copy (needed while RUN_DIR has none)."),
+    secrets: str = typer.Option(None, "--secrets", metavar="FILE",
+                                help="NAME=value file (mode 600) filling run.env's missing keys."),
+) -> None:
+    """Prepare RUN_DIR for `flock launch` (docs/slurm.md "Deploying"): create what is missing
+    (logs/, hosts/, a copy of the experiment folder, run.env with per-run tokens), then check
+    it without a controller. Never overwrites a run.env key or an edited copy. Run it again as
+    the doctor; exit 1 if a check fails."""
+    try:
+        rep = rundir.init(run_dir, from_, secrets_file=secrets)
+    except ValueError as e:
+        _fail([str(e)])
+    for what in rep.created:
+        typer.echo(f"created {what}")
+    for note in rep.notes:
+        typer.echo(f"note: {note}")
+    for c in rep.checks:
+        typer.echo(f"{'ok' if c.ok else 'skip' if c.ok is None else 'FAIL':<5}{c.name}: {c.detail}")
+        for line in c.lines:
+            typer.echo(f"       {line}")
+    if rep.failed:
+        raise typer.Exit(1)
+
+
+@app.command()
 def launch(
     target: str = typer.Argument(..., metavar="FOLDER_OR_SPEC_OR_SWARM"),
     type_: Annotated[list[str] | None, typer.Option(
@@ -224,9 +270,10 @@ def launch(
         return
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
     source = ref_header or source_header(spec_file)  # before any write lands in the folder
-    spec = load_spec(spec_file, env_files or ())
+    env_files = [*_RUN_ENV_FILES, *(env_files or ())]
+    spec = load_spec(spec_file, env_files)
     checked = _checked(spec, spec_file)
-    started = _start_local(spec, spec_file, env_files or ()) if spec.compute.kind == "local" \
+    started = _start_local(spec, spec_file, env_files) if spec.compute.kind == "local" \
         else None
     try:
         try:
@@ -369,7 +416,7 @@ def update(
     spec_file, ref_header = _at_ref(str(path / "spec.yaml" if path.is_dir() else path), ref)
     sources: dict[str, str] = {}
     try:
-        spec = read_spec(spec_file, env_files or (), sources=sources)
+        spec = read_spec(spec_file, [*_RUN_ENV_FILES, *(env_files or ())], sources=sources)
         done = ops.update(Client(), spec, spec_file, sources=sources, preflight=preflight,
                           strict=strict, replicas=replicas, check=check, source=ref_header)
     except SpecError as e:

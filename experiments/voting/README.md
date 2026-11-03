@@ -35,7 +35,7 @@ the rule on their honour: flock and the world do not check it.
 
 As hierarchy, on its own dataset `HuggingFaceSwarms/chatbot-v6` (seeded with
 `../run4/publish_seed.py`; the prompts name it, no placeholders are left), with
-`RUN3_EXPERIMENT=voting`, `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/chatbot-v6`
+`flock init $RUNS/voting --from experiments/voting`, then `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/chatbot-v6`
 in the run's `run.env`, then
 `sbatch world.sbatch voting` and `sbatch controller.sbatch voting`.
 

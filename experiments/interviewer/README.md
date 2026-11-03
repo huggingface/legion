@@ -50,11 +50,10 @@ The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v9`, seeded with
 to it, and `MODEL_INTERVIEWER` (the served model id; may be the same as `MODEL_WORKER`).
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
-`slurm/` scripts, in a new run directory (`runs/interviewer/run.env`, from
-`../run4/slurm/run.env.example`) with:
+`slurm/` scripts, in a run directory made by `flock init $RUNS/interviewer --from experiments/interviewer` (docs/slurm.md
+"Deploying"), with in its `run.env`:
 
 ```sh
-RUN3_EXPERIMENT=interviewer   # controller.sbatch copies experiments/interviewer (links followed)
 CHATBOT_RUN=interviewer       # the swarm name
 MODEL_INTERVIEWER=<served model id>
 ```

@@ -47,11 +47,10 @@ The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v10`, seeded with
 with an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
-`slurm/` scripts, in a new run directory (`runs/levels/run.env`, from
-`../run4/slurm/run.env.example`) with:
+`slurm/` scripts, in a run directory made by `flock init $RUNS/levels --from experiments/levels` (docs/slurm.md
+"Deploying"), with in its `run.env`:
 
 ```sh
-RUN3_EXPERIMENT=levels   # controller.sbatch copies experiments/levels (links followed)
 CHATBOT_RUN=levels       # the swarm name
 ```
 

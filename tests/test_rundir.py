@@ -1,0 +1,303 @@
+"""flock.rundir: `flock init RUN_DIR --from FOLDER` (files, run.env, checks with fakes, no
+network) and `flock --run RUN_DIR` / FLOCK_RUN_DIR."""
+
+from __future__ import annotations
+
+import os
+import stat
+
+import pytest
+import yaml
+from typer.testing import CliRunner
+
+from flock import cli, rundir
+from flock.client import Client
+from flock.models import PreflightReport, PreflightResult
+from flock.ops import read_spec
+from flock.specrender import read_env_file
+
+runner = CliRunner()
+SPEC = {
+    "swarm": "${SWARM:-demo}",
+    "namespace": "ns",
+    "bucket": "hf://buckets/ns/sh",
+    "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"},
+    "types": {"researcher": {
+        "harness": "claude", "model": "claude-opus-5-5", "replicas": 2, "agents_per_worker": 2,
+        "secrets": ["ANTHROPIC_API_KEY"], "system_prompt_file": "prompts/system.md",
+        "env": {"MSGBOARD_URL": "${BOARD_URL:-https://board.invalid}"}}},
+}
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """No Hub token from this machine; the network checks report what they would."""
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+
+def _folder(tmp_path, spec=SPEC):
+    f = tmp_path / "exp"
+    (f / "prompts").mkdir(parents=True)
+    (f / "spec.yaml").write_text(yaml.safe_dump(spec))
+    (f / "prompts" / "system.md").write_text("You research.\n")
+    return f
+
+
+def _by_name(rep):
+    return {c.name: c for c in rep.checks}
+
+
+def test_init_creates_everything_then_changes_nothing(tmp_path):
+    src, run = _folder(tmp_path), tmp_path / "runs" / "r1"
+    rep = rundir.init(run, src, env={})
+    assert (run / "logs").is_dir() and (run / "hosts").is_dir()
+    assert (run / "experiment" / "prompts" / "system.md").read_text() == "You research.\n"
+    env_file = run / "run.env"
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    values = read_env_file(env_file)
+    assert len(values["FLOCK_TOKEN"]) > 30 and values["FLOCK_WORLD_TOKEN"] != values["FLOCK_TOKEN"]
+    assert values["CHATBOT_WORLD_TOKEN"] == values["FLOCK_WORLD_TOKEN"]  # world.token_env
+    text = env_file.read_text()
+    assert "# swarm (default: demo)\n#SWARM=demo\n" in text  # a default stays the spec's
+    assert "#ANTHROPIC_API_KEY=" in text and "#HF_TOKEN=" in text  # secrets named, unset
+    checks = _by_name(rep)
+    assert checks["tokens"].ok and checks["spec"].ok and checks["worker slots"].ok
+    assert checks["bucket"].ok is None and "no HF token" in checks["bucket"].detail
+    assert checks["providers"].ok is None and checks["board"].ok is None
+    assert checks["world"].ok is None and checks["venv"].ok and not rep.failed
+
+    before = env_file.read_text()
+    (run / "experiment" / "prompts" / "system.md").write_text("Edited.\n")
+    env_file.write_text(before.replace("#SWARM=demo", "SWARM=mine"))
+    again = rundir.init(run, src, env={})  # the doctor
+    assert again.created == [] and env_file.read_text() == before.replace("#SWARM=demo", "SWARM=mine")
+    assert (run / "experiment" / "prompts" / "system.md").read_text() == "Edited.\n"
+    assert any("(kept): edited prompts/system.md" in n for n in again.notes)
+    assert _by_name(again)["spec"].detail.startswith("mine:")
+    assert rundir.init(run, env={}).created == []  # --from not needed once copied
+
+
+def test_empty_experiment_folder_is_filled_and_missing_source_refused(tmp_path):
+    src, run = _folder(tmp_path), tmp_path / "r"
+    (run / "experiment").mkdir(parents=True)
+    with pytest.raises(ValueError, match="--from"):
+        rundir.init(run, env={})
+    rundir.init(run, src, env={})
+    assert (run / "experiment" / "spec.yaml").is_file()
+
+
+def test_secrets_fill_without_echo_and_never_overwrite(tmp_path, monkeypatch):
+    src, run = _folder(tmp_path), tmp_path / "r"
+    sec = tmp_path / "secrets.env"
+    sec.write_text("ANTHROPIC_API_KEY=sk-very-secret\nFLOCK_TOKEN=shared-token\nOTHER=x y\n")
+    sec.chmod(0o600)
+    monkeypatch.setattr(rundir, "check_venv", lambda env: rundir.Check("venv", True))
+    r = runner.invoke(cli.app, ["init", str(run), "--from", str(src), "--secrets", str(sec)])
+    values = read_env_file(run / "run.env")
+    assert values["ANTHROPIC_API_KEY"] == "sk-very-secret" and values["FLOCK_TOKEN"] != "shared-token"
+    for secret in ("sk-very-secret", "shared-token", values["FLOCK_TOKEN"],
+                   values["FLOCK_WORLD_TOKEN"]):
+        assert secret not in r.output
+    assert "ANTHROPIC_API_KEY (from --secrets)" in r.output and "not written: OTHER" in r.output
+    assert r.exit_code == 0, r.output
+
+    sec.write_text("ANTHROPIC_API_KEY=sk-other\n")
+    r = runner.invoke(cli.app, ["init", str(run), "--secrets", str(sec)])
+    assert read_env_file(run / "run.env")["ANTHROPIC_API_KEY"] == "sk-very-secret"
+    assert "ANTHROPIC_API_KEY: kept, differs" in r.output and "sk-other" not in r.output
+
+    sec.chmod(0o644)
+    r = runner.invoke(cli.app, ["init", str(run), "--secrets", str(sec)])
+    assert r.exit_code == 1 and "FAIL secrets file" in r.output
+
+
+def test_spec_check_fails_on_an_empty_required_var(tmp_path):
+    t = SPEC["types"]["researcher"]
+    spec = {**SPEC, "types": {"researcher": {**t, "env": {"NOTE": "${NS}"}}}}
+    run = tmp_path / "r"
+    rep = rundir.init(run, _folder(tmp_path, spec), env={})
+    assert not _by_name(rep)["spec"].ok and "NS" in " ".join(_by_name(rep)["spec"].lines)
+    assert rep.failed and "#NS=\n" in (run / "run.env").read_text()
+    (run / "run.env").write_text((run / "run.env").read_text().replace("#NS=", "NS="))
+    assert _by_name(rundir.init(run, env={}))["spec"].detail == "empty, no default: NS"
+    (run / "run.env").write_text((run / "run.env").read_text().replace("NS=", "NS=ns"))
+    assert _by_name(rundir.init(run, env={}))["spec"].ok
+
+
+def _spec(tmp_path, spec=SPEC):
+    run = tmp_path / "r"
+    rundir.init(run, _folder(tmp_path, spec), env={})
+    return read_spec(str(run / "experiment" / "spec.yaml"), [str(run / "run.env")])
+
+
+def test_slots_count_ramp_max_and_spawned_children(tmp_path):
+    t = SPEC["types"]["researcher"]
+    spec = {**SPEC, "types": {
+        "lead": {**t, "replicas": 0, "workers": {"initial": 1},
+                 "replicas_ramp": {"start": 1, "add": 1, "every": "1m", "max": 3}},
+        "helper": {**t, "replicas": 0, "workers": {"initial": 0, "max_extra": 2}}},
+        "spawn": {"lead": {"types": {"helper": 2}}}}
+    c = rundir.check_slots(_spec(tmp_path, spec))
+    assert c.ok is False and sorted(c.lines) == [
+        "OVER: type helper: 6 agents planned, 2 workers x 2 = 4 slots",
+        "OVER: type lead: 3 agents planned, 1 workers x 2 = 2 slots"]
+
+
+def test_tokens_must_match(tmp_path):
+    data = {"world": {"token_env": "CHATBOT_WORLD_TOKEN"}}
+    ok = {"FLOCK_TOKEN": "a", "FLOCK_WORLD_TOKEN": "w", "CHATBOT_WORLD_TOKEN": "w"}
+    assert rundir.check_tokens(data, ok).ok
+    assert not rundir.check_tokens(data, {**ok, "CHATBOT_WORLD_TOKEN": "x"}).ok
+    assert "FLOCK_TOKEN" in rundir.check_tokens(data, {**ok, "FLOCK_TOKEN": ""}).detail
+
+
+class FakeBucket:
+    def __init__(self, found=None, fail=False):
+        self.found, self.fail, self.ops = found, fail, []
+
+    def upload(self, files):
+        if self.fail:
+            raise PermissionError("403 read-only token")
+        self.ops += [("up", r) for _, r in files]
+
+    def delete(self, paths):
+        self.ops += [("del", p) for p in paths]
+
+    def first(self, prefix):
+        return self.found and prefix + self.found
+
+
+def test_bucket_writable_reused_and_read_only(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    b = FakeBucket()
+    monkeypatch.setattr(rundir, "bucket_store", lambda url, token: b)
+    rep = rundir.InitReport()
+    assert rundir.check_bucket(spec, {"HF_TOKEN": "t"}, rep).ok and rep.notes == []
+    assert b.ops == [("up", rundir.PROBE), ("del", rundir.PROBE)]
+    b.found = "a-0001/base.tar"
+    assert rundir.check_bucket(spec, {"HF_TOKEN": "t"}, rep).ok
+    assert "already holds data for swarm demo (demo/a-0001/base.tar)" in rep.notes[0]
+    b.fail = True
+    c = rundir.check_bucket(spec, {"HF_TOKEN": "t"}, rep)
+    assert c.ok is False and "403" in c.detail
+    assert rundir.check_bucket(spec, {}, rep).ok is None
+
+
+def _result(ok, unverified=False):
+    return PreflightResult(model="p:m", provider="p", types=["researcher"], api="responses",
+                           ok=ok, unverified=unverified, latency_ms=5,
+                           error=None if ok else "HTTP 500")
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_providers_reuse_the_preflight_probe(tmp_path, monkeypatch, ok):
+    spec = _spec(tmp_path)
+    monkeypatch.setattr("flock.ops.provider_backed", lambda s: True)
+
+    async def fake(s, secrets, client):
+        assert secrets["K"] == "v"
+        return PreflightReport(swarm=s.swarm, ok=ok, results=[_result(ok)])
+
+    monkeypatch.setattr("flock.controller.preflight.run_preflight", fake)
+    c = rundir.check_providers(spec, {"K": "v"})
+    assert c.ok is ok and c.lines == (["p:m: ok 5 ms"] if ok else ["p:m: FAIL 5 ms (HTTP 500)"])
+
+
+def test_board_join_dry_run(tmp_path, monkeypatch):
+    from flock.controller.comms import CommsError
+
+    spec = _spec(tmp_path, {**SPEC, "comms": {"kind": "msgboard", "url": "https://b.invalid",
+                                              "invite_env": "INV", "channel": "general"}})
+    seen = {}
+
+    def fake(s, previous, secrets, dry_run):
+        seen["dry_run"] = dry_run
+        if not secrets.get("INV"):
+            raise CommsError("comms.invite_env: the secret INV is not set")
+        s.comms.channel_id = 7
+
+    monkeypatch.setattr("flock.controller.comms.resolve", fake)
+    c = rundir.check_board(spec, {"INV": "code"})
+    assert c.ok and "demo-host joined #general (id 7)" == c.detail and seen["dry_run"]
+    assert spec.comms.channel_id is None  # the spec itself untouched
+    assert rundir.check_board(spec, {}).ok is False
+
+
+def test_venv_must_import_the_worker(tmp_path):
+    assert rundir.check_venv({}).ok
+    c = rundir.check_venv({"FLOCK_SLURM_VENV": str(tmp_path / "nope")})
+    assert c.ok is False and "nope/bin/python" in c.detail
+
+
+def test_world_conformance_when_up(tmp_path, monkeypatch):
+    import httpx
+
+    spec = _spec(tmp_path)
+    run = tmp_path / "r"
+    assert "no " in rundir.check_world(spec, {}, run).detail  # no hosts/world.host yet
+    (run / "hosts" / "world.host").write_text("node7\n")
+    calls = []
+
+    def down(url, timeout):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", down)
+    assert rundir.check_world(spec, {}, run).ok is None
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: calls.append(url))
+    for failed in (False, True):
+        monkeypatch.setattr("flock.world.doctor.doctor",
+                            lambda url, token, f=failed: (calls.append((url, token)) or ["manifest ok"], f))
+        c = rundir.check_world(spec, {"CHATBOT_WORLD_TOKEN": "w"}, run)
+        assert c.ok is (not failed) and c.lines == ["manifest ok"]
+    assert calls[:2] == ["http://node7:7860/healthz", ("http://node7:7860", "w")]
+
+
+def test_run_dir_resolution(tmp_path, monkeypatch):
+    run = tmp_path / "r"
+    (run / "hosts").mkdir(parents=True)
+    (run / "run.env").write_text("FLOCK_TOKEN=run-tok\n")
+    assert rundir.run_context(run) == ({"FLOCK_TOKEN": "run-tok"}, [str(run / "run.env")])
+    (run / ".flock").mkdir()
+    (run / ".flock" / "current").write_text("{}")
+    assert rundir.run_context(run)[0]["FLOCK_CURRENT"] == str(run / ".flock" / "current")
+    (run / "hosts" / "controller.host").write_text("node3\n")
+    assert rundir.run_context(run)[0]["FLOCK_URL"] == "http://node3:7860"
+    (run / "hosts" / "controller.host").write_text("node3:7999\n")
+    assert rundir.run_context(run)[0]["FLOCK_URL"] == "http://node3:7999"
+
+    seen = []
+    monkeypatch.setattr(Client, "swarms", lambda self: seen.append(
+        (os.environ.get("FLOCK_URL"), os.environ.get("FLOCK_TOKEN"))) or [])
+    monkeypatch.setenv("FLOCK_URL", "http://shell:1")  # restored by monkeypatch at teardown
+    monkeypatch.setenv("FLOCK_TOKEN", "shell-tok")
+    monkeypatch.setenv("FLOCK_RUN_DIR", str(run))
+    assert runner.invoke(cli.app, ["status"]).exit_code == 0  # FLOCK_RUN_DIR loses to FLOCK_URL
+    assert runner.invoke(cli.app, ["--run", str(run), "status"]).exit_code == 0  # --run wins
+    monkeypatch.delenv("FLOCK_URL")
+    assert runner.invoke(cli.app, ["status"]).exit_code == 0
+    assert seen == [("http://shell:1", "shell-tok"), ("http://node3:7999", "run-tok"),
+                    ("http://node3:7999", "run-tok")]
+
+
+def test_run_env_is_the_first_env_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCK_TOKEN", "t")  # --run sets it from run.env: restored at teardown
+    run = tmp_path / "r"
+    rundir.init(run, _folder(tmp_path), env={})
+    with (run / "run.env").open("a") as f:
+        f.write("SWARM=from-run\nBOARD_URL=https://run.invalid\n")
+    over = tmp_path / "over.env"
+    over.write_text("SWARM=from-flag\n")
+    got = {}
+
+    def fake_update(api, spec, spec_file, **kw):
+        got["spec"] = spec
+        return {"warnings": [], "probed": [], "kept": [], "diff": [], "deletes": [],
+                "world_tools": None, "applied": False}
+
+    monkeypatch.setattr("flock.ops.update", fake_update)
+    r = runner.invoke(cli.app, ["--run", str(run), "update", str(run / "experiment"),
+                                "--env", str(over)])
+    assert r.exit_code == 0, r.output
+    assert got["spec"].swarm == "from-flag"  # an explicit --env still wins
+    assert got["spec"].types["researcher"].env["MSGBOARD_URL"] == "https://run.invalid"
