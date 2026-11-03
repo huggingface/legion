@@ -68,23 +68,8 @@ types:
     tool_output_chars: 32000
     context_tokens: 64000                      # compaction threshold (the server needs >= 64k)
     loop: &loop
-      first: |
-        You just joined a running effort (round 0). Others have been building for a while. ONE tool call per reply:
-        1. `search` the channel for what is going on: the threads ("[" tags), "promoted", "INTERVIEW". Then `best_status` for the current best.
-        2. Pick ONE: an approach that needs hands (join its thread, `post` "taking: <the piece>") or a new angle nobody covers (open a thread: thread "new", "[<tag>] <the idea>: agents/<your name>/...").
-        3. If best exists and you have no bot yet: copy_file("best/bot", "agents/<your name>/bot") (or best/bot.py), then run_bot it with 6 lines that test your piece.
-        4. `done` with "joined: <thread> <your plan>".
-        In the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].
-        Probes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe; paste the bot's failing reply exactly as `run_bot` returned it.
-        The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.
-        Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board: insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once with "# notes" and the line.
-        The board is a team chat. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, "I'm taking [tag], anyone already on it?". Post in your approach's thread; a new root only for a genuinely new approach, titled [tag] what it is. Reply to people who talk to you.
-        When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.
-        Stuck on a probe? Ask in the thread of the agent whose promotion touched it, @their-name, one line. If someone @mentions you, answer them in your next round.
-        Communicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.
       prompt_file: prompts/round.md
       every: turn_end                          # continuous: the next round when a turn ends
-      stagger: 2s
       on: [comms.mention, comms.thread]
       wake: {min_gap: 10s, max: 20, window: 30m}
       notices: true                            # one line after each round prompt: mentions and thread replies since the last round (controller only)
@@ -109,24 +94,6 @@ types:
     loop:
       <<: *loop
       # KEEP IN SYNC: the Pi note above + exactly agent's `first` (tests/test_run3_experiment.py)
-      first: |
-        HOW YOU WORK (Pi harness): every tool named in these prompts (search, read, post, best_status, read_file, edit_file, run_bot, add_probe, promote_best, spawn_interviewer, ...) is a shell command: `flock-tool <name> --json '<args as JSON>'` (the Tools section of AGENTS.md lists each one with an example; `flock-tool --list` shows the parameters). Example: flock-tool post --json '{"text": "taking: greetings", "thread": "new"}'.
-        - Your files live in the shared world, not on this machine: read, write and run them only with flock-tool (read_file, edit_file, write_file, run_bot). Never use your own read/edit/write tools on the world's files.
-        - "ONE tool call per reply" means one flock-tool command per step. Everything else (the board is a team chat, status lines in notes.md, read your thread in round 1 and every multiple of 3, ...) holds as written.
-        - There is no `done` command: to end a round (where the prompts say `done`), reply in plain text with the one line the prompt asks for. Plain text ends your turn, so do not stop before that.
-        You just joined a running effort (round 0). Others have been building for a while. ONE tool call per reply:
-        1. `search` the channel for what is going on: the threads ("[" tags), "promoted", "INTERVIEW". Then `best_status` for the current best.
-        2. Pick ONE: an approach that needs hands (join its thread, `post` "taking: <the piece>") or a new angle nobody covers (open a thread: thread "new", "[<tag>] <the idea>: agents/<your name>/...").
-        3. If best exists and you have no bot yet: copy_file("best/bot", "agents/<your name>/bot") (or best/bot.py), then run_bot it with 6 lines that test your piece.
-        4. `done` with "joined: <thread> <your plan>".
-        In the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].
-        Probes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe; paste the bot's failing reply exactly as `run_bot` returned it.
-        The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.
-        Status lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board: insert_after("agents/<your name>/notes.md", "# notes", "<line>"); no file yet? write_file it once with "# notes" and the line.
-        The board is a team chat. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, "I'm taking [tag], anyone already on it?". Post in your approach's thread; a new root only for a genuinely new approach, titled [tag] what it is. Reply to people who talk to you.
-        When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.
-        Stuck on a probe? Ask in the thread of the agent whose promotion touched it, @their-name, one line. If someone @mentions you, answer them in your next round.
-        Communicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.
   interviewer:                                 # spawned by agents (spawn_interviewer), never replicas
     harness: llm
     model: interviewer
