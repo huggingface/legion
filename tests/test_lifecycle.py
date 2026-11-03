@@ -113,7 +113,7 @@ def test_stop_release_drains_every_worker_waits_and_reports_unsynced(
         clock.advance(120)
         tick()
 
-    monkeypatch.setattr(cli, "_sleep", workers_drain_and_exit)
+    monkeypatch.setattr("flock.ops._sleep", workers_drain_and_exit)
     r = runner.invoke(cli.app, ["stop", "demo", "--release", "--reason", "night"])
     assert r.exit_code == 1, r.output
     assert "NOT synced: researcher-0001: drain sync failed: OSError: 503" in r.output

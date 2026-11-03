@@ -9,16 +9,21 @@ refusals raise SpecError, failed controller calls raise ClientError.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
+import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
-from flock.client import Client, ClientError
+from flock.client import Client, ClientError, local_run
 from flock.models import SwarmSpec, comms_tools, loop_refusals
 from flock.specrender import render, source_of
 
@@ -205,7 +210,8 @@ def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
 def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, str] | None = None,
            types: list[str] | None = None, agents: list[str] | None = None, adopt: bool = False,
            checkpoint: str | None = None, no_checkpoint: bool = False,
-           preflight: bool | None = None, strict: bool = False) -> dict[str, Any]:
+           preflight: bool | None = None, strict: bool = False,
+           checked: tuple[Any, list[str]] | None = None) -> dict[str, Any]:
     """`flock launch` (docs/live.md "Lifecycle") on a spec read with `read_spec`. Missing on
     the controller: created (with `adopt`, first restored from a controller checkpoint, its
     own or `checkpoint`); refused when its bucket already holds agents of that name, unless
@@ -215,9 +221,19 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, st
     "warnings"; "adopted" (the adopt reply) or "adopt_skipped" (why, with `no_checkpoint`);
     "resumed" (the holds left) or "preflight" (the report) / "unverified" (models not probed),
     "tools" (the upload reply, plus "bytes") and "status" (the new swarm's). Refusals raise
-    SpecError with these keys so far in `done`."""
-    bundle, warnings = check_spec(spec, spec_file)
+    SpecError with these keys so far in `done`, as do failed controller calls. `checked`:
+    `check_spec`'s result when the caller already has it."""
+    bundle, warnings = checked or check_spec(spec, spec_file)
     done: dict[str, Any] = {"warnings": warnings}
+    try:
+        return _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt,
+                       checkpoint, no_checkpoint, preflight, strict)
+    except ClientError as e:
+        raise SpecError([str(e)], done) from None
+
+
+def _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt, checkpoint,
+            no_checkpoint, preflight, strict) -> dict[str, Any]:
 
     def refuse(*lines: str):
         raise SpecError(list(lines), done)
@@ -275,11 +291,12 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, st
 
 def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, str] | None = None,
            preflight: bool | None = None, strict: bool = False, replicas: str = "keep",
-           check: bool = False, source: dict[str, str] | None = None) -> list[str]:
+           check: bool = False, source: dict[str, str] | None = None) -> dict[str, Any]:
     """`flock update`: apply a spec read with `read_spec` (and its folder's tools) to the
-    running swarm (docs/live.md). Returns the
-    lines to show (warnings, then what changed, or "no changes"); raises SpecError with the
-    refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
+    running swarm (docs/live.md). Returns {"warnings", "probed" (preflight lines, with
+    `check`), "kept" (live replica counts kept), "diff" (what changed), "deletes" (what the
+    controller would drop, with `check`), "world_tools" (a line or None), "applied"}; raises
+    SpecError with the refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
     by default only when the spec names a provider-backed model the running one does not.
     `replicas="keep"` keeps the live counts of existing types; `check` runs the controller's
     validation (dry run), stores nothing and names where each changed value came from.
@@ -331,17 +348,80 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     if check:  # `path: old -> new (spec.yaml:41 | run.env WORKER_MEM | default)`
         lines = [f"{x} ({source_of(sources or {}, x.split(':', 1)[0])})" if ": " in x
                  and not x.startswith(("tools:", "prompts changed:")) else x for x in lines]
+    out: dict[str, Any] = {"warnings": warnings, "probed": probed if check else [], "kept": kept,
+                           "diff": lines, "deletes": [], "world_tools": None, "applied": False}
     if not lines and not check:
-        return [*warnings, *kept, "no changes"]
+        return out
     try:
-        out = api.update(spec, check=check, source=source or source_header(spec_file))
+        reply = api.update(spec, check=check, source=source or source_header(spec_file))
     except ClientError as e:
         raise SpecError([f"refused: {e.detail}"]) from None
     if check:  # the stored spec is untouched: the new manifest is in the reply
-        new = SwarmSpec.model_validate(out["spec"])
-        lines += out.get("deletes", [])
+        new = SwarmSpec.model_validate(reply["spec"])
+        out["deletes"] = reply.get("deletes", [])
     else:
         new = SwarmSpec.model_validate(api.swarm(spec.swarm)["spec"])
-    wt = world_tool_changes(old, new)
-    return [*warnings, *(probed if check else []), *kept, *lines, *([wt] if wt else []),
-            *(["check ok: nothing was applied"] if check else [])]
+    out["world_tools"], out["applied"] = world_tool_changes(old, new), not check
+    return out
+
+
+RELEASE_POLL = 5.0  # s between worker checks while `release_wait` waits
+_sleep = time.sleep  # tests replace it
+
+
+def release_wait(api: Client, swarm: str, *,
+                 progress: Callable[[int], None] | None = None) -> dict[str, str]:
+    """After `api.stop(swarm, release=True)`: wait until no worker of the swarm runs
+    (`progress` gets the count still running at each check), then return the agents whose
+    final sync failed (name -> error; empty when every agent synced)."""
+    while live := [w for w in api.workers(swarm) if w["job_id"]]:
+        if progress is not None:
+            progress(len(live))
+        _sleep(RELEASE_POLL)
+    return (api.swarm(swarm)["status"].get("released") or {}).get("unsynced") or {}
+
+
+LOCAL_START_S = 120.0  # s `start_local` waits for a local controller to come up
+LOCAL_DIR = Path(".flock")  # the local run's data dir and launch.log, in the working directory
+
+
+def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
+    """`compute: local`: start this machine's controller and workers detached
+    (flock.controller.localrun, output in .flock/launch.log) unless a live one in this directory
+    already serves the swarm; wait for its `.flock/current`. Returns the run started (its
+    `.flock/current` record), or None; SpecError when another swarm's local run is up or the
+    controller does not start (the log's tail in the lines)."""
+    if os.environ.get("FLOCK_URL"):
+        return None  # pointed at a controller explicitly
+    if (run := local_run()) is not None:
+        if run.get("swarm") != spec.swarm:
+            raise SpecError([(f"a local run of {run.get('swarm')} is up in this directory: "
+                              f"`flock stop {run.get('swarm')} --release` first")])
+        return None
+    LOCAL_DIR.mkdir(exist_ok=True)
+    cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
+           "--data-dir", str(LOCAL_DIR), *(a for f in env_files for a in ("--env", f))]
+    with (LOCAL_DIR / "launch.log").open("w") as out:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                                start_new_session=True)
+    end = time.monotonic() + LOCAL_START_S
+    while time.monotonic() < end:
+        if (run := local_run()) is not None and run.get("pid") == proc.pid:
+            return run
+        if proc.poll() is not None:
+            break
+        _sleep(0.2)
+    else:
+        proc.terminate()
+    log = (LOCAL_DIR / "launch.log").read_text(errors="replace").strip().splitlines()[-20:]
+    raise SpecError([*log, "the local controller did not start"])
+
+
+def end_local(run: dict) -> None:
+    """SIGTERM a background local run and wait (up to LOCAL_START_S) until it is gone: it
+    drains what is left, writes the run bundle (<run_dir>/run.json) and exits (docs/local.md)."""
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(run["pid"], signal.SIGTERM)
+    end = time.monotonic() + LOCAL_START_S
+    while local_run() is not None and time.monotonic() < end:
+        _sleep(0.2)

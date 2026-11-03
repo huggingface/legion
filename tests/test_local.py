@@ -466,12 +466,12 @@ def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
     """Ctrl-C during the preflight: the background controller `launch` started is ended."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(local_spec().model_dump(mode="json")))
-    run = {"pid": 1, "run_dir": "x"}
+    run = {"pid": 1, "run_dir": "x", "url": "http://127.0.0.1:1"}
     ended = []
-    monkeypatch.setattr(cli, "_start_local", lambda *a: run)
-    monkeypatch.setattr(cli, "_end_local", ended.append)
+    monkeypatch.setattr("flock.ops.start_local", lambda *a: run)
+    monkeypatch.setattr("flock.ops.end_local", ended.append)
 
-    def interrupted(*a):
+    def interrupted(*a, **k):
         raise KeyboardInterrupt
 
     monkeypatch.setattr("flock.ops.launch", interrupted)

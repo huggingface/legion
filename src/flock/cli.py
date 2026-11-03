@@ -3,13 +3,9 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
-import signal
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -37,7 +33,6 @@ class _Group(TyperGroup):
 
 app = typer.Typer(cls=_Group, help="Host coding-harness agent swarms on HF Jobs.",
                   no_args_is_help=True)
-_sleep = time.sleep  # tests replace it
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -129,14 +124,14 @@ def _warn_unverified(models: list[str], why: str) -> None:
 
 
 def _checked(spec: SwarmSpec, spec_file: str):
-    """`check_spec`: its warnings on stderr; exit 1 with the refusal. Returns the tools bundle."""
+    """`check_spec`: its warnings on stderr; exit 1 with the refusal. Returns its result."""
     try:
-        bundle, warnings = check_spec(spec, spec_file)
+        checked = check_spec(spec, spec_file)
     except SpecError as e:
         _fail([*e.done.get("warnings", []), *e.lines])
-    for line in warnings:
+    for line in checked[1]:
         typer.echo(line, err=True)
-    return bundle
+    return checked
 
 
 def _print_preflight(rep: dict, strict: bool) -> None:
@@ -230,14 +225,14 @@ def launch(
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
     source = ref_header or source_header(spec_file)  # before any write lands in the folder
     spec = load_spec(spec_file, env_files or ())
-    _checked(spec, spec_file)
+    checked = _checked(spec, spec_file)
     started = _start_local(spec, spec_file, env_files or ()) if spec.compute.kind == "local" \
         else None
     try:
         try:
             done = ops.launch(Client(), spec, spec_file, source=source, types=type_, agents=agent,
                               adopt=adopt, checkpoint=checkpoint, no_checkpoint=no_checkpoint,
-                              preflight=preflight, strict=strict)
+                              preflight=preflight, strict=strict, checked=checked)
         except SpecError as e:
             _show_launch(spec.swarm, e.done, strict)
             _fail(e.lines)
@@ -266,50 +261,19 @@ def _show_launch(swarm: str, done: dict, strict: bool) -> None:
         _print_status(done["status"])
 
 
-LOCAL_START_S = 120.0  # s `launch` waits for a local controller to come up
-
-
 def _start_local(spec: SwarmSpec, spec_file: str, env_files) -> dict | None:
-    """`compute: local`: start this machine's controller and workers detached
-    (flock.controller.localrun, output in .flock/launch.log) unless a live one in this directory
-    already serves the swarm; wait for its `.flock/current`. Returns the run started, or None."""
-    if os.environ.get("FLOCK_URL"):
-        return None  # pointed at a controller explicitly
-    if (run := local_run()) is not None:
-        if run.get("swarm") != spec.swarm:
-            _fail([(f"a local run of {run.get('swarm')} is up in this directory: "
-                    f"`flock stop {run.get('swarm')} --release` first")])
-        return None
-    data_dir = Path(".flock")
-    data_dir.mkdir(exist_ok=True)
-    cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
-           "--data-dir", str(data_dir), *(a for f in env_files for a in ("--env", f))]
-    with (data_dir / "launch.log").open("w") as out:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                                start_new_session=True)
-    end = time.monotonic() + LOCAL_START_S
-    while time.monotonic() < end:
-        if (run := local_run()) is not None and run.get("pid") == proc.pid:
-            typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {data_dir}/launch.log)")
-            return run
-        if proc.poll() is not None:
-            break
-        _sleep(0.2)
-    else:
-        proc.terminate()
-    log = (data_dir / "launch.log").read_text(errors="replace").strip().splitlines()[-20:]
-    _fail([*log, "the local controller did not start"])
-    return None
+    """`ops.start_local`, saying where the run is; exit 1 when it cannot start."""
+    try:
+        run = ops.start_local(spec, spec_file, env_files)
+    except SpecError as e:
+        _fail(e.lines)
+    if run is not None:
+        typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {ops.LOCAL_DIR}/launch.log)")
+    return run
 
 
 def _end_local(run: dict) -> None:
-    """SIGTERM the background local run: it drains what is left, writes the run bundle and
-    exits (docs/local.md)."""
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(run["pid"], signal.SIGTERM)
-    end = time.monotonic() + LOCAL_START_S
-    while local_run() is not None and time.monotonic() < end:
-        _sleep(0.2)
+    ops.end_local(run)
     typer.echo(f"local run ended; bundle: {run['run_dir']}/run.json")
 
 
@@ -322,9 +286,6 @@ def _show_held(r: dict) -> None:
     h = r["held"]
     held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
     typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
-
-
-RELEASE_POLL = 5.0  # s between worker checks while `stop --release` waits
 
 
 @app.command()
@@ -377,10 +338,8 @@ def stop(
         return
     typer.echo("releasing: running turns finish, every agent syncs, workers exit "
                "(Ctrl-C stops waiting, not the release)")
-    while live := [w for w in api.workers(swarm) if w["job_id"]]:
-        typer.echo(f"  {len(live)} workers still running")
-        _sleep(RELEASE_POLL)
-    unsynced = (api.swarm(swarm)["status"].get("released") or {}).get("unsynced")
+    unsynced = ops.release_wait(api, swarm, progress=lambda n: typer.echo(
+        f"  {n} workers still running"))
     if unsynced:
         _fail([*(f"NOT synced: {n}: {e}" for n, e in sorted(unsynced.items())),
                (f"released, but {len(unsynced)} agents' final sync failed: their bucket copies "
@@ -411,14 +370,24 @@ def update(
     sources: dict[str, str] = {}
     try:
         spec = read_spec(spec_file, env_files or (), sources=sources)
-        lines = ops.update(Client(), spec, spec_file, sources=sources, preflight=preflight,
-                           strict=strict, replicas=replicas, check=check, source=ref_header)
+        done = ops.update(Client(), spec, spec_file, sources=sources, preflight=preflight,
+                          strict=strict, replicas=replicas, check=check, source=ref_header)
     except SpecError as e:
         for line in e.lines:
             typer.echo(line, err=True)
         raise typer.Exit(1) from None
-    for line in lines:
+    for line in update_lines(done, check):
         typer.echo(line, err=line.startswith("warning:"))
+
+
+def update_lines(done: dict, check: bool = False) -> list[str]:
+    """`ops.update`'s result as `flock update` prints it: warnings, then what changed (or
+    "no changes")."""
+    if not done["diff"] and not check:
+        return [*done["warnings"], *done["kept"], "no changes"]
+    wt = done["world_tools"]
+    return [*done["warnings"], *done["probed"], *done["kept"], *done["diff"], *done["deletes"],
+            *([wt] if wt else []), *(["check ok: nothing was applied"] if check else [])]
 
 
 @app.command()

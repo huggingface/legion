@@ -679,7 +679,7 @@ def main(
     if spec.compute.kind != "local":
         typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}, not `local`", err=True)
         raise typer.Exit(1)
-    bundle = _checked(spec, spec_file)
+    bundle, _ = _checked(spec, spec_file)
     seconds, idle = None, False
     if until == "idle":
         idle = True
