@@ -49,7 +49,7 @@ def _main(ctx: typer.Context, run: str = typer.Option(
         help="Run every command against RUN_DIR (`flock init`): its cluster.env and run.env as "
              "the first --env files, its controller (hosts/controller.host) and token. Also FLOCK_RUN_DIR, which "
              "an exported FLOCK_URL beats; --run beats FLOCK_URL.")) -> None:
-    _API[:] = [] if ctx.invoked_subcommand == "init" else [
+    _API[:] = [] if ctx.invoked_subcommand in ("init", "world") else [
         Client.for_run(run, need_host=ctx.invoked_subcommand != "launch")]
 
 
