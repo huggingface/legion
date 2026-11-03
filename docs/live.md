@@ -117,16 +117,32 @@ The ramp adds `ramp_step`.
 types:
   agent:
     replicas: 0
-    replicas_ramp: {start: 20, add: 20, every: 10m, max: 300}
+    replicas_ramp:
+      start: 20                       # step 0, on the first pass that sees the ramp
+      phases:                         # or one phase as `add: 20, every: 10m`
+        - {every: 5m, add: 20, until: 100}
+        - {every: 10m, add: 20}       # until: max
+      max: 300
+      stagger: 10s                    # the start raise adds one agent every 10 s (default)
+      hold_if: {waiting: 1, request_s: 15, above: 100}
 ```
 
-The reconciler raises the type's replicas to `start` on the first pass that sees the ramp.
-It then adds `add` every `every`, up to `max`. Replicas change only when a new step is due,
-and never go down. An operator's `flock scale` between steps, up or down, stays until the
-next step asks for more. Each raise rewrites the stored spec and writes `ramp_step {type,
-from, replicas, step, max}`. The start time and the last step are stored, so a controller
-restart keeps the schedule. `flock update` keeps the live replicas by default. This replaces
-`experiments/run4/waves.py run` (fixed schedule only; there is no load guard).
+The reconciler raises the type's replicas along the schedule: `start`, then each phase adds
+`add` every `every` until its `until`; the next phase starts where it stopped. Replicas change
+only when a new step is due, and never go down. An operator's `flock scale` between steps, up
+or down, stays until the next step asks for more. A lowered `max` caps later raises; it never
+deletes agents. `stagger` spaces the agents of the `start` raise (a phase's own `stagger`,
+default 0, those of its steps). Each step writes `ramp_step {type, from, replicas, step, max}`.
+The start time, the last step and a staggered raise in progress are stored (`ramp:<type>`), so
+a controller restart keeps the schedule. While the type is held (`flock pause`), the clock
+stops: a resume does not jump the missed steps.
+
+`hold_if` is the load guard: a step that takes the swarm's replicas above `above` waits while
+any vLLM server of a provider with `metrics: true` had `waiting` or more requests queued in
+every health sample of the last 2 minutes, or needs more than `request_s` seconds per request
+(running requests / completions per second), or its metrics are missing or reset. It asks
+again every 2 minutes and writes `ramp_held {type, want, holds, reason}`; from the third hold
+in a row the event carries a `warning`. `flock update` keeps the live replicas by default.
 
 ## Per-type concurrency (`max_working`)
 

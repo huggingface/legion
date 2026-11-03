@@ -60,22 +60,25 @@ TOKEN_FIELDS = (("input", "input"), ("output", "output"), ("cache_read", "cacheR
 DOWN_AFTER = 2  # consecutive failed manifest probes before `world_down`
 DOWN_PAUSE_S = 1800.0  # world down this long: pause the types that use it (FLOCK_WORLD_DOWN_PAUSE_S)
 VLLM_METRICS = {"num_requests_waiting": "waiting", "num_requests_running": "running",
-                "gpu_cache_usage_perc": "kv", "kv_cache_usage_perc": "kv"}  # vLLM v0 / v1 names
+                "gpu_cache_usage_perc": "kv", "kv_cache_usage_perc": "kv",
+                "request_success_total": "completed"}  # vLLM v0 / v1 names
+VLLM_KEEP_S = 120.0  # per-server samples kept for the ramp's hold_if (reconcile.vllm_busy)
 
 
-_PROM = re.compile(r"^([A-Za-z_:][\w:]*)(?:\{[^}]*\})?\s+(\S+)")
+_PROM = re.compile(r"^([A-Za-z_:][\w:]*)(\{[^}]*\})?\s+(\S+)")
 
 
 def parse_vllm(text: str) -> dict[str, float]:
-    """`waiting`, `running` (summed over label sets) and `kv` (max) from vLLM's /metrics."""
+    """`waiting`, `running`, `completed` (summed over label sets; aborted requests are not
+    completed) and `kv` (max) from vLLM's /metrics."""
     out: dict[str, float] = {}
     for line in text.splitlines():
         m = _PROM.match(line)
         key = VLLM_METRICS.get(m.group(1).rsplit(":", 1)[-1]) if m else None
-        if key is None:
+        if key is None or (key == "completed" and 'finished_reason="abort"' in (m.group(2) or "")):
             continue
         try:
-            v = float(m.group(2))
+            v = float(m.group(3))
         except ValueError:
             continue
         out[key] = max(out.get(key, 0.0), v) if key == "kv" else out.get(key, 0.0) + v
@@ -614,23 +617,36 @@ class Health:
                                  auto=True)
 
     async def _probe_providers(self, http: httpx.AsyncClient, spec: SwarmSpec) -> None:
+        """Summed queues per provider for the snapshot, and per server the last 2 minutes of
+        `[ts, waiting, running, completed]` in the store (`vllm`) for the ramp's hold_if; a
+        failed or incomplete scrape empties that server's samples (the ramp then holds)."""
         out: dict[str, dict[str, float]] = {}
+        old = self.store.get_control(spec.swarm, "vllm") or {}
+        servers: dict[str, list[list[float]]] = {}
+        now = time.time()
         for name, p in spec.providers.items():
             if not p.metrics:
                 continue
             q: dict[str, float] = {}
             for base in p.base_urls or ([p.base_url] if p.base_url else []):
                 root = base.rstrip("/").removesuffix("/v1")
+                servers[root] = []
                 try:
                     r = await http.get(f"{root}/metrics")
                     r.raise_for_status()
                 except httpx.HTTPError as e:
                     log.debug("provider %s metrics at %s: %s", name, root, e)
                     continue
-                for k, v in parse_vllm(r.text).items():
+                m = parse_vllm(r.text)
+                for k, v in m.items():
                     q[k] = max(q.get(k, 0.0), v) if k == "kv" else q.get(k, 0.0) + v
+                if "waiting" in m and "running" in m:
+                    servers[root] = [x for x in old.get(root, []) if now - x[0] <= VLLM_KEEP_S] + [
+                        [now, m["waiting"], m["running"], m.get("completed", 0.0)]]
             out[name] = q
         self.providers[spec.swarm] = out
+        if servers or old:
+            self.store.put_control(spec.swarm, "vllm", servers)
 
     def _event(self, swarm: str, now: float, kind: str, data: dict[str, Any]) -> None:
         log.warning("%s: %s %s", swarm, kind, data)

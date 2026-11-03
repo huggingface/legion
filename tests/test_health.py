@@ -79,6 +79,11 @@ async def test_probe_world_metrics_slurm_and_vllm(store):
     assert w["metrics"] == {"loop_lag_s": 0.01, "world": {"open_prs": 4}}
     assert set(world.seen_tokens) == {"s3cret"}
     assert h.providers["demo"] == {"v": {"waiting": 6.0, "running": 10.0, "kv": 0.42}}
+    vllm = store.get_control("demo", "vllm")  # per server, for the ramp's hold_if
+    assert {k: [x[1:] for x in v] for k, v in vllm.items()} == {
+        "http://g1": [[3.0, 5.0, 0.0]], "http://g2": [[3.0, 5.0, 0.0]]}
+    await h.probe(T)
+    assert [len(v) for v in store.get_control("demo", "vllm").values()] == [2, 2]
 
 
 async def test_world_down_after_two_failed_probes_then_up(store):
