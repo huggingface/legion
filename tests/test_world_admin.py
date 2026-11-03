@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli
 from flock.controller.api import create_app as controller_app
 from flock.models import SwarmSpec
 from flock.world import Admin, World, server, tool
@@ -295,7 +294,7 @@ def _swarm(world_client, store, clock):
 def test_controller_proxies_the_admin_api_and_records_events(store, clock, monkeypatch):
     world = Knobbed()
     app, spec = _swarm(TestClient(create_app(world, SECRET)), store, clock)
-    monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
     monkeypatch.setenv("USER", "carol")
     run = CliRunner()
     c = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})

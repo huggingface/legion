@@ -83,7 +83,7 @@ def test_controller_refuses_what_it_cannot_run(app):
 
 
 def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, monkeypatch, app, store):
-    monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "round.md").write_text("Round {round} ({why}).\n")
     (tmp_path / "prompts" / "final.md").write_text("Final: submit.\n")

@@ -157,7 +157,7 @@ async def test_persistent_failure_emits_controller_call_failed(tmp_path, monkeyp
 async def test_cli_call_goes_through_the_gateway_when_the_pin_names_one(tmp_path, monkeypatch):
     import asyncio
 
-    from flock import cli
+    from flock.client import Client, gateway
 
     ctrl = AgentRoutes("controller")
     worker = await gateway_worker(tmp_path, ctrl)
@@ -166,14 +166,14 @@ async def test_cli_call_goes_through_the_gateway_when_the_pin_names_one(tmp_path
     monkeypatch.setenv("FLOCK_TOOLS_PIN", str(pin))
     monkeypatch.setenv("FLOCK_URL", "http://stale-host:7860")  # frozen at harness start
     monkeypatch.delenv("FLOCK_AGENT_TOKEN", raising=False)
-    monkeypatch.setattr(cli, "client", lambda: pytest.fail("direct call"))
-    ack = await asyncio.to_thread(cli._call, "POST", f"/agents/{AGENT}/spawn",
+    monkeypatch.setattr("flock.client.connect", lambda *_: pytest.fail("direct call"))
+    ack = await asyncio.to_thread(Client()._call, "POST", f"/agents/{AGENT}/spawn",
                                   json={"type": "analyst"})
     assert ack["name"] == f"{AGENT}-analyst-0001"
-    assert cli._as_agent()  # no FLOCK_AGENT_TOKEN needed any more
+    assert Client().as_agent  # no FLOCK_AGENT_TOKEN needed any more
 
     monkeypatch.delenv("FLOCK_TOOLS_PIN")  # no gateway: the direct path, as before
-    assert cli._gateway() is None
+    assert gateway() is None
     await worker.client.aclose()
 
 

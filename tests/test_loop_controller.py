@@ -441,6 +441,7 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     from typer.testing import CliRunner
 
     from flock import cli
+    from flock.client import Client
 
     await sim.apply({"prompt": "p", "every": "5s", "final": {"prompt": "fin"}})
     await sim.heartbeat()
@@ -449,21 +450,21 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     for a in (A0, A1):
         await sim.turn(a, got[a])
     app = sim.c._transport.app
-    monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
     run = CliRunner()
     r = run.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "loop researcher: running (controller, every 5s), round 1, 0/2" in r.output
     body = {"type": "researcher", "action": "stop", "final": False}  # the route (no CLI command)
-    line = cli._loop_line(cli._call("POST", "/swarms/demo/loop", json=body))
+    line = cli._loop_line(Client()._call("POST", "/swarms/demo/loop", json=body))
     assert "loop researcher: done" in line and "stopped: manual" in line
     sim.tick(10)
     assert await sim.commands() == []  # stopped without a final round
     body = {"type": "researcher", "action": "start", "final": True}
-    assert "running" in cli._loop_line(cli._call("POST", "/swarms/demo/loop", json=body))
+    assert "running" in cli._loop_line(Client()._call("POST", "/swarms/demo/loop", json=body))
     sim.tick()
     got = prompts(await sim.commands())
     assert {p["loop"]["round"] for p in got.values()} == {1}  # a new run of the loop: from round 1
-    (lp,) = cli._call("GET", "/swarms/demo/loop")
+    (lp,) = Client()._call("GET", "/swarms/demo/loop")
     assert lp["per_agent"][A0]["phase"] == "looping"
     r = run.invoke(cli.app, ["events", "demo"])
     got = [json.loads(x)["type"] for x in r.output.splitlines()]

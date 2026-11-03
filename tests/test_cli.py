@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import Client
 
 from .conftest import TOKEN, make_spec
 
@@ -15,7 +16,7 @@ runner = CliRunner()
 
 def _wire(monkeypatch, app):
     monkeypatch.setattr(
-        cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
+        "flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
     )
 
 
@@ -131,7 +132,7 @@ def test_status_prints_zero_usage_warning(monkeypatch):
           "types": {}, "providers": {"hf": {"name": "hf", "type": "openai_compat", "self_hosted": False,
                                             "types": ["w"], "working": 0, "max_working": None,
                                             "zero_usage_agents": 2}}}
-    monkeypatch.setattr(cli, "_call", lambda *a, **k: {"status": st})
+    monkeypatch.setattr(Client, "_call", lambda *a, **k: {"status": st})
     r = runner.invoke(cli.app, ["status", "op"])
     assert r.exit_code == 0 and "2 agents finished turns with zero reported tokens" in r.output
 
@@ -143,7 +144,7 @@ def test_status_prints_launch_errors(monkeypatch):
     st = {"swarm": "op", "agents_total": 2, "workers_total": 2, "pending_prompts": 0, "cost_usd": 0,
           "types": {"a": t("a", "launch_refused", "BadRequestError: bad flavor"),
                     "b": t("b", "ok", "HfHubHTTPError: 503")}}
-    monkeypatch.setattr(cli, "_call", lambda *a, **k: {"status": st})
+    monkeypatch.setattr(Client, "_call", lambda *a, **k: {"status": st})
     r = runner.invoke(cli.app, ["status", "op"])
     assert "type a: launch refused, not retrying until the next apply: BadRequestError" in r.output
     assert "type b: last launch error, retrying: HfHubHTTPError: 503" in r.output

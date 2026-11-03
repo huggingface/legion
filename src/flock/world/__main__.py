@@ -1,6 +1,6 @@
 """`python -m flock.world serve|doctor|knobs|set` (docs/world.md): a world author's and a
-world host's commands, not the operator CLI. knobs/set reach the controller through flock.cli
-(imported late: flock.cli mounts this app as its hidden `world`)."""
+world host's commands, not the operator CLI. knobs/set reach the controller through
+flock.client (flock.cli, imported late, mounts this app as its hidden `world`)."""
 
 from __future__ import annotations
 
@@ -51,12 +51,24 @@ def world_doctor(
 
 # -- the world's admin API through the controller (docs/world.md, "Admin API") ----------------
 
+def _or_exit(call):
+    """A refused controller call: its line on stderr, exit 1 (as the `flock` CLI does)."""
+    from flock.client import ClientError
+
+    try:
+        return call()
+    except ClientError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+
+
 @world_app.command("knobs")
 def world_knobs(swarm: str) -> None:
     """The world's knobs (value, default, range) and paused lanes."""
-    from flock.cli import _call, _table
+    from flock.cli import _table
+    from flock.client import Client
 
-    out = _call("GET", f"/swarms/{swarm}/world/knobs")
+    out = _or_exit(lambda: Client().world_knobs(swarm))
     rows = [[n, json.dumps(k["value"]), json.dumps(k["default"]), k["type"],
              f"{'' if k['min'] is None else k['min']}..{'' if k['max'] is None else k['max']}",
              k["doc"]] for n, k in out["knobs"].items()]
@@ -74,7 +86,8 @@ def world_set(
     reason: str = typer.Option("", "--reason", help="Recorded in the swarm's events."),
 ) -> None:
     """Set world knobs at runtime; the world keeps them across restarts."""
-    from flock.cli import _call, source_header
+    from flock.cli import source_header
+    from flock.client import Client
 
     values = {}
     for a in assignments:
@@ -86,8 +99,8 @@ def world_set(
             values[name] = json.loads(raw)
         except ValueError:
             values[name] = raw
-    out = _call("PATCH", f"/swarms/{swarm}/world/knobs", json=values, params={"reason": reason},
-                headers=source_header(None))
+    out = _or_exit(lambda: Client().set_world_knobs(swarm, values, reason=reason,
+                                                    source=source_header(None)))
     for c in out["changes"]:
         typer.echo(f"{c['name']}: {json.dumps(c['old'])} -> {json.dumps(c['new'])}")
 

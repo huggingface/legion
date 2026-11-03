@@ -20,6 +20,7 @@ import yaml
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import connect
 from flock.controller import localrun
 from flock.controller.api import create_app
 from flock.controller.local import LocalJobsClient
@@ -247,19 +248,19 @@ def test_cli_finds_a_live_run_without_flock_url(tmp_path, monkeypatch):
     monkeypatch.delenv("FLOCK_URL", raising=False)
     monkeypatch.delenv("FLOCK_TOKEN", raising=False)
     monkeypatch.delenv("FLOCK_AGENT_TOKEN", raising=False)
-    with cli.client() as c:
+    with connect() as c:
         assert str(c.base_url).rstrip("/") == "http://127.0.0.1:4321"
         assert c.headers["X-Flock-Token"] == "run-tok"
     monkeypatch.setenv("FLOCK_URL", "http://other:1")  # explicit config wins
     monkeypatch.setenv("FLOCK_TOKEN", "explicit")
-    with cli.client() as c:
+    with connect() as c:
         assert str(c.base_url).rstrip("/") == "http://other:1"
         assert c.headers["X-Flock-Token"] == "explicit"
     monkeypatch.delenv("FLOCK_URL")
     elsewhere = tmp_path / "elsewhere"
     write_current(elsewhere, {"url": "http://127.0.0.1:99", "token": "t2", "pid": os.getpid()})
     monkeypatch.setenv("FLOCK_CURRENT", str(elsewhere / "current"))
-    with cli.client() as c:
+    with connect() as c:
         assert str(c.base_url).rstrip("/") == "http://127.0.0.1:99"
 
 

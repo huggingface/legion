@@ -8,6 +8,7 @@ from datetime import timedelta
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import Client
 from flock.controller import spawn as spawning
 from flock.models import AgentHeartbeat, PromptCommand, WorkerHeartbeat
 
@@ -74,11 +75,11 @@ async def test_children_prompt_refused_for_other_tokens(client, app, store, tick
 def test_cli_prompt_children(monkeypatch, app, store):
     sent = []
 
-    def fake_call(method, path, **kw):
+    def fake_call(self, method, path, **kw):
         sent.append((method, path, kw["json"]))
         return {"matched": 0}
 
-    monkeypatch.setattr(cli, "_call", fake_call)
+    monkeypatch.setattr(Client, "_call", fake_call)
     monkeypatch.setenv("FLOCK_AGENT", LEADER)
     r = runner.invoke(cli.app, ["prompt", "--children", "--type", "analyst", "--state", "idle", "go"])
     assert r.exit_code == 0, r.output

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import connect
 from flock.controller import spawn as spawning
 
 from .conftest import TOKEN
@@ -38,7 +39,7 @@ def agent_cli(monkeypatch, app, store, tick):
             monkeypatch.setenv("FLOCK_AGENT_TOKEN", spawning.agent_token(store, name, "demo", 0))
             monkeypatch.setenv("FLOCK_AGENT", name)
             monkeypatch.setenv("FLOCK_TOKEN", "")  # what the worker leaves in the harness env
-        monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers=_auth()))
+        monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers=_auth()))
 
     def _auth() -> dict:
         tok = os.environ.get("FLOCK_AGENT_TOKEN") or os.environ.get("FLOCK_TOKEN", "")
@@ -54,9 +55,9 @@ def run(*args: str):
 def test_client_prefers_the_agent_token(monkeypatch):
     monkeypatch.setenv("FLOCK_TOKEN", "swarm")
     monkeypatch.setenv("FLOCK_AGENT_TOKEN", "agent")
-    assert cli.client().headers["authorization"] == "Bearer agent"
+    assert connect().headers["authorization"] == "Bearer agent"
     monkeypatch.setenv("FLOCK_AGENT_TOKEN", "")
-    assert cli.client().headers["authorization"] == "Bearer swarm"
+    assert connect().headers["authorization"] == "Bearer swarm"
 
 
 def test_agent_spawns_prompts_and_removes(agent_cli):

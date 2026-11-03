@@ -33,7 +33,7 @@ runner = CliRunner()
 
 def _wire(monkeypatch, app):
     monkeypatch.setattr(
-        cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+        "flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
 
 
 def _write(path, spec) -> str:
@@ -323,7 +323,7 @@ def test_a_failed_event_download_adopts_nothing_and_a_retry_works(tmp_path, monk
     new = Store(tmp_path / "new")
     app = create_app(new, TOKEN, clock=clock, buckets=lambda url: bucket)
     _wire(monkeypatch, app)
-    monkeypatch.setattr(cli, "_sleep", lambda s: None)  # the CLI retries a 502
+    monkeypatch.setattr("flock.client._sleep", lambda s: None)  # the CLI retries a 502
     f = _write(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
     r = runner.invoke(cli.app, ["launch", f, "--adopt"])
     assert r.exit_code == 1 and "events download cut" in r.output
