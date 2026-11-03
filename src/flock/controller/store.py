@@ -907,7 +907,7 @@ class Store:
         h = (self.swarm_flags(a["swarm"]) if flags is None else flags).get("holds") or {}
         return a["type"] in h.get("types", {}) or a["name"] in h.get("agents", {})
 
-    # ------------------------------------------------- controls --------------------
+    # ----------------------------------------------------------------- controls
     # Controller settings kept across restarts: `ramp:<type>` start times. Rows of removed
     # features (`notice:`, `broadcast:`, `policy_mutes`) may linger in old databases; unread.
 
