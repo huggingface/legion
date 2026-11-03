@@ -1111,12 +1111,3 @@ def test_doctor_flags_a_missing_read_and_a_failing_read_only_tool():
 def test_doctor_manifest_unreachable():
     r = CliRunner().invoke(world_app, ["doctor", "http://127.0.0.1:1"])
     assert r.exit_code == 1 and "FAIL" in r.output
-
-
-def test_stored_specs_world_serve_through_flock_cli_still_works():
-    """Stored specs (e.g. eliza) run `{python} -m flock.cli world serve`: a hidden alias."""
-    import subprocess
-
-    r = subprocess.run([sys.executable, "-m", "flock.cli", "world", "serve", "--help"],
-                       capture_output=True, text=True, timeout=60, check=False)
-    assert r.returncode == 0 and "module:Class" in r.stdout, r.stdout + r.stderr

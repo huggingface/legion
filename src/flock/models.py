@@ -1627,7 +1627,7 @@ class LoopMeta(BaseModel):
     """What the worker needs to render a loop prompt (docs/loop.md): it fills the
     LOOP_PLACEHOLDERS from these plus its own spend and last `done` summary."""
 
-    kind: Literal["first", "loop", "final"]  # "first": only so queues from before its removal parse
+    kind: Literal["loop", "final"]
     type: str
     round: int | None = None  # None: the worker numbers it (its own next round)
     started_at: datetime | None = None  # when the loop started, for {elapsed}

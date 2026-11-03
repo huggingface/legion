@@ -708,13 +708,9 @@ def remove(name: str) -> None:
     typer.echo(json.dumps(Client().remove(name)))
 
 
-# Hidden aliases: agents of runs started before flock-agent and stored specs still call
-# `flock spawn|remove` and `{python} -m flock.cli world serve`.
+# Hidden aliases: agents of runs started before flock-agent still call `flock spawn|remove`.
 app.command("spawn", hidden=True)(spawn)
 app.command("remove", hidden=True)(remove)
-from flock.world.__main__ import world_app
-
-app.add_typer(world_app, name="world", hidden=True)
 
 if __name__ == "__main__":
     app()

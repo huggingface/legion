@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flock.controller.store import DB_NAME, Store
 
-FIXTURE = Path(__file__).parent / "fixtures" / "stored_specs" / "run4.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "stored_specs" / "hierarchy.json"
 
 # main @ 8949085: the grants table, dropped from the schema since
 GRANTS = """CREATE TABLE IF NOT EXISTS grants (

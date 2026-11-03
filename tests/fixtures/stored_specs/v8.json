@@ -1,0 +1,973 @@
+{
+ "swarm": "v8",
+ "namespace": "cmpatino",
+ "bucket": "hf://buckets/cmpatino/eliza-swarm",
+ "providers": {
+  "vllm": {
+   "type": "openai_compat",
+   "base_url": "https://your-vllm.example.invalid/v1",
+   "base_urls": [
+    "https://your-vllm.example.invalid/v1"
+   ],
+   "api_key_env": "OPENAI_API_KEY",
+   "self_hosted": true,
+   "max_working": null,
+   "pricing": {
+    "*": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "timeout_s": 300.0,
+   "max_retries": 5,
+   "auth": null,
+   "metrics": false
+  }
+ },
+ "models": {
+  "worker-pi": {
+   "model": "vllm:MODEL_WORKER",
+   "reasoning": "high",
+   "extra": null,
+   "pricing": null
+  }
+ },
+ "types": {
+  "answers": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": null,
+   "system_prompt_append_file": "prompts/lanes/answers.md",
+   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "pack.windowMemory",
+    "GIT_CONFIG_VALUE_0": "256m",
+    "GIT_CONFIG_KEY_1": "pack.threads",
+    "GIT_CONFIG_VALUE_1": "1",
+    "GIT_CONFIG_KEY_2": "gc.auto",
+    "GIT_CONFIG_VALUE_2": "0"
+   },
+   "secrets": [
+    "OPENAI_API_KEY"
+   ],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 12,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": {
+    "start": 12,
+    "add": 12,
+    "every": "10m",
+    "max": 96
+   },
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "54h",
+   "lifetime_jitter": "0s",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "2h",
+   "max_turns": 150,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": "Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.",
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:run_bot",
+    "world:open_pr",
+    "world:review_pr",
+    "world:merge_pr",
+    "world:list_prs",
+    "world:close_pr",
+    "world:get_pr",
+    "comms:post",
+    "comms:read",
+    "comms:search",
+    "comms:channels",
+    "comms:create_channel",
+    "comms:join_channel",
+    "comms:react",
+    "comms:doc",
+    "comms:edit_doc"
+   ],
+   "loop": {
+    "prompt": null,
+    "prompt_file": "prompts/round.md",
+    "first": null,
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread",
+     "comms.channel"
+    ],
+    "context": [],
+    "stagger": null,
+    "final": {
+     "prompt": null,
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 10000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": [
+      "https://your-vllm.example.invalid/v1"
+     ],
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "understanding": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": null,
+   "system_prompt_append_file": "prompts/lanes/understanding.md",
+   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "pack.windowMemory",
+    "GIT_CONFIG_VALUE_0": "256m",
+    "GIT_CONFIG_KEY_1": "pack.threads",
+    "GIT_CONFIG_VALUE_1": "1",
+    "GIT_CONFIG_KEY_2": "gc.auto",
+    "GIT_CONFIG_VALUE_2": "0"
+   },
+   "secrets": [
+    "OPENAI_API_KEY"
+   ],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 12,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": {
+    "start": 6,
+    "add": 6,
+    "every": "10m",
+    "max": 24
+   },
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "54h",
+   "lifetime_jitter": "0s",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "2h",
+   "max_turns": 150,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": "Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.",
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:run_bot",
+    "world:open_pr",
+    "world:review_pr",
+    "world:merge_pr",
+    "world:list_prs",
+    "world:close_pr",
+    "world:get_pr",
+    "comms:post",
+    "comms:read",
+    "comms:search",
+    "comms:channels",
+    "comms:create_channel",
+    "comms:join_channel",
+    "comms:react",
+    "comms:doc",
+    "comms:edit_doc"
+   ],
+   "loop": {
+    "prompt": null,
+    "prompt_file": "prompts/round.md",
+    "first": null,
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread",
+     "comms.channel"
+    ],
+    "context": [],
+    "stagger": null,
+    "final": {
+     "prompt": null,
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 10000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": [
+      "https://your-vllm.example.invalid/v1"
+     ],
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "conversation": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": null,
+   "system_prompt_append_file": "prompts/lanes/conversation.md",
+   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "pack.windowMemory",
+    "GIT_CONFIG_VALUE_0": "256m",
+    "GIT_CONFIG_KEY_1": "pack.threads",
+    "GIT_CONFIG_VALUE_1": "1",
+    "GIT_CONFIG_KEY_2": "gc.auto",
+    "GIT_CONFIG_VALUE_2": "0"
+   },
+   "secrets": [
+    "OPENAI_API_KEY"
+   ],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 12,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": {
+    "start": 6,
+    "add": 6,
+    "every": "10m",
+    "max": 48
+   },
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "54h",
+   "lifetime_jitter": "0s",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "2h",
+   "max_turns": 150,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": "Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.",
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:run_bot",
+    "world:open_pr",
+    "world:review_pr",
+    "world:merge_pr",
+    "world:list_prs",
+    "world:close_pr",
+    "world:get_pr",
+    "comms:post",
+    "comms:read",
+    "comms:search",
+    "comms:channels",
+    "comms:create_channel",
+    "comms:join_channel",
+    "comms:react",
+    "comms:doc",
+    "comms:edit_doc"
+   ],
+   "loop": {
+    "prompt": null,
+    "prompt_file": "prompts/round.md",
+    "first": null,
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread",
+     "comms.channel"
+    ],
+    "context": [],
+    "stagger": null,
+    "final": {
+     "prompt": null,
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 10000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": [
+      "https://your-vllm.example.invalid/v1"
+     ],
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "routing": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": null,
+   "system_prompt_append_file": "prompts/lanes/routing.md",
+   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "pack.windowMemory",
+    "GIT_CONFIG_VALUE_0": "256m",
+    "GIT_CONFIG_KEY_1": "pack.threads",
+    "GIT_CONFIG_VALUE_1": "1",
+    "GIT_CONFIG_KEY_2": "gc.auto",
+    "GIT_CONFIG_VALUE_2": "0"
+   },
+   "secrets": [
+    "OPENAI_API_KEY"
+   ],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 12,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": {
+    "start": 6,
+    "add": 6,
+    "every": "20m",
+    "max": 24
+   },
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "54h",
+   "lifetime_jitter": "0s",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "2h",
+   "max_turns": 150,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": "Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.",
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:run_bot",
+    "world:open_pr",
+    "world:review_pr",
+    "world:merge_pr",
+    "world:list_prs",
+    "world:close_pr",
+    "world:get_pr",
+    "comms:post",
+    "comms:read",
+    "comms:search",
+    "comms:channels",
+    "comms:create_channel",
+    "comms:join_channel",
+    "comms:react",
+    "comms:doc",
+    "comms:edit_doc"
+   ],
+   "loop": {
+    "prompt": null,
+    "prompt_file": "prompts/round.md",
+    "first": null,
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread",
+     "comms.channel"
+    ],
+    "context": [],
+    "stagger": null,
+    "final": {
+     "prompt": null,
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 10000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": [
+      "https://your-vllm.example.invalid/v1"
+     ],
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "quality": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": null,
+   "system_prompt_append_file": "prompts/lanes/quality.md",
+   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "pack.windowMemory",
+    "GIT_CONFIG_VALUE_0": "256m",
+    "GIT_CONFIG_KEY_1": "pack.threads",
+    "GIT_CONFIG_VALUE_1": "1",
+    "GIT_CONFIG_KEY_2": "gc.auto",
+    "GIT_CONFIG_VALUE_2": "0"
+   },
+   "secrets": [
+    "OPENAI_API_KEY"
+   ],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 12,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": {
+    "start": 6,
+    "add": 6,
+    "every": "15m",
+    "max": 36
+   },
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "54h",
+   "lifetime_jitter": "0s",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "2h",
+   "max_turns": 150,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": "Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.",
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:run_bot",
+    "world:open_pr",
+    "world:review_pr",
+    "world:merge_pr",
+    "world:list_prs",
+    "world:close_pr",
+    "world:get_pr",
+    "comms:post",
+    "comms:read",
+    "comms:search",
+    "comms:channels",
+    "comms:create_channel",
+    "comms:join_channel",
+    "comms:react",
+    "comms:doc",
+    "comms:edit_doc"
+   ],
+   "loop": {
+    "prompt": null,
+    "prompt_file": "prompts/round.md",
+    "first": null,
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread",
+     "comms.channel"
+    ],
+    "context": [],
+    "stagger": null,
+    "final": {
+     "prompt": null,
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 10000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": [
+      "https://your-vllm.example.invalid/v1"
+     ],
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "safety": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": null,
+   "system_prompt_append_file": "prompts/lanes/safety.md",
+   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "pack.windowMemory",
+    "GIT_CONFIG_VALUE_0": "256m",
+    "GIT_CONFIG_KEY_1": "pack.threads",
+    "GIT_CONFIG_VALUE_1": "1",
+    "GIT_CONFIG_KEY_2": "gc.auto",
+    "GIT_CONFIG_VALUE_2": "0"
+   },
+   "secrets": [
+    "OPENAI_API_KEY"
+   ],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 12,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": {
+    "start": 3,
+    "add": 3,
+    "every": "30m",
+    "max": 6
+   },
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "54h",
+   "lifetime_jitter": "0s",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "2h",
+   "max_turns": 150,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": "Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.",
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:run_bot",
+    "world:open_pr",
+    "world:review_pr",
+    "world:merge_pr",
+    "world:list_prs",
+    "world:close_pr",
+    "world:get_pr",
+    "comms:post",
+    "comms:read",
+    "comms:search",
+    "comms:channels",
+    "comms:create_channel",
+    "comms:join_channel",
+    "comms:react",
+    "comms:doc",
+    "comms:edit_doc"
+   ],
+   "loop": {
+    "prompt": null,
+    "prompt_file": "prompts/round.md",
+    "first": null,
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread",
+     "comms.channel"
+    ],
+    "context": [],
+    "stagger": null,
+    "final": {
+     "prompt": null,
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 10000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": [
+      "https://your-vllm.example.invalid/v1"
+     ],
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  }
+ },
+ "tools_dir": null,
+ "tools_version": null,
+ "comms": {
+  "kind": "msgboard",
+  "extended": true,
+  "poll_cycle_s": null,
+  "url": "https://huggingfaceswarms-chatbot-v8-msgboard.hf.space",
+  "invite_env": "CHATBOT_BOARD_INVITE",
+  "channel": "general",
+  "kickoff_file": null,
+  "kickoff": null,
+  "rules": {
+   "min_post_gap": "10s",
+   "max_posts": null,
+   "max_len": 1200,
+   "threads": "per_topic",
+   "max_channels_per_agent": 3,
+   "max_channels": 40,
+   "no_group_mentions": true
+  },
+  "protocols": [],
+  "protocols_text": [],
+  "wake": [
+   "mention",
+   "thread",
+   "channel"
+  ],
+  "search": "board",
+  "channel_id": null,
+  "kickoff_id": null
+ },
+ "world": {
+  "dir": null,
+  "command": null,
+  "url": "http://${WORLD_HOST}:7860",
+  "token_env": "CHATBOT_WORLD_TOKEN",
+  "endpoint": null,
+  "manifest": null,
+  "credential_origin": null,
+  "credential_id": null,
+  "slurm_job_name": null
+ },
+ "naming": "words",
+ "naming_seed": null,
+ "spawn": {},
+ "limits": {
+  "alive": 250,
+  "spawned_total": null,
+  "budget_usd": null
+ },
+ "compute": {
+  "kind": "slurm",
+  "partition": "hopper-cpu",
+  "cpus": 4,
+  "mem": "7G",
+  "time": "54:00:00"
+ },
+ "policies": null,
+ "report": null
+}

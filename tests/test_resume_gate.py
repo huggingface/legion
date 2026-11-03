@@ -1,5 +1,6 @@
 """Resume gate: specs of runs we already have must still load after spec fields are deleted.
-Existing fixtures are frozen (they stand for swarms already stored); `uv run python
+Only runs from the run5 branch onwards must resume (RESUMABLE; v8.json was generated on the v8
+branch). Existing fixtures are frozen (they stand for swarms already stored); `uv run python
 tests/test_resume_gate.py` only writes missing ones (hermetic: shell ${VAR}s are ignored, only
 spec defaults apply; the repo path is written as `<repo>`)."""
 
@@ -20,6 +21,7 @@ from flock.models import SwarmSpec
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "stored_specs"
 EXPERIMENTS = sorted(p.parent for p in (ROOT / "experiments").glob("*/spec.yaml"))
+RESUMABLE = {"hierarchy", "voting", "teams", "interviewer", "levels", "v8"}
 
 
 def load_experiment(d: Path) -> SwarmSpec:
@@ -46,14 +48,14 @@ def test_stored_spec_resumes(f: Path, tmp_path: Path) -> None:
     assert store.get_swarm(spec.swarm)["spec"] == spec
 
 
-def test_fixtures_cover_every_experiment() -> None:
-    assert {f.stem for f in FIXTURES.glob("*.json")} == {d.name for d in EXPERIMENTS}
+def test_fixtures_cover_every_resumable_run() -> None:
+    assert {f.stem for f in FIXTURES.glob("*.json")} == RESUMABLE
 
 
 def test_removed_key_dropped_typo_refused(monkeypatch, caplog, tmp_path: Path) -> None:
     monkeypatch.setitem(models.REMOVED, "LoopSpec", models.REMOVED["LoopSpec"] | {"gone_opt"})
     monkeypatch.setattr(models, "_warned", set())
-    raw = json.loads((FIXTURES / "run4.json").read_text())
+    raw = json.loads((FIXTURES / "hierarchy.json").read_text())
     name = next(n for n, t in raw["types"].items() if t.get("loop"))
     raw["types"][name]["loop"]["gone_opt"] = "5s"
     with caplog.at_level(logging.WARNING, logger="flock.models"):  # a stored spec: dropped
@@ -61,7 +63,7 @@ def test_removed_key_dropped_typo_refused(monkeypatch, caplog, tmp_path: Path) -
         SwarmSpec.model_validate(raw)
     assert [r.getMessage() for r in caplog.records] == [
         "spec: LoopSpec.gone_opt was removed from flock; ignoring it"]
-    d = ROOT / "experiments" / "run4"
+    d = ROOT / "experiments" / "hierarchy"
     overlay = tmp_path / "typo.yaml"
     overlay.write_text(f"types: {{{name}: {{loop: {{gone_opt: 5s}}}}}}\n")
     read_spec(str(d / "spec.yaml"), (), [str(overlay)])  # a spec file: dropped too
@@ -74,7 +76,8 @@ if __name__ == "__main__":
     os.environ.clear()  # identical fixtures for everyone: no shell ${VAR}s
     FIXTURES.mkdir(parents=True, exist_ok=True)
     for d in EXPERIMENTS:
-        if (FIXTURES / f"{d.name}.json").exists():  # frozen: regenerating would hide a deletion
+        # frozen: regenerating would hide a deletion
+        if d.name not in RESUMABLE or (FIXTURES / f"{d.name}.json").exists():
             continue
         text = stored_json(load_experiment(d)).replace(str(ROOT), "<repo>")
         (FIXTURES / f"{d.name}.json").write_text(text + "\n")
