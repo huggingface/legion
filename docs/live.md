@@ -80,7 +80,7 @@ $ flock update experiments/run4 --env runs/run4/run.env --overlay experiments/ru
   are read at the ref too; `--env` files are read where they are. The source sent is
   `{git_sha, ref, dirty: false, by}`. `--check` works with it.
 
-## Generations and `flock history`
+## Generations
 
 Every apply that changes the spec (`flock apply`, `flock update`, `flock scale`, the first
 apply of `flock run`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
@@ -92,21 +92,8 @@ header: `by` from `$USER` and, when the spec's folder is in a git repo, `git_sha
 branch) and `dirty` (the folder has uncommitted changes). Each generation is also a
 `spec_applied {generation, source, diff_summary}` event on the swarm stream.
 
-```console
-$ flock history calc
-gen  applied (UTC)        by      git                     changes
-1    2026-10-28 09:12:03  carlos  3f9c0e2a main           created
-2    2026-10-28 10:40:51  carlos  9a1b2c3d+dirty main     types.calc.replicas: 2 -> 3
-$ flock history calc --diff 1 2
-types.calc.replicas: 2 -> 3
-```
-
-| Method | Path | |
-|---|---|---|
-| GET | `/swarms/{swarm}/history` | `[{generation, ts, source, diff_summary}]`, oldest first |
-| GET | `/swarms/{swarm}/history/{generation}` | the same fields plus `spec`, the stored spec |
-
-Removing the swarm drops its history.
+The history is kept in the controller's store (no route reads it). Removing the swarm drops
+it.
 
 ## Control-plane events
 

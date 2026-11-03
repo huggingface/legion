@@ -232,17 +232,14 @@ async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client
     r = await client.put("/swarms/demo?replicas=spec", json=spec.model_dump(mode="json"),
                          headers=hdr)
     assert r.json()["generation"] == 2
-    hist = (await client.get("/swarms/demo/history")).json()
-    assert [(h["generation"], h["diff_summary"]) for h in hist] == [
+    hist = store.spec_history("demo")
+    assert [(h["generation"], h["diff"]) for h in hist] == [
         (1, ["created"]), (2, [f"types.researcher.replicas: {n} -> {n + 1}"])]
     assert hist[0]["source"] == {}
     assert hist[1]["source"] == {"git_sha": "abc123", "ref": "main", "dirty": True, "by": "carlos"}
-    got = (await client.get("/swarms/demo/history/1")).json()
-    assert got["spec"]["types"]["researcher"]["replicas"] == n and got["ts"]
-    assert (await client.get("/swarms/demo/history/9")).status_code == 404
     evs = [e["data"] for e in store.read_events("_swarm.demo", 0) if e["type"] == "spec_applied"]
     assert [e["generation"] for e in evs] == [1, 2] and evs[1]["source"]["by"] == "carlos"
-    assert evs[1]["diff_summary"] == hist[1]["diff_summary"]
+    assert evs[1]["diff_summary"] == hist[1]["diff"]
 
 
 def test_bash_switch_is_llm_only_in_the_spec():

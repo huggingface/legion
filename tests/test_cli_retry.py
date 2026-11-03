@@ -3,8 +3,6 @@ agents calling it through the Space edge do not fail on throttling."""
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -54,7 +52,7 @@ def test_cli_gives_up_after_five_attempts(monkeypatch, sleeps):
     seen, handler = _edge([(429, {})] * 10)
     monkeypatch.setattr(cli, "client", lambda: httpx.Client(base_url="http://c",
                                                             transport=httpx.MockTransport(handler)))
-    r = runner.invoke(cli.app, ["whoami"])
+    r = runner.invoke(cli.app, ["agent", "leader-0000"])
     assert r.exit_code == 1 and "error 429" in r.output
     assert len(seen) == cli.RETRY_ATTEMPTS == 5 and len(sleeps) == 4
 
@@ -69,5 +67,5 @@ def test_cli_does_not_retry_a_post_500(monkeypatch, sleeps):
 
 def test_cli_against_the_app_still_works(monkeypatch, app, sleeps):
     monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
-    r = runner.invoke(cli.app, ["whoami"])
-    assert r.exit_code == 0 and json.loads(r.output) == {"kind": "controller"} and not sleeps
+    r = runner.invoke(cli.app, ["status"])
+    assert r.exit_code == 0 and not sleeps

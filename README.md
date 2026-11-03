@@ -213,7 +213,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
 | `GET/POST /swarms/{swarm}/loop`, `GET /swarms/{swarm}/events` | loop state per type and agent, `{type, action: start\|stop, final}`, the swarm-level event stream ([docs/loop.md](docs/loop.md)) |
-| `GET /swarms/{swarm}/health`, `/health/history?since=&res=`, `/usage?by=type\|hour` | health snapshots, token usage ([docs/health.md](docs/health.md)) |
+| `GET /swarms/{swarm}/health`, `/health/history?since=&res=` | health snapshots ([docs/health.md](docs/health.md)) |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests

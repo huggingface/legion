@@ -263,7 +263,6 @@ and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in
 environment for that fallback; with the gateway they are not needed and can be dropped.
 
 ```sh
-flock whoami                               # name, parent, depth, children
 flock spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
 flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
 flock prompt --children --state idle "text"   # all your idle children, one request

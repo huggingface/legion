@@ -122,7 +122,5 @@ with a prompt queued).
 - `flock status --watch` also shows the world's `/metrics`: event-loop lag, 429s, each pool's
   oldest queue wait, `lane_<lane>_tripped/paused/effective_slots/in_flight` per lane, the
   comment outbox depth and age, and any other number under `world`.
-- `GET /swarms/{s}/usage?by=type|hour`: token rows.
-- `flock status [swarm] --watch` (every 10 s), `flock status [swarm] --json`,
-  `flock usage <swarm> [--by type|hour]`.
+- `flock status [swarm] --watch` (every 10 s), `flock status [swarm] --json`.
 - The `/` status page has one health line per swarm: aggregates only, no agent names.

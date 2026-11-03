@@ -341,17 +341,15 @@ async def test_health_endpoints(app, store, client):
     assert len((await client.get("/swarms/demo/health/history",
                                  params={"since": iso, "res": "5m"})).json()) == 1
     assert (await client.get("/swarms/demo/health/history", params={"since": "x"})).status_code == 422
-    by_type = (await client.get("/swarms/demo/usage")).json()["rows"]
-    assert by_type == [{"type": "researcher", "input": 5, "output": 1, "cache_read": 0,
-                        "cache_write": 0, "reasoning": 0}]
-    by_hour = (await client.get("/swarms/demo/usage", params={"by": "hour"})).json()["rows"]
-    assert by_hour[0]["hour"] == "2026-09-21T14"
+    assert store.usage("demo") == [{"hour": "2026-09-21T14", "type": "researcher", "input": 5,
+                                    "output": 1, "cache_read": 0, "cache_write": 0,
+                                    "reasoning": 0}]
     page = (await client.get("/")).text
     assert "health:" in page and "1 workers within 1 h of their memory limit" in page
     assert "researcher-0000" not in page.split("health:")[1].split("</p>")[0]  # no agent names
 
 
-def test_cli_status_json_watch_and_usage(app, store, monkeypatch):
+def test_cli_status_json_and_watch(app, store, monkeypatch):
     from typer.testing import CliRunner
 
     from flock import cli
@@ -376,8 +374,6 @@ def test_cli_status_json_watch_and_usage(app, store, monkeypatch):
                  "world tools:", "open_pr", "restores:", "control-plane events", "crash",
                  "reaches its memory limit in 30 min"):
         assert want in out.output, (want, out.output)
-    out = runner.invoke(cli.app, ["usage", "demo", "--by", "hour"])
-    assert out.exit_code == 0 and "2026-09-21T14" in out.output and "researcher" in out.output
 
 
 def test_watch_shows_world_metrics_and_provider_queues(capsys):

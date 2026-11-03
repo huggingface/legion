@@ -800,7 +800,7 @@ def create_app(
         """Apply `spec` as sent (`replicas=spec`, the default); `replicas=keep` keeps the live
         replica count of types that already exist (`flock update` does that client-side). `dry_run` runs every check and returns the
         resolved spec without storing anything (`flock update --check`). An apply that changes
-        the spec bumps the swarm's generation and keeps the spec (`flock history`)."""
+        the spec bumps the swarm's generation and keeps the spec (spec_history)."""
         prev = store.get_swarm(swarm)
         if prev and replicas == "keep":
             keep_replicas(prev["spec"], spec)
@@ -852,7 +852,7 @@ def create_app(
             return {"dry_run": True, "spec": spec.model_dump(mode="json")}
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
         store.put_swarm(spec, clock().timestamp())
-        if diff:  # an effective apply: a new generation, its spec kept for `flock history`
+        if diff:  # an effective apply: a new generation, its spec kept in spec_history
             src = spec_source(x_flock_source)
             gen = store.record_spec(spec, clock().timestamp(), src, diff[:50], new=prev is None)
             store.append_events(swarm, swarm_stream(swarm), [Event(
@@ -862,11 +862,6 @@ def create_app(
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
         return swarm_status(store, spec, clock().timestamp())
-
-    @api.get("/swarms/{swarm}/history")
-    def history(swarm: str) -> list[dict]:
-        return [{"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
-                 "diff_summary": r["diff"]} for r in store.spec_history(swarm)]
 
     # ------------------------------------------------------------- health (docs/health.md)
 
@@ -897,30 +892,6 @@ def create_app(
         limit = max(1, min(limit, 20000))
         return health.history(swarm, t)[-limit:] if res == "30s" else store.health_samples(
             swarm, res, t, limit)
-
-    @api.get("/swarms/{swarm}/usage")
-    def usage(swarm: str, by: Literal["type", "hour"] = "type") -> dict:
-        """Tokens by type (all hours summed) or by UTC hour and type."""
-        spec_or_404(swarm)
-        rows = store.usage(swarm)
-        if by == "type":
-            totals: dict[str, dict[str, int]] = {}
-            for r in rows:
-                acc = totals.setdefault(r["type"], {})
-                for k, v in r.items():
-                    if k not in ("hour", "type"):
-                        acc[k] = acc.get(k, 0) + v
-            rows = [{"type": t, **v} for t, v in sorted(totals.items())]
-        return {"swarm": swarm, "by": by, "rows": rows}
-
-    @api.get("/swarms/{swarm}/history/{generation}")
-    def history_spec(swarm: str, generation: int) -> dict:
-        rows = store.spec_history(swarm, generation)
-        if not rows:
-            raise HTTPException(404, f"no generation {generation} of swarm {swarm!r}")
-        r = rows[0]
-        return {"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
-                "diff_summary": r["diff"], "spec": json.loads(r["spec"])}
 
     def folder_names(swarm: str, spec: SwarmSpec, type_name: str) -> list[str]:
         sel = spec.types[type_name].folder_tools

@@ -207,7 +207,7 @@ def _is_swarm(name: str) -> bool:
 
 
 def source_header(spec_file: str | Path | None) -> dict[str, str]:
-    """`X-Flock-Source` for an apply (`flock history`): who applied it and, when the spec's
+    """`X-Flock-Source` for an apply (spec history): who applied it and, when the spec's
     folder is in a git repo, its commit, branch and whether the folder has local changes."""
     src: dict[str, Any] = {"by": os.environ.get("USER")}
     if spec_file is not None:
@@ -903,49 +903,6 @@ def _print_health(st: dict, h: dict | None) -> None:
 
 
 @app.command()
-def usage(
-    swarm: str,
-    by: Annotated[str, typer.Option("--by", help="type (all hours) or hour (UTC hour x type)")
-                  ] = "type",
-) -> None:
-    """Tokens a swarm used, from turn ends (docs/health.md)."""
-    if by not in ("type", "hour"):
-        raise typer.BadParameter("--by type or --by hour")
-    rows = _call("GET", f"/swarms/{swarm}/usage", params={"by": by})["rows"]
-    keys = ["input", "output", "cache_read", "cache_write", "reasoning"]
-    head = (["hour"] if by == "hour" else []) + ["type", *keys]
-    _table([([r["hour"]] if by == "hour" else []) + [r["type"], *(r.get(k, 0) for k in keys)]
-            for r in rows], head)
-
-
-@app.command()
-def history(
-    swarm: str,
-    diff: Annotated[tuple[int, int] | None, typer.Option(
-        "--diff", metavar="A B", help="What changed from generation A to generation B.")] = None,
-) -> None:
-    """A swarm's spec generations (docs/live.md): when each apply that changed the spec ran, who
-    ran it, from which commit, and what it changed. --diff A B diffs two stored specs."""
-    if diff is not None:
-        from flock.live import diff_specs
-
-        a, b = (SwarmSpec.model_validate(_call("GET", f"/swarms/{swarm}/history/{g}")["spec"])
-                for g in diff)
-        for line in diff_specs(a, b) or ["no changes"]:
-            typer.echo(line)
-        return
-    rows = []
-    for h in _call("GET", f"/swarms/{swarm}/history"):
-        src, changes = h["source"], h["diff_summary"]
-        git = " ".join(x for x in (src.get("git_sha", "")[:8] + ("+dirty" if src.get("dirty")
-                                                                   else ""), src.get("ref")) if x)
-        more = f" (+{len(changes) - 1} more)" if len(changes) > 1 else ""
-        rows.append([h["generation"], h["ts"][:19].replace("T", " "), src.get("by") or "-",
-                     git or "-", (changes[0] if changes else "-") + more])
-    _table(rows, ["gen", "applied (UTC)", "by", "git", "changes"])
-
-
-@app.command()
 def agents(
     swarm: str,
     type: str = typer.Option(None, "--type"),
@@ -1175,12 +1132,6 @@ def spawn(
     body = {"type": type, "prompt": prompt, "key": key}
     ack = _call("POST", f"/agents/{parent}/spawn", json=body)
     typer.echo(json.dumps(ack) if as_json else ack["name"])
-
-
-@app.command()
-def whoami() -> None:
-    """Who the configured token acts as: the controller, or an agent with its lineage."""
-    typer.echo(json.dumps(_call("GET", "/whoami"), indent=2))
 
 
 @app.command()

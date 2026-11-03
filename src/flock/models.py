@@ -1829,7 +1829,7 @@ class SwarmStatus(BaseModel):
     # pause holds (docs/loop.md "Pause and resume"): {types: {T: {since, reason, by, auto}},
     # agents: {A: ...}}; None when nothing is held
     held: dict[str, dict[str, dict[str, Any]]] | None = None
-    # bumped by every apply that changes the spec (docs/live.md, `flock history`)
+    # bumped by every apply that changes the spec (docs/live.md)
     generation: int | None = None
 
 
