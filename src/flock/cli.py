@@ -37,20 +37,22 @@ _RUN_ENV_FILES: list[str] = []  # --run / FLOCK_RUN_DIR: the run's run.env, befo
 
 
 @app.callback()
-def _main(run: str = typer.Option(
+def _main(ctx: typer.Context, run: str = typer.Option(
         None, "--run", metavar="RUN_DIR",
         help="Run every command against RUN_DIR (`flock init`): its run.env as the first --env "
              "file, its controller (hosts/controller.host) and token. Also FLOCK_RUN_DIR, which "
              "an exported FLOCK_URL beats; --run beats FLOCK_URL.")) -> None:
     run_dir = run or os.environ.get("FLOCK_RUN_DIR")
     _RUN_ENV_FILES[:] = []
-    if not run_dir:
+    if not run_dir or ctx.invoked_subcommand == "init":
         return
     env, _RUN_ENV_FILES[:] = rundir.run_context(run_dir)
-    if run is not None or not os.environ.get("FLOCK_URL"):
-        if "FLOCK_CURRENT" in env:
-            os.environ.pop("FLOCK_URL", None)
-        os.environ.update(env)
+    if run is None and os.environ.get("FLOCK_URL"):
+        return  # an exported FLOCK_URL (with its token) beats FLOCK_RUN_DIR
+    os.environ.pop("FLOCK_URL", None)  # never this run's token with another controller's URL
+    if "FLOCK_URL" not in env and "FLOCK_CURRENT" not in env and ctx.invoked_subcommand != "launch":
+        _fail([f"no controller host file in {run_dir}/hosts; launch first"])
+    os.environ.update(env)
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:

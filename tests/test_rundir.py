@@ -204,30 +204,59 @@ def test_providers_reuse_the_preflight_probe(tmp_path, monkeypatch, ok):
     assert c.ok is ok and c.lines == (["p:m: ok 5 ms"] if ok else ["p:m: FAIL 5 ms (HTTP 500)"])
 
 
-def test_board_join_dry_run(tmp_path, monkeypatch):
-    from flock.controller.comms import CommsError
+def test_board_checks_the_invite_and_health_without_joining(tmp_path, monkeypatch):
+    import httpx
 
-    spec = _spec(tmp_path, {**SPEC, "comms": {"kind": "msgboard", "url": "https://b.invalid",
+    spec = _spec(tmp_path, {**SPEC, "comms": {"kind": "msgboard", "url": "https://b.invalid/x/",
                                               "invite_env": "INV", "channel": "general"}})
-    seen = {}
-
-    def fake(s, previous, secrets, dry_run):
-        seen["dry_run"] = dry_run
-        if not secrets.get("INV"):
-            raise CommsError("comms.invite_env: the secret INV is not set")
-        s.comms.channel_id = 7
-
-    monkeypatch.setattr("flock.controller.comms.resolve", fake)
+    seen = []
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: seen.append(url) or httpx.Response(200))
+    monkeypatch.setattr("flock.controller.comms.resolve", lambda *a, **k: pytest.fail("joined"))
     c = rundir.check_board(spec, {"INV": "code"})
-    assert c.ok and "demo-host joined #general (id 7)" == c.detail and seen["dry_run"]
-    assert spec.comms.channel_id is None  # the spec itself untouched
-    assert rundir.check_board(spec, {}).ok is False
+    assert c.ok and "join not tested" in c.detail and "code" not in c.detail
+    assert seen == ["https://b.invalid/x/v1/health"]
+    assert rundir.check_board(spec, {}).ok is False and seen == ["https://b.invalid/x/v1/health"]
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: httpx.Response(503))
+    assert rundir.check_board(spec, {"INV": "code"}).ok is False
+
+
+def test_world_dir_made_absolute_for_the_copy(tmp_path):
+    src = tmp_path / "repo" / "experiments" / "exp"
+    (src / "prompts").mkdir(parents=True)
+    (tmp_path / "repo" / "worlds" / "w").mkdir(parents=True)
+    spec = {**SPEC, "world": {**SPEC["world"], "dir": "${WORLD_DIR:-../../worlds/w}",
+                              "command": ["{python}", "w.py"]}}
+    (src / "spec.yaml").write_text(yaml.safe_dump(spec))
+    (src / "prompts" / "system.md").write_text("x\n")
+    run = tmp_path / "runs" / "r"
+    rep = rundir.init(run, src, env={})
+    assert read_env_file(run / "run.env")["WORLD_DIR"] == str(tmp_path / "repo" / "worlds" / "w")
+    assert _by_name(rep)["spec"].ok, _by_name(rep)["spec"].lines
+    assert rundir.init(run, src, env={}).created == []
+
+
+def test_a_spec_failure_still_reports_the_other_checks(tmp_path):
+    rep = rundir.init(tmp_path / "r", _folder(tmp_path, {**SPEC, "namespace": "${NS}"}), env={})
+    checks = _by_name(rep)
+    assert checks["spec"].ok is False and checks["tokens"].ok and checks["venv"].ok
+    assert checks["bucket"].detail == "skipped: needs the spec" and checks["world"].ok is None
+
+
+def test_existing_open_run_env_is_made_private(tmp_path):
+    run = tmp_path / "r"
+    run.mkdir()
+    (run / "run.env").write_text("")
+    (run / "run.env").chmod(0o644)
+    rundir.init(run, _folder(tmp_path), env={})
+    assert stat.S_IMODE((run / "run.env").stat().st_mode) == 0o600
+    assert read_env_file(run / "run.env")["FLOCK_TOKEN"]
 
 
 def test_venv_must_import_the_worker(tmp_path):
     assert rundir.check_venv({}).ok
-    c = rundir.check_venv({"FLOCK_SLURM_VENV": str(tmp_path / "nope")})
+    c = rundir.check_venv({"WORKER_VENV": str(tmp_path / "nope"), "VENV": "/other"})
     assert c.ok is False and "nope/bin/python" in c.detail
+    assert "other/bin/python" in rundir.check_venv({"VENV": "/other"}).detail
 
 
 def test_world_conformance_when_up(tmp_path, monkeypatch):
@@ -278,12 +307,20 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
     assert runner.invoke(cli.app, ["status"]).exit_code == 0
     assert seen == [("http://shell:1", "shell-tok"), ("http://node3:7999", "run-tok"),
                     ("http://node3:7999", "run-tok")]
+    (run / "hosts" / "controller.host").unlink()
+    (run / ".flock" / "current").unlink()
+    monkeypatch.setenv("FLOCK_URL", "http://shell:1")
+    r = runner.invoke(cli.app, ["--run", str(run), "status"])
+    assert r.exit_code == 1 and "no controller host file" in r.output
+    assert "FLOCK_URL" not in os.environ and len(seen) == 3
 
 
 def test_run_env_is_the_first_env_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLOCK_TOKEN", "t")  # --run sets it from run.env: restored at teardown
+    monkeypatch.setenv("FLOCK_TOKEN", "t")  # --run sets both: restored at teardown
+    monkeypatch.setenv("FLOCK_URL", "http://shell:1")
     run = tmp_path / "r"
     rundir.init(run, _folder(tmp_path), env={})
+    (run / "hosts" / "controller.host").write_text("node3\n")
     with (run / "run.env").open("a") as f:
         f.write("SWARM=from-run\nBOARD_URL=https://run.invalid\n")
     over = tmp_path / "over.env"

@@ -13,7 +13,6 @@ reports the difference. Running it again is the doctor. None of its checks needs
 from __future__ import annotations
 
 import asyncio
-import copy
 import os
 import re
 import secrets
@@ -133,13 +132,15 @@ def _quote(v: str) -> str:
 
 
 def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
-                  rep: InitReport) -> None:
+                  rep: InitReport, derived: Mapping[str, str] | None = None) -> None:
     """Create or complete run.env (mode 600): a missing key is appended, commented out when it
     has no value (the spec's default then applies); `fill` (the --secrets file) sets keys that
     are missing or commented out. A set key is never changed: a different `fill` value is
-    reported by name only."""
+    reported by name only. `derived`: values init works out (an absolute WORLD_DIR), written
+    like `fill`."""
+    derived = derived or {}
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    if lines and path.stat().st_mode & 0o077:
+    if path.exists() and path.stat().st_mode & 0o077:
         path.chmod(0o600)
         rep.notes.append(f"{path}: mode set to 600")
     set_keys, commented = {}, {}
@@ -168,18 +169,19 @@ def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
     for name in [n for n in fill if n in tokens]:
         rep.notes.append(f"--secrets {name}: ignored, the run keeps its per-run token")
     for name, (default, comment) in keys.items():
-        value = fill.get(name)
+        value = fill.get(name, derived.get(name))
+        how = "from --secrets" if name in fill else "absolute: the copy cannot reach the default"
         if name in set_keys:
-            if value is not None and value != current.get(name):
+            if name in fill and value != current.get(name):
                 rep.notes.append(f"{RUN_ENV} {name}: kept, differs from the --secrets file")
             continue
         if value is not None and name in commented:  # fill the placeholder in place
             lines[commented[name]] = f"{name}={_quote(value)}"
             filled = True
-            rep.created.append(f"{RUN_ENV} {name} (from --secrets)")
+            rep.created.append(f"{RUN_ENV} {name} ({how})")
         elif value is not None:
             new += [f"# {comment}", f"{name}={_quote(value)}"]
-            rep.created.append(f"{RUN_ENV} {name} (from --secrets)")
+            rep.created.append(f"{RUN_ENV} {name} ({how})")
         elif name not in commented:
             new += [f"# {comment}", f"#{name}={default or ''}"]
             rep.created.append(f"{RUN_ENV} {name}")
@@ -190,6 +192,7 @@ def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
         return
     text = "\n".join(lines + new) + "\n"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # O_CREAT's mode only applies to a new file
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -319,21 +322,25 @@ def check_providers(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
 
 
 def check_board(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
-    from flock.controller.comms import CommsError, host_name, resolve
+    """The invite is set and the board answers. No join: it may use up a limited invite or
+    rotate the host token a running controller holds."""
+    import httpx
 
-    if spec.comms is None:
+    c = spec.comms
+    if c is None:
         return Check("board", None, "no comms block")
-    s = copy.deepcopy(spec)
+    if not env.get(c.invite_env):
+        return Check("board", False, f"comms.invite_env: {c.invite_env} is not set in {RUN_ENV}")
+    url = c.url.rstrip("/") + "/v1/health"
     try:
-        resolve(s, None, env, dry_run=True)  # joins the host identity; posts nothing
-    except CommsError as e:
-        return Check("board", False, str(e))
-    return Check("board", True, f"{host_name(spec.swarm)} joined #{s.comms.channel} "
-                                f"(id {s.comms.channel_id})")
+        code = httpx.get(url, timeout=10).status_code
+    except httpx.HTTPError as e:
+        return Check("board", False, f"{url}: {type(e).__name__}: {e}")
+    return Check("board", code == 200, f"{c.invite_env} set; {url} -> {code}; join not tested")
 
 
 def check_venv(env: Mapping[str, str]) -> Check:
-    venv = env.get("FLOCK_SLURM_VENV")
+    venv = env.get("WORKER_VENV") or env.get("VENV")  # the Slurm scripts' names (common.sh)
     py = f"{venv}/bin/python" if venv else sys.executable
     try:
         r = subprocess.run([py, "-I", "-c", "import flock.worker"], capture_output=True,
@@ -402,15 +409,23 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
             fill = read_file(secrets_file)
         except SecretsFileError as e:
             rep.checks.append(Check("secrets file", False, str(e)))
-    write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep)
+    derived: dict[str, str] = {}
+    m = _VAR.fullmatch(str((data.get("world") or {}).get("dir") or ""))
+    if experiment and m and m[1] and m[2] and not Path(m[2]).is_absolute() \
+            and (Path(experiment) / m[2]).is_dir() and not (exp / m[2]).is_dir():
+        derived[m[1]] = str((Path(experiment) / m[2]).resolve())  # world.dir, relative to --from
+    write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived)
     values = read_env_file(d / RUN_ENV)
     rep.checks.append(check_tokens(data, values))
     try:
         spec = read_spec(str(spec_file), [str(d / RUN_ENV)])
         _, warnings = check_spec(spec, str(spec_file))
     except SpecError as e:
-        rep.checks.append(Check("spec", False, f"{spec_file} does not load with {RUN_ENV}",
-                                [*e.done.get("warnings", []), *e.lines]))
+        rep.checks += [Check("spec", False, f"{spec_file} does not load with {RUN_ENV}",
+                             [*e.done.get("warnings", []), *e.lines]),
+                       *(Check(n, None, "skipped: needs the spec") for n in
+                         ("worker slots", "bucket", "providers", "board", "world")),
+                       check_venv({**env, **values})]
         return rep
     unset = [n for n, (default, why) in spec_keys(data).items()  # `NAME=` substitutes ""
              if default is None and not why.startswith("secret:") and not values.get(n)

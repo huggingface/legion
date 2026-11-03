@@ -29,7 +29,7 @@ models:
     model: 'vllm:${MODEL_INTERVIEWER:-MODEL_INTERVIEWER}'  # may be the same id as MODEL_WORKER
     extra: {max_tokens: 2048, temperature: 0.7, chat_template_kwargs: {thinking: false}}
 world:
-  dir: ../../worlds/chatbot4
+  dir: ${WORLD_DIR:-../../worlds/chatbot4}   # flock init writes WORLD_DIR (absolute) for a copied folder
   command: ['{python}', chatbot4.py, serve]
   url: http://${WORLD_HOST}:7860              # Slurm: the world job's host (FLOCK_WORLD_HOST_FILE); local runs `command`
   token_env: CHATBOT_WORLD_TOKEN
