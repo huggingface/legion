@@ -48,7 +48,7 @@ def agent_cli(monkeypatch, app, store, tick):
 
 
 def run(*args: str):
-    return runner.invoke(cli.app, list(args))
+    return runner.invoke(cli.agent_app if args[0] in ("spawn", "remove") else cli.app, list(args))
 
 
 def test_client_prefers_the_agent_token(monkeypatch):
@@ -106,4 +106,5 @@ def test_operator_names_swarms_or_agents(agent_cli):
     assert child in r.output and "leader-0000 " not in r.output
     assert run("spawn", "analyst").exit_code == 1  # no FLOCK_AGENT, no --parent
     assert json.loads(run("remove", child).output) == {"removed": [child]}
-    assert json.loads(run("remove", "demo").output) == {"swarm": "demo", "removing": True}
+    r = runner.invoke(cli.app, ["stop", "demo", "--delete", "--yes"])
+    assert json.loads(r.output) == {"swarm": "demo", "removing": True}

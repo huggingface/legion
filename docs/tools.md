@@ -262,7 +262,7 @@ the agent never sees.
 
 ## Follow-ups
 
-- Hot reload: done, `flock run --watch` and `flock update` ([live.md](live.md)); a CLI harness
+- Hot reload: done, `flock update` ([live.md](live.md)); a CLI harness
   gets a "tools changed" note in its next prompt.
 - Per-tool settings (timeout, rate) via a decorator; a long-lived tool host per type for tools
   that want warm state.

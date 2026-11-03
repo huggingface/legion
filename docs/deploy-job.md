@@ -123,7 +123,7 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
     final push never overlap.
 - **restores on start** (`FLOCK_STATE_RESTORE=1`, the default), before the store opens.
   - It downloads `state.db` and checks it. **A snapshot with no swarms is not restored**:
-    after `flock remove` of the last swarm, the next push writes an empty snapshot, so a later
+    after `flock stop --delete` of the last swarm, the next push writes an empty snapshot, so a later
     controller in the same group starts empty.
   - It drops any local WAL, then pulls `events/`.
   - It logs what it restored: `state: restored N swarms (names), A agents, W workers`.

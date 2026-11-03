@@ -3,7 +3,7 @@
 # only the types, prompts, spawn policy and sizes differ.
 swarm: ${CHATBOT_RUN:-levels}                # ${VAR:-default}: flock launch --env run.env (run 4 README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
-  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
+  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock launch` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
   cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
   mem: ${WORKER_MEM:-7G}
@@ -90,7 +90,7 @@ types:
     system_prompt_append_file: prompts/worker.md
     workers: {initial: 0, max_extra: 42}    # 500 workers at 12 per worker, opened on demand
 # A child's depth is its parent's minus 1: leads 2, managers 1, workers 0. Workers have no
-# spawn entry, so `flock spawn` is refused for them; leads cannot spawn workers directly.
+# spawn entry, so `flock-agent spawn` is refused for them; leads cannot spawn workers directly.
 spawn:
   lead: {types: {manager: 5}, depth: 2}
   manager: {types: {worker: 5}, depth: 1}

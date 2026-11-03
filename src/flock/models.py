@@ -436,7 +436,7 @@ class WorldSpec(_Removable):
 
     model_config = {"extra": "forbid"}
 
-    dir: str | None = None  # relative to the spec file; `flock launch` / `flock run` resolve it
+    dir: str | None = None  # relative to the spec file; `flock launch` resolves it
     command: list[str] | None = None  # `{port}` and `{python}` are filled in by flock
     url: str | None = None
     token_env: str | None = None
@@ -894,7 +894,7 @@ class SlurmResources(_Removable):
 class ComputeSpec(_Removable):
     """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
     `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
-    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md).
+    (`flock launch` runs them on this machine). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
     The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
@@ -1668,7 +1668,7 @@ class LoopStartCommand(BaseModel):
     meta: LoopMeta  # kind "loop"; `round` is the rounds done so far
     max_rounds: int | None = None
     deadline: datetime | None = None
-    # One run of the loop (`flock loop --start` begins a new one): a new run resets the
+    # One run of the loop (POST /swarms/{swarm}/loop start begins a new one): a new run resets the
     # worker's round counter; a repeat of the same run (lost command, live update) does not.
     run: str | None = None
 

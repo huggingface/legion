@@ -47,7 +47,7 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert "understanding engine" in system and "general mechanisms" in system
     lead, manager, worker = (spec.types[n].system_prompt for n in ("lead", "manager", "worker"))
     everything = lead + manager + worker
-    for gone in ("## Interviews", "flock spawn interviewer", "verdict", "vote", "voting",
+    for gone in ("## Interviews", "flock-agent spawn interviewer", "verdict", "vote", "voting",
                  "flock prompt", "SwarmChat-v9", "chatbot-v5"):
         assert gone not in everything, gone
     assert rules("lead") == rules("manager") == rules("worker")
@@ -55,11 +55,11 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     for text in ("Establish the goal", "Build the shared plan", "Claim and execute", "Reassess",
                  "Verify and hand off", "say so in the team channel"):
         assert text in rules("lead"), text
-    assert SUPERVISION + "#general. Remove an agent that is done with `flock remove`." in lead
+    assert SUPERVISION + "#general. Remove an agent that is done with `flock-agent remove`." in lead
     assert SUPERVISION + "your lead in the team channel." in manager
-    assert "between 1 and 5" in lead and "flock spawn manager --prompt" in lead
-    assert "between 1 and 5" in manager and "flock spawn worker --prompt" in manager
-    assert "flock spawn" not in worker and "You cannot start other agents" in worker
+    assert "between 1 and 5" in lead and "flock-agent spawn manager --prompt" in lead
+    assert "between 1 and 5" in manager and "flock-agent spawn worker --prompt" in manager
+    assert "flock-agent spawn" not in worker and "You cannot start other agents" in worker
     assert "$FLOCK_PARENT" in manager and "$FLOCK_PARENT" in worker
 
 

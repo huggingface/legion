@@ -1,6 +1,6 @@
 """A shared task board world (docs/world.md): agents list, add, claim and finish tasks.
 
-    cd worlds/taskboard && FLOCK_WORLD_TOKEN=dev flock world serve taskboard:TaskBoard
+    cd worlds/taskboard && FLOCK_WORLD_TOKEN=dev python -m flock.world serve taskboard:TaskBoard
 
 State is one SQLite file in the current directory (`$TASKBOARD_DB`, default `taskboard.db`), so
 it survives a restart of the world. On first start the board is seeded from `tasks.txt` next to

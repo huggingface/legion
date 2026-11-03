@@ -2,7 +2,7 @@
 # world-inner.sh: the world's driver INSIDE its container (started by world.sbatch through
 # `srun --container-image ... bash world-inner.sh`). Never run it on the host.
 #
-# restore world.tar.gz from the bucket into an EMPTY $CHATBOT_WS -> `flock world serve` -> upload an archive every
+# restore world.tar.gz from the bucket into an EMPTY $CHATBOT_WS -> `python -m flock.world serve` -> upload an archive every
 # WS_SYNC_S -> final sync when the server ends. The workspace lives on the container root (/work,
 # node disk, deleted with the container), so every archive upload runs here, not on the host.
 #
@@ -59,7 +59,7 @@ stop_world() {  # stop_world [kill]: TERM the restore, the sync loop and the ser
   done
   # uvicorn's graceful shutdown can wait indefinitely on an in-flight contract run
   if [ "${1:-}" = kill ] && [ -n "$WORLD_PID" ] && kill -0 "$WORLD_PID" 2>/dev/null; then
-    log "flock world serve still alive after 5 s: SIGKILL"
+    log "python -m flock.world serve still alive after 5 s: SIGKILL"
     kill -KILL "$WORLD_PID" 2>/dev/null
   fi
 }
@@ -127,7 +127,7 @@ fi
 # ---------------------------------------------------------------- serve + periodic push
 cd "$WORLD_SRC" || { log "FATAL: cannot cd $WORLD_SRC"; exit 2; }   # `module:Class` imports from the cwd
 trap '' USR1
-"$VENV/bin/flock" world serve chatbot4:Chatbot4World --host 0.0.0.0 --port "$WORLD_PORT" \
+"$VENV/bin/python" -m flock.world serve chatbot4:Chatbot4World --host 0.0.0.0 --port "$WORLD_PORT" \
   --token-env FLOCK_WORLD_TOKEN 2>&1 &
 WORLD_PID=$!
 (
@@ -138,12 +138,12 @@ WORLD_PID=$!
 ) &
 SYNC_PID=$!
 trap on_usr1 USR1
-log "flock world serve pid $WORLD_PID, ws sync loop pid $SYNC_PID (every ${WS_SYNC_S}s), ws=$CHATBOT_WS"
+log "python -m flock.world serve pid $WORLD_PID, ws sync loop pid $SYNC_PID (every ${WS_SYNC_S}s), ws=$CHATBOT_WS"
 [ -z "$MODE" ] || stop_world   # a stop signal between the restore and here
 
 wait_pid "$WORLD_PID"; rc=$WRC
 [ -n "$SYNC_PID" ] && { kill -TERM "$SYNC_PID" 2>/dev/null; pkill -TERM -P "$SYNC_PID" 2>/dev/null; wait "$SYNC_PID" 2>/dev/null; }
-log "flock world serve exited with $rc (mode=${MODE:-none})"
+log "python -m flock.world serve exited with $rc (mode=${MODE:-none})"
 
 # ---------------------------------------------------------------- final sync (USR1 never gets here: on_usr1 exits)
 if [ "$MODE" = stop ]; then          # bound from world.sbatch (signal-only: long; plain scancel: 25 s)

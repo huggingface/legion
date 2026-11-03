@@ -65,14 +65,14 @@ chat completions at the same latency, and the controller's preflight can reach i
    - Run `flock launch experiments/pixel/run/spec-smoke.yaml`. Preflight probes the proxy URL.
    - Then `python experiments/pixel/run/driver.py --swarm pixel-smoke --canvas-url https://<JOB_ID>--8765.hf.jobs --max-steps 5`.
    - Check `/replay` and the progress Space.
-   - Then `flock remove pixel-smoke`.
+   - Then `flock stop pixel-smoke --delete`.
 6. **Run.**
    - Run `flock launch experiments/pixel/run/spec-100.yaml`.
    - Then run `python experiments/pixel/run/driver.py --swarm pixel-100 --canvas-url <canvas URL> --run-id run1-20261019 --repeat --interval 3 --max-minutes 80 --gpu-usd-per-hour 2.75`, with `SPACE_ID`/`HF_TOKEN` set for the progress page. Use the job's RUN_ID as `--run-id`.
    - `--repeat` goes with `done_tool: true`: the step prompt asks the model to repeat the command within the turn, and only idle agents are prompted (a prompt sent mid-turn would be steered into the running turn). With `done_tool: false`, drop `--repeat`.
    - The driver stops when the work set is 100% done. Cap the run with `--max-minutes`, or each agent with `--max-steps`.
 7. **Teardown.**
-   - Run `flock remove pixel-100`.
+   - Run `flock stop pixel-100 --delete`.
    - Confirm the paint log is in the bucket: `$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`. It is copied every 60 s; the driver also uploads `final/<run>/paint-log.jsonl.gz` to the Space.
    - Then `hf jobs cancel <JOB_ID>`, and pause `cmpatino/flock-smoke` again.
    - The log is the replay. A canvas started on it (`CANVAS_DATA=<dir with paint.log.jsonl> python -m canvas`) serves `/replay` locally.
@@ -206,7 +206,7 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
 ### Teardown (3 GPU jobs)
 1. The driver stops at 100% and uploads `final/<run>/` (canvas.png, agents.png fresh, score.json,
    paint-log.jsonl.gz).
-2. Run `flock remove pixel-1k`, and wait until the workers are gone (~2 min at 100 agents; longer at 42 workers).
+2. Run `flock stop pixel-1k --delete`, and wait until the workers are gone (~2 min at 100 agents; longer at 42 workers).
 3. Check the bucket paint log has `seq` lines: `$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`
    (copied every 60 s; wait one more minute after the driver ends).
 4. `hf jobs cancel` all three (`$RUN_ID-gpu1..3`); `hf jobs ps` should show none. Pause the controller Space.
@@ -286,13 +286,13 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
 | when | what |
 |---|---|
 | +0-1 min | leaders install, read bands, lease (409 -> next band) |
-| +1-2 min | 1,000 `flock spawn` calls (100 serial per leader, 10 leaders in parallel; the controller handles ~300 spawns/s, local scale test), one grant per leader |
+| +1-2 min | 1,000 `flock-agent spawn` calls (100 serial per leader, 10 leaders in parallel; the controller handles ~300 spawns/s, local scale test), one grant per leader |
 | +1-3 min | painter workers boot as slots fill: `workers.initial` does NOT pre-create workers, so the first spawn of each type waits ~45 s for a job; 42 workers launch in one pass and boot in parallel; first prompts wait as pending |
 | +3-7 min | painting: ~62k calls at ~400 calls/s if all bands run at once, i.e. ~3 min; uneven leaders make it longer |
 | +7-8 min | leaders see BAND DONE within 30 s, reply "band N done" |
 
 ### Teardown
-- `flock remove pixel-spawn` removes leaders and cascades to all 1,000 children (drain; a few minutes).
+- `flock stop pixel-spawn --delete` removes leaders and cascades to all 1,000 children (drain; a few minutes).
 - Check the bucket paint log (`$BUCKET/pixel/runs/$RUN_ID/paint.log.jsonl`). The observer has
   uploaded `final/`.
 - `hf jobs cancel` the three `$RUN_ID-gpuN` jobs and pause the Space.

@@ -1,7 +1,7 @@
-"""`<data-dir>/current`: how a second terminal finds a live `flock run` (docs/local.md).
+"""`<data-dir>/current`: how a second terminal finds a local run `flock launch` started (docs/local.md).
 
 A JSON file (mode 0600) with the run's controller URL, its generated token, the run dir and the
-pid of the `flock run` process. Written when the controller is up, removed at exit; a file whose
+pid of its background process (flock.controller.localrun). Written when the controller is up, removed at exit; a file whose
 pid is gone is ignored. No controller dependencies: the plain CLI reads it.
 """
 
@@ -34,7 +34,7 @@ def clear_current(data_dir: Path, pid: int) -> None:
 
 
 def read_current(path: Path) -> dict[str, Any] | None:
-    """URL and token of a live `flock run`, or None (no file, unreadable, or its pid is gone)."""
+    """URL and token of a live local run, or None (no file, unreadable, or its pid is gone)."""
     try:
         info = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):

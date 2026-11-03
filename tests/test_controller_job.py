@@ -340,7 +340,7 @@ def test_build_restores_state_before_opening_the_store(tmp_path, monkeypatch):
 
 
 def test_a_snapshot_without_swarms_is_not_restored(tmp_path, caplog):
-    """After `flock remove` of the last swarm, the next push writes an empty snapshot: a new
+    """After `flock stop --delete` of the last swarm, the next push writes an empty snapshot: a new
     controller in the same group must start empty, not resurrect the removed swarm."""
     caplog.set_level(logging.INFO, "flock.state")
     bucket = FakeBucket(tmp_path / "bucket")

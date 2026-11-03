@@ -66,7 +66,7 @@ layout. Configure the entry before launch and ensure the viewer token can read t
    A check would need a `proposal` argument on `open_pr` verified before the call, in the
    worker's world hub (`src/flock/world/hub.py`, which already holds the agent's board
    identity) or in the world (which would need board credentials).
-2. **Spawn votes are on the honour system.** `flock spawn` (`POST /agents/{parent}/spawn`,
+2. **Spawn votes are on the honour system.** `flock-agent spawn` (`POST /agents/{parent}/spawn`,
    `src/flock/controller/spawn.py`) does not look at the board. A check would belong in the
    controller (a CLI-side check is bypassed by calling the API with the agent token): a
    `proposal` field, a `vote` refusal reason, and a board read token for the controller.

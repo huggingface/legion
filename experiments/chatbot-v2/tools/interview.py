@@ -1,4 +1,4 @@
-"""spawn_interviewer: a team agent spawns a short-lived interviewer child (flock spawn,
+"""spawn_interviewer: a team agent spawns a short-lived interviewer child (flock-agent spawn,
 docs/spawn.md) through the controller API, as itself (FLOCK_URL, FLOCK_AGENT_TOKEN in its env),
 for a booking made first with the world's book_interview. A folder tool cannot call the world
 (the world secret never reaches tools), so the world does the quota check, the reservation and

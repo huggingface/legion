@@ -20,7 +20,7 @@ There is no per-type prompt file: everything an agent needs is in `prompts/syste
 ## Mechanics
 
 - One type, `agent`, identical to run 4's `agent` (world tools, board, model, loop). No
-  `spawn:` block, so `flock spawn` is refused; agents never start or remove others.
+  `spawn:` block, so `flock-agent spawn` is refused; agents never start or remove others.
 - The ramp raises `replicas` (`replicas_ramp`); `limits: {alive: 250}` matches its `max`.
   To grow, raise `replicas_ramp.max` in `spec.yaml` and `limits.alive` together.
 - Teams exist only on the board: an agent creates or joins a channel (`create_channel`,

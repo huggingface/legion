@@ -1,4 +1,4 @@
-"""experiments/chatbot-v2 end to end under `flock run` (offline): the real CLI runs the
+"""experiments/chatbot-v2 end to end under a local run (flock.controller.localrun) (offline): the real CLI runs the
 experiment's own spec, kickoff, protocols, tools and world.yaml with worlds/chatbot2, against
 tests/fake_openai.py and tests/fake_msgboard.py. Only the provider, the board, the loop prompts
 (scripted tool calls) and the loop timings are swapped: 8 agents in 4 types (2 teams).

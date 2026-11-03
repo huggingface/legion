@@ -1,5 +1,5 @@
 #!/bin/bash
-# world.sbatch: the run-4 PR world (worlds/chatbot4, `flock world serve`) as one CPU Slurm job.
+# world.sbatch: the run-4 PR world (worlds/chatbot4, `python -m flock.world serve`) as one CPU Slurm job.
 #
 #   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
 #   sbatch -J flock-world-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
@@ -124,7 +124,7 @@ export B=${CHATBOT_BUCKET%/}
 export WS_SYNC_S=${WS_SYNC_S:-300}
 export WORLD_PORT=7860
 WORLD_HOST=$(hostname)
-export WORLD_SRC=$REPO/worlds/chatbot4            # `flock world serve module:Class` imports from the cwd
+export WORLD_SRC=$REPO/worlds/chatbot4            # `python -m flock.world serve module:Class` imports from the cwd
 export CHATBOT_WS=/work/world/ws                  # container root: restored empty at each start, deleted with the container
 export FLOCK_WORLD_TOKEN=$CHATBOT_WORLD_TOKEN     # start.sh: the token the controller/workers send as X-World-Token
 export FINAL_SYNC_S FINAL_SYNC_LONG_S CANCEL_SYNC_S WORLD_CTL

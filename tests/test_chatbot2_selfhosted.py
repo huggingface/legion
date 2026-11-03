@@ -1,6 +1,6 @@
 """experiments/chatbot-v2/selfhosted: the render (N teams, price 0, no $ caps, continuous
 cadence), the load smoke's analysis, and an offline run of a rendered 4-team swarm under
-`flock run` with the fakes: phase 1 isolates every team from the 3 others, the rounds come
+a local run with the fakes: phase 1 isolates every team from the 3 others, the rounds come
 back to back (`every: turn_end`), price 0 never stops anything; phase 2 (a second run on the
 same, merged workspace) reads across teams and promotes."""
 

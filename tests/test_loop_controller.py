@@ -1,6 +1,6 @@
 """Controller side of `loop:` (docs/loop.md), driven tick by tick on a fake clock:
 loop / final ordering, `every` as a duration and as turn_end (worker- and controller-side),
-`while` conditions, the wake queue's debounce, `flock loop --stop/--start` and the
+`while` conditions, the wake queue's debounce, the loop stop/start route and the
 `limits.budget_usd` thresholds. The worker is simulated by posting its heartbeats and events."""
 
 from __future__ import annotations
@@ -453,18 +453,18 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     run = CliRunner()
     r = run.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "loop researcher: running (controller, every 5s), round 1, 0/2" in r.output
-    r = run.invoke(cli.app, ["loop", "demo", "--type", "researcher", "--stop", "--no-final"])
-    assert r.exit_code == 0 and "loop researcher: done" in r.output and "stopped: manual" in r.output
+    body = {"type": "researcher", "action": "stop", "final": False}  # the route (no CLI command)
+    line = cli._loop_line(cli._call("POST", "/swarms/demo/loop", json=body))
+    assert "loop researcher: done" in line and "stopped: manual" in line
     sim.tick(10)
     assert await sim.commands() == []  # stopped without a final round
-    r = run.invoke(cli.app, ["loop", "demo", "--type", "researcher", "--start"])
-    assert r.exit_code == 0 and "running" in r.output, r.output
+    body = {"type": "researcher", "action": "start", "final": True}
+    assert "running" in cli._loop_line(cli._call("POST", "/swarms/demo/loop", json=body))
     sim.tick()
     got = prompts(await sim.commands())
     assert {p["loop"]["round"] for p in got.values()} == {1}  # a new run of the loop: from round 1
-    r = run.invoke(cli.app, ["loop", "demo"])
-    assert r.exit_code == 0 and A0 in r.output and "looping" in r.output
-    assert run.invoke(cli.app, ["loop", "demo", "--stop"]).exit_code == 1  # needs --type
+    (lp,) = cli._call("GET", "/swarms/demo/loop")
+    assert lp["per_agent"][A0]["phase"] == "looping"
     r = run.invoke(cli.app, ["events", "demo"])
     got = [json.loads(x)["type"] for x in r.output.splitlines()]
     assert [k for k in got if k.startswith("loop_")][:2] == ["loop_started", "loop_tick"]
@@ -719,7 +719,7 @@ async def test_finish_never_resends_a_fetched_final(sim):
 
 
 async def test_until_idle_ignores_a_dormant_looping_type(sim):
-    """`flock run --until idle` (localrun.Tracker): a `replicas: 0` type with a loop and no
+    """`--until idle` (localrun.Tracker): a `replicas: 0` type with a loop and no
     agents never runs a round, so it must not hold a finished run open. A type whose replicas
     are not created yet, or one just spawned into, still counts (review of PR #17)."""
     from flock.controller.api import swarm_status

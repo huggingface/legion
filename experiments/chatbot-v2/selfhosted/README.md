@@ -57,7 +57,7 @@ Locally:
 ```sh
 cp -r experiments/chatbot-v2 /tmp/cb && \
   python experiments/chatbot-v2/selfhosted/render.py --into /tmp/cb   # with the env above
-cd /tmp/cb && CHATBOT_CONFIG=$PWD/world.yaml flock run spec.yaml --until idle
+cd /tmp/cb && CHATBOT_CONFIG=$PWD/world.yaml python -m flock.controller.localrun spec.yaml --until idle
 ```
 
 As the HF Job of the main README, with `-e CHATBOT_VARIANT=selfhosted`, the model variables

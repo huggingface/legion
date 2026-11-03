@@ -12,7 +12,7 @@ B=$((10#${FLOCK_AGENT##*-})); for k in 0 1 2 3 4 5 6 7 8 9; do b=$(((B+k)%10)); 
 
 3. Spawn your 100 painters in ONE command (no waiting between spawns; the first spawn of a type
 boots a worker, ~45 s, that is normal), then give your whole team your band:
-: > kids.txt; for t in a:34 b:33 c:33; do for i in $(seq 1 ${t#*:}); do flock spawn painter-${t%:*} --key ${t%:*}$i >> kids.txt; done; done; wc -l < kids.txt; python3 canvas grant-region "$FLOCK_AGENT-*"
+: > kids.txt; for t in a:34 b:33 c:33; do for i in $(seq 1 ${t#*:}); do flock-agent spawn painter-${t%:*} --key ${t%:*}$i >> kids.txt; done; done; wc -l < kids.txt; python3 canvas grant-region "$FLOCK_AGENT-*"
 
 4. Start them in ONE command (bash timeout 600000 ms): ONE bulk call sends the install prompt P1; P
 (keep both texts as is) goes to prompt.txt only, and step 5 sends it to children once they are idle:
@@ -36,5 +36,5 @@ RC=$(tr ' ' , < band.txt); P=$(cat prompt.txt); last=x; same=0; for r in $(seq 1
   "ok, my painters are on it"), restart your painters with `flock prompt --children "$(cat prompt.txt)"`, write that leader's region
   (from python3 canvas regions) into band.txt as "X Y W H" and run step 5. Otherwise reply "band <n> done" and stop.
 
-Errors: canvas 401: stop and say so. A `flock spawn` refusal (alive, spawned_total, workers):
+Errors: canvas 401: stop and say so. A `flock-agent spawn` refusal (alive, spawned_total, workers):
 stop spawning and continue with the painters you have. Never use `flock events --wait` on painters.

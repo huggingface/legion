@@ -70,7 +70,7 @@ is not counted. Hours are by the time the controller received the events.
 
 ## Files (mirrored by the state sync)
 
-Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flock run`:
+Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flock launch`:
 `<run dir>/controller/`):
 
 ```

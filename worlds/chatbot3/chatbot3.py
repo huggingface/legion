@@ -725,7 +725,7 @@ for _name, _text in DOCS.items():
 
 def serve() -> None:
     """What the spec runs (`{python} chatbot3.py serve`); no operator routes. A world served
-    elsewhere (a Space) can use `flock world serve chatbot3:Chatbot3World` instead."""
+    elsewhere (a Space) can use `python -m flock.world serve chatbot3:Chatbot3World` instead."""
     from flock.world.server import serve as world_serve
 
     world_serve("chatbot3:Chatbot3World")

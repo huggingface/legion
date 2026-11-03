@@ -293,7 +293,7 @@ the type defines `resume_prompt`, sends it. No default.
 
 ```yaml
 swarm: paper-review
-compute: hf-jobs               # default; `local`: workers as subprocesses, `flock run` (docs/local.md)
+compute: hf-jobs               # default; `local`: workers as subprocesses, `flock launch` (docs/local.md)
 namespace: cmpatino            # HF namespace for jobs (required for hf-jobs, ignored locally)
 bucket: hf://buckets/cmpatino/flock
 providers:                     # optional: where open models are served (see "Providers")

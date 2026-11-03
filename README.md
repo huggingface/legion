@@ -12,8 +12,8 @@ them.
 
 ## Features
 
-- **Local mode:** `compute: local` and `flock run spec.yaml` run the same spec on a laptop
-  (controller in-process, workers as subprocesses, terminal view, run bundle);
+- **Local mode:** `compute: local` and `flock launch spec.yaml` run the same spec on a laptop
+  (background controller, workers as subprocesses, run bundle);
   `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
   and one or more agent types. Each type sets the harness (`claude`,
@@ -56,11 +56,10 @@ them.
 - **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
   turn_end` or a duration) while `while:` holds
   (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
-  round; `limits.budget_usd` stops the swarm. `flock loop` stops or restarts
-  a loop. See [docs/loop.md](docs/loop.md).
+  round; `limits.budget_usd` stops the swarm. `flock stop --final` stops
+  a loop with its final round. See [docs/loop.md](docs/loop.md).
 - **Live changes:** `flock update <folder>` applies an edited experiment folder (spec,
-  prompts, tools) to the running swarm and prints what changed; `flock run --watch` does it
-  on every save. Agents take each change at their next turn, with a one-line note.
+  prompts, tools) to the running swarm and prints what changed; run it again after each edit. Agents take each change at their next turn, with a one-line note.
   See [docs/live.md](docs/live.md).
 - **Comms (optional):** a `comms:` block gives the agents one msgboard channel and
   built-in `post` / `read` / `search` tools; each agent joins under its own name at its
@@ -68,8 +67,8 @@ them.
   worker turns @mentions and thread replies into events. See [docs/comms.md](docs/comms.md).
 - **Worlds (optional):** a `world:` block names an HTTP service holding the swarm's shared state
   (World API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); its tools reach the
-  agents like folder tools, each call carrying the agent's name. `flock run` starts a local world
-  as a child process; `flock world serve module:Class` serves a `flock.world.World` subclass;
+  agents like folder tools, each call carrying the agent's name. `flock launch` starts a local world
+  as a child process; `python -m flock.world serve module:Class` serves a `flock.world.World` subclass;
   `worlds/taskboard` is an example. See [docs/world.md](docs/world.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
@@ -98,14 +97,16 @@ uv sync --all-extras                 # or: pip install -e ".[controller,worker,d
 run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,
 a different program; `uv run` also gives the scripts a Python with `huggingface_hub`.
 
-### On your laptop: `flock run`
+### On your laptop: `flock launch`
 
-The same spec with `compute: local` runs the controller and its workers on your machine, with
-a live view in the terminal and a run bundle at the end; no HF token or bucket needed for a
+The same spec with `compute: local` runs the controller and its workers on your machine, in the background
+with a run bundle at the end (`flock status` to watch); no HF token or bucket needed for a
 local model endpoint. See [docs/local.md](docs/local.md):
 
 ```sh
-uv run flock run examples/local.yaml --prompt "Introduce yourself." --until idle
+uv run flock launch examples/local.yaml
+uv run flock prompt --swarm hello --type writer "Introduce yourself."
+uv run flock stop hello --release      # ends the run and writes the bundle
 ```
 
 ### Run the controller
@@ -191,7 +192,7 @@ uv run flock prompt scribe-0007 "Summarize your workdir."
 uv run flock events scribe-0007 --follow # JSONL: turn_started, turn_ended, ...
 uv run flock stop demo --release      # drain, sync every agent, free the workers
 uv run flock launch demo              # resume
-uv run flock remove demo
+uv run flock stop demo --delete
 ```
 
 Other commands: `agents <swarm> [--type --state]`, `agent <name>`,

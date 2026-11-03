@@ -47,7 +47,7 @@ def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
 
 @pytest.fixture(autouse=True)
 def no_local_checkpoint(monkeypatch):
-    """`flock run` checkpoints to <bucket>/controller/<swarm> by default: never from tests."""
+    """A local run checkpoints to <bucket>/controller/<swarm> by default: never from tests."""
     monkeypatch.setenv("FLOCK_STATE_URL", "")
 
 

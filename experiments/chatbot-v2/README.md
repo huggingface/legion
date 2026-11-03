@@ -56,14 +56,14 @@ its reply has a statement of 3+ words). A crash or a timeout fails every check.
 cd experiments/chatbot-v2
 export HF_TOKEN=... CHATBOT_BOARD_INVITE=... CHATBOT_WORLD_TOKEN=$(openssl rand -hex 16)
 export CHATBOT_CONFIG=$PWD/world.yaml
-flock run spec.yaml --until idle          # after setting comms.url / comms.channel
+python -m flock.controller.localrun spec.yaml --until idle          # after setting comms.url / comms.channel
 # at the 2 h mark, the switch: the world first, then the phase-2 prompts
 python ../../worlds/chatbot2/chatbot2.py merge && flock update phase2/spec.yaml
 ```
 
 ## Run it as an HF Job
 
-The same job shape as chatbot-v1: ONE `cpu-upgrade` job running `flock run --until idle` in
+The same job shape as chatbot-v1: ONE `cpu-upgrade` job running `python -m flock.controller.localrun --until idle` in
 local mode, a bucket carrying the payload in and the workspace, bundle and logs out.
 
 ```sh
@@ -110,7 +110,7 @@ without `-I`). Files a package no longer has are deleted from the bucket.
 ## Offline tests (no network, no cost)
 
 - `tests/test_chatbot2_world.py`: the world in process.
-- `tests/test_chatbot2_experiment.py`: the experiment under `flock run` with the fake model
+- `tests/test_chatbot2_experiment.py`: the experiment under `localrun` with the fake model
   server and the fake board (8 agents, both phases, the compare round, bookings, probes,
   promotions, the final round), the phase-2 spec check, and `job/bootstrap.sh` run locally
   (live update, switch marker, stop marker).

@@ -15,4 +15,4 @@ if [ -n "$B" ]; then  # the whole workspace every WS_SYNC_S (best/ is mirrored a
   ( while sleep "${WS_SYNC_S:-300}"; do hf buckets sync "$WS" "$B/ws" -q >/dev/null 2>&1 || echo "ws sync failed"; done ) &
 fi
 cd /app/worlds/chatbot3
-exec python -m flock world serve chatbot3:Chatbot3World --host 0.0.0.0 --port 7860 --token-env FLOCK_WORLD_TOKEN
+exec python -m flock.world serve chatbot3:Chatbot3World --host 0.0.0.0 --port 7860 --token-env FLOCK_WORLD_TOKEN

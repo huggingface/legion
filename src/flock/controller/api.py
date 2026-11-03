@@ -872,8 +872,8 @@ def create_app(
             raise HTTPException(
                 400,
                 f"this controller launches workers with compute {compute!r}; the spec asks for "
-                f"compute {spec.compute.kind!r} (docs/local.md: `flock run` for local, a "
-                "deployed controller and `flock launch` for hf-jobs)",
+                f"compute {spec.compute.kind!r} (docs/local.md: `flock launch` starts a local "
+                "controller for `compute: local`)",
             )
         for type_name in spec.types:
             owner = store.type_owner(type_name)

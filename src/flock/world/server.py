@@ -1,6 +1,6 @@
 """Serve a `flock.world.World` over HTTP (World API v1, docs/world.md).
 
-`flock world serve module:Class` imports `module` from the current directory, instantiates
+`python -m flock.world serve module:Class` imports `module` from the current directory, instantiates
 `Class` (or takes a World instance named so) and serves it with uvicorn on
 `$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default 127.0.0.1:8765), requiring `X-World-Token` to
 equal `$FLOCK_WORLD_TOKEN`. Synchronous tools and hooks run one at a time (a lock), so a world

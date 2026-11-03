@@ -22,7 +22,7 @@ models:                                        # swap in any router model with t
     extra: {max_tokens: 32000, temperature: 0.6, chat_template_kwargs: {enable_thinking: false}}
 world:
   dir: ../../worlds/eliza                      # workspace: worlds/eliza/ws (or $ELIZA_WS)
-  command: ["{python}", -m, flock.cli, world, serve, "eliza:ElizaWorld"]
+  command: ["{python}", -m, flock.world, serve, "eliza:ElizaWorld"]
 comms:
   kind: msgboard
   url: https://msgboard.example.invalid        # placeholder: your board's URL

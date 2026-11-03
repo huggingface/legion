@@ -34,7 +34,7 @@ the spawn policy are this folder's specs. There is no loop code.
 | `prompts/interviewer.md` | the interviewers' system prompt |
 | `protocols/team.md`, `protocols/chatbot.md` | phase-1 rules: own thread, the team's own direction, leaderless splits, review by talking |
 | `phase2/system.md`, `round.md`, `final.md`, `protocol.md` | phase-2 prompts and the merged-team rules |
-| `tools/interview.py` | `spawn_interviewer`: the team agents' spawn tool (flock spawn through the controller API) |
+| `tools/interview.py` | `spawn_interviewer`: the team agents' spawn tool (flock-agent spawn through the controller API) |
 | `job/bootstrap.sh`, `job/switch.sh`, `job/launch.sh` | the HF Job: container entrypoint, phase switch, payload upload |
 | `variant-two-channels/` | the alternative where team B has its own channel in phase 1 (see below) |
 
@@ -139,7 +139,7 @@ for f in spec.yaml phase2/spec.yaml; do      # the spec has no ${ENV}: render th
   sed -e "s|https://msgboard.example.invalid|$CHATBOT_BOARD_URL|" \
       -e "s|your-chatbot-channel|$CHATBOT_CHANNEL|" "$f" > "${f%.yaml}.local.yaml"; done
 rm -rf ../../worlds/chatbot/ws                # a fresh workspace (or set CHATBOT_WS)
-uv run flock run spec.local.yaml --until idle
+uv run python -m flock.controller.localrun spec.local.yaml --until idle
 ```
 
 ## Phase switch (at the 2 h mark)
@@ -166,12 +166,12 @@ Check that it took effect:
   (version 0.1.0-teams -> 0.1.0-merged)" and the phase-2 round prompt:
   `uv run flock events ds-a-0000 --pretty | grep -E "world changed|Phase 2"`.
 - `$CHATBOT_BUCKET/phase.json` says `merged`; the world mirrors it at once.
-- The loop keeps its start time and round count (`uv run flock loop chatbot-v1`). The 4 h
+- The loop keeps its start time and round count (`uv run flock status chatbot-v1`). The 4 h
   `until` is still measured from the start of the run.
 
 ## Run it as an HF Job
 
-The job is ONE `cpu-upgrade` job (8 vCPU, 32 GB) running `flock run spec.local.yaml --until
+The job is ONE `cpu-upgrade` job (8 vCPU, 32 GB) running `python -m flock.controller.localrun spec.local.yaml --until
 idle` in local mode. The controller, 8 agents, the interviewers and the world are all child
 processes. There are no proxies and no network group.
 
@@ -196,7 +196,7 @@ What `job/bootstrap.sh` does:
 1. It installs `huggingface_hub==2.2.0`, pulls `<bucket>/payload/` and installs the wheel
    with its `controller` extra.
 2. It unpacks the experiment and renders the `*.local.yaml` specs from `CHATBOT_BOARD_URL`
-   and `CHATBOT_CHANNEL`, then starts `flock run`.
+   and `CHATBOT_CHANNEL`, then starts `localrun`.
 3. While the run goes, it does two things:
    - every `CHATBOT_SYNC_S` (300 s) it syncs the workspace to `<bucket>/ws/`, the run dirs to
      `<bucket>/flock/` (never flock's `current` file, which holds the controller token) and
@@ -244,7 +244,7 @@ and channel), and agents' reads start there.
 echo stop > stop && hf buckets cp stop hf://buckets/<ns>/<bucket>/<run>/control/stop
 ```
 
-Within `CHATBOT_CHECK_S` (30 s) the bootstrap passes a SIGTERM to `flock run`, which drains
+Within `CHATBOT_CHECK_S` (30 s) the bootstrap passes a SIGTERM to `localrun`, which drains
 its turns (up to 10 s) and writes the run bundle (`stop_reason: interrupted`). The bootstrap
 then runs the final sync and the job exits.
 
@@ -276,7 +276,7 @@ What changes:
   fills from `CHATBOT_CHANNEL_B`.
   - In phase 2, `phase2/spec-b.yaml` moves team B to the main channel.
   - When B moves, its host posts `kickoff-b-joins.md` there once.
-- **Runs and budget.** There are two `flock run`s, each with its own data dir (`.flock-a`,
+- **Runs and budget.** There are two `localrun`s, each with its own data dir (`.flock-a`,
   `.flock-b`), bundle and budget: $75 each, `spawned_total` 32 each.
 - **The switch** is one merge plus two updates (`job/switch.sh` with
   `CHATBOT_VARIANT=two-channels`).
@@ -290,7 +290,7 @@ If either swarm fails (for example its apply), the bootstrap stops the other.
 
 - the world's phase rules, the operator route, the bucket mirror (`huggingface_hub` faked),
   qualify, chat, verdicts and the quota, and the spawn tool;
-- the experiment under `flock run` with the fake model server and board:
+- the experiment under `localrun` with the fake model server and board:
   - 8 agents, with phase-1 refusals;
   - interviews: spawn, chat, verdict, post, done, then removal;
   - the switch, phase-2 promotions, the final round and the bundle;

@@ -1,4 +1,4 @@
-"""experiments/eliza end to end under `flock run` (offline): the real CLI in a subprocess runs the
+"""experiments/eliza end to end under a local run (flock.controller.localrun) (offline): the real CLI in a subprocess runs the
 experiment's own spec, prompts, protocols and kickoff with worlds/eliza, against
 tests/fake_openai.py and tests/fake_msgboard.py. Only the provider, the board, the loop prompts
 (scripted tool calls) and the loop timings are swapped: 5 agents, round 0, 2 rounds, a final.

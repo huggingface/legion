@@ -1,4 +1,4 @@
-# The run-3 world (worlds/chatbot3) as a Docker Space: `flock world serve` (FastAPI, World API
+# The run-3 world (worlds/chatbot3) as a Docker Space: `python -m flock.world serve` (FastAPI, World API
 # v1) on port 7860. Build context: the folder prepare.sh stages (this file, start.sh, the flock
 # wheel, worlds/, world.yaml). Not deployed by anything in this repo.
 FROM python:3.12-slim

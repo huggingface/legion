@@ -301,7 +301,7 @@ class LoopEngine:
             return True
 
     def control(self, swarm: str, type_name: str, action: str, final: bool = True) -> LoopStatus:
-        """`flock loop --start|--stop`: stop (optionally without the final round) or start
+        """POST /swarms/{swarm}/loop start|stop: stop (optionally without the final round) or start
         the loop again from round 0."""
         with self._lock:
             sw = self.store.get_swarm(swarm)

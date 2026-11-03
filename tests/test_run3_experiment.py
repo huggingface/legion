@@ -339,7 +339,7 @@ WAIT = script(("read", {}))
 
 
 def test_world_space_entry_point(tmp_path):
-    """What the Space's start.sh runs: `flock world serve chatbot3:Chatbot3World` from
+    """What the Space's start.sh runs: `python -m flock.world serve chatbot3:Chatbot3World` from
     worlds/chatbot3 serves the manifest behind the world token; the scripts parse."""
     import socket
 
@@ -349,7 +349,7 @@ def test_world_space_entry_point(tmp_path):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     env = {**_env(tmp_path), "FLOCK_WORLD_TOKEN": "w0rld-t0ken", "CHATBOT_WS": str(tmp_path / "ws")}
-    proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "world", "serve",
+    proc = subprocess.Popen([sys.executable, "-m", "flock.world", "serve",
                              "chatbot3:Chatbot3World", "--port", str(port)],
                             cwd=ROOT / "worlds" / "chatbot3", env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
