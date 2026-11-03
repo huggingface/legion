@@ -101,15 +101,19 @@ creates or resumes and never changes the spec.
 `flock stop S --release` holds every type, then drains every worker: running turns finish,
 each agent's final push to the bucket is retried once, and a push that still fails is named in
 the worker's last heartbeat (`sync_failed` on the swarm stream, the worker's `last_error`,
-`status.released.unsynced`). The command waits until no worker runs, then exits 0 when every
+`status.released.unsynced`; a worker that ends unplanned mid-release, without that heartbeat,
+puts all its agents there). The command waits until no worker runs, then exits 0 when every
 agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, loops, spec and
 history stay on the controller; nothing launches until `flock launch S`, when each agent
 restores from the bucket by name. The world and controller jobs keep running.
 
 `--adopt` is for a controller that does not know the swarm (its state was lost or it is a new
 deployment). It restores the swarm from the controller checkpoint in the bucket (`state.db` and
-`events/<swarm>/`, pushed every 60 s by `FLOCK_STATE_URL`): from this controller's own
-`FLOCK_STATE_URL`, else `<bucket>/controller/<swarm>`. Every agent comes back with its cost,
+`events/<swarm>/`, pushed every 60 s by `FLOCK_STATE_URL`): from `--checkpoint URL` (an
+earlier run's state URL, e.g. `<bucket>/controller/<old RUN>`), else this controller's own
+`FLOCK_STATE_URL`, else `<bucket>/controller/<swarm>`. Adopting from the controller's own URL
+is refused when that checkpoint also holds other swarms (its next push would drop them):
+restart it with `FLOCK_STATE_RESTORE=1` instead. Every agent comes back with its cost,
 loop state, ramp step, spawn links and the naming counters; then `launch` resumes it as above.
 With no checkpoint `--adopt` is refused unless `--no-checkpoint` is also given: the swarm is
 then created from the spec and the agents restore from the bucket alone (costs, loops, ramp

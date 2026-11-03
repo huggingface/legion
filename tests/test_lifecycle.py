@@ -270,3 +270,148 @@ def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions
     assert r.exit_code == 0, r.output
     types = store.get_swarm("demo")["spec"].types
     assert types["r"].replicas == 2 and types["b"].replicas == 1
+
+
+# ----------------------------------------------------------------- review fixes
+
+
+def _checkpoint(tmp_path, bucket, *swarms):
+    """A controller checkpoint holding `swarms` (one agent each), pushed to `bucket`."""
+    s = Store(tmp_path / "ckpt")
+    for name in swarms:
+        s.put_swarm(make_spec(name, **{f"t{name}": {"replicas": 1}}), 1.0)
+        s.insert_agent(f"t{name}-0000", name, f"t{name}", 0, 1.0)
+    StateSync(bucket, tmp_path / "ckpt").push(s)
+    s.close()
+
+
+def test_adopt_checkpoint_url_wins_and_own_url_never_drops_other_swarms(tmp_path, monkeypatch,
+                                                                        clock):
+    buckets: dict[str, MemoryStore] = defaultdict(MemoryStore)
+    old_run, own = "hf://buckets/ns/sh/controller/run-1", "hf://buckets/ns/sh/controller/run-2"
+    _checkpoint(tmp_path, buckets[old_run], "demo")
+    new = Store(tmp_path / "new")
+    app = create_app(new, TOKEN, clock=clock, buckets=buckets.__getitem__, state_url=own)
+    _wire(monkeypatch, app)
+    f = _write(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
+    r = runner.invoke(cli.app, ["launch", f, "--adopt"])  # its own (new) run prefix is empty
+    assert r.exit_code == 1 and f"no controller checkpoint of swarm 'demo' at {own}" in r.output
+    r = runner.invoke(cli.app, ["launch", f, "--adopt", "--checkpoint", old_run])
+    assert r.exit_code == 0 and f"from {old_run}" in r.output, r.output
+    assert new.get_agent("tdemo-0000") is not None
+    # the own prefix holding another swarm too: its next push would drop that one
+    _checkpoint(tmp_path / "b", buckets[own], "demo2", "other")
+    f2 = _write(tmp_path / "s2.yaml", make_spec("demo2", tdemo2={"replicas": 1}))
+    r = runner.invoke(cli.app, ["launch", f2, "--adopt"])
+    assert r.exit_code == 1 and "drop them" in r.output and "other" in r.output, r.output
+    assert new.get_swarm("demo2") is None
+    new.close()
+
+
+class BrokenEvents(MemoryStore):
+    fail = True
+
+    def sync_down(self, prefix, local):
+        if self.fail:
+            raise OSError("events download cut")
+        super().sync_down(prefix, local)
+
+
+def test_a_failed_event_download_adopts_nothing_and_a_retry_works(tmp_path, monkeypatch, clock):
+    bucket = BrokenEvents()
+    _checkpoint(tmp_path, bucket, "demo")
+    new = Store(tmp_path / "new")
+    app = create_app(new, TOKEN, clock=clock, buckets=lambda url: bucket)
+    _wire(monkeypatch, app)
+    monkeypatch.setattr(cli, "_sleep", lambda s: None)  # the CLI retries a 502
+    f = _write(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
+    r = runner.invoke(cli.app, ["launch", f, "--adopt"])
+    assert r.exit_code == 1 and "events download cut" in r.output
+    assert new.get_swarm("demo") is None and new.get_agent("tdemo-0000") is None
+    bucket.fail = False
+    assert runner.invoke(cli.app, ["launch", f, "--adopt"]).exit_code == 0
+    new.close()
+
+
+def test_the_bucket_guard_stops_at_the_first_file(monkeypatch):
+    from huggingface_hub import BucketFile
+
+    from flock.worker.sync import HubBucketStore
+
+    def tree(bucket_id, prefix, recursive):
+        f = BucketFile.__new__(BucketFile)
+        f.path = "b/demo/a/x"
+        yield f
+        raise AssertionError("listed past the first file")
+
+    hub = HubBucketStore("hf://buckets/ns/name/b")
+    monkeypatch.setattr(hub.api, "list_bucket_tree", tree)
+    assert hub.first("demo/") == "demo/a/x"
+
+
+def test_a_worker_killed_mid_release_reports_its_agents_unsynced(store, jobs, settings, clock):
+    store.put_swarm(make_spec(), clock().timestamp())
+    reconcile(store, jobs, clock(), settings)
+    from flock.controller.loop import LoopEngine
+
+    LoopEngine(store, send=lambda *a: None, clock=clock).pause("demo", release=True)
+    reconcile(store, jobs, clock(), settings)  # drains sent
+    w0, w1 = store.list_workers("demo")
+    jobs.set_stage(w0["job_id"], "ERROR", "killed")  # no final heartbeat
+    jobs.set_stage(w1["job_id"], "COMPLETED")  # drained and exited
+    clock.advance(120)
+    reconcile(store, jobs, clock(), settings)
+    unsynced = store.get_control("demo", "unsynced")
+    gone = {a["name"] for a in store.list_agents(worker=w0["id"])}
+    assert set(unsynced) == gone and gone
+    assert "ended before its final sync (ERROR: killed)" in next(iter(unsynced.values()))
+
+
+def test_resume_diff_ignores_where_the_folder_is():
+    from flock.models import SwarmSpec
+
+    base = make_spec().model_dump(mode="json")
+
+    def at(d, cmd="w"):
+        return SwarmSpec.model_validate({**base, "compute": {"kind": "local"},
+                                         "world": {"command": cmd, "dir": d}})
+
+    assert cli.resume_diff(at("/runs/a/experiment/world"), at("/runs/b/experiment/world")) == []
+    assert cli.resume_diff(at("/y"), at("/x", "w2"))
+
+
+def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, clock):
+    import flock.controller.api as api_mod
+    from flock.world.host import WorldHost
+
+    class Host(WorldHost):
+        def __init__(self):
+            super().__init__()
+            self.discarded: list[str] = []
+
+        def discard(self, swarm):
+            self.discarded.append(swarm)
+
+    spec_ = make_spec()
+
+    def the_other_launch_wins(spec, **kw):  # it stores the swarm while this one resolves
+        store.put_swarm(spec_, 1.0)
+
+    monkeypatch.setattr(api_mod, "world_resolve", the_other_launch_wins)
+    host = Host()
+    app = create_app(store, TOKEN, clock=clock, worlds=host)
+    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        r = c.put("/swarms/demo", json=spec_.model_dump(mode="json"),
+                  headers={"If-None-Match": "*"})
+    assert r.status_code == 412 and host.discarded == ["demo"]
+
+
+def test_local_runs_checkpoint_to_the_bucket_by_default():
+    from flock.controller.localrun import state_env
+
+    spec_ = make_spec()
+    assert state_env({}, spec_)["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
+    assert state_env({"FLOCK_STATE_URL": ""}, spec_)["FLOCK_STATE_URL"] == ""  # off
+    assert state_env({"FLOCK_STATE_URL": "hf://x/y"}, spec_)["FLOCK_STATE_URL"] == "hf://x/y"
+    nob = make_spec().model_copy(update={"bucket": ""})
+    assert "FLOCK_STATE_URL" not in state_env({}, nob)

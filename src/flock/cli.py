@@ -528,6 +528,11 @@ def launch(
     adopt: bool = typer.Option(
         False, "--adopt", help="Take over a swarm this controller does not know: restore it "
                                "from the controller checkpoint in its bucket."),
+    checkpoint: str = typer.Option(
+        None, "--checkpoint", metavar="STATE_URL",
+        help="With --adopt: the checkpoint to read (an earlier run's FLOCK_STATE_URL, e.g. "
+             "hf://buckets/ns/b/controller/<RUN>); default the controller's own, else "
+             "<bucket>/controller/<swarm>."),
     no_checkpoint: bool = typer.Option(
         False, "--no-checkpoint", help="With --adopt and no checkpoint: create the swarm from "
                                        "the spec; agents restore from the bucket by name."),
@@ -558,6 +563,7 @@ def launch(
         r = _request(c, "GET", f"/swarms/{spec.swarm}")
         if r.status_code == 404 and adopt:
             a = _request(c, "POST", f"/swarms/{spec.swarm}/adopt", json=spec.model_dump(mode="json"),
+                         params={"checkpoint": checkpoint} if checkpoint else None,
                          extensions={"timeout": httpx.Timeout(300).as_dict()})
             if a.status_code == 200:
                 typer.echo(f"adopted {spec.swarm}: {a.json()['agents']} agents from "
@@ -573,12 +579,10 @@ def launch(
                 typer.echo(f"{_detail(a)}: creating from the spec (agents restore from the bucket)")
     if r.status_code == 200:
         old = SwarmSpec.model_validate(r.json()["spec"])
-        from flock.live import diff_specs, keep_replicas
         from flock.tools.bundle import version_of
 
         spec.tools_version = version_of(bundle.data) if bundle is not None else None
-        keep_replicas(old, spec)  # the ramp rewrites the stored count: never a difference
-        if lines := diff_specs(old, spec):
+        if lines := resume_diff(old, spec):
             _fail([*lines, (f"the folder's spec differs from swarm {spec.swarm}'s: run "
                            "`flock update` first, then `flock launch`")])
         _resume(spec.swarm, type_, agent)
@@ -606,6 +610,18 @@ def launch(
                json=spec.model_dump(mode="json"),
                headers={**source, "If-None-Match": "*"})
     _print_status(st)
+
+
+def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
+    """What `launch` on a stored swarm refuses: the folder's spec against the stored one,
+    without the live replicas (the ramp rewrites them) and `world.dir` (absolute: the same
+    folder copied elsewhere). Changes `spec` in place."""
+    from flock.live import diff_specs, keep_replicas
+
+    keep_replicas(old, spec)
+    if old.world is not None and spec.world is not None:
+        spec.world.dir = old.world.dir
+    return diff_specs(old, spec)
 
 
 def _resume(swarm: str, types: list[str] | None, agents: list[str] | None) -> None:

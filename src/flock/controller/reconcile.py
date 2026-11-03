@@ -643,6 +643,13 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "draining": 0,
         "preempted": 0,
     }
+    if not planned and store.swarm_flags(w["swarm"]).get("released"):
+        # killed mid-drain (`stop --release`): no final heartbeat, so its agents' syncs are unknown
+        why = f"worker {wid} ended before its final sync ({st.stage}: {st.message})"[:300]
+        lost = {a["name"]: why for a in store.list_agents(worker=wid)}
+        if lost:
+            store.put_control(w["swarm"], "unsynced",
+                              {**lost, **(store.get_control(w["swarm"], "unsynced") or {})})
     if planned:
         store.update_worker(wid, **common, consecutive_crashes=0, next_launch_at=p.now)
         p.act("planned_restart", wid, f"{st.stage}: {st.message}")

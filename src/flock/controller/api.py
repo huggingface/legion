@@ -809,13 +809,15 @@ def create_app(
         if buckets is None or spec.compute.kind == "local" or not spec.bucket:
             return None  # local agents live in the run dir, never in the bucket
         try:
-            found = buckets(spec.bucket).list(f"{spec.swarm}/")
+            b = buckets(spec.bucket)
+            found = (b.first(f"{spec.swarm}/") if hasattr(b, "first")
+                     else next(iter(b.list(f"{spec.swarm}/")), None))
         except Exception as e:  # noqa: BLE001 - cannot tell: refuse, never guess
             return f"cannot check bucket {spec.bucket} for earlier agents: {type(e).__name__}: {e}"
         if not found:
             return None
         return (f"bucket {spec.bucket} already holds agents of swarm {spec.swarm!r} "
-                f"({len(found)} files under {spec.swarm}/): a fresh launch would restore them. "
+                f"({found}): a fresh launch would restore them. "
                 "`flock launch --adopt` takes that run over; else pick a new swarm name or bucket")
 
     def deletions(prev: SwarmSpec, spec: SwarmSpec) -> list[str]:
@@ -908,6 +910,7 @@ def create_app(
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
         with create_lock:  # two `flock launch` racing: one creates, the other gets 412
             if create and store.get_swarm(swarm):
+                worlds.discard(swarm)  # the candidate world this losing launch started
                 raise HTTPException(412, f"swarm {swarm!r} already exists")
             store.put_swarm(spec, clock().timestamp())
         if diff:  # an effective apply: a new generation, its spec kept in spec_history
@@ -1010,19 +1013,23 @@ def create_app(
         return Response(b["body"], media_type="application/gzip")
 
     @api.post("/swarms/{swarm}/adopt")
-    def adopt_swarm(swarm: str, spec: SwarmSpec) -> dict:
-        """`flock launch --adopt`: restore the swarm from the controller checkpoint in its
-        bucket (agents with their cost, loops, ramp, spawn tree, naming counters, holds).
-        404 when there is none: `--no-checkpoint` then creates it from the spec instead."""
+    def adopt_swarm(swarm: str, spec: SwarmSpec, checkpoint: str | None = None) -> dict:
+        """`flock launch --adopt`: restore the swarm from a controller checkpoint (agents with
+        their cost, loops, ramp, spawn tree, naming counters, holds): `checkpoint` (a state URL,
+        e.g. an earlier run's `controller/<RUN>`), else this controller's FLOCK_STATE_URL, else
+        `<bucket>/controller/<swarm>`. 404 when there is none: `--no-checkpoint` then creates
+        it from the spec instead."""
         if spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
         if store.get_swarm(swarm):
             raise HTTPException(409, f"swarm {swarm!r} is already on this controller")
-        url = state_url or f"{spec.bucket.rstrip('/')}/controller/{swarm}"
-        if buckets is None or not spec.bucket and not state_url:
+        url = checkpoint or state_url or f"{spec.bucket.rstrip('/')}/controller/{swarm}"
+        if buckets is None or not (checkpoint or state_url or spec.bucket):
             raise HTTPException(404, "this controller has no bucket to read a checkpoint from")
         try:
-            n = adopt_checkpoint(buckets(url), store, swarm)
+            n = adopt_checkpoint(buckets(url), store, swarm, own=url == state_url)
+        except ValueError as e:  # adopting from our own prefix would drop other swarms
+            raise HTTPException(409, str(e)) from None
         except Exception as e:  # noqa: BLE001 - a bad or unreachable checkpoint: say so
             raise HTTPException(502, f"checkpoint {url}: {type(e).__name__}: {e}") from None
         if n is None:

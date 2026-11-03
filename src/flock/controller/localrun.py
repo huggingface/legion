@@ -109,6 +109,15 @@ def run_name(swarm: str, data_dir: Path, now: datetime | None = None) -> str:
     return name
 
 
+def state_env(env, spec: SwarmSpec) -> dict[str, str]:
+    """The env the run's checkpoint is read from (`launch --adopt`): FLOCK_STATE_URL, by
+    default <bucket>/controller/<swarm> when the spec has a bucket; `FLOCK_STATE_URL=` is off."""
+    env = dict(env)
+    if env.get("FLOCK_STATE_URL") is None and spec.bucket:
+        env["FLOCK_STATE_URL"] = f"{spec.bucket.rstrip('/')}/controller/{spec.swarm}"
+    return env
+
+
 def redacted_spec(spec: SwarmSpec) -> dict[str, Any]:
     """The spec as stored, with env values whose name looks like a secret replaced. A spec
     holds only secret *names* (`secrets:`, `api_key_env`), but `env:` is free-form."""
@@ -573,8 +582,7 @@ async def run_local(opts: RunOptions) -> RunResult:
 
     health = Health(store, token=token, jobs=jobs, run=run_dir.name)
     health_every = float(os.environ.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
-    # FLOCK_STATE_URL: checkpoint the controller as a deployed one does (`launch --adopt`)
-    state = state_sync_from_env(os.environ, run_dir / "controller")
+    state = state_sync_from_env(state_env(os.environ, spec), run_dir / "controller")
 
     async def checkpoint() -> None:
         while True:
