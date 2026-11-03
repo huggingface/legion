@@ -22,7 +22,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from flock import cli
+from flock import cli, ops
 from flock.cli import load_spec
 from flock.controller.api import create_app as controller_app
 from flock.controller.jobs import FakeJobsClient
@@ -136,7 +136,7 @@ def test_render_variants(tmp_path):
         assert (pi.loop.every, pi.loop.on, pi.loop.wake, pi.loop.while_) == (
             ag.loop.every, ag.loop.on, ag.loop.wake, ag.loop.while_)
         assert s.spawn["agent-pi"] == s.spawn["agent"]
-        assert cli.extra_warnings(s) == []  # agent-pi's alias has no `extra` Pi would drop
+        assert ops.extra_warnings(s) == []  # agent-pi's alias has no `extra` Pi would drop
         assert s.naming == "words" and s.types["interviewer"].name_prefix == "iv-"
         for name in ("agent", "agent-think"):
             t = s.types[name]

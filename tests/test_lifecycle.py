@@ -11,7 +11,7 @@ import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli
+from flock import cli, ops
 from flock.controller.api import create_app
 from flock.controller.reconcile import reconcile, record_heartbeat
 from flock.controller.state import StateSync
@@ -376,8 +376,8 @@ def test_resume_diff_ignores_where_the_folder_is():
         return SwarmSpec.model_validate({**base, "compute": {"kind": "local"},
                                          "world": {"command": cmd, "dir": d}})
 
-    assert cli.resume_diff(at("/runs/a/experiment/world"), at("/runs/b/experiment/world")) == []
-    assert cli.resume_diff(at("/y"), at("/x", "w2"))
+    assert ops.resume_diff(at("/runs/a/experiment/world"), at("/runs/b/experiment/world")) == []
+    assert ops.resume_diff(at("/y"), at("/x", "w2"))
 
 
 def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, clock):

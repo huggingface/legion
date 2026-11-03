@@ -451,7 +451,7 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
         spec.tools_version = up["version"]
         say(f"tools: version {up['version']} ({len(opts.tools)} bytes): "
             f"{', '.join(up['tools']) or 'none'}")
-    from flock.cli import source_header
+    from flock.ops import source_header
 
     r = await http.put(f"/swarms/{spec.swarm}", params={"replicas": "spec"},
                        json=spec.model_dump(mode="json"), headers=source_header(None))
@@ -670,25 +670,16 @@ def main(
 ) -> None:
     """Run a `compute: local` swarm in the foreground until a stop condition, then write the
     run bundle (docs/local.md). Operators use `flock launch`; this is its background process."""
-    from flock.cli import (
-        _check_loops,
-        _provider_backed,
-        _tools_bundle,
-        _unprobed,
-        _warn_extra,
-        _warn_unverified,
-        load_spec,
-    )
+    from flock.cli import _checked, _warn_unverified, load_spec
     from flock.models import parse_duration
+    from flock.ops import provider_backed, unprobed
 
     env_files = env_files or []
     spec = load_spec(spec_file, env_files)
     if spec.compute.kind != "local":
         typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}, not `local`", err=True)
         raise typer.Exit(1)
-    _check_loops(spec)
-    _warn_extra(spec)
-    bundle = _tools_bundle(spec, spec_file)
+    bundle = _checked(spec, spec_file)
     seconds, idle = None, False
     if until == "idle":
         idle = True
@@ -699,9 +690,9 @@ def main(
             typer.echo(f"--until: {e} (or `idle`)", err=True)
             raise typer.Exit(2) from None
     if preflight is None:
-        preflight = _provider_backed(spec)
-    elif not preflight and (unprobed := _unprobed(spec)):
-        _warn_unverified(unprobed, "preflight skipped")
+        preflight = provider_backed(spec)
+    elif not preflight and (models := unprobed(spec)):
+        _warn_unverified(models, "preflight skipped")
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
                       tools=bundle.data if bundle is not None else None, apply=apply)

@@ -162,7 +162,8 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     `only`: `total` is that one type's count (the schedule's types keep theirs; the cap counts
     them too). Every other replica type is written as the controller runs it, so applying the
     spec never changes it (e.g. agent-pi agents an operator added stay)."""
-    from flock.cli import SpecError, load_spec, update_swarm
+    from flock.cli import load_spec
+    from flock.ops import SpecError, read_spec, update
 
     swarm = load_spec(str(spec)).swarm
     types = [only] if only else list(sched.split(0))
@@ -187,7 +188,8 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
             time.sleep(stagger)
         write_replicas(spec, {**others, **split(k)})
         try:
-            rec["lines"] = update_swarm(c, str(spec), replicas="spec")  # waves set replicas
+            # waves set replicas
+            rec["lines"] = update(c, read_spec(str(spec)), str(spec), replicas="spec")
         except SpecError as e:
             rec["error"] = e.lines
             break

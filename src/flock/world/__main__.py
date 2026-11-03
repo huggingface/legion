@@ -86,8 +86,8 @@ def world_set(
     reason: str = typer.Option("", "--reason", help="Recorded in the swarm's events."),
 ) -> None:
     """Set world knobs at runtime; the world keeps them across restarts."""
-    from flock.cli import source_header
     from flock.client import Client
+    from flock.ops import source_header
 
     values = {}
     for a in assignments:

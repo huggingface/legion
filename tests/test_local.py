@@ -474,6 +474,6 @@ def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
     def interrupted(*a):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "_launch", interrupted)
+    monkeypatch.setattr("flock.ops.launch", interrupted)
     runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
     assert ended == [run]

@@ -7,7 +7,7 @@ import subprocess
 import pytest
 import yaml
 
-from flock import cli
+from flock import cli, ops
 from flock.specrender import merge, read_env_file, render, substitute
 
 from .conftest import make_spec
@@ -143,7 +143,7 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
     assert len(store.spec_history("demo")) == 1
     r = runner.invoke(cli.app, ["update", str(exp), "--ref", "nope"])
     assert r.exit_code == 1 and "--ref nope" in r.output
-    hdr = cli.source_header(exp / "spec.yaml")["X-Flock-Source"]
+    hdr = ops.source_header(exp / "spec.yaml")["X-Flock-Source"]
     assert json.loads(hdr)["dirty"] is True  # without --ref: the working tree, as before
 
 

@@ -6,7 +6,7 @@ import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli
+from flock import cli, ops
 from flock.client import Client
 
 from .conftest import TOKEN, make_spec
@@ -223,14 +223,12 @@ def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
                    "am": {"model": "a:m", "extra": {"x": 1}}},
         "types": {"cx": {"harness": "codex", "model": "m"}, "pi": {"harness": "pi", "model": "m"},
                   "cl": {"harness": "claude", "model": "am"}, "nox": {"harness": "codex", "model": "plain"}}})
-    cli._warn_extra(spec)
-    err = capsys.readouterr().err
+    err = "\n".join(ops.extra_warnings(spec))
     assert all(f"type {t}: `extra`" in err for t in ("cx", "pi", "cl")) and "nox" not in err
     # the llm harness sends `extra` as body fields: never warned (PR #7 adds the harness)
-    assert "llm" not in cli.EXTRA_NOT_SENT
-    monkeypatch.setattr(cli, "EXTRA_NOT_SENT", frozenset({"claude"}))
-    cli._warn_extra(spec)
-    err = capsys.readouterr().err
+    assert "llm" not in ops.EXTRA_NOT_SENT
+    monkeypatch.setattr(ops, "EXTRA_NOT_SENT", frozenset({"claude"}))
+    err = "\n".join(ops.extra_warnings(spec))
     assert "type cl:" in err and "type cx:" not in err
 
 
@@ -251,10 +249,10 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     (gen1,) = store.spec_history("demo")
     assert gen1["source"] == {"by": "carlos", "git_sha": sha, "ref": "exp", "dirty": False}
-    assert json.loads(cli.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
+    assert json.loads(ops.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
         "by": "carlos"}  # not a repo (the folder does not exist)
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
-    assert json.loads(cli.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
+    assert json.loads(ops.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
 
 
 def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
@@ -276,4 +274,4 @@ def test_extra_warnings_flags_pi_env_dropped_by_isolation():
     spec = SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b", "types": {
         "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}},
         "b": {"harness": "claude", "model": "m", "env": {"HF_TOKEN": "x"}}}})
-    assert cli.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
+    assert ops.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
