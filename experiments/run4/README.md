@@ -178,8 +178,11 @@ to 4 peer helpers (20 + 80 = 100).
   controller and workers only get the combined `system_prompt`.
 
 A live change goes out with `flock update experiments/run4 --env runs/run4/run.env`
-(add `--ref <commit>` for the committed folder). Launch the spawner wave with
-`flock scale run4 agent-spawner 20` (all at once: no stagger and no load guard).
+(add `--ref <commit>` for the committed folder). Always pass `--env run.env`: without it the
+spec's defaults (e.g. 4 CPUs / 7G workers) replace the run's sizes. Launch the spawner wave by
+giving `agent-spawner` a one-step ramp in the spec and running that update:
+`replicas_ramp: {start: 20, add: 20, every: 1h, max: 20, stagger: 10s, hold_if: {...}}` (the
+same `hold_if` as `agent`). A second wave needs a higher `max`, and that raise is not staggered.
 
 Watch:
 
