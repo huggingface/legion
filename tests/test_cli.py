@@ -281,3 +281,17 @@ def test_extra_warnings_flags_pi_env_dropped_by_isolation():
         "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}},
         "b": {"harness": "claude", "model": "m", "env": {"HF_TOKEN": "x"}}}})
     assert ops.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
+
+
+def test_hidden_world_app_and_plain_help():
+    """run5-era Slurm world jobs call `flock world serve`; help is not re-wrapped by rich."""
+    r = runner.invoke(cli.app, ["world", "serve", "--help"])
+    assert r.exit_code == 0 and "module:Class" in r.output
+    out = runner.invoke(cli.app, ["--help"]).output
+    assert "  world " not in out and "╭" not in out
+
+
+def test_launch_swarm_name_refuses_adopt():
+    for flag in (["--adopt"], ["--checkpoint", "hf://x"], ["--no-checkpoint"]):
+        r = runner.invoke(cli.app, ["launch", "demo", *flag])
+        assert r.exit_code == 1 and "swarm name" in r.output, r.output

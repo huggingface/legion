@@ -317,7 +317,7 @@ def test_hidden_old_events_and_agents(monkeypatch):
     monkeypatch.setattr(Client, "_call", call)
     r = runner.invoke(cli.app, ["events", "l-0000", "--wait", "--timeout", "0"])
     assert r.exit_code == 0 and json.loads(r.stdout.splitlines()[0]) == evs[0]
-    assert "│ events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
+    assert "  events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
     r = runner.invoke(cli.app, ["agents", "s", "--parent", "l-0000"])
     lines = r.output.splitlines()
     assert lines[0].split() == ["name", "state", "provider", "worker", "turns", "pending", "cost",

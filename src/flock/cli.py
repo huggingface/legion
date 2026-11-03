@@ -20,6 +20,7 @@ from flock.client import Client, ClientError, local_run
 from flock.models import SwarmSpec
 from flock.ops import SpecError, check_spec, read_spec, source_header
 from flock.specrender import at_ref
+from flock.world.__main__ import world_app
 
 
 class _Group(TyperGroup):
@@ -33,7 +34,7 @@ class _Group(TyperGroup):
             raise typer.Exit(1) from None
 
 
-app = typer.Typer(cls=_Group, help="Host coding-harness agent swarms on HF Jobs.",
+app = typer.Typer(cls=_Group, help="Host coding-harness agent swarms on HF Jobs.", rich_markup_mode=None,
                   no_args_is_help=True)
 _RUN_ENV_FILES: list[str] = []  # --run / FLOCK_RUN_DIR: cluster.env, run.env, before any --env
 
@@ -274,6 +275,9 @@ def launch(
     `flock update` first. Given a swarm name instead of a folder: resumes it."""
     if ref is None and not Path(target).exists() and "/" not in target \
             and not target.endswith((".yaml", ".yml")):
+        if adopt or checkpoint or no_checkpoint:
+            _fail([(f"--adopt, --checkpoint and --no-checkpoint need the experiment folder: "
+                   f"{target} is a swarm name (resume only)")])
         _resume(target, type_, agent)
         return
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
@@ -762,6 +766,10 @@ def remove(name: str) -> None:
 # Hidden aliases: agents of runs started before flock-agent still call `flock spawn|remove`.
 app.command("spawn", hidden=True)(spawn)
 app.command("remove", hidden=True)(remove)
+
+
+# Hidden: run5-era Slurm world jobs (experiments/run4/slurm/world-inner.sh) call `flock world serve`.
+app.add_typer(world_app, name="world", hidden=True)
 
 
 # Hidden, old output: prompts in resumed runs' sessions call `flock events <child> --wait`
