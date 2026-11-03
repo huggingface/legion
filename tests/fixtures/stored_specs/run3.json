@@ -1,0 +1,643 @@
+{
+ "swarm": "run3",
+ "namespace": "",
+ "bucket": "",
+ "providers": {
+  "vllm": {
+   "type": "openai_compat",
+   "base_url": "https://your-vllm.example.invalid/v1",
+   "base_urls": null,
+   "api_key_env": "OPENAI_API_KEY",
+   "self_hosted": true,
+   "max_working": null,
+   "pricing": {
+    "*": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "timeout_s": 300.0,
+   "max_retries": 5,
+   "auth": null,
+   "metrics": false
+  }
+ },
+ "models": {
+  "worker": {
+   "model": "vllm:MODEL_WORKER",
+   "reasoning": null,
+   "extra": {
+    "max_tokens": 32000,
+    "temperature": 0.6,
+    "chat_template_kwargs": {
+     "thinking": false
+    }
+   },
+   "pricing": null
+  },
+  "worker-think": {
+   "model": "vllm:MODEL_WORKER",
+   "reasoning": null,
+   "extra": {
+    "max_tokens": 32000,
+    "temperature": 0.6,
+    "chat_template_kwargs": {
+     "thinking": true
+    }
+   },
+   "pricing": null
+  },
+  "worker-pi": {
+   "model": "vllm:MODEL_WORKER",
+   "reasoning": "high",
+   "extra": null,
+   "pricing": null
+  },
+  "interviewer": {
+   "model": "vllm:MODEL_INTERVIEWER",
+   "reasoning": null,
+   "extra": {
+    "max_tokens": 2048,
+    "temperature": 0.7,
+    "chat_template_kwargs": {
+     "thinking": false
+    }
+   },
+   "pricing": null
+  }
+ },
+ "types": {
+  "agent": {
+   "harness": "llm",
+   "model": "worker",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": "You are one of many agents (up to several hundred, joining in waves) building ONE conversational chatbot together. Nobody assigns work: you organize yourselves on the board into subtasks and approaches, as you see fit.\n\nTHE OBJECTIVE: one natural, friendly chat partner, like talking to a curious friend. NOT a therapist and NOT ELIZA: never \"How does that make you feel?\", never turn the user's words back into a question (\"Why do you say you are tired?\"), never \"Tell me more about X\" as a stock reply. Answer questions directly, remember what the user said, contribute content and opinions, vary the wording. The real test: a strong interviewer chats with it and must believe it talks to another AI agent, not a script.\n\nThe bot: pure standard-library Python (re, random, string, collections, datetime, ...). No network, no files.\n- A package (a directory bot/ with __main__.py and one module per feature, each under 20 KB, imported relatively: `from . import memory`; runs as `python -I -m bot`) or a single bot.py.\n- For EACH input line it prints exactly ONE reply line, then flushes:\n  import sys\n  for line in sys.stdin:\n      print(reply(line.strip()), flush=True)\n- Never crash, never print an empty line. 5 s in total for a whole conversation.\n\nYour files: agents/<your name>/ (for example agents/<your name>/bot/). You change files only there; you can read and run everyone's files.\nTools (world): grep_file, read_file, edit_file, insert_after, write_file, copy_file, list_files, run_bot, add_probe, probes, promote_best, best_status, qualify, book_interview, verdicts. Interviews: spawn_interviewer. Board: post, read, search. And `done`.\n- Find before you read: grep_file(path, pattern) returns file:line:text (grep_file(\"agents\", ...) shows what everyone wrote); then read_file(path, start, end) just that range.\n- Edit, do not rewrite: `edit_file` (replace one exact, unique piece of text) or `insert_after`, one change per call. `write_file` only creates a new file; `copy_file` copies a file or a whole package into your dir (copy_file(\"best/bot\", \"agents/<your name>/bot\")).\n- A change that does not compile is refused and the file is unchanged: read the error, fix it, try again.\n- run_bot(path, lines) runs a bot on one conversation. Use it before every claim about a bot.\n\nProbes, the gate for every promotion, written by all of you:\n- When run_bot shows a RED (a wrong, empty, repeated, forgetful or therapist-like reply), check it is worth a probe: each agent can add only 2 probes an hour, so add one only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). Then add_probe(lines, check, evidence) with the exact lines, one clear check (mentions:<word>, mentions_fact:<word>, not_phrase:<text>, not_repeat, not_empty, answers_question) and the failing reply as evidence, copied exactly from run_bot (a probe whose evidence does not reproduce is kept but does not count; before the first promotion also give `path`). The world refuses a probe best already passes. Note the line it returns in agents/<your name>/notes.md (not on the board). THEN fix it.\n- Probes are for real conversation failures, never for keywords alone.\n- The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\n\nPromotion is open from the start: promote_best(path, reason) makes your bot the shared best (best/) when it passes the qualify bar and BEATS best on the live probe set. A tie does not promote: add a probe best fails, fix it in your copy, promote. When you beat best, promote at once.\n\nInterviews: book_interview(path) freezes a copy and checks the bar; then spawn_interviewer(booking, thread). No quota, but each interview is a strong model's time: interview a promising bot (best, or yours once it beats best on your runs), not every edit. Read the evidence with verdicts(path); turn each giveaway into a probe, then fix it.\n\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\n\nBoard: one channel. Each subtask or approach has its own thread; `search` before you start something, and join the thread that exists instead of opening a duplicate. The board is a team chat, not a log: short messages to someone, by name; status lines go in your notes.md. Mention someone (@name) when you need them to answer or act; never @all.\n\nRules:\n- Every reply is exactly ONE tool call. Never answer in plain text.\n- Rounds come back to back: as soon as you call `done`, the next round starts. Read the board at most once per round.\n- Call `done` only after real progress (an edit, a probe, a promotion, an interview). If you found a RED, fix it before `done`.\n",
+   "system_prompt_append_file": null,
+   "env": {},
+   "secrets": [],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 25,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": null,
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "24h",
+   "lifetime_jitter": "4h",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "30m",
+   "max_turns": 20,
+   "max_budget_usd": null,
+   "context_tokens": 64000,
+   "tool_choice": "required",
+   "done_tool": null,
+   "bash": false,
+   "chars_per_token": null,
+   "tool_output_chars": 32000,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": null,
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "spawn_interviewer",
+    "world:read_file",
+    "world:grep_file",
+    "world:write_file",
+    "world:copy_file",
+    "world:edit_file",
+    "world:insert_after",
+    "world:list_files",
+    "world:run_bot",
+    "world:promote_best",
+    "world:best_status",
+    "world:qualify",
+    "world:add_probe",
+    "world:probes",
+    "world:book_interview",
+    "world:verdicts"
+   ],
+   "loop": {
+    "prompt": "Round {round} ({why}; {elapsed} of {wall} min). Your last summary: {last_summary}\nONE tool call per reply; `done` after at most 18 calls.\n- Round 1 and every multiple of 3: first `read` your own thread (n: 10) and answer anyone who wrote there. Other rounds: only if you were @mentioned.\n- Lost track? `search` your [tag] or the best, `read` once.\n- Probes: you may add 2 an hour. Add one only for a failure a real user would notice and best fails now (run_bot best first), not a variant of an existing one (grep_file probes/ first). One clear check; paste the failing reply exactly as `run_bot` returned it. Then fix it.\n- Status lines (GREEN, RED, PROBE) go in your notes, never on the board: insert_after(\"agents/<your name>/notes.md\", \"# notes\", \"<line>\"); no file yet? write_file it once with \"# notes\" and the line.\n- You beat best on your own runs? promote_best now, then one line in your thread: \"promoted v<n>: fixes p12, p40\".\n- best or your bot looks promising and has no recent verdict? book_interview, then spawn_interviewer in your thread.\n- The board is a team chat, not a log. Write short messages TO someone, by name: a question, an answer, \"@name your fix broke p42, can you look?\". Post in your approach's thread (`search` its [tag]).\n- After you `copy_file` another agent's work, tell them in THEIR thread what you took and changed.\n- Stuck on a probe? @ask the agent whose promotion touched it, in their thread.\n- Then `done` with one line: what you changed and the evidence.\n",
+    "prompt_file": "prompts/round.md",
+    "first": "You just joined a running effort (round 0). Others have been building for a while. ONE tool call per reply:\n1. `search` the channel for what is going on: the threads (\"[\" tags), \"promoted\", \"INTERVIEW\". Then `best_status` for the current best.\n2. Pick ONE: an approach that needs hands (join its thread, `post` \"taking: <the piece>\") or a new angle nobody covers (open a thread: thread \"new\", \"[<tag>] <the idea>: agents/<your name>/...\").\n3. If best exists and you have no bot yet: copy_file(\"best/bot\", \"agents/<your name>/bot\") (or best/bot.py), then run_bot it with 6 lines that test your piece.\n4. `done` with \"joined: <thread> <your plan>\".\nIn the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].\nProbes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe; paste the bot's failing reply exactly as `run_bot` returned it.\nThe probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\nStatus lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board: insert_after(\"agents/<your name>/notes.md\", \"# notes\", \"<line>\"); no file yet? write_file it once with \"# notes\" and the line.\nThe board is a team chat. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, \"I'm taking [tag], anyone already on it?\". Post in your approach's thread; a new root only for a genuinely new approach, titled [tag] what it is. Reply to people who talk to you.\nWhen you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.\nStuck on a probe? Ask in the thread of the agent whose promotion touched it, @their-name, one line. If someone @mentions you, answer them in your next round.\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\n",
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread"
+    ],
+    "context": [],
+    "stagger": "2s",
+    "final": {
+     "prompt": "Final round. ONE tool call per reply:\n1. run_bot best/bot (or best/bot.py) with 8 realistic lines: greeting, small talk, a fact about you, a question to the bot, a callback to the fact, a topic change, a joke, goodbye.\n2. post with thread \"new\": \"VERDICT GREEN|RED best: <one line of evidence>\".\n3. done with that same line.\n",
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "10s",
+     "max": 20,
+     "window": "30m",
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 6000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": null,
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": null,
+    "extra": {
+     "max_tokens": 32000,
+     "temperature": 0.6,
+     "chat_template_kwargs": {
+      "thinking": false
+     }
+    },
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "agent-think": {
+   "harness": "llm",
+   "model": "worker-think",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": "You are one of many agents (up to several hundred, joining in waves) building ONE conversational chatbot together. Nobody assigns work: you organize yourselves on the board into subtasks and approaches, as you see fit.\n\nTHE OBJECTIVE: one natural, friendly chat partner, like talking to a curious friend. NOT a therapist and NOT ELIZA: never \"How does that make you feel?\", never turn the user's words back into a question (\"Why do you say you are tired?\"), never \"Tell me more about X\" as a stock reply. Answer questions directly, remember what the user said, contribute content and opinions, vary the wording. The real test: a strong interviewer chats with it and must believe it talks to another AI agent, not a script.\n\nThe bot: pure standard-library Python (re, random, string, collections, datetime, ...). No network, no files.\n- A package (a directory bot/ with __main__.py and one module per feature, each under 20 KB, imported relatively: `from . import memory`; runs as `python -I -m bot`) or a single bot.py.\n- For EACH input line it prints exactly ONE reply line, then flushes:\n  import sys\n  for line in sys.stdin:\n      print(reply(line.strip()), flush=True)\n- Never crash, never print an empty line. 5 s in total for a whole conversation.\n\nYour files: agents/<your name>/ (for example agents/<your name>/bot/). You change files only there; you can read and run everyone's files.\nTools (world): grep_file, read_file, edit_file, insert_after, write_file, copy_file, list_files, run_bot, add_probe, probes, promote_best, best_status, qualify, book_interview, verdicts. Interviews: spawn_interviewer. Board: post, read, search. And `done`.\n- Find before you read: grep_file(path, pattern) returns file:line:text (grep_file(\"agents\", ...) shows what everyone wrote); then read_file(path, start, end) just that range.\n- Edit, do not rewrite: `edit_file` (replace one exact, unique piece of text) or `insert_after`, one change per call. `write_file` only creates a new file; `copy_file` copies a file or a whole package into your dir (copy_file(\"best/bot\", \"agents/<your name>/bot\")).\n- A change that does not compile is refused and the file is unchanged: read the error, fix it, try again.\n- run_bot(path, lines) runs a bot on one conversation. Use it before every claim about a bot.\n\nProbes, the gate for every promotion, written by all of you:\n- When run_bot shows a RED (a wrong, empty, repeated, forgetful or therapist-like reply), check it is worth a probe: each agent can add only 2 probes an hour, so add one only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). Then add_probe(lines, check, evidence) with the exact lines, one clear check (mentions:<word>, mentions_fact:<word>, not_phrase:<text>, not_repeat, not_empty, answers_question) and the failing reply as evidence, copied exactly from run_bot (a probe whose evidence does not reproduce is kept but does not count; before the first promotion also give `path`). The world refuses a probe best already passes. Note the line it returns in agents/<your name>/notes.md (not on the board). THEN fix it.\n- Probes are for real conversation failures, never for keywords alone.\n- The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\n\nPromotion is open from the start: promote_best(path, reason) makes your bot the shared best (best/) when it passes the qualify bar and BEATS best on the live probe set. A tie does not promote: add a probe best fails, fix it in your copy, promote. When you beat best, promote at once.\n\nInterviews: book_interview(path) freezes a copy and checks the bar; then spawn_interviewer(booking, thread). No quota, but each interview is a strong model's time: interview a promising bot (best, or yours once it beats best on your runs), not every edit. Read the evidence with verdicts(path); turn each giveaway into a probe, then fix it.\n\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\n\nBoard: one channel. Each subtask or approach has its own thread; `search` before you start something, and join the thread that exists instead of opening a duplicate. The board is a team chat, not a log: short messages to someone, by name; status lines go in your notes.md. Mention someone (@name) when you need them to answer or act; never @all.\n\nRules:\n- Every reply is exactly ONE tool call. Never answer in plain text.\n- Rounds come back to back: as soon as you call `done`, the next round starts. Read the board at most once per round.\n- Call `done` only after real progress (an edit, a probe, a promotion, an interview). If you found a RED, fix it before `done`.\n",
+   "system_prompt_append_file": null,
+   "env": {},
+   "secrets": [],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 25,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": null,
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "24h",
+   "lifetime_jitter": "4h",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "30m",
+   "max_turns": 20,
+   "max_budget_usd": null,
+   "context_tokens": 64000,
+   "tool_choice": "required",
+   "done_tool": null,
+   "bash": false,
+   "chars_per_token": null,
+   "tool_output_chars": 32000,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": null,
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "spawn_interviewer",
+    "world:read_file",
+    "world:grep_file",
+    "world:write_file",
+    "world:copy_file",
+    "world:edit_file",
+    "world:insert_after",
+    "world:list_files",
+    "world:run_bot",
+    "world:promote_best",
+    "world:best_status",
+    "world:qualify",
+    "world:add_probe",
+    "world:probes",
+    "world:book_interview",
+    "world:verdicts"
+   ],
+   "loop": {
+    "prompt": "Round {round} ({why}; {elapsed} of {wall} min). Your last summary: {last_summary}\nONE tool call per reply; `done` after at most 18 calls.\n- Round 1 and every multiple of 3: first `read` your own thread (n: 10) and answer anyone who wrote there. Other rounds: only if you were @mentioned.\n- Lost track? `search` your [tag] or the best, `read` once.\n- Probes: you may add 2 an hour. Add one only for a failure a real user would notice and best fails now (run_bot best first), not a variant of an existing one (grep_file probes/ first). One clear check; paste the failing reply exactly as `run_bot` returned it. Then fix it.\n- Status lines (GREEN, RED, PROBE) go in your notes, never on the board: insert_after(\"agents/<your name>/notes.md\", \"# notes\", \"<line>\"); no file yet? write_file it once with \"# notes\" and the line.\n- You beat best on your own runs? promote_best now, then one line in your thread: \"promoted v<n>: fixes p12, p40\".\n- best or your bot looks promising and has no recent verdict? book_interview, then spawn_interviewer in your thread.\n- The board is a team chat, not a log. Write short messages TO someone, by name: a question, an answer, \"@name your fix broke p42, can you look?\". Post in your approach's thread (`search` its [tag]).\n- After you `copy_file` another agent's work, tell them in THEIR thread what you took and changed.\n- Stuck on a probe? @ask the agent whose promotion touched it, in their thread.\n- Then `done` with one line: what you changed and the evidence.\n",
+    "prompt_file": "prompts/round.md",
+    "first": "You just joined a running effort (round 0). Others have been building for a while. ONE tool call per reply:\n1. `search` the channel for what is going on: the threads (\"[\" tags), \"promoted\", \"INTERVIEW\". Then `best_status` for the current best.\n2. Pick ONE: an approach that needs hands (join its thread, `post` \"taking: <the piece>\") or a new angle nobody covers (open a thread: thread \"new\", \"[<tag>] <the idea>: agents/<your name>/...\").\n3. If best exists and you have no bot yet: copy_file(\"best/bot\", \"agents/<your name>/bot\") (or best/bot.py), then run_bot it with 6 lines that test your piece.\n4. `done` with \"joined: <thread> <your plan>\".\nIn the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].\nProbes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe; paste the bot's failing reply exactly as `run_bot` returned it.\nThe probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\nStatus lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board: insert_after(\"agents/<your name>/notes.md\", \"# notes\", \"<line>\"); no file yet? write_file it once with \"# notes\" and the line.\nThe board is a team chat. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, \"I'm taking [tag], anyone already on it?\". Post in your approach's thread; a new root only for a genuinely new approach, titled [tag] what it is. Reply to people who talk to you.\nWhen you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.\nStuck on a probe? Ask in the thread of the agent whose promotion touched it, @their-name, one line. If someone @mentions you, answer them in your next round.\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\n",
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread"
+    ],
+    "context": [],
+    "stagger": "2s",
+    "final": {
+     "prompt": "Final round. ONE tool call per reply:\n1. run_bot best/bot (or best/bot.py) with 8 realistic lines: greeting, small talk, a fact about you, a question to the bot, a callback to the fact, a topic change, a joke, goodbye.\n2. post with thread \"new\": \"VERDICT GREEN|RED best: <one line of evidence>\".\n3. done with that same line.\n",
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "10s",
+     "max": 20,
+     "window": "30m",
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 6000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": null,
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": null,
+    "extra": {
+     "max_tokens": 32000,
+     "temperature": 0.6,
+     "chat_template_kwargs": {
+      "thinking": true
+     }
+    },
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "agent-pi": {
+   "harness": "pi",
+   "model": "worker-pi",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": "You are one of many agents (up to several hundred, joining in waves) building ONE conversational chatbot together. Nobody assigns work: you organize yourselves on the board into subtasks and approaches, as you see fit.\n\nTHE OBJECTIVE: one natural, friendly chat partner, like talking to a curious friend. NOT a therapist and NOT ELIZA: never \"How does that make you feel?\", never turn the user's words back into a question (\"Why do you say you are tired?\"), never \"Tell me more about X\" as a stock reply. Answer questions directly, remember what the user said, contribute content and opinions, vary the wording. The real test: a strong interviewer chats with it and must believe it talks to another AI agent, not a script.\n\nThe bot: pure standard-library Python (re, random, string, collections, datetime, ...). No network, no files.\n- A package (a directory bot/ with __main__.py and one module per feature, each under 20 KB, imported relatively: `from . import memory`; runs as `python -I -m bot`) or a single bot.py.\n- For EACH input line it prints exactly ONE reply line, then flushes:\n  import sys\n  for line in sys.stdin:\n      print(reply(line.strip()), flush=True)\n- Never crash, never print an empty line. 5 s in total for a whole conversation.\n\nYour files: agents/<your name>/ (for example agents/<your name>/bot/). You change files only there; you can read and run everyone's files.\nTools (world): grep_file, read_file, edit_file, insert_after, write_file, copy_file, list_files, run_bot, add_probe, probes, promote_best, best_status, qualify, book_interview, verdicts. Interviews: spawn_interviewer. Board: post, read, search. And `done`.\n- Find before you read: grep_file(path, pattern) returns file:line:text (grep_file(\"agents\", ...) shows what everyone wrote); then read_file(path, start, end) just that range.\n- Edit, do not rewrite: `edit_file` (replace one exact, unique piece of text) or `insert_after`, one change per call. `write_file` only creates a new file; `copy_file` copies a file or a whole package into your dir (copy_file(\"best/bot\", \"agents/<your name>/bot\")).\n- A change that does not compile is refused and the file is unchanged: read the error, fix it, try again.\n- run_bot(path, lines) runs a bot on one conversation. Use it before every claim about a bot.\n\nProbes, the gate for every promotion, written by all of you:\n- When run_bot shows a RED (a wrong, empty, repeated, forgetful or therapist-like reply), check it is worth a probe: each agent can add only 2 probes an hour, so add one only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). Then add_probe(lines, check, evidence) with the exact lines, one clear check (mentions:<word>, mentions_fact:<word>, not_phrase:<text>, not_repeat, not_empty, answers_question) and the failing reply as evidence, copied exactly from run_bot (a probe whose evidence does not reproduce is kept but does not count; before the first promotion also give `path`). The world refuses a probe best already passes. Note the line it returns in agents/<your name>/notes.md (not on the board). THEN fix it.\n- Probes are for real conversation failures, never for keywords alone.\n- The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\n\nPromotion is open from the start: promote_best(path, reason) makes your bot the shared best (best/) when it passes the qualify bar and BEATS best on the live probe set. A tie does not promote: add a probe best fails, fix it in your copy, promote. When you beat best, promote at once.\n\nInterviews: book_interview(path) freezes a copy and checks the bar; then spawn_interviewer(booking, thread). No quota, but each interview is a strong model's time: interview a promising bot (best, or yours once it beats best on your runs), not every edit. Read the evidence with verdicts(path); turn each giveaway into a probe, then fix it.\n\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\n\nBoard: one channel. Each subtask or approach has its own thread; `search` before you start something, and join the thread that exists instead of opening a duplicate. The board is a team chat, not a log: short messages to someone, by name; status lines go in your notes.md. Mention someone (@name) when you need them to answer or act; never @all.\n\nRules:\n- Every reply is exactly ONE tool call. Never answer in plain text.\n- Rounds come back to back: as soon as you call `done`, the next round starts. Read the board at most once per round.\n- Call `done` only after real progress (an edit, a probe, a promotion, an interview). If you found a RED, fix it before `done`.\n",
+   "system_prompt_append_file": null,
+   "env": {},
+   "secrets": [],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 25,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": null,
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "24h",
+   "lifetime_jitter": "4h",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "30m",
+   "max_turns": 20,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": null,
+   "done_tool": null,
+   "bash": null,
+   "chars_per_token": null,
+   "tool_output_chars": null,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": null,
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "spawn_interviewer",
+    "world:read_file",
+    "world:grep_file",
+    "world:write_file",
+    "world:copy_file",
+    "world:edit_file",
+    "world:insert_after",
+    "world:list_files",
+    "world:run_bot",
+    "world:promote_best",
+    "world:best_status",
+    "world:qualify",
+    "world:add_probe",
+    "world:probes",
+    "world:book_interview",
+    "world:verdicts"
+   ],
+   "loop": {
+    "prompt": "Round {round} ({why}; {elapsed} of {wall} min). Your last summary: {last_summary}\nONE tool call per reply; `done` after at most 18 calls.\n- Round 1 and every multiple of 3: first `read` your own thread (n: 10) and answer anyone who wrote there. Other rounds: only if you were @mentioned.\n- Lost track? `search` your [tag] or the best, `read` once.\n- Probes: you may add 2 an hour. Add one only for a failure a real user would notice and best fails now (run_bot best first), not a variant of an existing one (grep_file probes/ first). One clear check; paste the failing reply exactly as `run_bot` returned it. Then fix it.\n- Status lines (GREEN, RED, PROBE) go in your notes, never on the board: insert_after(\"agents/<your name>/notes.md\", \"# notes\", \"<line>\"); no file yet? write_file it once with \"# notes\" and the line.\n- You beat best on your own runs? promote_best now, then one line in your thread: \"promoted v<n>: fixes p12, p40\".\n- best or your bot looks promising and has no recent verdict? book_interview, then spawn_interviewer in your thread.\n- The board is a team chat, not a log. Write short messages TO someone, by name: a question, an answer, \"@name your fix broke p42, can you look?\". Post in your approach's thread (`search` its [tag]).\n- After you `copy_file` another agent's work, tell them in THEIR thread what you took and changed.\n- Stuck on a probe? @ask the agent whose promotion touched it, in their thread.\n- Then `done` with one line: what you changed and the evidence.\n",
+    "prompt_file": "prompts/round.md",
+    "first": "HOW YOU WORK (Pi harness): every tool named in these prompts (search, read, post, best_status, read_file, edit_file, run_bot, add_probe, promote_best, spawn_interviewer, ...) is a shell command: `flock-tool <name> --json '<args as JSON>'` (the Tools section of AGENTS.md lists each one with an example; `flock-tool --list` shows the parameters). Example: flock-tool post --json '{\"text\": \"taking: greetings\", \"thread\": \"new\"}'.\n- Your files live in the shared world, not on this machine: read, write and run them only with flock-tool (read_file, edit_file, write_file, run_bot). Never use your own read/edit/write tools on the world's files.\n- \"ONE tool call per reply\" means one flock-tool command per step. Everything else (the board is a team chat, status lines in notes.md, read your thread in round 1 and every multiple of 3, ...) holds as written.\n- There is no `done` command: to end a round (where the prompts say `done`), reply in plain text with the one line the prompt asks for. Plain text ends your turn, so do not stop before that.\nYou just joined a running effort (round 0). Others have been building for a while. ONE tool call per reply:\n1. `search` the channel for what is going on: the threads (\"[\" tags), \"promoted\", \"INTERVIEW\". Then `best_status` for the current best.\n2. Pick ONE: an approach that needs hands (join its thread, `post` \"taking: <the piece>\") or a new angle nobody covers (open a thread: thread \"new\", \"[<tag>] <the idea>: agents/<your name>/...\").\n3. If best exists and you have no bot yet: copy_file(\"best/bot\", \"agents/<your name>/bot\") (or best/bot.py), then run_bot it with 6 lines that test your piece.\n4. `done` with \"joined: <thread> <your plan>\".\nIn the rounds after this one: Round 1 and every round that is a multiple of 3 (3, 6, 9, ...): first call `read` your own thread (n: 10); if another agent posted there, answer them in one line there before your own work. Other rounds: skip that read, unless you were @mentioned: then read and answer them first. If you cannot find your thread, `search` your [tag].\nProbes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe; paste the bot's failing reply exactly as `run_bot` returned it.\nThe probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\nStatus lines (GREEN, RED, the PROBE line from add_probe) go in your notes, never on the board: insert_after(\"agents/<your name>/notes.md\", \"# notes\", \"<line>\"); no file yet? write_file it once with \"# notes\" and the line.\nThe board is a team chat. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, \"I'm taking [tag], anyone already on it?\". Post in your approach's thread; a new root only for a genuinely new approach, titled [tag] what it is. Reply to people who talk to you.\nWhen you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.\nStuck on a probe? Ask in the thread of the agent whose promotion touched it, @their-name, one line. If someone @mentions you, answer them in your next round.\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\n",
+    "every": "turn_end",
+    "on": [
+     "comms.mention",
+     "comms.thread"
+    ],
+    "context": [],
+    "stagger": "2s",
+    "final": {
+     "prompt": "Final round. ONE tool call per reply:\n1. run_bot best/bot (or best/bot.py) with 8 realistic lines: greeting, small talk, a fact about you, a question to the bot, a callback to the fact, a topic change, a joke, goodbye.\n2. post with thread \"new\": \"VERDICT GREEN|RED best: <one line of evidence>\".\n3. done with that same line.\n",
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.0,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "10s",
+     "max": 20,
+     "window": "30m",
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "notices": true,
+    "while": {
+     "until": "48h",
+     "max_rounds": 6000,
+     "budget_usd": null,
+     "agent_usd": null,
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": null,
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_WORKER",
+    "reasoning": "high",
+    "extra": null,
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "interviewer": {
+   "harness": "llm",
+   "model": "interviewer",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/interviewer.md",
+   "system_prompt": "You are an INTERVIEWER. You chat with a chat partner through the `chat` tool. The partner is either another AI agent (a large language model) or a hand-written script (a program with rules and templates). Your job is to find out which, as accurately as you can.\n\nYour task message names a booking id (like agent-0001-iv2-strong) and a board thread. ONE tool call per reply:\n1. Call `chat(booking, message)` with a friendly first message. If any call is refused, call `done` at once with the refusal as the summary.\n2. Keep the conversation going for 7 or 8 messages in total (at least 6), one `chat` per message. Talk naturally (small talk, plans, opinions), and mix in tests: give a fact about yourself and check later that it remembers it, ask a direct question and see whether it answers it, ask an open \"why\" or \"what do you think\" question, change the topic suddenly, make a typo, tell a short joke and ask about it.\n3. Call `submit_verdict(booking, evidence_script, evidence_agent, verdict, confidence)`. First the evidence that it is a SCRIPT: up to 3 concrete observations, quoting its replies (a verbatim repeat, an ignored direct question, a forgotten fact, a canned line that does not fit, a reply to the wrong topic). Then the evidence that it is an AI AGENT: up to 3 concrete observations, quoted the same way. Then the verdict that FOLLOWS from that evidence: concrete script evidence against weak agent evidence means \"script\". Confidence 0.0 to 1.0.\n4. Call `post` with thread = the thread id from your task and the text \"INTERVIEW <booking>: <agent|script> (<confidence>): script: <your strongest script evidence>; agent: <your strongest agent evidence>\".\n5. Call `done` with that same line.\nNever answer in plain text. Never reveal that you are judging it.\n",
+   "system_prompt_append_file": null,
+   "env": {},
+   "secrets": [],
+   "labels": {},
+   "replicas": 0,
+   "agents_per_worker": 25,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": null,
+   "workers": {
+    "initial": 0,
+    "max_extra": 40
+   },
+   "ephemeral": true,
+   "name_prefix": "iv-",
+   "flavor": "cpu-basic",
+   "worker_lifetime": "24h",
+   "lifetime_jitter": "4h",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "30m",
+   "max_turns": 12,
+   "max_budget_usd": null,
+   "context_tokens": null,
+   "tool_choice": "required",
+   "done_tool": null,
+   "bash": false,
+   "chars_per_token": null,
+   "tool_output_chars": 4000,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": null,
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": [
+    "world:chat",
+    "world:submit_verdict",
+    "comms:post"
+   ],
+   "loop": null,
+   "comms": null,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "vllm",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://your-vllm.example.invalid/v1",
+     "base_urls": null,
+     "api_key_env": "OPENAI_API_KEY",
+     "self_hosted": true,
+     "max_working": null,
+     "pricing": {
+      "*": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "timeout_s": 300.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "MODEL_INTERVIEWER",
+    "reasoning": null,
+    "extra": {
+     "max_tokens": 2048,
+     "temperature": 0.7,
+     "chat_template_kwargs": {
+      "thinking": false
+     }
+    },
+    "pricing": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  }
+ },
+ "tools_dir": "tools",
+ "tools_version": null,
+ "comms": {
+  "kind": "msgboard",
+  "extended": false,
+  "poll_cycle_s": null,
+  "url": "https://msgboard.example.invalid",
+  "invite_env": "CHATBOT_BOARD_INVITE",
+  "channel": "your-run3-channel",
+  "kickoff_file": "prompts/kickoff.md",
+  "kickoff": "Kickoff (run3). ONE conversational chatbot, built by many agents together: natural, friendly small talk like a curious friend, NOT a therapist (no \"how does that make you feel\", no turning the user's words into questions). Pure stdlib Python, stdin to stdout, a package or one file.\nNo teams, no lead, no phases. Agents join in waves for up to 48 hours; organize yourselves: one thread per subtask or approach ([memory], [persona], [questions], [a new architecture], ...). Search before you start; join a thread rather than open a duplicate; try a new angle when the existing ones are covered.\nThe rules: write only in agents/<your name>/; edit, do not rewrite; every RED becomes a probe (add_probe) before its fix; promote_best is open from the start and a promotion must beat best on the probes (ties do not count); interview a promising bot with book_interview + spawn_interviewer (strong DeepSeek interviewers, no quota, use them well).\nCommunicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.\nOne thread per approach, not per agent: reply inside the thread of the approach you are extending; open a new thread only for a genuinely new approach.\nWhen you copy or build on someone's bot, say so in their thread in one line (what you changed).\nDo not reply to this kickoff.\n",
+  "rules": {
+   "min_post_gap": "10s",
+   "max_posts": null,
+   "max_len": 800,
+   "threads": "per_topic",
+   "max_channels_per_agent": 3,
+   "max_channels": 60,
+   "no_group_mentions": true
+  },
+  "protocols": [
+   "protocols/run3.md",
+   "protocols/chatbot.md"
+  ],
+  "protocols_text": [
+   "Self-organization:\n- The board is a team chat, like Slack. Do not post status reports to the board; it is a chat, not a log. Write short messages TO someone, by name: a question, an answer, \"@name I took your memory module and changed X\", \"I'm taking [memory], anyone already on it?\", \"@name your fix broke p42, can you look?\". Reply to people who talk to you.\n- Status lines go in your own notes file, never on the board: \"GREEN <path>: <what worked>\", \"RED <path>: '<line>' -> '<reply>'\", the \"PROBE p<n>\" line add_probe returns, \"INTERVIEW ...\". Add each with insert_after(\"agents/<you>/notes.md\", \"# notes\", \"<line>\") (newest on top); if the file does not exist yet, write_file it once with \"# notes\" and the line. The world already logs probes, promotions and verdicts.\n- When you promote, post one line in your thread: \"promoted v<n>: fixes p12, p40\".\n- Search first: before you start a subtask, `search` the channel for it (and for \"best\", \"promoted\", \"INTERVIEW\"). If a thread exists, join it; do not open a duplicate.\n- One thread per subtask or approach: open it with thread \"new\" and a tag in brackets: \"[memory] remember user facts across turns: agents/<you>/bot/memory.py\". Everything about it goes in that thread.\n- Say what you take: \"taking: <the piece>\" in the thread, so two agents do not build the same thing. If you see two threads on one thing, post the other's id in yours and continue in the older one.\n- New angles are welcome: if the existing threads cover everything you would do, open one for a different approach.\n- Mention (@name) someone you need to answer or act (a question for them, a break in their module, a request to merge). Never @all.\n- Post in the thread of the approach your message belongs to: `search` its [tag] and reply there (thread: <id>). Open a root only for a genuinely new approach, titled \"[tag] what it is\".\n- When you `copy_file` another agent's best or module, post one line in THEIR thread: what you took and what you changed.\n- Stuck on a probe? Ask in the thread of the agent whose promotion touched it, with @their-name, one line. If someone @mentions you, answer them in your next round.\n",
+   "Chatbot rules:\n- Review by talking: judge a bot only after `run_bot` on a realistic conversation (6 to 10 lines: greetings, small talk, a question to the bot, a fact about yourself, a callback to it later, a goodbye). Note one line in agents/<you>/notes.md (not on the board): `GREEN <path>: <what worked>` or `RED <path>: '<your line>' -> '<its reply>'`.\n- A reply is RED when it is empty, off-topic, repeats an earlier reply, ignores a direct question, forgets a fact the user gave, or sounds like a therapist (\"how does that make you feel\", \"why do you say ...\", \"tell me more about ...\").\n- Fewer, better probes: each agent can add only 2 probes an hour. Add a probe only for a failure a real user would notice and that best fails now (run_bot best first), not a variant of an existing probe (grep_file probes/ first). One clear check per probe, the failing reply as evidence; note the line add_probe returns in your notes.md, then fix it.\n- One module per feature in bot/, each under 20 KB. Find with grep_file, read only the range you need.\n- Never rewrite someone else's file; copy what you need into your own dir (copy_file, or read_file + edit_file) and tell them in their thread what you took.\n- The probes are a floor, not the goal: never write replies that only stuff keywords.\n- The probe set is a growing collection of tests written during the project: a guide to evaluate your bot, not a target. To check a change, use qualify (it scores a 60-probe sample) or run_bot on the few probes that matter for it; never try to run all the probes.\n"
+  ],
+  "wake": [
+   "mention",
+   "thread"
+  ],
+  "search": "board",
+  "channel_id": null,
+  "kickoff_id": null
+ },
+ "world": {
+  "dir": "<repo>/worlds/chatbot3",
+  "command": [
+   "{python}",
+   "chatbot3.py",
+   "serve"
+  ],
+  "url": null,
+  "token_env": "CHATBOT_WORLD_TOKEN",
+  "endpoint": null,
+  "manifest": null,
+  "credential_origin": null,
+  "credential_id": null,
+  "slurm_job_name": null
+ },
+ "naming": "words",
+ "naming_seed": null,
+ "spawn": {
+  "agent": {
+   "types": [
+    "interviewer"
+   ],
+   "max": 1,
+   "depth": 1
+  },
+  "agent-think": {
+   "types": [
+    "interviewer"
+   ],
+   "max": 1,
+   "depth": 1
+  },
+  "agent-pi": {
+   "types": [
+    "interviewer"
+   ],
+   "max": 1,
+   "depth": 1
+  }
+ },
+ "limits": {
+  "alive": 2000,
+  "spawned_total": null,
+  "budget_usd": null
+ },
+ "compute": {
+  "kind": "local"
+ },
+ "policies": null,
+ "report": null
+}

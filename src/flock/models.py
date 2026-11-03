@@ -7,6 +7,7 @@ is expressed here. Change it deliberately and update the design doc.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -275,7 +276,34 @@ def comms_name(entry: str) -> str:
     return entry.split(":", 1)[1]
 
 
-class CommsRules(BaseModel):
+# --------------------------------------------------------------------------- removed keys
+
+log = logging.getLogger(__name__)
+
+# Keys deleted from an extra=forbid spec model, by class name: dropped with one warning (per
+# key, per process) instead of refused, so a spec stored before the deletion still loads on
+# resume. Any other unknown key is still refused. e.g. {"LoopSpec": {"stagger"}}
+REMOVED: dict[str, set[str]] = {}
+_warned: set[tuple[str, str]] = set()
+
+
+class _Removable(BaseModel):
+    """Base of the extra=forbid spec models: drops the class's REMOVED keys before validation."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed(cls, data: Any) -> Any:
+        gone = REMOVED.get(cls.__name__, set()) & set(data) if isinstance(data, dict) else None
+        if not gone:
+            return data
+        for k in sorted(gone):
+            if (cls.__name__, k) not in _warned:
+                _warned.add((cls.__name__, k))
+                log.warning("spec: %s.%s was removed from flock; ignoring it", cls.__name__, k)
+        return {k: v for k, v in data.items() if k not in gone}
+
+
+class CommsRules(_Removable):
     """Enforced by the worker before it calls the board; a refused post is a tool result
     ("refused: ..."), never a board request. Live: a re-apply reaches workers by heartbeat."""
 
@@ -308,7 +336,7 @@ class CommsRules(BaseModel):
         return parse_duration(self.min_post_gap).total_seconds() if self.min_post_gap else 0.0
 
 
-class CommsSpec(BaseModel):
+class CommsSpec(_Removable):
     """Swarm-level `comms:` (docs/comms.md). `url`, `invite_env` and `channel` are resolved
     once by the controller at apply (channel name -> `channel_id`); `kickoff_file` and
     `protocols` are files next to the spec that `flock apply` inlines (`kickoff`,
@@ -388,7 +416,7 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
 # --------------------------------------------------------------------------- world (docs/world.md)
 
 
-class WorldSpec(BaseModel):
+class WorldSpec(_Removable):
     """Swarm-level `world:` (docs/world.md): an HTTP service speaking World API v1 whose tools
     the agents get. `command` (run in `dir`) is started by the controller as a child process
     with `compute: local`; `url` names a world already running (required with `compute:
@@ -474,7 +502,7 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     return world.manifest.names() if world.manifest is not None else []
 
 
-class RecycleAfter(BaseModel):
+class RecycleAfter(_Removable):
     """`recycle_after`: restart an agent's harness process (same session) at the first turn
     boundary past any of these, counted from the process start (docs/pi.md "Memory")."""
 
@@ -485,7 +513,7 @@ class RecycleAfter(BaseModel):
     pss_mb: float | None = None  # the harness process's PSS, sampled every 15 s
 
 
-class WorkdirSpec(BaseModel):
+class WorkdirSpec(_Removable):
     """Workdir size feedback and throwaway dirs (docs/pi.md "Workdir"). Sizes count what the
     bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
     a note naming its largest dirs (at most hourly); above `max_*` (default 5x soft) a
@@ -517,7 +545,7 @@ class WorkdirSpec(BaseModel):
         return out
 
 
-class MemoryKnobs(BaseModel):
+class MemoryKnobs(_Removable):
     """Worker memory thresholds, passed through as the FLOCK_MEM_* settings (worker.main)."""
 
     model_config = {"extra": "forbid"}
@@ -529,7 +557,7 @@ class MemoryKnobs(BaseModel):
     recycle_gap_s: float | None = Field(default=None, ge=0)
 
 
-class WorkerKnobs(BaseModel):
+class WorkerKnobs(_Removable):
     """A type's worker settings, applied live (heartbeats) by its workers. Each one unset
     falls back to the worker's env variable, then to the built-in default (docs/slurm.md)."""
 
@@ -548,7 +576,7 @@ class WorkerKnobs(BaseModel):
     memory: MemoryKnobs | None = None
 
 
-class RampSpec(BaseModel):
+class RampSpec(_Removable):
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): the controller raises the type's
     replicas to `start`, then by `add` every `every`, up to `max`. It never lowers them."""
 
@@ -786,7 +814,7 @@ def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str,
     return None
 
 
-class SlurmResources(BaseModel):
+class SlurmResources(_Removable):
     """Per-type overrides of a `compute: slurm` spec."""
 
     model_config = {"extra": "forbid"}
@@ -798,7 +826,7 @@ class SlurmResources(BaseModel):
     container_root: str | None = None
 
 
-class ComputeSpec(BaseModel):
+class ComputeSpec(_Removable):
     """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
     `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
     (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md). `external`: flock
@@ -882,7 +910,7 @@ def _actions(v: Any) -> list[dict[str, Any]]:
     return out
 
 
-class PolicyRule(BaseModel):
+class PolicyRule(_Removable):
     """One rule: `metric op value` on `for` consecutive fresh samples fires (`alert`, then
     `do`); `metric op clear` failing clears it (`alert_cleared`, then `clear_do`)."""
 
@@ -920,7 +948,7 @@ class PolicyRule(BaseModel):
         return v
 
 
-class PolicySpec(BaseModel):
+class PolicySpec(_Removable):
     """The spec's `policies:` block (docs/policies.md). Without it the built-in rules run in
     alert mode."""
 
@@ -944,7 +972,7 @@ class PolicySpec(BaseModel):
         return v
 
 
-class ReportSpec(BaseModel):
+class ReportSpec(_Removable):
     """The spec's `report:` block: a short digest from the latest health snapshot every
     `every`, to each sink (docs/policies.md "Digest")."""
 
@@ -1201,7 +1229,7 @@ class WorkersSpec(BaseModel):
         return v
 
 
-class SpawnRule(BaseModel):
+class SpawnRule(_Removable):
     """What an agent of one type may spawn. `types` is a list (with one total `max`) or a map
     of per-type caps (`max` then an optional total cap). Caps count the parent's existing
     children. `depth` is the generations allowed below the agent (0: cannot spawn). Unknown
@@ -1318,7 +1346,7 @@ NEEDS_WORLD = "needs a world (not in this version)"
 _LOOP_SOURCE_RE = re.compile(r"^(comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 
-class LoopWhile(BaseModel):
+class LoopWhile(_Removable):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
     `agent_usd` (the agent's cost; a map is keyed by model alias or model id), `idle_rounds`
@@ -1381,7 +1409,7 @@ class LoopWhile(BaseModel):
         return v
 
 
-class LoopFinal(BaseModel):
+class LoopFinal(_Removable):
     """One last prompt per live agent when the loop stops (any reason but `--no-final`).
     `reserve_usd` is held back from `limits.budget_usd` for it. `add_tools` are tool names the
     final prompt unlocks; carried in the prompt and its events for the tools layer."""
@@ -1407,7 +1435,7 @@ class LoopFinal(BaseModel):
         return self
 
 
-class LoopWake(BaseModel):
+class LoopWake(_Removable):
     """How `on:` wake-ups spend rounds (docs/loop.md, "Wake queue"). Per agent: at least
     `min_gap` between two wake prompts (wakes in between are coalesced into the next one), at
     most `max` wake prompts per run of the loop, or per `window` when set (None: no cap).
@@ -1436,7 +1464,7 @@ class LoopWake(BaseModel):
         return v
 
 
-class LoopStopWhen(BaseModel):
+class LoopStopWhen(_Removable):
     """Extra ways for a loop to end. `all_agents_done`: an agent that calls `done` with
     `finished: true` (the `llm` harness offers that argument then) leaves the loop, and the
     loop stops once every live agent has left it."""
@@ -1446,7 +1474,7 @@ class LoopStopWhen(BaseModel):
     all_agents_done: bool = False
 
 
-class LoopSpec(BaseModel):
+class LoopSpec(_Removable):
     """A type's prompting loop (docs/loop.md). `first` goes alone to each agent; the loop
     prompt follows once that turn ended, then on every `every` (`turn_end`: re-sent by the
     worker when a turn completes; a duration: the controller prompts idle agents that long
