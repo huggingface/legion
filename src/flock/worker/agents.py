@@ -177,7 +177,7 @@ class AgentRuntime:
         # only then may anything push this agent (flock.worker.sync, "Push safety")
         self.setup_done = False
         self._turn_started_at = 0.0
-        # prompt ids for the turn events (tracked broadcasts): the next turn's, the current one's
+        # prompt ids for the turn events: the next turn's, the current one's
         self._pids: list[str] = []
         self._turn_pids: list[str] = []
         self._last_activity = 0.0

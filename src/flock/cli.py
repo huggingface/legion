@@ -1002,8 +1002,6 @@ def prompt(
     children: bool = typer.Option(
         False, "--children", help="prompt the direct children of --parent (one request)"),
     parent: str = typer.Option(None, "--parent", help="with --children; default: $FLOCK_AGENT"),
-    track: bool = typer.Option(
-        False, "--track", help="with --type: one prompt id for all, counted by `flock broadcasts`"),
 ) -> None:
     """Send a prompt to an agent (`prompt NAME TEXT`), to every agent of a type
     (`prompt --swarm S --type T [--state idle] TEXT`) or to your children
@@ -1026,14 +1024,11 @@ def prompt(
         if swarm is None or len(args) != 1:
             typer.echo("usage: flock prompt --swarm S --type T [--state STATE] TEXT", err=True)
             raise typer.Exit(2)
-        body.update(type=type, state=state, text=args[0], track=track)
+        body.update(type=type, state=state, text=args[0])
         if skip_pending is not None:
             body["skip_pending"] = skip_pending
         typer.echo(json.dumps(_call("POST", f"/swarms/{swarm}/prompts", json=body)))
         return
-    if track:
-        typer.echo("--track needs --swarm S --type T", err=True)
-        raise typer.Exit(2)
     if swarm is not None or state is not None or len(args) != 2:
         typer.echo("usage: flock prompt NAME TEXT (or --swarm S --type T TEXT)", err=True)
         raise typer.Exit(2)
@@ -1350,34 +1345,3 @@ def world_set(
 
 if __name__ == "__main__":
     app()
-
-
-# -- steering (docs/live.md) -------------------------------------------------
-
-notice_app = typer.Typer(help="Banner line on top of every loop prompt (docs/loop.md).",
-                         no_args_is_help=True)
-app.add_typer(notice_app, name="notice")
-
-
-@notice_app.command("set")
-def notice_set(swarm: str, text: str,
-               type: str = typer.Option(None, "--type", help="default: every type")) -> None:
-    """Add TEXT as the first line of every loop prompt of the type until `notice clear`."""
-    typer.echo(json.dumps(_call("PUT", f"/swarms/{swarm}/notice",
-                                json={"type": type, "text": text}), indent=2))
-
-
-@notice_app.command("clear")
-def notice_clear(swarm: str, type: str = typer.Option(None, "--type")) -> None:
-    typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}/notice",
-                                params={"type": type} if type else {}), indent=2))
-
-
-@app.command()
-def broadcasts(swarm: str, limit: int = typer.Option(10, "--limit")) -> None:
-    """Tracked prompts (`flock prompt --track`): how many agents acted on each."""
-    rows = [[b["id"], time.strftime("%m-%d %H:%M", time.gmtime(b["ts"])), b["type"],
-             f"{b['finished']}/{b['targets']} acted", f"{b['delivered']} delivered",
-             f"{b['started']} started", _short(b["text"], 50)]
-            for b in _call("GET", f"/swarms/{swarm}/broadcasts", params={"limit": limit})]
-    _table(rows, ["id", "sent", "type", "acted", "delivered", "started", "text"])

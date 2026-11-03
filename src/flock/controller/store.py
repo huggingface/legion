@@ -908,33 +908,17 @@ class Store:
         return a["type"] in h.get("types", {}) or a["name"] in h.get("agents", {})
 
     # ------------------------------------------------- steering controls (docs/policies.md)
-    # Operator and controller settings kept across restarts: `notice:<type>` banners,
-    # `broadcast:<id>` prompt tracking, `ramp:<type>` start times, `policy_mutes`.
+    # Controller settings kept across restarts: `ramp:<type>` start times. Rows of removed
+    # features (`notice:`, `broadcast:`, `policy_mutes`) may linger in old databases; unread.
 
     def get_control(self, swarm: str, key: str) -> Any:
         row = self._one("SELECT body FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
         return json.loads(row["body"]) if row else None
 
     def put_control(self, swarm: str, key: str, body: Any) -> None:
-        if key.startswith("broadcast:") and isinstance(body, dict) and "ts" in body:  # expire after 7 days
-            self._x("DELETE FROM controls WHERE swarm = ? AND key LIKE 'broadcast:%' "
-                    "AND json_extract(body, '$.ts') < ?", [swarm, body["ts"] - 7 * 86400])
         self._x("INSERT INTO controls (swarm, key, body) VALUES (?, ?, ?) "
                 "ON CONFLICT(swarm, key) DO UPDATE SET body = excluded.body",
                 [swarm, key, json.dumps(body, sort_keys=True)])
-
-    def delete_control(self, swarm: str, key: str) -> None:
-        self._x("DELETE FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
-
-    def controls(self, swarm: str, prefix: str) -> dict[str, Any]:
-        rows = self._q("SELECT key, body FROM controls WHERE swarm = ? AND key LIKE ?",
-                       [swarm, prefix + "%"])
-        return {r["key"]: json.loads(r["body"]) for r in rows}
-
-    def pending_with(self, needle: str) -> int:
-        """Undelivered prompts whose command contains `needle` (a broadcast's prompt id)."""
-        return self._one("SELECT COUNT(*) AS n FROM pending_prompts WHERE body LIKE ?",
-                         [f"%{needle}%"])["n"]
 
     # ----------------------------------------------------------------- launch budget
 

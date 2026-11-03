@@ -628,60 +628,6 @@ def add_world_admin_routes(api: APIRouter, store: Store, token: str,
 
 
 
-def add_steering_routes(api: APIRouter, store: Store, health: Health,
-                        clock: Callable[[], datetime]) -> None:
-    """Policies (docs/policies.md), loop banners and broadcast counts (docs/live.md)."""
-
-    def spec_of(swarm: str) -> SwarmSpec:
-        row = store.get_swarm(swarm)
-        if row is None:
-            raise HTTPException(404, f"no swarm {swarm!r}")
-        return row["spec"]
-
-    def audit(swarm: str, kind: str, data: dict) -> None:
-        store.append_events(swarm, swarm_stream(swarm), [Event(type=kind, ts=clock(), agent="",
-                                                               data=data)])
-
-    @api.get("/swarms/{swarm}/notices")
-    def notices(swarm: str) -> dict:
-        spec_of(swarm)
-        return {k.removeprefix("notice:"): v for k, v in store.controls(swarm, "notice:").items()}
-
-    @api.put("/swarms/{swarm}/notice")
-    def set_notice(swarm: str, body: Annotated[dict[str, Any], Body()]) -> dict:
-        """The banner line at the top of every loop prompt of `type` (None: every type)."""
-        spec = spec_of(swarm)
-        t, text = body.get("type") or "*", str(body.get("text") or "").strip()
-        if t != "*" and t not in spec.types:
-            raise HTTPException(404, f"no type {t!r} in swarm {swarm!r}")
-        if not text or "\n" in text or len(text) > 500:
-            raise HTTPException(400, "notice text: one line, 1-500 characters")
-        store.put_control(swarm, f"notice:{t}", {"text": text, "since": clock().timestamp()})
-        audit(swarm, "notice_set", {"type": t, "text": text})
-        return notices(swarm)
-
-    @api.delete("/swarms/{swarm}/notice")
-    def clear_notice(swarm: str, type: str | None = None) -> dict:
-        spec_of(swarm)
-        store.delete_control(swarm, f"notice:{type or '*'}")
-        audit(swarm, "notice_cleared", {"type": type or "*"})
-        return notices(swarm)
-
-    @api.get("/swarms/{swarm}/broadcasts")
-    def broadcasts(swarm: str, limit: int = 20) -> list[dict]:
-        """Tracked prompts, newest first: targets, delivered (left the queue), started,
-        finished (`acted`)."""
-        spec_of(swarm)
-        out = []
-        for b in sorted(store.controls(swarm, "broadcast:").values(), key=lambda b: -b["ts"]
-                        )[:max(1, limit)]:
-            n = len(b["agents"])
-            out.append({"id": b["id"], "ts": b["ts"], "type": b["type"], "text": b["text"],
-                        "targets": n, "delivered": n - store.pending_with(b["id"]),
-                        "started": len(b["started"]), "finished": len(b["finished"])})
-        return out
-
-
 def create_app(
     store: Store,
     token: str,
@@ -730,7 +676,6 @@ def create_app(
     # "working" (turn_started seen) or "idle" (turn_ended / turn_interrupted / prompt_deferred
     # seen). A heartbeat that reports the agent replaces it (see `heartbeat_seen`).
     live: dict[str, tuple[str, float]] = {}
-    broadcast_lock = threading.Lock()  # tracked broadcasts: read-modify-write of one row
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
     set_token_key(store, token)
@@ -1211,8 +1156,6 @@ def create_app(
         skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
         pending = store.pending_counts(swarm) if skip_pending else {}
         rows: list[tuple[str, str]] = []
-        # `track` (docs/live.md "Broadcasts"): one prompt id for all, counted as turns report it
-        bid = f"b-{uuid.uuid4().hex[:12]}" if getattr(req, "track", False) else None
         for a in sorted(agents, key=lambda a: a["name"]):
             ack.matched += 1
             w = workers.get(a["worker"])
@@ -1226,7 +1169,7 @@ def create_app(
                 ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
                 continue
             cmd = build(a) if build else PromptCommand(
-                agent=a["name"], prompt_id=bid or uuid.uuid4().hex, text=req.text,
+                agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
                 timeout=req.timeout, reply_to=req.reply_to)
             rows.append((a["name"], cmd.model_dump_json()))
             if sent is not None:
@@ -1236,30 +1179,7 @@ def create_app(
             else:
                 ack.pending += 1
         store.add_prompts(rows, now)
-        if bid:
-            store.put_control(swarm, f"broadcast:{bid}", {
-                "id": bid, "ts": now, "type": req.type, "text": req.text[:200],
-                "agents": [n for n, _ in rows], "started": [], "finished": []})
-            ack.prompt_id = bid
         return ack
-
-    def track_broadcasts(a: Row, evs: list[Event]) -> None:
-        """Turn events of a tracked prompt (`prompt_id` / `prompt_ids` starting `b-`): the
-        agent counts as started / finished in that broadcast."""
-        for ev in evs:
-            if ev.type not in ("turn_started", "turn_ended"):
-                continue
-            d = ev.data.get("data") if isinstance(ev.data.get("data"), dict) else ev.data
-            for pid in {d.get("prompt_id"), *(d.get("prompt_ids") or [])}:
-                if not (isinstance(pid, str) and pid.startswith("b-")):
-                    continue
-                key = f"broadcast:{pid}"
-                field = "started" if ev.type == "turn_started" else "finished"
-                with broadcast_lock:  # event posts of several workers at once
-                    b = store.get_control(a["swarm"], key)
-                    if b is not None and a["name"] not in b[field]:
-                        b[field].append(a["name"])
-                        store.put_control(a["swarm"], key, b)
 
     # ------------------------------------------------------------- loops (docs/loop.md)
 
@@ -1619,7 +1539,6 @@ def create_app(
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
             if a is not None:
-                track_broadcasts(a, evs)
                 loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
                 try:
                     health.on_events(a, evs, now)
@@ -1630,7 +1549,6 @@ def create_app(
         return {"ok": True, "accepted": len(batch.events)}
 
     add_world_admin_routes(api, store, token, secret_source, world_transport, clock)
-    add_steering_routes(api, store, health, clock)
     add_pause_routes(api, loops)
     app.include_router(api)
     return app

@@ -1731,9 +1731,6 @@ class BulkPromptRequest(BaseModel):
     # Skip agents that already have a pending (undelivered) prompt. Default: on with
     # state=idle ("only if idle and empty": repeated calls never stack prompts), off otherwise.
     skip_pending: bool | None = None
-    # One prompt id for every agent, counted as their turns start and end
-    # (`GET /swarms/{swarm}/broadcasts`, docs/live.md "Broadcasts").
-    track: bool = False
 
 
 class ChildrenPromptRequest(BaseModel):
@@ -1760,7 +1757,6 @@ class BulkPromptAck(BaseModel):
     skipped_state: int = 0  # not in the requested state
     skipped_removing: int = 0  # being removed (spawn cascade)
     skipped_pending: int = 0  # already had an undelivered prompt (skip_pending)
-    prompt_id: str | None = None  # `track`: the broadcast id
 
 
 class SpawnRequest(BaseModel):

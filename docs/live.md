@@ -149,16 +149,6 @@ same admission as a provider's `max_working`: prompts wait in the controller, an
 go to the oldest pending prompt first. When both caps are set, a prompt needs a slot in both.
 A type with it runs its `turn_end` loop on the controller (docs/loop.md).
 
-## Broadcasts (`flock prompt --track`)
-
-`flock prompt --swarm S --type T --track "text"` sends every matching agent the same prompt
-with one id (`b-...`, returned as `prompt_id` in the counts). Workers put `prompt_id` on
-`turn_started` and `turn_ended`, the id of the turn's last prompt. When a turn took several
-prompts, the events also carry `prompt_ids` with all of them. The controller counts the
-agents that started and finished a turn with it. `flock broadcasts <swarm>`
-(`GET /swarms/{s}/broadcasts`) shows `312/359 acted`: finished out of targeted, plus how many
-were delivered (left the queue) and started. Agents do nothing extra.
-
 ## `flock run --watch`
 
 `flock run spec.yaml --watch` polls the files the spec references and the tools folder every
