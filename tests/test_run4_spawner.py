@@ -42,7 +42,7 @@ def as_agent(app, token) -> httpx.AsyncClient:
 def test_spec_types_are_clones_of_agent_with_the_spawn_policy_and_caps():
     spec = load_spec(str(EXP / "spec.yaml"))
     agent = spec.types["agent"]
-    skip = {"system_prompt", "system_prompt_append_file", "workers"}
+    skip = {"system_prompt", "system_prompt_append_file", "workers", "replicas_ramp"}
     for name in ("agent-spawner", "agent-child"):
         t = spec.types[name]
         assert t.replicas == 0
@@ -60,20 +60,20 @@ def test_spec_types_are_clones_of_agent_with_the_spawn_policy_and_caps():
     assert spec.limits.alive == 400 and spec.limits.spawned_total == 100
 
 
-def test_rendered_slurm_spec_has_both_types_without_aliases(monkeypatch):
-    import importlib.util
+def test_slurm_spec_has_both_types_without_aliases(monkeypatch):
+    from flock.specrender import render
 
-    mod_spec = importlib.util.spec_from_file_location("run4_render_spawner", EXP / "render.py")
-    render = importlib.util.module_from_spec(mod_spec)
-    mod_spec.loader.exec_module(render)
-    data = render.render()
+    monkeypatch.delenv("LOOP_UNTIL", raising=False)
+    data = render(EXP / "spec.yaml")
     assert {"agent", "agent-spawner", "agent-child"} <= set(data["types"])
     assert data["types"]["agent-child"]["loop"] is not data["types"]["agent"]["loop"]
     assert data["types"]["agent-child"]["system_prompt_append_file"] == "prompts/group-child.md"
-    smoke = render.render("smoke")
-    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
     assert data["types"]["agent"]["loop"]["while"]["until"] == "48h"
+    assert data["types"]["agent-spawner"]["replicas_ramp"] is None  # only `agent` ramps
     assert "&id" not in yaml.safe_dump(data)
+    monkeypatch.setenv("LOOP_UNTIL", "30m")
+    smoke = render(EXP / "spec.yaml")
+    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
 
 
 async def test_spawner_spawns_four_children_and_the_fifth_is_refused(client, app, store, tick):
@@ -266,38 +266,3 @@ def test_flock_spawn_works_inside_the_pi_namespace(tmp_path):
                                  writable=[workspace, home], network=True)
 
     _check_spawn(tmp_path, wrap)
-
-
-def test_waves_add_spawners_uses_their_own_cap_and_the_capacity_guard(tmp_path, monkeypatch):
-    """`waves.py add 20 --type agent-spawner` on top of the finished 300-agent schedule: 20
-    spawners (their own cap, not the schedule's 300), agent kept at 300, guard consulted."""
-    import sys
-    from types import SimpleNamespace
-
-    import yaml
-
-    import flock.cli
-
-    from .test_run4_experiment import module
-
-    waves = module("waves")
-    sched = waves.load(EXP / "waves.yaml")
-    assert sched.type_caps == {"agent-spawner": 20}
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("types: {agent: {replicas: 300}, agent-spawner: {replicas: 0}, "
-                    "agent-child: {replicas: 0}}\n")
-    live = {"agent": 300, "agent-spawner": 0, "agent-child": 0}
-    applied, guard = [], []
-    monkeypatch.setattr(flock.cli, "load_spec", lambda _: SimpleNamespace(swarm="run4"))
-    monkeypatch.setattr(flock.cli, "update_swarm", lambda _c, path, **_: applied.append(
-        yaml.safe_load(Path(path).read_text())["types"]) or ["ok"])
-    monkeypatch.setattr(waves, "current", lambda _, __, names: {n: live[n] for n in names})
-    monkeypatch.setitem(sys.modules, "load_guard", SimpleNamespace(
-        capacity_ok=lambda: guard.append(1) or (True, "ok")))
-    rec = waves.apply(None, spec, sched, 25, "add 25 --type agent-spawner", tmp_path / "w.jsonl",
-                      only="agent-spawner")
-    assert rec["after"] == {"agent-spawner": 20} and rec["cap"] == 20 and guard == [1]
-    assert {t: v["replicas"] for t, v in applied[-1].items()} == {
-        "agent": 300, "agent-spawner": 20, "agent-child": 0}
-    with pytest.raises(ValueError, match="type_caps"):
-        waves.parse({"type": "agent", "type_caps": {"agent": 5}})

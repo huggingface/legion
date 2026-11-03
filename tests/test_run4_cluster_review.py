@@ -148,31 +148,6 @@ async def test_busy_board_polling_rotates_once_per_cycle_on_a_busy_feed(monkeypa
     assert starts[-1] - starts[0] < 47 * spacing + 1
 
 
-def test_capacity_holds_persist_and_warn_without_growing(tmp_path, monkeypatch):
-    import json
-
-    import flock.cli
-
-    from .test_run4_experiment import module
-
-    waves = module("waves")
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("types: {agent: {replicas: 100}}\n")
-    state = spec.with_name(spec.name + ".waves.json")
-    state.write_text(json.dumps({"start": 123}))
-    monkeypatch.setattr(flock.cli, "load_spec", lambda _: SimpleNamespace(swarm="run4"))
-    monkeypatch.setattr(flock.cli, "update_swarm", lambda *_: pytest.fail("held wave must not apply"))
-    monkeypatch.setattr(waves, "current", lambda _, __, names: {n: 100 for n in names})
-    monkeypatch.setitem(sys.modules, "load_guard", SimpleNamespace(capacity_ok=lambda: (False, "HOLD: busy")))
-    schedule = waves.parse({"cap": 300, "type": "agent"})
-    for i in range(1, 4):
-        rec = waves.apply(None, spec, schedule, 120, "schedule", tmp_path / "waves.jsonl")
-        assert rec["held"] and rec["total"] == 100
-        assert rec.get("consecutive_holds") == i
-    assert "ACTION REQUIRED" in rec.get("warning", "")
-    assert json.loads(state.read_text())["start"] == 123
-
-
 def test_world_backoff_doubles_to_the_cap(tmp_path):
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", HF_TOKEN="x", CHATBOT_WORLD_TOKEN="x", WORLD_STABLE_S="600")
@@ -193,8 +168,13 @@ container_srun_args() { CTR_SRUN=(); }
     assert backoffs == ["300", "600", "1200", "1800", "1800"]
 
 
-@pytest.mark.parametrize(("swarm_code", "waited", "calls"), [(200, False, ["pin", "run"]), (404, True, [])])
-def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm_code, waited, calls):
+@pytest.mark.parametrize(("swarm_code", "world", "waited", "calls"), [
+    (200, "000", False, []),            # a requeue: the swarm is live, nothing is applied (S2)
+    (404, "000", True, []),             # first start, world down: waits, gives up, applies nothing
+    (404, "200", False, ["apply"]),     # first start: flock apply spec.yaml once the world answers
+    (500, "200", False, []),            # anything else: nothing
+])
+def test_controller_applies_only_when_the_swarm_is_missing(tmp_path, swarm_code, world, waited, calls):
     import shlex
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URLS="http://fake/v1",
@@ -205,19 +185,18 @@ def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm
     (tmp_path / "run/hosts/world.host").write_text("w\n")
     exp = tmp_path / "run/experiment"
     exp.mkdir()
-    (exp / "render.py").write_text("import sys; open(sys.argv[sys.argv.index('--out') + 1], 'w').write('swarm: s\\n')")
-    (exp / "waves.py").write_text("import os, sys; open(os.environ['CALLS'], 'a').write(sys.argv[1] + '\\n')")
+    (exp / "spec.yaml").write_text("swarm: ${CHATBOT_RUN:-s}\n")
     (tmp_path / "common.sh").write_text(f'''log() {{ echo "$*"; }}
 die() {{ echo "$*" >&2; exit 2; }}
 require_var() {{ :; }}
 publish_host() {{ :; }}
-http_status() {{ case $1 in */healthz) echo 200;; */swarms/*) echo {swarm_code};; *) echo 000;; esac; }}
+http_status() {{ case $1 in */healthz) echo 200;; */swarms/s) echo {swarm_code};; */manifest) echo {world};; *) echo 000;; esac; }}
 ''')
     (tmp_path / "venv/bin/python").unlink()
     executable(tmp_path / "venv/bin/python", f'#!/bin/bash\nexec {shlex.quote(sys.executable)} "$@"\n')
     for name in ("sbatch", "sacct"):
         executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
-    executable(tmp_path / "venv/bin/flock", '#!/bin/bash\necho "$1" >> "$CALLS"\n')
+    executable(tmp_path / "venv/bin/flock", '#!/bin/bash\necho "$1 $2" >> "$CALLS"\n')
     executable(tmp_path / "venv/bin/flock-controller", '#!/bin/bash\n/bin/sleep 1\n')
     executable(tmp_path / "venv/bin/date", '#!/bin/bash\nn=$(cat "$CLOCK" 2>/dev/null || echo 0)\nn=$((n+1))\necho "$n" > "$CLOCK"\necho "$n"\n')
     result = run_script(tmp_path, "controller.sbatch", env)
@@ -225,7 +204,8 @@ http_status() {{ case $1 in */healthz) echo 200;; */swarms/*) echo {swarm_code};
     assert ("world unavailable after 2s" in result.stdout) == waited
     assert not (tmp_path / "requeues").exists()  # never requeues itself over a missing world
     called = tmp_path / "calls"
-    assert (called.read_text().split() if called.exists() else []) == calls
+    got = called.read_text().splitlines() if called.exists() else []
+    assert got == [f"apply {exp / 'spec.yaml'}" for _ in calls], result.stdout
 
 
 def test_role_preparation_plan_and_existing_checkout_protection(tmp_path):
@@ -346,25 +326,6 @@ def test_worker_paths_trim_slashes_and_accept_only_shared_hub_token(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[-2:] == [str(tmp_path / "venv"), str(tmp_path / "repo")]
     assert "shared-fixture" not in result.stdout + result.stderr
-
-
-def test_calibrated_capacity_threshold_and_invalid_values(monkeypatch):
-    from .test_run4_experiment import module
-
-    guard = module("load_guard")
-    def measure(threshold):
-        times = iter([0, 60, 120])
-        completed = iter([0, 30, 60])
-        monkeypatch.setenv("RUN4_MAX_REQUEST_SECONDS", str(threshold))
-        return guard.capacity_ok(["fake"], sleep=lambda _: None, clock=lambda: next(times),
-                                 get=lambda _: SimpleNamespace(raise_for_status=lambda: None, text=(
-                                     "vllm:num_requests_running 10\nvllm:num_requests_waiting 0\n"
-                                     f"vllm:request_success_total {next(completed)}\n")))
-    assert not measure(15)[0]  # observed 20 s/request
-    assert measure(25)[0]
-    for invalid in [0, -1, "bad", "nan", "inf"]:
-        ok, message = measure(invalid)
-        assert not ok and "finite and positive" in message
 
 
 @pytest.mark.parametrize("stop_signal", ["USR1", "TERM"])

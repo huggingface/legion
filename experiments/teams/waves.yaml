@@ -1,8 +1,0 @@
-# One type, no spawning. Change `add`, `every` and `until`/`cap` here (and limits.alive in
-# spec.yaml when going past 250).
-type: agent
-cap: 250
-stagger_s: 10
-waves:
-  - {at: 0, add: 20}
-  - {every: 10m, add: 20, until: 250}

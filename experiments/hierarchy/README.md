@@ -14,9 +14,7 @@ are the same agent without the right to spawn, with a different role prompt.
 | `prompts/coordinator.md` | appended for coordinators: the coordinator rules, how to spawn, the team rules |
 | `prompts/worker.md` | appended for workers: who started them, the team rules |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
-| `waves.yaml` | 10 coordinators every 10 min, to 50 |
-| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
-| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for these two types |
+| `spec.yaml` `replicas_ramp` | 10 coordinators every 10 min, to 50; the controller runs it (was `waves.yaml`) |
 
 ## Mechanics
 
@@ -27,7 +25,7 @@ are the same agent without the right to spawn, with a different role prompt.
 - Sizes: 50 coordinators (`workers.initial: 5`, 12 agents per worker job) and up to 200
   workers (`max_extra: 17`, opened on demand); `limits: {alive: 250, spawned_total: 400}`.
   `spawned_total` never frees a place, so it leaves room for teams to be rebuilt. To grow,
-  raise `cap`/`until` in `waves.yaml`, `coordinator.workers.initial` and `limits` together.
+  raise `replicas_ramp.max` in `spec.yaml`, `coordinator.workers.initial` and `limits` together.
 - The shared plan is the team channel's shared document, read with `doc` and rewritten with
   `edit_doc`. Both are extended comms tools included in `run5`, enabled by the spec's
   `comms.extended: true` and each type's `comms: true`.
@@ -47,14 +45,13 @@ Follow run 4's README ("Operator preparation", "Launch and stop boundaries") wit
 
 ```sh
 RUN3_EXPERIMENT=hierarchy   # controller.sbatch copies experiments/hierarchy (links followed)
-CHATBOT_RUN=hierarchy       # the swarm name (render.py)
+CHATBOT_RUN=hierarchy       # the swarm name
 ```
 
-then `sbatch world.sbatch hierarchy` and `sbatch controller.sbatch hierarchy`. The controller
-renders this folder, applies it and runs `waves.py run` on `waves.yaml`.
+then `sbatch world.sbatch hierarchy` and `sbatch controller.sbatch hierarchy`. The controller job
+applies this folder's `spec.yaml` on its first start; the controller runs the ramp.
 
-Offline checks: `python experiments/hierarchy/render.py --out /tmp/h.yaml`,
-`python experiments/hierarchy/waves.py plan`, `pytest tests/test_hierarchy_experiment.py`.
+Offline checks: `pytest tests/test_hierarchy_experiment.py`.
 
 ## Board
 

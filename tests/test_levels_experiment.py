@@ -6,7 +6,7 @@ from pathlib import Path
 
 from flock.cli import load_spec
 
-from .test_hierarchy_experiment import module
+from .test_hierarchy_experiment import check_one_spec
 from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
@@ -26,7 +26,8 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     spec = load_spec(str(EXP / "spec.yaml"))
     hierarchy = load_spec(str(ROOT / "hierarchy/spec.yaml")).types["worker"]
     assert set(spec.types) == {"lead", "manager", "worker"}
-    skip = {"system_prompt": True, "system_prompt_append_file": True, "workers": True}
+    skip = {"system_prompt": True, "system_prompt_append_file": True, "workers": True,
+            "replicas_ramp": True}
     for t in spec.types.values():  # hierarchy's agent: same model, tools, loop
         assert t.replicas == 0 and t.model_dump(exclude=skip) == hierarchy.model_dump(exclude=skip)
     assert set(spec.spawn) == {"lead", "manager"}  # workers: depth 0, no spawning
@@ -62,15 +63,9 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert "$FLOCK_PARENT" in manager and "$FLOCK_PARENT" in worker
 
 
-def test_render_and_waves_read_this_folder():
-    data = module(EXP, "render").render()  # jobs: the Slurm overlay
-    assert data["swarm"] == "levels" and data["compute"]["kind"] == "slurm"
-    assert set(data["types"]) == {"lead", "manager", "worker"}
-    smoke = module(EXP, "render").render("smoke", "slurm")
-    assert smoke["compute"]["kind"] == "slurm"
-    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
-    waves = module(EXP, "waves").load(EXP / "waves.yaml")
-    assert waves.type == "lead" and waves.cap == 20 and waves.events == [(0, 10), (600, 20)]
+def test_one_spec_with_the_ramp(monkeypatch):
+    spec = check_one_spec(EXP, monkeypatch, "lead", [(0, 10), (600, 20)])
+    assert set(spec.types) == {"lead", "manager", "worker"}
 
 
 async def test_three_levels_spawn_with_caps(client, app, store, tick):
@@ -81,7 +76,7 @@ async def test_three_levels_spawn_with_caps(client, app, store, tick):
     data = spec.model_dump(mode="json")  # no world or board in the in-process controller
     data.update(world=None, comms=None)
     for t in data["types"].values():
-        t.update(tools=[], comms=False)
+        t.update(tools=[], comms=False, replicas_ramp=None)
     assert (await client.put(f"/swarms/{spec.swarm}", json=data)).status_code == 200
     tick()
     [lead] = [a["name"] for a in (await client.get(f"/swarms/{spec.swarm}/agents")).json()["agents"]]

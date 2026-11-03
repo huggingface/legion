@@ -2,7 +2,14 @@
 # World, board, model and loop are run 4's (experiments/run4/spec.yaml); only the system
 # prompt, the board's channel cap and the limits differ.
 swarm: ${CHATBOT_RUN:-teams}                 # ${VAR:-default}: flock apply --env run.env (run 4 README)
-compute: local
+compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
+  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
+  partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
+  cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
+  mem: ${WORKER_MEM:-7G}
+  time: '54:00:00'                          # matches worker_lifetime 54h; the run is 48h
+bucket: ${RUN3_BUCKET:-hf://buckets/cmpatino/eliza-swarm}
+namespace: ${RUN3_NAMESPACE:-cmpatino}
 naming: words
 providers:
   vllm:
@@ -13,11 +20,13 @@ providers:
     timeout_s: 300
     max_retries: 5
     pricing: {"*": [0, 0, 0]}
+    metrics: true                           # vLLM /metrics: health and the ramp's hold_if
 models:
   worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
 world:
   dir: ../../worlds/chatbot4
   command: ['{python}', chatbot4.py, serve]
+  url: http://${WORLD_HOST}:7860              # Slurm: the world job's host (FLOCK_WORLD_HOST_FILE); local runs `command`
   token_env: CHATBOT_WORLD_TOKEN
 comms:
   kind: msgboard
@@ -38,7 +47,10 @@ types:
   agent:
     harness: pi
     model: worker-pi
-    replicas: 0                             # waves.yaml raises it
+    replicas: 0                             # the ramp raises it; `flock update` keeps the live count
+    replicas_ramp:                          # the controller raises replicas (was waves.yaml)
+      {start: 20, add: 20, every: 10m, max: 250, stagger: 10s,
+       hold_if: {waiting: 1, request_s: '${RUN4_MAX_REQUEST_SECONDS:-15}', above: 100}}  # was load_guard.py
     agents_per_worker: 12
     system_prompt_file: prompts/system.md
     comms: true
@@ -63,7 +75,7 @@ types:
       every: turn_end
       notices: true
       on: [comms.mention, comms.thread, comms.dm, comms.channel]
-      while: {until: 48h, max_rounds: 10000}
+      while: {until: '${LOOP_UNTIL:-48h}', max_rounds: '${LOOP_MAX_ROUNDS:-10000}'}  # smoke: LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100
       final: {prompt_file: prompts/final.md}
 # No spawn block: agents cannot start others. 250 alive (waves.yaml); nothing is spawned.
 limits: {alive: 250}

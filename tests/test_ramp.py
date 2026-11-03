@@ -39,8 +39,9 @@ def test_phases_follow_on_and_the_old_form_is_one_phase():
                 {"start": 1, "max": 5, "add": 1, "every": "1m", "stagger": "soon"}):
         with pytest.raises(ValidationError):
             RampSpec.model_validate(bad)
-    with pytest.raises(ValidationError):
-        RampHold(request_s=float("inf"))
+    for bad in (0, -1, "bad", float("nan"), float("inf")):  # load_guard: finite and positive
+        with pytest.raises(ValidationError):
+            RampHold(request_s=bad)
 
 
 def test_steps_raise_to_the_schedule(store, clock, tick):

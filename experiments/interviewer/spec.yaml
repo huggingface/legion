@@ -2,7 +2,16 @@
 # interviewers that coordinators and workers spawn to judge a bot (main or a PR).
 # World, board, model and loop are run 4's (experiments/run4/spec.yaml).
 swarm: ${CHATBOT_RUN:-interviewer}             # ${VAR:-default}: flock apply --env run.env (run 4 README)
-compute: local
+compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
+  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
+  partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
+  cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
+  mem: ${WORKER_MEM:-7G}
+  time: '54:00:00'                          # matches worker_lifetime 54h; the run is 48h
+  types:                                    # interviewer slots: 2 CPUs / 3800M (one session each)
+    interviewer: {cpus: '${RUN3_INTERVIEWER_CPUS:-2}', mem: '${RUN3_INTERVIEWER_MEM:-3800M}'}
+bucket: ${RUN3_BUCKET:-hf://buckets/cmpatino/eliza-swarm}
+namespace: ${RUN3_NAMESPACE:-cmpatino}
 naming: words
 providers:
   vllm:
@@ -13,6 +22,7 @@ providers:
     timeout_s: 300
     max_retries: 5
     pricing: {"*": [0, 0, 0]}
+    metrics: true                           # vLLM /metrics: health and the ramp's hold_if
 models:
   worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
   interviewer:                              # thinking off, as run 3's interviewers
@@ -21,6 +31,7 @@ models:
 world:
   dir: ../../worlds/chatbot4
   command: ['{python}', chatbot4.py, serve]
+  url: http://${WORLD_HOST}:7860              # Slurm: the world job's host (FLOCK_WORLD_HOST_FILE); local runs `command`
   token_env: CHATBOT_WORLD_TOKEN
 comms:
   kind: msgboard
@@ -41,7 +52,10 @@ types:
   coordinator: &agent
     harness: pi
     model: worker-pi
-    replicas: 0                             # waves.yaml raises it
+    replicas: 0                             # the ramp raises it; `flock update` keeps the live count
+    replicas_ramp:                          # the controller raises replicas (was waves.yaml)
+      {start: 10, add: 10, every: 10m, max: 50, stagger: 10s,
+       hold_if: {waiting: 1, request_s: '${RUN4_MAX_REQUEST_SECONDS:-15}', above: 100}}  # was load_guard.py
     agents_per_worker: 12
     system_prompt_file: prompts/system.md
     system_prompt_append_file: prompts/coordinator.md
@@ -68,10 +82,11 @@ types:
       every: turn_end
       notices: true
       on: [comms.mention, comms.thread, comms.dm, comms.channel]
-      while: {until: 48h, max_rounds: 10000}
+      while: {until: '${LOOP_UNTIL:-48h}', max_rounds: '${LOOP_MAX_ROUNDS:-10000}'}  # smoke: LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100
       final: {prompt_file: prompts/final.md}
   worker:
     <<: *agent
+    replicas_ramp: null                     # not ramped
     system_prompt_append_file: prompts/worker.md
     workers: {initial: 0, max_extra: 17}    # 200 workers at 12 per worker, opened on demand
   interviewer:                              # spawned by coordinators and workers; one session each

@@ -6,19 +6,18 @@ from pathlib import Path
 from flock.cli import load_spec
 from flock.models import load_spec_yaml
 
-from .test_hierarchy_experiment import REPOS, check_types, module
+from .test_hierarchy_experiment import REPOS, check_one_spec, check_types
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP, HIER = ROOT / "voting", ROOT / "hierarchy"
 
 
-def test_same_spec_as_hierarchy_but_the_name():
+def test_same_spec_as_hierarchy_but_the_name(monkeypatch):
     voting, hier = (load_spec_yaml((d / "spec.yaml").read_text()) for d in (EXP, HIER))
     assert voting.pop("swarm") == "${CHATBOT_RUN:-voting}" and hier.pop("swarm") == "${CHATBOT_RUN:-hierarchy}"
     assert voting == hier
-    data = module(EXP, "render").render()
-    assert data["swarm"] == "voting" and set(data["types"]) == {"coordinator", "worker"}
-    assert module(EXP, "waves").load(EXP / "waves.yaml").type == "coordinator"
+    spec = check_one_spec(EXP, monkeypatch, "coordinator", [(600 * i, 10 * (i + 1)) for i in range(5)])
+    assert set(spec.types) == {"coordinator", "worker"}
 
 
 def test_role_prompts_are_hierarchy_plus_voting():

@@ -1,13 +1,9 @@
-"""Run-4 configuration, all-node capacity guard and notification integration."""
+"""Run-4 configuration (one spec.yaml: cluster settings and the two-phase ramp) and notifications."""
 from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
-from types import SimpleNamespace
-
-import httpx
-import yaml
 
 from flock.cli import load_spec
 from flock.controller.loop import notice_line
@@ -23,7 +19,7 @@ def module(name):
     return result
 
 
-def test_spec_fixed_prompt_and_waves():
+def test_spec_fixed_prompt_and_ramp():
     spec = load_spec(str(EXP / "spec.yaml"))
     assert set(spec.types) == {"agent", "agent-spawner", "agent-child"}  # test_run4_spawner
     agent = spec.types["agent"]
@@ -38,63 +34,43 @@ def test_spec_fixed_prompt_and_waves():
     assert set(agent.tools) == {"world:run_bot", "world:open_pr", "world:review_pr",
                                 "world:merge_pr", "world:list_prs", "world:close_pr",
                                 "world:get_pr"}
-    waves = module("waves").load(EXP / "waves.yaml")
-    assert waves.cap == 300 and waves.split(300) == {"agent": 300}
-    assert waves.events[:5] == [(0, 20), (300, 40), (600, 60), (900, 80), (1200, 100)]
-    assert waves.events[-1] == (7200, 300)
+    ramp = agent.replicas_ramp  # was waves.yaml: 20 every 5 min to 100, then +20 every 10 min
+    events = [(t, n) for t, n, _ in ramp.schedule()]
+    assert ramp.max == 300 and events[:6] == [(0, 20), (300, 40), (600, 60), (900, 80),
+                                              (1200, 100), (1800, 120)]
+    assert events[-1] == (7200, 300) and [g for _, _, g in ramp.schedule()][:2] == [10, 0]
+    assert ramp.hold_if.above == 100 and ramp.hold_if.request_s == 15
+    assert spec.types["agent-spawner"].replicas_ramp is None
+    assert spec.types["agent-child"].replicas_ramp is None
 
 
-def test_render_multiple_endpoints_and_cluster_lifetime(monkeypatch, tmp_path):
-    """render.py is flock's own --env/--overlay plus OPENAI_BASE_URLS; its output reads back
-    unchanged (the rendered file goes through substitution again at `flock apply`)."""
-    for name in ("RUN3_BUCKET", "RUN3_NAMESPACE", "CHATBOT_RUN", "MODEL_WORKER"):
+def test_env_file_fills_the_cluster_settings(monkeypatch, tmp_path):
+    """One spec.yaml: --env run.env fills compute, bucket and endpoints; the file wins over the
+    shell; COMPUTE_KIND=local and LOOP_UNTIL make the local smoke."""
+    for name in ("RUN3_BUCKET", "RUN3_NAMESPACE", "CHATBOT_RUN", "MODEL_WORKER", "COMPUTE_KIND",
+                 "LOOP_UNTIL", "LOOP_MAX_ROUNDS", "WORKER_MEM"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URLS", "http://first/v1,http://second/v1")
-    (tmp_path / "run.env").write_text("MODEL_WORKER=fake-model\nRUN3_BUCKET=hf://buckets/x/y\n")
-    data = module("render").render(env_files=[tmp_path / "run.env"])
-    smoke = module("render").render("smoke", env_files=[tmp_path / "run.env"])
-    assert all(t["loop"]["while"] == {"until": "30m", "max_rounds": 100}
-               for t in smoke["types"].values()) and smoke["compute"] == "local"
-    assert data["compute"] == {"kind": "slurm", "partition": "hopper-cpu", "cpus": 4,
-                               "mem": "7G", "time": "54:00:00"}
-    assert data["bucket"] == "hf://buckets/x/y" and data["namespace"] == "cmpatino"
-    assert data["world"] == {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"}
-    assert data["models"]["worker-pi"]["model"] == "vllm:fake-model"
+    monkeypatch.setenv("OPENAI_BASE_URLS", "http://shell/v1")
+    monkeypatch.setenv("WORKER_CPUS", "8")
+    (tmp_path / "run.env").write_text("MODEL_WORKER=fake-model\nRUN3_BUCKET=hf://buckets/x/y\n"
+                                      "OPENAI_BASE_URLS=http://first/v1,http://second/v1\n")
+    spec = load_spec(str(EXP / "spec.yaml"), [str(tmp_path / "run.env")])
+    assert spec.compute.model_dump(exclude_none=True) == {
+        "kind": "slurm", "partition": "hopper-cpu", "cpus": 8, "mem": "7G", "time": "54:00:00"}
+    assert spec.bucket == "hf://buckets/x/y" and spec.namespace == "cmpatino"
+    assert spec.world.url == "http://${WORLD_HOST}:7860" and spec.world.token_env == "CHATBOT_WORLD_TOKEN"
+    assert spec.models["worker-pi"].model == "vllm:fake-model"
+    assert spec.providers["vllm"].base_urls == ["http://first/v1", "http://second/v1"]
     tools = {"world:run_bot", "world:open_pr", "world:review_pr", "world:merge_pr",
              "world:list_prs", "world:close_pr", "world:get_pr"}
-    for t in data["types"].values():  # the overlay keeps every type's settings from spec.yaml
-        assert t["replicas"] == 0 and t["harness"] == "pi" and set(t["tools"]) == tools
-    out = tmp_path / "experiment" / "spec.slurm.local.yaml"
-    out.parent.mkdir()
-    (out.parent / "prompts").symlink_to(EXP / "prompts")
-    out.write_text(yaml.safe_dump(data, sort_keys=False))
-    spec = load_spec(str(out))  # as controller.sbatch applies it
-    assert spec.world.url == "http://${WORLD_HOST}:7860" and spec.compute.kind == "slurm"
-    assert set(spec.types["agent-child"].tools) == tools
-    assert spec.providers["vllm"].base_urls == ["http://first/v1", "http://second/v1"]
-    assert spec.providers["vllm"].base_url == "http://first/v1"
-
-
-def test_capacity_guard_checks_each_node_and_holds_on_missing_metrics():
-    guard = module("load_guard")
-    def response(waiting, completed):
-        return SimpleNamespace(raise_for_status=lambda: None, text=(
-            f"vllm:num_requests_running 10\nvllm:num_requests_waiting {waiting}\n"
-            f"vllm:request_success_total{{finished_reason=\"stop\"}} {completed}\n"))
-    clocks = iter([0, 0, 60, 60, 120, 120])
-    counters = {"one": 0, "two": 0}
-    def healthy(url):
-        counters[url] += 60
-        return response(0, counters[url])
-    ok, _ = guard.capacity_ok(["one", "two"], get=healthy, sleep=lambda _: None,
-                             clock=lambda: next(clocks))
-    assert ok and counters == {"one": 180, "two": 180}
-    clocks = iter([0, 0, 60, 60, 120, 120])
-    ok, message = guard.capacity_ok(["one", "two"], get=lambda url: response(url == "two", 100),
-                                   sleep=lambda _: None, clock=lambda: next(clocks))
-    assert not ok and message.startswith("HOLD")
-    ok, _ = guard.capacity_ok(["one"], get=lambda _: (_ for _ in ()).throw(httpx.ConnectError("down")))
-    assert not ok
+    for t in spec.types.values():
+        assert t.replicas == 0 and t.harness.value == "pi" and set(t.tools) == tools
+        assert t.loop.while_.until == "48h" and t.loop.while_.max_rounds == 10000
+    monkeypatch.setenv("COMPUTE_KIND", "local")
+    monkeypatch.setenv("LOOP_UNTIL", "30m")
+    smoke = load_spec(str(EXP / "spec.yaml"))
+    assert smoke.compute.kind == "local" and smoke.world.command
+    assert all(t.loop.while_.until == "30m" for t in smoke.types.values())
 
 
 def test_notices_group_dm_channels_and_remain_bounded():
@@ -104,21 +80,3 @@ def test_notices_group_dm_channels_and_remain_bounded():
     many = [{"kind": "channel", "thread": i, "from": "cedar", "channel": f"topic-{i}"}
             for i in range(20)]
     assert "+15 more groups" in notice_line(many)
-
-
-def test_a_wave_raises_the_stored_replicas(tmp_path, monkeypatch, app, store, tick):
-    """`flock update` keeps live replicas by default; a wave must apply its own counts."""
-    from flock import cli
-
-    from .test_cli import _wire, runner
-    from .test_live import _experiment
-
-    _wire(monkeypatch, app)
-    f = _experiment(tmp_path / "exp", replicas=2)
-    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
-    tick()
-    waves = module("waves")
-    sched = waves.parse({"cap": 300, "type": "researcher"})
-    rec = waves.apply(cli.client(), f, sched, 5, "test", tmp_path / "w.jsonl")
-    assert "error" not in rec, rec
-    assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 5

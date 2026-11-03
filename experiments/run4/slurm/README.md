@@ -20,9 +20,9 @@ the scripts source `/fsx/carlos_patino/prj-eliza/slurm/common.sh` at runtime.
   `WORLD_PARTITION`/`WORLD_QOS` and `CTL_PARTITION`/`CTL_QOS` in run.env and pass them on the
   sbatch line (see the top of each script); unset keeps the `#SBATCH` header.
 
-## Waves runner vs `replicas_ramp`
+## Ramp
 
-`controller.sbatch` still runs `waves.py run`. The spec's `replicas_ramp` (`start`, `add`, `every`,
-`max`) is a single phase; the run-4 schedule has two (a fast opening, then a slower steady add) plus
-`stagger_s`, `think_share` and `type_caps`, which a ramp does not express. Switch only when the
-schedule fits one ramp.
+The controller job applies `experiments/$RUN3_EXPERIMENT/spec.yaml` only when the swarm is not on
+the controller (404); a requeue (200) applies nothing, so it never undoes a pause or resets live
+counts. The controller then raises replicas along the spec's `replicas_ramp` (phases, `stagger`,
+`hold_if`: docs/live.md "Ramp"); its clock is in the controller state, so a requeue continues it.

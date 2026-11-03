@@ -15,9 +15,7 @@ script.
 | `prompts/coordinator.md`, `prompts/worker.md` | hierarchy's role prompts; workers may start interviewers |
 | `prompts/interviewer.md` | the interviewer's whole job (run 3's, adapted to `run_bot` and `record_verdict`) |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
-| `waves.yaml` | 10 coordinators every 10 min, to 50 |
-| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
-| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for the looping types |
+| `spec.yaml` `replicas_ramp` | 10 coordinators every 10 min, to 50; the controller runs it (was `waves.yaml`) |
 
 ## Mechanics
 
@@ -57,14 +55,13 @@ Follow run 4's README ("Operator preparation", "Launch and stop boundaries") wit
 
 ```sh
 RUN3_EXPERIMENT=interviewer   # controller.sbatch copies experiments/interviewer (links followed)
-CHATBOT_RUN=interviewer       # the swarm name (render.py)
+CHATBOT_RUN=interviewer       # the swarm name
 MODEL_INTERVIEWER=<served model id>
 ```
 
 then `sbatch world.sbatch interviewer` and `sbatch controller.sbatch interviewer`.
 
-Offline checks: `python experiments/interviewer/render.py --out /tmp/i.yaml`,
-`python experiments/interviewer/waves.py plan`, `pytest tests/test_interviewer_experiment.py`.
+Offline checks: `pytest tests/test_interviewer_experiment.py`.
 
 ## Board
 
