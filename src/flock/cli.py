@@ -126,14 +126,12 @@ def _loop_line(lp: dict) -> str:
     return line
 
 
-def load_spec(spec_file: str, env_files=()) -> SwarmSpec:
+def load_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = None) -> SwarmSpec:
     """`read_spec`, exiting 1 with the reasons on stderr."""
     try:
-        return read_spec(spec_file, env_files)
+        return read_spec(spec_file, env_files, sources)
     except SpecError as e:
-        for line in e.lines:
-            typer.echo(line, err=True)
-        raise typer.Exit(1) from None
+        _fail(e.lines)
 
 
 def _warn_unverified(models: list[str], why: str) -> None:
@@ -387,17 +385,14 @@ def update(
     running swarm (docs/live.md): new tools version, prompts, loop and comms settings, limits,
     replicas. Running agents take tools and prompts at their next turn boundary.
     Prints what changed; a refused change applies nothing."""
-    path = Path(target)
-    spec_file, ref_header = _at_ref(str(path / "spec.yaml" if path.is_dir() else path), ref)
+    spec_file, ref_header = _at_ref(_spec_file(target), ref)
     sources: dict[str, str] = {}
+    spec = load_spec(spec_file, [*_api().env_files, *(env_files or ())], sources)
     try:
-        spec = read_spec(spec_file, [*_api().env_files, *(env_files or ())], sources=sources)
         done = ops.update(_api(), spec, spec_file, sources=sources, preflight=preflight,
                           strict=strict, replicas=replicas, check=check, source=ref_header)
     except SpecError as e:
-        for line in e.lines:
-            typer.echo(line, err=True)
-        raise typer.Exit(1) from None
+        _fail(e.lines)
     for line in update_lines(done, check):
         typer.echo(line, err=line.startswith("warning:"))
 
@@ -477,11 +472,11 @@ def status(
 
 
 def _print_events(api: Client, name: str, only: str, after: int, follow: bool, wait: bool,
-                  as_json: bool) -> None:
+                  as_json: bool, timeout: float = 600, raw: bool = False) -> None:
     if not name:
         _fail(["--events needs a swarm or --agent"])
     for page in flock_status.events(api, name, after=after, follow=follow or wait, prefix=only,
-                                    timeout=600 if wait else None):
+                                    timeout=timeout if wait else None, raw=raw):
         for ev in page["events"]:
             typer.echo(json.dumps(ev) if as_json else pretty_event(ev))
         after = page["next"]
@@ -744,16 +739,7 @@ def old_events(name: str, after: int = typer.Option(0, "--after"),
                timeout: float = typer.Option(600, "--timeout"),
                pretty: bool = typer.Option(False, "--pretty")) -> None:
     """Raw JSONL (or `status --events` lines with --pretty); see `flock status --events`."""
-    api = _api()
-    for page in flock_status.events(api, name, after=after, follow=follow or wait,
-                                    timeout=timeout if wait else None, raw=not pretty):
-        for ev in page["events"]:
-            typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
-        after = page["next"]
-        if wait and page["events"]:
-            break
-    if wait:
-        typer.echo(f"next: {after}", err=True)
+    _print_events(_api(), name, "", after, follow, wait, not pretty, timeout, raw=not pretty)
 
 
 @app.command("agents", hidden=True)

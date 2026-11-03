@@ -24,7 +24,7 @@ from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 from flock.worker.tools import ToolsManager
 
-from .test_cli import _wire
+from .conftest import wire
 from .worker_fakes import ScriptedAdapter, until
 
 runner = CliRunner()
@@ -67,7 +67,7 @@ def write_spec(tmp_path: Path, raw: dict) -> Path:
 
 
 def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec(tools=["add"]))
     r = runner.invoke(cli.app, ["launch", str(f)])
@@ -93,7 +93,7 @@ def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, ap
 
 
 def test_apply_refuses_unknown_tools_and_bad_modules(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec(tools=["add", "mul"]))
     r = runner.invoke(cli.app, ["launch", str(f)])
@@ -108,7 +108,7 @@ def test_apply_refuses_unknown_tools_and_bad_modules(tmp_path, monkeypatch, app,
 
 def test_existing_specs_are_unchanged(tmp_path, monkeypatch, app, store):
     """No type selects tools: an unrelated tools/ next to the spec is not shipped."""
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec())
     r = runner.invoke(cli.app, ["launch", str(f)])

@@ -813,8 +813,7 @@ def create_app(
             return None  # local agents live in the run dir, never in the bucket
         try:
             b = buckets(spec.bucket)
-            found = (b.first(f"{spec.swarm}/") if hasattr(b, "first")
-                     else next(iter(b.list(f"{spec.swarm}/")), None))
+            found = b.first(f"{spec.swarm}/")
         except Exception as e:  # noqa: BLE001 - cannot tell: refuse, never guess
             return f"cannot check bucket {spec.bucket} for earlier agents: {type(e).__name__}: {e}"
         if not found:

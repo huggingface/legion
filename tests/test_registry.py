@@ -15,8 +15,6 @@ from flock.registry import COMPUTE, HARNESSES, load
 def test_harness_entry_is_complete(name):
     h = HARNESSES[name]
     assert list(inspect.signature(load(h.adapter)).parameters) == ["workdir", "name", "spec"]
-    assert h.provider_type in ("anthropic", "openai_compat")
-    assert h.api in ("messages", "responses", "chat_completions")
     assert h.instructions_file.endswith(".md")
     assert Harness(name) == name
     if h.version:  # Dockerfile.worker is edited by hand

@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from flock import models
 from flock.cli import SpecError, read_spec
@@ -25,9 +27,7 @@ RESUMABLE = {"hierarchy", "voting", "teams", "interviewer", "levels", "v8"}
 
 
 def load_experiment(d: Path) -> SwarmSpec:
-    """As the run scripts apply it: spec.yaml, with the Slurm overlay when the folder has one."""
-    slurm = d / "spec.slurm.yaml"
-    return read_spec(str(d / "spec.yaml"), (), [str(slurm)] if slurm.is_file() else [])
+    return read_spec(str(d / "spec.yaml"))
 
 
 def stored_json(spec: SwarmSpec) -> str:
@@ -36,8 +36,11 @@ def stored_json(spec: SwarmSpec) -> str:
 
 
 @pytest.mark.parametrize("d", EXPERIMENTS, ids=lambda d: d.name)
-def test_experiment_spec_loads(d: Path) -> None:
-    load_experiment(d)
+def test_experiment_spec_loads_without_removed_keys(d: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(models, "_warned", set())
+    with caplog.at_level(logging.WARNING, logger="flock.models"):
+        load_experiment(d)
+    assert not [r for r in caplog.records if "was removed from flock" in r.getMessage()]
 
 
 @pytest.mark.parametrize("f", sorted(FIXTURES.glob("*.json")), ids=lambda f: f.stem)
@@ -63,14 +66,17 @@ def test_removed_key_dropped_typo_refused(monkeypatch, caplog, tmp_path: Path) -
         SwarmSpec.model_validate(raw)
     assert [r.getMessage() for r in caplog.records] == [
         "spec: LoopSpec.gone_opt was removed from flock; ignoring it"]
-    d = ROOT / "experiments" / "hierarchy"
-    overlay = tmp_path / "typo.yaml"
-    overlay.write_text(f"types: {{{name}: {{loop: {{gone_opt: 5s}}}}}}\n")
-    read_spec(str(d / "spec.yaml"), (), [str(overlay)])  # a spec file: dropped too
-    overlay.write_text(f"types: {{{name}: {{loop: {{gone_optt: 5s}}}}}}\n")
+    monkeypatch.setenv("WORLD_DIR", str(ROOT / "worlds" / "chatbot4"))  # as `flock init` does
+    spec = shutil.copytree(ROOT / "experiments" / "hierarchy", tmp_path / "h") / "spec.yaml"
+    data = models.load_spec_yaml(spec.read_text())
+    loop = data["types"][name]["loop"]
+    loop["gone_opt"] = "5s"
+    spec.write_text(yaml.safe_dump(data))
+    read_spec(str(spec))  # a spec file: dropped too
+    loop["gone_optt"] = loop.pop("gone_opt")
+    spec.write_text(yaml.safe_dump(data))
     with pytest.raises(SpecError, match="gone_optt"):  # a typo: still refused
-        read_spec(str(d / "spec.yaml"), (), [str(overlay)])
-
+        read_spec(str(spec))
 
 if __name__ == "__main__":
     os.environ.clear()  # identical fixtures for everyone: no shell ${VAR}s

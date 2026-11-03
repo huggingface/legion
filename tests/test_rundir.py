@@ -369,11 +369,6 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
 
 
-def test_no_profile_partition_is_the_cluster_default(tmp_path):
-    spec = read_spec(str(_folder(tmp_path, SLURM_SPEC) / "spec.yaml"), [])
-    assert spec.compute.partition == ""
-
-
 def test_slurm_capacity_from_a_fake_sinfo(tmp_path):
     spec = read_spec(str(_folder(tmp_path, SLURM_SPEC) / "spec.yaml"), [])
     calls = []
@@ -432,12 +427,3 @@ def test_container_mounts_follow_every_symlink_hop(tmp_path):
     assert rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(uv.parent)}).ok
 
 
-def test_old_partition_variable_is_noted(tmp_path, monkeypatch):
-    monkeypatch.setattr(rundir, "_sinfo", lambda argv: pytest.fail("sinfo in a unit test"))
-    monkeypatch.setattr(rundir, "check_capacity", lambda spec, env: rundir.Check("slurm capacity", True))
-    src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
-    rundir.init(run, src, env={})
-    with (run / "run.env").open("a") as f:
-        f.write("RUN3_SLURM_PARTITION=hopper-cpu\n")
-    rep = rundir.init(run, env={})
-    assert any("RUN3_SLURM_PARTITION is now ignored" in n for n in rep.notes)

@@ -38,27 +38,22 @@ class SpecError(Exception):
         self.lines, self.done = lines, done or {}
 
 
-def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
-    """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
-    name = getattr(holder, field)
-    if not name or getattr(holder, target) is not None:
-        return
-    src = Path(name)
-    src = src if src.is_absolute() else base / src
+def _read_rel(base: Path, rel: str, where: str) -> str:
+    """The text of `rel` (relative to the spec's folder `base`); SpecError when missing."""
+    src = base / rel  # an absolute `rel` replaces `base`
     if not src.is_file():
-        raise SpecError([f"{where}: {field} {src} not found"])
-    setattr(holder, target, src.read_text(encoding="utf-8"))
+        raise SpecError([f"{where} {src} not found"])
+    return src.read_text(encoding="utf-8")
 
 
-def read_spec(spec_file: str, env_files=(), overlays=(),
-              sources: dict[str, str] | None = None) -> SwarmSpec:
-    """Read a spec (overlay files merged: library callers only; then ${VAR} from --env files
-    and the environment substituted: flock.specrender, `sources` filled) and inline each type's
+def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = None) -> SwarmSpec:
+    """Read a spec (${VAR} from --env files and the environment substituted:
+    flock.specrender, `sources` filled) and inline each type's
     system_prompt_file (plus system_prompt_append_file) and loop prompt files, and the comms
     kickoff and protocol files (relative to the spec file). Raises SpecError."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(render(path, env_files, overlays, sources))
+        spec = SwarmSpec.model_validate(render(path, env_files, sources))
     except ValidationError as e:
         lines = []
         for err in e.errors():
@@ -69,36 +64,23 @@ def read_spec(spec_file: str, env_files=(), overlays=(),
         raise SpecError([f"{spec_file}: {e}"]) from None
     except (OSError, yaml.YAMLError) as e:  # unreadable file, broken YAML (a save in progress)
         raise SpecError([f"{spec_file}: {' '.join(str(e).split())}"]) from None
+    base = path.parent
     for name, ts in spec.types.items():
         if ts.system_prompt_file and ts.system_prompt is None:
-            src = Path(ts.system_prompt_file)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"type {name}: system_prompt_file {src} not found"])
-            ts.system_prompt = src.read_text(encoding="utf-8")
+            ts.system_prompt = _read_rel(base, ts.system_prompt_file,
+                                         f"type {name}: system_prompt_file")
         if ts.system_prompt_append_file:
-            src = Path(ts.system_prompt_append_file)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"type {name}: system_prompt_append_file {src} not found"])
-            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n"
-                                + src.read_text(encoding="utf-8")).lstrip("\n")
-        if ts.loop is not None:
-            _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
-            if ts.loop.final is not None:
-                _inline(path.parent, ts.loop.final, "prompt_file", "prompt", f"type {name}: loop.final")
+            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n" + _read_rel(
+                base, ts.system_prompt_append_file, f"type {name}: system_prompt_append_file")
+                                ).lstrip("\n")
+        for lp, where in ((ts.loop, "loop"), (ts.loop and ts.loop.final, "loop.final")):
+            if lp is not None and lp.prompt_file and lp.prompt is None:
+                lp.prompt = _read_rel(base, lp.prompt_file, f"type {name}: {where}: prompt_file")
     c = spec.comms
     if c is not None:  # kickoff and protocol files, next to the spec (docs/comms.md)
-        def read(rel: str, what: str) -> str:
-            src = Path(rel)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"comms.{what}: {src} not found"])
-            return src.read_text(encoding="utf-8")
-
         if c.kickoff_file:
-            c.kickoff = read(c.kickoff_file, "kickoff_file")
-        c.protocols_text = [read(f, "protocols") for f in c.protocols]
+            c.kickoff = _read_rel(base, c.kickoff_file, "comms.kickoff_file:")
+        c.protocols_text = [_read_rel(base, f, "comms.protocols:") for f in c.protocols]
     w = spec.world
     if w is not None and w.command is not None:  # the world runs in its dir (docs/world.md)
         d = Path(w.dir or ".")
@@ -169,6 +151,13 @@ def extra_warnings(spec: SwarmSpec) -> list[str]:
             for name, ts in spec.types.items()
             if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
             and ts.resolved_model.extra]
+
+
+def preflight_lines(results: list[dict]) -> list[str]:
+    """One line per probed model: `MODEL: ok|unverified|FAIL[ N ms][ (error)]`."""
+    return [f"{r['model']}: " + ("unverified" if r.get("unverified") else "ok" if r["ok"] else "FAIL")
+            + (f" {r['latency_ms']} ms" if r.get("latency_ms") is not None else "")
+            + (f" ({r['error']})" if r.get("error") else "") for r in results]
 
 
 def unprobed(spec: SwarmSpec) -> list[str]:
@@ -337,11 +326,9 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
             rep = api.preflight(spec)
         except ClientError as e:
             raise SpecError([f"preflight error {e.status}: {e.detail}"]) from None
-        probed = [f"preflight {x['model']}: " + ("unverified" if x.get("unverified") else "ok"
-                                                 if x["ok"] else "FAIL") for x in rep["results"]]
-        bad = [f"preflight {x['model']}: {'unverified' if x.get('unverified') else 'FAIL'}"
-               + (f" ({x['error']})" if x.get("error") else "")
-               for x in rep["results"] if not x["ok"] and (strict or not x.get("unverified"))]
+        probed = [f"preflight {x}" for x in preflight_lines(rep["results"])]
+        bad = [line for line, x in zip(probed, rep["results"], strict=True)
+               if not x["ok"] and (strict or not x.get("unverified"))]
         if bad:
             raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
                                     "--skip-preflight)")])

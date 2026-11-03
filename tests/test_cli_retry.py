@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from flock import cli
 from flock import client as flock_client
 
-from .conftest import TOKEN
+from .conftest import wire
 
 LEADER = "leader-0000"
 runner = CliRunner()
@@ -70,7 +69,6 @@ def test_cli_does_not_retry_a_post_500(monkeypatch, sleeps):
 
 
 def test_cli_against_the_app_still_works(monkeypatch, app, sleeps):
-    monkeypatch.setattr("flock.client.connect",
-                        lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    wire(monkeypatch, app)
     r = runner.invoke(cli.app, ["status"])
     assert r.exit_code == 0 and not sleeps

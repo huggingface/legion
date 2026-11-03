@@ -386,14 +386,12 @@ class Client:
         return self._call("POST", f"/agents/{parent}/children/prompts",
                           json=_bulk(text, type, state, skip_pending, timeout, reply_to))
 
-    def events(self, name: str, *, after: int = 0, follow: bool = False,
-               timeout: float | None = None, swarm: bool | None = None) -> Iterator[dict]:
+    def events(self, name: str, *, swarm: bool, after: int = 0, follow: bool = False,
+               timeout: float | None = None) -> Iterator[dict]:
         """Pages of an agent's (or, `swarm`, a swarm's) event stream after cursor `after`:
         {"events": [...], "next": cursor}. One page, or with `follow` long-polls (25 s each)
-        forever or until `timeout` seconds have passed. `swarm=None` tells from the name."""
+        forever or until `timeout` seconds have passed."""
         end = None if timeout is None else time.monotonic() + timeout
-        if swarm is None:  # agent-shaped names (`...-NNNN`) are agents without a lookup
-            swarm = not (self.as_agent or AGENT_NAME_RE.match(name)) and self.is_swarm(name)
         route = f"/swarms/{name}/events" if swarm else f"/agents/{name}/events"
         while True:
             page = self._call("GET", route, params={"after": after, "wait": 25 if follow else 0})

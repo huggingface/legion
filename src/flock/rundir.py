@@ -318,7 +318,7 @@ def check_providers(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
     import httpx
 
     from flock.controller.preflight import run_preflight
-    from flock.ops import provider_backed
+    from flock.ops import preflight_lines, provider_backed
 
     if not provider_backed(spec):
         return Check("providers", None, "no provider-backed models")
@@ -328,9 +328,7 @@ def check_providers(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
             return await run_preflight(spec, env, client)
 
     rep = asyncio.run(go())
-    lines = [f"{r.model}: " + ("unverified" if r.unverified else "ok" if r.ok else "FAIL")
-             + (f" {r.latency_ms} ms" if r.latency_ms is not None else "")
-             + (f" ({r.error})" if r.error else "") for r in rep.results]
+    lines = preflight_lines([r.model_dump() for r in rep.results])
     unv = sum(r.unverified for r in rep.results)
     bad = sum(not r.ok and not r.unverified for r in rep.results)
     return Check("providers", rep.ok, f"{len(rep.results) - unv - bad} answered a tool call, "
@@ -504,9 +502,6 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
         derived[m[1]] = str((Path(experiment) / m[2]).resolve())  # world.dir, relative to --from
     write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived)
     values = {k: v for f in env_files for k, v in read_env_file(f).items()}  # later wins
-    if values.get("RUN3_SLURM_PARTITION") and not values.get("SLURM_PARTITION"):
-        rep.notes.append("RUN3_SLURM_PARTITION is now ignored: set SLURM_PARTITION in the cluster "
-                         "profile (cluster.env)")
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
     try:
         spec = read_spec(str(spec_file), env_files)
