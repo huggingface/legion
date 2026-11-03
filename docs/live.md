@@ -16,7 +16,7 @@ prompts changed: calc (system_prompt); comms (protocols_text)
 types.calc.replicas: 2 -> 3
 ```
 
-It reads the folder exactly as `flock apply` does: the spec, `system_prompt_file`, the loop
+It reads the folder exactly as `flock launch` does: the spec, `system_prompt_file`, the loop
 prompt files, the comms kickoff and protocols, and the tools folder. It checks the folder,
 compares it with the spec the controller is running and applies it. The output is one line per
 change: the tools version (old -> new, with the tools added and removed), the prompts changed
@@ -27,8 +27,10 @@ Replicas: `flock update` keeps the running replica count of every type that alre
 (a type with `replicas: 20` in the file and 300 running stays at 300) and prints
 `agent: replicas kept (spec 20, live 300)`. `--replicas spec` applies the file's counts
 instead. `flock update` does this client-side; `PUT /swarms/{swarm}` applies the replicas it
-is sent unless the request asks `?replicas=keep` (`flock apply`, `flock scale` and `flock run`
-send the spec as is).
+is sent unless the request asks `?replicas=keep` (`flock launch` and `flock run` send the spec
+as is). `--replicas spec` never lowers a type with `replicas_ramp` (the ramp raised it): lower
+`replicas_ramp.max` to stop it growing. `--check` also probes every provider-backed model and
+lists the agents (and their spawned children) a lowered count or a removed type would delete.
 
 Lists print element by element (`types.agent.tools: +world:get_pr -world:foo`); only long
 scalar strings are shortened. `world.endpoint`, `manifest` and the credential fields are
@@ -44,7 +46,7 @@ the reason when the update would be refused. A world started for the
 check is stopped again.
 
 A refused update exits 1, prints the reason and applies nothing. The reasons are the ones
-`flock apply` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
+`flock launch` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
 from the controller. On a running swarm the controller also refuses to change the harness of a
 type that has agents. Use a new type name for that, or remove the type first.
 
@@ -54,11 +56,11 @@ through `.flock/current`, like the other commands do.
 
 ## Env files and `--ref`
 
-`flock apply`, `flock update` and `flock run` render the spec as they read it, so one folder
+`flock launch`, `flock update` and `flock run` render the spec as they read it, so one folder
 (one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock apply experiments/run4/spec.yaml --env runs/run4/run.env
+$ flock launch experiments/run4/spec.yaml --env runs/run4/run.env
 $ COMPUTE_KIND=local flock run experiments/run4/spec.yaml --env runs/run4/run.env
 $ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --check
 ```
@@ -79,9 +81,48 @@ $ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --chec
   where they are. The source sent is
   `{git_sha, ref, dirty: false, by}`. `--check` works with it.
 
+## Lifecycle: `flock launch` and `flock stop`
+
+| Want | Command |
+|---|---|
+| start a new run | `flock launch FOLDER` (refused when the bucket already holds agents of that swarm name) |
+| hold turns, keep compute | `flock stop S` (running turns finish; `--interrupt` cuts them; `--type`/`--agent` narrow it) |
+| free the workers, keep everything | `flock stop S --release` |
+| end the loops with their final round | `flock stop S --final [--type T]` |
+| continue after either | `flock launch S` (or `flock launch FOLDER`; `--type`/`--agent` lift one hold) |
+| take over a swarm another controller ran | `flock launch FOLDER --adopt` |
+
+`flock launch FOLDER` creates the swarm when the controller does not have it (with
+`If-None-Match: *`: of two launches racing, one creates and the other gets 412). When it has
+it, `launch` resumes it, and refuses if the folder's spec differs from the stored one
+(`replicas` aside, which the ramp rewrites): run `flock update` first. So one call either
+creates or resumes and never changes the spec.
+
+`flock stop S --release` holds every type, then drains every worker: running turns finish,
+each agent's final push to the bucket is retried once, and a push that still fails is named in
+the worker's last heartbeat (`sync_failed` on the swarm stream, the worker's `last_error`,
+`status.released.unsynced`; a worker that ends unplanned mid-release, without that heartbeat,
+puts all its agents there). The command waits until no worker runs, then exits 0 when every
+agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, loops, spec and
+history stay on the controller; nothing launches until `flock launch S`, when each agent
+restores from the bucket by name. The world and controller jobs keep running.
+
+`--adopt` is for a controller that does not know the swarm (its state was lost or it is a new
+deployment). It restores the swarm from the controller checkpoint in the bucket (`state.db` and
+`events/<swarm>/`, pushed every 60 s by `FLOCK_STATE_URL`): from `--checkpoint URL` (an
+earlier run's state URL, e.g. `<bucket>/controller/<old RUN>`), else this controller's own
+`FLOCK_STATE_URL`, else `<bucket>/controller/<swarm>`. Adopting from the controller's own URL
+is refused when that checkpoint also holds other swarms (its next push would drop them):
+restart it with `FLOCK_STATE_RESTORE=1` instead. Every agent comes back with its cost,
+loop state, ramp step, spawn links and the naming counters; then `launch` resumes it as above.
+With no checkpoint `--adopt` is refused unless `--no-checkpoint` is also given: the swarm is
+then created from the spec and the agents restore from the bucket alone (costs, loops, ramp
+and spawn links start over). A fresh controller that never had a swarm never pushes, so it
+does not overwrite the checkpoint it is about to adopt.
+
 ## Generations
 
-Every apply that changes the spec (`flock apply`, `flock update`, `flock scale`, the first
+Every apply that changes the spec (`flock launch`, `flock update`, the first
 apply of `flock run`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
 apply that changes nothing keeps it. `flock status` shows it as `gen N` on the swarm line.
 
@@ -128,13 +169,13 @@ types:
 
 The reconciler raises the type's replicas along the schedule: `start`, then each phase adds
 `add` every `every` until its `until`; the next phase starts where it stopped. Replicas change
-only when a new step is due, and never go down. An operator's `flock scale` between steps, up
-or down, stays until the next step asks for more. A lowered `max` caps later raises; it never
+only when a new step is due, and never go down. An operator's `flock update --replicas spec` between steps (up only on a
+ramp type), stays until the next step asks for more. A lowered `max` caps later raises; it never
 deletes agents. `stagger` spaces the agents of the `start` raise (a phase's own `stagger`,
 default 0, those of its steps). Each step writes `ramp_step {type, from, replicas, step, max}`.
 The start time, the last step and a staggered raise in progress are stored (`ramp:<type>`), so
-a controller restart keeps the schedule. While the type is held (`flock pause`), the clock
-stops: a resume does not jump the missed steps.
+a controller restart keeps the schedule. While the type is held (`flock stop`) or the swarm
+released (`flock stop --release`), the clock stops: a resume does not jump the missed steps.
 
 `hold_if` is the load guard: a step that takes the swarm's replicas above `above` waits while
 any vLLM server of a provider with `metrics: true` had `waiting` or more requests queued in

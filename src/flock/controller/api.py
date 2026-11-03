@@ -43,6 +43,7 @@ from flock.controller.spawn import (
     worker_cap_conflicts,
 )
 from flock.controller.spawn import spawn as spawn_child
+from flock.controller.state import adopt_checkpoint
 from flock.controller.store import Row, Store, agent_tokens
 from flock.live import diff_specs, keep_replicas
 from flock.models import (
@@ -344,6 +345,9 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
         cost_usd=round(sum(t.cost_usd for t in types.values()), 6),
         budget_stop=(flags := store.swarm_flags(spec.swarm)).get("budget_stop"),
         held=_held_view(flags.get("holds")),
+        released={**(r := flags["released"]), "since": _dt(r["since"]).isoformat(),
+                  "unsynced": store.get_control(spec.swarm, "unsynced") or {}}
+        if flags.get("released") else None,
         generation=store.generation(spec.swarm),
     )
 
@@ -552,7 +556,7 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
         )
     body = "".join(parts) or (
         '<div class="empty">No swarms yet.<br>Apply one with '
-        "<code>flock apply spec.yaml</code></div>"
+        "<code>flock launch spec.yaml</code></div>"
     )
     stamp = e(_dt(now).strftime("%Y-%m-%d %H:%M:%S UTC"))
     return (
@@ -645,6 +649,8 @@ def create_app(
     worlds: WorldHost | None = None,
     world_transport: httpx.BaseTransport | None = None,
     health: Health | None = None,
+    buckets: Callable[[str], Any] | None = None,
+    state_url: str | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -663,7 +669,11 @@ def create_app(
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.
     `health` (docs/health.md) gets every posted event batch; its probe/snapshot loop is run by
-    the caller (main, localrun). Default: one that only counts."""
+    the caller (main, localrun). Default: one that only counts.
+    `buckets(url)` opens a bucket (a `BucketStore`): `flock launch` checks the spec's bucket for
+    agents of an earlier run and `--adopt` reads the controller checkpoint, at `state_url`
+    (this controller's FLOCK_STATE_URL) or `<bucket>/controller/<swarm>`. None: no bucket
+    access (tests): no fresh-run guard, no checkpoint adopt."""
     secret_source = os.environ if secret_source is None else secret_source
     worlds = WorldHost() if worlds is None else worlds
     health = Health(store, token=token, secrets=secret_source) if health is None else health
@@ -793,19 +803,65 @@ def create_app(
         now = clock().timestamp()
         return [swarm_status(store, sw["spec"], now) for sw in store.list_swarms()]
 
+    def reused_bucket(spec: SwarmSpec) -> str | None:
+        """Why a fresh `flock launch` must not create this swarm: its bucket already holds
+        agents of that name (they would be restored silently). None: nothing there."""
+        if buckets is None or spec.compute.kind == "local" or not spec.bucket:
+            return None  # local agents live in the run dir, never in the bucket
+        try:
+            b = buckets(spec.bucket)
+            found = (b.first(f"{spec.swarm}/") if hasattr(b, "first")
+                     else next(iter(b.list(f"{spec.swarm}/")), None))
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse, never guess
+            return f"cannot check bucket {spec.bucket} for earlier agents: {type(e).__name__}: {e}"
+        if not found:
+            return None
+        return (f"bucket {spec.bucket} already holds agents of swarm {spec.swarm!r} "
+                f"({found}): a fresh launch would restore them. "
+                "`flock launch --adopt` takes that run over; else pick a new swarm name or bucket")
+
+    def deletions(prev: SwarmSpec, spec: SwarmSpec) -> list[str]:
+        """`flock update --check`: the agents (and their spawned subtrees) the new spec deletes."""
+        kids = store.children_by_parent(prev.swarm)
+
+        def subtree(n: str) -> list[str]:
+            return [x for k in kids.get(n, []) for x in (k, *subtree(k))]
+
+        out = []
+        for t in prev.types:
+            n = spec.types[t].replicas if t in spec.types else -1
+            gone = sorted(a["name"] for a in store.list_agents(prev.swarm, t)
+                          if n < 0 or (a["parent"] is None and a["slot"] >= n))
+            sub = [x for g in gone for x in subtree(g)]
+            if gone:
+                names = ", ".join(gone[:10]) + (f" (+{len(gone) - 10} more)" if len(gone) > 10 else "")
+                out.append(f"deletes {t}: {len(gone)} agents ({names})"
+                           + (f" and {len(sub)} spawned under them" if sub else ""))
+        return out
+
+    create_lock = threading.Lock()
+
     @api.put("/swarms/{swarm}", response_model=None)
     def apply(swarm: str, spec: SwarmSpec, replicas: Literal["keep", "spec"] = "spec",
-              dry_run: bool = False,
-              x_flock_source: Annotated[str | None, Header()] = None) -> SwarmStatus | dict:
+              dry_run: bool = False, adopt: bool = False,
+              x_flock_source: Annotated[str | None, Header()] = None,
+              if_none_match: Annotated[str | None, Header()] = None) -> SwarmStatus | dict:
         """Apply `spec` as sent (`replicas=spec`, the default); `replicas=keep` keeps the live
         replica count of types that already exist (`flock update` does that client-side). `dry_run` runs every check and returns the
-        resolved spec without storing anything (`flock update --check`). An apply that changes
-        the spec bumps the swarm's generation and keeps the spec (spec_history)."""
+        resolved spec without storing anything (`flock update --check`), with the agents it
+        would delete. An apply that changes the spec bumps the swarm's generation and keeps
+        the spec (spec_history). `If-None-Match: *` (`flock launch`): create only, 412 when
+        the swarm exists, 409 when its bucket holds agents of an earlier run (unless `adopt`)."""
         prev = store.get_swarm(swarm)
+        create = if_none_match == "*"
+        if create and prev:
+            raise HTTPException(412, f"swarm {swarm!r} already exists")
         if prev and replicas == "keep":
             keep_replicas(prev["spec"], spec)
         if spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
+        if create and not adopt and (why := reused_bucket(spec)):
+            raise HTTPException(409, why)
         if namespace and spec.namespace != namespace:
             raise HTTPException(
                 400,
@@ -817,7 +873,7 @@ def create_app(
                 400,
                 f"this controller launches workers with compute {compute!r}; the spec asks for "
                 f"compute {spec.compute.kind!r} (docs/local.md: `flock run` for local, a "
-                "deployed controller and `flock apply` for hf-jobs)",
+                "deployed controller and `flock launch` for hf-jobs)",
             )
         for type_name in spec.types:
             owner = store.type_owner(type_name)
@@ -849,9 +905,14 @@ def create_app(
             raise HTTPException(400, str(e)) from None
         if dry_run:
             worlds.discard(swarm)  # a candidate world started for the check
-            return {"dry_run": True, "spec": spec.model_dump(mode="json")}
+            return {"dry_run": True, "spec": spec.model_dump(mode="json"),
+                    "deletes": deletions(prev["spec"], spec) if prev else []}
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
-        store.put_swarm(spec, clock().timestamp())
+        with create_lock:  # two `flock launch` racing: one creates, the other gets 412
+            if create and store.get_swarm(swarm):
+                worlds.discard(swarm)  # the candidate world this losing launch started
+                raise HTTPException(412, f"swarm {swarm!r} already exists")
+            store.put_swarm(spec, clock().timestamp())
         if diff:  # an effective apply: a new generation, its spec kept in spec_history
             src = spec_source(x_flock_source)
             gen = store.record_spec(spec, clock().timestamp(), src, diff[:50], new=prev is None)
@@ -906,7 +967,7 @@ def create_app(
         if spec.tools_version is None:
             if selecting:
                 raise HTTPException(400, f"types {', '.join(selecting)} select tools but the spec "
-                                         "has no tools_version: apply it with `flock apply`, "
+                                         "has no tools_version: apply it with `flock launch`, "
                                          "which uploads the tools folder (docs/tools.md)")
             return
         b = store.get_tool_bundle(swarm, spec.tools_version, body=False)
@@ -925,7 +986,7 @@ def create_app(
 
     @api.post("/swarms/{swarm}/tools", status_code=201)
     async def upload_tools(swarm: str, request: Request) -> dict:
-        """Store a tools bundle (the tar.gz `flock apply` packs) under its content hash. The
+        """Store a tools bundle (the tar.gz `flock launch` packs) under its content hash. The
         swarm need not exist yet; the spec then names the version (`tools_version`)."""
         body = await request.body()
         if len(body) > MAX_BUNDLE_BYTES:
@@ -950,6 +1011,32 @@ def create_app(
         if b is None:
             raise HTTPException(404, f"no tools bundle {version!r} for swarm {swarm!r}")
         return Response(b["body"], media_type="application/gzip")
+
+    @api.post("/swarms/{swarm}/adopt")
+    def adopt_swarm(swarm: str, spec: SwarmSpec, checkpoint: str | None = None) -> dict:
+        """`flock launch --adopt`: restore the swarm from a controller checkpoint (agents with
+        their cost, loops, ramp, spawn tree, naming counters, holds): `checkpoint` (a state URL,
+        e.g. an earlier run's `controller/<RUN>`), else this controller's FLOCK_STATE_URL, else
+        `<bucket>/controller/<swarm>`. 404 when there is none: `--no-checkpoint` then creates
+        it from the spec instead."""
+        if spec.swarm != swarm:
+            raise HTTPException(400, "spec.swarm does not match the path")
+        if store.get_swarm(swarm):
+            raise HTTPException(409, f"swarm {swarm!r} is already on this controller")
+        url = checkpoint or state_url or f"{spec.bucket.rstrip('/')}/controller/{swarm}"
+        if buckets is None or not (checkpoint or state_url or spec.bucket):
+            raise HTTPException(404, "this controller has no bucket to read a checkpoint from")
+        try:
+            n = adopt_checkpoint(buckets(url), store, swarm, own=url == state_url)
+        except ValueError as e:  # adopting from our own prefix would drop other swarms
+            raise HTTPException(409, str(e)) from None
+        except Exception as e:  # noqa: BLE001 - a bad or unreachable checkpoint: say so
+            raise HTTPException(502, f"checkpoint {url}: {type(e).__name__}: {e}") from None
+        if n is None:
+            raise HTTPException(404, f"no controller checkpoint of swarm {swarm!r} at {url}")
+        store.append_events(swarm, swarm_stream(swarm), [Event(
+            type="adopted", ts=clock(), agent="", data={"checkpoint": url, "agents": n})])
+        return {"swarm": swarm, "agents": n, "checkpoint": url}
 
     @api.post("/swarms/{swarm}/preflight")
     async def preflight(
@@ -1066,7 +1153,7 @@ def create_app(
     def not_budget_stopped(swarm: str) -> None:
         if loops.hard_stopped(swarm):
             raise HTTPException(409, f"swarm {swarm!r} reached limits.budget_usd: every agent was "
-                                     "stopped; raise the budget (flock apply) to prompt again")
+                                     "stopped; raise the budget (flock update) to prompt again")
 
     @api.post("/agents/{name}/prompt")
     def prompt(name: str, req: PromptRequest) -> PromptAck:
@@ -1532,6 +1619,7 @@ class HoldRequest(BaseModel):
     types: list[str] | None = None
     agents: list[str] | None = None
     interrupt: bool = False  # pause: also stop the turns in flight
+    release: bool = False  # pause: also drain and free every worker; resume: relaunch them
     reason: str = ""
     by: str = "operator"
 
@@ -1546,8 +1634,9 @@ def add_pause_routes(api: APIRouter, loops: LoopEngine) -> None:
     @api.post("/swarms/{swarm}/pause")
     def pause(swarm: str, req: HoldRequest) -> dict:
         return call(loops.pause, swarm, types=req.types, agents=req.agents,
-                    interrupt=req.interrupt, reason=req.reason, by=req.by)
+                    interrupt=req.interrupt, reason=req.reason, by=req.by, release=req.release)
 
     @api.post("/swarms/{swarm}/resume")
     def resume(swarm: str, req: HoldRequest) -> dict:
-        return call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by)
+        return call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by,
+                    release=req.release)

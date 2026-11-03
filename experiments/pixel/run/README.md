@@ -62,12 +62,12 @@ chat completions at the same latency, and the controller's preflight can reach i
      - But workers also use `HF_TOKEN` for the wheel and **bucket sync (write)**, so a read-only `HF_TOKEN` would break that. Keep the operator token for run 1.
      - Or put the read-only token in a separate secret (e.g. `HF_PROXY_TOKEN`) and point `api_key_env` at it.
 5. **Smoke.** Point `FLOCK_URL` at the Space and set `FLOCK_TOKEN`.
-   - Run `flock apply experiments/pixel/run/spec-smoke.yaml`. Preflight probes the proxy URL.
+   - Run `flock launch experiments/pixel/run/spec-smoke.yaml`. Preflight probes the proxy URL.
    - Then `python experiments/pixel/run/driver.py --swarm pixel-smoke --canvas-url https://<JOB_ID>--8765.hf.jobs --max-steps 5`.
    - Check `/replay` and the progress Space.
    - Then `flock remove pixel-smoke`.
 6. **Run.**
-   - Run `flock apply experiments/pixel/run/spec-100.yaml`.
+   - Run `flock launch experiments/pixel/run/spec-100.yaml`.
    - Then run `python experiments/pixel/run/driver.py --swarm pixel-100 --canvas-url <canvas URL> --run-id run1-20261019 --repeat --interval 3 --max-minutes 80 --gpu-usd-per-hour 2.75`, with `SPACE_ID`/`HF_TOKEN` set for the progress page. Use the job's RUN_ID as `--run-id`.
    - `--repeat` goes with `done_tool: true`: the step prompt asks the model to repeat the command within the turn, and only idle agents are prompted (a prompt sent mid-turn would be steered into the running turn). With `done_tool: false`, drop `--repeat`.
    - The driver stops when the work set is 100% done. Cap the run with `--max-minutes`, or each agent with `--max-steps`.
@@ -179,7 +179,7 @@ Same conditions as run 1, except agent count, GPUs and workers (Carlos):
    - `/v1/models` returns 200 through each proxy;
    - canvas `/status` answers.
 4. Controller `cmpatino/flock-smoke` on the `pixel-run` wheel (it includes the bulk-prompt route).
-   Run `flock apply experiments/pixel/run/spec-1k.yaml`; expect ~42 workers and 1,000 idle agents
+   Run `flock launch experiments/pixel/run/spec-1k.yaml`; expect ~42 workers and 1,000 idle agents
    after a few minutes.
 5. Driver (polls every 2 s: 2 canvas reads, 1 controller status and 3 bulk POSTs per tick):
    ```
@@ -190,7 +190,7 @@ Same conditions as run 1, except agent count, GPUs and workers (Carlos):
 6. Compare on the progress Space: `?tab=compare`, run 1 against this run. The time axis switches
    to seconds for short runs.
 
-### The 5-minute check (from `flock apply`)
+### The 5-minute check (from `flock launch`)
 By minute 5 the swarm should be painting. If not, stop and diagnose before the GPUs burn time.
 - `flock status pixel-1k`: ~1,000 agents, 42 workers running, no `launch_error`.
 - Driver line:
@@ -268,7 +268,7 @@ By minute 5 the swarm should be painting. If not, stop and diagnose before the G
    - Space secrets: `ANTHROPIC_API_KEY` (leaders), `HF_TOKEN`, `CANVAS_URL`, `CANVAS_TOKEN`,
      `BOARD_URL`, `BOARD_INVITE` (the #flock-pixel-test invite).
    - Turn on persistent storage: spawned rows live only in the controller's SQLite.
-4. `flock apply experiments/pixel/run/spec-spawn.yaml`. The 10 leaders appear and idle (2 workers,
+4. `flock launch experiments/pixel/run/spec-spawn.yaml`. The 10 leaders appear and idle (2 workers,
    ~1 min). No painters exist yet.
 5. Start the observer (no prompts):
    ```

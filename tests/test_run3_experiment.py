@@ -262,7 +262,7 @@ def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
                    CHATBOT_CHANNEL="chatbot-test", RUN3_WORLD_URL="https://world.example.invalid")
     try:
         # in process: cli.client is the controller app
-        res = CliRunner().invoke(cli.app, ["apply", str(spec), "--skip-preflight"])
+        res = CliRunner().invoke(cli.app, ["launch", str(spec), "--skip-preflight"])
         assert res.exit_code == 0, res.output
         stored = ctl.store.get_swarm("run3")["spec"]
         assert stored.world.manifest.name == "chatbot3" and stored.compute.kind == "hf-jobs"

@@ -1,7 +1,7 @@
 # Levels (README): three levels. Waves of leads; a lead may spawn up to 5 managers, a manager
 # up to 5 workers. World, board, model and loop are hierarchy's (experiments/hierarchy/spec.yaml);
 # only the types, prompts, spawn policy and sizes differ.
-swarm: ${CHATBOT_RUN:-levels}                # ${VAR:-default}: flock apply --env run.env (run 4 README)
+swarm: ${CHATBOT_RUN:-levels}                # ${VAR:-default}: flock launch --env run.env (run 4 README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
   kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}

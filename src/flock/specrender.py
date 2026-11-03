@@ -139,7 +139,7 @@ def yaml_lines(text: str) -> dict[str, int]:
 
 def render(spec_file: str | Path, env_files=(), overlays=(),
            sources: dict[str, str] | None = None) -> Any:
-    """The spec's data as `flock apply` validates it: base, overlays in order, then
+    """The spec's data as `flock launch` validates it: base, overlays in order, then
     substitution. Env sources, later winning: the process environment, then each --env file
     in order. `sources` gets where each value came from, per dotted path:
     `spec.yaml:12`, `run.env WORKER_MEM`, `env WORKER_MEM`, `spec.yaml:12 default of X`."""

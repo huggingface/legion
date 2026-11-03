@@ -1,9 +1,9 @@
-"""Tools folder end to end in one process: `flock apply` (the real CLI) packs and uploads a
+"""Tools folder end to end in one process: `flock launch` (the real CLI) packs and uploads a
 `tools/` folder next to the spec, the real controller app and reconcile pass place a 2-agent
 `llm` swarm on two real Worker loops (FakeJobsClient, ASGI), each worker fetches the bundle by
 hash, and the real LLMAdapter talks to tests/fake_openai.py, whose model calls `add(a, b)`.
 The result comes back to the model and the agent's events carry the tools version. Then the
-folder changes (a new `mul` tool), `flock apply` runs again on the running swarm, and the next
+folder changes (a new `mul` tool), `flock update` runs on the running swarm, and the next
 turns use the new version without any worker restart."""
 
 from __future__ import annotations
@@ -110,9 +110,9 @@ class Swarm:
         self.store.close()
 
 
-async def apply(spec_file: Path) -> str:
-    """`flock apply` in a thread (the CLI is synchronous; the workers keep running)."""
-    r = await asyncio.to_thread(CliRunner().invoke, cli.app, ["apply", str(spec_file),
+async def apply(spec_file: Path, cmd: str = "launch") -> str:
+    """`flock launch` (or `update`) in a thread (the CLI is synchronous; the workers keep running)."""
+    r = await asyncio.to_thread(CliRunner().invoke, cli.app, [cmd, str(spec_file),
                                                               "--skip-preflight"])
     assert r.exit_code == 0, r.output
     return r.output
@@ -212,8 +212,8 @@ async def test_tools_folder_end_to_end(tmp_path, monkeypatch):
         spec_file.write_text(yaml.safe_dump(spec_raw(url, "all")))
         v2 = pack(exp / "tools").version
         assert v2 != v1
-        out = await apply(spec_file)
-        assert f"tools: version {v2}" in out and "add, mul" in out
+        out = await apply(spec_file, "update")
+        assert f"tools: {v1} -> {v2} (+mul)" in out, out
         await until(lambda: all(w.tools.version == v2 for w in sw.workers.values()), timeout=10)
         for agent in AGENTS:
             r = await admin.post(f"/agents/{agent}/prompt", json={"text": 'call: mul {"a": 6, "b": 7}'})

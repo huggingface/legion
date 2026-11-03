@@ -103,7 +103,7 @@ a JSON line in `<spec>.waves.jsonl`. The schedule file is re-read at every tick.
 - **Jobs mode:** the operator session runs `python waves.py run --spec spec.jobs.local.yaml`
   with `FLOCK_URL`/`FLOCK_TOKEN` set; it stops when the schedule is over (300).
   `waves.py status` shows the count and the next wave; `waves.py add 100` or `set 250`
-  overrides (`set` may lower). `flock scale run3 agent N` also works; the next wave never
+  overrides (`set` may lower). Editing `replicas` and `flock update --replicas spec` also works; the next wave never
   lowers it. `waves.py add 25 --type agent-pi` adds Pi agents without touching `agent` /
   `agent-think`; waves, `add` and `pin` keep every other type at the controller's count.
 
@@ -158,7 +158,7 @@ agents each (40 agent workers at the cap, up to 40 interviewer workers), the wor
    CHATBOT_CHANNEL=<channel> CHATBOT_RUN=<suffix> RUN3_NAMESPACE=<ns>
    RUN3_BUCKET=hf://buckets/<ns>/<bucket> RUN3_WORLD_URL=https://<space host>
    python experiments/run3/render.py --variant jobs --out experiments/run3/spec.jobs.local.yaml`
-5. `flock apply experiments/run3/spec.jobs.local.yaml` (replicas 0: the swarm, the kickoff, the
+5. `flock launch experiments/run3/spec.jobs.local.yaml` (replicas 0: the swarm, the kickoff, the
    world check; no worker yet).
 6. Waves, in a session that stays up (tmux):
    `python experiments/run3/waves.py run --spec experiments/run3/spec.jobs.local.yaml`.

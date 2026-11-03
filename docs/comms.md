@@ -37,7 +37,7 @@ Every field is optional except `url`, `invite_env` and `channel`. A type gets co
 not comms tools. `comms: false` with listed comms tools is refused. A type without either gets
 no comms tools, so existing specs are unchanged.
 
-`flock apply` reads `kickoff_file` and the `protocols` files next to the spec and puts their text
+`flock launch` reads `kickoff_file` and the `protocols` files next to the spec and puts their text
 in the spec it sends (`comms.kickoff`, `comms.protocols_text`); the controller and the workers
 never read your files.
 
@@ -172,7 +172,7 @@ experiment (they are examples, never loaded from flock's wheel):
 
 ## Live settings
 
-`rules`, `protocols` (and `wake`) are live: edit them, run `flock apply` again, and the running
+`rules`, `protocols` (and `wake`) are live: edit them, run `flock update`, and the running
 agents get them without a restart. The controller stores the new spec; each worker gets the comms
 block in its next heartbeat response (every 30 s, ±10 %), the same path as the tools version
 (docs/tools.md). Then:

@@ -160,6 +160,7 @@ class AgentRuntime:
         self.resumed: bool | None = None
         self.idle_since: datetime = utcnow()
         self.last_sync: datetime | None = None
+        self.unsynced: str | None = None  # the last push's error (heartbeat `unsynced`)
         self.dirty = False
         self._env_dropped_rev: str | None = None
         self.allow_starts = True
@@ -938,12 +939,15 @@ class AgentRuntime:
             return
         self.emit("sync", {"reason": reason})
         self.save_state()
-        try:
-            await self.sync.push(self, rebase=reason == "periodic")
-            self.last_sync = utcnow()
-            self.dirty = False
-        except Exception as e:  # noqa: BLE001
-            log.warning("%s: sync failed: %s", self.name, e)
+        # the last push before a worker exits (drain, unassign) is retried once
+        for attempt in range(2 if reason in ("drain", "unassign") else 1):
+            try:
+                await self.sync.push(self, rebase=reason == "periodic")
+                self.last_sync, self.dirty, self.unsynced = utcnow(), False, None
+                return
+            except Exception as e:  # noqa: BLE001 - reported in the heartbeat, never dropped
+                self.unsynced = f"{reason} sync failed: {type(e).__name__}: {e}"[:300]
+                log.warning("%s: %s (attempt %d)", self.name, self.unsynced, attempt + 1)
 
     def heartbeat(self) -> AgentHeartbeat:
         working = self.turn_id is not None or self.awaiting or (self.phase == "starting" and bool(self.buffer))

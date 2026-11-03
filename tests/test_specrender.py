@@ -76,15 +76,15 @@ def test_cli_apply_with_env_files_and_no_overlay(tmp_path, monkeypatch, app, sto
     spec = tmp_path / "spec.yaml"
     spec.write_text(yaml.safe_dump(data))
     (tmp_path / "run.env").write_text("REPLICAS=4\n")
-    r = runner.invoke(cli.app, ["apply", str(spec)])
+    r = runner.invoke(cli.app, ["launch", str(spec)])
     assert r.exit_code == 1 and "unset variables without a default: NS" in r.output
     (tmp_path / "ns.env").write_text("NS=other\n")
-    r = runner.invoke(cli.app, ["apply", str(spec), "--env", str(tmp_path / "run.env"),
+    r = runner.invoke(cli.app, ["launch", str(spec), "--env", str(tmp_path / "run.env"),
                                 "--env", str(tmp_path / "ns.env")])
     assert r.exit_code == 0, r.output
     stored = store.get_swarm("demo")["spec"]
     assert stored.types["researcher"].replicas == 4 and stored.namespace == "other"
-    for cmd in ("apply", "update"):  # one spec per run: no overlays on the live path
+    for cmd in ("launch", "update"):  # one spec per run: no overlays on the live path
         r = runner.invoke(cli.app, [cmd, str(spec), "--overlay", str(spec)])
         assert r.exit_code == 2 and "--overlay" in r.output
 
@@ -131,7 +131,7 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
     data["types"]["researcher"]["replicas"] = 9  # uncommitted: --ref must not see it
     data["namespace"] = "working-tree"
     (exp / "spec.yaml").write_text(yaml.safe_dump(data))
-    r = runner.invoke(cli.app, ["apply", str(exp / "spec.yaml"), "--ref", "v1"])
+    r = runner.invoke(cli.app, ["launch", str(exp / "spec.yaml"), "--ref", "v1"])
     assert r.exit_code == 0, r.output
     (gen1,) = store.spec_history("demo")
     assert gen1["source"] == {"git_sha": sha, "ref": "v1", "dirty": False, "by": "carlos"}

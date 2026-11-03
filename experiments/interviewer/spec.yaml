@@ -1,7 +1,7 @@
 # Interviewer (README): hierarchy (coordinators spawn up to 4 workers) plus ephemeral
 # interviewers that coordinators and workers spawn to judge a bot (main or a PR).
 # World, board, model and loop are run 4's (experiments/run4/spec.yaml).
-swarm: ${CHATBOT_RUN:-interviewer}             # ${VAR:-default}: flock apply --env run.env (run 4 README)
+swarm: ${CHATBOT_RUN:-interviewer}             # ${VAR:-default}: flock launch --env run.env (run 4 README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
   kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}

@@ -49,6 +49,7 @@ from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
 from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.reconcile import Settings, agent_state, run_reconciler, worker_state
+from flock.controller.state import DEFAULT_INTERVAL, state_sync_from_env
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
 from flock.models import DrainCommand, SwarmSpec, SwarmStatus, TokenUsage
@@ -108,6 +109,23 @@ def run_name(swarm: str, data_dir: Path, now: datetime | None = None) -> str:
     return name
 
 
+def state_env(env, spec: SwarmSpec, token=None) -> tuple[dict[str, str], str | None]:
+    """The env the run's checkpoint is read from (`launch --adopt`) and a line to print when
+    it is off: FLOCK_STATE_URL, by default <bucket>/controller/<swarm> when the spec has a
+    bucket and an HF token is found (HF_TOKEN or the saved one, as HubBucketStore finds it);
+    `FLOCK_STATE_URL=` is off. `token()` finds the token (tests)."""
+    env = dict(env)
+    if env.get("FLOCK_STATE_URL") is not None or not spec.bucket:
+        return env, None
+    if token is None:
+        from huggingface_hub import get_token as token
+    if not (env.get("HF_TOKEN") or token()):
+        return env, ("checkpoint: off (no HF token for the bucket; set HF_TOKEN or "
+                     "FLOCK_STATE_URL to checkpoint for `flock launch --adopt`)")
+    env["FLOCK_STATE_URL"] = f"{spec.bucket.rstrip('/')}/controller/{spec.swarm}"
+    return env, None
+
+
 def redacted_spec(spec: SwarmSpec) -> dict[str, Any]:
     """The spec as stored, with env values whose name looks like a secret replaced. A spec
     holds only secret *names* (`secrets:`, `api_key_env`), but `env:` is free-form."""
@@ -119,7 +137,7 @@ def redacted_spec(spec: SwarmSpec) -> dict[str, Any]:
 
 
 def active_spec(store: Store, last: SwarmSpec) -> SwarmSpec:
-    """The swarm's spec as the controller stores it now (re-applied specs, `flock scale`), or
+    """The swarm's spec as the controller stores it now (re-applied specs, `flock update`), or
     the last one seen once the swarm is gone."""
     row = store.get_swarm(last.swarm)
     return row["spec"] if row is not None else last
@@ -478,7 +496,7 @@ async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
             say("preflight failed: not starting (fix the provider or pass --skip-preflight)")
             return False
     spec.tools_version = None
-    if opts.tools is not None:  # as `flock apply`: upload the folder, name it in the spec by hash
+    if opts.tools is not None:  # as `flock launch`: upload the folder, name it in the spec by hash
         r = await http.post(f"/swarms/{spec.swarm}/tools", content=opts.tools,
                             headers={"content-type": "application/gzip"}, timeout=120)
         if r.status_code >= 400:
@@ -572,11 +590,23 @@ async def run_local(opts: RunOptions) -> RunResult:
 
     health = Health(store, token=token, jobs=jobs, run=run_dir.name)
     health_every = float(os.environ.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
+    state_vars, state_note = state_env(os.environ, spec)
+    state = state_sync_from_env(state_vars, run_dir / "controller")
+
+    async def checkpoint() -> None:
+        while True:
+            await asyncio.sleep(float(os.environ.get("FLOCK_STATE_SYNC_INTERVAL", DEFAULT_INTERVAL)))
+            try:
+                await asyncio.to_thread(state.push, store)
+            except Exception:
+                log.exception("state push failed")
 
     async def background(notifier) -> None:
         reconcile_task.append(asyncio.current_task())
         if health_every > 0:  # cancelled with the reconciler (_stop_workers)
             reconcile_task.append(asyncio.create_task(health.run(health_every)))
+        if state is not None:
+            reconcile_task.append(asyncio.create_task(checkpoint()))
         await run_reconciler(store, jobs, settings, opts.reconcile_interval,
                              wake=lambda t: notifier.wait("reconcile:", t))
 
@@ -613,6 +643,8 @@ async def run_local(opts: RunOptions) -> RunResult:
         write_current(data_dir, {"url": url, "token": token, "run_dir": str(run_dir),
                                  "swarm": spec.swarm, "pid": os.getpid()})
         say(f"flock run: {spec.swarm} at {url}; run dir {run_dir}")
+        if state_note:
+            say(state_note)
         say(f"second terminal: {cli_hint(data_dir)} (URL and token in {current})")
         headers = {"X-Flock-Token": token}
         async with httpx.AsyncClient(base_url=url, headers=headers, timeout=60) as http:
@@ -632,7 +664,7 @@ async def run_local(opts: RunOptions) -> RunResult:
         idle_streak = 0
         while not stop.is_set():
             elapsed = time.monotonic() - t0
-            spec = active_spec(store, spec)  # a live PUT (flock scale, apply) wins
+            spec = active_spec(store, spec)  # a live PUT (flock update) wins
             snap = tracker.snapshot(spec, time.time())
             if tty:
                 frame = render(spec, snap, elapsed=elapsed, url=url, current=current,
@@ -697,6 +729,11 @@ async def run_local(opts: RunOptions) -> RunResult:
             await server.stop()
             uv_log.setLevel(level)
             clear_current(data_dir, os.getpid())
+            if state is not None:
+                try:
+                    await asyncio.to_thread(state.push, store, force=True, final=True)
+                except Exception:
+                    log.exception("final state push failed")
             store.close()
             logging.getLogger().removeHandler(handler)
             handler.close()

@@ -195,8 +195,8 @@ is never "in" a process; the process is a view of files on disk.
 ### CLI and library
 
 One Python package, three entry points: `flock` (CLI/library),
-`flock-controller`, `flock-worker`. Commands: `apply`,
-`prompt`, `status`, `events`, `scale`, `remove`, `logs`.
+`flock-controller`, `flock-worker`. Commands: `launch`,
+`stop`, `update`, `prompt`, `status`, `events`, `remove`.
 
 ## 4. Agent lifecycle
 
@@ -345,7 +345,7 @@ types:
 ```
 
 `scale` and `remove` edit the spec and re-apply. The system prompt is a file
-in the workdir, not a flag, so it survives resume. `flock apply` reads
+in the workdir, not a flag, so it survives resume. `flock launch` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
 caller's files (added in the e2e run). `system_prompt_append_file` (optional) is appended
@@ -353,7 +353,7 @@ after a blank line, so several types can share one prompt plus a section of thei
 (experiments/run4's spawner and child types).
 
 Tools folder (docs/tools.md): `tools_dir` (top level, default `tools/` next to the spec file)
-holds Python functions; `types.<t>.tools` selects them. `flock apply` packs the folder,
+holds Python functions; `types.<t>.tools` selects them. `flock launch` packs the folder,
 uploads it and writes its content hash into the spec as `tools_version`; assigns
 (`AssignCommand.tools_version`) and heartbeat responses (`{"tools": {"version", "select"}}`)
 carry it to the workers, which switch at the next turn.
@@ -440,10 +440,10 @@ distinct provider-backed model from the controller (which holds the keys) with t
 turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
 API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`, non-streamed
 Chat Completions (with `extra`) for types on the `llm` harness. Best-effort: a
-failed probe refuses `flock apply` (`--skip-preflight` bypasses); a model not probed (key not
+failed probe refuses `flock launch` (`--skip-preflight` bypasses); a model not probed (key not
 in the controller's environment, or preflight skipped) is reported `unverified` with a warning
 and applied anyway unless `--strict`. Zero streamed usage is a warning.
-`flock preflight spec.yaml` runs it alone.
+`flock update --check` runs it alone on a running swarm.
 
 ### Harness environment
 
@@ -761,7 +761,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
 | 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, compaction past `context_tokens` projected from the server's prompt_tokens (2026-10-20, run 3: chars/4 undercounted JSON 2x; context-length 400 compacts and retries once, else reason `context_overflow`), tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 | 32 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
-| 33 | Tools folder (2026-10-21, thread 3063: tools live outside flock, are read at runtime and change while the swarm runs): public documented functions in `tools/*.py` are tools (schema from type hints, injected `Context`); `flock apply` ships the folder as a tar.gz named by its content hash; workers fetch it at assign and from heartbeat responses and switch at the next turn; one `python -I` subprocess per call (60 s, 1 MB); `llm` offers them as function tools, CLI harnesses through `flock-tool` and a generated Tools section |
+| 33 | Tools folder (2026-10-21, thread 3063: tools live outside flock, are read at runtime and change while the swarm runs): public documented functions in `tools/*.py` are tools (schema from type hints, injected `Context`); `flock launch` ships the folder as a tar.gz named by its content hash; workers fetch it at assign and from heartbeat responses and switch at the next turn; one `python -I` subprocess per call (60 s, 1 MB); `llm` offers them as function tools, CLI harnesses through `flock-tool` and a generated Tools section |
 | 34 | Comms in the spec (2026-10-21, design note §10, threads 3063 and 3144): agents join the board under their flock name at their first prompt; the token stays in the worker (never in the agent env, workdir or pin); one activity long-poll per worker fans messages out as `comms_mention` / `comms_thread_reply` events; built-in `post` / `read` / `search` tools with rules enforced before the board call; search cut 1 is the board's own FTS5 search with query relaxation, no msgboard change; the kickoff is posted by `<swarm>-host`, never an agent (Carlos) |
 
 ## 12. Road to 10k

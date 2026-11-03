@@ -1,5 +1,5 @@
 """`loop:` in the spec (docs/loop.md): validation, the `while` alias on the wire, prompt files
-inlined by `flock apply`, and world-backed settings accepted by the model but refused at apply."""
+inlined by `flock launch`, and world-backed settings accepted by the model but refused at apply."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def test_controller_refuses_what_it_cannot_run(app):
     s = spec_with({"prompt": "x", "on": ["world.event:claim"]})
     r = c.put("/swarms/demo", json=s.model_dump(mode="json"))
     assert r.status_code == 400 and "needs a world (not in this version)" in r.text
-    s = spec_with({"prompt_file": "round.md"})  # sent without `flock apply`'s inlining
+    s = spec_with({"prompt_file": "round.md"})  # sent without `flock launch`'s inlining
     r = c.put("/swarms/demo", json=s.model_dump(mode="json"))
     assert r.status_code == 400 and "not inlined" in r.text
 
@@ -93,7 +93,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
         "final": {"prompt_file": "prompts/final.md", "reserve_usd": 0.5}}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
     assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
@@ -101,18 +101,18 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
 
     raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 1
     assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
     raw["types"]["researcher"]["loop"]["on"] = ["comms.mention"]
     raw["types"]["researcher"]["loop"]["prompt_file"] = "prompts/missing.md"
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 1 and "missing.md not found" in r.output
 
 
 def test_flock_run_checks_loops_like_apply(tmp_path, monkeypatch):
-    """`flock run` runs the same CLI loop checks as `flock apply` (`_check_loops`): the `on:`
+    """`flock run` runs the same CLI loop checks as `flock launch` (`_check_loops`): the `on:`
     warning, and refusals on the CLI before anything starts."""
     from flock.controller import localrun
 
@@ -162,7 +162,7 @@ def _doc_example(heading: str) -> str:
 
 @pytest.mark.parametrize("heading", ["## Spec", "### Eliza"])
 def test_documented_examples_load_with_an_unquoted_on_key(heading, tmp_path):
-    """`on:` is a YAML 1.1 boolean: `flock apply` must read it as the key "on" (defect 2)."""
+    """`on:` is a YAML 1.1 boolean: `flock launch` must read it as the key "on" (defect 2)."""
     (tmp_path / "prompts").mkdir()
     for f in ("system.md", "round.md", "final.md"):
         (tmp_path / "prompts" / f).write_text(f)

@@ -1,7 +1,7 @@
 # Voting (README): the hierarchy experiment plus a vote before each PR and each worker batch.
 # World, board, model and loop are run 4's (experiments/run4/spec.yaml); only the types,
 # prompts and spawn policy differ. Same as ../hierarchy/spec.yaml apart from the name.
-swarm: ${CHATBOT_RUN:-voting}             # ${VAR:-default}: flock apply --env run.env (run 4 README)
+swarm: ${CHATBOT_RUN:-voting}             # ${VAR:-default}: flock launch --env run.env (run 4 README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
   kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}

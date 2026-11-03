@@ -332,11 +332,12 @@ def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): raise replicas along the ramp's schedule
     from the first pass that saw it, never above `max`. Replicas move only when a new step
     comes, and never down, so an operator's scale (up or down) between steps stays. The clock
-    stops while the type is held (paused), so a resume does not jump the missed steps. A
+    stops while the type is held or the swarm released (`flock stop`), so a resume does not jump the missed steps. A
     staggered raise adds one agent per `stagger`. `{t0, step, ...}` lives in the store
     (`ramp:<type>`): a restart keeps the schedule. Each raise rewrites the stored spec
     (re-read just before); each step writes `ramp_step`, each hold `ramp_held`."""
-    held = (p.store.swarm_flags(spec.swarm).get("holds") or {}).get("types") or {}
+    flags = p.store.swarm_flags(spec.swarm)
+    held = (flags.get("holds") or {}).get("types") or {}
     want: dict[str, tuple[int, dict | None]] = {}  # type -> (replicas now, ramp_step data)
     for name, ts in spec.types.items():
         if ts.replicas_ramp is None:
@@ -344,7 +345,7 @@ def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
         key = f"ramp:{name}"
         old = p.store.get_control(spec.swarm, key)
         st = dict(old or {"t0": p.now, "step": -1})
-        if name in held:
+        if name in held or flags.get("released"):
             st.setdefault("paused_at", p.now)
         else:
             if "paused_at" in st:
@@ -427,6 +428,15 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     store = p.store
     for w in store.list_workers(spec.swarm, type_name):
         _refresh_worker(p, spec, w, ts)
+    # `flock stop --release`: every worker drains (its agents sync) and exits; the rows stay
+    # and nothing launches until `flock launch` clears the flag.
+    released = ts is not None and bool(store.swarm_flags(spec.swarm).get("released"))
+    if released:
+        for w in store.list_workers(spec.swarm, type_name):
+            if w["job_id"] is not None and not w["draining"] and w["retire_at"] is None:
+                store.enqueue_command(w["id"], DrainCommand().model_dump_json())
+                store.update_worker(w["id"], draining=1)
+                p.act("release", w["id"], w["job_id"])
 
     # Desired agents; scale down removes the highest slots first. Spawned agents (parent set)
     # are not replicas: they go with their parent, their type or the swarm (docs/spawn.md).
@@ -442,7 +452,7 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
             store.insert_agent(name, spec.swarm, type_name, slot, p.now)
 
     # Placement: fill live slots in order, never move a placed agent, open new slots as needed.
-    if ts is not None:
+    if ts is not None and not released:
         _place(p, spec, type_name, ts)
         if ts.resume_prompt:
             _nudge_stuck(p, spec.swarm, type_name, ts.resume_prompt)
@@ -465,8 +475,8 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
             p.act("cancel", w["id"], w["job_id"])
 
     # Launch slots that have agents and no job.
-    if ts is None or store.type_health(spec.swarm, type_name) != TypeHealth.ok:
-        return  # crashlooping or launch_refused: wait for a new apply
+    if ts is None or released or store.type_health(spec.swarm, type_name) != TypeHealth.ok:
+        return  # released, crashlooping or launch_refused: wait for a launch / new apply
     for w in store.list_workers(spec.swarm, type_name):
         if w["job_id"] is not None or not counts[w["id"]]:
             continue
@@ -633,6 +643,13 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "draining": 0,
         "preempted": 0,
     }
+    if not planned and store.swarm_flags(w["swarm"]).get("released"):
+        # killed mid-drain (`stop --release`): no final heartbeat, so its agents' syncs are unknown
+        why = f"worker {wid} ended before its final sync ({st.stage}: {st.message})"[:300]
+        lost = {a["name"]: why for a in store.list_agents(worker=wid)}
+        if lost:
+            store.put_control(w["swarm"], "unsynced",
+                              {**lost, **(store.get_control(w["swarm"], "unsynced") or {})})
     if planned:
         store.update_worker(wid, **common, consecutive_crashes=0, next_launch_at=p.now)
         p.act("planned_restart", wid, f"{st.stage}: {st.message}")
@@ -812,6 +829,13 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
     }
     if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
         fields["preempted"] = 1
+    if hb.unsynced and (hb.draining or hb.preempted):  # a final sync failed: never swallowed
+        fields["last_error"] = ("final sync failed: " + ", ".join(sorted(hb.unsynced)))[:500]
+        store.put_control(w["swarm"], "unsynced",
+                          {**(store.get_control(w["swarm"], "unsynced") or {}), **hb.unsynced})
+        store.append_events(w["swarm"], swarm_stream(w["swarm"]), [Event(
+            type="sync_failed", ts=now, agent="", data={"worker": worker_id,
+                                                        "agents": hb.unsynced})])
     for name in hb.interrupted:  # cut by a preemption or a drain deadline: resume after the restore
         a = store.get_agent(name)
         if a is not None and a["worker"] == worker_id:
