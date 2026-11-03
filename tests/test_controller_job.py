@@ -16,9 +16,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-import typer
 
-from flock import cli
+from flock.client import ClientError, auth_headers
 from flock.controller import jobdeploy
 from flock.controller import spawn as spawning
 from flock.controller.jobs import HubJobsClient
@@ -167,30 +166,30 @@ async def test_agent_token_in_header_keeps_its_scope(app, store, client, tick):
 
 
 def test_cli_headers_space_mode():
-    h = cli.auth_headers("https://me-flock.hf.space", {"FLOCK_TOKEN": "ft"})
+    h = auth_headers("https://me-flock.hf.space", {"FLOCK_TOKEN": "ft"})
     assert h == {"X-Flock-Token": "ft", "Authorization": "Bearer ft"}
-    h = cli.auth_headers("http://nwa-x-controller:7860", {"FLOCK_TOKEN": "ft",
-                                                          "FLOCK_AGENT_TOKEN": "at"})
+    h = auth_headers("http://nwa-x-controller:7860", {"FLOCK_TOKEN": "ft",
+                                                      "FLOCK_AGENT_TOKEN": "at"})
     assert h == {"X-Flock-Token": "at", "Authorization": "Bearer at"}
 
 
 def test_cli_headers_behind_the_jobs_proxy(monkeypatch):
     url = "https://6ad7aaaa0000000000000001--7860.hf.jobs"
-    h = cli.auth_headers(url, {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x"})
+    h = auth_headers(url, {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x"})
     assert h == {"X-Flock-Token": "ft", "Authorization": "Bearer hf_x"}
-    h = cli.auth_headers("https://proxy.example", {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x",
-                                                   "FLOCK_PROXY_AUTH": "hf"})
+    h = auth_headers("https://proxy.example", {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x",
+                                               "FLOCK_PROXY_AUTH": "hf"})
     assert h["Authorization"] == "Bearer hf_x"
     monkeypatch.setattr("huggingface_hub.get_token", lambda: "hf_saved")
-    assert cli.auth_headers(url, {"FLOCK_TOKEN": "ft"})["Authorization"] == "Bearer hf_saved"
+    assert auth_headers(url, {"FLOCK_TOKEN": "ft"})["Authorization"] == "Bearer hf_saved"
     monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
-    with pytest.raises(typer.Exit):
-        cli.auth_headers(url, {"FLOCK_TOKEN": "ft"})
+    with pytest.raises(ClientError, match="behind the HF Jobs proxy"):
+        auth_headers(url, {"FLOCK_TOKEN": "ft"})
 
 
 async def test_cli_headers_pass_the_api_auth(app):
     """The headers the CLI sends behind the proxy are accepted by the controller."""
-    headers = cli.auth_headers("https://j--7860.hf.jobs", {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf"})
+    headers = auth_headers("https://j--7860.hf.jobs", {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf"})
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as c:
         assert (await c.get("/swarms")).status_code == 200

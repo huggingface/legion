@@ -11,7 +11,7 @@ import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli
+from flock import cli, ops
 from flock.controller.api import create_app
 from flock.controller.reconcile import reconcile, record_heartbeat
 from flock.controller.state import StateSync
@@ -33,7 +33,7 @@ runner = CliRunner()
 
 def _wire(monkeypatch, app):
     monkeypatch.setattr(
-        cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+        "flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
 
 
 def _write(path, spec) -> str:
@@ -113,7 +113,7 @@ def test_stop_release_drains_every_worker_waits_and_reports_unsynced(
         clock.advance(120)
         tick()
 
-    monkeypatch.setattr(cli, "_sleep", workers_drain_and_exit)
+    monkeypatch.setattr("flock.ops._sleep", workers_drain_and_exit)
     r = runner.invoke(cli.app, ["stop", "demo", "--release", "--reason", "night"])
     assert r.exit_code == 1, r.output
     assert "NOT synced: researcher-0001: drain sync failed: OSError: 503" in r.output
@@ -323,7 +323,7 @@ def test_a_failed_event_download_adopts_nothing_and_a_retry_works(tmp_path, monk
     new = Store(tmp_path / "new")
     app = create_app(new, TOKEN, clock=clock, buckets=lambda url: bucket)
     _wire(monkeypatch, app)
-    monkeypatch.setattr(cli, "_sleep", lambda s: None)  # the CLI retries a 502
+    monkeypatch.setattr("flock.client._sleep", lambda s: None)  # the CLI retries a 502
     f = _write(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
     r = runner.invoke(cli.app, ["launch", f, "--adopt"])
     assert r.exit_code == 1 and "events download cut" in r.output
@@ -376,8 +376,8 @@ def test_resume_diff_ignores_where_the_folder_is():
         return SwarmSpec.model_validate({**base, "compute": {"kind": "local"},
                                          "world": {"command": cmd, "dir": d}})
 
-    assert cli.resume_diff(at("/runs/a/experiment/world"), at("/runs/b/experiment/world")) == []
-    assert cli.resume_diff(at("/y"), at("/x", "w2"))
+    assert ops.resume_diff(at("/runs/a/experiment/world"), at("/runs/b/experiment/world")) == []
+    assert ops.resume_diff(at("/y"), at("/x", "w2"))
 
 
 def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, clock):

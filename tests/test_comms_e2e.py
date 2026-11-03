@@ -13,7 +13,6 @@ import json
 import yaml
 from fastapi.testclient import TestClient
 
-from flock import cli
 from flock.controller.api import create_app
 
 from . import fake_msgboard, fake_openai
@@ -61,8 +60,8 @@ async def test_comms_end_to_end(tmp_path, monkeypatch):
                         on_comms=lambda agent, reason, data: wakes.append((agent, reason, data)))
     import httpx
     sw.transport = httpx.ASGITransport(app=sw.app)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     exp = tmp_path / "experiment"
     (exp / "prompts").mkdir(parents=True)
     (exp / "protocols").mkdir()
@@ -179,8 +178,8 @@ async def test_mention_on_the_board_wakes_the_mentioned_agent_once(tmp_path, mon
     sw.app = create_app(sw.store, TOKEN, secret_source={INVITE_ENV: board.invite}, loop_interval=0)
     import httpx
     sw.transport = httpx.ASGITransport(app=sw.app)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(wake_spec(llm_url, board_url)))
     MW, NW = "mw-0000", "nw-0000"

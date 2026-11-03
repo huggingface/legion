@@ -22,7 +22,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from flock import cli
+from flock import cli, ops
 from flock.cli import load_spec
 from flock.controller.api import create_app as controller_app
 from flock.controller.jobs import FakeJobsClient
@@ -136,7 +136,7 @@ def test_render_variants(tmp_path):
         assert (pi.loop.every, pi.loop.on, pi.loop.wake, pi.loop.while_) == (
             ag.loop.every, ag.loop.on, ag.loop.wake, ag.loop.while_)
         assert s.spawn["agent-pi"] == s.spawn["agent"]
-        assert cli.extra_warnings(s) == []  # agent-pi's alias has no `extra` Pi would drop
+        assert ops.extra_warnings(s) == []  # agent-pi's alias has no `extra` Pi would drop
         assert s.naming == "words" and s.types["interviewer"].name_prefix == "iv-"
         for name in ("agent", "agent-think"):
             t = s.types[name]
@@ -257,11 +257,11 @@ def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
                "OPENAI_API_KEY": "fake-key"}
     world = _load_world().Chatbot3World(str(tmp_path / "ws"))
     ctl = _Controller(tmp_path / "ctl", world_app(world, "w0rld-t0ken"), secrets, board_url)
-    monkeypatch.setattr(cli, "client", ctl.client)
+    monkeypatch.setattr("flock.client.connect", lambda *_: ctl.client())
     spec = _render(tmp_path, "jobs", MODEL_WORKER="m", CHATBOT_BOARD_URL=board_url,
                    CHATBOT_CHANNEL="chatbot-test", RUN3_WORLD_URL="https://world.example.invalid")
     try:
-        # in process: cli.client is the controller app
+        # in process: flock.client.connect is the controller app
         res = CliRunner().invoke(cli.app, ["launch", str(spec), "--skip-preflight"])
         assert res.exit_code == 0, res.output
         stored = ctl.store.get_swarm("run3")["spec"]
@@ -374,8 +374,6 @@ def test_waves_run_starts_its_clock_at_the_first_controller_answer(tmp_path, mon
                                                                  capsys):
     """Jobs/Slurm mode: `waves.py run` may start before the controller answers (a cold node).
     The clock starts at the first answer, so the first tick never merges two waves."""
-    import contextlib
-
     spec = _render(tmp_path, "jobs", MODEL_WORKER="m")
     sched = tmp_path / "w.yaml"
     sched.write_text("cap: 100\nwaves:\n  - {at: 0, add: 5}\n")
@@ -396,7 +394,6 @@ def test_waves_run_starts_its_clock_at_the_first_controller_answer(tmp_path, mon
     monkeypatch.setattr(waves, "current", current)
     monkeypatch.setattr(waves.time, "sleep", sleep)
     monkeypatch.setattr(waves.time, "time", lambda: fake_now[0])
-    monkeypatch.setattr(cli, "client", lambda: contextlib.nullcontext(object()))
     try:
         assert waves.main(["run", "--spec", str(spec), "--waves", str(sched)]) == 0
         state = json.loads(Path(str(spec) + ".waves.json").read_text())

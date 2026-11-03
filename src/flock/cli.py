@@ -1,231 +1,38 @@
-"""`flock` CLI: a thin client over the controller API.
-
-Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
-FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
-a local run `flock launch` started in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
-agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; when the
-agent's pin file (FLOCK_TOOLS_PIN) names a worker gateway, calls go through it instead. See
-docs/spawn.md for what an agent may call.
-"""
+"""`flock` CLI: argument parsing, spec and file loading, local-run processes and output over
+`flock.client.Client` (connection config: see flock/client.py)."""
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import random
 import re
-import signal
-import subprocess
-import sys
 import time
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-import httpx
 import typer
-import yaml
-from pydantic import ValidationError
+from typer.core import TyperGroup
 
-from flock.models import AGENT_NAME_RE, SwarmSpec, comms_tools, loop_refusals
-from flock.specrender import at_ref, render, source_of
-
-app = typer.Typer(help="Host coding-harness agent swarms on HF Jobs.", no_args_is_help=True)
-
-
-def proxy_auth(url: str, env=os.environ) -> bool:
-    """True when `url` is behind the HF Jobs proxy (a job-mode controller seen from outside its
-    network group): the proxy wants `Authorization: Bearer <HF token>` (docs/deploy-job.md)."""
-    if env.get("FLOCK_PROXY_AUTH") == "hf":
-        return True
-    return (httpx.URL(url).host or "").endswith(".hf.jobs")
+from flock import ops
+from flock.client import Client, ClientError, local_run
+from flock.models import SwarmSpec
+from flock.ops import SpecError, check_spec, read_spec, source_header
+from flock.specrender import at_ref
 
 
-def auth_headers(url: str, env=os.environ) -> dict[str, str]:
-    """`X-Flock-Token` always. `Authorization` carries the HF token behind the jobs proxy, and
-    the flock token otherwise (what Space-mode controllers before X-Flock-Token expect)."""
-    token = env.get("FLOCK_AGENT_TOKEN") or env.get("FLOCK_TOKEN", "")
-    headers = {"X-Flock-Token": token}
-    if proxy_auth(url, env):
-        hf = env.get("HF_TOKEN")
-        if not hf:
-            from huggingface_hub import get_token
+class _Group(TyperGroup):
+    """Every command: a refused or failed controller call prints its line and exits 1."""
 
-            hf = get_token()
-        if not hf:
-            typer.echo(f"{url} is behind the HF Jobs proxy: set HF_TOKEN (or `hf auth login`)",
-                       err=True)
-            raise typer.Exit(1)
-        headers["Authorization"] = f"Bearer {hf}"
-    else:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-CURRENT_FILE = Path(".flock") / "current"  # written by a local run (docs/local.md)
-
-
-def local_run(env=os.environ) -> dict | None:
-    """The live local run this CLI talks to when FLOCK_URL is unset: `$FLOCK_CURRENT` or
-    `.flock/current` in the working directory, if its process is still alive."""
-    if env.get("FLOCK_URL"):
-        return None
-    from flock.current import read_current
-
-    return read_current(Path(env.get("FLOCK_CURRENT") or CURRENT_FILE))
-
-
-def client() -> httpx.Client:
-    """Overridden in tests to point at an in-process app."""
-    env = os.environ
-    if (run := local_run(env)) is not None:
-        env = {**env, "FLOCK_URL": run["url"], "FLOCK_TOKEN": run["token"]}
-        env.pop("FLOCK_AGENT_TOKEN", None)
-    url = env.get("FLOCK_URL", "http://localhost:7860")
-    return httpx.Client(base_url=url, headers=auth_headers(url, env), timeout=60)
-
-
-RETRY_ATTEMPTS = 5  # requests in all, per call
-RETRY_BASE = 1.0  # s, first backoff before jitter
-RETRY_CAP = 30.0  # s, longest single wait, Retry-After included
-_sleep = time.sleep  # tests replace it
-
-
-def _retry_after(r: httpx.Response) -> float | None:
-    raw = r.headers.get("retry-after")
-    if not raw:
-        return None
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        pass
-    try:
-        when = parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
-        return None
-    return max(0.0, when.timestamp() - time.time()) if when.tzinfo else None
-
-
-def _retryable(method: str, r: httpx.Response | None) -> bool:
-    """429 (the Space edge throttling 1,000 agents) and 502/503/504 never reached the app or
-    were not processed: retry any method. A 500 or a dropped connection may have been
-    processed, so only reads retry on those."""
-    if r is None:
-        return method == "GET"
-    return r.status_code in (429, 502, 503, 504) or (r.status_code == 500 and method == "GET")
-
-
-def _request(c: httpx.Client, method: str, path: str, **kw) -> httpx.Response:
-    """One controller request, retried up to RETRY_ATTEMPTS times with exponential backoff and
-    full jitter, never sooner than Retry-After."""
-    for attempt in range(RETRY_ATTEMPTS):
-        last = attempt == RETRY_ATTEMPTS - 1
+    def invoke(self, ctx):
         try:
-            r = c.request(method, path, **kw)
-        except httpx.TransportError:
-            if last or not _retryable(method, None):
-                raise
-            r = None
-        if r is not None and (last or not _retryable(method, r)):
-            return r
-        backoff = random.uniform(0, min(RETRY_CAP, RETRY_BASE * 2 ** attempt))
-        wait = max(backoff, (_retry_after(r) or 0.0) if r is not None else 0.0)
-        _sleep(min(RETRY_CAP, wait))
-    raise AssertionError("unreachable")
+            return super().invoke(ctx)
+        except ClientError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1) from None
 
 
-def _gateway(env=os.environ) -> tuple[str, str, str] | None:
-    """(address, key, agent) of the worker gateway named in the agent's pin file
-    (FLOCK_TOOLS_PIN), or None outside an agent or on a worker without one."""
-    from flock.tools.toolset import PIN_ENV, read_pin
-
-    if not (pin := env.get(PIN_ENV)):
-        return None
-    try:
-        ts, agent, _ = read_pin(pin)
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    return (ts.gateway, ts.gateway_key or "", agent) if ts.gateway else None
-
-
-def _call_gateway(gw: tuple[str, str, str], method: str, path: str, timeout: float | None,
-                  **kw) -> Any:
-    """One controller call through the worker (`controller:request`): the worker sends it with
-    this agent's token to wherever the controller is now, retrying there."""
-    import asyncio
-
-    from flock.tools.toolset import gateway_call
-
-    address, key, agent = gw
-    args = {"method": method, "path": path, "params": kw.get("params"), "json": kw.get("json")}
-    r = asyncio.run(gateway_call(address, key, agent, "controller:request", args,
-                                 timeout=(timeout or 60) + 120))
-    try:
-        out = json.loads(r.output)
-    except ValueError:
-        out = {}
-    if not isinstance(out, dict) or "status" not in out:
-        err = out.get("error") if isinstance(out, dict) else None
-        typer.echo(f"error: {err or r.output}", err=True)
-        raise typer.Exit(1)
-    if out["status"] >= 400:
-        body = out["body"] if isinstance(out["body"], str) else json.dumps(out["body"])
-        typer.echo(f"error {out['status']}: {body}", err=True)
-        raise typer.Exit(1)
-    return out["body"]
-
-
-def _call(method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
-    if (gw := _gateway()) is not None:  # inside an agent: through its worker (docs/spawn.md)
-        return _call_gateway(gw, method, path, timeout, **kw)
-    if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
-        kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
-    with client() as c:
-        r = _request(c, method, path, **kw)
-    if r.status_code >= 400:
-        typer.echo(f"error {r.status_code}: {r.text}", err=True)
-        raise typer.Exit(1)
-    return r.json()
-
-
-def _as_agent() -> bool:
-    """Running inside an agent (its scoped token or its worker's gateway): names are agents,
-    never swarms."""
-    return bool(os.environ.get("FLOCK_AGENT_TOKEN") or _gateway())
-
-
-def _is_swarm(name: str) -> bool:
-    """A swarm, unless it names an agent: a numeric agent name (`...-NNNN`) that is not a
-    swarm, or any other name (`naming: words`, e.g. `amber-otter`) that is an agent and not a
-    swarm. A name without a hyphen is no agent's: no lookup."""
-    if "-" not in name:
-        return True
-    with client() as c:
-        if _request(c, "GET", f"/swarms/{name}").status_code == 200:
-            return True
-        if AGENT_NAME_RE.match(name):
-            return False
-        return _request(c, "GET", f"/agents/{name}").status_code != 200
-
-
-def source_header(spec_file: str | Path | None) -> dict[str, str]:
-    """`X-Flock-Source` for an apply (spec history): who applied it and, when the spec's
-    folder is in a git repo, its commit, branch and whether the folder has local changes."""
-    src: dict[str, Any] = {"by": os.environ.get("USER")}
-    if spec_file is not None:
-        d = str(Path(spec_file).resolve().parent)
-        try:
-            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=False,
-                                            capture_output=True, text=True, timeout=10)
-            head = git("rev-parse", "HEAD")
-            if head.returncode == 0:
-                src["git_sha"] = head.stdout.strip()
-                src["ref"] = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-                src["dirty"] = bool(git("status", "--porcelain", "--", ".").stdout.strip())
-        except (OSError, subprocess.SubprocessError):
-            pass  # no git: `by` only
-    return {"X-Flock-Source": json.dumps(src)}
+app = typer.Typer(cls=_Group, help="Host coding-harness agent swarms on HF Jobs.",
+                  no_args_is_help=True)
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -301,26 +108,6 @@ def _loop_line(lp: dict) -> str:
     return line
 
 
-class SpecError(Exception):
-    """A spec that cannot be applied: the lines say why (printed to stderr by the CLI)."""
-
-    def __init__(self, lines: list[str]) -> None:
-        super().__init__("; ".join(lines))
-        self.lines = lines
-
-
-def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
-    """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
-    name = getattr(holder, field)
-    if not name or getattr(holder, target) is not None:
-        return
-    src = Path(name)
-    src = src if src.is_absolute() else base / src
-    if not src.is_file():
-        raise SpecError([f"{where}: {field} {src} not found"])
-    setattr(holder, target, src.read_text(encoding="utf-8"))
-
-
 def load_spec(spec_file: str, env_files=()) -> SwarmSpec:
     """`read_spec`, exiting 1 with the reasons on stderr."""
     try:
@@ -331,143 +118,24 @@ def load_spec(spec_file: str, env_files=()) -> SwarmSpec:
         raise typer.Exit(1) from None
 
 
-def read_spec(spec_file: str, env_files=(), overlays=(),
-              sources: dict[str, str] | None = None) -> SwarmSpec:
-    """Read a spec (overlay files merged: library callers only; then ${VAR} from --env files
-    and the environment substituted: flock.specrender, `sources` filled) and inline each type's
-    system_prompt_file (plus system_prompt_append_file) and loop prompt files, and the comms
-    kickoff and protocol files (relative to the spec file). Raises SpecError."""
-    path = Path(spec_file)
-    try:
-        spec = SwarmSpec.model_validate(render(path, env_files, overlays, sources))
-    except ValidationError as e:
-        lines = []
-        for err in e.errors():
-            where = ".".join(str(x) for x in err["loc"])
-            lines.append(f"{spec_file}: {where + ': ' if where else ''}{err['msg']}")
-        raise SpecError(lines) from None
-    except ValueError as e:  # an unset ${VAR}, a bad --env line
-        raise SpecError([f"{spec_file}: {e}"]) from None
-    except (OSError, yaml.YAMLError) as e:  # unreadable file, broken YAML (a save in progress)
-        raise SpecError([f"{spec_file}: {' '.join(str(e).split())}"]) from None
-    for name, ts in spec.types.items():
-        if ts.system_prompt_file and ts.system_prompt is None:
-            src = Path(ts.system_prompt_file)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"type {name}: system_prompt_file {src} not found"])
-            ts.system_prompt = src.read_text(encoding="utf-8")
-        if ts.system_prompt_append_file:
-            src = Path(ts.system_prompt_append_file)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"type {name}: system_prompt_append_file {src} not found"])
-            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n"
-                                + src.read_text(encoding="utf-8")).lstrip("\n")
-        if ts.loop is not None:
-            _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
-            if ts.loop.final is not None:
-                _inline(path.parent, ts.loop.final, "prompt_file", "prompt", f"type {name}: loop.final")
-    c = spec.comms
-    if c is not None:  # kickoff and protocol files, next to the spec (docs/comms.md)
-        def read(rel: str, what: str) -> str:
-            src = Path(rel)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"comms.{what}: {src} not found"])
-            return src.read_text(encoding="utf-8")
-
-        if c.kickoff_file:
-            c.kickoff = read(c.kickoff_file, "kickoff_file")
-        c.protocols_text = [read(f, "protocols") for f in c.protocols]
-    w = spec.world
-    if w is not None and w.command is not None:  # the world runs in its dir (docs/world.md)
-        d = Path(w.dir or ".")
-        w.dir = str((d if d.is_absolute() else path.parent / d).resolve())
-        if not Path(w.dir).is_dir():
-            typer.echo(f"world.dir: {w.dir} not found", err=True)
-            raise typer.Exit(1)
-    return spec
-
-
-# `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
-COMMS_WAKES = {"comms.mention": "mention", "comms.thread": "thread"}
-
-
-def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
-    """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
-    kind = COMMS_WAKES.get(src)
-    if kind is None:
-        return "no feeder in this version (comms.mention and comms.thread are fed)"
-    if spec.comms is None or not comms_tools(ts, spec.comms):
-        return ("no comms feeder: the type is not on the board (set `comms: true` and the "
-                "swarm-level `comms:` block)")
-    if kind not in spec.comms.wake:
-        return f"no comms feeder: comms.wake does not list {kind}"
-    return None
-
-
-def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
-    """(refusals, warnings): loop settings this version cannot run, and `on:` sources that
-    have no feeder."""
-    refused = [f"refused: {r}" for r in loop_refusals(spec)]
-    warnings = [f"warning: type {name}: loop.on {src}: {why}"
-                for name, ts in spec.types.items() for src in (ts.loop.on if ts.loop else [])
-                if (why := _unfed(spec, ts, src))]
-    return refused, warnings
-
-
-def _check_loops(spec: SwarmSpec) -> None:
-    """Refuse loop settings this version cannot run; say which `on:` sources have no feeder."""
-    refused, warnings = loop_problems(spec)
-    for line in refused or warnings:
-        typer.echo(line, err=True)
-    if refused:
-        raise typer.Exit(1)
-
-
-def _provider_backed(spec: SwarmSpec) -> bool:
-    return any(ts.resolved_model is not None for ts in spec.types.values())
-
-
-# Harnesses that cannot add request-body fields, so a model's `extra` is kept but not sent.
-# The `llm` harness (and any harness not listed) sends it.
-EXTRA_NOT_SENT = frozenset({"claude", "codex", "pi"})
-
-
-def extra_warnings(spec: SwarmSpec) -> list[str]:
-    from flock.worker.adapters.pi import env_dropped
-
-    return [f"warning: types.{name}.env.{k}: dropped by pi isolation (use `secrets`)"
-            for name, ts in spec.types.items() if ts.harness.value == "pi"
-            for k in env_dropped(ts.env, ts.resolved_model and ts.resolved_model.provider.api_key_env)] + [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
-            f"{ts.harness.value} harness (docs/open-models.md)"
-            for name, ts in spec.types.items()
-            if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
-            and ts.resolved_model.extra]
-
-
-def _warn_extra(spec: SwarmSpec) -> None:
-    for line in extra_warnings(spec):
-        typer.echo(line, err=True)
-
-
 def _warn_unverified(models: list[str], why: str) -> None:
     for m in models:
         typer.echo(f"warning: {m}: unverified ({why})", err=True)
 
 
-def _unprobed(spec: SwarmSpec) -> list[str]:
-    return sorted({ts.resolved_model.qualified for ts in spec.types.values()
-                   if ts.resolved_model is not None})
+def _checked(spec: SwarmSpec, spec_file: str):
+    """`check_spec`: its warnings on stderr; exit 1 with the refusal. Returns its result."""
+    try:
+        checked = check_spec(spec, spec_file)
+    except SpecError as e:
+        _fail([*e.done.get("warnings", []), *e.lines])
+    for line in checked[1]:
+        typer.echo(line, err=True)
+    return checked
 
 
-def _preflight(spec: SwarmSpec, strict: bool) -> bool:
-    """POST /swarms/{swarm}/preflight with the spec; print one row per model. True when no probe
-    failed and, with `strict`, every model was actually probed. Never silent about a model that
-    was not probed."""
-    rep = _call("POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
-                timeout=300)
+def _print_preflight(rep: dict, strict: bool) -> None:
+    """One row per model; never silent about a model that was not probed."""
     rows = [
         [r["model"], ",".join(r["types"]), r["api"],
          "unverified" if r.get("unverified") else "ok" if r["ok"] else "FAIL",
@@ -487,7 +155,6 @@ def _preflight(spec: SwarmSpec, strict: bool) -> bool:
     if unverified:
         typer.echo(f"warning: {unverified} model(s) unverified"
                    + (" (--strict: counted as failure)" if strict else ""), err=True)
-    return bool(rep["ok"]) and not (strict and unverified)
 
 
 ENV_OPT = typer.Option(None, "--env", help="NAME=value file for ${VAR} in the spec (repeatable; "
@@ -558,148 +225,67 @@ def launch(
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
     source = ref_header or source_header(spec_file)  # before any write lands in the folder
     spec = load_spec(spec_file, env_files or ())
-    _check_loops(spec)
-    _warn_extra(spec)
-    bundle = _tools_bundle(spec, spec_file)
+    checked = _checked(spec, spec_file)
     started = _start_local(spec, spec_file, env_files or ()) if spec.compute.kind == "local" \
         else None
     try:
-        _launch(spec, spec_file, bundle, source, type_, agent, adopt, checkpoint, no_checkpoint,
-                preflight, strict)
+        try:
+            done = ops.launch(Client(), spec, spec_file, source=source, types=type_, agents=agent,
+                              adopt=adopt, checkpoint=checkpoint, no_checkpoint=no_checkpoint,
+                              preflight=preflight, strict=strict, checked=checked)
+        except SpecError as e:
+            _show_launch(spec.swarm, e.done, strict)
+            _fail(e.lines)
+        _show_launch(spec.swarm, done, strict)
     except BaseException:  # also Ctrl-C during the preflight
         if started is not None:  # nothing created: do not leave a controller behind
             _end_local(started)
         raise
 
 
-def _launch(spec, spec_file, bundle, source, type_, agent, adopt, checkpoint, no_checkpoint,
-            preflight, strict) -> None:
-    with client() as c:
-        r = _request(c, "GET", f"/swarms/{spec.swarm}")
-        if r.status_code == 404 and adopt:
-            a = _request(c, "POST", f"/swarms/{spec.swarm}/adopt", json=spec.model_dump(mode="json"),
-                         params={"checkpoint": checkpoint} if checkpoint else None,
-                         extensions={"timeout": httpx.Timeout(300).as_dict()})
-            if a.status_code == 200:
-                typer.echo(f"adopted {spec.swarm}: {a.json()['agents']} agents from "
-                           f"{a.json()['checkpoint']}")
-                r = _request(c, "GET", f"/swarms/{spec.swarm}")
-            elif a.status_code != 404:
-                _fail([f"error {a.status_code}: {_detail(a)}"])
-            elif not no_checkpoint:
-                _fail([f"refused: {_detail(a)}",
-                       ("pass --no-checkpoint to rebuild it from the bucket alone: agents restore "
-                       "by name, but costs, loops, ramp steps and spawn links start over")])
-            else:
-                typer.echo(f"{_detail(a)}: creating from the spec (agents restore from the bucket)")
-    if r.status_code == 200:
-        old = SwarmSpec.model_validate(r.json()["spec"])
-        from flock.tools.bundle import version_of
-
-        spec.tools_version = version_of(bundle.data) if bundle is not None else None
-        if lines := resume_diff(old, spec):
-            _fail([*lines, (f"the folder's spec differs from swarm {spec.swarm}'s: run "
-                           "`flock update` first, then `flock launch`")])
-        _resume(spec.swarm, type_, agent)
-        return
-    if r.status_code != 404:
-        _fail([f"error {r.status_code}: {_detail(r)}"])
-    if preflight is None:
-        preflight = _provider_backed(spec)
-    if preflight:
-        if not _preflight(spec, strict):
-            _fail(["preflight failed: not launching (fix the provider or pass --skip-preflight)"])
-    elif unprobed := _unprobed(spec):
-        _warn_unverified(unprobed, "preflight skipped")
-        if strict:
-            _fail(["--strict: not launching unverified models"])
-    spec.tools_version = None
-    if bundle is not None:
-        up = _call("POST", f"/swarms/{spec.swarm}/tools", content=bundle.data,
-                   headers={"content-type": "application/gzip"}, timeout=120)
-        spec.tools_version = up["version"]
+def _show_launch(swarm: str, done: dict, strict: bool) -> None:
+    """What `ops.launch` did, in order (its warnings were shown by `_checked`)."""
+    if a := done.get("adopted"):
+        typer.echo(f"adopted {swarm}: {a['agents']} agents from {a['checkpoint']}")
+    if why := done.get("adopt_skipped"):
+        typer.echo(f"{why}: creating from the spec (agents restore from the bucket)")
+    if "resumed" in done:
+        _show_held(done["resumed"])
+    if "preflight" in done:
+        _print_preflight(done["preflight"], strict)
+    _warn_unverified(done.get("unverified", []), "preflight skipped")
+    if up := done.get("tools"):
         names = ", ".join(up["tools"]) or "none"
-        typer.echo(f"tools: version {up['version']} ({len(bundle.data)} bytes): {names}")
-    st = _call("PUT", f"/swarms/{spec.swarm}",
-               params={"replicas": "spec", **({"adopt": 1} if adopt else {})},
-               json=spec.model_dump(mode="json"),
-               headers={**source, "If-None-Match": "*"})
-    _print_status(st)
-
-
-LOCAL_START_S = 120.0  # s `launch` waits for a local controller to come up
+        typer.echo(f"tools: version {up['version']} ({up['bytes']} bytes): {names}")
+    if "status" in done:
+        _print_status(done["status"])
 
 
 def _start_local(spec: SwarmSpec, spec_file: str, env_files) -> dict | None:
-    """`compute: local`: start this machine's controller and workers detached
-    (flock.controller.localrun, output in .flock/launch.log) unless a live one in this directory
-    already serves the swarm; wait for its `.flock/current`. Returns the run started, or None."""
-    if os.environ.get("FLOCK_URL"):
-        return None  # pointed at a controller explicitly
-    if (run := local_run()) is not None:
-        if run.get("swarm") != spec.swarm:
-            _fail([(f"a local run of {run.get('swarm')} is up in this directory: "
-                    f"`flock stop {run.get('swarm')} --release` first")])
-        return None
-    data_dir = Path(".flock")
-    data_dir.mkdir(exist_ok=True)
-    cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
-           "--data-dir", str(data_dir), *(a for f in env_files for a in ("--env", f))]
-    with (data_dir / "launch.log").open("w") as out:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                                start_new_session=True)
-    end = time.monotonic() + LOCAL_START_S
-    while time.monotonic() < end:
-        if (run := local_run()) is not None and run.get("pid") == proc.pid:
-            typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {data_dir}/launch.log)")
-            return run
-        if proc.poll() is not None:
-            break
-        _sleep(0.2)
-    else:
-        proc.terminate()
-    log = (data_dir / "launch.log").read_text(errors="replace").strip().splitlines()[-20:]
-    _fail([*log, "the local controller did not start"])
-    return None
+    """`ops.start_local`, saying where the run is; exit 1 when it cannot start."""
+    try:
+        run = ops.start_local(spec, spec_file, env_files)
+    except SpecError as e:
+        _fail(e.lines)
+    if run is not None:
+        typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {ops.LOCAL_DIR}/launch.log)")
+    return run
 
 
 def _end_local(run: dict) -> None:
-    """SIGTERM the background local run: it drains what is left, writes the run bundle and
-    exits (docs/local.md)."""
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(run["pid"], signal.SIGTERM)
-    end = time.monotonic() + LOCAL_START_S
-    while local_run() is not None and time.monotonic() < end:
-        _sleep(0.2)
+    ops.end_local(run)
     typer.echo(f"local run ended; bundle: {run['run_dir']}/run.json")
-
-
-def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
-    """What `launch` on a stored swarm refuses: the folder's spec against the stored one,
-    without the live replicas (the ramp rewrites them) and `world.dir` (absolute: the same
-    folder copied elsewhere). Changes `spec` in place."""
-    from flock.live import diff_specs, keep_replicas
-
-    keep_replicas(old, spec)
-    if old.world is not None and spec.world is not None:
-        spec.world.dir = old.world.dir
-    return diff_specs(old, spec)
 
 
 def _resume(swarm: str, types: list[str] | None, agents: list[str] | None) -> None:
     """Lift holds (all, or the named ones) and the release: workers relaunch."""
-    r = _call("POST", f"/swarms/{swarm}/resume",
-              json={"types": types or None, "agents": agents or None, "release": True})
-    _show_held(r)
+    _show_held(Client().resume(swarm, types=types, agents=agents))
 
 
 def _show_held(r: dict) -> None:
     h = r["held"]
     held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
     typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
-
-
-RELEASE_POLL = 5.0  # s between worker checks while `stop --release` waits
 
 
 @app.command()
@@ -725,6 +311,7 @@ def stop(
     prompts or loop rounds, running turns finish, workers stay. `flock launch SWARM` resumes.
     A local run (`compute: local`) ends its background controller (and writes its bundle) on
     --delete only."""
+    api = Client()
     if delete:
         if final or release or interrupt or type_ or agent:
             _fail(["--delete takes only --yes"])
@@ -734,126 +321,30 @@ def stop(
         if (run := local_run()) is not None and run.get("swarm") == swarm:
             _end_local(run)  # no DELETE first: the bundle is written from the rows it would drop
         else:
-            typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
+            typer.echo(json.dumps(api.delete(swarm)))
         return
     if final:
         if release or interrupt or agent:
             _fail(["--final takes only --type"])
-        spec = _call("GET", f"/swarms/{swarm}")["spec"]
+        spec = api.swarm(swarm)["spec"]
         for t in type_ or [n for n, ts in spec["types"].items() if ts.get("loop")]:
-            typer.echo(_loop_line(_call("POST", f"/swarms/{swarm}/loop",
-                                        json={"type": t, "action": "stop", "final": True})))
+            typer.echo(_loop_line(api.stop_loop(swarm, t)))
         return
     if release and (type_ or agent):
         _fail(["--release frees the whole swarm: no --type or --agent"])
-    _show_held(_call("POST", f"/swarms/{swarm}/pause", json={
-        "types": type_ or None, "agents": agent or None, "interrupt": interrupt,
-        "reason": reason, "release": release}))
+    _show_held(api.stop(swarm, types=type_, agents=agent, interrupt=interrupt, reason=reason,
+                        release=release))
     if not release:
         return
     typer.echo("releasing: running turns finish, every agent syncs, workers exit "
                "(Ctrl-C stops waiting, not the release)")
-    while live := [w for w in _call("GET", "/workers", params={"swarm": swarm}) if w["job_id"]]:
-        typer.echo(f"  {len(live)} workers still running")
-        _sleep(RELEASE_POLL)
-    unsynced = (_call("GET", f"/swarms/{swarm}")["status"].get("released") or {}).get("unsynced")
+    unsynced = ops.release_wait(api, swarm, progress=lambda n: typer.echo(
+        f"  {n} workers still running"))
     if unsynced:
         _fail([*(f"NOT synced: {n}: {e}" for n, e in sorted(unsynced.items())),
                (f"released, but {len(unsynced)} agents' final sync failed: their bucket copies "
                "are older than their last turns")])
     typer.echo(f"released: every agent synced, compute freed; `flock launch {swarm}` resumes")
-
-
-def _detail(r: httpx.Response) -> str:
-    try:
-        d = r.json().get("detail")
-    except ValueError:
-        d = None
-    return d if isinstance(d, str) else r.text
-
-
-def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = None,
-                 strict: bool = False, replicas: str = "keep", check: bool = False,
-                 env_files=(), source: dict[str, str] | None = None) -> list[str]:
-    """Re-read the experiment folder and apply it to the running swarm (docs/live.md): the
-    spec, its prompt files and the tools folder, as `flock launch` reads them. Returns the
-    lines to show (warnings, then what changed, or "no changes"); raises SpecError with the
-    refusal when the folder cannot be applied, and then nothing was changed. Preflight runs
-    by default only when the spec names a provider-backed model the running one does not.
-    `replicas="keep"` keeps the live counts of existing types; `check` runs the controller's
-    validation (dry run), stores nothing and names where each changed value came from.
-    `env_files` as in `read_spec`; `source` replaces the `X-Flock-Source` header (--ref)."""
-    from flock.live import diff_specs, keep_replicas, world_tool_changes
-    from flock.tools.loader import ToolsError
-    from flock.tools.spec import prepare
-
-    sources: dict[str, str] = {}
-    spec = read_spec(spec_file, env_files, sources=sources)
-    refused, warnings = loop_problems(spec)
-    if refused:
-        raise SpecError(refused)
-    warnings += extra_warnings(spec)
-    try:
-        bundle = prepare(spec, spec_file)
-    except ToolsError as e:
-        raise SpecError([f"{spec_file}: tools: {e}"]) from None
-    r = _request(c, "GET", f"/swarms/{spec.swarm}")
-    if r.status_code == 404:
-        raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
-                          "with `flock launch`")])
-    if r.status_code >= 400:
-        raise SpecError([f"error {r.status_code}: {_detail(r)}"])
-    old = SwarmSpec.model_validate(r.json()["spec"])
-    if preflight is None:  # --check probes every model; an update only the ones it adds
-        preflight = bool(set(_unprobed(spec)) - set(_unprobed(old))) or (check and bool(_unprobed(spec)))
-    probed: list[str] = []
-    if preflight:
-        r = _request(c, "POST", f"/swarms/{spec.swarm}/preflight", json=spec.model_dump(mode="json"),
-                     extensions={"timeout": httpx.Timeout(300).as_dict()})
-        if r.status_code >= 400:
-            raise SpecError([f"preflight error {r.status_code}: {_detail(r)}"])
-        rep = r.json()
-        probed = [f"preflight {x['model']}: " + ("unverified" if x.get("unverified") else "ok"
-                                                 if x["ok"] else "FAIL") for x in rep["results"]]
-        bad = [f"preflight {x['model']}: {'unverified' if x.get('unverified') else 'FAIL'}"
-               + (f" ({x['error']})" if x.get("error") else "")
-               for x in rep["results"] if not x["ok"] and (strict or not x.get("unverified"))]
-        if bad:
-            raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
-                                    "--skip-preflight)")])
-    spec.tools_version = None
-    names: tuple[list[str], list[str]] | None = None
-    if bundle is not None:
-        r = _request(c, "POST", f"/swarms/{spec.swarm}/tools", content=bundle.data,
-                     headers={"content-type": "application/gzip"},
-                     extensions={"timeout": httpx.Timeout(120).as_dict()})
-        if r.status_code >= 400:
-            raise SpecError([f"refused: tools upload ({r.status_code}): {_detail(r)}"])
-        spec.tools_version = r.json()["version"]
-        if spec.tools_version != old.tools_version:
-            listed = _request(c, "GET", f"/swarms/{spec.swarm}/tools").json().get("bundles", [])
-            before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
-            names = (before, r.json()["tools"])
-    kept = keep_replicas(old, spec, ramps_only=replicas == "spec")
-    lines = diff_specs(old, spec, names)
-    if check:  # `path: old -> new (spec.yaml:41 | run.env WORKER_MEM | default)`
-        lines = [f"{x} ({source_of(sources, x.split(':', 1)[0])})" if ": " in x
-                 and not x.startswith(("tools:", "prompts changed:")) else x for x in lines]
-    if not lines and not check:
-        return [*warnings, *kept, "no changes"]
-    r = _request(c, "PUT", f"/swarms/{spec.swarm}", json=spec.model_dump(mode="json"),
-                 params={"replicas": "spec", **({"dry_run": 1} if check else {})},
-                 headers=source or source_header(spec_file))
-    if r.status_code >= 400:
-        raise SpecError([f"refused: {_detail(r)}"])
-    if check:  # the stored spec is untouched: the new manifest is in the reply
-        new = SwarmSpec.model_validate(r.json()["spec"])
-        lines += r.json().get("deletes", [])
-    else:
-        new = SwarmSpec.model_validate(_request(c, "GET", f"/swarms/{spec.swarm}").json()["spec"])
-    wt = world_tool_changes(old, new)
-    return [*warnings, *(probed if check else []), *kept, *lines, *([wt] if wt else []),
-            *(["check ok: nothing was applied"] if check else [])]
 
 
 @app.command()
@@ -876,32 +367,27 @@ def update(
     Prints what changed; a refused change applies nothing."""
     path = Path(target)
     spec_file, ref_header = _at_ref(str(path / "spec.yaml" if path.is_dir() else path), ref)
+    sources: dict[str, str] = {}
     try:
-        with client() as c:
-            if replicas not in ("keep", "spec"):
-                raise SpecError([f"--replicas {replicas!r}: use keep or spec"])
-            lines = update_swarm(c, spec_file, preflight=preflight, strict=strict,
-                                 replicas=replicas, check=check, env_files=env_files or (),
-                                 source=ref_header)
+        spec = read_spec(spec_file, env_files or (), sources=sources)
+        done = ops.update(Client(), spec, spec_file, sources=sources, preflight=preflight,
+                          strict=strict, replicas=replicas, check=check, source=ref_header)
     except SpecError as e:
         for line in e.lines:
             typer.echo(line, err=True)
         raise typer.Exit(1) from None
-    for line in lines:
+    for line in update_lines(done, check):
         typer.echo(line, err=line.startswith("warning:"))
 
 
-def _tools_bundle(spec: SwarmSpec, spec_file: str):
-    """The spec's tools folder packed and checked (None: the spec uses none); exit 1 on a bad
-    module or an unknown tool name."""
-    from flock.tools.loader import ToolsError
-    from flock.tools.spec import prepare
-
-    try:
-        return prepare(spec, spec_file)
-    except ToolsError as e:
-        typer.echo(f"{spec_file}: tools: {e}", err=True)
-        raise typer.Exit(1) from None
+def update_lines(done: dict, check: bool = False) -> list[str]:
+    """`ops.update`'s result as `flock update` prints it: warnings, then what changed (or
+    "no changes")."""
+    if not done["diff"] and not check:
+        return [*done["warnings"], *done["kept"], "no changes"]
+    wt = done["world_tools"]
+    return [*done["warnings"], *done["probed"], *done["kept"], *done["diff"], *done["deletes"],
+            *([wt] if wt else []), *(["check ok: nothing was applied"] if check else [])]
 
 
 @app.command()
@@ -914,18 +400,19 @@ def status(
 ) -> None:
     """Swarm status: counts by type and state. Given an agent name (or inside an agent), that
     agent's status as JSON."""
-    if not swarm and _as_agent():
+    api = Client()
+    if not swarm and api.as_agent:
         swarm = os.environ.get("FLOCK_AGENT")
-    if swarm and (_as_agent() or not _is_swarm(swarm)):
-        typer.echo(json.dumps(_call("GET", f"/agents/{swarm}"), indent=2))
+    if swarm and (api.as_agent or not api.is_swarm(swarm)):
+        typer.echo(json.dumps(api.agent(swarm), indent=2))
         return
     if watch or as_json:
-        _health_view(swarm, as_json=as_json, watch=watch)
+        _health_view(api, swarm, as_json=as_json, watch=watch)
         return
     if swarm:
-        _print_status(_call("GET", f"/swarms/{swarm}")["status"])
+        _print_status(api.swarm(swarm)["status"])
         return
-    swarms = _call("GET", "/swarms")
+    swarms = api.swarms()
     if not swarms:
         typer.echo("no swarms")
     for st in swarms:
@@ -933,16 +420,10 @@ def status(
         typer.echo("")
 
 
-def _health_of(swarm: str) -> dict | None:
-    with client() as c:
-        r = _request(c, "GET", f"/swarms/{swarm}/health")
-    return r.json() if r.status_code == 200 else None
-
-
-def _health_view(swarm: str | None, *, as_json: bool, watch: bool) -> None:
+def _health_view(api: Client, swarm: str | None, *, as_json: bool, watch: bool) -> None:
     while True:
-        sts = [_call("GET", f"/swarms/{swarm}")["status"]] if swarm else _call("GET", "/swarms")
-        docs = [{"status": st, "health": _health_of(st["swarm"])} for st in sts]
+        sts = [api.swarm(swarm)["status"]] if swarm else api.swarms()
+        docs = [{"status": st, "health": api.health(st["swarm"])} for st in sts]
         if as_json:
             typer.echo(json.dumps(docs if not swarm else docs[0], indent=2))
         else:
@@ -1049,30 +530,10 @@ def agents(
     parent: str = typer.Option(None, "--parent", help="only the children of this agent"),
 ) -> None:
     """List a swarm's agents."""
-    params = {k: v for k, v in (("type", type), ("state", state), ("parent", parent)) if v}
-    rows, cursor = [], None
-    while True:
-        page = _call(
-            "GET",
-            f"/swarms/{swarm}/agents",
-            params={**params, "cursor": cursor} if cursor else params,
-        )
-        for a in page["agents"]:
-            rows.append(
-                [
-                    a["name"],
-                    a["state"],
-                    a.get("provider") or "-",
-                    a["worker"],
-                    a["turns"],
-                    a["pending"],
-                    f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
-                    a["last_heartbeat"],
-                ]
-            )
-        cursor = page["cursor"]
-        if not cursor:
-            break
+    rows = [[a["name"], a["state"], a.get("provider") or "-", a["worker"], a["turns"],
+             a["pending"], f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
+             a["last_heartbeat"]]
+            for a in Client().agents(swarm, type=type, state=state, parent=parent)]
     _table(rows, ["name", "state", "provider", "worker", "turns", "pending", "cost",
                   "last_heartbeat"])
 
@@ -1080,7 +541,7 @@ def agents(
 @app.command()
 def agent(name: str) -> None:
     """One agent's status as JSON."""
-    typer.echo(json.dumps(_call("GET", f"/agents/{name}"), indent=2))
+    typer.echo(json.dumps(Client().agent(name), indent=2))
 
 
 @app.command()
@@ -1104,32 +565,26 @@ def prompt(
     (`prompt --children [--type T] [--state idle] TEXT`); prints the ack (counts for the bulk
     forms). With `--state idle` an agent that already has a pending prompt is skipped, so
     repeating the call never stacks prompts (`skipped_pending` in the counts)."""
-    body = {"timeout": timeout, "reply_to": reply_to}
+    api, opts = Client(), {"timeout": timeout, "reply_to": reply_to}
+    bulk = {"state": state, "skip_pending": skip_pending, **opts}
     if children:
         parent = parent or os.environ.get("FLOCK_AGENT")
         if not parent or swarm is not None or len(args) != 1:
             typer.echo("usage: flock prompt --children [--parent P] [--type T] [--state STATE] "
                        "TEXT (parent defaults to $FLOCK_AGENT)", err=True)
             raise typer.Exit(2)
-        body.update(type=type, state=state, text=args[0])
-        if skip_pending is not None:
-            body["skip_pending"] = skip_pending
-        typer.echo(json.dumps(_call("POST", f"/agents/{parent}/children/prompts", json=body)))
+        typer.echo(json.dumps(api.prompt_children(parent, args[0], type=type, **bulk)))
         return
     if type is not None:
         if swarm is None or len(args) != 1:
             typer.echo("usage: flock prompt --swarm S --type T [--state STATE] TEXT", err=True)
             raise typer.Exit(2)
-        body.update(type=type, state=state, text=args[0])
-        if skip_pending is not None:
-            body["skip_pending"] = skip_pending
-        typer.echo(json.dumps(_call("POST", f"/swarms/{swarm}/prompts", json=body)))
+        typer.echo(json.dumps(api.prompt_type(swarm, type, args[0], **bulk)))
         return
     if swarm is not None or state is not None or len(args) != 2:
         typer.echo("usage: flock prompt NAME TEXT (or --swarm S --type T TEXT)", err=True)
         raise typer.Exit(2)
-    body["text"] = args[1]
-    typer.echo(json.dumps(_call("POST", f"/agents/{args[0]}/prompt", json=body)))
+    typer.echo(json.dumps(api.prompt(args[0], args[1], **opts)))
 
 
 def _short(text: Any, n: int = 160) -> str:
@@ -1185,28 +640,21 @@ def events(
     something new arrived (the last line on stderr is the cursor for the next --after);
     --pretty prints time, turn, kind and the text or a summary instead of JSON. Given a swarm,
     its swarm-level stream (loop_started, loop_tick, loop_stopped, final_round, budget_stop)."""
-    deadline = time.monotonic() + timeout
-    # agent-shaped names (`...-NNNN`) are agents, without the lookup `status` makes; other
-    # names (`naming: words`) are agents unless a swarm has that name
-    route = (f"/agents/{name}/events" if _as_agent() or AGENT_NAME_RE.match(name)
-             or not _is_swarm(name) else f"/swarms/{name}/events")
-    while True:
-        poll = follow or wait
-        page = _call("GET", route, params={"after": after, "wait": 25 if poll else 0})
+    for page in Client().events(name, after=after, follow=follow or wait,
+                                timeout=timeout if wait else None):
         for ev in page["events"]:
             typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
         after = page["next"]
-        if wait and (page["events"] or time.monotonic() >= deadline):
-            typer.echo(f"next: {after}", err=True)
+        if wait and page["events"]:
             break
-        if not poll:
-            break
+    if wait:
+        typer.echo(f"next: {after}", err=True)
 
 
 @app.command()
 def workers(swarm: str) -> None:
     """List a swarm's workers."""
-    found = _call("GET", "/workers", params={"swarm": swarm})
+    found = Client().workers(swarm)
 
     rows = [
         [
@@ -1233,8 +681,8 @@ def workers(swarm: str) -> None:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
-agent_app = typer.Typer(help="Inside an agent (FLOCK_AGENT_TOKEN): spawn and remove child agents "
-                             "(docs/spawn.md).", no_args_is_help=True)
+agent_app = typer.Typer(cls=_Group, help="Inside an agent (FLOCK_AGENT_TOKEN): spawn and remove "
+                        "child agents (docs/spawn.md).", no_args_is_help=True)
 
 
 @agent_app.command()
@@ -1250,15 +698,14 @@ def spawn(
     if not parent:
         typer.echo("no parent: pass --parent or set FLOCK_AGENT", err=True)
         raise typer.Exit(1)
-    body = {"type": type, "prompt": prompt, "key": key}
-    ack = _call("POST", f"/agents/{parent}/spawn", json=body)
+    ack = Client().spawn(parent, type, prompt=prompt, key=key)
     typer.echo(json.dumps(ack) if as_json else ack["name"])
 
 
 @agent_app.command()
 def remove(name: str) -> None:
     """Remove a spawned agent and everything it spawned."""
-    typer.echo(json.dumps(_call("DELETE", f"/agents/{name}")))
+    typer.echo(json.dumps(Client().remove(name)))
 
 
 # Hidden aliases: agents of runs started before flock-agent and stored specs still call

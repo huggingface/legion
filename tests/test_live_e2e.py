@@ -63,8 +63,8 @@ async def test_update_reaches_running_agents(tmp_path, monkeypatch):
     srv = fake_openai.serve(0, str(log))
     url = f"http://127.0.0.1:{srv.server_port}/v1"
     sw = Swarm(tmp_path)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     exp = tmp_path / "experiment"
     (exp / "tools").mkdir(parents=True)
     (exp / "prompts").mkdir()

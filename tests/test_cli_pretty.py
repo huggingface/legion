@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import Client
 from flock.models import Event
 from flock.worker.events import SessionLog
 
@@ -55,7 +56,7 @@ def test_pretty_lines(tmp_path):
 
 def test_events_flag(tmp_path, monkeypatch):
     evs = stream(tmp_path)
-    monkeypatch.setattr(cli, "_call", lambda *a, **k: {"events": evs, "next": len(evs)})
+    monkeypatch.setattr(Client, "_call", lambda *a, **k: {"events": evs, "next": len(evs)})
     r = CliRunner().invoke(cli.app, ["events", "leader-0000", "--pretty"])
     assert r.exit_code == 0 and r.output.splitlines()[1].endswith("analyst children now.")
     r = CliRunner().invoke(cli.app, ["events", "leader-0000"])
