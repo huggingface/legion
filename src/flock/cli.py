@@ -566,7 +566,7 @@ def launch(
     try:
         _launch(spec, spec_file, bundle, source, type_, agent, adopt, checkpoint, no_checkpoint,
                 preflight, strict)
-    except (typer.Exit, httpx.HTTPError):
+    except BaseException:  # also Ctrl-C during the preflight
         if started is not None:  # nothing created: do not leave a controller behind
             _end_local(started)
         raise
@@ -723,15 +723,18 @@ def stop(
 ) -> None:
     """Stop a swarm, keeping everything (docs/live.md "Lifecycle"). Default: hold, no new
     prompts or loop rounds, running turns finish, workers stay. `flock launch SWARM` resumes.
-    A local run (`compute: local`) ends its background controller on --release or --delete."""
+    A local run (`compute: local`) ends its background controller (and writes its bundle) on
+    --delete only."""
     if delete:
         if final or release or interrupt or type_ or agent:
             _fail(["--delete takes only --yes"])
         if not yes:
             typer.confirm(f"delete swarm {swarm} from the controller (agents drained, state "
                           "gone; the bucket keeps its copies)?", abort=True)
-        typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
-        _end_local_of(swarm)
+        if (run := local_run()) is not None and run.get("swarm") == swarm:
+            _end_local(run)  # no DELETE first: the bundle is written from the rows it would drop
+        else:
+            typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
         return
     if final:
         if release or interrupt or agent:
@@ -759,12 +762,6 @@ def stop(
                (f"released, but {len(unsynced)} agents' final sync failed: their bucket copies "
                "are older than their last turns")])
     typer.echo(f"released: every agent synced, compute freed; `flock launch {swarm}` resumes")
-    _end_local_of(swarm)
-
-
-def _end_local_of(swarm: str) -> None:
-    if (run := local_run()) is not None and run.get("swarm") == swarm:
-        _end_local(run)
 
 
 def _detail(r: httpx.Response) -> str:
@@ -1263,6 +1260,14 @@ def remove(name: str) -> None:
     """Remove a spawned agent and everything it spawned."""
     typer.echo(json.dumps(_call("DELETE", f"/agents/{name}")))
 
+
+# Hidden aliases: agents of runs started before flock-agent and stored specs still call
+# `flock spawn|remove` and `{python} -m flock.cli world serve`.
+app.command("spawn", hidden=True)(spawn)
+app.command("remove", hidden=True)(remove)
+from flock.world.__main__ import world_app
+
+app.add_typer(world_app, name="world", hidden=True)
 
 if __name__ == "__main__":
     app()

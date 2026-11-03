@@ -118,7 +118,7 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
     assert json.loads((ctl / "run.json").read_text())["status"] == "ended"
 
 
-def test_launch_in_background_then_stop_release(tmp_path, fake_server):
+def test_launch_in_background_release_resume_delete(tmp_path, fake_server):
     (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url))
     env = _env(tmp_path)
 
@@ -144,7 +144,14 @@ def test_launch_in_background_then_stop_release(tmp_path, fake_server):
         assert "second-terminal" in r.stdout
         r = flock("status", "hello")
         assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
-        r = flock("stop", "hello", "--release")
+        r = flock("stop", "hello", "--release")  # workers freed, the controller stays
+        assert r.returncode == 0 and "released" in r.stdout, r.stdout + r.stderr
+        assert current.exists()
+        r = flock("launch", "spec.yaml")  # resumes the same swarm, as on any backend
+        assert r.returncode == 0 and "held: nothing" in r.stdout, r.stdout + r.stderr
+        r = flock("status", "hello")
+        assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
+        r = flock("stop", "hello", "--delete", "--yes")  # ends the run: the bundle
         assert r.returncode == 0 and "bundle:" in r.stdout, r.stdout + r.stderr
     finally:
         if (info := current.exists() and json.loads(current.read_text())):

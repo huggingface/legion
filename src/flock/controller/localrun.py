@@ -17,7 +17,7 @@ controller) on 127.0.0.1 with a generated token; the reconcile loop launches wor
 `<data-dir>/current` (mode 0600) holds the URL, token and pid while the run is up, so `flock status`
 and the other commands reach it from the same directory.
 
-Stops on SIGINT/SIGTERM (`flock stop --release` sends it; a second one forces), `--until
+Stops on SIGINT/SIGTERM (`flock stop --delete` sends it; a second one forces), `--until
 <duration>`, `--until idle`, or the spec's `limits.budget_usd`. Stopping halts the reconcile loop (so nothing relaunches), sends each worker
 a drain (in-flight turns finish within `grace` s, then the processes are killed), waits for the
 final event flush, writes the bundle and exits.

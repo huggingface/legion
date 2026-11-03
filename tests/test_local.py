@@ -459,3 +459,20 @@ async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     doc = json.loads((result.run_dir / "run.json").read_text())
     assert doc["spec"]["limits"]["budget_usd"] == 0
     assert doc["spec"]["types"]["w"]["labels"] == {"applied": "live"}
+
+
+def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
+    """Ctrl-C during the preflight: the background controller `launch` started is ended."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(local_spec().model_dump(mode="json")))
+    run = {"pid": 1, "run_dir": "x"}
+    ended = []
+    monkeypatch.setattr(cli, "_start_local", lambda *a: run)
+    monkeypatch.setattr(cli, "_end_local", ended.append)
+
+    def interrupted(*a):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_launch", interrupted)
+    runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
+    assert ended == [run]

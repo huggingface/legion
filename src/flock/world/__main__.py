@@ -1,5 +1,6 @@
 """`python -m flock.world serve|doctor|knobs|set` (docs/world.md): a world author's and a
-world host's commands, not the operator CLI. knobs/set reach the controller as `flock` does."""
+world host's commands, not the operator CLI. knobs/set reach the controller through flock.cli
+(imported late: flock.cli mounts this app as its hidden `world`)."""
 
 from __future__ import annotations
 
@@ -7,8 +8,6 @@ import json
 from typing import Annotated
 
 import typer
-
-from flock.cli import _call, _table, source_header
 
 world_app = typer.Typer(help="Worlds: shared state behind tools (docs/world.md).",
                         no_args_is_help=True)
@@ -55,6 +54,8 @@ def world_doctor(
 @world_app.command("knobs")
 def world_knobs(swarm: str) -> None:
     """The world's knobs (value, default, range) and paused lanes."""
+    from flock.cli import _call, _table
+
     out = _call("GET", f"/swarms/{swarm}/world/knobs")
     rows = [[n, json.dumps(k["value"]), json.dumps(k["default"]), k["type"],
              f"{'' if k['min'] is None else k['min']}..{'' if k['max'] is None else k['max']}",
@@ -73,6 +74,8 @@ def world_set(
     reason: str = typer.Option("", "--reason", help="Recorded in the swarm's events."),
 ) -> None:
     """Set world knobs at runtime; the world keeps them across restarts."""
+    from flock.cli import _call, source_header
+
     values = {}
     for a in assignments:
         name, eq, raw = a.partition("=")

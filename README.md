@@ -106,7 +106,7 @@ local model endpoint. See [docs/local.md](docs/local.md):
 ```sh
 uv run flock launch examples/local.yaml
 uv run flock prompt --swarm hello --type writer "Introduce yourself."
-uv run flock stop hello --release      # ends the run and writes the bundle
+uv run flock stop hello --delete --yes   # ends the run and writes the bundle
 ```
 
 ### Run the controller
