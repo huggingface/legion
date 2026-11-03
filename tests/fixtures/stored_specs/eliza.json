@@ -1,0 +1,374 @@
+{
+ "swarm": "eliza",
+ "namespace": "",
+ "bucket": "",
+ "providers": {
+  "hf": {
+   "type": "openai_compat",
+   "base_url": "https://router.huggingface.co/v1",
+   "base_urls": null,
+   "api_key_env": "HF_TOKEN",
+   "self_hosted": false,
+   "max_working": null,
+   "pricing": {
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017:novita": [
+     0.3,
+     1.2,
+     0.3
+    ],
+    "zai-org/GLM-5.3-Flash:novita": [
+     0.15,
+     0.5,
+     0.15
+    ]
+   },
+   "timeout_s": 180.0,
+   "max_retries": 5,
+   "auth": null,
+   "metrics": false
+  }
+ },
+ "models": {
+  "deepseek": {
+   "model": "hf:deepseek-ai/DeepSeek-V4.1-Flash-1017:novita",
+   "reasoning": null,
+   "extra": {
+    "max_tokens": 32000,
+    "temperature": 0.6,
+    "chat_template_kwargs": {
+     "thinking": false
+    }
+   },
+   "pricing": null
+  },
+  "glm": {
+   "model": "hf:zai-org/GLM-5.3-Flash:novita",
+   "reasoning": null,
+   "extra": {
+    "max_tokens": 32000,
+    "temperature": 0.6,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    }
+   },
+   "pricing": null
+  }
+ },
+ "types": {
+  "ds": {
+   "harness": "llm",
+   "model": "deepseek",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": "You are one of 5 agents writing ONE ELIZA-style chatbot together.\nTeam: ds-0000 (lead and integrator), ds-0001, ds-0002, glm-0000, glm-0001.\n\nThe bot:\n- ONE Python file, standard library only (re, random, string, collections, ...). No network, no files.\n- It reads the user's messages from stdin, one per line, and for EACH line prints exactly ONE reply line, then flushes. Pattern:\n  import sys\n  for line in sys.stdin:\n      print(reply(line.strip()), flush=True)\n- Good bots: reflect the user's words (I -> you, my -> your), ask follow-up questions, remember names and facts the user gave, vary their replies, never crash, never print an empty line.\n- It runs as `python -I bot.py` with 5 s in total. Keep it fast and deterministic enough to test.\n- Keep bot.py under 30 KB, so a teammate can read it whole.\n\nYour tools (world): read_file, edit_file, insert_after, write_file, copy_file, list_files, run_bot, promote_best, best_status. Board: post, read, search. And `done`.\n- You change files ONLY under agents/<your name>/.\n- Edit, do not rewrite: use `edit_file` (replace one exact, unique piece of text) or `insert_after` (add lines after a unique line) for changes. Use `write_file` only to create a new file, and `copy_file` to start your bot from best/bot.py or a teammate's bot.\n- One change per call. Copy `old` / `anchor` exactly from `read_file`. If a change does not compile it is refused and the file is unchanged: read the error, fix it, try again.\n- run_bot(path, lines) runs a bot on a conversation. Use it before every claim about a bot.\n- promote_best(path, reason) makes a bot the team's best/bot.py if it passes the probes (probes/*.txt) at least as well as the current best.\n\nRules:\n- Every reply is exactly ONE tool call. Never answer in plain text.\n- Keep board posts to one or two short lines. Mention a teammate with @name (never @all).\n- Call `done` with a one-line summary when the round's steps are finished or you are waiting on someone.\n",
+   "system_prompt_append_file": null,
+   "env": {},
+   "secrets": [],
+   "labels": {},
+   "replicas": 3,
+   "agents_per_worker": 5,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": null,
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "24h",
+   "lifetime_jitter": "4h",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "30m",
+   "max_turns": 12,
+   "max_budget_usd": 0.2,
+   "context_tokens": 64000,
+   "tool_choice": "required",
+   "done_tool": null,
+   "bash": false,
+   "chars_per_token": null,
+   "tool_output_chars": 32000,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": null,
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": null,
+   "loop": {
+    "prompt": "Round {round} ({why}; {elapsed} of {wall} min; you spent ${spend} of ${cap}). Your last summary: {last_summary}\nDo the steps below in order, skipping the ones already done, ONE tool call per reply. Stop with `done` after at most 10 calls.\nA. Call `read` (no arguments). Find the [plan] thread and any message that mentions you.\nB. If you are not ds-0000 and you have not posted `agree` in [plan]: `post` with thread = the [plan] root id and text \"agree <root id>\". If there is no [plan] thread yet: `done`.\nC. If a message asks you to check a bot: `run_bot` that path with 4 to 8 realistic lines about your part, then `post` in that thread: \"GREEN <path>: <what worked>\" or \"RED <path>: '<your line>' -> '<its reply>'\".\nD. Your part. If you have no agents/<your name>/bot.py: `copy_file` best/bot.py to it (no best yet: `write_file` a small new bot). Then `read_file` it, and improve YOUR part with `edit_file` or `insert_after`, one change per call (edit, do not rewrite). Then `run_bot` it with 4 to 8 lines that test your part. If a reply is wrong or empty, fix it with another edit.\nE. When your bot is GREEN on your own run: `post` in [plan] \"@ds-0000 ready: agents/<your name>/bot.py: <one line on your part>\".\nF. ds-0000 only: when a teammate is ready, `read_file` their bot, merge their part into agents/ds-0000/bot.py with `edit_file` / `insert_after`, `run_bot` it, then `promote_best` it with your run_bot evidence as the reason. `post` the result in [plan] with @<author>.\nG. Call `done` with a one-line summary of what you did.\n",
+    "prompt_file": "prompts/round.md",
+    "first": "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n2. If you are ds-0000: call `post` with thread \"new\" and this text, then go to step 3:\n   \"[plan] ds-0000=integrator (stdin loop, normalising, fallbacks, merges parts into agents/ds-0000/bot.py), ds-0001=ELIZA rules (keywords, decomposition, reflection I->you), ds-0002=memory (names, facts, recall), glm-0000=feelings and family topics, glm-0001=tester (realistic conversations with run_bot, reports GREEN/RED). Reply `agree <this message id>`.\"\n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n",
+    "every": "90s",
+    "on": [
+     "comms.mention",
+     "comms.thread"
+    ],
+    "context": [],
+    "stagger": "4s",
+    "final": {
+     "prompt": "Final round. ONE tool call per reply:\n1. Call `best_status`.\n2. Call `run_bot` on best/bot.py with 8 lines of a realistic conversation of your choice.\n3. Call `post` in the [plan] thread with one line: \"VERDICT GREEN best/bot.py: <why>\" or \"VERDICT RED best/bot.py: '<your line>' -> '<its reply>'\".\n4. Call `done` with that same line.\n",
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.3,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "while": {
+     "until": "2h",
+     "max_rounds": 80,
+     "budget_usd": null,
+     "agent_usd": {
+      "deepseek": 3.6,
+      "glm": 2.1
+     },
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "hf",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://router.huggingface.co/v1",
+     "base_urls": null,
+     "api_key_env": "HF_TOKEN",
+     "self_hosted": false,
+     "max_working": null,
+     "pricing": {
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017:novita": [
+       0.3,
+       1.2,
+       0.3
+      ],
+      "zai-org/GLM-5.3-Flash:novita": [
+       0.15,
+       0.5,
+       0.15
+      ]
+     },
+     "timeout_s": 180.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "deepseek-ai/DeepSeek-V4.1-Flash-1017:novita",
+    "reasoning": null,
+    "extra": {
+     "max_tokens": 32000,
+     "temperature": 0.6,
+     "chat_template_kwargs": {
+      "thinking": false
+     }
+    },
+    "pricing": [
+     0.3,
+     1.2,
+     0.3
+    ]
+   }
+  },
+  "glm": {
+   "harness": "llm",
+   "model": "glm",
+   "reasoning": null,
+   "image": null,
+   "system_prompt_file": "prompts/system.md",
+   "system_prompt": "You are one of 5 agents writing ONE ELIZA-style chatbot together.\nTeam: ds-0000 (lead and integrator), ds-0001, ds-0002, glm-0000, glm-0001.\n\nThe bot:\n- ONE Python file, standard library only (re, random, string, collections, ...). No network, no files.\n- It reads the user's messages from stdin, one per line, and for EACH line prints exactly ONE reply line, then flushes. Pattern:\n  import sys\n  for line in sys.stdin:\n      print(reply(line.strip()), flush=True)\n- Good bots: reflect the user's words (I -> you, my -> your), ask follow-up questions, remember names and facts the user gave, vary their replies, never crash, never print an empty line.\n- It runs as `python -I bot.py` with 5 s in total. Keep it fast and deterministic enough to test.\n- Keep bot.py under 30 KB, so a teammate can read it whole.\n\nYour tools (world): read_file, edit_file, insert_after, write_file, copy_file, list_files, run_bot, promote_best, best_status. Board: post, read, search. And `done`.\n- You change files ONLY under agents/<your name>/.\n- Edit, do not rewrite: use `edit_file` (replace one exact, unique piece of text) or `insert_after` (add lines after a unique line) for changes. Use `write_file` only to create a new file, and `copy_file` to start your bot from best/bot.py or a teammate's bot.\n- One change per call. Copy `old` / `anchor` exactly from `read_file`. If a change does not compile it is refused and the file is unchanged: read the error, fix it, try again.\n- run_bot(path, lines) runs a bot on a conversation. Use it before every claim about a bot.\n- promote_best(path, reason) makes a bot the team's best/bot.py if it passes the probes (probes/*.txt) at least as well as the current best.\n\nRules:\n- Every reply is exactly ONE tool call. Never answer in plain text.\n- Keep board posts to one or two short lines. Mention a teammate with @name (never @all).\n- Call `done` with a one-line summary when the round's steps are finished or you are waiting on someone.\n",
+   "system_prompt_append_file": null,
+   "env": {},
+   "secrets": [],
+   "labels": {},
+   "replicas": 2,
+   "agents_per_worker": 5,
+   "max_working_per_worker": 20,
+   "max_working": null,
+   "replicas_ramp": null,
+   "workers": null,
+   "ephemeral": false,
+   "name_prefix": null,
+   "flavor": "cpu-basic",
+   "worker_lifetime": "24h",
+   "lifetime_jitter": "4h",
+   "drain_window": "10m",
+   "idle_grace": "120s",
+   "turn_timeout": "30m",
+   "max_turns": 12,
+   "max_budget_usd": 0.2,
+   "context_tokens": 64000,
+   "tool_choice": "required",
+   "done_tool": null,
+   "bash": false,
+   "chars_per_token": null,
+   "tool_output_chars": 32000,
+   "persist_workdir": true,
+   "workdir": null,
+   "worker": null,
+   "resume_prompt": null,
+   "recycle_after": null,
+   "tool_memory_mb": null,
+   "node_heap_mb": null,
+   "msgboard_invite": null,
+   "tools": null,
+   "loop": {
+    "prompt": "Round {round} ({why}; {elapsed} of {wall} min; you spent ${spend} of ${cap}). Your last summary: {last_summary}\nDo the steps below in order, skipping the ones already done, ONE tool call per reply. Stop with `done` after at most 10 calls.\nA. Call `read` (no arguments). Find the [plan] thread and any message that mentions you.\nB. If you are not ds-0000 and you have not posted `agree` in [plan]: `post` with thread = the [plan] root id and text \"agree <root id>\". If there is no [plan] thread yet: `done`.\nC. If a message asks you to check a bot: `run_bot` that path with 4 to 8 realistic lines about your part, then `post` in that thread: \"GREEN <path>: <what worked>\" or \"RED <path>: '<your line>' -> '<its reply>'\".\nD. Your part. If you have no agents/<your name>/bot.py: `copy_file` best/bot.py to it (no best yet: `write_file` a small new bot). Then `read_file` it, and improve YOUR part with `edit_file` or `insert_after`, one change per call (edit, do not rewrite). Then `run_bot` it with 4 to 8 lines that test your part. If a reply is wrong or empty, fix it with another edit.\nE. When your bot is GREEN on your own run: `post` in [plan] \"@ds-0000 ready: agents/<your name>/bot.py: <one line on your part>\".\nF. ds-0000 only: when a teammate is ready, `read_file` their bot, merge their part into agents/ds-0000/bot.py with `edit_file` / `insert_after`, `run_bot` it, then `promote_best` it with your run_bot evidence as the reason. `post` the result in [plan] with @<author>.\nG. Call `done` with a one-line summary of what you did.\n",
+    "prompt_file": "prompts/round.md",
+    "first": "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n2. If you are ds-0000: call `post` with thread \"new\" and this text, then go to step 3:\n   \"[plan] ds-0000=integrator (stdin loop, normalising, fallbacks, merges parts into agents/ds-0000/bot.py), ds-0001=ELIZA rules (keywords, decomposition, reflection I->you), ds-0002=memory (names, facts, recall), glm-0000=feelings and family topics, glm-0001=tester (realistic conversations with run_bot, reports GREEN/RED). Reply `agree <this message id>`.\"\n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n",
+    "every": "90s",
+    "on": [
+     "comms.mention",
+     "comms.thread"
+    ],
+    "context": [],
+    "stagger": "4s",
+    "final": {
+     "prompt": "Final round. ONE tool call per reply:\n1. Call `best_status`.\n2. Call `run_bot` on best/bot.py with 8 lines of a realistic conversation of your choice.\n3. Call `post` in the [plan] thread with one line: \"VERDICT GREEN best/bot.py: <why>\" or \"VERDICT RED best/bot.py: '<your line>' -> '<its reply>'\".\n4. Call `done` with that same line.\n",
+     "prompt_file": "prompts/final.md",
+     "reserve_usd": 0.3,
+     "add_tools": []
+    },
+    "wake": {
+     "min_gap": "30s",
+     "max": 10,
+     "window": null,
+     "counts_as_round": false
+    },
+    "stop_when": {
+     "all_agents_done": false
+    },
+    "while": {
+     "until": "2h",
+     "max_rounds": 80,
+     "budget_usd": null,
+     "agent_usd": {
+      "deepseek": 3.6,
+      "glm": 2.1
+     },
+     "idle_rounds": null,
+     "score": {}
+    }
+   },
+   "comms": true,
+   "world": null,
+   "resolved_model": {
+    "provider_name": "hf",
+    "provider": {
+     "type": "openai_compat",
+     "base_url": "https://router.huggingface.co/v1",
+     "base_urls": null,
+     "api_key_env": "HF_TOKEN",
+     "self_hosted": false,
+     "max_working": null,
+     "pricing": {
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017:novita": [
+       0.3,
+       1.2,
+       0.3
+      ],
+      "zai-org/GLM-5.3-Flash:novita": [
+       0.15,
+       0.5,
+       0.15
+      ]
+     },
+     "timeout_s": 180.0,
+     "max_retries": 5,
+     "auth": null,
+     "metrics": false
+    },
+    "model_id": "zai-org/GLM-5.3-Flash:novita",
+    "reasoning": null,
+    "extra": {
+     "max_tokens": 32000,
+     "temperature": 0.6,
+     "chat_template_kwargs": {
+      "enable_thinking": false
+     }
+    },
+    "pricing": [
+     0.15,
+     0.5,
+     0.15
+    ]
+   }
+  }
+ },
+ "tools_dir": null,
+ "tools_version": null,
+ "comms": {
+  "kind": "msgboard",
+  "extended": false,
+  "poll_cycle_s": null,
+  "url": "https://msgboard.example.invalid",
+  "invite_env": "ELIZA_BOARD_INVITE",
+  "channel": "your-eliza-channel",
+  "kickoff_file": "prompts/kickoff.md",
+  "kickoff": "Kickoff (eliza). Team: ds-0000 (lead), ds-0001, ds-0002, glm-0000, glm-0001.\nGoal: ONE ELIZA-style chatbot, built together, that keeps a conversation going as convincingly as possible. It is one Python file, standard library only: it reads the user's lines on stdin and writes one reply line per line. The team's best is best/bot.py.\nHow: ds-0000 opens a \"[plan] \" thread with the split; everyone replies `agree <id>` there. Then each works on their part in agents/<name>/bot.py (edit with edit_file / insert_after, do not rewrite), tests it with run_bot, and tells @ds-0000 when it is ready. ds-0000 merges and promotes with promote_best. Review each other by talking to the bots with run_bot.\nDo not reply to this kickoff.\n",
+  "rules": {
+   "min_post_gap": "20s",
+   "max_posts": 60,
+   "max_len": 800,
+   "threads": "per_topic",
+   "max_channels_per_agent": 3,
+   "max_channels": 60,
+   "no_group_mentions": true
+  },
+  "protocols": [
+   "protocols/lead-agree.md",
+   "protocols/eliza.md"
+  ],
+  "protocols_text": [
+   "Lead / agree (chat-test: 4/8 correct splits without it, 6/6 with it):\n- The agent who opened a topic's thread is its lead; the lead proposes the split. Others never propose first.\n- Others reply in the thread with `agree <proposal message id>` or one counter-proposal. The lead confirms or adjusts once.\n- Start work only after the thread has an `agree` for that exact proposal id.\n- If two proposals cross, the lead's proposal wins; never swap roles.\n",
+   "Eliza team rules:\n- Announce: before you work on something, say it in one line in its thread (\"[memory] I take name recall in agents/ds-0002/bot.py\").\n- Review by talking: judge a bot only after `run_bot` on it with a realistic conversation. Report one line: `GREEN <path>: <what worked>` or `RED <path>: '<your line>' -> '<its reply>'`.\n- Promote only with evidence: call `promote_best` only for a bot you ran with `run_bot` in this turn, and put that evidence in `reason`. Then post the result (promoted or refused, and the probe lines) in the [plan] thread.\n- Never rewrite a teammate's file; copy what you need into your own dir and credit them in your post.\n- Final round: everyone runs best/bot.py with `run_bot` and posts one verdict line in [plan].\n"
+  ],
+  "wake": [
+   "mention",
+   "thread"
+  ],
+  "search": "board",
+  "channel_id": null,
+  "kickoff_id": null
+ },
+ "world": {
+  "dir": "/home/node/local/git/flock/worlds/eliza",
+  "command": [
+   "{python}",
+   "-m",
+   "flock.cli",
+   "world",
+   "serve",
+   "eliza:ElizaWorld"
+  ],
+  "url": null,
+  "token_env": null,
+  "endpoint": null,
+  "manifest": null,
+  "credential_origin": null,
+  "credential_id": null,
+  "slurm_job_name": null
+ },
+ "naming": "numeric",
+ "naming_seed": null,
+ "spawn": {},
+ "limits": {
+  "alive": null,
+  "spawned_total": null,
+  "budget_usd": 15.0
+ },
+ "compute": {
+  "kind": "local"
+ },
+ "policies": null,
+ "report": null
+}
