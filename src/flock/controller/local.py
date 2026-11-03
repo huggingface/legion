@@ -23,9 +23,10 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from flock.controller.jobs import JobListing, JobState
 from flock.models import TypeSpec
@@ -286,3 +287,10 @@ class LocalJobsClient:
     def _closed(p: _Proc) -> None:
         if not p.log_handle.closed:
             p.log_handle.close()
+
+
+def local_jobs_client(env: Mapping[str, str], dep: Any, data_dir: str) -> LocalJobsClient:
+    """The controller's client for compute `local` (flock.registry)."""
+    if dep.mode == "job":
+        raise SystemExit("FLOCK_COMPUTE=local cannot run with FLOCK_MODE=job")
+    return LocalJobsClient(root=data_dir)

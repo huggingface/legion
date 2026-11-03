@@ -496,3 +496,8 @@ class CodexAdapter:
         for g in self.extra_globs:
             files += sorted(p for p in self.home.glob(g) if p.is_file())
         return files
+
+
+def make_adapter(workdir: Path, name: str, spec: TypeSpec) -> CodexAdapter:
+    """The worker's factory for harness `codex` (flock.registry)."""
+    return CodexAdapter(workdir)

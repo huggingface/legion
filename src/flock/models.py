@@ -16,6 +16,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
+from flock.registry import COMPUTE, HARNESSES
 from flock.world.protocol import TOOL_NAME_RE as WORLD_TOOL_RE
 from flock.world.protocol import WorldManifest
 
@@ -74,11 +75,8 @@ def until_deadline(until: str, started_at: float) -> float:
 # --------------------------------------------------------------------------- enums
 
 
-class Harness(StrEnum):
-    claude = "claude"
-    codex = "codex"
-    pi = "pi"
-    llm = "llm"  # in-process chat-completions loop (docs/llm-harness.md)
+# the names in flock.registry.HARNESSES; an enum so spec errors and the JSON schema list them
+Harness = StrEnum("Harness", [(name, name) for name in HARNESSES], module=__name__)
 
 
 class AgentState(StrEnum):
@@ -903,7 +901,7 @@ class ComputeSpec(_Removable):
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["hf-jobs", "local", "slurm"] = "hf-jobs"
+    kind: Literal[tuple(COMPUTE)] = "hf-jobs"  # type: ignore[valid-type]
     partition: str | None = None
     account: str | None = None
     cpus: int | None = Field(default=None, ge=1)
@@ -1003,8 +1001,7 @@ class SwarmSpec(BaseModel):
                         f"types.{type_name}.model: harness 'llm' needs a provider-backed model "
                         f"('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
                 continue
-            want = {Harness.claude: "anthropic", Harness.codex: "openai_compat",
-                    Harness.pi: "openai_compat", Harness.llm: "openai_compat"}[ts.harness]
+            want = HARNESSES[ts.harness].provider_type
             if r.provider.type != want:
                 raise ValueError(
                     f"types.{type_name}.model: harness {ts.harness.value!r} cannot use provider "
@@ -1074,7 +1071,7 @@ class SwarmSpec(BaseModel):
             if missing:
                 raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
                                  "(or set `compute: local`, docs/local.md)")
-        elif kind == "slurm" and not self.bucket:
+        elif kind != "local" and not self.bucket:
             # agent state goes to an HF bucket on every remote backend, never to a shared disk
             raise ValueError(f"bucket is required for compute {kind}")
         if kind != "local" and self.world is not None and self.world.url is None:

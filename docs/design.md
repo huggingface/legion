@@ -198,6 +198,25 @@ One Python package, three entry points: `flock` (CLI/library),
 `flock-controller`, `flock-worker`. Commands: `launch`,
 `init`, `stop`, `update`, `prompt`, `status` (also the event stream, `--events`).
 
+### Adding a harness or a compute backend
+
+Both are one module plus one entry in `src/flock/registry.py`; the spec loader, controller,
+worker and CLI read nothing else, and `tests/test_registry.py` checks every entry.
+
+- **Harness**: write `src/flock/worker/adapters/<name>.py` with a class implementing
+  `HarnessAdapter` (`adapters/base.py`) and a `make_adapter(workdir, name, spec)` function.
+  Add a `HARNESSES` entry: that function's import path, the provider `type` it needs, the
+  wire API preflight probes, the instructions file name, the pinned CLI version and whether it
+  sends a model's `extra`. A harness CLI also needs its install line in `Dockerfile.worker` and in
+  the bootstrap script (`controller/jobs.py`); those stay by hand. A harness that keeps state
+  in a home directory (like `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) also needs that variable set in
+  `controller/local.py`, `controller/slurm.py` and the bootstrap script.
+- **Compute backend**: write `src/flock/controller/<name>.py` with a `JobsClient`
+  (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function that builds it
+  from the controller's environment (and rejects a setup it cannot run in). Add a `COMPUTE`
+  entry: `compute.kind` / `FLOCK_COMPUTE` name -> that function's import path. Every kind but
+  `local` needs `bucket` and `world.url` in the spec.
+
 ## 4. Agent lifecycle
 
 ### Process per burst

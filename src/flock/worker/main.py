@@ -70,6 +70,7 @@ from flock.models import (
     type_spec_rev,
     world_tools,
 )
+from flock.registry import HARNESSES, load
 from flock.secrets_file import load as load_secrets
 from flock.secrets_file import secret_env
 from flock.tools.runner import Result
@@ -431,30 +432,7 @@ MEM_KNOB_ENV = {"rotate": "FLOCK_MEM_ROTATE", "drain": "FLOCK_MEM_DRAIN",
 
 def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
-        workdir = cfg.work_root / name
-        if spec.harness.value == "claude":
-            from flock.worker.adapters.claude import ClaudeAdapter
-
-            return ClaudeAdapter(workdir)
-        if spec.harness.value == "pi":
-            from flock.controller.prices import type_price_table
-            from flock.isolation import enabled
-            from flock.worker.adapters.pi import PiAdapter, pi_home, pi_model_config
-
-            # Each endpoint needs its own models.json; agents on one worker can
-            # target different servers, so keep their Pi config directories separate.
-            multi = enabled() or (spec.resolved_model and len(spec.resolved_model.provider.endpoints) > 1)
-            home = pi_home() / "agents" / name if multi else None
-            return PiAdapter(workdir, agent=name, home=home, model_config=pi_model_config(spec, name),
-                             prices=type_price_table(spec))
-        if spec.harness.value == "llm":
-            from flock.controller.prices import type_price_table
-            from flock.worker.adapters.llm import LLMAdapter
-
-            return LLMAdapter(workdir, agent=name, prices=type_price_table(spec))
-        from flock.worker.adapters.codex import CodexAdapter
-
-        return CodexAdapter(workdir)
+        return load(HARNESSES[spec.harness].adapter)(cfg.work_root / name, name, spec)
 
     return make
 

@@ -1,0 +1,39 @@
+"""flock.registry: every harness and compute entry is complete and its code imports."""
+
+import inspect
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from flock.controller.main import build
+from flock.models import ComputeSpec, Harness, TypeSpec
+from flock.registry import COMPUTE, HARNESSES, load
+
+
+@pytest.mark.parametrize("name", HARNESSES)
+def test_harness_entry_is_complete(name):
+    h = HARNESSES[name]
+    assert list(inspect.signature(load(h.adapter)).parameters) == ["workdir", "name", "spec"]
+    assert h.provider_type in ("anthropic", "openai_compat")
+    assert h.api in ("messages", "responses", "chat_completions")
+    assert h.instructions_file.endswith(".md")
+    assert Harness(name) == name
+    if h.version:  # Dockerfile.worker is edited by hand
+        assert f"@{h.version}" in (Path(__file__).parents[1] / "Dockerfile.worker").read_text()
+
+
+@pytest.mark.parametrize("kind", COMPUTE)
+def test_compute_entry_is_complete(kind):
+    assert list(inspect.signature(load(COMPUTE[kind])).parameters) == ["env", "dep", "data_dir"]
+    assert ComputeSpec(kind=kind).kind == kind
+
+
+def test_unknown_names_keep_their_errors():
+    with pytest.raises(ValidationError, match="Input should be 'claude', 'codex', 'pi' or 'llm'"):
+        TypeSpec.model_validate({"harness": "nope"})
+    with pytest.raises(ValidationError, match="Input should be 'hf-jobs', 'local' or 'slurm'"):
+        ComputeSpec(kind="nope")
+    with pytest.raises(SystemExit, match=r"FLOCK_COMPUTE='nope' is not one of hf-jobs, local, "
+                                         r"slurm \(unset: hf-jobs\)"):
+        build({"FLOCK_TOKEN": "t", "FLOCK_COMPUTE": "nope"})

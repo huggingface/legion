@@ -35,6 +35,7 @@ from flock.models import (
     parse_duration,
     type_spec_rev,
 )
+from flock.registry import HARNESSES
 from flock.secrets_file import secret_env
 from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
 from flock.worker import comms as comms_mod
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-INSTRUCTIONS_FILE = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "pi": "AGENTS.md", "llm": "AGENTS.md"}
+INSTRUCTIONS_FILE = {name: h.instructions_file for name, h in HARNESSES.items()}
 LOOP_ERROR_LIMIT = 3  # failed loop turns in a row end the worker-side loop
 LOOP_ERROR_BACKOFF = 2.0  # s before re-sending the loop prompt after a failed turn
 # Transient failures (turn timeout, model transport) do not count toward LOOP_ERROR_LIMIT at
