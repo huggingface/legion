@@ -27,12 +27,13 @@ stream is tailed by byte offset.
   `absent` when no such job is queued, `unknown` when squeue is missing, fails or times out),
   so a world waiting for a node is told apart from a crash.
 - **vLLM.** With `providers.<p>.metrics: true`, each base URL's server root `/metrics`
-  (Prometheus text), per server (`host:port`), never summed: `up`, `waiting`, `running`, `kv`
-  (`gpu_cache_usage_perc` or `kv_cache_usage_perc`), or `up: false` and the `error` when the
-  scrape failed. Each agent's heartbeat names the server it is pinned to (`endpoint`,
-  `pick_endpoint`), so a server counts its `agents`; a dead one lists them (`dead_agents`,
-  first 20) and raises `dead_server` (`provider_down` when every server of the provider is
-  down). Moving agents off a dead server is manual: drop it from `base_urls` and `flock update`.
+  (Prometheus text): `providers` sums `waiting` and `running` over servers with the highest
+  `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`), as before; `provider_servers` has
+  each server (`host:port`): `up`, its queues, or `up: false`, the `error` and `fails` (failed
+  scrapes in a row; `dead` from 2 on). Each agent's heartbeat names the server it is pinned to
+  (`endpoint`, `pick_endpoint`), so a server counts its `agents`; a dead one lists them
+  (`dead_agents`, first 20) and raises `dead_server` (`provider_down` when every server of the
+  provider is dead). Moving agents off a dead server is manual: drop it from `base_urls` and `flock update`.
 
 ## Snapshot body
 
@@ -41,7 +42,8 @@ stream is tailed by byte offset.
  workers: {wid: {hb, mem, slope_mb_h, eta_limit_s, restore: {..., eta_s}, relaunches}},
  types: {t: {by_state, stuck: [{agent, state, silent_s}], gens: {rev: n}}},
  tools: {name: {rate_per_min, err_pct, refused_pct, max_s}},
- providers: {p: {"host:port": {up, waiting, running, kv, completed, error, agents, dead_agents}}},
+ providers: {p: {waiting, running, kv, completed}},
+ provider_servers: {p: {"host:port": {up, fails, dead, waiting, running, kv, completed, error, agents, dead_agents}}},
  ramps: {t: {step, steps, replicas, max, next_add, next_at, holds}},
  tokens: {hour: "YYYY-MM-DDTHH", by_type: {t: {input, output, cache_read, cache_write, reasoning}}},
  alerts: [{kind, msg}]}
@@ -57,7 +59,8 @@ stream is tailed by byte offset.
 - `hb` is the worker's last heartbeat time and `ts` the world probe's time.
 - `ramps`: per `replicas_ramp` type, its step (`ramp:<type>`), the next step's size and time
   (epoch s; null while held, released or at the end) and the consecutive capacity holds.
-- Alerts: world down, a dead model server (`dead_server`, `provider_down`), 3 or more ramp
+- Alerts: world down (2 failed probes in a row; `world_pending` instead while its Slurm job is
+  PENDING), a dead model server (`dead_server`, `provider_down`), 3 or more ramp
   holds in a row (`ramp_held`), a worker within 1 h of its memory limit, stuck agents, a tool
   with 20 % or more errors or refusals over the last sample.
 
@@ -137,7 +140,8 @@ agents. The first line is the verdict (`flock.status.verdict`):
 
 - `FAILING`: the world is down, every server of a provider is down under its agents, or a
   type's launches are refused. Exit 1.
-- `DEGRADED`: any other alert (stuck agents, a dead server, memory, tool errors, ramp holds),
+- `DEGRADED`: any other alert (a world whose Slurm job is PENDING, stuck agents, a dead
+  server, memory, tool errors, ramp holds),
   a launch error being retried, agents whose final sync failed, a budget stop, or no snapshot
   in the last 2 min (the controller's prober is not running).
 - `OK`.
@@ -169,7 +173,9 @@ the last control-plane events.
 `--agent A --events`) an agent's; `--only PREFIX` keeps the names starting with it (`--only
 agent.`), `--after N` starts after a cursor, `--follow` keeps long-polling, `--wait` returns
 once something new arrived (the next cursor on stderr), `--json` prints JSONL.
-`flock.status.events` yields the same pages. Stored events are never rewritten (resume reads
+`flock.status.events` yields the same pages (a removed agent's stored events too). Hidden,
+for prompts in resumed runs: `flock events NAME [--after --follow --wait --timeout --pretty]`
+(raw JSONL) and `flock agents SWARM [--type --state --parent]` (the old table). Stored events are never rewritten (resume reads
 them); `flock.status.normalise` maps each to one schema:
 
 `{name, ts, swarm, agent?, type?, worker?, data}`; `data` is the event's payload, with

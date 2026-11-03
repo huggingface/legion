@@ -76,16 +76,23 @@ async def test_dead_server_flags_its_agents(store, clock, tick):
     await h.probe(t)
     h.tick(t)
     body = h.latest("demo")["body"]
-    g1, g2 = body["providers"]["v"]["g1"], body["providers"]["v"]["g2"]
-    assert g1 == {"up": True, "waiting": 1.0, "running": 2.0, "agents": 1}
-    assert not g2["up"] and g2["agents"] == 1 and g2["dead_agents"] == ["researcher-0001"]
+    assert body["alerts"] == [] and fs.dead_servers({"body": body}) == set()  # one miss: no alert
+    assert body["providers"]["v"] == {"waiting": 1.0, "running": 2.0}  # summed, as before
+    await h.probe(t)
+    h.tick(t)
+    body = h.latest("demo")["body"]
+    g1, g2 = body["provider_servers"]["v"]["g1"], body["provider_servers"]["v"]["g2"]
+    assert g1 == {"up": True, "fails": 0, "dead": False, "waiting": 1.0, "running": 2.0,
+                  "agents": 1}
+    assert g2["dead"] and g2["agents"] == 1 and g2["dead_agents"] == ["researcher-0001"]
     assert [a["kind"] for a in body["alerts"]] == ["dead_server"]
     assert "researcher-0001" in body["alerts"][0]["msg"]
     assert fs.verdict(_status(), {"ts": t, "body": body}, t)["level"] == "degraded"
     assert fs.dead_servers({"body": body}) == {"g2"}
     dead.add("g1")
-    await h.probe(t + 30)
-    h.tick(t + 30)
+    for _ in range(2):
+        await h.probe(t + 30)
+        h.tick(t + 30)
     body = h.latest("demo")["body"]
     assert [a["kind"] for a in body["alerts"]] == ["provider_down"]
     assert fs.verdict(_status(), {"ts": t, "body": body}, t)["level"] == "failing"
@@ -101,7 +108,8 @@ async def test_status_filters_flag_agents_on_a_dead_server(app, store, clock, ti
     _wire(monkeypatch, app)
     monkeypatch.setattr(Client, "health", lambda *_: {"ts": clock().timestamp(), "body": {
         "alerts": [], "types": {}, "workers": {}, "tools": {},
-        "providers": {"v": {"g1": {"up": True}, "g2": {"up": False}}}}})
+        "providers": {}, "provider_servers": {"v": {"g1": {"up": True, "dead": False},
+                                                    "g2": {"up": False, "dead": True}}}}})
     v = fs.view(Client(), "demo", state="working")
     assert [(a["name"], a["endpoint"], a["on_dead_server"]) for a in v["agents"]] == [
         ("researcher-0001", "g2", True)]
@@ -247,3 +255,71 @@ def test_status_json_carries_the_verdict(monkeypatch):
     assert r.exit_code == 1 and json.loads(r.output)["verdict"]["level"] == "failing"
     r = runner.invoke(cli.app, ["status", "s"])
     assert r.output.startswith("FAILING: type a: launches refused: x; no health snapshot yet")
+
+
+def test_world_alerts_wait_for_two_misses_and_pending_is_degraded():
+    from flock.controller.health import alerts
+
+    def kinds(**w):
+        body = {"world": {"up": False, **w}, "workers": {}, "types": {}, "tools": {}}
+        return [a["kind"] for a in alerts(body)]
+
+    assert kinds(fails=1) == []
+    assert kinds(fails=2) == ["world_down"]
+    assert kinds(fails=2, slurm_state="PENDING") == ["world_pending"]
+    h = {"ts": 0, "body": {"alerts": [{"kind": "world_pending", "msg": "queued"}]}}
+    assert fs.verdict(_status(), h, 0)["level"] == "degraded"
+
+
+def test_status_reads_an_old_format_sample(app, store, clock, monkeypatch):
+    """After a restart `latest()` may be a stored slim sample from an older controller:
+    summed `providers`, no `provider_servers`, `workers` as aggregates."""
+    store.put_swarm(make_spec(), clock().timestamp())
+    old = {"world": None, "types": {}, "tools": {}, "tokens": {"by_type": {}}, "alerts": [],
+           "providers": {"v": {"waiting": 3.0, "running": 5.0, "kv": 0.4}},
+           "workers": {"count": 2, "max_nonreclaim_frac": None, "min_eta_limit_s": None,
+                       "restoring": 0, "relaunches": 0}}
+    store.add_health_sample("demo", clock().timestamp(), "5m", old, 3600)
+    _wire(monkeypatch, app)
+    r = runner.invoke(cli.app, ["status", "demo"])
+    assert r.exit_code == 0 and "Traceback" not in r.output, r.output
+    for bad in ({"v": None}, [], {"v": {"g": 1}}):
+        assert fs.servers({"body": {"provider_servers": bad}}) in ({}, {"v": {}})
+        assert fs.dead_servers({"body": {"provider_servers": bad}}) == set()
+
+
+def test_events_of_a_removed_agent(monkeypatch):
+    evs = [{"type": "turn_ended", "ts": "t", "agent": "w-0001", "data": {"data": {"status": "ok"}}}]
+
+    def call(_, method, path, **kw):
+        if path == "/agents/w-0001":
+            from flock.client import ClientError
+            raise ClientError("error 404", 404, "{}")
+        return {"events": evs, "next": 1}
+
+    monkeypatch.setattr(Client, "_call", call)
+    (page,) = fs.events(Client(), "w-0001")
+    assert page["events"][0]["name"] == "agent.turn_ended" and page["events"][0]["agent"] == "w-0001"
+
+
+def test_hidden_old_events_and_agents(monkeypatch):
+    """Prompts in resumed runs still call them: raw JSONL and the old agents table."""
+    evs = [{"type": "spawned", "ts": "t", "agent": "l-0000", "data": {"child": "l-0000-a-0001"}}]
+    rows = [{"name": "l-0000-a-0001", "state": "working", "provider": None, "worker": "w0",
+             "turns": 2, "pending": 0, "cost_usd": 0.01, "last_heartbeat": "t"}]
+    seen = []
+
+    def call(_, method, path, **kw):
+        seen.append(path)
+        return {"agents": rows, "cursor": None} if path.endswith("/agents") else \
+            {"events": evs, "next": 1}
+
+    monkeypatch.setattr(Client, "_call", call)
+    r = runner.invoke(cli.app, ["events", "l-0000", "--wait", "--timeout", "0"])
+    assert r.exit_code == 0 and json.loads(r.stdout.splitlines()[0]) == evs[0]
+    assert "│ events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
+    r = runner.invoke(cli.app, ["agents", "s", "--parent", "l-0000"])
+    lines = r.output.splitlines()
+    assert lines[0].split() == ["name", "state", "provider", "worker", "turns", "pending", "cost",
+                                "last_heartbeat"]
+    assert lines[1].split()[:3] == ["l-0000-a-0001", "working", "-"]  # awk '$2=="working"'

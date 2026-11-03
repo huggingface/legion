@@ -577,12 +577,13 @@ def _print_health(h: dict | None, workers: list[dict]) -> None:
                + ("no world" if not w else f"world {'up' if w['up'] else 'DOWN'} "
                   f"{_num(w.get('manifest_ms'))} ms"
                   + (f" slurm {w['slurm_state']}" if w.get("slurm_state") else "")))
-    for p, servers in b["providers"].items():
+    for p, servers in flock_status.servers(h).items():
         for host, s in sorted(servers.items()):
             typer.echo(f"vllm {p} {host}: " + (
                 f"waiting {_num(s.get('waiting'))} running {_num(s.get('running'))} "
-                f"kv {_num(s.get('kv'), '{:.0%}')}" if s["up"] else f"DOWN ({s.get('error')})")
-                + f", {s.get('agents', 0)} agents")
+                f"kv {_num(s.get('kv'), '{:.0%}')}" if s["up"]
+                else f"{'DOWN' if s.get('dead') else 'no answer'} x{s.get('fails', 1)} "
+                     f"({s.get('error')})") + f", {s.get('agents', 0)} agents")
     for t, r in (b.get("ramps") or {}).items():
         nxt = f", next +{r['next_add']} at {_hhmm(r['next_at'])}" if r["next_add"] else ""
         typer.echo(f"ramp {t}: step {r['step']}/{r['steps']} ({r['replicas']} of max "
@@ -592,8 +593,8 @@ def _print_health(h: dict | None, workers: list[dict]) -> None:
     for name, t in b["types"].items():
         gens = " ".join(f"{r[:8]}:{n}" for r, n in sorted(t["gens"].items(), key=lambda x: -x[1]))
         typer.echo(f"type {name}: {_states(t['by_state'])}  revs {gens or '-'}")
-    ws = sorted(b["workers"].items(), key=lambda x: (x[1].get("eta_limit_s") is None,
-                                                     x[1].get("eta_limit_s") or 0))
+    ws = sorted(((wid, wk) for wid, wk in b["workers"].items() if isinstance(wk, dict)),
+                key=lambda x: (x[1].get("eta_limit_s") is None, x[1].get("eta_limit_s") or 0))
     if ws:
         typer.echo("workers (by time to memory limit):")
         _table([[wid, f"{_num(wk['mem'].get('current_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
@@ -757,6 +758,38 @@ def remove(name: str) -> None:
 # Hidden aliases: agents of runs started before flock-agent still call `flock spawn|remove`.
 app.command("spawn", hidden=True)(spawn)
 app.command("remove", hidden=True)(remove)
+
+
+# Hidden, old output: prompts in resumed runs' sessions call `flock events <child> --wait`
+# (examples/prompts) and parse `flock agents SWARM --parent` (experiments/pixel/run/leader.md).
+@app.command("events", hidden=True)
+def old_events(name: str, after: int = typer.Option(0, "--after"),
+               follow: bool = typer.Option(False, "--follow", "-f"),
+               wait: bool = typer.Option(False, "--wait"),
+               timeout: float = typer.Option(600, "--timeout"),
+               pretty: bool = typer.Option(False, "--pretty")) -> None:
+    """Raw JSONL (or `status --events` lines with --pretty); see `flock status --events`."""
+    api = Client()
+    for page in flock_status.events(api, name, after=after, follow=follow or wait,
+                                    timeout=timeout if wait else None, raw=not pretty):
+        for ev in page["events"]:
+            typer.echo(pretty_event(ev) if pretty else json.dumps(ev))
+        after = page["next"]
+        if wait and page["events"]:
+            break
+    if wait:
+        typer.echo(f"next: {after}", err=True)
+
+
+@app.command("agents", hidden=True)
+def old_agents(swarm: str, type: str = typer.Option(None, "--type"),
+               state: str = typer.Option(None, "--state"),
+               parent: str = typer.Option(None, "--parent")) -> None:
+    """The old table (name state provider worker ...); see `flock status --type/--state/--parent`."""
+    _table([[a["name"], a["state"], a.get("provider") or "-", a["worker"], a["turns"],
+             a["pending"], f"${a['cost_usd']:.4f}", a["last_heartbeat"]]
+            for a in Client().agents(swarm, type=type, state=state, parent=parent)],
+           ["name", "state", "provider", "worker", "turns", "pending", "cost", "last_heartbeat"])
 
 if __name__ == "__main__":
     app()

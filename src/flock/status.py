@@ -9,11 +9,11 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from flock.client import Client
+from flock.client import Client, ClientError
 from flock.models import AGENT_NAME_RE
 
 STALE_S = 120.0  # a health snapshot older than this: the controller's prober is not running
-FAILING = ("world_down", "provider_down")  # snapshot alerts that make the verdict `failing`
+FAILING = ("world_down", "provider_down")  # world_pending (Slurm PENDING) is degraded  # snapshot alerts that make the verdict `failing`
 
 # Stored event type -> its dotted name where `<family>.<rest>` or `<stream>.<type>` is not it.
 # Stored events are never rewritten (resume reads them); docs/health.md "Events" has the table.
@@ -60,14 +60,24 @@ def normalise(ev: dict, swarm: str, agent: dict | None = None) -> dict:
 
 
 def events(client: Client, name: str, *, after: int = 0, follow: bool = False,
-           prefix: str = "", timeout: float | None = None) -> Iterator[dict]:
+           prefix: str = "", timeout: float | None = None, raw: bool = False) -> Iterator[dict]:
     """Pages `{"events": [normalised, ...], "next": cursor}` of a swarm's or an agent's stream
-    after `after`, only the names starting with `prefix`; `follow` long-polls (until
-    `timeout` s, if given)."""
+    (a removed agent's too) after `after`, only the names starting with `prefix`; `follow`
+    long-polls (until `timeout` s, if given). `raw`: the stored events as they are."""
     is_swarm = not (client.as_agent or AGENT_NAME_RE.match(name)) and client.is_swarm(name)
-    agent = None if is_swarm else client.agent(name)
-    swarm = name if is_swarm else agent["swarm"]
+    agent = None
+    if not is_swarm and not raw:
+        try:
+            agent = client.agent(name)
+        except ClientError as e:
+            if e.status != 404:
+                raise
+            agent = {"name": name}  # removed: its stored events are still served
+    swarm = name if is_swarm else (agent or {}).get("swarm", "")
     for page in client.events(name, after=after, follow=follow, timeout=timeout, swarm=is_swarm):
+        if raw:
+            yield page
+            continue
         evs = (normalise(e, swarm, agent) for e in page["events"])
         yield {"events": [e for e in evs if e["name"].startswith(prefix)], "next": page["next"]}
 
@@ -99,10 +109,19 @@ def verdict(status: dict, health: dict | None, now: float | None = None) -> dict
             "reasons": failing + degraded}
 
 
+def servers(health: dict | None) -> dict[str, dict[str, dict]]:
+    """The snapshot's `provider_servers` (provider -> `host:port` -> probe); empty when the
+    snapshot predates it or it is malformed (a stored sample from an older controller)."""
+    ps = ((health or {}).get("body") or {}).get("provider_servers")
+    if not isinstance(ps, dict):
+        return {}
+    return {p: {h: sv for h, sv in hosts.items() if isinstance(sv, dict) and "up" in sv}
+            for p, hosts in ps.items() if isinstance(hosts, dict)}
+
+
 def dead_servers(health: dict | None) -> set[str]:
-    """`host:port` of every model server the last probe found down."""
-    return {h for servers in ((health or {}).get("body", {}).get("providers") or {}).values()
-            for h, sv in servers.items() if not sv["up"]}
+    """`host:port` of every model server down DOWN_AFTER probes in a row."""
+    return {h for hosts in servers(health).values() for h, sv in hosts.items() if sv.get("dead")}
 
 
 def view(client: Client, swarm: str, *, type: str | None = None, state: str | None = None,
