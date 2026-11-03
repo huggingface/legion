@@ -2,7 +2,7 @@
 
 A world is any HTTP server that speaks World API v1 (`flock.world.protocol`); this base is a
 convenience, not a requirement. Subclass `World`, mark tool methods with `@tool`, and serve it
-with `flock world serve module:Class` (`flock.world.server`):
+with `python -m flock.world serve module:Class` (`flock.world.server`):
 
     from flock.world import Agent, ToolError, World, tool
 
@@ -230,7 +230,7 @@ class World:
         """An agent got its first prompt on its worker (again after a relaunch)."""
 
     def on_agent_done(self, agent: Agent, data: dict[str, Any]) -> None:
-        """An agent was removed from the swarm (scale down, `flock remove`)."""
+        """An agent was removed from the swarm (scale down, `flock stop --delete`, `flock-agent remove`)."""
 
     def on_turn(self, agent: Agent, data: dict[str, Any]) -> None:
         """An agent's turn ended: `data` has status, tool_calls, turn."""

@@ -9,7 +9,7 @@ and rounds), §4.4 (live settings), §4.7 (the Eliza yardstick), §13 (budget st
 
 Code: `models.py` (`LoopSpec`, `LoopMeta`, `LoopStartCommand`, `LoopStopCommand`,
 `LoopStatus`), `controller/loop.py` (the engine), `worker/agents.py` + `worker/loop.py` (the
-worker side and rendering), `cli.py` (`flock loop`).
+worker side and rendering), `cli.py` (`flock stop --final`, `flock status`).
 
 ## Spec
 
@@ -53,7 +53,7 @@ limits:
 | `notices` | default `false`. `true`: the round prompts name the board notifications since the agent's last round in one line after the rendered prompt (see "Notices") |
 | `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
 | `while.max_rounds`, `while.agent_usd` | per agent: the agent leaves the loop; when every agent has left, the loop stops |
-| `final.prompt` / `prompt_file` | sent once to every live agent when the loop stops (any reason except `flock loop --stop --no-final` and the hard budget stop) |
+| `final.prompt` / `prompt_file` | sent once to every live agent when the loop stops (any reason except a stop with `final: false` (`POST /swarms/{swarm}/loop`) and the hard budget stop) |
 | `final.reserve_usd` | subtracted from `limits.budget_usd` to get the point where loops stop; summed over the types that have a final round |
 
 Every field is optional except a prompt; a type without `loop:` behaves exactly as before.
@@ -85,7 +85,7 @@ bulk-prompt path (`POST /swarms/{s}/prompts` with `state: idle, skip_pending: tr
 that is working or already has an undelivered prompt is skipped, so prompts never stack, and
 every turn is admitted under the provider's `max_working` like any other prompt.
 
-**Who re-prompts on `turn_end`** (`flock loop` shows it as the mode):
+**Who re-prompts on `turn_end`** (`flock status` shows it as the mode):
 
 - `worker` (provider without `max_working`): the controller sends one `loop_start` command per
   agent. The worker then sends the rendered prompt when the agent is
@@ -114,7 +114,7 @@ count.
 
 **Stopping.** The loop stops when a type-wide condition fails (`until`, `budget_usd`, the
 budget threshold), when every agent has left it (`max_rounds`, `agent_usd`,
-`errors`; the reason is theirs if they agree, else `agents_done`), on `flock loop --stop`, or
+`errors`; the reason is theirs if they agree, else `agents_done`), on `flock stop --final`, or
 when `loop:` is removed from the spec (no final round then). Stopping drops the type's
 undelivered loop prompts and sends `loop_stop` to worker-side loops.
 
@@ -164,9 +164,9 @@ were never delivered their rounds are taken back, so the `loop_start` carries th
 sent. Removing `final`
 while the final round is in flight ends it (`final_done`, note "final removed from the spec");
 its final prompts not yet fetched by a worker are dropped, and one already fetched is not sent
-again. Any end of a final round (also `--stop --no-final` during it, and the hard budget stop)
+again. Any end of a final round (also a stop with `final: false` during it, and the hard budget stop)
 drops its undelivered final prompts.
-A stopped loop stays stopped until `flock loop --start`. `limits.budget_usd` is live too.
+A stopped loop stays stopped until the loop is started again (`POST /swarms/{swarm}/loop`; no CLI command). `limits.budget_usd` is live too.
 
 **Restart.** Loop state is in the controller's SQLite (`loops`, `loop_agents`, `swarm_flags`),
 so a controller restart resumes the loops; only queued wake-ups are lost.
@@ -231,7 +231,7 @@ queued, is taken back from the wake count, and from the round count when it coun
 
 Why: in a thread of five agents each reply woke the four others, and each wake was a full round,
 so `max_rounds` went on board chatter in minutes. With the defaults one agent gets at most one
-wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock launch` and `flock run` warn when an `on:` source can never
+wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock launch` warns when an `on:` source can never
 fire: a `comms.*` source on a type that is not on the board (no `comms: true` or no swarm
 `comms:` block), a kind the swarm's `comms.wake` leaves out, or a source with no feeder.
 
@@ -288,10 +288,8 @@ prompts, so wakes and cadence rounds are apart; the same fields are in `run.json
 ### CLI
 
 ```
-flock loop eliza-v1                                  # state per type and per agent
-flock loop eliza-v1 --type ds --stop                 # stop now, then the final round
-flock loop eliza-v1 --type ds --stop --no-final      # stop, no final round
-flock loop eliza-v1 --type ds --start                # run the loop again from round 1
+flock stop eliza-v1 --final --type ds                # stop now, then the final round
+# no final round, or starting a stopped loop again: POST /swarms/eliza-v1/loop (no CLI command)
 flock status eliza-v1                                # adds: loop ds: running (controller, every 120s), rounds 3-5, 0/3 agents done
 flock events eliza-v1                                # the swarm stream
 ```
@@ -350,7 +348,7 @@ How `config.yaml` and `swarm.py::main_loop` map:
 | `caps.final_reserve_usd: 0.60`, `soft_cap = global - reserve` | `final.reserve_usd: 0.60`; the `final_reserve` budget stop |
 | `caps.wall_clock_s: 7200` | `while.until: 2h` |
 | `final_round: auto` | `final:` |
-| `final_round: off` / `manual` | no `final:` / `flock loop --stop --no-final`, then a manual prompt |
+| `final_round: off` / `manual` | no `final:` / stop with `final: false` (`POST /swarms/{swarm}/loop`), then a manual prompt |
 | `ctx.halt(...)` when `global_spend >= soft_cap` | `budget_stop {phase: final_reserve}` |
 | `ROUND` template `{rnd} {el} {wall} {spent} {cap} {why} {summary}` | `{round} {elapsed} {wall} {spend} {cap} {why} {last_summary}` |
 | `done_for_now(summary)` | the `done` tool; its summary is `{last_summary}` |

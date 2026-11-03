@@ -3,7 +3,7 @@
 # prompts and spawn policy differ.
 swarm: ${CHATBOT_RUN:-hierarchy}             # ${VAR:-default}: flock launch --env run.env (run 4 README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
-  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
+  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock launch` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
   cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
   mem: ${WORKER_MEM:-7G}
@@ -84,7 +84,7 @@ types:
     replicas_ramp: null                     # not ramped
     system_prompt_append_file: prompts/worker.md
     workers: {initial: 0, max_extra: 17}    # 200 workers at 12 per worker, opened on demand
-# Workers have no spawn entry: depth 0, so `flock spawn` is refused for them.
+# Workers have no spawn entry: depth 0, so `flock-agent spawn` is refused for them.
 spawn:
   coordinator: {types: {worker: 4}, depth: 1}
 # 50 coordinators + 200 workers. spawned_total never frees a place: room for teams to be rebuilt.

@@ -1,4 +1,4 @@
-"""Local smoke of run3's agent-pi type: `flock run` (compute local) with the chatbot3 world, the
+"""Local smoke of run3's agent-pi type: `flock.controller.localrun` (compute local) with the chatbot3 world, the
 fake OpenAI server scripted so each Pi agent calls flock-tool write_file, run_bot, add_probe and
 post from its bash tool, then ends the turn in plain text; the fake msgboard as the board.
 
@@ -85,7 +85,7 @@ env.update(HOME=str(OUT / "home"), PATH=f"{node}:{os.environ['PI_PREFIX_BIN']}:{
 (OUT / "home").mkdir()
 out = open(OUT / "flock-run.out", "w")  # noqa: SIM115 (the process holds it)
 t0 = time.time()
-proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "run", "spec.pi.yaml", "--until",
+proc = subprocess.Popen([sys.executable, "-m", "flock.controller.localrun", "spec.pi.yaml", "--until",
                          f"{int(SECS)}s", "--skip-preflight"], cwd=exp, env=env, stdout=out,
                         stderr=subprocess.STDOUT, start_new_session=True)
 rss: dict[str, list[int]] = {}  # Pi pid -> VmRSS samples (kB)
@@ -133,7 +133,7 @@ def sample_rss() -> None:
 
 
 def _under(pid: int, ps: dict) -> bool:
-    """A flock worker started by our `flock run` (its parent chain reaches proc.pid)."""
+    """A flock worker started by our `flock.controller.localrun` (its parent chain reaches proc.pid)."""
     if b"flock.worker.main" not in ps[pid][1]:
         return False
     while pid in ps and pid > 1:

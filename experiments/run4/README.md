@@ -9,7 +9,7 @@ module interface. This folder prepares the run; nothing here has been launched.
 - `spec.yaml`, `prompts/`: the agreed system prompt, continuation-only rounds,
   150 model calls / 2 h per round, 12 Pi agents per worker and a 48 h run.
 - One `spec.yaml` holds the cluster settings too: `compute.kind: ${COMPUTE_KIND:-slurm}`
-  (`COMPUTE_KIND=local` for `flock run`), the worker size `${WORKER_CPUS:-4}`/`${WORKER_MEM:-7G}`,
+  (`COMPUTE_KIND=local` for `flock launch`), the worker size `${WORKER_CPUS:-4}`/`${WORKER_MEM:-7G}`,
   `bucket`/`namespace` from RUN3_BUCKET/RUN3_NAMESPACE, and both `world.command` (local) and
   `world.url` (Slurm). `flock launch|update spec.yaml --env run.env` fills the `${VAR:-default}`
   placeholders (an `--env` file wins over the shell); the defaults give a placeholder spec offline.

@@ -173,7 +173,7 @@ class LocalJobsClient:
             popen = subprocess.Popen(
                 self.command, env=self.process_env(env, secrets), stdin=subprocess.DEVNULL,
                 stdout=handle, stderr=subprocess.STDOUT, cwd=str(self.root),
-                start_new_session=True,  # Ctrl-C in the terminal reaches `flock run`, not workers
+                start_new_session=True,  # Ctrl-C in the terminal reaches the local run, not workers
             )
         except Exception:
             handle.close()

@@ -111,8 +111,8 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     assert r.exit_code == 1 and "missing.md not found" in r.output
 
 
-def test_flock_run_checks_loops_like_apply(tmp_path, monkeypatch):
-    """`flock run` runs the same CLI loop checks as `flock launch` (`_check_loops`): the `on:`
+def test_local_run_checks_loops_like_apply(tmp_path, monkeypatch):
+    """The local run (flock.controller.localrun) runs the same CLI loop checks as `flock launch` (`_check_loops`): the `on:`
     warning, and refusals on the CLI before anything starts."""
     from flock.controller import localrun
 
@@ -131,13 +131,13 @@ def test_flock_run_checks_loops_like_apply(tmp_path, monkeypatch):
                                           "on": ["comms.mention"]}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["run", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
     assert "loop.on comms.mention: no comms feeder" in r.output and len(started) == 1
 
     raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["run", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 1 and len(started) == 1  # refused on the CLI: no run started
     assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
 

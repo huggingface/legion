@@ -2,7 +2,7 @@
 
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
 FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
-a live `flock run` in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
+a local run `flock launch` started in this directory (`.flock/current`, docs/local.md) is used. Inside an agent the worker sets FLOCK_AGENT_TOKEN (that
 agent's scoped token, which wins over FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; when the
 agent's pin file (FLOCK_TOOLS_PIN) names a worker gateway, calls go through it instead. See
 docs/spawn.md for what an agent may call.
@@ -10,11 +10,14 @@ docs/spawn.md for what an agent may call.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
 import re
+import signal
 import subprocess
+import sys
 import time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -60,11 +63,11 @@ def auth_headers(url: str, env=os.environ) -> dict[str, str]:
     return headers
 
 
-CURRENT_FILE = Path(".flock") / "current"  # written by `flock run` (docs/local.md)
+CURRENT_FILE = Path(".flock") / "current"  # written by a local run (docs/local.md)
 
 
 def local_run(env=os.environ) -> dict | None:
-    """The live `flock run` this CLI talks to when FLOCK_URL is unset: `$FLOCK_CURRENT` or
+    """The live local run this CLI talks to when FLOCK_URL is unset: `$FLOCK_CURRENT` or
     `.flock/current` in the working directory, if its process is still alive."""
     if env.get("FLOCK_URL"):
         return None
@@ -299,8 +302,7 @@ def _loop_line(lp: dict) -> str:
 
 
 class SpecError(Exception):
-    """A spec that cannot be applied: the lines say why (printed to stderr by the CLI, shown in
-    the `flock run --watch` view)."""
+    """A spec that cannot be applied: the lines say why (printed to stderr by the CLI)."""
 
     def __init__(self, lines: list[str]) -> None:
         super().__init__("; ".join(lines))
@@ -559,6 +561,19 @@ def launch(
     _check_loops(spec)
     _warn_extra(spec)
     bundle = _tools_bundle(spec, spec_file)
+    started = _start_local(spec, spec_file, env_files or ()) if spec.compute.kind == "local" \
+        else None
+    try:
+        _launch(spec, spec_file, bundle, source, type_, agent, adopt, checkpoint, no_checkpoint,
+                preflight, strict)
+    except BaseException:  # also Ctrl-C during the preflight
+        if started is not None:  # nothing created: do not leave a controller behind
+            _end_local(started)
+        raise
+
+
+def _launch(spec, spec_file, bundle, source, type_, agent, adopt, checkpoint, no_checkpoint,
+            preflight, strict) -> None:
     with client() as c:
         r = _request(c, "GET", f"/swarms/{spec.swarm}")
         if r.status_code == 404 and adopt:
@@ -612,6 +627,53 @@ def launch(
     _print_status(st)
 
 
+LOCAL_START_S = 120.0  # s `launch` waits for a local controller to come up
+
+
+def _start_local(spec: SwarmSpec, spec_file: str, env_files) -> dict | None:
+    """`compute: local`: start this machine's controller and workers detached
+    (flock.controller.localrun, output in .flock/launch.log) unless a live one in this directory
+    already serves the swarm; wait for its `.flock/current`. Returns the run started, or None."""
+    if os.environ.get("FLOCK_URL"):
+        return None  # pointed at a controller explicitly
+    if (run := local_run()) is not None:
+        if run.get("swarm") != spec.swarm:
+            _fail([(f"a local run of {run.get('swarm')} is up in this directory: "
+                    f"`flock stop {run.get('swarm')} --release` first")])
+        return None
+    data_dir = Path(".flock")
+    data_dir.mkdir(exist_ok=True)
+    cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
+           "--data-dir", str(data_dir), *(a for f in env_files for a in ("--env", f))]
+    with (data_dir / "launch.log").open("w") as out:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                                start_new_session=True)
+    end = time.monotonic() + LOCAL_START_S
+    while time.monotonic() < end:
+        if (run := local_run()) is not None and run.get("pid") == proc.pid:
+            typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {data_dir}/launch.log)")
+            return run
+        if proc.poll() is not None:
+            break
+        _sleep(0.2)
+    else:
+        proc.terminate()
+    log = (data_dir / "launch.log").read_text(errors="replace").strip().splitlines()[-20:]
+    _fail([*log, "the local controller did not start"])
+    return None
+
+
+def _end_local(run: dict) -> None:
+    """SIGTERM the background local run: it drains what is left, writes the run bundle and
+    exits (docs/local.md)."""
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(run["pid"], signal.SIGTERM)
+    end = time.monotonic() + LOCAL_START_S
+    while local_run() is not None and time.monotonic() < end:
+        _sleep(0.2)
+    typer.echo(f"local run ended; bundle: {run['run_dir']}/run.json")
+
+
 def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
     """What `launch` on a stored swarm refuses: the folder's spec against the stored one,
     without the live replicas (the ramp rewrites them) and `world.dir` (absolute: the same
@@ -655,9 +717,25 @@ def stop(
         False, "--final", help="stop the loops after their final round (default: every type "
                                "with a loop)"),
     reason: str = typer.Option("", "--reason", help="why (shown in status and events)"),
+    delete: bool = typer.Option(
+        False, "--delete", help="drain and DELETE the swarm from the controller (asks first)"),
+    yes: bool = typer.Option(False, "--yes", help="with --delete: do not ask"),
 ) -> None:
     """Stop a swarm, keeping everything (docs/live.md "Lifecycle"). Default: hold, no new
-    prompts or loop rounds, running turns finish, workers stay. `flock launch SWARM` resumes."""
+    prompts or loop rounds, running turns finish, workers stay. `flock launch SWARM` resumes.
+    A local run (`compute: local`) ends its background controller (and writes its bundle) on
+    --delete only."""
+    if delete:
+        if final or release or interrupt or type_ or agent:
+            _fail(["--delete takes only --yes"])
+        if not yes:
+            typer.confirm(f"delete swarm {swarm} from the controller (agents drained, state "
+                          "gone; the bucket keeps its copies)?", abort=True)
+        if (run := local_run()) is not None and run.get("swarm") == swarm:
+            _end_local(run)  # no DELETE first: the bundle is written from the rows it would drop
+        else:
+            typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
+        return
     if final:
         if release or interrupt or agent:
             _fail(["--final takes only --type"])
@@ -722,7 +800,7 @@ def update_swarm(c: httpx.Client, spec_file: str, *, preflight: bool | None = No
     r = _request(c, "GET", f"/swarms/{spec.swarm}")
     if r.status_code == 404:
         raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
-                          "with `flock run` (compute: local) or `flock launch`")])
+                          "with `flock launch`")])
     if r.status_code >= 400:
         raise SpecError([f"error {r.status_code}: {_detail(r)}"])
     old = SwarmSpec.model_validate(r.json()["spec"])
@@ -811,73 +889,6 @@ def update(
         raise typer.Exit(1) from None
     for line in lines:
         typer.echo(line, err=line.startswith("warning:"))
-
-
-@app.command()
-def run(
-    spec_file: str,
-    data_dir: str = typer.Option(".flock", "--data-dir",
-                                  help="Where the run dir and `current` go."),
-    until: str = typer.Option(
-        None, "--until",
-        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle with nothing "
-             "pending, after at least one turn (and one per agent with --prompt), every loop over."),
-    prompt_text: str = typer.Option(None, "--prompt",
-                                    help="Send this prompt to every agent once at start."),
-    preflight: bool = typer.Option(
-        None, "--preflight/--skip-preflight",
-        help="Probe provider-backed models first (default: on when the spec has any)."),
-    strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
-    grace: float = typer.Option(10.0, "--grace",
-                                help="Seconds in-flight turns get to finish at stop."),
-    watch: bool = typer.Option(
-        False, "--watch",
-        help="Watch the experiment folder (spec, prompts, tools/) and apply each saved change "
-             "to the running swarm, as `flock update` does (docs/live.md)."),
-    env_files: list[str] | None = ENV_OPT,
-) -> None:
-    """Run a `compute: local` swarm on this machine: controller on 127.0.0.1, workers as
-    subprocesses, a live view in the terminal, a run bundle at the end (docs/local.md). Other
-    commands (`status`, `agents`, `prompt`, `events`, ...) reach it from this directory."""
-    import asyncio
-
-    from flock.models import parse_duration
-
-    try:
-        from flock.controller.localrun import RunOptions, run_local
-    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
-        typer.echo(f"flock run needs the controller extra (pip install 'flock[controller]'): {e}",
-                   err=True)
-        raise typer.Exit(1) from None
-    env_files = env_files or []
-    spec = load_spec(spec_file, env_files)
-    if spec.compute.kind != "local":
-        typer.echo(f"{spec_file}: compute is {spec.compute.kind!r}; `flock run` runs "
-                   "`compute: local` specs. For hf-jobs, deploy a controller and use "
-                   "`flock launch` (docs/deploy-job.md), or set `compute: local`.", err=True)
-        raise typer.Exit(1)
-    _check_loops(spec)
-    _warn_extra(spec)
-    bundle = _tools_bundle(spec, spec_file)
-    seconds, idle = None, False
-    if until == "idle":
-        idle = True
-    elif until:
-        try:
-            seconds = parse_duration(until).total_seconds()
-        except ValueError as e:
-            typer.echo(f"--until: {e} (or `idle`)", err=True)
-            raise typer.Exit(2) from None
-    if preflight is None:
-        preflight = _provider_backed(spec)
-    elif not preflight and (unprobed := _unprobed(spec)):
-        _warn_unverified(unprobed, "preflight skipped")
-    opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
-                      prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
-                      tools=bundle.data if bundle is not None else None,
-                      watch=Path(spec_file) if watch else None, env_files=env_files)
-    result = asyncio.run(run_local(opts))
-    raise typer.Exit(result.exit_code)
 
 
 def _tools_bundle(spec: SwarmSpec, spec_file: str):
@@ -1193,64 +1204,6 @@ def events(
 
 
 @app.command()
-def loop(
-    swarm: str,
-    type: str = typer.Option(None, "--type", help="the agent type whose loop to stop or start"),
-    stop: bool = typer.Option(False, "--stop", help="stop the loop (then its final round)"),
-    start: bool = typer.Option(False, "--start", help="start the loop again from round 0"),
-    final: bool = typer.Option(True, "--final/--no-final", help="with --stop: run the final round"),
-) -> None:
-    """A swarm's loops (docs/loop.md): state per type and per agent, or --stop / --start one."""
-    if stop and start:
-        typer.echo("--stop or --start, not both", err=True)
-        raise typer.Exit(1)
-    if stop or start:
-        if not type:
-            typer.echo("--stop/--start need --type", err=True)
-            raise typer.Exit(1)
-        body = {"type": type, "action": "stop" if stop else "start", "final": final}
-        typer.echo(_loop_line(_call("POST", f"/swarms/{swarm}/loop", json=body)))
-        return
-    loops = [lp for lp in _call("GET", f"/swarms/{swarm}/loop") if not type or lp["type"] == type]
-    if not loops:
-        typer.echo("no loops")
-    for lp in loops:
-        typer.echo(_loop_line(lp))
-        rows = [[n, a["phase"], a["rounds"], a["done_reason"], a["final"], a["errors"]]
-                for n, a in (lp.get("per_agent") or {}).items()]
-        if rows:
-            _table(rows, ["agent", "phase", "rounds", "done", "final", "errors"])
-
-
-@app.command()
-def remove(swarm: str) -> None:
-    """Drain and remove a swarm. Given a spawned agent's name (or inside an agent), remove that
-    agent and everything it spawned."""
-    if _as_agent() or not _is_swarm(swarm):
-        typer.echo(json.dumps(_call("DELETE", f"/agents/{swarm}")))
-        return
-    typer.echo(json.dumps(_call("DELETE", f"/swarms/{swarm}")))
-
-
-@app.command()
-def spawn(
-    type: str,
-    prompt: str = typer.Option(None, "--prompt", help="first prompt for the child"),
-    key: str = typer.Option(None, "--key", help="idempotency key: a repeat returns the same child"),
-    parent: str = typer.Option(None, "--parent", help="default: $FLOCK_AGENT (yourself)"),
-    as_json: bool = typer.Option(False, "--json", help="print the whole ack"),
-) -> None:
-    """Spawn a child agent of TYPE; prints its name."""
-    parent = parent or os.environ.get("FLOCK_AGENT")
-    if not parent:
-        typer.echo("no parent: pass --parent or set FLOCK_AGENT", err=True)
-        raise typer.Exit(1)
-    body = {"type": type, "prompt": prompt, "key": key}
-    ack = _call("POST", f"/agents/{parent}/spawn", json=body)
-    typer.echo(json.dumps(ack) if as_json else ack["name"])
-
-
-@app.command()
 def workers(swarm: str) -> None:
     """List a swarm's workers."""
     found = _call("GET", "/workers", params={"swarm": swarm})
@@ -1280,86 +1233,41 @@ def workers(swarm: str) -> None:
         typer.echo("full job logs: hf jobs logs <job>", err=True)
 
 
-world_app = typer.Typer(help="Worlds: shared state behind tools (docs/world.md).",
-                        no_args_is_help=True)
-app.add_typer(world_app, name="world")
+agent_app = typer.Typer(help="Inside an agent (FLOCK_AGENT_TOKEN): spawn and remove child agents "
+                             "(docs/spawn.md).", no_args_is_help=True)
 
 
-@world_app.command("serve")
-def world_serve(
-    target: str = typer.Argument(..., help="module:Class, imported from the current directory."),
-    host: str = typer.Option(None, "--host", help="Default: $FLOCK_WORLD_HOST or 127.0.0.1."),
-    port: int = typer.Option(None, "--port", help="Default: $FLOCK_WORLD_PORT or 8765."),
-    token_env: str = typer.Option("FLOCK_WORLD_TOKEN", "--token-env",
-                                  help="The variable holding the shared secret (X-World-Token)."),
-    insecure: bool = typer.Option(False, "--insecure", help="Serve without a secret."),
+@agent_app.command()
+def spawn(
+    type: str,
+    prompt: str = typer.Option(None, "--prompt", help="first prompt for the child"),
+    key: str = typer.Option(None, "--key", help="idempotency key: a repeat returns the same child"),
+    parent: str = typer.Option(None, "--parent", help="default: $FLOCK_AGENT (yourself)"),
+    as_json: bool = typer.Option(False, "--json", help="print the whole ack"),
 ) -> None:
-    """Serve a flock.world.World subclass over HTTP (World API v1). A world flock starts gets
-    its port and secret in the environment."""
-    try:
-        from flock.home import cache_defaults
-        from flock.world.server import serve
-
-        cache_defaults()  # no usable HOME (a container): $FLOCK_HOMELESS_ROOT, else the temp dir
-    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
-        typer.echo(f"flock world serve needs the controller extra: {e}", err=True)
-        raise typer.Exit(1) from None
-    serve(target, host=host, port=port, token_env=token_env, insecure=insecure)
+    """Spawn a child agent of TYPE; prints its name."""
+    parent = parent or os.environ.get("FLOCK_AGENT")
+    if not parent:
+        typer.echo("no parent: pass --parent or set FLOCK_AGENT", err=True)
+        raise typer.Exit(1)
+    body = {"type": type, "prompt": prompt, "key": key}
+    ack = _call("POST", f"/agents/{parent}/spawn", json=body)
+    typer.echo(json.dumps(ack) if as_json else ack["name"])
 
 
-
-@world_app.command("doctor")
-def world_doctor(
-    url: str = typer.Argument(..., help="The world's URL."),
-    token: str = typer.Option(None, "--token", envvar="FLOCK_WORLD_TOKEN", help="The world secret."),
-    calls: int = typer.Option(0, "--calls", help="Concurrent calls of each read-only tool (0: none)."),
-) -> None:
-    """Check a world against the author checklist (docs/world.md); non-zero on a hard failure."""
-    from flock.world.doctor import doctor
-
-    lines, failed = doctor(url, token, calls)
-    typer.echo("\n".join(lines))
-    raise typer.Exit(1 if failed else 0)
+@agent_app.command()
+def remove(name: str) -> None:
+    """Remove a spawned agent and everything it spawned."""
+    typer.echo(json.dumps(_call("DELETE", f"/agents/{name}")))
 
 
-# -- the world's admin API through the controller (docs/world.md, "Admin API") ----------------
+# Hidden aliases: agents of runs started before flock-agent and stored specs still call
+# `flock spawn|remove` and `{python} -m flock.cli world serve`.
+app.command("spawn", hidden=True)(spawn)
+app.command("remove", hidden=True)(remove)
+from flock.world.__main__ import world_app
 
-@world_app.command("knobs")
-def world_knobs(swarm: str) -> None:
-    """The world's knobs (value, default, range) and paused lanes."""
-    out = _call("GET", f"/swarms/{swarm}/world/knobs")
-    rows = [[n, json.dumps(k["value"]), json.dumps(k["default"]), k["type"],
-             f"{'' if k['min'] is None else k['min']}..{'' if k['max'] is None else k['max']}",
-             k["doc"]] for n, k in out["knobs"].items()]
-    _table(rows, ["knob", "value", "default", "type", "range", "doc"])
-    if out.get("parked"):
-        typer.echo("world is parked (not built yet; it retries)")
-    for lane, why in out.get("paused", {}).items():
-        typer.echo(f"paused: {lane}{f' ({why})' if why else ''}")
-
-
-@world_app.command("set")
-def world_set(
-    swarm: str,
-    assignments: Annotated[list[str], typer.Argument(help="name=value (JSON, else a string)")],
-    reason: str = typer.Option("", "--reason", help="Recorded in the swarm's events."),
-) -> None:
-    """Set world knobs at runtime; the world keeps them across restarts."""
-    values = {}
-    for a in assignments:
-        name, eq, raw = a.partition("=")
-        if not eq or not name:
-            typer.echo(f"expected name=value, got {a!r}", err=True)
-            raise typer.Exit(2)
-        try:
-            values[name] = json.loads(raw)
-        except ValueError:
-            values[name] = raw
-    out = _call("PATCH", f"/swarms/{swarm}/world/knobs", json=values, params={"reason": reason},
-                headers=source_header(None))
-    for c in out["changes"]:
-        typer.echo(f"{c['name']}: {json.dumps(c['old'])} -> {json.dumps(c['new'])}")
-
+app.add_typer(world_app, name="world", hidden=True)
 
 if __name__ == "__main__":
     app()

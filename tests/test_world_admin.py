@@ -14,6 +14,7 @@ from flock import cli
 from flock.controller.api import create_app as controller_app
 from flock.models import SwarmSpec
 from flock.world import Admin, World, server, tool
+from flock.world.__main__ import world_app
 from flock.world.host import derived_token, world_admin_token
 from flock.world.server import create_app
 
@@ -300,13 +301,13 @@ def test_controller_proxies_the_admin_api_and_records_events(store, clock, monke
     c = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
     assert c.put("/swarms/sw", json=spec).status_code == 200
 
-    r = run.invoke(cli.app, ["world", "set", "sw", "hub.push.slots=2", "--reason", "hub is fine"])
+    r = run.invoke(world_app, ["set", "sw", "hub.push.slots=2", "--reason", "hub is fine"])
     assert r.exit_code == 0 and "hub.push.slots: 1 -> 2" in r.output, r.output
     assert world.slots_seen == [2]
-    r = run.invoke(cli.app, ["world", "set", "sw", "hub.push.slots=7"])
+    r = run.invoke(world_app, ["set", "sw", "hub.push.slots=7"])
     assert r.exit_code == 1 and "maximum" in r.output
     world.admin.pause(["push"], "429s")
-    r = run.invoke(cli.app, ["world", "knobs", "sw"])
+    r = run.invoke(world_app, ["knobs", "sw"])
     assert r.exit_code == 0 and "hub.push.slots" in r.output and "0..4" in r.output
     assert "paused: push (429s)" in r.output and world.paused("push")
 

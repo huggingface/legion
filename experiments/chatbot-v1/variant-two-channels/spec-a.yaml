@@ -1,4 +1,4 @@
-# Two-channel variant, swarm A (team A), phase 1. Run next to spec-b.yaml: two `flock run`s
+# Two-channel variant, swarm A (team A), phase 1. Run next to spec-b.yaml: two `flock launch`s
 # sharing ONE world that you start yourself (README.md "Two-channel variant"). Team A uses the
 # main channel; team B has its own channel in phase 1. Generated from ../spec.yaml: keep in sync.
 swarm: chatbot-v1-a

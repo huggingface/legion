@@ -40,7 +40,7 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     system = (EXP / "prompts/system.md").read_text()
     assert f"`{REPO}` on Hugging Face" in system and f"datasets/{REPO}` into `chatbot-swarm`" in system
     assert "chatbot-v5" not in system + spec.types["coordinator"].system_prompt
-    assert "## Interviews" in system and "flock spawn interviewer" in system
+    assert "## Interviews" in system and "flock-agent spawn interviewer" in system
     assert "Treat a `script` verdict as a bug to fix" in system and "team channel" in system
     assert "The real test: a strong interviewer" in system
     assert "understanding engine" in system and "general mechanisms" in system

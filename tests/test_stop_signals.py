@@ -57,7 +57,7 @@ def test_world_serve_stops_once(tmp_path, signals):
         port = s.getsockname()[1]
     env = {**_env(tmp_path), "FLOCK_WORLD_TOKEN": "w0rld-t0ken",
            "CHATBOT_WS": str(tmp_path / "ws")}
-    proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "world", "serve",
+    proc = subprocess.Popen([sys.executable, "-m", "flock.world", "serve",
                              "chatbot3:Chatbot3World", "--port", str(port)],
                             cwd=ROOT / "worlds" / "chatbot3", env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

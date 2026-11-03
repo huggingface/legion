@@ -1,6 +1,6 @@
 """Run 4's spawner wave: agent-spawner agents may spawn up to four agent-child peers, children
 cannot spawn, both get the shared system prompt plus their group section, a child's first
-prompt is the spawner's context, and an isolated Pi agent gets what `flock spawn` needs."""
+prompt is the spawner's context, and an isolated Pi agent gets what `flock-agent spawn` needs."""
 from __future__ import annotations
 
 import json
@@ -129,7 +129,7 @@ async def test_spawner_spawns_four_children_and_the_fifth_is_refused(client, app
 
 
 async def test_isolated_pi_env_carries_the_agent_token_and_the_flock_cli(tmp_path, monkeypatch):
-    """What `flock spawn` needs inside the Pi namespace: FLOCK_URL and the agent's own token
+    """What `flock-agent spawn` needs inside the Pi namespace: FLOCK_URL and the agent's own token
     (never FLOCK_TOKEN) in the environment, and the venv's `flock` on PATH under a read-only
     mount of the chroot."""
     import shutil
@@ -224,14 +224,14 @@ def _agent_env(url: str, home: Path) -> dict[str, str]:
 
 
 def _check_spawn(tmp_path: Path, wrap=None) -> None:
-    """`flock spawn` as an agent runs it (`wrap`: inside the namespace), against a fake
+    """`flock-agent spawn` as an agent runs it (`wrap`: inside the namespace), against a fake
     controller: it posts under the agent's own name with the agent token, never the worker's."""
     import subprocess
     import sys
 
-    flock_cli = Path(sys.executable).parent / "flock"
+    flock_cli = Path(sys.executable).parent / "flock-agent"
     if not flock_cli.exists():
-        pytest.skip("the flock console script is not installed next to this interpreter")
+        pytest.skip("the flock-agent console script is not installed next to this interpreter")
     server, seen = _fake_controller()
     workspace, home = tmp_path / "cedar", tmp_path / "home"
     workspace.mkdir()

@@ -1,25 +1,20 @@
-"""Live changes (docs/live.md): the `flock update` diff, the folder watch, what heartbeats
-carry, the runtime side (prompts at the next turn boundary, with a note), the CLI commands
-against the in-process app, and `flock run --watch` in process."""
+"""Live changes (docs/live.md): the `flock update` diff, what heartbeats carry, the
+runtime side (prompts at the next turn boundary, with a note), the CLI commands against the
+in-process app."""
 
 from __future__ import annotations
 
-import asyncio
-import io
 import json
 import textwrap
 from pathlib import Path
 
-import httpx
 import pytest
 import yaml
 from typer.testing import CliRunner
 
 from flock import cli
 from flock.comms.tools import tool_def
-from flock.controller import localrun
 from flock.live import (
-    FolderWatch,
     diff_specs,
     keep_replicas,
     world_tool_changes,
@@ -121,40 +116,6 @@ def test_keep_replicas_copies_live_counts_of_existing_types():
     new.types["fresh"] = new.types["calc"].model_copy(update={"replicas": 7})
     assert keep_replicas(old, new) == ["calc: replicas kept (spec 20, live 2)"]
     assert (new.types["calc"].replicas, new.types["fresh"].replicas) == (2, 7)
-
-
-# --------------------------------------------------------------------------- the folder watch
-
-
-def test_folder_watch_settles_and_follows_the_spec(tmp_path):
-    (tmp_path / "prompts").mkdir()
-    (tmp_path / "prompts" / "system.md").write_text("v1")
-    folder = tmp_path / "tools"
-    folder.mkdir()
-    (folder / "calc.py").write_text(TOOLS)
-    f = tmp_path / "spec.yaml"
-    r = raw()
-    r["types"]["calc"]["system_prompt_file"] = "prompts/system.md"
-    f.write_text(yaml.safe_dump(r))
-    w = FolderWatch(f, cli.read_spec(str(f)), quiet=1.0)
-    assert not w.poll(0.0)
-    (tmp_path / "prompts" / "system.md").write_text("v2, longer")
-    assert not w.poll(1.0)  # changed: wait until it is quiet
-    assert not w.poll(1.5)
-    assert w.poll(2.1) and not w.poll(3.0)  # once
-    (folder / "_helpers.py").write_text("X = 1\n")  # a new file in the tools folder counts
-    assert not w.poll(4.0) and w.poll(5.1)
-    (tmp_path / "unrelated.txt").write_text("x")  # not referenced: ignored
-    assert not w.poll(6.0) and not w.poll(7.5)
-    # a spec that references a new file: retarget, then that file is watched
-    (tmp_path / "prompts" / "round.md").write_text("round {round}")
-    r["types"]["calc"]["loop"] = {"prompt_file": "prompts/round.md"}
-    f.write_text(yaml.safe_dump(r))
-    assert not w.poll(8.0) and w.poll(9.1)
-    w.retarget(cli.read_spec(str(f)))
-    assert not w.poll(10.0)
-    (tmp_path / "prompts" / "round.md").write_text("round {round}, again")
-    assert not w.poll(11.0) and w.poll(12.1)
 
 
 # --------------------------------------------------------------------------- the API
@@ -437,52 +398,3 @@ async def test_put_replicas_keep_and_dry_run(client, store):
     assert store.get_swarm("demo")["spec"].types["calc"].replicas == 5
 
 
-# --------------------------------------------------------------------------- flock run --watch
-
-
-async def test_run_watch_applies_saved_changes_and_survives_a_broken_spec(tmp_path):
-    exp = tmp_path / "exp"
-    exp.mkdir()
-    f = exp / "spec.yaml"
-
-    def write(budget: float = 10, **extra) -> None:
-        f.write_text(yaml.safe_dump({
-            "swarm": "watched", "compute": "local", "limits": {"budget_usd": budget},
-            "types": {"w": {"harness": "claude", "model": "m", "replicas": 0, **extra}}}))
-
-    write(labels={"v": "1"})
-    out = io.StringIO()
-    task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
-        spec=cli.read_spec(str(f)), data_dir=tmp_path / ".flock", until=60, refresh=0.05,
-        grace=0, out=out, tty=False, watch=f, watch_interval=0.05, watch_quiet=0.15)))
-    current = tmp_path / ".flock" / "current"
-    while not current.exists():
-        assert not task.done(), out.getvalue()
-        await asyncio.sleep(0.02)
-    info = json.loads(current.read_text())
-    async with httpx.AsyncClient(base_url=info["url"],
-                                 headers={"X-Flock-Token": info["token"]}) as c:
-        async def labels() -> dict:
-            r = await c.get("/swarms/watched")
-            return r.json()["spec"]["types"]["w"]["labels"] if r.status_code == 200 else {}
-
-        while await labels() != {"v": "1"}:
-            await asyncio.sleep(0.02)
-        write(labels={"v": "2"})
-        await until(lambda: "types.w.labels.v: 1 -> 2" in out.getvalue(), timeout=10)
-        assert await labels() == {"v": "2"}
-        f.write_text("types: [unclosed\n")
-        await until(lambda: "not applied: the swarm keeps running" in out.getvalue(), timeout=10)
-        assert await labels() == {"v": "2"} and not task.done()
-        write(labels={"v": "3"}, bash=False)  # refused by the spec: bash is llm only
-        await until(lambda: out.getvalue().count("not applied") == 2, timeout=10)
-        assert await labels() == {"v": "2"}
-    write(budget=0, labels={"v": "3"})  # a live budget of 0 ends the run
-    try:
-        result = await asyncio.wait_for(task, 20)
-    except TimeoutError:
-        raise AssertionError(out.getvalue()) from None
-    assert result.reason == "budget", out.getvalue()
-    doc = json.loads((result.run_dir / "run.json").read_text())
-    assert doc["spec"]["limits"]["budget_usd"] == 0
-    assert doc["spec"]["types"]["w"]["labels"] == {"v": "3"}

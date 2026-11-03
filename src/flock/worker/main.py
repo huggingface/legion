@@ -1036,7 +1036,7 @@ class Worker:
         await self.abandon(f"controller process {self.cfg.parent_pid} is gone")
 
     async def terminate(self, reason: str) -> None:
-        """compute local: SIGTERM from `flock run` at stop. Interrupt every turn now (the
+        """compute local: SIGTERM from the local run at stop. Interrupt every turn now (the
         adapters kill their harness and tool processes), then exit through the normal path:
         flush events, last heartbeat. No sync (a local worker has no bucket)."""
         if self._terminating or self.stale:
@@ -1158,7 +1158,7 @@ class Worker:
                  self.deadline_loop(), self.parent_loop(), self.memory_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
         loop = asyncio.get_running_loop()
-        # compute local: SIGTERM is `flock run` stopping (terminate). Elsewhere SIGTERM and
+        # compute local: SIGTERM is the local run stopping (terminate). Elsewhere SIGTERM and
         # SIGUSR1 mean the machine goes away (a Spot notice, a time limit, a cancel): preempt.
         local = self.cfg.parent_pid is not None
         handlers = {

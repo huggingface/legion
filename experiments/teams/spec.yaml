@@ -3,7 +3,7 @@
 # prompt, the board's channel cap and the limits differ.
 swarm: ${CHATBOT_RUN:-teams}                 # ${VAR:-default}: flock launch --env run.env (run 4 README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
-  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
+  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock launch` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
   cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
   mem: ${WORKER_MEM:-7G}

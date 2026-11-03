@@ -14,7 +14,7 @@ rm -rf "$CHATBOT_WS"; mkdir -p "$CHATBOT_WS" "${TMPDIR:-/tmp}"
 if "$HF" buckets sync "$B/ws" "$CHATBOT_WS" -q >/dev/null 2>&1; then log "restored ws from $B/ws"
 else log "no ws in $B/ws yet (a new run)"; fi
 cd "$REPO/worlds/chatbot3"
-"$PY" -m flock world serve chatbot3:Chatbot3World --host 0.0.0.0 --port 7860 \
+"$PY" -m flock.world serve chatbot3:Chatbot3World --host 0.0.0.0 --port 7860 \
   --token-env FLOCK_WORLD_TOKEN &
 PID=$!
 ( while sleep "${WS_SYNC_S:-300}"; do

@@ -52,7 +52,7 @@ def test_one_type_no_spawn_and_the_rules():
         assert rule in text, rule
     assert "Coordinate daily work" not in text and "All agents are equal" in text
     lower = text.lower()
-    for banned in ("spawn", "flock remove", "$flock_parent", "vote", "voting", "#proposals",
+    for banned in ("spawn", "flock-agent remove", "flock remove", "$flock_parent", "vote", "voting", "#proposals",
                    "chatbot-v5", "chatbot-v6", "[project", "enforce", "flock prompt"):
         assert banned not in lower, banned
     assert f"`{REPO}` on Hugging Face" in text

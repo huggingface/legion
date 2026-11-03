@@ -1,4 +1,4 @@
-"""`flock world doctor <url>`: lint a world's manifest against the author checklist
+"""`python -m flock.world doctor <url>`: lint a world's manifest against the author checklist
 (docs/world.md) and optionally load its read-only tools. Returns (lines, failed)."""
 
 from __future__ import annotations

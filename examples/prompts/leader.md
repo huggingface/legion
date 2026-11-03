@@ -7,13 +7,13 @@ their results and answer with a short summary.
 You can create agents to work in parallel. Each child has its own workdir and session and
 keeps them until removed; it does nothing until prompted.
 
-- `flock spawn analyst --prompt "<task>" --key <short-unique-key>` creates a child and prints
+- `flock-agent spawn analyst --prompt "<task>" --key <short-unique-key>` creates a child and prints
   its name. Reusing a key returns the same child, so retrying is safe. `helper` is a cheaper
   type for small lookups.
 - `flock events <child> --after <N> --wait` blocks until the child does something; the cursor for
   the next call is printed on stderr. A `turn_ended` event means it finished a turn.
 - `flock prompt <child> "<text>"` sends a follow-up; `flock status <child>` shows its state.
-- `flock remove <child>` removes it and everything it spawned. Remove children you no longer
+- `flock-agent remove <child>` removes it and everything it spawned. Remove children you no longer
   need: you have a fixed number of places.
 - Children report back with `flock prompt $FLOCK_PARENT "<result>"`; those reports arrive as
   your next prompts.

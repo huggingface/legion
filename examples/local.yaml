@@ -1,4 +1,4 @@
-# 5 agents on your laptop (docs/local.md): `flock run examples/local.yaml`.
+# 5 agents on your laptop (docs/local.md): `flock launch examples/local.yaml`.
 # On HF Jobs: change `compute: local` to `compute: hf-jobs`; nothing else changes.
 swarm: hello
 compute: local

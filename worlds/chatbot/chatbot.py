@@ -9,7 +9,7 @@ log.jsonl, phase.json.
 
 Interviews: a team agent `qualify`s a candidate (a mechanical bar on the probe conversations:
 it runs within the time limit, answers every line, no empty or repeated reply; the file's hash
-is recorded) and spawns an interviewer (flock spawn, the experiment's
+is recorded) and spawns an interviewer (flock-agent spawn, the experiment's
 spawn_interviewer tool). The interviewer (`<parent>-interviewer-<level>-NNNN`, same team as its
 parent) talks to the qualified, unchanged candidate with `chat` (each turn re-runs the bot on
 the whole conversation so far) and files `submit_verdict`; the team reads `verdicts`. Each

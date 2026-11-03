@@ -123,7 +123,7 @@ def test_example_spec_loads():
 
     s = load_spec(str(Path(__file__).parent.parent / "examples" / "spawn.yaml"))
     assert s.spawn["leader"].cap_for("analyst") == 4 and s.limits.alive == 20
-    assert "flock spawn" in s.types["leader"].system_prompt
+    assert "flock-agent spawn" in s.types["leader"].system_prompt
 
 
 def test_replicas_must_fit_declared_workers():

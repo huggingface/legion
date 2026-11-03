@@ -171,7 +171,7 @@ the type's `resume_prompt`. Without the flag (a hard kill), the unrequested `CAN
 `PREEMPTED`, `NODE_FAIL`, exit 75) gives the same planned restart once the job is checked
 (after 90 s of silence); `TIMEOUT` is planned as before.
 
-The controller and `flock world serve` treat SIGUSR1 like SIGTERM, once (one final state push
+The controller and `python -m flock.world serve` treat SIGUSR1 like SIGTERM, once (one final state push
 for the controller).
 
 ## Memory

@@ -41,7 +41,7 @@ def test_cli_retries_429_then_succeeds(monkeypatch, sleeps):
     seen, handler = _edge([(429, {"retry-after": "3"}), (429, {}), (503, {})])
     monkeypatch.setattr(cli, "client", lambda: httpx.Client(base_url="http://c",
                                                             transport=httpx.MockTransport(handler)))
-    r = runner.invoke(cli.app, ["spawn", "analyst", "--parent", LEADER])
+    r = runner.invoke(cli.agent_app, ["spawn", "analyst", "--parent", LEADER])
     assert r.exit_code == 0, r.output
     assert r.output.strip() == "leader-0000-analyst-0001"
     assert seen == ["POST"] * 4

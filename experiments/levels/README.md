@@ -23,11 +23,11 @@ cannot spawn. Whoever starts agents supervises them.
 
 - `spawn: {lead: {types: {manager: 5}, depth: 2}, manager: {types: {worker: 5}, depth: 1}}`.
   A child's depth is its parent's minus 1: leads 2, managers 1, workers 0. A sixth manager or
-  worker is refused with `max_children`. A lead's `flock spawn worker` is refused
-  (`type_not_allowed`); workers have no spawn entry (depth 0), so their `flock spawn` is
+  worker is refused with `max_children`. A lead's `flock-agent spawn worker` is refused
+  (`type_not_allowed`); workers have no spawn entry (depth 0), so their `flock-agent spawn` is
   refused.
 - The child's first prompt is its parent's `--prompt`; `$FLOCK_PARENT` is its parent.
-- `flock remove <manager>` removes the manager and its workers (removal cascades to the
+- `flock-agent remove <manager>` removes the manager and its workers (removal cascades to the
   subtree). A lead may also remove any worker below it.
 - Sizes at 12 agents per worker job: 20 leads (`workers.initial: 2`), up to 100 managers
   (`max_extra: 9`) and 500 workers (`max_extra: 42`), opened on demand: 620 at most.

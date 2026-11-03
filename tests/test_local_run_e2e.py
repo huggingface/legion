@@ -1,11 +1,11 @@
-"""`flock run` end to end (docs/local.md): the real CLI in a subprocess, the controller on
-127.0.0.1, real worker subprocesses running the `llm` harness against tests/fake_openai.py.
-No HF token, bucket or network.
+"""A local run end to end (docs/local.md): the controller on 127.0.0.1, real worker subprocesses
+running the `llm` harness against tests/fake_openai.py. No HF token, bucket or network.
 
-1. `--prompt ... --until idle`: 3 agents each get the prompt, finish a turn, the run stops on
-   its own, exits 0 and leaves the bundle (run.json, events.jsonl, events/<agent>.jsonl).
-2. A second terminal: plain `flock prompt` / `flock events` find the run through
-   `.flock/current`; Ctrl-C (SIGINT) stops it cleanly."""
+1. `python -m flock.controller.localrun --prompt ... --until idle`: 3 agents each get the
+   prompt, finish a turn, the run stops on its own, exits 0 and leaves the bundle (run.json,
+   events.jsonl, events/<agent>.jsonl).
+2. `flock launch` starts it in the background; `flock prompt` / `events` / `status` find it
+   through `.flock/current`; `flock stop --release` ends it cleanly."""
 
 from __future__ import annotations
 
@@ -54,6 +54,10 @@ def _flock(*args: str) -> list[str]:
     return [sys.executable, "-m", "flock.cli", *args]
 
 
+def _localrun(*args: str) -> list[str]:
+    return [sys.executable, "-m", "flock.controller.localrun", *args]
+
+
 def _run_dir(cwd: Path) -> Path:
     (run,) = [p for p in (cwd / ".flock").iterdir() if p.is_dir()]
     return run
@@ -70,7 +74,7 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
     (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url))
     t0 = time.monotonic()
     p = subprocess.run(
-        _flock("run", "spec.yaml", "--prompt", "bash: echo hi-from-$FLOCK_AGENT", "--until",
+        _localrun("spec.yaml", "--prompt", "bash: echo hi-from-$FLOCK_AGENT", "--until",
                "idle", "--skip-preflight"),
         cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=90,
         check=False)
@@ -114,24 +118,19 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
     assert json.loads((ctl / "run.json").read_text())["status"] == "ended"
 
 
-def test_flock_run_second_terminal_and_ctrl_c(tmp_path, fake_server):
+def test_launch_in_background_release_resume_delete(tmp_path, fake_server):
     (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url))
     env = _env(tmp_path)
-    proc = subprocess.Popen(_flock("run", "spec.yaml", "--until", "50s", "--skip-preflight"),
-                            cwd=tmp_path, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
+
+    def flock(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(_flock(*args), cwd=tmp_path, env=env, capture_output=True,
+                              check=False, text=True, timeout=120)
+
+    current = tmp_path / ".flock" / "current"
     try:
-        current = tmp_path / ".flock" / "current"
-        end = time.monotonic() + 30
-        while not current.exists():
-            assert proc.poll() is None and time.monotonic() < end, proc.stdout.read()
-            time.sleep(0.1)
-
-        def flock(*args: str) -> subprocess.CompletedProcess:
-            return subprocess.run(_flock(*args), cwd=tmp_path, env=env, capture_output=True,
-                                  check=False,
-                                  text=True, timeout=60)
-
+        r = flock("launch", "spec.yaml", "--skip-preflight")
+        assert r.returncode == 0 and "local run" in r.stdout, r.stdout + r.stderr
+        assert current.exists()
         r = flock("prompt", "writer-0001", "bash: echo second-terminal")
         assert r.returncode == 0, r.stdout + r.stderr
         end = time.monotonic() + 40
@@ -145,31 +144,35 @@ def test_flock_run_second_terminal_and_ctrl_c(tmp_path, fake_server):
         assert "second-terminal" in r.stdout
         r = flock("status", "hello")
         assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
-        proc.send_signal(signal.SIGINT)
-        out, _ = proc.communicate(timeout=40)
+        r = flock("stop", "hello", "--release")  # workers freed, the controller stays
+        assert r.returncode == 0 and "released" in r.stdout, r.stdout + r.stderr
+        assert current.exists()
+        r = flock("launch", "spec.yaml")  # resumes the same swarm, as on any backend
+        assert r.returncode == 0 and "held: nothing" in r.stdout, r.stdout + r.stderr
+        r = flock("status", "hello")
+        assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
+        r = flock("stop", "hello", "--delete", "--yes")  # ends the run: the bundle
+        assert r.returncode == 0 and "bundle:" in r.stdout, r.stdout + r.stderr
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-    assert proc.returncode == 0, out
-    assert "stopping (interrupted)" in out and "bundle:" in out, out
+        if (info := current.exists() and json.loads(current.read_text())):
+            os.killpg(info["pid"], signal.SIGKILL)
     run = _run_dir(tmp_path)
     doc = json.loads((run / "run.json").read_text())
     assert doc["stop_reason"] == "interrupted"
     one = next(a for a in doc["agents"] if a["name"] == "writer-0001")
     assert one["turns_completed"] == 1
     assert yaml.safe_load(yaml.safe_dump(doc["spec"]))["compute"] == {"kind": "local"}
-    assert not (tmp_path / ".flock" / "current").exists()
+    assert not current.exists()
 
 
 def test_flock_run_ctrl_c_kills_running_tools(tmp_path, fake_server):
     """--grace 0 and SIGINT while an agent's bash tool sleeps: the worker interrupts the turn,
-    the adapter kills the tool's own session, and nothing survives `flock run`."""
+    the adapter kills the tool's own session, and nothing survives the local run."""
     (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url).replace(
         "replicas: 3", "replicas: 1"))
     pids = tmp_path / "pids"
     cmd = f"bash: sleep 60 & echo $$ $! > {pids}; wait"
-    proc = subprocess.Popen(_flock("run", "spec.yaml", "--prompt", cmd, "--grace", "0",
+    proc = subprocess.Popen(_localrun("spec.yaml", "--prompt", cmd, "--grace", "0",
                                    "--until", "50s", "--skip-preflight"),
                             cwd=tmp_path, env=_env(tmp_path), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
@@ -202,7 +205,7 @@ def test_flock_run_ctrl_c_kills_running_tools(tmp_path, fake_server):
     assert "terminating (SIGTERM)" in next((run / "logs").glob("hello-writer-w*.log")).read_text()
 
 
-GREET = '''"""A folder tool for the `flock run` tools test."""
+GREET = '''"""A folder tool for the local run tools test."""
 
 from flock.tools import Context
 
@@ -218,14 +221,14 @@ def greet(name: str, ctx: Context) -> str:
 
 
 def test_flock_run_ships_the_tools_folder(tmp_path, fake_server):
-    """`flock run` uploads tools/ like `flock launch` (docs/tools.md): the spec is applied with
+    """the local run uploads tools/ like `flock launch` (docs/tools.md): the spec is applied with
     its tools_version, and an agent's turn calls the folder tool."""
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "greet.py").write_text(GREET)
     spec = SPEC.format(url=fake_server.url).replace("replicas: 3", "replicas: 1")
     (tmp_path / "spec.yaml").write_text(spec + "    tools: [greet]\n")
     p = subprocess.run(
-        _flock("run", "spec.yaml", "--prompt", 'call: greet {"name": "flock"}', "--until",
+        _localrun("spec.yaml", "--prompt", 'call: greet {"name": "flock"}', "--until",
                "idle", "--skip-preflight"),
         cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=90,
         check=False)
@@ -262,7 +265,7 @@ LOOP_AGENTS = ["writer-0000", "writer-0001"]
 def _run_loop_spec(tmp_path: Path, url: str, extra: str = "") -> subprocess.CompletedProcess:
     (tmp_path / "spec.yaml").write_text(LOOP_SPEC.format(url=url) + extra)
     return subprocess.run(
-        _flock("run", "spec.yaml", "--until", "idle", "--skip-preflight"),
+        _localrun("spec.yaml", "--until", "idle", "--skip-preflight"),
         cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120,
         check=False)
 
@@ -306,7 +309,7 @@ def test_flock_run_bundle_has_the_swarm_stream_and_loop_summary(tmp_path, fake_s
 
 
 def test_flock_run_reads_unquoted_on_and_bundles_loop_max_turns(tmp_path, fake_server):
-    """The documented unquoted `on: [comms.mention]` loads under `flock run` (YAML 1.2 loader,
+    """The documented unquoted `on: [comms.mention]` loads under a local run (YAML 1.2 loader,
     so it is the key "on", not True), the CLI loop check warns that this type is not on the
     board, and each turn that stops at `max_turns: 1` is a `loop_max_turns` event in
     events.jsonl (once: it is the agent's, also on the swarm stream), not a loop error."""
@@ -314,7 +317,7 @@ def test_flock_run_reads_unquoted_on_and_bundles_loop_max_turns(tmp_path, fake_s
     spec = spec.replace("    agents_per_worker: 2\n", "    agents_per_worker: 2\n    max_turns: 1\n")
     (tmp_path / "spec.yaml").write_text(spec.format(url=fake_server.url))
     p = subprocess.run(
-        _flock("run", "spec.yaml", "--until", "idle", "--skip-preflight"),
+        _localrun("spec.yaml", "--until", "idle", "--skip-preflight"),
         cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120,
         check=False)
     assert p.returncode == 0, p.stdout + p.stderr

@@ -23,7 +23,7 @@ script.
 - Interviewers: `spawn.coordinator` and `spawn.worker` each allow `interviewer: 2` alive at
   once. The coordinator's `depth: 2` lets its workers (born with depth 1) spawn; interviewers
   have no spawn entry (depth 0). A third live interviewer is refused with `max_children`.
-- The spawner runs `flock spawn interviewer --prompt "<target> <its name> <team channel>"
+- The spawner runs `flock-agent spawn interviewer --prompt "<target> <its name> <team channel>"
   --key <k>`. The interviewer type is `ephemeral: true`: flock removes it when its one
   session ends.
 - An interviewer is `harness: llm` with thinking off (`models.interviewer`, as run 3), tools

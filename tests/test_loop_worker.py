@@ -179,7 +179,7 @@ async def test_controller_loop_prompts_render_with_summary_and_spend(tmp_path):
 
 
 async def test_a_new_run_restarts_from_round_one_a_repeat_does_not(tmp_path):
-    """Finding 4: `flock loop --start` after an exhausted loop (new run id) starts at round
+    """Finding 4: a loop `start` after an exhausted loop (new run id) starts at round
     1; the same run sent again (a lost command, a live update) keeps its count."""
     rt, ad = runtime(tmp_path, idle_grace="5s")
     await rt.setup(restore=False)

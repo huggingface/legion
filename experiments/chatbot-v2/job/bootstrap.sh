@@ -1,4 +1,4 @@
-# chatbot-v2 in ONE HF Job (README.md "Run it as an HF Job"): `flock run --until idle` in local
+# chatbot-v2 in ONE HF Job (README.md "Run it as an HF Job"): `python -m flock.controller.localrun --until idle` in local
 # mode inside the container (controller, workers, agents and the world are child processes; no
 # proxy, no network group). Passed inline: hf jobs run ... python:3.12-slim bash -c "$(cat job/bootstrap.sh)".
 #
@@ -6,7 +6,7 @@
 #          CHATBOT_BOARD_URL, CHATBOT_CHANNEL
 #          CHATBOT_SYNC_S   seconds between bucket syncs (default 300)
 #          CHATBOT_CHECK_S  seconds between looks for the control marker (default 30)
-#          CHATBOT_FLOCK_ARGS  extra `flock run` flags (e.g. --skip-preflight)
+#          CHATBOT_FLOCK_ARGS  extra `localrun` flags (e.g. --skip-preflight)
 #          CHATBOT_SMOKE=1  a short run: job/smoke.json's loop and budget on every rendered spec
 #          CHATBOT_RUN      e.g. run3: the swarm is chatbot-v2-run3 (a fresh kickoff on a reused
 #                           channel) and the kickoff says "chatbot-v2 run3"
@@ -73,7 +73,7 @@ log "installed $(flock --help >/dev/null && echo flock) $($PYTHON --version)"
 PIDS=()
 RUNS=()
 cd "$EXP"
-flock run spec.local.yaml --until idle ${CHATBOT_FLOCK_ARGS:-} > "$H/logs/run.out" 2>&1 &
+"$PYTHON" -m flock.controller.localrun spec.local.yaml --until idle ${CHATBOT_FLOCK_ARGS:-} > "$H/logs/run.out" 2>&1 &
 PIDS+=($!); RUNS+=("$EXP/.flock")
 log "flock run started (pids ${PIDS[*]})"
 
@@ -87,7 +87,7 @@ report() {  # flock's start lines and its latest status line, into the job log
     [ -f "$o" ] || continue
     local n; n=$(wc -l < "$o"); local k="seen_${o//[^a-z]/_}"; local s=${!k:-0}
     [ "$n" -gt "$s" ] && tail -n +"$((s + 1))" "$o" | head -n "$((n - s))" | grep -aE \
-      '^(preflight|tools:|apply|prompt to|flock run|stopping|run |bundle:|update:)' | sed "s|^|$(basename "$o"): |" || true
+      '^(preflight|tools:|apply|prompt to|flock:|local run|stopping|run |bundle:)' | sed "s|^|$(basename "$o"): |" || true
     printf -v "$k" '%s' "$n"
     tail -n 30 "$o" | grep -a '^\[' | tail -1 | sed "s|^|$(basename "$o"): |" || true
   done

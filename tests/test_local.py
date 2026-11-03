@@ -1,5 +1,5 @@
 """`compute: local` (docs/local.md): the spec field, the LocalJobsClient process backend, the
-controller's compute check, `.flock/current` discovery and the `flock run` pieces. The end-to-end
+controller's compute check, `.flock/current` discovery and the local run pieces. The end-to-end
 runs are in test_local_run_e2e.py."""
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ async def test_controller_accepts_only_its_compute(tmp_path):
 
     jobs_app = create_app(Store(tmp_path / "b"), TOKEN, compute="hf-jobs")
     r = await _put(jobs_app, local_spec())
-    assert r.status_code == 400 and "flock run" in r.text
+    assert r.status_code == 400 and "flock launch" in r.text
     assert (await _put(jobs_app, make_spec())).status_code == 200
 
     any_app = create_app(Store(tmp_path / "c"), TOKEN)  # tests and FLOCK_FAKE_JOBS: unchecked
@@ -263,17 +263,17 @@ def test_cli_finds_a_live_run_without_flock_url(tmp_path, monkeypatch):
         assert str(c.base_url).rstrip("/") == "http://127.0.0.1:99"
 
 
-# --------------------------------------------------------------------------- flock run pieces
+# --------------------------------------------------------------------------- local run pieces
 
 
-def test_flock_run_refuses_a_jobs_spec_and_a_bad_until(tmp_path):
+def test_local_run_refuses_a_jobs_spec_and_a_bad_until(tmp_path):
     jobs_spec = tmp_path / "jobs.yaml"
     jobs_spec.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
-    r = runner.invoke(cli.app, ["run", str(jobs_spec)])
-    assert r.exit_code == 1 and "compute: local" in r.output and "flock launch" in r.output
+    r = runner.invoke(localrun.app, [str(jobs_spec)])
+    assert r.exit_code == 1 and "not `local`" in r.output
     loc = tmp_path / "local.yaml"
     loc.write_text(yaml.safe_dump(local_spec().model_dump(mode="json")))
-    r = runner.invoke(cli.app, ["run", str(loc), "--until", "soon"])
+    r = runner.invoke(localrun.app, [str(loc), "--until", "soon"])
     assert r.exit_code == 2 and "--until" in r.output
 
 
@@ -292,7 +292,7 @@ def _events(store: Store, agent: str, *kinds: str) -> None:
         for k in kinds])
 
 
-def test_tracker_idle_and_render(tmp_path):
+def test_tracker_idle(tmp_path):
     store = Store(tmp_path / "data")
     spec = local_spec()
     store.put_swarm(spec, time.time())
@@ -314,12 +314,6 @@ def test_tracker_idle_and_render(tmp_path):
     _events(store, "w-0001", "turn_ended")
     snap = tr.snapshot(spec, now)
     assert snap["completed"] == 2 and tr.idle(snap)
-    frame = localrun.render(spec, snap, elapsed=65, url="http://127.0.0.1:1",
-                            current=tmp_path / ".flock" / "current", recent=list(tr.recent))
-    assert "flock run · loc · compute local · 00:01:05" in frame
-    assert "prompts  pending 0 · running 0 · completed 2" in frame
-    assert "w-0001" in frame and "turn_ended" in frame
-    assert "FLOCK_CURRENT=" in frame  # not ./.flock: the hint names the file
     assert "completed 2" in localrun.status_line(snap, 3)
     # an agent removed with a turn still open (an ephemeral child whose turn_ended was never
     # read): its open turn goes with its row and does not block idle (chatbot-v1 run 2)
@@ -380,12 +374,6 @@ def test_run_local_refuses_a_jobs_spec(tmp_path):
     opts = localrun.RunOptions(spec=make_spec(), data_dir=tmp_path, out=io.StringIO())
     with pytest.raises(ValueError, match="compute: local"):
         asyncio.run(localrun.run_local(opts))
-
-
-def test_cli_hint(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    assert "from this directory" in localrun.cli_hint(Path(".flock"))
-    assert localrun.cli_hint(tmp_path / "x").startswith("FLOCK_CURRENT=")
 
 
 # --------------------------------------------------------------------------- review of #13
@@ -471,3 +459,20 @@ async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     doc = json.loads((result.run_dir / "run.json").read_text())
     assert doc["spec"]["limits"]["budget_usd"] == 0
     assert doc["spec"]["types"]["w"]["labels"] == {"applied": "live"}
+
+
+def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
+    """Ctrl-C during the preflight: the background controller `launch` started is ended."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(local_spec().model_dump(mode="json")))
+    run = {"pid": 1, "run_dir": "x"}
+    ended = []
+    monkeypatch.setattr(cli, "_start_local", lambda *a: run)
+    monkeypatch.setattr(cli, "_end_local", ended.append)
+
+    def interrupted(*a):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_launch", interrupted)
+    runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
+    assert ended == [run]

@@ -48,7 +48,7 @@ def agent_cli(monkeypatch, app, store, tick):
 
 
 def run(*args: str):
-    return runner.invoke(cli.app, list(args))
+    return runner.invoke(cli.agent_app if args[0] in ("spawn", "remove") else cli.app, list(args))
 
 
 def test_client_prefers_the_agent_token(monkeypatch):
@@ -95,6 +95,18 @@ def test_agent_spawns_prompts_and_removes(agent_cli):
     assert r.exit_code == 0 and json.loads(r.output) == {"removed": [child]}
 
 
+def test_old_flock_spawn_and_remove_still_work_inside_an_agent(agent_cli):
+    """Agents of runs started before flock-agent call `flock spawn|remove` (hidden aliases)."""
+    agent_cli(LEADER)
+    r = runner.invoke(cli.app, ["spawn", "analyst", "--key", "old"])
+    assert r.exit_code == 0, r.output
+    child = r.output.strip()
+    assert child.startswith("leader-0000-analyst-")
+    r = runner.invoke(cli.app, ["remove", child])
+    assert json.loads(r.output) == {"removed": [child]}
+    assert "spawn" not in runner.invoke(cli.app, ["--help"]).output
+
+
 def test_operator_names_swarms_or_agents(agent_cli):
     agent_cli(None)
     r = run("spawn", "analyst", "--parent", LEADER)
@@ -106,4 +118,5 @@ def test_operator_names_swarms_or_agents(agent_cli):
     assert child in r.output and "leader-0000 " not in r.output
     assert run("spawn", "analyst").exit_code == 1  # no FLOCK_AGENT, no --parent
     assert json.loads(run("remove", child).output) == {"removed": [child]}
-    assert json.loads(run("remove", "demo").output) == {"swarm": "demo", "removing": True}
+    r = runner.invoke(cli.app, ["stop", "demo", "--delete", "--yes"])
+    assert json.loads(r.output) == {"swarm": "demo", "removing": True}

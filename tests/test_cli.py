@@ -61,7 +61,7 @@ def test_update_replicas_agents_workers_remove(tmp_path, monkeypatch, app, store
     assert json.loads(r.output)["worker"] == "demo-researcher-w0002"
     r = runner.invoke(cli.app, ["events", "researcher-0004"])
     assert r.exit_code == 0 and r.output == ""
-    r = runner.invoke(cli.app, ["remove", "demo"])
+    r = runner.invoke(cli.app, ["stop", "demo", "--delete", "--yes"])
     assert r.exit_code == 0 and json.loads(r.output)["removing"] is True
 
 

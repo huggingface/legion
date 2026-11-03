@@ -30,7 +30,7 @@ SWARM_HEADER = "X-Flock-Swarm"
 TURN_HEADER = "X-Flock-Turn"
 REQUEST_HEADER = "X-Request-Id"
 
-# Environment of a world flock starts (and of `flock world serve`), and of the workers.
+# Environment of a world flock starts (and of `python -m flock.world serve`), and of the workers.
 TOKEN_ENV = "FLOCK_WORLD_TOKEN"
 PORT_ENV = "FLOCK_WORLD_PORT"
 HOST_ENV = "FLOCK_WORLD_HOST"

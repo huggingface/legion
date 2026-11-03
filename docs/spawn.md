@@ -64,7 +64,7 @@ If a worker never gets past `launching`/`dead`, `uv run flock workers first-spaw
 ## Teardown
 
 ```sh
-uv run flock remove first-spawn                    # drains and cancels its workers (about 20 s)
+uv run flock stop first-spawn --delete                    # drains and cancels its workers (about 20 s)
 uv run hf jobs ps --label swarm=first-spawn        # empty once they are gone
 uv run hf spaces pause <you>/flock                 # the Space is public and holds your secrets
 uv run hf buckets delete <you>/flock               # optional: wheels and agent state
@@ -154,7 +154,7 @@ spawn:
   freed, since caps count live children. The worker then deletes the agent's workdir, session
   log, state, tools pin and the harness's own session dir (`AgentRuntime.purge`).
 - **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
-  session. A run bundle (`flock run`) keeps removed agents' events (`events/<name>.jsonl`) and
+  session. A run bundle (`flock launch`) keeps removed agents' events (`events/<name>.jsonl`) and
   lists them in `run.json` under `removed_agents`, each with its type, tokens and `cost_usd`
   (priced from its turns' tokens, as the swarm's total counts it).
 - **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
@@ -188,7 +188,7 @@ types:
 - **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
   counts it); with `words` it no longer appears in the name.
 - **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
-  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock remove <name>`. A words
+  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock-agent remove <name>`. A words
   name says nothing about the parent: a world that needs the parent uses `X-Flock-Type` and
   its own records (worlds/chatbot3 binds an interview booking to the first interviewer that
   uses it).
@@ -263,19 +263,19 @@ and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in
 environment for that fallback; with the gateway they are not needed and can be dropped.
 
 ```sh
-flock spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
+flock-agent spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
 flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
 flock prompt --children --state idle "text"   # all your idle children, one request
 flock status [<agent>]                     # JSON; yourself by default
 flock events <agent> --after N --wait      # blocks until something new (or --timeout, 600 s)
-flock remove <agent>                       # a descendant and its subtree
+flock-agent remove <agent>                    # a descendant and its subtree
 ```
 
 The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up to
 5 attempts with exponential backoff and jitter, never sooner than `Retry-After`, so a thousand
 agents calling it through a Space edge do not fail on throttling.
 
-For the operator (controller token), `flock spawn <type> --parent <agent>` spawns on an agent's
+For the operator (controller token), `flock-agent spawn <type> --parent <agent>` spawns on an agent's
 behalf, `flock agents <swarm> --parent <agent>` lists children, and `status` / `remove` take an
 agent name when the name is not a swarm.
 
@@ -287,12 +287,12 @@ agent name when the name is not a swarm.
 You can create agents to work in parallel. Each child has its own workdir and session and
 keeps them until removed; it does nothing until prompted.
 
-- `flock spawn <type> --prompt "<task>" --key <short-unique-key>` creates a child and prints
+- `flock-agent spawn <type> --prompt "<task>" --key <short-unique-key>` creates a child and prints
   its name. Reusing a key returns the same child, so retrying is safe.
 - `flock events <child> --after <N> --wait` blocks until the child does something; the cursor for
   the next call is printed on stderr. A `turn_ended` event means it finished a turn.
 - `flock prompt <child> "<text>"` sends a follow-up; `flock status <child>` shows its state.
-- `flock remove <child>` removes it and everything it spawned. Remove children you no longer
+- `flock-agent remove <child>` removes it and everything it spawned. Remove children you no longer
   need: you have a fixed number of places.
 - Children report back with `flock prompt $FLOCK_PARENT "<result>"`; those reports arrive as
   your next prompts.

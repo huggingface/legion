@@ -1,11 +1,10 @@
-# Live changes: `flock update`, `flock run --watch`
+# Live changes: `flock update`
 
 Everything an experiment customises lives in its folder, next to the spec: `spec.yaml`, the
 prompt files it names, `tools/`, the comms protocol files. flock reads them at runtime, and
-they can change while the swarm runs. Two commands do this:
+they can change while the swarm runs. `flock update` does this:
 
 - `flock update` applies an edited folder to the running swarm.
-- `flock run --watch` does the same on every save, locally.
 
 ## `flock update`
 
@@ -27,7 +26,7 @@ Replicas: `flock update` keeps the running replica count of every type that alre
 (a type with `replicas: 20` in the file and 300 running stays at 300) and prints
 `agent: replicas kept (spec 20, live 300)`. `--replicas spec` applies the file's counts
 instead. `flock update` does this client-side; `PUT /swarms/{swarm}` applies the replicas it
-is sent unless the request asks `?replicas=keep` (`flock launch` and `flock run` send the spec
+is sent unless the request asks `?replicas=keep` (`flock launch` sends the spec
 as is). `--replicas spec` never lowers a type with `replicas_ramp` (the ramp raised it): lower
 `replicas_ramp.max` to stop it growing. `--check` also probes every provider-backed model and
 lists the agents (and their spawned children) a lowered count or a removed type would delete.
@@ -56,12 +55,12 @@ through `.flock/current`, like the other commands do.
 
 ## Env files and `--ref`
 
-`flock launch`, `flock update` and `flock run` render the spec as they read it, so one folder
+`flock launch` and `flock update` render the spec as they read it, so one folder
 (one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
 $ flock launch experiments/run4/spec.yaml --env runs/run4/run.env
-$ COMPUTE_KIND=local flock run experiments/run4/spec.yaml --env runs/run4/run.env
+$ COMPUTE_KIND=local flock launch experiments/run4/spec.yaml --env runs/run4/run.env
 $ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --check
 ```
 
@@ -123,7 +122,7 @@ does not overwrite the checkpoint it is about to adopt.
 ## Generations
 
 Every apply that changes the spec (`flock launch`, `flock update`, the first
-apply of `flock run`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
+apply of `flock launch`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
 apply that changes nothing keeps it. `flock status` shows it as `gen N` on the swarm line.
 
 The controller keeps each generation's applied spec with its UTC time, the diff lines (as
@@ -145,7 +144,7 @@ preemption), `cancel`, `retire`, `remove_worker`. Per-agent placement
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).
 
-World knob changes made through the controller (`flock world set`; docs/world.md, "Admin
+World knob changes made through the controller (`python -m flock.world set`; docs/world.md, "Admin
 API") are recorded as `world_knob {name, old, new, by, reason}`. They take effect in the
 world at once and survive its restarts; they are not part of the spec.
 
@@ -192,13 +191,7 @@ same admission as a provider's `max_working`: prompts wait in the controller, an
 go to the oldest pending prompt first. When both caps are set, a prompt needs a slot in both.
 A type with it runs its `turn_end` loop on the controller (docs/loop.md).
 
-## `flock run --watch`
-
-`flock run spec.yaml --watch` polls the files the spec references and the tools folder every
-second. Once a change has been quiet for a second, it runs `flock update`. The terminal view
-gets a `live updates` pane with the update's lines. A broken save (half-written YAML, a
-syntax error in a tool) shows the refusal and `not applied: the swarm keeps running as it
-was`. The next good save applies. Watching is off by default.
+Local runs: after editing the folder, run `flock update FOLDER`; there is no watch mode in the CLI yet.
 
 ## What takes effect when
 

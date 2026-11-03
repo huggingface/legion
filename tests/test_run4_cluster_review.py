@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import shlex
 import subprocess
 import sys
 from itertools import pairwise
@@ -30,7 +31,9 @@ def executable(path, text):
 def shell_environment(tmp_path):
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
-    (venv / "bin/python").symlink_to(sys.executable)
+    # `python -m flock.world ...` runs the test's `flock` stub (as `flock world ...`)
+    executable(venv / "bin/python", '#!/bin/bash\n[ "$1 $2" = "-m flock.world" ] && { shift 2; '
+               f'exec "$VENV/bin/flock" world "$@"; }}\nexec {shlex.quote(sys.executable)} "$@"\n')
     executable(venv / "bin/sleep", '#!/bin/bash\ncase "$1" in 60) exec /bin/sleep 0.02;; *) echo "$1" >> "$SLEEPS";; esac\n')
     env = {"PATH": f"{venv / 'bin'}:{os.environ['PATH']}", "HOME": str(tmp_path),
            "VENV": str(venv), "SLEEPS": str(tmp_path / "sleeps"), "SLURM_JOB_ID": "123",
@@ -344,7 +347,7 @@ raise SystemExit(1)
     result = run_script(tmp_path, "world-inner.sh", env)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "operations").read_text().splitlines() == ["restore"]
-    assert "flock world serve pid" not in result.stderr
+    assert "flock.world serve pid" not in result.stderr
 
 
 def test_online_preflight_only_reads_metadata_and_sanitizes_failures(tmp_path):

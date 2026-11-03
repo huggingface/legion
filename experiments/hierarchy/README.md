@@ -19,8 +19,8 @@ are the same agent without the right to spawn, with a different role prompt.
 ## Mechanics
 
 - `spawn: {coordinator: {types: {worker: 4}, depth: 1}}`. A fifth worker is refused with
-  `max_children`; `flock remove <worker>` frees a place. Workers have no spawn entry
-  (depth 0), so their `flock spawn` is refused.
+  `max_children`; `flock-agent remove <worker>` frees a place. Workers have no spawn entry
+  (depth 0), so their `flock-agent spawn` is refused.
 - The worker's first prompt is the coordinator's `--prompt`; `$FLOCK_PARENT` is its coordinator.
 - Sizes: 50 coordinators (`workers.initial: 5`, 12 agents per worker job) and up to 200
   workers (`max_extra: 17`, opened on demand); `limits: {alive: 250, spawned_total: 400}`.
@@ -100,6 +100,6 @@ The legacy entries can remain alongside them.
   world's `merged` events to the author's parent and siblings as loop notices.
 - **Team moves are prompt-level only.** A worker may move to another team (it tells both
   coordinators and updates both plans), but its spawn parent stays fixed in flock: it still
-  counts toward the old coordinator's cap of 4, only that coordinator can `flock remove` it,
+  counts toward the old coordinator's cap of 4, only that coordinator can `flock-agent remove` it,
   and `$FLOCK_PARENT` still names it. Re-parenting would need a controller call
   (`src/flock/controller/spawn.py`) that moves the child and its cap slot.

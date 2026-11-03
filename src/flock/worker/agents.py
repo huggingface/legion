@@ -806,7 +806,7 @@ class AgentRuntime:
 
     def start_loop(self, cmd: LoopStartCommand) -> None:
         """`loop_start`: send the loop prompt now if idle, then after every completed turn. A
-        new run (`flock loop --start`) counts rounds from the command's; a repeat of the same
+        new run (a loop `start`) counts rounds from the command's; a repeat of the same
         run keeps the higher count."""
         self.loop = cmd
         if cmd.run is not None and cmd.run != self.state.loop_run:
