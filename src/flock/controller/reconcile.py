@@ -362,12 +362,13 @@ def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
         ts = fresh.types.get(name)
         if ts is None or ts.replicas_ramp is None:
             continue
+        n = min(n, ts.replicas_ramp.max)  # a lowered max caps the raise, never lowers
+        if n <= ts.replicas:
+            continue
+        raised[name] = ts.model_copy(update={"replicas": n})
         if data is not None:
             p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
                 type="ramp_step", ts=datetime.fromtimestamp(p.now, UTC), agent="", data=data)])
-        n = min(n, ts.replicas_ramp.max)  # a lowered max caps the raise, never lowers
-        if n > ts.replicas:
-            raised[name] = ts.model_copy(update={"replicas": n})
     if not raised:
         return fresh
     fresh = fresh.model_copy(update={"types": {**fresh.types, **raised}})
