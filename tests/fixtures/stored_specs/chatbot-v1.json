@@ -876,7 +876,7 @@
   "kickoff_id": null
  },
  "world": {
-  "dir": "/home/node/local/git/flock/worlds/chatbot",
+  "dir": "<repo>/worlds/chatbot",
   "command": [
    "{python}",
    "chatbot.py",

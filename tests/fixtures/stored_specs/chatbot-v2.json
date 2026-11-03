@@ -892,7 +892,7 @@
   "kickoff_id": null
  },
  "world": {
-  "dir": "/home/node/local/git/flock/worlds/chatbot2",
+  "dir": "<repo>/worlds/chatbot2",
   "command": [
    "{python}",
    "chatbot2.py",

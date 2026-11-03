@@ -341,7 +341,7 @@
   "kickoff_id": null
  },
  "world": {
-  "dir": "/home/node/local/git/flock/worlds/eliza",
+  "dir": "<repo>/worlds/eliza",
   "command": [
    "{python}",
    "-m",
