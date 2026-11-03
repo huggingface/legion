@@ -1,8 +1,8 @@
 swarm: ${CHATBOT_RUN:-run4}             # ${VAR:-default}: flock launch --env run.env (README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
   kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock launch` on one machine
-  partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
-  cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
+  partition: ${SLURM_PARTITION:-}           # cluster.env; empty: the cluster default
+  cpus: ${WORKER_CPUS:-4}                   # mem / cpus under the profile's SLURM_MAX_MEM_PER_CPU_MB
   mem: ${WORKER_MEM:-7G}
   time: '54:00:00'                          # matches worker_lifetime 54h; the run is 48h
 bucket: ${RUN3_BUCKET:-hf://buckets/cmpatino/eliza-swarm}

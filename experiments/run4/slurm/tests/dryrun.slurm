@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --partition=hopper-cpu
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=7G
 #SBATCH --time=00:20:00
 #SBATCH --requeue
 # Prepared for the operator; never submitted by the implementation or tests.
+#   SLURM_DIR=<slurm dir> sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} dryrun.slurm <run dir>
 set -euo pipefail
-RUN=${1:-run4}
+RUN=${1:?usage: dryrun.slurm <run dir>}
 LOG_TAG=worker
-. /fsx/carlos_patino/prj-eliza/slurm/common.sh
-CONTAINER_IMAGE=${CONTAINER_IMAGE_agent:-$PRJ/images/pi-worker-node22.sqsh}
+. "${SLURM_DIR:?export SLURM_DIR=<the slurm scripts folder>}/common.sh"
+CONTAINER_IMAGE=${CONTAINER_IMAGE_agent:-$CONTAINER_IMAGE}
 container_srun_args
 trap '' USR1
 srun "${CTR_SRUN[@]}" bash -c '

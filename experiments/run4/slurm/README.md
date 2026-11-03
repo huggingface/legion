@@ -6,8 +6,9 @@ per-role code pins and one-archive world snapshots. They have not been submitted
 
 Use `run3-reference.md` only for the proven signal/requeue procedures and cluster
 constraints. Its old run3 paths, world/probe settings and vLLM address are historical.
-Copy these templates to the cluster's operational slurm directory before use;
-the scripts source `/fsx/carlos_patino/prj-eliza/slurm/common.sh` at runtime.
+Copy these templates to a slurm directory on the shared disk and `export SLURM_DIR=<it>` before
+`sbatch`: the scripts source `$SLURM_DIR/common.sh` at runtime, and read the cluster's values
+from `<run dir>/cluster.env` (`flock init --profile`, docs/slurm.md "Cluster profile").
 
 ## Resilience and placement
 
@@ -18,7 +19,7 @@ the scripts source `/fsx/carlos_patino/prj-eliza/slurm/common.sh` at runtime.
   (`WORLD_WAIT_S`); if the world is still down it logs and leaves the controller running.
 - Spot-only capacity is enough. If the cluster has a non-preemptible partition or QOS, set
   `WORLD_PARTITION`/`WORLD_QOS` and `CTL_PARTITION`/`CTL_QOS` in run.env and pass them on the
-  sbatch line (see the top of each script); unset keeps the `#SBATCH` header.
+  sbatch line (see the top of each script); unset uses the profile's `SLURM_PARTITION`.
 
 ## Ramp
 

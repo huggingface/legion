@@ -99,6 +99,7 @@ from flock.worker.sync import (
 )
 from flock.worker.tools import ToolsManager, tools_root
 from flock.world.hub import WorldHub
+from flock.world.protocol import fill_host
 
 log = logging.getLogger("flock.worker")
 
@@ -164,10 +165,11 @@ class WorkerConfig:
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
         host_file = env.get("FLOCK_CTL_HOST_FILE") or None
         template = env["FLOCK_URL"] if host_file and "${CTL_HOST}" in env["FLOCK_URL"] else None
+        url = env["FLOCK_URL"]
         if template is not None:
-            env = {**env, "CTL_HOST": env.get("CTL_HOST") or read_host_file(host_file)}
+            url = fill_host(url, "${CTL_HOST}", env.get("CTL_HOST") or read_host_file(host_file))
         return cls(
-            url=expand_env(env["FLOCK_URL"], env).rstrip("/"),
+            url=expand_env(url, env).rstrip("/"),
             url_template=template,
             host_file=host_file,
             drain_budget=float(env.get("FLOCK_DRAIN_BUDGET_S") or DEFAULT_DRAIN_BUDGET),
@@ -194,7 +196,8 @@ class WorkerConfig:
 
 
 def read_host_file(path: str) -> str:
-    """The controller's hostname from its host file (first word; the controller job writes it)."""
+    """The controller's `host` or `host:port` from its host file (first word; the controller
+    job writes it)."""
     try:
         words = Path(path).read_text().split()
     except OSError as e:
@@ -1260,7 +1263,7 @@ def main() -> None:
         template, host_file = cfg.url_template, cfg.host_file
 
         def resolve() -> str:
-            return expand_env(template, {"CTL_HOST": read_host_file(host_file)})
+            return fill_host(template, "${CTL_HOST}", read_host_file(host_file))
 
     client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation,
                               resolve_url=resolve)

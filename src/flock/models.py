@@ -866,13 +866,13 @@ def mem_mb(value: str) -> float:
     return float(m.group(1)) * scale
 
 
-def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str,
-                 max_mem: str) -> str | None:
-    """Why a job of this size can never start on the partition (None: it fits)."""
+def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str | None,
+                 max_mem: str | None) -> str | None:
+    """Why a job of this size can never start on the partition (None: it fits, or no limit)."""
     try:
-        if cpus is not None and int(cpus) > int(max_cpus):
+        if cpus is not None and max_cpus and int(cpus) > int(max_cpus):
             return f"cpus {cpus} is over max_cpus {max_cpus}: the job would pend forever"
-        if mem is not None and mem_mb(mem) > mem_mb(max_mem):
+        if mem is not None and mem_mb(mem) > (mem_mb(max_mem) if max_mem else float("inf")):
             return f"mem {mem} is over max_mem {max_mem}: the job would pend forever"
     except ValueError as e:
         return str(e)
@@ -927,14 +927,13 @@ class ComputeSpec(_Removable):
         out = handler(self)
         if not isinstance(out, dict):
             return out
-        defaults = {"types": {}, "max_cpus": 28, "max_mem": "54G"}
-        return {k: v for k, v in out.items()
-                if k == "kind" or (v is not None and defaults.get(k, object()) != v)}
+        return {k: v for k, v in out.items() if k == "kind" or (v is not None and v != {})}
     types: dict[str, SlurmResources] = Field(default_factory=dict)
     # the largest job the partition can ever run: sbatch accepts bigger ones, which then pend
-    # forever; a launch over these is refused (also checked at apply)
-    max_cpus: int = Field(default=28, ge=1)
-    max_mem: str = "54G"
+    # forever; a launch over these is refused (also checked at apply). None: not checked (the
+    # controller's FLOCK_SLURM_MAX_CPUS/_MEM, from the cluster profile, still apply at launch)
+    max_cpus: int | None = Field(default=None, ge=1)
+    max_mem: str | None = None
 
 
 class SwarmSpec(BaseModel):

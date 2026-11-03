@@ -1,10 +1,10 @@
 #!/bin/bash
 # Prepare code and environments only. No services, containers or jobs are started.
-# Usage: bash prepare_roles.sh <full-commit-sha> [--project DIR] [--repo DIR] [--apply]
+# Usage: bash prepare_roles.sh <full-commit-sha> --project DIR [--repo DIR] [--apply]
 set -euo pipefail
-commit=${1:?usage: prepare_roles.sh FULL_SHA [--project DIR] [--repo DIR] [--apply]}
+commit=${1:?usage: prepare_roles.sh FULL_SHA --project DIR [--repo DIR] [--apply]}
 shift
-project=/fsx/carlos_patino/prj-eliza
+project=
 source_repo=
 apply=0
 while [ "$#" -gt 0 ]; do
@@ -17,10 +17,13 @@ while [ "$#" -gt 0 ]; do
 done
 case $commit in *[!0-9a-f]*|'') echo "use a full 40-character commit SHA" >&2; exit 2;; esac
 [ "${#commit}" = 40 ] || { echo "use a full 40-character commit SHA" >&2; exit 2; }
+[ -n "$project" ] || { echo "--project DIR is required (the shared dir for checkouts and venvs)" >&2; exit 2; }
 project=${project%/}
 source_repo=${source_repo:-$project/flock}
-export UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR:-/fsx/carlos_patino/uv/python}
-export UV_CACHE_DIR=${UV_CACHE_DIR:-/fsx/carlos_patino/uv/cache}
+# The venvs' bin/python links into UV_PYTHON_INSTALL_DIR: put it on the shared disk and list it in
+# the cluster profile's CONTAINER_MOUNTS (`flock init` checks it).
+export UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR:-$project/uv/python}
+export UV_CACHE_DIR=${UV_CACHE_DIR:-$project/uv/cache}
 run() {
   printf '%q ' "$@"; printf '\n'
   if [ "$apply" = 1 ]; then "$@"; fi

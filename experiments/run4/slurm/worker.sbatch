@@ -15,10 +15,11 @@
 #   WORKER_INCARNATION, SWARM, TYPE, DEADLINE, DRAIN_WINDOW, BUCKET, RUN, WORK_ROOT, FLOCK_LLM_HOME,
 #   FLOCK_URL, FLOCK_CTL_HOST_FILE, FLOCK_VENV, FLOCK_SECRETS_FILE, PYTHONUNBUFFERED (worker.env.example).
 # - CTL_HOST is read from <run>/hosts/controller.host and exported BEFORE the env file is read, so
-#   FLOCK_URL='http://${CTL_HOST}:7860' expands inside flock-worker (worker/main.py expand_env).
+#   FLOCK_URL='http://${CTL_HOST}:<port>' expands inside flock-worker (worker/main.py fill_host:
+#   the file's host:port, or an old host-only file with the URL's port).
 #   <run>/hosts is mounted read-only in the container, so FLOCK_CTL_HOST_FILE is readable there.
 # - CONTAINER: flock-worker runs in an Enroot/Pyxis container (worker-inner.sh): home not mounted,
-#   /fsx read-only and limited to the venv, uv Python, repo, slurm dir and <run>/hosts. Agent files
+#   the shared disk read-only and limited to the venv, repo, slurm dir, CONTAINER_MOUNTS and <run>/hosts. Agent files
 #   go to /work/flock/agents/{work,llm} on the container root (node disk, deleted with the
 #   container; not /tmp, a tmpfs counted against the job memory). WORK_ROOT and FLOCK_LLM_HOME of
 #   the env file (/tmp/flock/<id>/...) are overridden here; the paths are the same on every node
@@ -42,26 +43,24 @@
 #   job 255727. Never `kill -TERM $SRUN_PID`: srun answers that with a SIGKILL of the task.
 #
 #SBATCH --job-name=flock-worker
-#SBATCH --partition=hopper-cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=7G              # hopper-cpu MaxMemPerCPU=2000: 7G / 4 = 1792 MB per CPU (more would silently raise the CPU count)
+#SBATCH --mem=7G              # 1792 MB per CPU (under a MaxMemPerCPU of 2000, which more would silently exceed)
 #SBATCH --time=54:00:00
 #SBATCH --no-requeue
 #SBATCH --signal=B:TERM@60    # 60 s before the time limit (DEADLINE + drain should end the worker long before)
-#SBATCH -o /fsx/carlos_patino/prj-eliza/runs/_slurm-logs/%x-%j.out
 
 set -uo pipefail  # no -e: the traps and the wait loop must keep running after a signal
 ENVFILE=${1:?usage: worker.sbatch <envfile>  (<runs>/<RUN>/launch/<worker id>-<incarnation>.env)}
 [ -f "$ENVFILE" ] || { echo "worker.sbatch: $ENVFILE: no such file" >&2; exit 2; }
 
-# RUN: from a RUN= line in the env file, else from its path <runs>/<RUN>/launch/<file>.
-RUN=$(sed -n 's/^RUN=//p' "$ENVFILE" | tail -1 | tr -d "\"'[:space:]")
-[ -n "$RUN" ] || RUN=$(basename "$(dirname "$(dirname "$ENVFILE")")")
+# RUN: the run directory, from the env file's path <run dir>/launch/<file> (the controller's
+# FLOCK_SLURM_LAUNCH_DIR); its name is the env file's RUN= line.
+RUN=$(cd "$(dirname "$ENVFILE")/.." && pwd) || { echo "worker.sbatch: $ENVFILE: no run directory" >&2; exit 2; }
 # shellcheck disable=SC2034  # LOG_TAG is read by log() in common.sh
 LOG_TAG=worker
-. /fsx/carlos_patino/prj-eliza/slurm/common.sh
+. "${SLURM_DIR:?SLURM_DIR is unset: the controller job exports it}/common.sh"
 
 # ---------------------------------------------------------------- controller address, then the worker env
 CTL_HOST_FILE=$HOSTS_DIR/controller.host
@@ -76,7 +75,7 @@ require_var FLOCK_URL FLOCK_TOKEN WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLI
   HF_TOKEN FLOCK_WORLD_TOKEN OPENAI_API_KEY CHATBOT_BOARD_INVITE
 case $WORKER_ID in *[!A-Za-z0-9._-]*|"") die "WORKER_ID=$WORKER_ID: unexpected characters";; esac
 
-# ---------------------------------------------------------------- agent files: the container root, never /fsx
+# ---------------------------------------------------------------- agent files: the container root, never the shared disk
 # No WORKER_ID in these paths (see the header): an agent's workdir must be the same absolute
 # path on every worker that ever hosts it, or its Pi session cannot be resumed.
 export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent> (restored from <BUCKET>/<swarm>/<type>/<agent>/)

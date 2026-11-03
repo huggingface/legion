@@ -48,7 +48,7 @@ def test_env_file_fills_the_cluster_settings(monkeypatch, tmp_path):
     """One spec.yaml: --env run.env fills compute, bucket and endpoints; the file wins over the
     shell; COMPUTE_KIND=local and LOOP_UNTIL make the local smoke."""
     for name in ("RUN3_BUCKET", "RUN3_NAMESPACE", "CHATBOT_RUN", "MODEL_WORKER", "COMPUTE_KIND",
-                 "LOOP_UNTIL", "LOOP_MAX_ROUNDS", "WORKER_MEM"):
+                 "LOOP_UNTIL", "LOOP_MAX_ROUNDS", "WORKER_MEM", "SLURM_PARTITION"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENAI_BASE_URLS", "http://shell/v1")
     monkeypatch.setenv("WORKER_CPUS", "8")
@@ -56,7 +56,7 @@ def test_env_file_fills_the_cluster_settings(monkeypatch, tmp_path):
                                       "OPENAI_BASE_URLS=http://first/v1,http://second/v1\n")
     spec = load_spec(str(EXP / "spec.yaml"), [str(tmp_path / "run.env")])
     assert spec.compute.model_dump(exclude_none=True) == {
-        "kind": "slurm", "partition": "hopper-cpu", "cpus": 8, "mem": "7G", "time": "54:00:00"}
+        "kind": "slurm", "partition": "", "cpus": 8, "mem": "7G", "time": "54:00:00"}
     assert spec.bucket == "hf://buckets/x/y" and spec.namespace == "cmpatino"
     assert spec.world.url == "http://${WORLD_HOST}:7860" and spec.world.token_env == "CHATBOT_WORLD_TOKEN"
     assert spec.models["worker-pi"].model == "vllm:fake-model"

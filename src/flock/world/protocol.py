@@ -159,6 +159,14 @@ def credential_id(token: str, origin: str) -> str:
 
 WORLD_HOST_VAR = "${WORLD_HOST}"  # in world.url: the host is read from FLOCK_WORLD_HOST_FILE
 WORLD_HOST_FILE_ENV = "FLOCK_WORLD_HOST_FILE"
+DEFAULT_PORT = 7860  # what an old host-only host file means (the url's own port)
+
+
+def fill_host(url: str, var: str, host: str) -> str:
+    """`url` with `var` (`${WORLD_HOST}`, `${CTL_HOST}`) replaced by a host file's first word:
+    `host:port` (the jobs bind a free port) also replaces the url's port after `var`; an old
+    host-only file keeps the url's port (DEFAULT_PORT in every spec)."""
+    return re.sub(re.escape(var) + (r"(:\d+)?" if ":" in host else ""), lambda _: host, url)
 
 
 def origin_matches(origin: str, endpoint: str) -> bool:

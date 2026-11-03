@@ -37,7 +37,11 @@ def test_world_endpoint_needs_the_host_file(tmp_path):
         world_endpoint(TEMPLATE, {"FLOCK_WORLD_HOST_FILE": str(f)})
     f.write_text("node-3\n")
     assert world_endpoint(TEMPLATE + ":7860", {"FLOCK_WORLD_HOST_FILE": str(f)}) == \
-        "http://node-3:7860"
+        "http://node-3:7860"  # an old host-only file: the url's port
+    f.write_text("node-3:41234\n")  # host:port: the job bound a free port
+    assert world_endpoint(TEMPLATE + ":7860/x", {"FLOCK_WORLD_HOST_FILE": str(f)}) == \
+        "http://node-3:41234/x"
+    assert world_endpoint(TEMPLATE, {"FLOCK_WORLD_HOST_FILE": str(f)}) == "http://node-3:41234"
     assert world_endpoint("http://fixed:1", {}) == "http://fixed:1"
 
 

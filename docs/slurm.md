@@ -11,15 +11,30 @@ the secrets file, host files, env files and logs.
 One run directory per run. `flock init` prepares it; the jobs and every later command read it.
 
 ```sh
-flock init runs/hierarchy --from experiments/hierarchy --secrets secrets.env
+flock init $PWD/runs/hierarchy --from experiments/hierarchy --profile my-cluster.env --secrets secrets.env
 #   logs/ hosts/                 the jobs' logs and host files (controller.host, world.host)
 #   experiment/                  a copy of the folder (links followed): what is launched
+#   cluster.env                  a copy of the cluster profile (below)
 #   run.env (mode 600)           every ${VAR} the spec reads (commented: the spec's default),
 #                                the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
 $EDITOR runs/hierarchy/run.env   # fill what the checks report; then rerun `flock init runs/hierarchy`
-sbatch world.sbatch hierarchy && sbatch controller.sbatch hierarchy   # or `flock launch` on a running controller
-flock --run runs/hierarchy status                                    # or export FLOCK_RUN_DIR=runs/hierarchy
+export SLURM_DIR=/shared/flock-slurm          # the job scripts (experiments/run4/slurm/ copied here)
+. runs/hierarchy/cluster.env
+sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-world-hierarchy "$SLURM_DIR/world.sbatch" $PWD/runs/hierarchy
+sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-ctl-hierarchy "$SLURM_DIR/controller.sbatch" $PWD/runs/hierarchy
+flock --run runs/hierarchy status             # or export FLOCK_RUN_DIR=runs/hierarchy
 ```
+
+Upgrading: copy new scripts to a NEW folder (a new `SLURM_DIR`), never over an old run's slurm
+folder: its controller keeps submitting workers from it, and its requeued jobs would source the
+new `common.sh`, which needs `SLURM_DIR` and the profile's `VENV`/`REPO`/`SECRETS_FILE` and dies
+without them.
+
+sbatch order: the world first, then the controller. The controller's first start waits for the
+world's `/manifest`, then runs `flock launch` (only when the swarm is not on it yet: a requeue
+applies nothing); it sbatch'es the workers itself. A job script takes the run directory (or a
+run name under `$RUNS`); `SLURM_DIR` comes from the submitting shell (the controller passes it on
+to the workers). The partition is the sbatch line's `-p`, never an `#SBATCH` line.
 
 `init` creates only what is missing. It never changes a set `run.env` key or an edited copy;
 it reports how they differ. `--secrets FILE` (mode 600) fills missing keys and prints names
@@ -31,14 +46,51 @@ the swarm's data, which `flock launch` refuses); the tokens are set and the spec
 (the launch preflight); the board invite is set and `<board>/v1/health` answers (the join is not
 tested: it could use up an invite); `WORKER_VENV` or `VENV` from `run.env` (else this Python)
 imports `flock.worker`; the world passes `python -m flock.world doctor` when it is up
-(`hosts/world.host`). A spec whose `world.dir` default is relative (`${WORLD_DIR:-../../worlds/x}`)
+(`hosts/world.host`). With `compute.kind: slurm` also: the planned workers' CPUs against the
+idle CPUs `sinfo -h -p <partition> -o %C` reports (read-only; short is a warning, not a failure:
+Spot capacity moves and pending workers start as it frees up), and, when the profile names a
+container, the venv's `bin/python` with symlinks resolved sits in the venv or under a
+`CONTAINER_MOUNTS` entry (a uv-managed Python outside every mount fails with rc=127 in the
+container). A spec whose `world.dir` default is relative (`${WORLD_DIR:-../../worlds/x}`)
 cannot reach it from the copy: `init` writes `WORLD_DIR` as an absolute path from `--from`.
 
-`--run RUN_DIR` (or `FLOCK_RUN_DIR`) points any command at a run: `run.env` is the first `--env`
-file (an explicit `--env` wins), the controller URL comes from `hosts/controller.host`
+`--run RUN_DIR` (or `FLOCK_RUN_DIR`) points any command at a run: `cluster.env` then `run.env`
+are the first `--env` files (later wins; an explicit `--env` wins over both), the controller URL comes from `hosts/controller.host`
 (`host` means port 7860; `host:port` as written), else a local run's `RUN_DIR/.flock/current`,
 and the token from `run.env`. `--run` beats an exported `FLOCK_URL`; `FLOCK_RUN_DIR` loses to it.
 With neither host file every command but `launch` refuses ("launch first").
+
+## Cluster profile
+
+One cluster's values live in an env file, never in flock's code or the experiment's spec.
+`flock init --profile FILE` copies it to `RUN_DIR/cluster.env` (an existing, maybe edited, copy
+is kept and a difference reported). It is read before `run.env` everywhere: by every command
+(`--run`), by `init`'s checks and by the job scripts (`common.sh` sources it first). Later wins,
+so `run.env` overrides the profile; the spec still wins over both (it only fills `${VAR}`s).
+It is env, not YAML: no structure, no second spec.
+
+```sh
+# my-cluster.env: placeholders; one cluster's real values live with that cluster's kit
+SLURM_PARTITION=cpu                      # sbatch -p and the specs' ${SLURM_PARTITION:-}; unset: the cluster default
+WORKER_CPUS=4                            # the specs' compute.cpus / compute.mem
+WORKER_MEM=7G
+SLURM_MAX_MEM_PER_CPU_MB=2000            # the partition's MaxMemPerCPU: more silently raises the CPU count; unset: not checked
+FLOCK_SLURM_MAX_CPUS=32                  # the largest job a node runs (spec max_cpus/max_mem); unset: not checked
+FLOCK_SLURM_MAX_MEM=60G
+VENV=/shared/flock/venv                  # the job scripts: bin/flock, flock-controller, flock-worker, python
+REPO=/shared/flock/repo                  # a flock checkout (worlds/, the scripts' helpers)
+SECRETS_FILE=/shared/flock/secrets.env   # mode 600, sourced by every job
+CONTAINER_IMAGE=/shared/flock/images/worker.sqsh   # Enroot/Pyxis image for the world and workers
+CONTAINER_MOUNTS=/shared/uv/python       # comma-separated, read-only at the same path, besides VENV, REPO and SLURM_DIR
+```
+
+Who reads what: the specs read `SLURM_PARTITION`, `WORKER_CPUS`, `WORKER_MEM`. The controller
+job checks `WORKER_MEM / WORKER_CPUS` against `SLURM_MAX_MEM_PER_CPU_MB` and hands
+`SLURM_PARTITION` to the Slurm client as `FLOCK_SLURM_PARTITION`; the Slurm client and
+`flock init` read `FLOCK_SLURM_MAX_CPUS/_MEM` as they are (a size over them is refused).
+`cluster.env` is sourced as shell by jobs that hold secrets: it must be owned by the job's user
+and not group- or world-writable (the jobs refuse it otherwise). The job scripts read the paths, the
+image and the mounts. Without a partition anywhere, sbatch gets no `-p`.
 
 ## The launch contract
 
@@ -48,7 +100,7 @@ For each worker slot the controller writes `<launch_dir>/<worker id>-<incarnatio
 `--export`):
 
 ```
-sbatch --parsable -p <partition> [-A <account>] -c <cpus> --mem=<mem> --time=<time>
+sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<time>
        --no-requeue -J <worker id> --comment=swarm=..,type=..,worker=..
        -o <log_dir>/<worker id>-%j.out <worker_script> <env file>
 ```
@@ -95,8 +147,11 @@ exec env -u FLOCK_TOKEN -u HF_TOKEN -u OPENAI_API_KEY -u FLOCK_WORLD_TOKEN -u CH
 ```
 
 `FLOCK_URL` is `http://${CTL_HOST}:<port>` when a host file is configured: the worker reads
-the controller's hostname from `FLOCK_CTL_HOST_FILE` at start and again after a connection
-error, so a controller requeued on another node is followed without relaunching the fleet.
+the controller's `host:port` from `FLOCK_CTL_HOST_FILE` at start and again after a connection
+error, so a controller requeued on another node (and port) is followed without relaunching the
+fleet. Ports: the controller and the world jobs each bind a free port (Slurm may place both on
+one node) and write `host:port` to `hosts/controller.host` / `hosts/world.host`; every reader
+takes the port from the file, and an old host-only file means the URL's own port (7860).
 The controller itself gets the same template through `FLOCK_WORKER_URL` (honoured in space
 mode too).
 
@@ -105,29 +160,30 @@ mode too).
 ```yaml
 compute:
   kind: slurm
-  partition: hopper-cpu      # FLOCK_SLURM_PARTITION
+  partition: ${SLURM_PARTITION:-}   # FLOCK_SLURM_PARTITION; empty: no -p
   account: null              # FLOCK_SLURM_ACCOUNT (-A only when set)
   cpus: 4                    # FLOCK_SLURM_CPUS
   mem: 7G                    # FLOCK_SLURM_MEM
   time: "29:00:00"           # FLOCK_SLURM_TIME
-  worker_script: /fsx/...    # FLOCK_SLURM_WORKER_SCRIPT (required)
-  log_dir: /fsx/...          # FLOCK_SLURM_LOG_DIR (required)
-  launch_dir: /fsx/...       # FLOCK_SLURM_LAUNCH_DIR (required)
-  host_file: /fsx/...        # FLOCK_SLURM_HOST_FILE: the controller's hostname
+  worker_script: /shared/... # FLOCK_SLURM_WORKER_SCRIPT (required)
+  log_dir: /shared/...       # FLOCK_SLURM_LOG_DIR (required)
+  launch_dir: /shared/...    # FLOCK_SLURM_LAUNCH_DIR (required)
+  host_file: /shared/...     # FLOCK_SLURM_HOST_FILE: the controller's host:port
   run: null                  # FLOCK_SLURM_RUN; default: launch_dir's parent dir name
   venv: null                 # FLOCK_SLURM_VENV -> FLOCK_VENV
   secrets_file: null         # FLOCK_SLURM_SECRETS_FILE -> FLOCK_SECRETS_FILE (path only)
   container_root: null       # FLOCK_SLURM_CONTAINER_ROOT, e.g. /work (see Containers)
   container_image: null      # FLOCK_SLURM_CONTAINER_IMAGE -> FLOCK_CONTAINER_IMAGE
-  max_cpus: 28               # FLOCK_SLURM_MAX_CPUS
-  max_mem: 54G               # FLOCK_SLURM_MAX_MEM
+  max_cpus: null             # FLOCK_SLURM_MAX_CPUS (a profile key)
+  max_mem: null              # FLOCK_SLURM_MAX_MEM (a profile key)
   types:                     # per type: partition, cpus, mem, time, container_root
     interviewer: {cpus: 2, mem: 3800M}
 ```
 
-Precedence: built-in defaults < `FLOCK_SLURM_*` on the controller < spec keys < `types.<type>`:
-the spec wins; the env only fills keys the spec leaves unset.
-A size over `max_cpus`/`max_mem` is refused at apply and at launch (`launch_refused`): Slurm
+Precedence: built-in defaults (`cpus` 4, `mem` 7G, `time` 29:00:00; no partition, no node
+limits) < `FLOCK_SLURM_*` on the controller < spec keys < `types.<type>`: the spec wins; the env
+only fills keys the spec leaves unset.
+A size over `max_cpus`/`max_mem` (when set) is refused at apply and at launch (`launch_refused`): Slurm
 would accept it and leave it pending forever. A missing `worker_script`/`log_dir`/`launch_dir`
 is refused too. `bucket` is required; `world.url` is required (no `command` worlds).
 
@@ -211,8 +267,8 @@ for the controller).
 ## Memory
 
 `OUT_OF_MEMORY` is a crash with backoff, so the worker keeps itself under its limit. Every
-15 s it reads its cgroup (the smallest `memory.max` up the tree; `FLOCK_MEMORY_LIMIT_MB` when
-none) and compares nonreclaimable memory (anon + shmem + slab_unreclaimable + kernel_stack +
+15 s it reads its cgroup (the smallest `memory.max` up the tree; when none, Slurm's in-job
+`SLURM_MEM_PER_NODE`, then `FLOCK_MEMORY_LIMIT_MB`, both MB) and compares nonreclaimable memory (anon + shmem + slab_unreclaimable + kernel_stack +
 pagetables, not page cache) with the limit. Without a limit nothing below is armed. Each rung
 is logged once until memory falls below the first one again. `rotate`, `drain`, `preempt`,
 `spike_mb` and `recycle_gap_s` can also be set per type under `worker.memory` (spec, then the
@@ -241,7 +297,8 @@ tool limits (`tool_memory_mb`) do.
 ## The world on a moving host
 
 `world.url` may contain `${WORLD_HOST}` (e.g. `http://${WORLD_HOST}:7860`) with
-`FLOCK_WORLD_HOST_FILE` on the controller. The host is read at apply and every 15 s after;
+`FLOCK_WORLD_HOST_FILE` on the controller; a `host:port` in the file replaces the URL's port
+(7860 stays the default for an old host-only file). The host is read at apply and every 15 s after;
 when the file names another host and the world answers there, the stored spec gets the new
 endpoint and workers get it with their next heartbeat. The world credential is bound to the
 template, so workers keep their secret and do not drain; only a URL of that form (one host
@@ -268,4 +325,4 @@ only crashes within `WORLD_STABLE_S` of the start toward its cap of 5 (a longer 
 and, past the cap, retries with 5 min to 30 min backoff instead of ending. A requeued controller
 restores its state and follows the world's host without waiting for it. For non-preemptible
 placement set `WORLD_PARTITION`/`WORLD_QOS` and `CTL_PARTITION`/`CTL_QOS` in run.env and pass them
-to `sbatch` (`experiments/run4/slurm/run.env.example`).
+to `sbatch` as `-p`/`--qos` (`experiments/run4/slurm/run.env.example`).
