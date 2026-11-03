@@ -111,7 +111,7 @@ def test_compute_spec_keys_and_resolution(tmp_path):
     assert cfg["time"] == "1:00:00" and cfg["account"] == "acct"  # unset in the spec: env
     assert cfg["max_cpus"] == "64"  # the spec's default is not a value it sets
     assert resolve(spec.compute, "other", env)["cpus"] == "8"
-    assert resolve(None, "x", {})["partition"] == "hopper-cpu"
+    assert "partition" not in resolve(None, "x", {})  # no built-in cluster: sbatch's default
     with pytest.raises(ValueError, match="bucket is required"):
         SwarmSpec.model_validate({"swarm": "d", "compute": "slurm", "types": {}})
     with pytest.raises(ValueError, match="unknown types"):
@@ -160,6 +160,15 @@ def test_launch_writes_env_file_and_sbatch_line_without_secrets(tmp_path, slurm,
     assert env["FLOCK_SECRETS_FILE"] == "/fsx/run3/secrets.env"
     assert env["MSGBOARD_URL"] == "https://example.invalid" and "FLOCK_TOKEN" not in env
     assert "DEADLINE" in env and env["DRAIN_WINDOW"] == "10m"
+
+
+def test_no_partition_leaves_it_to_the_cluster(tmp_path, slurm):
+    # `partition: ${SLURM_PARTITION:-}` with no profile renders "": no -p, sbatch's default
+    spec = slurm_spec(tmp_path, partition="")
+    job = SlurmJobsClient(env={}).launch(W0, spec.types["researcher"], {"TYPE": "researcher"},
+                                         {}, {"worker": W0}, 3600, namespace="",
+                                         compute=spec.compute)
+    assert slurm.argv(job)[:3] == ["--parsable", "-A", "acct"]
 
 
 def test_state_mapping_lifecycle(tmp_path, slurm):
@@ -437,16 +446,19 @@ def test_size_guard_at_apply_and_at_launch(tmp_path, slurm, store, clock):
 
     assert mem_mb("54G") == 54 * 1024 and mem_mb("3500M") == 3500 and mem_mb("1T") == 1024**2
     assert mem_mb("512") == 512 and mem_mb("2048K") == 2
+    node = {"max_cpus": 28, "max_mem": "54G"}
     with pytest.raises(ValueError, match="cpus 32 is over max_cpus 28"):
-        slurm_spec(tmp_path, cpus=32)
+        slurm_spec(tmp_path, cpus=32, **node)
     with pytest.raises(ValueError, match="mem 60G is over max_mem 54G"):
-        slurm_spec(tmp_path, types={"researcher": {"mem": "60G"}})
+        slurm_spec(tmp_path, types={"researcher": {"mem": "60G"}}, **node)
     with pytest.raises(ValueError, match="expected a number"):
         slurm_spec(tmp_path, mem="lots")
     assert slurm_spec(tmp_path, cpus=32, max_cpus=64).compute.cpus == 32
-    # an env override that does not fit: refused at launch, nothing submitted
+    assert slurm_spec(tmp_path, cpus=99).compute.cpus == 99  # no node limits: nothing checked
+    # an env override that does not fit the profile's node limits: refused at launch
     store.put_swarm(slurm_spec(tmp_path), 0)
-    actions = reconcile(store, SlurmJobsClient(env={"FLOCK_SLURM_MEM": "100G"}), clock(),
+    actions = reconcile(store, SlurmJobsClient(env={"FLOCK_SLURM_MEM": "100G",
+                                                    "FLOCK_SLURM_MAX_MEM": "54G"}), clock(),
                         settings())
     refused = [a for a in actions if a.kind == "launch_refused"]
     assert refused and "max_mem" in refused[0].detail and slurm.ids() == []

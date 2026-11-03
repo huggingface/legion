@@ -73,16 +73,17 @@ no external model calls. The separate held-out evaluator consumes
    The first command prints the plan; the second prepares code and environments,
    including pytest and ruff. Neither submits jobs. Existing role checkouts must
    be clean and at the requested commit; the helper refuses to overwrite them.
-   Copy `slurm/` to `/fsx/carlos_patino/prj-eliza/slurm/`, then prepare the run directory
-   (docs/slurm.md "Deploying"): `flock init /fsx/carlos_patino/prj-eliza/runs/run4 --from
+   Copy `slurm/` to `<project>/slurm/`, then prepare the run directory
+   (docs/slurm.md "Deploying"): `flock init <project>/runs/run4 --from
    experiments/run4 --secrets <secrets.env>` copies this folder to `runs/run4/experiment` and
-   writes `runs/run4/run.env` (mode 600, per-run tokens); add the cluster settings from
+   writes `runs/run4/run.env` (mode 600, per-run tokens); pass the cluster profile with
+   `--profile <cluster.env>` (docs/slurm.md) and add the run settings from
    `slurm/run.env.example`. The old operational guide is
    kept as `slurm/run3-reference.md`; use it for signal/requeue mechanics, not its
    run3 code paths, probe settings or launch defaults.
 2. The Pi image needs git, Node 22, Pi 1.2.0 and util-linux `unshare`; use it for the world too,
    because the old Python-only world image has no git. Every agent file and world
-   state file belongs on `/work` in its container and in the bucket, never `/fsx`.
+   state file belongs on `/work` in its container and in the bucket, never the shared disk.
 3. Supply the secrets in `slurm/secrets.env.example`. Use **one `HF_TOKEN`** for
    read/write access to the experiment bucket and `cmpatino/chatbot-swarm` only.
    There is no separate dataset token. Check its fine-grained grants in the Hub;
@@ -108,10 +109,10 @@ no external model calls. The separate held-out evaluator consumes
 
    ```sh
    set -a
-   . /fsx/carlos_patino/prj-eliza/secrets/secrets.env
-   . /fsx/carlos_patino/prj-eliza/runs/run4/run.env
+   . <project>/secrets/secrets.env
+   . <project>/runs/run4/run.env
    set +a
-   flock init /fsx/carlos_patino/prj-eliza/runs/run4   # the doctor: exit 1 if a check fails
+   flock init <project>/runs/run4   # the doctor: exit 1 if a check fails
    python experiments/run4/preflight.py
    python experiments/run4/preflight.py --online
    ```

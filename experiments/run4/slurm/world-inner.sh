@@ -31,7 +31,7 @@ for v in VENV B CHATBOT_WS WORLD_SRC WORLD_PORT WORLD_CTL WS_SYNC_S FINAL_SYNC_S
 done
 case $CHATBOT_WS in /work/*) ;; *) log "FATAL: CHATBOT_WS=$CHATBOT_WS is not under /work"; exit 2;; esac
 
-# No home, no /fsx writes: every cache and temp dir on the container root.
+# No home, no shared-disk writes: every cache and temp dir on the container root.
 export HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp
 export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
 

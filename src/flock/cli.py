@@ -35,14 +35,14 @@ class _Group(TyperGroup):
 
 app = typer.Typer(cls=_Group, help="Host coding-harness agent swarms on HF Jobs.",
                   no_args_is_help=True)
-_RUN_ENV_FILES: list[str] = []  # --run / FLOCK_RUN_DIR: the run's run.env, before any --env
+_RUN_ENV_FILES: list[str] = []  # --run / FLOCK_RUN_DIR: cluster.env, run.env, before any --env
 
 
 @app.callback()
 def _main(ctx: typer.Context, run: str = typer.Option(
         None, "--run", metavar="RUN_DIR",
-        help="Run every command against RUN_DIR (`flock init`): its run.env as the first --env "
-             "file, its controller (hosts/controller.host) and token. Also FLOCK_RUN_DIR, which "
+        help="Run every command against RUN_DIR (`flock init`): its cluster.env and run.env as "
+             "the first --env files, its controller (hosts/controller.host) and token. Also FLOCK_RUN_DIR, which "
              "an exported FLOCK_URL beats; --run beats FLOCK_URL.")) -> None:
     run_dir = run or os.environ.get("FLOCK_RUN_DIR")
     _RUN_ENV_FILES[:] = []
@@ -216,13 +216,16 @@ def init(
                               help="The experiment folder to copy (needed while RUN_DIR has none)."),
     secrets: str = typer.Option(None, "--secrets", metavar="FILE",
                                 help="NAME=value file (mode 600) filling run.env's missing keys."),
+    profile: str = typer.Option(None, "--profile", metavar="FILE",
+                                help="Cluster profile (env file) to copy to RUN_DIR/cluster.env, "
+                                     "read before run.env (docs/slurm.md)."),
 ) -> None:
     """Prepare RUN_DIR for `flock launch` (docs/slurm.md "Deploying"): create what is missing
-    (logs/, hosts/, a copy of the experiment folder, run.env with per-run tokens), then check
+    (logs/, hosts/, a copy of the experiment folder, cluster.env, run.env with per-run tokens), then check
     it without a controller. Never overwrites a run.env key or an edited copy. Run it again as
     the doctor; exit 1 if a check fails."""
     try:
-        rep = rundir.init(run_dir, from_, secrets_file=secrets)
+        rep = rundir.init(run_dir, from_, secrets_file=secrets, profile=profile)
     except ValueError as e:
         _fail([str(e)])
     for what in rep.created:
@@ -230,7 +233,8 @@ def init(
     for note in rep.notes:
         typer.echo(f"note: {note}")
     for c in rep.checks:
-        typer.echo(f"{'ok' if c.ok else 'skip' if c.ok is None else 'FAIL':<5}{c.name}: {c.detail}")
+        word = "warn" if c.warn else "ok" if c.ok else "skip" if c.ok is None else "FAIL"
+        typer.echo(f"{word:<5}{c.name}: {c.detail}")
         for line in c.lines:
             typer.echo(f"       {line}")
     if rep.failed:

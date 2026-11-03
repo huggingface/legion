@@ -171,6 +171,10 @@ def test_budget_from_env_and_host_file(tmp_path):
     assert cfg.url == "http://ip-10-0-0-7:7860" and cfg.drain_budget == 12.0
     assert cfg.url_template == "http://${CTL_HOST}:7860"
     assert WorkerConfig.from_env({**env, "FLOCK_DRAIN_BUDGET_S": ""}).drain_budget == 20.0
+    host.write_text("ip-10-0-0-7:40111\n")  # host:port (a free port): the file's port wins
+    assert WorkerConfig.from_env(env).url == "http://ip-10-0-0-7:40111"
+    # worker.sbatch exports CTL_HOST from the same file
+    assert WorkerConfig.from_env({**env, "CTL_HOST": "n2:40222"}).url == "http://n2:40222"
 
 
 async def test_client_follows_a_moved_controller(tmp_path):

@@ -3,7 +3,7 @@
 `SlurmJobsClient` speaks the `JobsClient` protocol (controller/jobs.py), so the reconcile loop,
 placement, heartbeats and events are unchanged. flock only shells out:
 
-    sbatch --parsable -p <partition> [-A <account>] -c <cpus> --mem=<mem> --time=<time>
+    sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<time>
            --no-requeue -J <worker id> --comment=<labels> -o <log_dir>/<worker id>-%j.out
            <worker_script> <launch_dir>/<worker id>-<incarnation>.env
 
@@ -61,8 +61,9 @@ log = logging.getLogger("flock.slurm")
 
 # The worker's exit code after a preemption drain (worker/main.py): EX_TEMPFAIL.
 PREEMPT_EXIT = 75
-DEFAULTS = {"partition": "hopper-cpu", "cpus": "4", "mem": "7G", "time": "29:00:00",
-            "max_cpus": "28", "max_mem": "54G"}
+# No cluster's values here: partition and node limits come from the spec or the cluster
+# profile (FLOCK_SLURM_*; docs/slurm.md "Cluster profile"). No partition: sbatch's default.
+DEFAULTS = {"cpus": "4", "mem": "7G", "time": "29:00:00"}
 # compute spec key -> controller env override (the first seven are the cluster's contract)
 ENV_KEYS = {
     "partition": "FLOCK_SLURM_PARTITION",
@@ -307,13 +308,13 @@ class SlurmJobsClient:
         if missing:
             raise SlurmConfigError(f"compute slurm needs {', '.join(missing)} (spec `compute:` keys "
                              f"or {', '.join(ENV_KEYS[k] for k in missing)})")
-        if problem := size_problem(cfg["cpus"], cfg["mem"], cfg["max_cpus"], cfg["max_mem"]):
+        if problem := size_problem(cfg["cpus"], cfg["mem"], cfg.get("max_cpus"), cfg.get("max_mem")):
             raise SlurmConfigError(f"{env.get('TYPE', '')}: {problem}")
         settings, names = worker_env(worker_id, env, secrets, cfg)
         env_path = env_file_path(cfg["launch_dir"], worker_id, env)
         write_private(env_path, env_file_text(settings, names))
         Path(cfg["log_dir"]).mkdir(parents=True, exist_ok=True)
-        argv = ["sbatch", "--parsable", "-p", cfg["partition"]]
+        argv = ["sbatch", "--parsable", *(["-p", cfg["partition"]] if cfg.get("partition") else [])]
         if cfg.get("account"):
             argv += ["-A", cfg["account"]]
         argv += [
@@ -334,7 +335,7 @@ class SlurmJobsClient:
             self._launched[job_id] = (worker_id, time.monotonic(), cfg["log_dir"])
             self._dirs[job_id] = cfg["launch_dir"]
         log.info("sbatch %s for %s (%s cpus, %s, %s)", job_id, worker_id, cfg["cpus"],
-                 cfg["mem"], cfg["partition"])
+                 cfg["mem"], cfg.get("partition") or "default partition")
         return job_id
 
     def _squeue_state(self, job_id: str) -> tuple[str, str] | None:

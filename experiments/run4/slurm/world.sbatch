@@ -1,22 +1,22 @@
 #!/bin/bash
 # world.sbatch: the run-4 PR world (worlds/chatbot4, `python -m flock.world serve`) as one CPU Slurm job.
 #
-#   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
-#   sbatch -J flock-world-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
-#          ${WORLD_PARTITION:+-p $WORLD_PARTITION} ${WORLD_QOS:+--qos=$WORLD_QOS} \
-#          /fsx/carlos_patino/prj-eliza/slurm/world.sbatch <RUN>
+#   export SLURM_DIR=<this folder>; . <run dir>/cluster.env
+#   sbatch -J flock-world-<RUN> -o <run dir>/logs/%x-%j.out \
+#          ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} ${WORLD_QOS:+--qos=$WORLD_QOS} \
+#          "$SLURM_DIR/world.sbatch" <run dir>
 #
 # This batch script stays on the HOST (signals, <run>/hosts/world.host, `scontrol requeue`). The
 # world itself runs in an Enroot/Pyxis container through `srun ... bash world-inner.sh`, which
 # does restore -> serve -> periodic sync -> final sync INSIDE the container: the workspace lives on
 # the container root (/work/world/ws, node disk, deleted with the container), home is not mounted
-# and /fsx is visible only read-only (venv, uv Python, repo, slurm dir, <run>/world).
+# and the shared disk is visible only read-only (venv, repo, slurm dir, CONTAINER_MOUNTS, <run>/world).
 # - A consistent git bundle and PR/review state restore from <CHATBOT_BUCKET>/world.tar.gz
 #   into a fresh container workspace. Archive uploads run every WS_SYNC_S (300 s).
 # - CHATBOT_RUN_SLOTS controls concurrent contract runs (default 26, plus 2 service CPUs). There is no world.yaml,
 #   probe set or promotion service. <run>/world holds only the bounded-stop control file.
 # - <run>/hosts/world.host (and the <run>/world.host symlink) is rewritten at EVERY start, a
-#   requeue onto a new node included.
+#   requeue onto a new node included, as host:port (a free port: the controller may share the node).
 # - Spot reclaim: the watcher sends SIGUSR1 to this shell, to srun and to every process in the
 #   container. srun is started while this shell ignores USR1, then on_usr1 forwards USR1 to the
 #   step (`kill -USR1 $SRUN_PID`), waits for it (<= USR1_WAIT_S, 22 s; world-inner.sh: stop 5 s,
@@ -33,23 +33,21 @@
 # and checkout; common.sh applies them at run time, so a requeue picks them up too.
 #
 #SBATCH --job-name=flock-world
-#SBATCH --partition=hopper-cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=28
-#SBATCH --mem=54G             # full CPU node; 54G / 28 = 1975 MB per CPU, below the 2000 MB limit
+#SBATCH --mem=54G             # 1975 MB per CPU (under a MaxMemPerCPU of 2000); sbatch -c/--mem override for another node size
 #SBATCH --time=60:00:00
 #SBATCH --requeue
 #SBATCH --dependency=singleton
 #SBATCH --open-mode=append
 #SBATCH --signal=B:TERM@120   # 120 s before the time limit: SIGTERM to the batch shell -> clean stop (final push / sync)
-#SBATCH -o /fsx/carlos_patino/prj-eliza/runs/_slurm-logs/%x-%j.out
 
 set -uo pipefail  # no -e: the traps and the wait loop must keep running after a signal
 RUN="${1:-${RUN:-}}"
 # shellcheck disable=SC2034  # LOG_TAG is read by log() in common.sh
 LOG_TAG=world
-. /fsx/carlos_patino/prj-eliza/slurm/common.sh
+. "${SLURM_DIR:?export SLURM_DIR=<the slurm scripts folder> before sbatch}/common.sh"
 
 # ---------------------------------------------------------------- signals (first thing: a reclaim during start-up must requeue too)
 SRUN_PID= ; REQUEUE=0 ; STOPPING=0
@@ -122,7 +120,8 @@ RUN3_BUCKET=${RUN3_BUCKET%/}
 export CHATBOT_BUCKET="${CHATBOT_BUCKET:-$RUN3_BUCKET/$RUN}"   # hf://buckets/<ns>/<bucket>/<run> (README runbook B step 2)
 export B=${CHATBOT_BUCKET%/}
 export WS_SYNC_S=${WS_SYNC_S:-300}
-export WORLD_PORT=7860
+WORLD_PORT=$(free_port) || die "no free port on $(hostname)"   # the controller may share this node
+export WORLD_PORT
 WORLD_HOST=$(hostname)
 export WORLD_SRC=$REPO/worlds/chatbot4            # `python -m flock.world serve module:Class` imports from the cwd
 export CHATBOT_WS=/work/world/ws                  # container root: restored empty at each start, deleted with the container
@@ -134,7 +133,7 @@ export CHATBOT_RUN_SLOTS=${CHATBOT_RUN_SLOTS:-26}
 
 # ---------------------------------------------------------------- serve (in the container)
 [ "$STOPPING" = 0 ] || exit 0  # a signal during the start-up (already requeued on USR1; nothing to sync)
-publish_host world             # every start: a requeue may land on another node
+publish_host world "$WORLD_PORT"   # host:port, every start: a requeue may land on another node
 container_srun_args "$WORLD_CTL"   # -> CTR_SRUN; <run>/world ro (final-sync-bound)
 log "world.host=$WORLD_HOST; url http://$WORLD_HOST:$WORLD_PORT; ws=$CHATBOT_WS (container); bucket=$B; restarts=${SLURM_RESTART_COUNT:-0}"
 log "container=$CONTAINER_IMAGE; world log $RUN_DIR/logs/world-$RUN.log"
@@ -164,7 +163,7 @@ done
 wait "$SRUN_PID"; rc=$?   # the real status even when the last wait was cut by a trap
 log "world step exited with $rc (requeue=$REQUEUE, term=${TERM_MODE:-none}); the final sync ran inside it"
 [ "$REQUEUE" = 1 ] && exit 0  # already requeued by the Spot handler
-# Crash requeues only: SLURM_RESTART_COUNT also counts Spot requeues, so keep our own count on /fsx.
+# Crash requeues only: SLURM_RESTART_COUNT also counts Spot requeues, so keep our own count on the shared disk.
 # Only FAST crashes (up within WORLD_STABLE_S of the start) count toward the cap; a longer run
 # resets the count and the backoff. Past the cap the job never ends: it sleeps with backoff and
 # starts again, so a transient Hub problem heals without a person.

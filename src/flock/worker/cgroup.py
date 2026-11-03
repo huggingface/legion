@@ -86,11 +86,12 @@ class CgroupMem:
         self.samples: deque[tuple[float, float]] = deque()
         self.version, self.path = self._find()
         self.limit_mb: float | None = self._limit()
-        if self.limit_mb is None and env.get("FLOCK_MEMORY_LIMIT_MB"):
-            try:
-                self.limit_mb = float(env["FLOCK_MEMORY_LIMIT_MB"])
-            except ValueError:
-                log.warning("FLOCK_MEMORY_LIMIT_MB=%r is not a number", env["FLOCK_MEMORY_LIMIT_MB"])
+        for var in ("SLURM_MEM_PER_NODE", "FLOCK_MEMORY_LIMIT_MB"):  # MB; Slurm sets the first in-job
+            if self.limit_mb is None and env.get(var):
+                try:
+                    self.limit_mb = float(env[var])
+                except ValueError:
+                    log.warning("%s=%r is not a number", var, env[var])
 
     @property
     def armed(self) -> bool:

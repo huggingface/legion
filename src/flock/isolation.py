@@ -83,7 +83,7 @@ def tmpfs_size(env=os.environ) -> str:
 
 def runtime_paths(command: list[str], *, python_only=False) -> list[str]:
     paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", sys.prefix, sys.base_prefix]
-    # Config files needed by Python, Node, TLS, DNS and git; never a host home or /fsx root.
+    # Config files needed by Python, Node, TLS, DNS and git; never a host home or the shared-disk root.
     paths += ["/etc/ssl", "/etc/alternatives", "/etc/hosts", "/etc/resolv.conf",
               "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime"]
     if not python_only:

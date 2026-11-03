@@ -1,13 +1,14 @@
 #!/bin/bash
 # controller.sbatch: the flock controller as one CPU Slurm job; it applies the spec on the first start.
 #
-#   mkdir -p /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs
-#   sbatch -J flock-ctl-<RUN> -o /fsx/carlos_patino/prj-eliza/runs/<RUN>/logs/%x-%j.out \
-#          ${CTL_PARTITION:+-p $CTL_PARTITION} ${CTL_QOS:+--qos=$CTL_QOS} \
-#          /fsx/carlos_patino/prj-eliza/slurm/controller.sbatch <RUN>
+#   export SLURM_DIR=<this folder>; . <run dir>/cluster.env
+#   sbatch -J flock-ctl-<RUN> -o <run dir>/logs/%x-%j.out \
+#          ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} ${CTL_QOS:+--qos=$CTL_QOS} \
+#          "$SLURM_DIR/controller.sbatch" <run dir>
 #
 # Fact sheet (notes/run3-slurm-facts.md) §3 controller, §5 restart, §7 proposed layout.
-# - Step 1: `flock-controller` (FastAPI on 7860, SQLite in FLOCK_DATA under /tmp, state pushed to
+# - Step 1: `flock-controller` (FastAPI on a free port, written with the host to
+#   <run>/hosts/controller.host as host:port; SQLite in FLOCK_DATA under /tmp, state pushed to
 #   FLOCK_STATE_URL every 60 s and once more on SIGTERM; restored at start).
 # - Step 2, once GET /healthz answers: `flock launch` the experiment's spec.yaml only when the
 #   swarm is not on the controller (HTTP 404: the first start); on 200 (a Spot requeue restored
@@ -27,23 +28,21 @@
 # No `--export`: everything comes from common.sh (secrets.env, run.env) inside the job.
 #
 #SBATCH --job-name=flock-ctl
-#SBATCH --partition=hopper-cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=3800M           # hopper-cpu MaxMemPerCPU=2000: more than 2000 MB per CPU silently raises the CPU count (4G / 2 = 2048)
+#SBATCH --mem=3800M           # 1900 MB per CPU: fits a MaxMemPerCPU of 2000 (more silently raises the CPU count)
 #SBATCH --time=60:00:00
 #SBATCH --requeue
 #SBATCH --dependency=singleton  # one controller per run (the job name flock-ctl-<RUN> is per run)
 #SBATCH --open-mode=append      # a requeue keeps the job id: append to the .out instead of truncating it
 #SBATCH --signal=B:TERM@120   # 120 s before the time limit: SIGTERM to the batch shell -> clean stop (final push / sync)
-#SBATCH -o /fsx/carlos_patino/prj-eliza/runs/_slurm-logs/%x-%j.out
 
 set -uo pipefail  # no -e: the traps and the wait loop must keep running after a signal
 RUN="${1:-${RUN:-}}"
 # shellcheck disable=SC2034  # LOG_TAG is read by log() in common.sh
 LOG_TAG=controller
-. /fsx/carlos_patino/prj-eliza/slurm/common.sh
+. "${SLURM_DIR:?export SLURM_DIR=<the slurm scripts folder> before sbatch}/common.sh"
 
 # ---------------------------------------------------------------- signals (first thing: a reclaim during start-up must requeue too)
 CTL_PID= ; APPLY_PID= ; REQUEUE=0 ; STOPPING=0
@@ -88,7 +87,7 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
   || die "COMPUTE_KIND=$COMPUTE_KIND: this layout runs workers as Slurm jobs (spec.yaml compute.kind): unset it"
 
 RUN3_BUCKET=${RUN3_BUCKET%/}
-CTL_PORT=7860
+CTL_PORT=$(free_port) || die "no free port on $(hostname)"   # the world may share this node
 CTL_HOST=$(hostname)
 EXP=$RUN_DIR/experiment                         # the experiment folder's copy: `flock init <run dir> --from experiments/<name>`
 SPEC=$EXP/spec.yaml                             # the one spec: compute, ramp and ${VAR}s inline
@@ -99,10 +98,9 @@ WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # first launch only: how long `
 export FLOCK_MODE=space                         # space mode: workers get FLOCK_URL as-is (main.py)
 export PORT=$CTL_PORT
 export FLOCK_URL="http://$CTL_HOST:$CTL_PORT"   # this node; also what workers are handed in space mode
-# PROVISIONAL: today main.py reads FLOCK_WORKER_URL only in job mode. If the Slurm client (or main.py)
-# learns to hand workers this template instead of FLOCK_URL, worker.sbatch already exports CTL_HOST
-# from <run>/controller.host, so a requeued controller would not force a fleet-wide relaunch.
-export FLOCK_WORKER_URL='http://${CTL_HOST}:7860'
+# What workers are told: they fill ${CTL_HOST} from <run>/hosts/controller.host (host:port, so the
+# port of a requeued controller is followed too) without a fleet-wide relaunch.
+export FLOCK_WORKER_URL='http://${CTL_HOST}:'"$CTL_PORT"
 export FLOCK_COMPUTE=slurm                      # the Slurm backend (controller/slurm.py), checked above
 # /tmp is per job on this cluster (wiped at job end), so the `rm -rf` below can only hit this job's
 # files; the job id in the path keeps it safe even on a node where /tmp were shared.
@@ -121,24 +119,30 @@ export FLOCK_JOB_LABELS="run=$RUN"              # -> worker labels, so `list` fi
 # "SlurmJobsClient"). They are what `launch` passes to sbatch and where it writes/reads files.
 # The client must NOT pass `--export` to sbatch: worker.sbatch reads secrets.env and its env file
 # itself; with the default export the worker inherits this environment (same user: tolerable).
-# Worker size, partition and time are the spec's `compute:` (${WORKER_CPUS:-4}, ${WORKER_MEM:-7G}
-# from run.env; the spec wins over FLOCK_SLURM_*). hopper-cpu MaxMemPerCPU=2000: more than 2000 MB
-# per CPU silently raises the CPU count, so check the run.env values here (7G / 4 = 1792); the
-# Slurm client checks the 28 CPU / 54G node rule (slurm.py size_problem).
-_cpus=${WORKER_CPUS:-4} _mem=${WORKER_MEM:-7G}
-case $_cpus in ''|0|*[!0-9]*) die "WORKER_CPUS=$_cpus: must be a positive integer";; esac
-_mem_n=${_mem%[GgMm]}                           # sbatch --mem: an integer, bare (MB) or with M or G
-case $_mem_n in ''|*[!0-9]*) die "WORKER_MEM=$_mem: use an integer with M or G (e.g. 7G, 11G, 3800M)";; esac
-case $_mem in *[Gg]) _mem_mb=$(( _mem_n * 1024 ));; *) _mem_mb=$_mem_n;; esac
-_mem_per_cpu=$(( (_mem_mb + _cpus - 1) / _cpus ))  # ceiling, as Slurm rounds
-[ "$_mem_per_cpu" -le 2000 ] \
-  || die "WORKER_MEM=$_mem / WORKER_CPUS=$_cpus = $_mem_per_cpu MB per CPU, over hopper-cpu MaxMemPerCPU=2000: raise WORKER_CPUS or lower WORKER_MEM"
-unset _cpus _mem _mem_n _mem_mb _mem_per_cpu
+# Worker size, partition and time are the spec's `compute:` (${WORKER_CPUS:-4}, ${WORKER_MEM:-7G},
+# ${SLURM_PARTITION:-} from cluster.env / run.env; the spec wins over FLOCK_SLURM_*). The cluster
+# profile's limits: SLURM_MAX_MEM_PER_CPU_MB (the partition's MaxMemPerCPU: more silently raises
+# the CPU count) is checked here; SLURM_NODE_MAX_CPUS/_MEM (the largest job a node can run) by
+# the Slurm client (slurm.py size_problem). Unset: not checked.
+export FLOCK_SLURM_PARTITION=${FLOCK_SLURM_PARTITION:-${SLURM_PARTITION:-}}
+export FLOCK_SLURM_MAX_CPUS=${FLOCK_SLURM_MAX_CPUS:-${SLURM_NODE_MAX_CPUS:-}}
+export FLOCK_SLURM_MAX_MEM=${FLOCK_SLURM_MAX_MEM:-${SLURM_NODE_MAX_MEM:-}}
+if [ -n "${SLURM_MAX_MEM_PER_CPU_MB:-}" ]; then
+  _cpus=${WORKER_CPUS:-4} _mem=${WORKER_MEM:-7G}
+  case $_cpus in ''|0|*[!0-9]*) die "WORKER_CPUS=$_cpus: must be a positive integer";; esac
+  _mem_n=${_mem%[GgMm]}                           # sbatch --mem: an integer, bare (MB) or with M or G
+  case $_mem_n in ''|*[!0-9]*) die "WORKER_MEM=$_mem: use an integer with M or G (e.g. 7G, 11G, 3800M)";; esac
+  case $_mem in *[Gg]) _mem_mb=$(( _mem_n * 1024 ));; *) _mem_mb=$_mem_n;; esac
+  _mem_per_cpu=$(( (_mem_mb + _cpus - 1) / _cpus ))  # ceiling, as Slurm rounds
+  [ "$_mem_per_cpu" -le "$SLURM_MAX_MEM_PER_CPU_MB" ] \
+    || die "WORKER_MEM=$_mem / WORKER_CPUS=$_cpus = $_mem_per_cpu MB per CPU, over SLURM_MAX_MEM_PER_CPU_MB=$SLURM_MAX_MEM_PER_CPU_MB: raise WORKER_CPUS or lower WORKER_MEM"
+  unset _cpus _mem _mem_n _mem_mb _mem_per_cpu
+fi
 export FLOCK_SLURM_WORKER_SCRIPT=$SLURM_DIR/worker.sbatch
 export FLOCK_SLURM_LAUNCH_DIR=$RUN_DIR/launch   # one mode-600 env file per worker launch (worker.env.example)
 export FLOCK_SLURM_LOG_DIR=$RUN_DIR/logs        # sbatch -o <dir>/<worker id>-%j.out, so logs_tail can read them
 # The controller's hostname for the workers (slurm.py host_file -> FLOCK_CTL_HOST_FILE in the env
-# file; FLOCK_URL becomes http://${CTL_HOST}:7860). Under <run>/hosts: mounted ro in the worker's
+# file; FLOCK_URL becomes http://${CTL_HOST}:<port>, the file's host:port wins). Under <run>/hosts: mounted ro in the worker's
 # container, and a directory mount sees the rename publish_host does.
 export FLOCK_SLURM_HOST_FILE=$HOSTS_DIR/controller.host
 export FLOCK_SLURM_RUN=$RUN FLOCK_SLURM_VENV=$VENV FLOCK_SLURM_SECRETS_FILE=$SECRETS_FILE   # -> RUN, FLOCK_VENV, FLOCK_SECRETS_FILE in the env file
@@ -150,7 +154,7 @@ rm -rf "$CTL_TMP" && mkdir -p "$FLOCK_DATA" "$HF_HOME"
 
 # ---------------------------------------------------------------- step 1: the controller
 [ "$STOPPING" = 0 ] || exit 0  # a signal arrived during the start-up (already requeued on USR1)
-publish_host controller   # <run>/hosts/controller.host (+ the <run>/controller.host symlink), every start
+publish_host controller "$CTL_PORT"   # <run>/hosts/controller.host = host:port (+ the <run>/controller.host symlink), every start
 log "controller.host=$CTL_HOST; FLOCK_URL=$FLOCK_URL; state=$FLOCK_STATE_URL; restarts=${SLURM_RESTART_COUNT:-0}"
 # Started while USR1 is ignored: SIG_IGN is inherited across fork and exec (a trap handler is
 # not), so the watcher's direct SIGUSR1 does not kill flock-controller before on_usr1 has sent
@@ -188,16 +192,19 @@ apply_step() {  # runs in a background subshell (below)
   # follows the world's host by itself; it never waits).
   local t0 world_host
   t0=$(date +%s)
+  # world.host: host:port, or an old host-only file (port 7860)
   until world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null) && [ -n "$world_host" ] &&
-        [ "$(http_status "http://$world_host:7860/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ]; do
+        { [[ $world_host == *:* ]] || world_host=$world_host:7860; } &&
+        [ "$(http_status "http://$world_host/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ]; do
     [ $(( $(date +%s) - t0 )) -lt "$WORLD_WAIT_S" ] \
       || { log "world unavailable after ${WORLD_WAIT_S}s: start world.sbatch, then flock launch by hand (README)"; return 1; }
     sleep 10
   done
-  log "world: http://$world_host:7860 answers /manifest"
+  log "world: http://$world_host answers /manifest"
   log "swarm $swarm not on the controller: flock launch $SPEC ${RUN3_APPLY_ARGS:-}"
   # shellcheck disable=SC2086
-  (cd "$EXP" && "$VENV/bin/flock" launch "$SPEC" ${RUN3_APPLY_ARGS:-}) >> "$RUN_DIR/logs/apply-$RUN.log" 2>&1 \
+  # SLURM_PARTITION for the spec's ${SLURM_PARTITION:-} only (common.sh keeps it out of srun's env)
+  (cd "$EXP" && SLURM_PARTITION=${SLURM_PARTITION:-} "$VENV/bin/flock" launch "$SPEC" ${RUN3_APPLY_ARGS:-}) >> "$RUN_DIR/logs/apply-$RUN.log" 2>&1 \
     || { log "flock launch failed: see $RUN_DIR/logs/apply-$RUN.log"; return 1; }
   log "applied: the controller ramps the replicas (replicas_ramp in the spec)"
 }
