@@ -4,7 +4,8 @@ and CLI all read these entries. Code is named by import path ("module:function")
 only when used, so the controller never imports worker-only dependencies.
 
 Still by hand for a new harness CLI: its install line in Dockerfile.worker and in the bootstrap
-script (`_BOOTSTRAP`, flock/controller/jobs.py)."""
+script (`_BOOTSTRAP`, flock/controller/jobs.py), and, if it keeps state in a home directory, that
+variable in controller/local.py, controller/slurm.py and the bootstrap script."""
 
 from __future__ import annotations
 
