@@ -298,7 +298,7 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
 
     seen = []
     monkeypatch.setattr(Client, "swarms", lambda self: seen.append(
-        (os.environ.get("FLOCK_URL"), os.environ.get("FLOCK_TOKEN"))) or [])
+        (self.env.get("FLOCK_URL"), self.env.get("FLOCK_TOKEN"))) or [])
     monkeypatch.setenv("FLOCK_URL", "http://shell:1")  # restored by monkeypatch at teardown
     monkeypatch.setenv("FLOCK_TOKEN", "shell-tok")
     monkeypatch.setenv("FLOCK_RUN_DIR", str(run))
@@ -313,7 +313,7 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCK_URL", "http://shell:1")
     r = runner.invoke(cli.app, ["--run", str(run), "status"])
     assert r.exit_code == 1 and "no controller host file" in r.output
-    assert "FLOCK_URL" not in os.environ and len(seen) == 3
+    assert os.environ["FLOCK_URL"] == "http://shell:1" and len(seen) == 3  # not mutated
 
 
 def test_run_env_is_the_first_env_file(tmp_path, monkeypatch):

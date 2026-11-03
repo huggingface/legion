@@ -203,6 +203,31 @@ class Client:
 
     def __init__(self, env: Mapping[str, str] | None = None):
         self.env = os.environ if env is None else env
+        self.env_files: list[str] = []  # a run dir's cluster.env, run.env (`for_run`)
+
+    @classmethod
+    def for_run(cls, run_dir: str | Path | None = None, *, need_host: bool = True,
+                env: Mapping[str, str] = os.environ) -> Client:
+        """The client for RUN_DIR (`flock init`; default `$FLOCK_RUN_DIR`, else plain `env`):
+        its controller (hosts/controller.host, else its local run) and token, with its
+        cluster.env and run.env in `env_files` (the first --env files). An exported FLOCK_URL
+        beats `$FLOCK_RUN_DIR` but not an explicit `run_dir`. ClientError when `need_host` and
+        the run has no controller yet."""
+        from flock.rundir import run_context
+
+        d = run_dir or env.get("FLOCK_RUN_DIR")
+        if not d:
+            return cls(env)
+        ctx, files = run_context(d)
+        if run_dir is None and env.get("FLOCK_URL"):
+            api = cls(env)  # an exported FLOCK_URL (with its token) beats FLOCK_RUN_DIR
+        else:
+            if need_host and "FLOCK_URL" not in ctx and "FLOCK_CURRENT" not in ctx:
+                raise ClientError(f"no controller host file in {d}/hosts; launch first")
+            # never this run's token with another controller's URL
+            api = cls({**{k: v for k, v in env.items() if k != "FLOCK_URL"}, **ctx})
+        api.env_files = files
+        return api
 
     def _call(self, method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
         if (gw := gateway(self.env)) is not None:  # inside an agent: its worker (docs/spawn.md)

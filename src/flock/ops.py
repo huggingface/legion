@@ -16,7 +16,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -207,8 +207,14 @@ def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
     return diff_specs(old, spec)
 
 
-def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, str] | None = None,
-           types: list[str] | None = None, agents: list[str] | None = None, adopt: bool = False,
+def is_swarm_name(target: str) -> bool:
+    """`flock launch TARGET`: no file, no path and no .yaml name: a stored swarm to resume."""
+    return not Path(target).exists() and "/" not in target \
+        and not target.endswith((".yaml", ".yml"))
+
+
+def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
+           source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None, adopt: bool = False,
            checkpoint: str | None = None, no_checkpoint: bool = False,
            preflight: bool | None = None, strict: bool = False,
            checked: tuple[Any, list[str]] | None = None) -> dict[str, Any]:
@@ -222,14 +228,22 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, st
     "resumed" (the holds left) or "preflight" (the report) / "unverified" (models not probed),
     "tools" (the upload reply, plus "bytes") and "status" (the new swarm's). Refusals raise
     SpecError with these keys so far in `done`, as do failed controller calls. `checked`:
-    `check_spec`'s result when the caller already has it."""
+    `check_spec`'s result when the caller already has it. `compute: local`: first
+    `start_local` (with `env_files`), "local" its run; ended again when the launch fails."""
     bundle, warnings = checked or check_spec(spec, spec_file)
     done: dict[str, Any] = {"warnings": warnings}
+    if spec.compute.kind == "local" and (run := start_local(spec, spec_file, env_files, api.env)):
+        done["local"] = run
     try:
-        return _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt,
-                       checkpoint, no_checkpoint, preflight, strict)
-    except ClientError as e:
-        raise SpecError([str(e)], done) from None
+        try:
+            return _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt,
+                           checkpoint, no_checkpoint, preflight, strict)
+        except ClientError as e:
+            raise SpecError([str(e)], done) from None
+    except BaseException:  # also Ctrl-C during the preflight
+        if "local" in done:  # nothing created: do not leave a controller behind
+            end_local(done["local"], api.env)
+        raise
 
 
 def _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt, checkpoint,
@@ -365,6 +379,42 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     return out
 
 
+def stop(api: Client, swarm: str, *, types: list[str] | None = None,
+         agents: list[str] | None = None, interrupt: bool = False, reason: str = "",
+         release: bool = False, final: bool = False, delete: bool = False,
+         confirm: Callable[[], Any] | None = None,
+         progress: Callable[[int], None] | None = None) -> dict[str, Any]:
+    """`flock stop` (docs/live.md "Lifecycle"). Default: hold the swarm (or `types`/`agents`;
+    `interrupt` also cuts running turns) -> {"held": `api.stop`'s reply}; `release` also
+    drains every worker and waits (`release_wait`) -> plus {"unsynced": name -> error}.
+    `final`: stop the loops of `types` (default every type with one) after a final round ->
+    {"loops": replies}. `delete` (after `confirm()`): drop the swarm from the controller ->
+    {"deleted": reply}, or end this directory's local run of it -> {"ended": its record}.
+    Flags that do not combine raise SpecError."""
+    if delete:
+        if final or release or interrupt or types or agents:
+            raise SpecError(["--delete takes only --yes"])
+        if confirm is not None:
+            confirm()
+        if (run := local_run(api.env)) is not None and run.get("swarm") == swarm:
+            end_local(run, api.env)  # no DELETE first: the bundle is written from the rows it would drop
+            return {"ended": run}
+        return {"deleted": api.delete(swarm)}
+    if final:
+        if release or interrupt or agents:
+            raise SpecError(["--final takes only --type"])
+        spec = api.swarm(swarm)["spec"]
+        return {"loops": [api.stop_loop(swarm, t) for t in types
+                          or [n for n, ts in spec["types"].items() if ts.get("loop")]]}
+    if release and (types or agents):
+        raise SpecError(["--release frees the whole swarm: no --type or --agent"])
+    done = {"held": api.stop(swarm, types=types, agents=agents, interrupt=interrupt,
+                             reason=reason, release=release)}
+    if release:
+        done["unsynced"] = release_wait(api, swarm, progress=progress)
+    return done
+
+
 RELEASE_POLL = 5.0  # s between worker checks while `release_wait` waits
 _sleep = time.sleep  # tests replace it
 
@@ -385,15 +435,16 @@ LOCAL_START_S = 120.0  # s `start_local` waits for a local controller to come up
 LOCAL_DIR = Path(".flock")  # the local run's data dir and launch.log, in the working directory
 
 
-def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
+def start_local(spec: SwarmSpec, spec_file: str, env_files=(),
+                env: Mapping[str, str] = os.environ) -> dict | None:
     """`compute: local`: start this machine's controller and workers detached
     (flock.controller.localrun, output in .flock/launch.log) unless a live one in this directory
     already serves the swarm; wait for its `.flock/current`. Returns the run started (its
     `.flock/current` record), or None; SpecError when another swarm's local run is up or the
     controller does not start (the log's tail in the lines)."""
-    if os.environ.get("FLOCK_URL"):
+    if env.get("FLOCK_URL"):
         return None  # pointed at a controller explicitly
-    if (run := local_run()) is not None:
+    if (run := local_run(env)) is not None:
         if run.get("swarm") != spec.swarm:
             raise SpecError([(f"a local run of {run.get('swarm')} is up in this directory: "
                               f"`flock stop {run.get('swarm')} --release` first")])
@@ -403,10 +454,10 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
            "--data-dir", str(LOCAL_DIR), *(a for f in env_files for a in ("--env", f))]
     with (LOCAL_DIR / "launch.log").open("w") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                                start_new_session=True)
+                                start_new_session=True, env=dict(env))
     end = time.monotonic() + LOCAL_START_S
     while time.monotonic() < end:
-        if (run := local_run()) is not None and run.get("pid") == proc.pid:
+        if (run := local_run(env)) is not None and run.get("pid") == proc.pid:
             return run
         if proc.poll() is not None:
             break
@@ -417,11 +468,11 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
     raise SpecError([*log, "the local controller did not start"])
 
 
-def end_local(run: dict) -> None:
+def end_local(run: dict, env: Mapping[str, str] = os.environ) -> None:
     """SIGTERM a background local run and wait (up to LOCAL_START_S) until it is gone: it
     drains what is left, writes the run bundle (<run_dir>/run.json) and exits (docs/local.md)."""
     with contextlib.suppress(ProcessLookupError):
         os.kill(run["pid"], signal.SIGTERM)
     end = time.monotonic() + LOCAL_START_S
-    while local_run() is not None and time.monotonic() < end:
+    while local_run(env) is not None and time.monotonic() < end:
         _sleep(0.2)
