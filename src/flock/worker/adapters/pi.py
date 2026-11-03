@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flock.controller.prices import Price, price_for
+from flock.controller.prices import Price, price_for, type_price_table
 from flock.home import home
 from flock.isolation import command as isolate_command
 from flock.isolation import enabled as isolation_enabled
@@ -667,3 +667,13 @@ class PiAdapter:
     async def events(self) -> AsyncIterator[AdapterEvent]:
         async for ev in self._queue:
             yield ev
+
+
+def make_adapter(workdir: Path, name: str, spec: TypeSpec) -> PiAdapter:
+    """The worker's factory for harness `pi` (flock.registry)."""
+    # Each endpoint needs its own models.json; agents on one worker can
+    # target different servers, so keep their Pi config directories separate.
+    multi = isolation_enabled() or (spec.resolved_model and len(spec.resolved_model.provider.endpoints) > 1)
+    home = pi_home() / "agents" / name if multi else None
+    return PiAdapter(workdir, agent=name, home=home, model_config=pi_model_config(spec, name),
+                     prices=type_price_table(spec))

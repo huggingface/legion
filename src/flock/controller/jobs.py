@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import shlex
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from flock.models import TypeSpec
+from flock.registry import HARNESSES
 
 TERMINAL_STAGES = frozenset({"COMPLETED", "CANCELED", "ERROR", "DELETED"})
 WORKER_COMMAND = ["flock-worker"]
@@ -21,9 +23,9 @@ DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 # runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
 # Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
-CLAUDE_CODE_VERSION = "2.1.296"
-CODEX_VERSION = "0.162.1"
-PI_VERSION = "1.2.0"  # @earendil-works/pi-coding-agent; installed only on pi workers (~20 s)
+CLAUDE_CODE_VERSION = HARNESSES["claude"].version
+CODEX_VERSION = HARNESSES["codex"].version
+PI_VERSION = HARNESSES["pi"].version
 HF_HUB_VERSION = "2.2.0"
 CLAUDE_AGENT_SDK_VERSION = "0.2.166"
 
@@ -197,6 +199,11 @@ class HubJobsClient:
                 )
             )
         return out
+
+
+def hub_jobs_client(env: Mapping[str, str], dep: Any, data_dir: str) -> HubJobsClient:
+    """The controller's client for compute `hf-jobs` (flock.registry)."""
+    return HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
 
 
 @dataclass

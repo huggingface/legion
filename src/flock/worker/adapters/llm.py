@@ -74,7 +74,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from flock.controller.prices import Price, price_for
+from flock.controller.prices import Price, price_for, type_price_table
 from flock.home import home
 from flock.models import TokenUsage, TypeSpec
 from flock.tools.toolset import Toolset
@@ -1017,3 +1017,8 @@ class LLMAdapter:
             log.info("%s: %s; retry %d/%d in %.1fs", self.agent, err[:120], attempt + 1, retries, delay)
             await asyncio.sleep(delay)
         raise CallError("unreachable")
+
+
+def make_adapter(workdir: Path, name: str, spec: TypeSpec) -> LLMAdapter:
+    """The worker's factory for harness `llm` (flock.registry)."""
+    return LLMAdapter(workdir, agent=name, prices=type_price_table(spec))

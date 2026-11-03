@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from flock.client import Client, ClientError, local_run
 from flock.models import SwarmSpec, comms_tools, loop_refusals
+from flock.registry import HARNESSES
 from flock.specrender import render, source_of
 
 
@@ -155,8 +156,7 @@ def provider_backed(spec: SwarmSpec) -> bool:
 
 
 # Harnesses that cannot add request-body fields, so a model's `extra` is kept but not sent.
-# The `llm` harness (and any harness not listed) sends it.
-EXTRA_NOT_SENT = frozenset({"claude", "codex", "pi"})
+EXTRA_NOT_SENT = frozenset(name for name, h in HARNESSES.items() if not h.sends_extra)
 
 
 def extra_warnings(spec: SwarmSpec) -> list[str]:

@@ -451,3 +451,8 @@ class ClaudeAdapter:
             return []
         extra = t.parent / session_id
         return [t] + (sorted(p for p in extra.rglob("*") if p.is_file()) if extra.is_dir() else [])
+
+
+def make_adapter(workdir: Path, name: str, spec: TypeSpec) -> ClaudeAdapter:
+    """The worker's factory for harness `claude` (flock.registry)."""
+    return ClaudeAdapter(workdir)

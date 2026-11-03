@@ -377,14 +377,13 @@ def test_api_for_pi_speaks_chat_completions_on_openai_compat():
     from flock.models import Harness
     spec = pspec(preflight_providers(), **{h: {"harness": h, "model": "gpu1:Qwen/Small"}
                                            for h in ("llm", "pi", "codex")})
-    rm = spec.types["pi"].resolved_model
-    assert [api_for(Harness(h), rm) for h in ("llm", "pi", "codex")] == [
+    assert [api_for(Harness(h)) for h in ("llm", "pi", "codex")] == [
         "chat_completions", "chat_completions", "responses"]
     probes = {tuple(types): (api, choice) for _, types, api, choice in models_to_probe(spec)}
     assert probes == {("llm", "pi"): ("chat_completions", None), ("codex",): ("responses", None)}
     anth = pspec({"anth": {**PROVIDERS["anth"], "base_url": "http://fake"}},
                  a={"harness": "claude", "model": "anth:claude-x"})
-    assert api_for(Harness.claude, anth.types["a"].resolved_model) == "messages"
+    assert api_for(anth.types["a"].harness) == "messages"
 
 
 async def test_preflight_llm_accepts_a_tool_call_written_as_text(preflight_client):
