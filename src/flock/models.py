@@ -512,17 +512,6 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     return world.manifest.names() if world.manifest is not None else []
 
 
-class RecycleAfter(_Removable):
-    """`recycle_after`: restart an agent's harness process (same session) at the first turn
-    boundary past any of these, counted from the process start (docs/pi.md "Memory")."""
-
-    model_config = {"extra": "forbid"}
-
-    turns: int | None = None
-    hours: float | None = None
-    pss_mb: float | None = None  # the harness process's PSS, sampled every 15 s
-
-
 class WorkdirSpec(_Removable):
     """Workdir size feedback and throwaway dirs (docs/pi.md "Workdir"). Sizes count what the
     bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
@@ -669,10 +658,8 @@ class TypeSpec(BaseModel):
     workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
     worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
-    # Memory (docs/pi.md "Memory"): restart the harness process at a turn boundary, keeping the
-    # session; RLIMIT_DATA (MB) on every tool command of a Pi agent (through BASH_ENV); Pi's
-    # V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
-    recycle_after: RecycleAfter | None = None
+    # Memory (docs/pi.md "Memory"): RLIMIT_DATA (MB) on every tool command of a Pi agent
+    # (through BASH_ENV); Pi's V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
     tool_memory_mb: int | None = None
     node_heap_mb: int | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
@@ -903,10 +890,8 @@ class SwarmSpec(BaseModel):
     world: WorldSpec | None = None
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
     # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
-    # reserved and never reused while the swarm exists). `naming_seed` makes the words
-    # deterministic for the swarm; unset, they are random.
+    # reserved and never reused while the swarm exists).
     naming: Literal["numeric", "words"] = "numeric"
-    naming_seed: int | None = None
 
     @field_validator("tools_version")
     @classmethod

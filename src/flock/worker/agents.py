@@ -168,8 +168,6 @@ class AgentRuntime:
         # process on the same session. Not _stop_req: the burst's finally must restart.
         self._recycle_pending: str | None = None
         self.pss_mb: float | None = None  # the harness's PSS, set by the worker's memory loop
-        self._burst_started = 0.0
-        self._burst_turns = 0
         self._exit_code: int | None = None  # the harness's exit status (`exited` event)
         self._burst: asyncio.Task | None = None
         self._ready = asyncio.Event()
@@ -547,7 +545,6 @@ class AgentRuntime:
             self.state.session_id = sid
             self.start_rev = self.rev
             self._recycle_pending, self._exit_code = None, None
-            self._burst_started, self._burst_turns = self._now(), 0
             self.save_state()
             self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
@@ -656,8 +653,6 @@ class AgentRuntime:
                 if summary:
                     self.state.last_summary = summary
                 self._end_turn()
-                self._burst_turns += 1
-                self._check_recycle_after()
                 self._after_turn(ev.status or "completed",
                                  "max_turns" if hit_max_turns(ev.data) else ev.data.get("reason"))
         elif k == "error":
@@ -891,18 +886,6 @@ class AgentRuntime:
             return False
         self._recycle_pending = reason
         return True
-
-    def _check_recycle_after(self) -> None:
-        """`recycle_after` (TypeSpec), checked at each turn end."""
-        ra = self.spec.recycle_after
-        if ra is None:
-            return
-        if ra.turns and self._burst_turns >= ra.turns:
-            self.recycle("turns")
-        elif ra.hours and self._now() - self._burst_started >= ra.hours * 3600:
-            self.recycle("hours")
-        elif ra.pss_mb and self.pss_mb is not None and self.pss_mb >= ra.pss_mb:
-            self.recycle("pss_mb")
 
     async def stop(self, reason: str = "stop") -> None:
         """Kill the harness process if any (interrupting a turn); the agent stays assigned."""

@@ -979,8 +979,7 @@ class Worker:
         limit = mem.limit_mb if mem is not None and self.cgroup.armed else None
         # the per-agent /proc walk only when something can act on it
         scan = (limit and nonreclaim is not None and nonreclaim / limit >= th.rotate) or (
-            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb) or any(
-            rt.spec.recycle_after and rt.spec.recycle_after.pss_mb for rt in self.agents.values())
+            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb)
         if scan and any(rt.live for rt in self.agents.values()):
             for rt, data in await asyncio.to_thread(self.agent_memory, False):
                 rt.pss_mb = data.get("pi_pss_mb")

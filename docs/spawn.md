@@ -173,7 +173,6 @@ children alike.
 
 ```yaml
 naming: words
-naming_seed: 3          # optional: the same spec gives the same names; unset: random
 types:
   interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
 ```
