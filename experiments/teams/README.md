@@ -13,9 +13,7 @@ main channel's document.
 | `spec.yaml` | run 4's spec with one type, `agent`; no `spawn:` block |
 | `prompts/system.md` | hierarchy's system prompt with the Organization section rewritten for self-organised teams, followed by the six team rules |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
-| `waves.yaml` | 20 agents at start, +20 every 10 min, to 250 |
-| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
-| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for the one type |
+| `spec.yaml` `replicas_ramp` | 20 agents at start, +20 every 10 min, to 250; the controller runs it (was `waves.yaml`) |
 
 There is no per-type prompt file: everything an agent needs is in `prompts/system.md`.
 
@@ -23,8 +21,8 @@ There is no per-type prompt file: everything an agent needs is in `prompts/syste
 
 - One type, `agent`, identical to run 4's `agent` (world tools, board, model, loop). No
   `spawn:` block, so `flock spawn` is refused; agents never start or remove others.
-- Waves raise `replicas` (`waves.yaml`); `limits: {alive: 250}` matches the schedule's cap.
-  To grow, raise `cap`/`until` in `waves.yaml` and `limits.alive` together.
+- The ramp raises `replicas` (`replicas_ramp`); `limits: {alive: 250}` matches its `max`.
+  To grow, raise `replicas_ramp.max` in `spec.yaml` and `limits.alive` together.
 - Teams exist only on the board: an agent creates or joins a channel (`create_channel`,
   `join_channel`), and the team records its members, coordinator, channel and scope in the
   main channel's shared document (`doc` / `edit_doc`). Both are extended comms tools enabled
@@ -48,15 +46,14 @@ Follow run 4's README ("Operator preparation", "Launch and stop boundaries") wit
 
 ```sh
 RUN3_EXPERIMENT=teams   # controller.sbatch copies experiments/teams (links followed)
-CHATBOT_RUN=teams       # the swarm name (render.py)
+CHATBOT_RUN=teams       # the swarm name
 CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-v7-msgboard.hf.space
 ```
 
-then `sbatch world.sbatch teams` and `sbatch controller.sbatch teams`. The controller
-renders this folder, applies it and runs `waves.py run` on `waves.yaml`.
+then `sbatch world.sbatch teams` and `sbatch controller.sbatch teams`. The controller job
+applies this folder's `spec.yaml` on its first start; the controller runs the ramp.
 
-Offline checks: `python experiments/teams/render.py --out /tmp/t.yaml`,
-`python experiments/teams/waves.py plan`, `pytest tests/test_teams_experiment.py`.
+Offline checks: `pytest tests/test_teams_experiment.py`.
 
 ## Board
 

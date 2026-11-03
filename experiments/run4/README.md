@@ -8,27 +8,19 @@ module interface. This folder prepares the run; nothing here has been launched.
 
 - `spec.yaml`, `prompts/`: the agreed system prompt, continuation-only rounds,
   150 model calls / 2 h per round, 12 Pi agents per worker and a 48 h run.
-- `spec.slurm.yaml`: an overlay with only what differs on the cluster (`compute`,
-  `world`, `bucket`, `namespace`), deep-merged over `spec.yaml` by
-  `flock apply|update spec.yaml --env run.env --overlay spec.slurm.yaml`. `spec.yaml` holds
-  `${VAR:-default}` placeholders (CHATBOT_RUN, OPENAI_BASE_URLS, MODEL_WORKER,
-  CHATBOT_BOARD_URL, CHATBOT_CHANNEL; the overlay RUN3_BUCKET, RUN3_NAMESPACE,
-  RUN3_SLURM_PARTITION), so the defaults give a placeholder spec offline.
-- `spec.smoke.yaml`: overlay for the 30-min smoke (`RUN3_VARIANT=smoke`).
-- `render.py`: a thin wrapper that writes the same rendered spec to `spec.slurm.local.yaml`
-  (the variant picks the overlays) for the controller job and `waves.py`. It contacts no
-  service.
-- `waves.py`, `waves.yaml`: 20 every 5 min to 100, then +20 every 10 minutes to 300.
-  `load_guard.py` checks every configured node before any increase beyond 100:
-  three samples across two minutes; hold on persistent queues, >15 s/request,
-  unavailable metrics or reset counters. A held final wave is retried, not dropped.
-  `waves.py run` is deprecated: from run 5 the controller runs the schedule from
-  `types.<type>.replicas_ramp: {start, add, every, max}` in the spec (`ramp_step` events;
-  docs/live.md, "Ramp"). It has no load guard: a fixed schedule only. `add`, `set` and
-  `pin` stay for manual changes.
-  Three consecutive holds print `ACTION REQUIRED` and persist the streak across
-  restarts. `RUN4_HOLD_WARN_AFTER` and `RUN4_MAX_REQUEST_SECONDS` are configurable;
-  calibrate the latter on the live Pi smoke before growing past 100.
+- One `spec.yaml` holds the cluster settings too: `compute.kind: ${COMPUTE_KIND:-slurm}`
+  (`COMPUTE_KIND=local` for `flock run`), the worker size `${WORKER_CPUS:-4}`/`${WORKER_MEM:-7G}`,
+  `bucket`/`namespace` from RUN3_BUCKET/RUN3_NAMESPACE, and both `world.command` (local) and
+  `world.url` (Slurm). `flock apply|update spec.yaml --env run.env` fills the `${VAR:-default}`
+  placeholders (an `--env` file wins over the shell); the defaults give a placeholder spec offline.
+  The 30-min smoke is `LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100` in run.env.
+- `types.agent.replicas_ramp`: 20 every 5 min to 100, then +20 every 10 minutes to 300; the
+  first 20 join 10 s apart. The controller runs it (`ramp_step` events) and its `hold_if`
+  checks every vLLM server before any step beyond 100 agents: hold on a queue in every sample
+  of the last two minutes, >15 s/request (`RUN4_MAX_REQUEST_SECONDS`), unavailable metrics or
+  reset counters. A held step is asked again every 2 min, not dropped; from the third hold in a
+  row `ramp_held` carries a warning. Calibrate `RUN4_MAX_REQUEST_SECONDS` on the live Pi smoke
+  before growing past 100. `flock update --check` prints the schedule's changes.
 - `../../worlds/chatbot4/`: local clone upload, PR world, contract runner, seed and
   one-archive snapshot helper. The world rejects stale bases and self-review;
   author-triggered merge is allowed after independent approval of the exact head.
@@ -50,8 +42,7 @@ From the flock checkout, using its environment:
 ruff check .
 pytest -q
 FLOCK_PI_CLI=/path/to/pi pytest -q tests/test_run4_pi_smoke.py
-python experiments/run4/render.py --env runs/run4/run.env --out /tmp/run4-spec.yaml
-python experiments/run4/waves.py plan
+flock update experiments/run4 --env runs/run4/run.env --check   # against a running controller
 ```
 
 For one command covering the offline run4 checks, use `bash experiments/run4/dryrun.sh`
@@ -157,7 +148,7 @@ before `flock apply`. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S`,
 `WORLD_STABLE_S`, `WORLD_RETRY_MAX_S` and `WORLD_WAIT_S` configure these bounds. The controller snapshots state.db and uploads only changed event files after its
 first full sync. Test real restart timing on the cluster before launch.
 
-During the smoke and first waves, watch stale-base orphan PRs, PRs left open
+During the smoke and first ramp steps, watch stale-base orphan PRs, PRs left open
 after an uncertain Hub merge, PR-lock latency, full-tree upload memory, poller
 health and final-push duration. These remain observation items from the review.
 
@@ -176,8 +167,8 @@ to 4 peer helpers (20 + 80 = 100).
 - Workers: spawners `{initial: 2, max_extra: 0}`, children `{initial: 0, max_extra: 7}`
   (12 per worker), on top of the 25 `agent` workers: up to 34 worker jobs in total.
 - Limits: `limits.alive: 400`, `limits.spawned_total: 100` (the spawn counter is never
-  reused, so 100 spawns in total, removed children included). `waves.yaml` caps the spawner
-  type at 20 (`type_caps`), apart from the schedule's 300.
+  reused, so 100 spawns in total, removed children included). The spawner type has no ramp:
+  the operator sets its count (20).
 - Inside the agent, `flock` is the worker venv's CLI (first on PATH, a read-only mount of the
   namespace). It uses `FLOCK_URL` and the agent's own `FLOCK_AGENT_TOKEN`; `FLOCK_TOKEN` is
   never in the agent's environment. `tests/test_run4_spawner.py` covers this; its namespace
@@ -186,15 +177,12 @@ to 4 peer helpers (20 + 80 = 100).
   (this commit or later): an older CLI drops the group sections without an error. The
   controller and workers only get the combined `system_prompt`.
 
-A live change goes out with `flock update experiments/run4 --env runs/run4/run.env
---overlay experiments/run4/spec.slurm.yaml` (add `--ref <commit>` for the committed folder);
-it reads the same spec `render.py` writes. Launch, after rendering the spec again
-(`render.py`, for waves.py):
-
-```sh
-python experiments/run4/waves.py add 20 --spec experiments/run4/spec.slurm.local.yaml \
-  --type agent-spawner --stagger 10
-```
+A live change goes out with `flock update experiments/run4 --env runs/run4/run.env`
+(add `--ref <commit>` for the committed folder). Always pass `--env run.env`: without it the
+spec's defaults (e.g. 4 CPUs / 7G workers) replace the run's sizes. Launch the spawner wave by
+giving `agent-spawner` a one-step ramp in the spec and running that update:
+`replicas_ramp: {start: 20, add: 20, every: 1h, max: 20, stagger: 10s, hold_if: {...}}` (the
+same `hold_if` as `agent`). A second wave needs a higher `max`, and that raise is not staggered.
 
 Watch:
 
@@ -206,7 +194,7 @@ flock events <spawner> --pretty          # spawned / child_removed events
 ## Launch and stop boundaries
 
 The operator submits the world and controller jobs only after the owner's go.
-The controller then applies the zero-replica spec and runs the wave schedule.
+The controller job applies the zero-replica spec on its first start; the controller runs the ramp.
 No launch command is executed by offline validation or by the seed replacement.
 Use the controller's pinned CLI for all operation. Keep vLLM up while stopping
 loops and draining their final rounds. The liaison's reference explains the

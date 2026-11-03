@@ -1,6 +1,7 @@
-"""Spec rendering at read time (docs/live.md, "Env files, overlays and --ref"): overlays
-deep-merged over the base spec, then `${VAR}` / `${VAR:-default}` substituted in string
-values from `--env` files and the process environment; `--ref` reads the folder at a git ref."""
+"""Spec rendering at read time (docs/live.md, "Env files and --ref"): `${VAR}` /
+`${VAR:-default}` substituted in string values from `--env` files and the process
+environment, with where each value came from (`update --check`); `--ref` reads the folder at a
+git ref. Overlays (deep-merged over the spec) remain for library callers only (no CLI option)."""
 from __future__ import annotations
 
 import atexit
@@ -15,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from flock.models import load_spec_yaml
+from flock.models import _SpecLoader, load_spec_yaml
 from flock.world.protocol import WORLD_HOST_VAR
 
 # Only UPPERCASE names are variables, so inline prompt placeholders (`${spend}`) pass through;
@@ -57,12 +58,15 @@ def merge(base: Any, over: Any) -> Any:
     return out
 
 
-def substitute(data: Any, env: dict[str, str]) -> Any:
+def substitute(data: Any, env: dict[str, str],
+               used: dict[str, list[tuple[str, bool]]] | None = None) -> Any:
     """Expand placeholders in every string value (keys are left alone) and return a fresh
     tree (no shared sub-objects, so `<<: *anchor` copies come out independent). A string that
     is one placeholder takes the value's YAML type (`"${N:-20}"` -> 20). Raises ValueError
-    naming every unset variable without a default."""
+    naming every unset variable without a default. `used` gets, per dotted path, each
+    variable with whether its value came from `env` (else its default)."""
     missing: set[str] = set()
+    here: list[tuple[str, bool]] = []
 
     def rep(m: re.Match) -> str:
         name, default = m.groups()
@@ -72,14 +76,19 @@ def substitute(data: Any, env: dict[str, str]) -> Any:
             return m.group(0)
         value = env.get(name)
         if value or (value is not None and default is None):  # `:-` as in sh: empty = unset
+            here.append((name, True))
             return value
         if default is not None:
+            here.append((name, False))
             return default
         missing.add(name)
         return m.group(0)
 
-    def one(s: str) -> Any:
+    def one(s: str, path: str) -> Any:
+        here.clear()
         out = _VAR.sub(rep, s)
+        if here and used is not None:
+            used[path] = list(here)
         whole = _VAR.fullmatch(s)
         if whole and whole.group(1) and out:
             try:
@@ -90,41 +99,88 @@ def substitute(data: Any, env: dict[str, str]) -> Any:
                 return typed
         return out
 
-    def walk(v: Any) -> Any:
+    def walk(v: Any, path: str) -> Any:
         if isinstance(v, str):
-            return one(v)
+            return one(v, path)
         if isinstance(v, dict):
-            return {k: walk(x) for k, x in v.items()}
+            return {k: walk(x, f"{path}.{k}" if path else str(k)) for k, x in v.items()}
         if isinstance(v, list):
-            return [walk(x) for x in v]
+            return [walk(x, path) for x in v]
         return v
 
-    result = walk(data)
+    result = walk(data, "")
     if missing:
         raise ValueError("unset variables without a default: " + ", ".join(sorted(missing))
                          + " (set them in an --env file or the environment)")
     return result
 
 
-def render(spec_file: str | Path, env_files=(), overlays=()) -> Any:
+def yaml_lines(text: str) -> dict[str, int]:
+    """Dotted path -> the line (1-based) of each value in spec YAML, `<<` merge keys
+    resolved (a merged value keeps its anchor's line)."""
+    loader = _SpecLoader(text)
+    out: dict[str, int] = {}
+
+    def walk(node: yaml.Node, path: str) -> None:
+        out[path] = node.start_mark.line + 1
+        if isinstance(node, yaml.MappingNode):
+            loader.flatten_mapping(node)
+            for k, v in node.value:
+                walk(v, f"{path}.{k.value}" if path else str(k.value))
+
+    try:
+        node = loader.get_single_node()
+    finally:
+        loader.dispose()
+    if node is not None:
+        walk(node, "")
+    return out
+
+
+def render(spec_file: str | Path, env_files=(), overlays=(),
+           sources: dict[str, str] | None = None) -> Any:
     """The spec's data as `flock apply` validates it: base, overlays in order, then
-    substitution. Env sources, later winning: each --env file in order, then the process
-    environment."""
-    env: dict[str, str] = {}
+    substitution. Env sources, later winning: the process environment, then each --env file
+    in order. `sources` gets where each value came from, per dotted path:
+    `spec.yaml:12`, `run.env WORKER_MEM`, `env WORKER_MEM`, `spec.yaml:12 default of X`."""
+    env: dict[str, str] = dict(os.environ)
+    origin = dict.fromkeys(env, "env")
     for f in env_files:
-        env.update(read_env_file(f))
-    env.update(os.environ)
-    data = load_spec_yaml(Path(spec_file).read_text(encoding="utf-8"))
+        vals = read_env_file(f)
+        env.update(vals)
+        origin.update(dict.fromkeys(vals, Path(f).name))
+    text = Path(spec_file).read_text(encoding="utf-8")
+    data = load_spec_yaml(text)
     for o in overlays:
         data = merge(data, load_spec_yaml(Path(o).read_text(encoding="utf-8")) or {})
-    return substitute(data, env)
+    used: dict[str, list[tuple[str, bool]]] = {}
+    out = substitute(data, env, used)
+    if sources is not None:
+        name = Path(spec_file).name
+        sources.update({p: f"{name}:{n}" for p, n in yaml_lines(text).items()})
+        for p, names in used.items():
+            sources[p] = ", ".join(f"{origin[v]} {v}" if from_env else
+                                   f"{sources.get(p, name)} default of {v}"
+                                   for v, from_env in names)
+    return out
 
 
-def at_ref(target: str | Path, ref: str, overlays=()) -> tuple[Path, list[str], dict[str, str]]:
+def source_of(sources: dict[str, str], path: str) -> str:
+    """Where the value at a dotted path came from: its own entry or its nearest parent's
+    (a list item, a key of an inline mapping), else a model default."""
+    path = path.replace("while_", "while")  # LoopSpec.while_ dumps by its field name
+    while path:
+        if path in sources:
+            return sources[path]
+        path = path.rpartition(".")[0]
+    return "default"
+
+
+def at_ref(target: str | Path, ref: str) -> tuple[Path, dict[str, str]]:
     """`--ref REF[:PATH]`: the repo holding `target` exported at REF (`git archive`) into a
     temp dir removed at exit. Returns the spec file there (PATH, repo-relative, else `target`'s
-    own path in the repo; a folder means its spec.yaml), the overlays (those inside the repo are
-    read at REF too) and the `X-Flock-Source` header. Raises ValueError."""
+    own path in the repo; a folder means its spec.yaml) and the `X-Flock-Source` header.
+    Raises ValueError."""
     ref, _, rel = ref.partition(":")
     target = Path(target).resolve()
     where = target if target.is_dir() else target.parent
@@ -148,9 +204,5 @@ def at_ref(target: str | Path, ref: str, overlays=()) -> tuple[Path, list[str], 
     if not spec.is_file():
         raise ValueError(f"--ref {ref}: {spec.relative_to(tmp)} not found at {sha[:8]}")
 
-    def moved(o: str) -> str:
-        p = Path(o).resolve()
-        return str(tmp / p.relative_to(root)) if p.is_relative_to(root) else o
-
     src = {"git_sha": sha, "ref": ref, "dirty": False, "by": os.environ.get("USER")}
-    return spec, [moved(o) for o in overlays], {"X-Flock-Source": json.dumps(src)}
+    return spec, {"X-Flock-Source": json.dumps(src)}

@@ -38,7 +38,9 @@ as `world tools: +a -b`.
 `flock update --check` runs every check the controller runs on an apply (tools against the
 bundle and the live world manifest, world, comms channel, harness changes) and prints the
 diff, storing and posting nothing (`PUT /swarms/{swarm}?dry_run=1` returns the resolved
-spec). It exits 1 with the reason when the update would be refused. A world started for the
+spec). Each changed value names where it came from: `(spec.yaml:41)`, `(run.env WORKER_MEM)`,
+`(env WORKER_MEM)`, `(spec.yaml:12 default of WORKER_MEM)` or `(default)`. It exits 1 with
+the reason when the update would be refused. A world started for the
 check is stopped again.
 
 A refused update exits 1, prints the reason and applies nothing. The reasons are the ones
@@ -50,24 +52,21 @@ Preflight runs only when the update adds a provider-backed model the running spe
 have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
 through `.flock/current`, like the other commands do.
 
-## Env files, overlays and `--ref`
+## Env files and `--ref`
 
 `flock apply`, `flock update` and `flock run` render the spec as they read it, so one folder
-serves several clusters without a generated copy:
+(one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock apply experiments/run4/spec.yaml --env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml
-$ flock update experiments/run4 --env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml --ref origin/run5
+$ flock apply experiments/run4/spec.yaml --env runs/run4/run.env
+$ COMPUTE_KIND=local flock run experiments/run4/spec.yaml --env runs/run4/run.env
+$ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --check
 ```
 
-- `--overlay FILE` (repeatable, in order) is deep-merged over the spec: mappings merge key by
-  key, lists replace, `null` deletes a key (`world: {dir: null, command: null, url: ...}`
-  turns a local world into a remote one). Relative paths in it (prompts, `world.dir`) stay
-  relative to the spec file.
-- Then every string value, inline prompts and commands included, may use `${VAR}` and
+- Every string value, inline prompts and commands included, may use `${VAR}` and
   `${VAR:-default}` with an UPPERCASE name (as in `sh`, an empty value takes the default);
-  lowercase placeholders such as the loop's `${spend}` are left alone. Sources, later winning: each `--env FILE` in order (`NAME=value` lines,
-  `export ` and `#` comments allowed, no shell expansion), then the process environment. A
+  lowercase placeholders such as the loop's `${spend}` are left alone. Sources, later winning: the process environment, then each `--env FILE`
+  in order (`NAME=value` lines, `export ` and `#` comments allowed, no shell expansion). A
   value that is one placeholder takes its YAML type (`replicas: "${REPLICAS:-20}"` is the
   integer 20); otherwise it is plain text. Keys and prompt files are not substituted. An unset
   variable without a default refuses the spec, naming every such variable. `$${` is a literal
@@ -76,8 +75,8 @@ $ flock update experiments/run4 --env runs/run4/run.env --overlay experiments/ru
   comma-separated string, so `base_urls: ${OPENAI_BASE_URLS:-}` works (empty: none).
 - `--ref GIT_REF[:PATH]` (apply and update) exports the repo holding the given folder at
   `GIT_REF` (`git archive`) into a temp dir and reads the spec from there: the folder's own
-  path in the repo, or `PATH` (repo-relative, a folder or a spec file). Overlays inside the repo
-  are read at the ref too; `--env` files are read where they are. The source sent is
+  path in the repo, or `PATH` (repo-relative, a folder or a spec file). `--env` files are read
+  where they are. The source sent is
   `{git_sha, ref, dirty: false, by}`. `--check` works with it.
 
 ## Generations
@@ -117,16 +116,32 @@ The ramp adds `ramp_step`.
 types:
   agent:
     replicas: 0
-    replicas_ramp: {start: 20, add: 20, every: 10m, max: 300}
+    replicas_ramp:
+      start: 20                       # step 0, on the first pass that sees the ramp
+      phases:                         # or one phase as `add: 20, every: 10m`
+        - {every: 5m, add: 20, until: 100}
+        - {every: 10m, add: 20}       # until: max
+      max: 300
+      stagger: 10s                    # the start raise adds one agent every 10 s (default)
+      hold_if: {waiting: 1, request_s: 15, above: 100}
 ```
 
-The reconciler raises the type's replicas to `start` on the first pass that sees the ramp.
-It then adds `add` every `every`, up to `max`. Replicas change only when a new step is due,
-and never go down. An operator's `flock scale` between steps, up or down, stays until the
-next step asks for more. Each raise rewrites the stored spec and writes `ramp_step {type,
-from, replicas, step, max}`. The start time and the last step are stored, so a controller
-restart keeps the schedule. `flock update` keeps the live replicas by default. This replaces
-`experiments/run4/waves.py run` (fixed schedule only; there is no load guard).
+The reconciler raises the type's replicas along the schedule: `start`, then each phase adds
+`add` every `every` until its `until`; the next phase starts where it stopped. Replicas change
+only when a new step is due, and never go down. An operator's `flock scale` between steps, up
+or down, stays until the next step asks for more. A lowered `max` caps later raises; it never
+deletes agents. `stagger` spaces the agents of the `start` raise (a phase's own `stagger`,
+default 0, those of its steps). Each step writes `ramp_step {type, from, replicas, step, max}`.
+The start time, the last step and a staggered raise in progress are stored (`ramp:<type>`), so
+a controller restart keeps the schedule. While the type is held (`flock pause`), the clock
+stops: a resume does not jump the missed steps.
+
+`hold_if` is the load guard: a step that takes the swarm's replicas above `above` waits while
+any vLLM server of a provider with `metrics: true` had `waiting` or more requests queued in
+every health sample of the last 2 minutes, or needs more than `request_s` seconds per request
+(running requests / completions per second), or its metrics are missing or reset. It asks
+again every 2 minutes and writes `ramp_held {type, want, holds, reason}`; from the third hold
+in a row the event carries a `warning`. `flock update` keeps the live replicas by default.
 
 ## Per-type concurrency (`max_working`)
 

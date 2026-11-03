@@ -91,7 +91,8 @@ compute:
     interviewer: {cpus: 2, mem: 3800M}
 ```
 
-Precedence: built-in defaults < spec keys < `FLOCK_SLURM_*` on the controller < `types.<type>`.
+Precedence: built-in defaults < `FLOCK_SLURM_*` on the controller < spec keys < `types.<type>`:
+the spec wins; the env only fills keys the spec leaves unset.
 A size over `max_cpus`/`max_mem` is refused at apply and at launch (`launch_refused`): Slurm
 would accept it and leave it pending forever. A missing `worker_script`/`log_dir`/`launch_dir`
 is refused too. `bucket` is required; `world.url` is required (no `command` worlds).

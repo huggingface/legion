@@ -127,15 +127,16 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess:
 
 def resolve(compute: ComputeSpec | None, type_name: str,
             env: Mapping[str, str] = os.environ) -> dict[str, str]:
-    """Settings for one worker launch: defaults < spec keys < FLOCK_SLURM_* env < the spec's
-    `types.<type>` entry."""
+    """Settings for one worker launch: defaults < FLOCK_SLURM_* env < spec keys < the spec's
+    `types.<type>` entry (the spec wins; the env only fills what it leaves unset)."""
     out: dict[str, str] = dict(DEFAULTS)
     for key, var in ENV_KEYS.items():
-        spec_value = getattr(compute, key, None) if compute is not None else None
-        if spec_value not in (None, ""):
-            out[key] = str(spec_value)
+        set_ = compute is not None and key in compute.model_fields_set  # a default is not set
+        spec_value = getattr(compute, key) if set_ else None
         if env.get(var):
             out[key] = env[var]
+        if spec_value not in (None, ""):
+            out[key] = str(spec_value)
     per_type = compute.types.get(type_name) if compute is not None else None
     if per_type is not None:
         for key, value in per_type.model_dump(exclude_none=True).items():

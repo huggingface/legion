@@ -17,9 +17,7 @@ cannot spawn. Whoever starts agents supervises them.
 | `prompts/manager.md` | appended for managers: who started them, Supervision, how to spawn workers, the team rules |
 | `prompts/worker.md` | appended for workers: who started them, the team rules |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
-| `waves.yaml` | 10 leads at 0, 10 more at 10 min (20) |
-| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
-| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for these three types |
+| `spec.yaml` `replicas_ramp` | 10 leads at 0, 10 more at 10 min (20); the controller runs it (was `waves.yaml`) |
 
 ## Mechanics
 
@@ -34,7 +32,7 @@ cannot spawn. Whoever starts agents supervises them.
 - Sizes at 12 agents per worker job: 20 leads (`workers.initial: 2`), up to 100 managers
   (`max_extra: 9`) and 500 workers (`max_extra: 42`), opened on demand: 620 at most.
   `limits: {alive: 650, spawned_total: 1500}`; `spawned_total` never frees a place, so it
-  leaves room for teams to be rebuilt. To grow, raise `cap`/`until` in `waves.yaml`,
+  leaves room for teams to be rebuilt. To grow, raise `replicas_ramp.max` in `spec.yaml`,
   `lead.workers.initial` and `limits` together.
 - The shared plan: the main channel's doc for leads, each team channel's doc for its members
   (`doc` / `edit_doc`, extended comms tools enabled by `comms.extended: true` and each type's
@@ -54,13 +52,12 @@ Follow run 4's README ("Operator preparation", "Launch and stop boundaries") wit
 
 ```sh
 RUN3_EXPERIMENT=levels   # controller.sbatch copies experiments/levels (links followed)
-CHATBOT_RUN=levels       # the swarm name (render.py)
+CHATBOT_RUN=levels       # the swarm name
 ```
 
 then `sbatch world.sbatch levels` and `sbatch controller.sbatch levels`.
 
-Offline checks: `python experiments/levels/render.py --out /tmp/l.yaml`,
-`python experiments/levels/waves.py plan`, `pytest tests/test_levels_experiment.py`.
+Offline checks: `pytest tests/test_levels_experiment.py`.
 
 ## Board
 

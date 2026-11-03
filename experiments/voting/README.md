@@ -14,9 +14,7 @@ the rule on their honour: flock and the world do not check it.
 | `prompts/coordinator.md`, `prompts/worker.md` | hierarchy's role prompts plus a Voting section |
 | `prompts/round.md` | "Continue your work. If you have time, vote on open proposals in your channels and in #general that interest you." |
 | `prompts/system.md` | hierarchy's, naming this experiment's repo |
-| `prompts/final.md`, `waves.yaml` | links to hierarchy's / run 4's |
-| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
-| `spec.slurm.yaml`, `spec.smoke.yaml` | links to run 4's and hierarchy's overlays |
+| `prompts/final.md` | links to hierarchy's / run 4's |
 
 ## Mechanics
 

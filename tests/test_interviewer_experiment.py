@@ -7,7 +7,7 @@ from pathlib import Path
 from flock.cli import load_spec
 from flock.models import comms_tools
 
-from .test_hierarchy_experiment import module
+from .test_hierarchy_experiment import check_one_spec
 from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
@@ -52,15 +52,12 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
         assert text in interviewer, text
 
 
-def test_render_and_waves_read_this_folder():
-    data = module(EXP, "render").render()
-    assert data["swarm"] == "interviewer"
-    assert set(data["types"]) == {"coordinator", "worker", "interviewer"}
-    smoke = module(EXP, "render").render("smoke")
-    assert smoke["types"]["worker"]["loop"]["while"]["until"] == "30m"
-    waves = module(EXP, "waves").load(EXP / "waves.yaml")
-    assert waves.type == "coordinator" and waves.cap == 50
-    assert waves.events == [(0, 10), (600, 20), (1200, 30), (1800, 40), (2400, 50)]
+def test_one_spec_with_the_ramp_and_the_interviewer_size(monkeypatch):
+    spec = check_one_spec(EXP, monkeypatch, "coordinator", [(600 * i, 10 * (i + 1)) for i in range(5)])
+    assert set(spec.types) == {"coordinator", "worker", "interviewer"}
+    assert spec.compute.types["interviewer"].model_dump(exclude_none=True) == {"cpus": 2, "mem": "3800M"}
+    monkeypatch.setenv("RUN3_INTERVIEWER_MEM", "3G")  # run.env sizes it; the spec holds it
+    assert load_spec(str(EXP / "spec.yaml")).compute.types["interviewer"].mem == "3G"
 
 
 async def test_coordinators_and_workers_spawn_interviewers_with_caps(client, app, store, tick):
@@ -71,7 +68,7 @@ async def test_coordinators_and_workers_spawn_interviewers_with_caps(client, app
     data = spec.model_dump(mode="json")  # no world or board in the in-process controller
     data.update(world=None, comms=None)
     for t in data["types"].values():
-        t.update(tools=[], comms=False)
+        t.update(tools=[], comms=False, replicas_ramp=None)
     spec = type(spec).model_validate(data)
     assert (await client.put(f"/swarms/{spec.swarm}", json=data)).status_code == 200
     tick()

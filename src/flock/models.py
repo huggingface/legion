@@ -575,23 +575,91 @@ class WorkerKnobs(_Removable):
     memory: MemoryKnobs | None = None
 
 
+def _duration(v: str) -> str:
+    if parse_duration(v).total_seconds() < 0:
+        raise ValueError("must be >= 0")
+    return v
+
+
+def _positive_duration(v: str) -> str:
+    if parse_duration(v).total_seconds() <= 0:
+        raise ValueError("must be > 0")
+    return v
+
+
+class RampPhase(_Removable):
+    """One phase of `replicas_ramp.phases`: `add` every `every` until `until` (default: the
+    ramp's `max`). The next phase starts where this one reached `until`. `stagger`: the
+    agents of each of its raises join this far apart (waves.yaml's per-wave `stagger_s`)."""
+
+    model_config = {"extra": "forbid"}
+
+    every: str
+    add: int = Field(ge=1)
+    until: int | None = Field(default=None, ge=1)
+    stagger: str = "0s"
+
+    _every = field_validator("every")(_positive_duration)
+    _stagger = field_validator("stagger")(_duration)
+
+
+class RampHold(_Removable):
+    """`replicas_ramp.hold_if` (was experiments/run4/load_guard.py): a step that takes the
+    swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
+    had `waiting` or more requests queued in every sample of the last 2 minutes, or takes
+    more than `request_s` per request (running / completions per second), or its metrics
+    are missing, short or reset."""
+
+    model_config = {"extra": "forbid"}
+
+    waiting: float = Field(default=1, gt=0)
+    request_s: float = Field(default=15, gt=0, allow_inf_nan=False)
+    above: int = Field(default=100, ge=0)
+
+
 class RampSpec(_Removable):
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): the controller raises the type's
-    replicas to `start`, then by `add` every `every`, up to `max`. It never lowers them."""
+    replicas to `start`, then by `add` every `every` (or through `phases`), up to `max`. It
+    never lowers them: a lowered `max` only caps later raises. `stagger`: the `start` raise
+    adds one agent at a time this far apart (waves.yaml's wave-1 `stagger_s`, default 10 s)."""
 
     model_config = {"extra": "forbid"}
 
     start: int = Field(ge=0)
-    add: int = Field(ge=1)
-    every: str
+    add: int | None = Field(default=None, ge=1)
+    every: str | None = None
     max: int = Field(ge=1)
+    phases: list[RampPhase] = Field(default_factory=list)
+    stagger: str = "10s"
+    hold_if: RampHold | None = None
 
     @field_validator("every")
     @classmethod
-    def _every(cls, v: str) -> str:
-        if parse_duration(v).total_seconds() <= 0:
-            raise ValueError("every must be > 0")
-        return v
+    def _every(cls, v: str | None) -> str | None:
+        return None if v is None else _positive_duration(v)
+
+    _stagger = field_validator("stagger")(_duration)
+
+    @model_validator(mode="after")
+    def _one_form(self) -> RampSpec:
+        if self.phases and (self.add is not None or self.every is not None):
+            raise ValueError("give `phases` or `add` and `every`, not both")
+        if not self.phases and (self.add is None or self.every is None):
+            raise ValueError("needs `add` and `every` (or `phases`)")
+        return self
+
+    def schedule(self) -> list[tuple[float, int, float]]:
+        """(seconds from the ramp's start, replicas, stagger seconds) per step; step 0 is
+        `start` at 0."""
+        sec = lambda d: parse_duration(d).total_seconds()
+        t, n = 0.0, min(self.start, self.max)
+        out = [(t, n, sec(self.stagger))]
+        for ph in self.phases or [RampPhase(every=self.every, add=self.add)]:
+            until = min(ph.until or self.max, self.max)
+            while n < until:
+                t, n = t + sec(ph.every), min(n + ph.add, until)
+                out.append((t, n, sec(ph.stagger)))
+        return out
 
 
 class TypeSpec(BaseModel):
@@ -829,8 +897,8 @@ class ComputeSpec(_Removable):
     (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
-    The other keys are for `slurm`; unset keys
-    fall back to the controller's FLOCK_SLURM_* env, then to built-in defaults. `types` sets
+    The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
+    fills unset keys (then built-in defaults). `types` sets
     per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
 
     model_config = {"extra": "forbid"}

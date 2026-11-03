@@ -36,6 +36,7 @@ from flock.models import (
     DrainCommand,
     Event,
     PromptCommand,
+    RampHold,
     SwarmSpec,
     TypeHealth,
     TypeSpec,
@@ -301,42 +302,125 @@ def _rotate(p: _Pass, spec: SwarmSpec) -> None:
         rotate_worker(p.store, spec.swarm, w, p.now)
 
 
+HOLD_RECHECK_S = 120.0  # a held step asks again this often (load_guard's 2-minute window)
+HOLD_WARN_AFTER = 3  # consecutive holds before `ramp_held` carries a warning
+VLLM_WINDOW_S = 150.0  # samples older than this are not looked at (2 min + one late probe)
+
+
+def vllm_busy(servers: dict[str, list[list[float]]], h: RampHold, now: float) -> str | None:
+    """Why a ramp step must wait (None: it may go), from the controller's vLLM samples
+    (`[ts, waiting, running, completed]` per server, health.py). Was load_guard.capacity_ok."""
+    if not servers:
+        return "HOLD: no vLLM metrics (set `metrics: true` on the provider)"
+    details = []
+    for i, url in enumerate(sorted(servers), 1):
+        pts = [x for x in servers[url] if now - x[0] <= VLLM_WINDOW_S]
+        if len(pts) < 3:
+            return "HOLD: vLLM metrics unavailable or invalid"
+        (t0, _, _, c0), (t1, w1, r1, c1) = pts[0], pts[-1]
+        if c1 < c0:
+            return "HOLD: vLLM counters reset during capacity check"
+        rate = (c1 - c0) / max(t1 - t0, 0.001)
+        tpr = r1 / rate if rate > 0 else (float("inf") if r1 else 0.0)
+        details.append(f"server {i}: waiting={w1:g}, ~{tpr:.1f}s/request")
+        if all(x[1] >= h.waiting for x in pts) or tpr > h.request_s:
+            return "HOLD: " + "; ".join(details)
+    return None
+
+
 def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:
-    """`types.T.replicas_ramp` (docs/live.md "Ramp"): raise replicas to `start`, then by
-    `add` every `every` from the first pass that saw the ramp, up to `max`. Replicas move only
-    when a new step comes, and never down, so an operator's scale (up or down) between steps
-    stays. `{t0, step}` lives in the store (`ramp:<type>`): a restart keeps the schedule.
-    Each raise rewrites the stored spec (re-read just before) and writes `ramp_step`."""
-    due: dict[str, tuple[int, int]] = {}  # type -> (step, replicas the step wants)
+    """`types.T.replicas_ramp` (docs/live.md "Ramp"): raise replicas along the ramp's schedule
+    from the first pass that saw it, never above `max`. Replicas move only when a new step
+    comes, and never down, so an operator's scale (up or down) between steps stays. The clock
+    stops while the type is held (paused), so a resume does not jump the missed steps. A
+    staggered raise adds one agent per `stagger`. `{t0, step, ...}` lives in the store
+    (`ramp:<type>`): a restart keeps the schedule. Each raise rewrites the stored spec
+    (re-read just before); each step writes `ramp_step`, each hold `ramp_held`."""
+    held = (p.store.swarm_flags(spec.swarm).get("holds") or {}).get("types") or {}
+    want: dict[str, tuple[int, dict | None]] = {}  # type -> (replicas now, ramp_step data)
     for name, ts in spec.types.items():
-        r = ts.replicas_ramp
-        if r is None:
+        if ts.replicas_ramp is None:
             continue
         key = f"ramp:{name}"
-        st = p.store.get_control(spec.swarm, key) or {"t0": p.now, "step": -1}
-        step = int((p.now - st["t0"]) // parse_duration(r.every).total_seconds())
-        if step > st["step"]:
-            p.store.put_control(spec.swarm, key, {"t0": st["t0"], "step": step})
-            due[name] = (step, min(r.max, r.start + r.add * step))
-    if not due:
+        old = p.store.get_control(spec.swarm, key)
+        st = dict(old or {"t0": p.now, "step": -1})
+        if name in held:
+            st.setdefault("paused_at", p.now)
+        else:
+            if "paused_at" in st:
+                st["t0"] += p.now - st.pop("paused_at")
+            if (w := _ramp_type(p, spec, name, st)) is not None:
+                want[name] = w
+        if st != old:
+            p.store.put_control(spec.swarm, key, st)
+    if not want:
         return spec
     row = p.store.get_swarm(spec.swarm)
     fresh: SwarmSpec = row["spec"] if row else spec
     raised = {}
-    for name, (step, want) in due.items():
+    for name, (n, data) in want.items():
         ts = fresh.types.get(name)
-        if ts is None or ts.replicas_ramp is None or want <= ts.replicas:
+        if ts is None or ts.replicas_ramp is None:
             continue
-        raised[name] = ts.model_copy(update={"replicas": want})
-        p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
-            type="ramp_step", ts=datetime.fromtimestamp(p.now, UTC), agent="",
-            data={"type": name, "from": ts.replicas, "replicas": want, "step": step,
-                  "max": ts.replicas_ramp.max})])
+        n = min(n, ts.replicas_ramp.max)  # a lowered max caps the raise, never lowers
+        if n <= ts.replicas:
+            continue
+        raised[name] = ts.model_copy(update={"replicas": n})
+        if data is not None:
+            p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
+                type="ramp_step", ts=datetime.fromtimestamp(p.now, UTC), agent="", data=data)])
     if not raised:
         return fresh
     fresh = fresh.model_copy(update={"types": {**fresh.types, **raised}})
     p.store.update_swarm_spec(fresh)
     return fresh
+
+
+def _ramp_type(p: _Pass, spec: SwarmSpec, name: str, st: dict) -> tuple[int, dict | None] | None:
+    """The replicas one ramp type should get this pass (and its `ramp_step` data when a new
+    step starts), updating its stored state `st`; None: nothing now."""
+    r, live = spec.types[name].replicas_ramp, spec.types[name].replicas
+    assert r is not None
+    events = r.schedule()
+    step = sum(1 for e in events if e[0] <= p.now - st["t0"]) - 1
+    if step > st["step"]:
+        _, n, gap = events[step]
+        total = sum(t.replicas for t in spec.types.values()) - live + n
+        if r.hold_if is not None and n > live and total > r.hold_if.above:
+            if p.now - st.get("held_at", float("-inf")) < HOLD_RECHECK_S:
+                return None
+            why = vllm_busy(p.store.get_control(spec.swarm, "vllm") or {}, r.hold_if, p.now)
+            if why is not None:
+                st.update(held_at=p.now, holds=st.get("holds", 0) + 1)
+                data = {"type": name, "replicas": live, "want": n, "step": step,
+                        "holds": st["holds"], "reason": why}
+                if st["holds"] >= HOLD_WARN_AFTER:
+                    data["warning"] = (f"{st['holds']} consecutive capacity holds; replicas "
+                                       f"remain {live}. Inspect the vLLM servers and calibrate "
+                                       "hold_if.request_s; growth stays blocked.")
+                    log.warning("%s: ramp %s held: %s", spec.swarm, name, data["warning"])
+                p.store.append_events(spec.swarm, swarm_stream(spec.swarm), [Event(
+                    type="ramp_held", ts=datetime.fromtimestamp(p.now, UTC), agent="",
+                    data=data)])
+                return None
+        for k in ("held_at", "holds", "pending", "next_at", "gap"):
+            st.pop(k, None)
+        st["step"] = step
+        data = {"type": name, "from": live, "replicas": n, "step": step, "max": r.max}
+        if gap > 0 and n > live + 1:
+            st.update(pending=n, gap=gap, next_at=p.now + gap)
+            data["stagger_s"] = gap
+            return live + 1, data
+        return n, data
+    if "pending" not in st or p.now < st["next_at"]:
+        return None
+    pending = st["pending"]
+    if live + 1 >= pending:
+        for k in ("pending", "next_at", "gap"):
+            st.pop(k)
+    else:
+        st["next_at"] = p.now + st["gap"]
+    return (live + 1, None) if live < pending else None
 
 
 def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:

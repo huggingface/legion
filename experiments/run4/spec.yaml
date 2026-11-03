@@ -1,5 +1,12 @@
 swarm: ${CHATBOT_RUN:-run4}             # ${VAR:-default}: flock apply --env run.env (README)
-compute: local
+compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
+  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
+  partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
+  cpus: ${WORKER_CPUS:-4}                   # hopper-cpu MaxMemPerCPU=2000: at most 2000 MB per CPU
+  mem: ${WORKER_MEM:-7G}
+  time: '54:00:00'                          # matches worker_lifetime 54h; the run is 48h
+bucket: ${RUN3_BUCKET:-hf://buckets/cmpatino/eliza-swarm}
+namespace: ${RUN3_NAMESPACE:-cmpatino}
 naming: words
 providers:
   vllm:
@@ -10,11 +17,13 @@ providers:
     timeout_s: 300
     max_retries: 5
     pricing: {"*": [0, 0, 0]}
+    metrics: true                           # vLLM /metrics: health and the ramp's hold_if
 models:
   worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
 world:
   dir: ../../worlds/chatbot4
   command: ['{python}', chatbot4.py, serve]
+  url: http://${WORLD_HOST}:7860              # Slurm: the world job's host (FLOCK_WORLD_HOST_FILE); local runs `command`
   token_env: CHATBOT_WORLD_TOKEN
 comms:
   kind: msgboard
@@ -35,7 +44,15 @@ types:
   agent: &agent
     harness: pi
     model: worker-pi
-    replicas: 0
+    replicas: 0                             # the ramp raises it; `flock update` keeps the live count
+    replicas_ramp:                          # the controller raises replicas (was waves.yaml)
+      start: 20                             # 20 every 5 min to 100, then +20 every 10 min to 300
+      phases:
+        - {every: 5m, add: 20, until: 100}
+        - {every: 10m, add: 20}
+      max: 300
+      stagger: 10s                          # the first 20 join 10 s apart
+      hold_if: {waiting: 1, request_s: '${RUN4_MAX_REQUEST_SECONDS:-15}', above: 100}  # was load_guard.py
     agents_per_worker: 12
     system_prompt_file: prompts/system.md
     comms: true
@@ -60,17 +77,19 @@ types:
       every: turn_end
       notices: true
       on: [comms.mention, comms.thread, comms.dm, comms.channel]
-      while: {until: 48h, max_rounds: 10000}
+      while: {until: '${LOOP_UNTIL:-48h}', max_rounds: '${LOOP_MAX_ROUNDS:-10000}'}  # smoke: LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100
       final: {prompt_file: prompts/final.md}
-  # The spawner wave (README "Spawner wave"): the same agent, plus a group section. Waves add
-  # agent-spawner replicas; each may spawn up to 4 agent-child peers (spawn: below).
+  # The spawner wave (README "Spawner wave"): the same agent, plus a group section. The operator
+  # sets agent-spawner replicas (`flock scale`); each may spawn up to 4 agent-child peers (spawn: below).
   agent-spawner:
     <<: *agent
+    replicas_ramp: null                     # not ramped
     replicas: 0
     system_prompt_append_file: prompts/group-spawner.md
     workers: {initial: 2, max_extra: 0}     # 20 spawners at 12 per worker
   agent-child:
     <<: *agent
+    replicas_ramp: null                     # not ramped
     replicas: 0
     system_prompt_append_file: prompts/group-child.md
     workers: {initial: 0, max_extra: 7}     # 80 children at 12 per worker, opened on demand
