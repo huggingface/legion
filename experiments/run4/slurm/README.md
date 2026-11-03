@@ -22,7 +22,7 @@ the scripts source `/fsx/carlos_patino/prj-eliza/slurm/common.sh` at runtime.
 
 ## Ramp
 
-The controller job applies `experiments/$RUN3_EXPERIMENT/spec.yaml` only when the swarm is not on
+The controller job applies `<run>/experiment/spec.yaml` (the copy `flock init` made) only when the swarm is not on
 the controller (404); a requeue (200) applies nothing, so it never undoes a pause or resets live
 counts. The controller then raises replicas along the spec's `replicas_ramp` (phases, `stagger`,
 `hold_if`: docs/live.md "Ramp"); its clock is in the controller state, so a requeue continues it.

@@ -90,8 +90,7 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
 RUN3_BUCKET=${RUN3_BUCKET%/}
 CTL_PORT=7860
 CTL_HOST=$(hostname)
-EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hierarchy, voting or teams
-EXP=$RUN_DIR/experiment                         # a copy of experiments/$EXPERIMENT, taken at the first start
+EXP=$RUN_DIR/experiment                         # the experiment folder's copy: `flock init <run dir> --from experiments/<name>`
 SPEC=$EXP/spec.yaml                             # the one spec: compute, ramp and ${VAR}s inline
 HEALTH_WAIT_S=${HEALTH_WAIT_S:-300}
 WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # first launch only: how long `flock launch` waits for the world
@@ -173,12 +172,9 @@ log "controller healthy at $FLOCK_URL/healthz"
 
 # ---------------------------------------------------------------- step 2: apply on the first start only
 apply_step() {  # runs in a background subshell (below)
-  # The experiment folder, copied once per run (the spec's prompts/, tools/, protocols/ are read
+  # The experiment folder's copy, made by `flock init` (prompts/, tools/, protocols/ are read
   # relative to the spec file). One spec.yaml: run.env (sourced by common.sh) fills its ${VAR}s.
-  if [ ! -d "$EXP" ]; then
-    mkdir -p "$EXP" && cp -aL "$REPO/experiments/$EXPERIMENT/." "$EXP/" || { log "copy of experiments/$EXPERIMENT failed"; return 1; }
-    log "experiment folder: $EXP (from $REPO/experiments/$EXPERIMENT)"
-  fi
+  [ -f "$SPEC" ] || { log "$SPEC missing: run \`flock init $RUN_DIR --from experiments/<name>\` first"; return 1; }
   local swarm code
   swarm=$("$VENV/bin/python" -c 'import sys; from flock.specrender import render; print(render(sys.argv[1])["swarm"])' "$SPEC") \
     || { log "cannot read the swarm name from $SPEC"; return 1; }

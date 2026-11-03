@@ -40,16 +40,19 @@ The project repo is the dataset `HuggingFaceSwarms/chatbot-v5`, seeded with
 an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
-`slurm/` scripts, in a new run directory (`runs/hierarchy/run.env`, from
-`../run4/slurm/run.env.example`) with:
+`slurm/` scripts. From the flock checkout on the cluster, with `RUNS` the scripts' runs dir:
 
 ```sh
-RUN3_EXPERIMENT=hierarchy   # controller.sbatch copies experiments/hierarchy (links followed)
-CHATBOT_RUN=hierarchy       # the swarm name
+flock init $RUNS/hierarchy --from experiments/hierarchy --secrets $SECRETS_FILE
+# add to $RUNS/hierarchy/run.env: CHATBOT_RUN=hierarchy, CHATBOT_REPO, CHATBOT_BOARD_URL (below)
+# and the cluster settings of ../run4/slurm/run.env.example; rerun until every check passes:
+flock init $RUNS/hierarchy
+sbatch world.sbatch hierarchy && sbatch controller.sbatch hierarchy
+flock --run $RUNS/hierarchy status
 ```
 
-then `sbatch world.sbatch hierarchy` and `sbatch controller.sbatch hierarchy`. The controller job
-applies this folder's `spec.yaml` on its first start; the controller runs the ramp.
+The controller job applies the copy's `spec.yaml` (`$RUNS/hierarchy/experiment`) on its first
+start; the controller runs the ramp.
 
 Offline checks: `pytest tests/test_hierarchy_experiment.py`.
 

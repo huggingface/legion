@@ -41,11 +41,10 @@ rules' first line, the repo id and the clone line). Set
 with an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
-`slurm/` scripts, in a new run directory (`runs/teams/run.env`, from
-`../run4/slurm/run.env.example`) with:
+`slurm/` scripts, in a run directory made by `flock init $RUNS/teams --from experiments/teams` (docs/slurm.md
+"Deploying"), with in its `run.env`:
 
 ```sh
-RUN3_EXPERIMENT=teams   # controller.sbatch copies experiments/teams (links followed)
 CHATBOT_RUN=teams       # the swarm name
 CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-v7-msgboard.hf.space
 ```
