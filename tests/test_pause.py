@@ -39,8 +39,7 @@ async def resume(sim, **body) -> dict:
 
 
 async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
-    await sim.apply({"prompt": "r{round}", "every": "30s", "on": ["comms.mention"],
-                     "while": {"idle_rounds": 2}})
+    await sim.apply({"prompt": "r{round}", "every": "30s", "on": ["comms.mention"]})
     await sim.heartbeat()
     sim.tick()
     r1 = prompts(await sim.commands())
@@ -57,7 +56,7 @@ async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
         sim.tick()
         assert prompts(await sim.commands()) == {}  # no round, no hand prompt, no wake
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
-    assert st["rounds_total"] == 2 and st["per_agent"][A0]["idle_streak"] == 0
+    assert st["rounds_total"] == 2
     status = (await sim.c.get("/swarms/demo")).json()["status"]
     assert status["held"]["types"]["researcher"]["by"] == "operator"
 

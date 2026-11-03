@@ -843,8 +843,8 @@ no agents pays the worker's boot time; pre-warming is a possible later feature.
 
 Added 2026-10-21 (worlds design note §9 and §13). User guide: [loop.md](loop.md).
 
-A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: `first`
-alone, then the loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
+A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: the
+loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
 `final` prompt per live agent. The controller's loop engine (`controller/loop.py`) ticks once a
 second and sends every prompt through the bulk-prompt path with `state: idle, skip_pending:
 true`, so loops never stack prompts and stay under `max_working` admission. `every: turn_end` on
@@ -853,8 +853,8 @@ re-prompts when a turn completes), under `max_working` on the controller. Prompt
 the worker renders (`PromptCommand.loop`, `{round}`, `{spend}`, `{last_summary}`, ...).
 `limits.budget_usd` becomes a stop, not only a spawn check: at `budget_usd` minus the final
 reserves loops stop, pending prompts are dropped and final rounds run; at `budget_usd` every
-agent is stopped and prompts are refused. World-backed settings (`every: rounds`, `score_*`,
-`on: world.*`, `context:`) are in the model and refused at apply until a world exists.
+agent is stopped and prompts are refused. World-backed wakes (`on: world.*`) are in the
+model and refused at apply until a world exists.
 
 ### Run-4 additive contracts (2026-10-26)
 

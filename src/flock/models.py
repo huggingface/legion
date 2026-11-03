@@ -280,11 +280,21 @@ def comms_name(entry: str) -> str:
 
 log = logging.getLogger(__name__)
 
-# Keys deleted from an extra=forbid spec model, by class name: dropped with one warning (per
-# key, per process) instead of refused, so a spec stored before the deletion still loads on
+# Keys deleted from an extra=forbid spec model, by class name: dropped, with one warning (per
+# key, per process) when it holds a value, instead of refused, so a spec stored before the deletion still loads on
 # resume. Any other unknown key is still refused. e.g. {"LoopSpec": {"stagger"}}
-REMOVED: dict[str, set[str]] = {}
+REMOVED: dict[str, set[str]] = {
+    "LoopSpec": {"first", "context", "stagger", "stop_when"},
+    "LoopWhile": {"idle_rounds", "score"},
+    "LoopFinal": {"add_tools"},
+}
 _warned: set[tuple[str, str]] = set()
+
+
+def _is_set(v: Any) -> bool:
+    """A removed key worth a warning: a stored spec's dump carries every default (`first: null`,
+    `stop_when: {all_agents_done: false}`), which says nothing."""
+    return any(_is_set(x) for x in v.values()) if isinstance(v, dict) else bool(v)
 
 
 class _Removable(BaseModel):
@@ -297,7 +307,7 @@ class _Removable(BaseModel):
         if not gone:
             return data
         for k in sorted(gone):
-            if (cls.__name__, k) not in _warned:
+            if _is_set(data[k]) and (cls.__name__, k) not in _warned:
                 _warned.add((cls.__name__, k))
                 log.warning("spec: %s.%s was removed from flock; ignoring it", cls.__name__, k)
         return {k: v for k, v in data.items() if k not in gone}
@@ -1225,9 +1235,7 @@ _LOOP_SOURCE_RE = re.compile(r"^(comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 class LoopWhile(_Removable):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
-    `agent_usd` (the agent's cost; a map is keyed by model alias or model id), `idle_rounds`
-    (that many loop turns in a row without a tool call). `score_<op>: {metric: value}`
-    conditions are kept under `score` and need a world (refused at apply in this version)."""
+    `agent_usd` (the agent's cost; a map is keyed by model alias or model id)."""
 
     model_config = {"extra": "forbid"}
 
@@ -1235,19 +1243,6 @@ class LoopWhile(_Removable):
     max_rounds: int | None = None
     budget_usd: float | None = None
     agent_usd: float | dict[str, float] | None = None
-    idle_rounds: int | None = None
-    score: dict[str, dict[str, float]] = Field(default_factory=dict)  # op -> {metric: value}
-
-    @model_validator(mode="before")
-    @classmethod
-    def _score_keys(cls, data: Any) -> Any:
-        if isinstance(data, dict) and any(str(k).startswith("score_") for k in data):
-            data = dict(data)
-            score = dict(data.pop("score", None) or {})
-            for k in [k for k in data if str(k).startswith("score_")]:
-                score[k.removeprefix("score_")] = data.pop(k)
-            data["score"] = score
-        return data
 
     @field_validator("until", mode="before")
     @classmethod
@@ -1262,7 +1257,7 @@ class LoopWhile(_Removable):
             until_deadline(v, 0.0)
         return v
 
-    @field_validator("max_rounds", "idle_rounds")
+    @field_validator("max_rounds")
     @classmethod
     def _positive(cls, v: int | None) -> int | None:
         if v is not None and v < 1:
@@ -1287,15 +1282,13 @@ class LoopWhile(_Removable):
 
 class LoopFinal(_Removable):
     """One last prompt per live agent when the loop stops (any reason but `--no-final`).
-    `reserve_usd` is held back from `limits.budget_usd` for it. `add_tools` are tool names the
-    final prompt unlocks; carried in the prompt and its events for the tools layer."""
+    `reserve_usd` is held back from `limits.budget_usd` for it."""
 
     model_config = {"extra": "forbid"}
 
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
     reserve_usd: float = 0.0
-    add_tools: list[str] = Field(default_factory=list)
 
     @field_validator("reserve_usd")
     @classmethod
@@ -1340,36 +1333,21 @@ class LoopWake(_Removable):
         return v
 
 
-class LoopStopWhen(_Removable):
-    """Extra ways for a loop to end. `all_agents_done`: an agent that calls `done` with
-    `finished: true` (the `llm` harness offers that argument then) leaves the loop, and the
-    loop stops once every live agent has left it."""
-
-    model_config = {"extra": "forbid"}
-
-    all_agents_done: bool = False
-
-
 class LoopSpec(_Removable):
-    """A type's prompting loop (docs/loop.md). `first` goes alone to each agent; the loop
-    prompt follows once that turn ended, then on every `every` (`turn_end`: re-sent by the
-    worker when a turn completes; a duration: the controller prompts idle agents that long
-    after their last loop prompt; `rounds` needs a world) and on each `on` wake-up, while
-    `while` holds. Then `final`, once per live agent, then idle."""
+    """A type's prompting loop (docs/loop.md). The loop prompt goes on every `every`
+    (`turn_end`: re-sent by the worker when a turn completes; a duration: the controller
+    prompts idle agents that long after their last loop prompt) and on each `on` wake-up,
+    while `while` holds. Then `final`, once per live agent, then idle."""
 
     model_config = {"extra": "forbid", "populate_by_name": True}
 
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
-    first: str | None = None
     every: str = "turn_end"
     on: list[str] = Field(default_factory=list)  # comms.mention, comms.thread, world.event:*
-    context: list[str] = Field(default_factory=list)  # needs comms / artifacts / a world
-    stagger: str | None = None  # agent i gets its first prompt i * stagger after the start
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
     wake: LoopWake = Field(default_factory=LoopWake)
-    stop_when: LoopStopWhen = Field(default_factory=LoopStopWhen)
     # Controller only: one line after the rendered loop prompt naming the board notifications
     # (mentions, replies in the agent's threads) since its last round. Never sent to workers.
     notices: bool = False
@@ -1386,18 +1364,11 @@ class LoopSpec(_Removable):
     @field_validator("every")
     @classmethod
     def _every(cls, v: str) -> str:
-        if v not in ("turn_end", "rounds") and parse_duration(v).total_seconds() <= 0:
-            raise ValueError("every must be turn_end, rounds or a duration > 0")
+        if v != "turn_end" and parse_duration(v).total_seconds() <= 0:
+            raise ValueError("every must be turn_end or a duration > 0")
         return v
 
-    @field_validator("stagger")
-    @classmethod
-    def _stagger(cls, v: str | None) -> str | None:
-        if v is not None:
-            parse_duration(v)
-        return v
-
-    @field_validator("on", "context")
+    @field_validator("on")
     @classmethod
     def _sources(cls, v: list[str]) -> list[str]:
         for x in v:
@@ -1414,7 +1385,7 @@ class LoopSpec(_Removable):
     @property
     def every_s(self) -> float | None:
         """Seconds between loop prompts for a duration `every`, else None."""
-        if self.every in ("turn_end", "rounds"):
+        if self.every == "turn_end":
             return None
         return parse_duration(self.every).total_seconds()
 
@@ -1446,29 +1417,19 @@ def agent_cap(ts: TypeSpec) -> float | None:
 
 
 def loop_refusals(spec: SwarmSpec) -> list[str]:
-    """Loop settings this version accepts in the model but cannot run: world-backed ones, and
-    context sources whose feeders are not built yet. `flock apply` and the controller refuse a
-    spec with any of them."""
+    """Loop settings this version accepts in the model but cannot run: world-backed wakes and
+    prompt files not inlined. `flock apply` and the controller refuse a spec with any of them."""
     out: list[str] = []
     for name, ts in spec.types.items():
         lp = ts.loop
         if lp is None:
             continue
         where = f"types.{name}.loop"
-        if lp.every == "rounds":
-            out.append(f"{where}.every: rounds {NEEDS_WORLD}")
-        for op in lp.while_.score:
-            out.append(f"{where}.while.score_{op} {NEEDS_WORLD}")
         out += [f"{where}.on: {x} {NEEDS_WORLD}" for x in lp.on if x.startswith("world.")]
-        for x in lp.context:
-            why = NEEDS_WORLD if x.startswith("world.") else "is not in this version"
-            out.append(f"{where}.context: {x} {why}")
         if lp.prompt is None:
             out.append(f"{where}.prompt_file: not inlined (use `flock apply`, which reads it)")
         if lp.final is not None and lp.final.prompt is None:
             out.append(f"{where}.final.prompt_file: not inlined (use `flock apply`, which reads it)")
-        if lp.stop_when.all_agents_done and (ts.harness != Harness.llm or ts.done_tool is False):
-            out.append(f"{where}.stop_when.all_agents_done needs harness llm with the done tool")
     return out
 
 
@@ -1610,7 +1571,7 @@ class LoopMeta(BaseModel):
     """What the worker needs to render a loop prompt (docs/loop.md): it fills the
     LOOP_PLACEHOLDERS from these plus its own spend and last `done` summary."""
 
-    kind: Literal["first", "loop", "final"]
+    kind: Literal["loop", "final"]
     type: str
     round: int | None = None  # None: the worker numbers it (its own next round)
     started_at: datetime | None = None  # when the loop started, for {elapsed}
@@ -1621,7 +1582,6 @@ class LoopMeta(BaseModel):
     # current round and does not advance the worker's round counter
     counted: bool = True
     wake: bool = False  # a wake prompt (`on:`), counted or not: a deferral gives back its wake
-    add_tools: list[str] = Field(default_factory=list)  # final round: tools it unlocks
 
 
 class PromptCommand(BaseModel):
@@ -1834,7 +1794,7 @@ class LoopStatus(BaseModel):
     stopped_at: datetime | None = None
     reason: str | None = None  # why it stopped
     agents: int = 0
-    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, idle_rounds, errors, done)
+    agents_done: int = 0  # out of the loop (max_rounds, agent_usd, errors)
     rounds_min: int = 0
     rounds_max: int = 0
     rounds_total: int = 0

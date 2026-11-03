@@ -202,8 +202,6 @@ class AgentRuntime:
         self._loop_transient = 0  # consecutive timeout / model_transport turns
         self._loop_task: asyncio.Task | None = None
         self._turn_tool_calls = 0  # tool calls this turn, `done` excluded
-        self._turn_state_calls = 0  # of those, the ones that are not read-only (idle_rounds)
-        self._turn_finished = False  # `done(finished: true)` this turn (stop_when.all_agents_done)
         self._turn_call_names: list[str] = []  # their tool names, in order
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
@@ -643,12 +641,10 @@ class AgentRuntime:
                     extra["usage_missing"] = True
                 if self._turn_tools is not None:
                     extra["tools_version"] = self._turn_tools
-                if self._turn_finished:
-                    extra["finished"] = True
                 extra.update(self._pid_fields())
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
                                          "tool_calls": self._turn_tool_calls,
-                                         "state_calls": self._turn_state_calls, **extra,
+                                         **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 if self.world is not None:  # the `turn` hook (docs/world.md)
                     self.world.on_turn(self.name, self.turn_id,
@@ -659,13 +655,9 @@ class AgentRuntime:
                     summary = self._unfinished_summary(ev.data)  # not a stale or half-way text
                 if summary:
                     self.state.last_summary = summary
-                finished = self._turn_finished
                 self._end_turn()
                 self._burst_turns += 1
                 self._check_recycle_after()
-                lp = self.spec.loop
-                if finished and self.loop is not None and lp is not None and lp.stop_when.all_agents_done:
-                    self._loop_end("done")  # no next round; the controller takes it out too
                 self._after_turn(ev.status or "completed",
                                  "max_turns" if hit_max_turns(ev.data) else ev.data.get("reason"))
         elif k == "error":
@@ -715,7 +707,6 @@ class AgentRuntime:
                 data["tools_error"] = ts.error
         self._turn_tools = data.get("tools_version")
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
-        self._turn_state_calls, self._turn_finished = 0, False
         self._turn_call_names = []
         self._loop_inflight = None
         self._turn_pids, self._pids = self._pids, []
@@ -763,9 +754,7 @@ class AgentRuntime:
 
     # ------------------------------------------------------------------ loop (docs/loop.md)
     def _note_message(self, m: dict[str, Any]) -> None:
-        """Per turn: tool calls (not `done`), those that are not read-only (the `llm` adapter
-        marks a call `readonly` from the tools version it ran with: comms read/search,
-        `readonly` folder tools), `done`'s summary and the last assistant text."""
+        """Per turn: tool calls (not `done`), `done`'s summary and the last assistant text."""
         if m.get("role") != "assistant":
             return
         content = m.get("content")
@@ -777,9 +766,6 @@ class AgentRuntime:
         calls = [b for b in blocks if isinstance(b, dict)
                  and b.get("type") == "toolCall" and b.get("name") != "done"]
         self._turn_tool_calls += len(calls)
-        self._turn_state_calls += sum(1 for b in calls if b.get("readonly") is not True)
-        if m.get("fromDoneTool") and m.get("finished") is True:
-            self._turn_finished = True
         self._turn_call_names += [str(b.get("name")) for b in calls]
         if m.get("fromDoneTool") and text:
             self._turn_summary = text
@@ -803,7 +789,6 @@ class AgentRuntime:
             self._loop_end("final")
         self._loop_inflight = meta
         self.emit("loop_prompt", {"kind": meta.kind, "round": meta.round, "why": meta.why,
-                                  **({"add_tools": meta.add_tools} if meta.add_tools else {}),
                                   **({} if meta.counted else {"counted": False}),
                                   **({"wake": True} if meta.wake else {})})
         return render(template, meta, spend=self.spend_usd(), last_summary=self.state.last_summary,

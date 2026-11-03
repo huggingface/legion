@@ -54,7 +54,7 @@ them.
   folder reaches running agents at their next turn, with no image or wheel rebuild. See
   [docs/tools.md](docs/tools.md).
 - **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
-  turn_end` or a duration, after an optional `first`) while `while:` holds
+  turn_end` or a duration) while `while:` holds
   (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
   round; `limits.budget_usd` stops the swarm. `flock loop` stops or restarts
   a loop. See [docs/loop.md](docs/loop.md).

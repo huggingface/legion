@@ -51,7 +51,7 @@ def test_fixtures_cover_every_experiment() -> None:
 
 
 def test_removed_key_dropped_typo_refused(monkeypatch, caplog, tmp_path: Path) -> None:
-    monkeypatch.setitem(models.REMOVED, "LoopSpec", {"gone_opt"})
+    monkeypatch.setitem(models.REMOVED, "LoopSpec", models.REMOVED["LoopSpec"] | {"gone_opt"})
     monkeypatch.setattr(models, "_warned", set())
     raw = json.loads((FIXTURES / "run4.json").read_text())
     name = next(n for n, t in raw["types"].items() if t.get("loop"))

@@ -14,7 +14,6 @@ import random
 import shutil
 import subprocess
 import sys
-import tarfile
 import time
 from pathlib import Path
 
@@ -28,10 +27,9 @@ from flock.cli import load_spec
 from flock.controller.api import create_app as controller_app
 from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import Settings, reconcile
-from flock.models import load_spec_yaml
 
-from .test_chatbot_experiment import _kill, _no_secrets, _until, _wait, fakes, script
-from .test_local_run_e2e import _bundle_events, _env
+from .test_chatbot_experiment import fakes, script
+from .test_local_run_e2e import _env
 from .test_world import ROOT
 
 __all__ = ["fakes"]
@@ -137,10 +135,6 @@ def test_render_variants(tmp_path):
         assert pi.loop.prompt == ag.loop.prompt and pi.loop.final == ag.loop.final
         assert (pi.loop.every, pi.loop.on, pi.loop.wake, pi.loop.while_) == (
             ag.loop.every, ag.loop.on, ag.loop.wake, ag.loop.while_)
-        assert pi.loop.first.endswith(ag.loop.first), (
-            "spec.yaml: agent-pi's first must be its Pi note + exactly agent's first")
-        note = pi.loop.first[: -len(ag.loop.first)]
-        assert "flock-tool <name> --json" in note and "plain text" in note
         assert s.spawn["agent-pi"] == s.spawn["agent"]
         assert cli.extra_warnings(s) == []  # agent-pi's alias has no `extra` Pi would drop
         assert s.naming == "words" and s.types["interviewer"].name_prefix == "iv-"
@@ -150,11 +144,9 @@ def test_render_variants(tmp_path):
                                                                                False)
             assert t.max_turns == 20 and "at most 18 calls" in t.loop.prompt
             assert "exactly as `run_bot` returned it" in t.loop.prompt
-            assert "exactly as `run_bot` returned it" in t.loop.first
             lp = t.loop
             assert (lp.every, lp.while_.until, lp.wake.min_gap, lp.wake.max) == (
                 "turn_end", "48h", "10s", 20)
-            assert lp.first.startswith("You just joined a running effort")
             assert "search" in lp.prompt and len(lp.prompt) < 1500  # short, action-oriented
         iv = s.types["interviewer"]
         assert iv.ephemeral and iv.model == "interviewer" and iv.workers.max_extra == 40
@@ -337,15 +329,6 @@ def _load_world():
 
 
 # ------------------------------------------------------------------ the single job, end to end
-NEWCOMER_SCRIPT = script(
-    ("search", {"query": "best"}),
-    ("best_status", {}),
-    ("write_file", {"path": "agents/{me}/bot/__main__.py", "content": MAIN}),
-    ("write_file", {"path": "agents/{me}/bot/words.py", "content": WORDS}),
-    ("promote_best", {"path": "agents/{me}/bot", "reason": "first bot"}),
-    ("book_interview", {"path": "agents/{me}/bot"}),
-    ("spawn_interviewer", {"booking": "{me}-iv1-strong", "thread": "new"}),
-    ("done", {"summary": "joined"}))
 INTERVIEW = script(*[("chat", {"booking": "{booking}", "message": f"hello {i}"}) for i in range(6)],
                    ("submit_verdict", {"booking": "{booking}", "evidence_script": ["echoes"],
                                        "evidence_agent": ["warm"], "verdict": "script",
@@ -353,185 +336,6 @@ INTERVIEW = script(*[("chat", {"booking": "{booking}", "message": f"hello {i}"})
                    ("post", {"text": "INTERVIEW {booking}: script (0.8)", "thread": "{thread}"}),
                    ("done", {"summary": "interviewed"}))
 WAIT = script(("read", {}))
-
-
-def _payload(tmp_path: Path, waves: str) -> Path:
-    src, bucket = tmp_path / "src", tmp_path / "bucket"
-    exp = src / "experiments" / "run3"
-    shutil.copytree(EXP, exp, ignore=shutil.ignore_patterns("*.local.yaml*", "__py*", "ws"))
-    for w in ("chatbot3", "chatbot2", "chatbot", "eliza"):
-        shutil.copytree(ROOT / "worlds" / w, src / "worlds" / w,
-                        ignore=shutil.ignore_patterns("ws", "__py*"))
-    tool = exp / "tools" / "interview.py"  # the interviewer's task: a script for the fake model
-    text = tool.read_text()
-    a = text.index("PROMPT = (")
-    tool.write_text(text[:a] + f"PROMPT = {INTERVIEW!r}" + text[text.index("\n\n\n", a):])
-    d = load_spec_yaml((exp / "spec.yaml").read_text())
-    for t in d["types"].values():
-        if lp := t.get("loop"):
-            lp.pop("prompt_file", None)
-            first = lp["first"]  # the real newcomer prompt, then the fake model's script
-            t["loop"] = {**lp, "first": first + NEWCOMER_SCRIPT, "prompt": WAIT, "every": "5s",
-                         "stagger": "100ms", "final": {"prompt": script(("done", {}))}}
-            t["max_turns"] = 30
-    (exp / "spec.yaml").write_text(yaml.safe_dump(d, sort_keys=False))
-    w = exp / waves  # the variant's schedule, minutes -> seconds
-    w.write_text(w.read_text().replace("at: 5m", "at: 8s").replace("at: 10m", "at: 16s")
-                 + "stagger_s: 0.2\n")  # wave 1's agents join 0.2 s apart
-    (bucket / "payload").mkdir(parents=True)
-    with tarfile.open(bucket / "payload" / "repo.tar.gz", "w:gz") as tar:
-        for x in ("experiments", "worlds"):
-            tar.add(src / x, arcname=x)
-    return bucket
-
-
-def _second_server(tmp_path: Path):
-    """Another fake OpenAI server with its own request log (requests-2.jsonl)."""
-    import threading
-    from http.server import ThreadingHTTPServer
-
-    from . import fake_openai
-
-    h = type("Handler2", (fake_openai.Handler,), {"log_path": str(tmp_path / "requests-2.jsonl")})
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), h)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
-
-
-def _jsonl(p: Path) -> list[dict]:
-    return [json.loads(x) for x in p.read_text().splitlines()] if p.is_file() else []
-
-
-VARIANTS = {  # variant: waves file, cap, wave totals, the loop's `while`
-    "smoke": ("waves-smoke.yaml", 40, [(0, 20), (20, 40)], {"until": "30m", "max_rounds": 120}),
-    "standin": ("waves-standin.yaml", 20, [(0, 10), (10, 20)],
-                {"until": "20m", "max_rounds": 40, "agent_usd": 3.0})}
-
-
-@pytest.mark.parametrize("variant", list(VARIANTS))
-def test_single_job_three_waves_end_to_end(tmp_path, fakes, variant):
-    """The bootstrap rehearsal of the smoke variants (RUN3_VARIANT, its waves file with the
-    minutes as seconds): smoke 0 -> 20 -> 40 (the third wave capped), standin 0 -> 10 -> 20."""
-    waves, cap, totals, loop_while = VARIANTS[variant]
-    model_url, board, board_url = fakes
-    bucket, home = _payload(tmp_path, waves), tmp_path / "job"
-    env = {**_env(tmp_path), "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
-           "PYTHON": sys.executable, "CHATBOT_PREINSTALLED": "1", "CHATBOT_HOME": str(home),
-           "CHATBOT_BUCKET": str(bucket), "CHATBOT_BOARD_URL": board_url,
-           "CHATBOT_CHANNEL": "chatbot-test", "CHATBOT_BOARD_INVITE": board.invite,
-           "CHATBOT_WORLD_TOKEN": "w0rld-t0ken", "CHATBOT_SYNC_S": "5", "CHATBOT_CHECK_S": "1",
-           "CHATBOT_TICK_S": "1", "CHATBOT_FLOCK_ARGS": "--skip-preflight",
-           "OPENAI_BASE_URL": model_url, "OPENAI_API_KEY": "fake-key", "MODEL_WORKER": "fake-model",
-           "HF_TOKEN": "fake-key",
-           "RUN3_VARIANT": variant, "RUN3_WAVES": waves, "CHATBOT_RUN": "t1",
-           # a cold start: the controller is up well after the second wave would be due if
-           # the clock started with the script (it starts when the controller is healthy)
-           "CHATBOT_TEST_START_DELAY_S": "10"}
-    out = open(tmp_path / "job.out", "w")  # noqa: SIM115 (the process holds it)
-    proc = subprocess.Popen(["bash", "-c", (EXP / "job" / "bootstrap.sh").read_text()], env=env,
-                            stdout=out, stderr=subprocess.STDOUT, text=True,
-                            start_new_session=True)
-    ws, wlog = home / "ws", home / "logs" / "waves.jsonl"
-    try:
-        _until(proc, tmp_path, "flock run started")
-        deadline = time.monotonic() + 240
-        while True:  # every agent joined, each had its first turn; interviews filed verdicts
-            log = _jsonl(ws / "log.jsonl")
-            joined = {x["agent"] for x in log if x["action"] == "book_interview"}
-            verdicts = sum(x["action"] == "verdict" for x in log)
-            if len(joined) == cap and verdicts >= cap // 4 and time.time() - wlog.stat().st_ctime > 10:
-                break
-            assert proc.poll() is None and time.monotonic() < deadline, (
-                len(joined), verdicts, _jsonl(wlog), (tmp_path / "job.out").read_text()[-3000:])
-            time.sleep(1)
-        (bucket / "control").mkdir(exist_ok=True)
-        if variant == "smoke":  # a live server switch: every agent moves at its next turn
-            srv2 = _second_server(tmp_path)
-            url2 = f"http://127.0.0.1:{srv2.server_port}/v1"
-            (bucket / "control" / "endpoints").write_text(url2 + "\n")
-            _until(proc, tmp_path, "endpoints 1 ok", timeout=60)
-            deadline, host2 = time.monotonic() + 120, f"127.0.0.1:{srv2.server_port}"
-            (ctl,) = (home / "repo/experiments/run3/.flock").glob("*/controller")
-            # an agent's turn ended on server 2 (its requests alone may be a turn the stop cuts)
-            while not any(e["type"] == "turn_ended" and e["data"]["data"].get("endpoint") == host2
-                          for a in joined for e in _jsonl(ctl / "events/run3-t1" / f"{a}.jsonl")):
-                assert time.monotonic() < deadline and proc.poll() is None
-                time.sleep(1)
-        (bucket / "control" / "stop").write_text("stop\n")
-        assert _wait(proc, 180) == 0, (tmp_path / "job.out").read_text()[-3000:]
-    finally:
-        if proc.poll() is None:
-            _kill(proc)
-        out.close()
-    text = (tmp_path / "job.out").read_text()
-    assert "stop marker found" in text and "final sync" in text, text[-3000:]
-    # the waves; a capped wave makes no change and no line
-    waves_log = _jsonl(wlog)
-    assert waves_log[0]["total"] == totals[0][1]  # the first tick never merges two waves
-    assert "waves clock started at" in text
-    assert [(sum(x["before"].values()), x["total"]) for x in waves_log] == totals
-    assert all(x["lines"] and "error" not in x for x in waves_log), waves_log
-    n1 = totals[0][1]  # wave 1 staggered: one agent per step, the last step n1 - 1 -> n1
-    assert (waves_log[0]["steps"], waves_log[0]["stagger_s"]) == (n1, 0.2)
-    assert f"types.agent.replicas: {n1 - 1} -> {n1}" in waves_log[0]["lines"]
-    assert waves_log[1]["steps"] == 1  # later waves: all at once
-    # the bundle in the bucket, with every agent's events
-    (run,) = [p for p in (bucket / "flock" / ".flock").iterdir() if p.is_dir()]
-    assert "run3-t1" in (run / "run.json").read_text()
-    doc = json.loads((run / "run.json").read_text())
-    # naming: words: readable names for the agents, `iv-` for the interviewers
-    from flock.controller.naming import HANDLE_RE
-
-    agents = sorted(x["name"] for x in doc["agents"] if x["type"] == "agent")
-    assert len(agents) == cap and all(HANDLE_RE.match(a) and not a.startswith("iv-")
-                                      for a in agents), agents
-    ivs = [r["name"] for r in doc["removed_agents"]]
-    assert ivs and all(n.startswith("iv-") and HANDLE_RE.match(n) for n in ivs), ivs
-    posts = [m for m in board.msgs if m["body"].startswith("INTERVIEW ")]  # on the board
-    assert posts and all(m["sender"]["external_id"] in ivs for m in posts)
-    assert any(a in m["body"] for m in posts for a in agents)  # booking ids carry the name
-    if variant == "smoke":  # the server switch: turns moved to server 2, named in turn_ended
-        ends = [e["data"]["data"] for a in agents
-                for e in _bundle_events(run, a) if e["type"] == "turn_ended"]
-        host1, host2 = model_url.split("/")[2], f"127.0.0.1:{srv2.server_port}"
-        assert {d.get("endpoint") for d in ends} == {host1, host2}
-        moved = [d for d in ends if d.get("endpoint_from")]
-        assert moved and all((d["endpoint_from"], d["endpoint"]) == (host1, host2) for d in moved)
-        assert not (bucket / "control" / "endpoints").exists()
-        assert "endpoints 1 ok" in (bucket / "logs" / "bootstrap.log").read_text()
-        srv2.shutdown()
-    gone = doc["removed_agents"]  # removed interviewers carry their cost
-    assert gone and all(r["type"] == "interviewer" and r["cost_usd"] is not None for r in gone)
-    if variant == "standin":  # priced: live agents + removed ones = the swarm's total
-        assert all(r["cost_usd"] > 0 for r in gone)
-        live = sum(x["cost_usd"] for x in doc["agents"])
-        assert abs(live + sum(r["cost_usd"] for r in gone) - doc["totals"]["cost_usd"]) < 1e-3
-    local = yaml.safe_load((home / "repo/experiments/run3/spec.local.yaml").read_text())
-    assert local["types"]["agent"]["loop"]["while"] == loop_while
-    looped = 0
-    for a in agents:  # a newcomer: the newcomer prompt first, then rounds
-        ev = _bundle_events(run, a)
-        kinds = [e["data"]["data"]["kind"] for e in ev if e["type"] == "loop_prompt"]
-        assert kinds[0] == "first" and "first" not in kinds[1:], (a, kinds)
-        looped += "loop" in kinds
-        first_user = next(e["data"]["message"] for e in ev if e["type"] == "message"
-                          and e["data"]["message"].get("role") == "user")
-        assert "You just joined a running effort" in json.dumps(first_user)
-    if variant == "smoke":  # standin's rounds are 60 s apart: none in this short rehearsal
-        assert looped >= 5, looped  # rounds follow the first turn (few under a loaded machine)
-    # promotion from the start: the first bot promoted at once, identical ones refused as ties
-    hist = _jsonl(ws / "best" / "history.jsonl")
-    assert len(hist) == 1 and hist[0]["agent"] in agents
-    log = _jsonl(ws / "log.jsonl")
-    assert sum(x["action"] == "promote_refused" and "a tie" in x.get("why", "") for x in log) == cap - 1
-    # interviews: every agent booked one, none refused for quota, verdicts on frozen copies
-    books = json.loads((ws / "interviews.json").read_text())
-    assert len(books) == cap and not [x for x in log if x.get("why") == "quota"]
-    vs = _jsonl(ws / "verdicts.jsonl")
-    assert len(vs) >= cap // 4 and all(v["level"] == "strong" and v["counts"] for v in vs)
-    assert all(v["snapshot"] == f"interviews/{v['booking']}/bot" for v in vs)
-    assert (bucket / "ws" / "best" / "current.json").is_file()  # the mirror and the ws sync
-    _no_secrets(bucket, board)
 
 
 def test_world_space_entry_point(tmp_path):

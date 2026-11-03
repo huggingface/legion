@@ -46,9 +46,8 @@ start with `_` and that has a docstring is a tool. A function without a docstrin
   descriptions come from a Google-style `Args:` section.
 - readonly: optional, default false. Decorate the function with `@flock.tools.readonly` when the
   tool changes nothing (a status or a listing); the manifest then has `readonly: true` (the key is
-  left out when false, so existing folders keep their version). A loop turn whose calls are all
-  read-only is idle for `while.idle_rounds` (docs/loop.md). The comms `read` and `search`
-  built-ins are read-only too.
+  left out when false, so existing folders keep their version). Informational: nothing in flock
+  acts on it since loop `while.idle_rounds` was removed.
 
 ```python
 from flock.tools import readonly
