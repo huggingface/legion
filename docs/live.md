@@ -119,13 +119,11 @@ preemption), `cancel`, `retire`, `remove_worker`, `external_wait`. Per-agent pla
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).
 
-World admin changes made through the controller (`flock world set`, `flock world pause`,
-`flock world resume`; docs/world.md, "Admin API") are recorded as `world_knob {name, old,
-new, by, reason}`, `world_pause {lanes, reason, by}` and `world_resume {lanes, by}`. They
-take effect in the world at once and survive its restarts; they are not part of the spec.
+World knob changes made through the controller (`flock world set`; docs/world.md, "Admin
+API") are recorded as `world_knob {name, old, new, by, reason}`. They take effect in the
+world at once and survive its restarts; they are not part of the spec.
 
-Policies ([policies.md](policies.md)) add `alert`, `alert_cleared`, `policy_action`,
-`policy_budget_exhausted` and `digest`; the ramp adds `ramp_step`.
+The ramp adds `ramp_step`.
 
 ## Ramp (`replicas_ramp`)
 

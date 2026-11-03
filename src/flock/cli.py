@@ -1348,8 +1348,7 @@ def add_pause_commands(app: typer.Typer) -> None:
                                                 "flight")] = False,
     ) -> None:
         """Hold types or agents: no new prompts or loop rounds reach them (queued ones wait),
-        rounds are not counted, until `flock resume`. Not `flock loop --stop`. To pause world
-        lanes instead, see `flock world pause`."""
+        rounds are not counted, until `flock resume`. Not `flock loop --stop`."""
         _show(_call("POST", f"/swarms/{swarm}/pause", json={
             **_body(type_, agent), "interrupt": interrupt, "reason": reason}))
 
@@ -1449,64 +1448,11 @@ def world_set(
         typer.echo(f"{c['name']}: {json.dumps(c['old'])} -> {json.dumps(c['new'])}")
 
 
-@world_app.command("pause")
-def world_pause(
-    swarm: str,
-    lanes: Annotated[list[str], typer.Argument(help="Lanes the world names (e.g. push open merge).")],
-    reason: str = typer.Option("", "--reason", help="Shown with the pause; recorded in events."),
-) -> None:
-    """Pause world lanes (the world refuses or defers that kind of work). To hold agents
-    instead, see `flock pause`."""
-    out = _call("POST", f"/swarms/{swarm}/world/pause", json={"lanes": lanes, "reason": reason},
-                headers=source_header(None))
-    typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
-
-
-@world_app.command("resume")
-def world_resume(swarm: str, lanes: Annotated[list[str], typer.Argument()]) -> None:
-    """Resume paused world lanes."""
-    out = _call("POST", f"/swarms/{swarm}/world/resume", json={"lanes": lanes},
-                headers=source_header(None))
-    typer.echo(f"paused: {', '.join(out['paused']) or 'none'}")
-
-
 if __name__ == "__main__":
     app()
 
 
-# -- steering (docs/policies.md, docs/live.md) -------------------------------------------------
-
-policy_app = typer.Typer(help="Policies: alerts and automatic actions (docs/policies.md).",
-                         no_args_is_help=True)
-app.add_typer(policy_app, name="policy")
-
-
-def _show_policies(out: dict) -> None:
-    typer.echo(f"mode {out['mode']}{' (built-in rules)' if out['builtin'] else ''}; "
-               f"actions in the last hour {out['actions_last_hour']}/{out['max_actions_per_hour']}")
-    rows = [[r["name"], f"{r['metric']} {r['op']} {r['value']:g}", r["for"],
-             ", ".join(next(iter(a)) for a in r["do"]) or "-", r["effective_mode"],
-             "muted" if r["muted"] else "", ", ".join(r["firing"])] for r in out["rules"]]
-    _table(rows, ["rule", "when", "for", "do", "mode", "muted", "firing"])
-
-
-@policy_app.command("list")
-def policy_list(swarm: str) -> None:
-    """The swarm's rules, their mode, mutes and what fires now."""
-    _show_policies(_call("GET", f"/swarms/{swarm}/policies"))
-
-
-@policy_app.command("mute")
-def policy_mute(swarm: str, rule: str,
-                for_: str = typer.Option(None, "--for", help="e.g. 2h; default: until unmuted")) -> None:
-    """Mute a rule: no alerts, no actions (its state keeps updating)."""
-    _show_policies(_call("POST", f"/swarms/{swarm}/policies/{rule}/mute", json={"for": for_}))
-
-
-@policy_app.command("unmute")
-def policy_unmute(swarm: str, rule: str) -> None:
-    _show_policies(_call("POST", f"/swarms/{swarm}/policies/{rule}/unmute", json={}))
-
+# -- steering (docs/live.md) -------------------------------------------------
 
 notice_app = typer.Typer(help="Banner line on top of every loop prompt (docs/loop.md).",
                          no_args_is_help=True)

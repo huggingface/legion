@@ -390,7 +390,7 @@ class LoopEngine:
                *, by: str = "operator", auto_only: bool = False,
                reason: str | None = None) -> dict[str, Any]:
         """Lift holds: the named ones, or all (both None). `auto_only`: only the holds the
-        controller made itself (world down, policies), never an operator's. `reason`: only
+        controller made itself (world down), never an operator's. `reason`: only
         holds with that reason (each automatic source lifts its own). Queued prompts and wakes
         go out on the next poll / tick. Returns the swarm's holds."""
         with self._lock:

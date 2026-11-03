@@ -29,7 +29,6 @@ from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
 from flock.controller.health import Health
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
-from flock.controller.policy import rules_of
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
 from flock.controller.spawn import (
@@ -76,8 +75,6 @@ from flock.models import (
     comms_tools,
     loop_refusals,
     merge_grants,
-    parse_duration,
-    policy_refusals,
     type_spec_rev,
     worker_type_spec,
     world_tools,
@@ -581,8 +578,8 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
 def add_world_admin_routes(api: APIRouter, store: Store, token: str,
                            secret_source: Mapping[str, str],
                            transport: httpx.BaseTransport | None,
-                           clock: Callable[[], datetime]) -> Callable[..., Any]:
-    """`/swarms/{swarm}/world/...`: the world's admin API (knobs, lane pauses; docs/world.md)
+                           clock: Callable[[], datetime]) -> None:
+    """`/swarms/{swarm}/world/...`: the world's admin API (knobs; docs/world.md)
     through the controller with the world's admin secret (`world_admin_token`). Every change
     is a swarm event."""
 
@@ -634,18 +631,6 @@ def add_world_admin_routes(api: APIRouter, store: Store, token: str,
             audit(swarm, "world_knob", {**c, "by": by(x_flock_source), "reason": reason})
         return out
 
-    @api.post("/swarms/{swarm}/world/{action}")
-    def world_pause(swarm: str, action: Literal["pause", "resume"],
-                    body: Annotated[dict[str, Any], Body()],
-                    x_flock_source: Annotated[str | None, Header()] = None) -> dict:
-        lanes, reason = body.get("lanes"), str(body.get("reason") or "")
-        out = world_admin(swarm, "POST", f"/admin/{action}",
-                          {"lanes": lanes, **({"reason": reason} if action == "pause" else {})})
-        audit(swarm, f"world_{action}", {"lanes": lanes, "by": by(x_flock_source),
-                                         **({"reason": reason} if action == "pause" else {})})
-        return out
-
-    return world_admin  # policies (docs/policies.md) call the world through it too
 
 
 def add_steering_routes(api: APIRouter, store: Store, health: Health,
@@ -661,29 +646,6 @@ def add_steering_routes(api: APIRouter, store: Store, health: Health,
     def audit(swarm: str, kind: str, data: dict) -> None:
         store.append_events(swarm, swarm_stream(swarm), [Event(type=kind, ts=clock(), agent="",
                                                                data=data)])
-
-    @api.get("/swarms/{swarm}/policies")
-    def policies(swarm: str) -> dict:
-        return health.policies.view(spec_of(swarm), clock().timestamp())
-
-    @api.post("/swarms/{swarm}/policies/{rule}/{action}")
-    def mute(swarm: str, rule: str, action: Literal["mute", "unmute"],
-             body: Annotated[dict[str, Any] | None, Body()] = None) -> dict:
-        spec, now = spec_of(swarm), clock().timestamp()
-        if rule not in {r.name for r in rules_of(spec)[1]}:
-            raise HTTPException(404, f"no policy rule {rule!r} in swarm {swarm!r}")
-        if action == "unmute":
-            health.policies.unmute(swarm, rule)
-            audit(swarm, "policy_unmuted", {"rule": rule})
-        else:
-            dur = (body or {}).get("for")
-            try:
-                until = now + parse_duration(dur).total_seconds() if dur else None
-            except ValueError as e:
-                raise HTTPException(400, str(e)) from None
-            health.policies.mute(swarm, rule, until)
-            audit(swarm, "policy_muted", {"rule": rule, "for": dur})
-        return health.policies.view(spec, now)
 
     @api.get("/swarms/{swarm}/notices")
     def notices(swarm: str) -> dict:
@@ -789,7 +751,6 @@ def create_app(
     loops = LoopEngine(store, send=loop_send, clock=clock,
                        capped=lambda spec, t: bool(caps(spec, t)),
                        turn_state=lambda a, w, now: turn_state(a, w, now))
-    health.policies.loops = loops  # pause_type / resume_type (docs/policies.md)
 
     async def loop_ticker() -> None:
         while True:
@@ -925,7 +886,7 @@ def create_app(
         if conflicts := worker_cap_conflicts(store, spec):
             raise HTTPException(409, "; ".join(conflicts))
         check_tools(swarm, spec)
-        if refused := loop_refusals(spec) + policy_refusals(spec):
+        if refused := loop_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
@@ -1789,8 +1750,7 @@ def create_app(
             wake_window(w["swarm"], pools)
         return {"ok": True, "accepted": len(batch.events)}
 
-    health.policies.world_admin = add_world_admin_routes(api, store, token, secret_source,
-                                                         world_transport, clock)
+    add_world_admin_routes(api, store, token, secret_source, world_transport, clock)
     add_steering_routes(api, store, health, clock)
     add_pause_routes(api, loops)
     app.include_router(api)

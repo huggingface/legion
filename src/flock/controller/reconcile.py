@@ -12,14 +12,12 @@ import json
 import logging
 import os
 import random
-import threading
 import time
 import uuid
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from flock.controller import naming
 from flock.controller import spawn as spawning
@@ -256,11 +254,6 @@ def _record(p: _Pass, swarm: str, actions: list[Action]) -> None:
         p.store.append_events(swarm, swarm_stream(swarm), evs)
 
 
-# The reconcile pass and the health tick (policies) run in different threads: the room check
-# and the drain it allows happen under this lock in both.
-ROTATE_LOCK = threading.Lock()
-
-
 def rotation_room(store: Store, swarm: str, max_rotating: int | None, now: float) -> int:
     """Drains the rotation budget allows now: `max_rotating` (default 10% of the swarm's
     worker slots, at least 1) minus the workers restoring (launched, or a restore in flight)
@@ -273,13 +266,13 @@ def rotation_room(store: Store, swarm: str, max_rotating: int | None, now: float
     return budget - busy
 
 
-def rotate_worker(store: Store, swarm: str, w: Row, now: float, **why: Any) -> None:
+def rotate_worker(store: Store, swarm: str, w: Row, now: float) -> None:
     """Drain one worker for a memory rotation (ends in a planned restart): `memory_rotation`."""
     mem = json.loads(w.get("telemetry") or "{}").get("mem") or {}
     store.enqueue_command(w["id"], DrainCommand().model_dump_json())
     store.update_worker(w["id"], draining=1)  # counted as draining from now on
     data = {"worker": w["id"], "nonreclaim_mb": mem.get("nonreclaim_mb"),
-            "eta_limit_s": mem.get("eta_limit_s"), **why}
+            "eta_limit_s": mem.get("eta_limit_s")}
     log.info("memory rotation: %s", data)
     store.append_events(swarm, swarm_stream(swarm), [Event(
         type="memory_rotation", ts=datetime.fromtimestamp(now, UTC), agent="", data=data)])
@@ -295,19 +288,17 @@ def _rotate(p: _Pass, spec: SwarmSpec) -> None:
     `wants_rotation` are drained, the smallest `eta_limit_s` first, while fewer than
     `max_rotating` workers are restoring (launched, or a restore in flight) or draining. The
     drain ends in a planned restart. A worker's own drain or preemption at its hard
-    thresholds never waits for this budget (a preempted slot has already ended here). The
-    `drain_worker` policy action (docs/policies.md) takes slots from the same budget."""
+    thresholds never waits for this budget (a preempted slot has already ended here)."""
     workers = p.store.list_workers(spec.swarm)
     tel = {w["id"]: json.loads(w.get("telemetry") or "{}") for w in workers}
     want = [w for w in workers if tel[w["id"]].get("wants_rotation") and rotatable(w, p.now)]
     if not want:
         return
     eta = {w["id"]: (tel[w["id"]].get("mem") or {}).get("eta_limit_s") for w in want}
-    with ROTATE_LOCK:
-        room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
-        for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)
-                        )[:max(0, room)]:
-            rotate_worker(p.store, spec.swarm, w, p.now)
+    room = rotation_room(p.store, spec.swarm, p.settings.max_rotating, p.now)
+    for w in sorted(want, key=lambda w: (eta[w["id"]] is None, eta[w["id"]] or 0.0)
+                    )[:max(0, room)]:
+        rotate_worker(p.store, spec.swarm, w, p.now)
 
 
 def _ramp(p: _Pass, spec: SwarmSpec) -> SwarmSpec:

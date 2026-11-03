@@ -305,9 +305,7 @@ def test_controller_proxies_the_admin_api_and_records_events(store, clock, monke
     assert world.slots_seen == [2]
     r = run.invoke(cli.app, ["world", "set", "sw", "hub.push.slots=7"])
     assert r.exit_code == 1 and "maximum" in r.output
-    assert run.invoke(cli.app, ["world", "pause", "sw", "push", "open", "--reason", "429s"]).exit_code == 0
-    r = run.invoke(cli.app, ["world", "resume", "sw", "open"])
-    assert r.exit_code == 0 and "paused: push" in r.output
+    world.admin.pause(["push"], "429s")
     r = run.invoke(cli.app, ["world", "knobs", "sw"])
     assert r.exit_code == 0 and "hub.push.slots" in r.output and "0..4" in r.output
     assert "paused: push (429s)" in r.output and world.paused("push")
@@ -315,9 +313,7 @@ def test_controller_proxies_the_admin_api_and_records_events(store, clock, monke
     evs = c.get("/swarms/sw/events").json()["events"]
     mine = [(e["type"], e["data"]) for e in evs if e["type"].startswith("world_")]
     assert mine == [
-        ("world_knob", {"name": "hub.push.slots", "old": 1, "new": 2, "by": "carol", "reason": "hub is fine"}),
-        ("world_pause", {"lanes": ["push", "open"], "by": "carol", "reason": "429s"}),
-        ("world_resume", {"lanes": ["open"], "by": "carol"})]
+        ("world_knob", {"name": "hub.push.slots", "old": 1, "new": 2, "by": "carol", "reason": "hub is fine"})]
     assert c.get("/swarms/nope/world/knobs").status_code == 404
 
 
