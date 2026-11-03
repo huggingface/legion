@@ -7,6 +7,8 @@ from pydantic import TypeAdapter
 
 from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import (
+    LAUNCH_TIMEOUT,
+    NUDGE_EVERY,
     agent_state,
     rebuild_from_jobs,
     reconcile,
@@ -582,3 +584,72 @@ def test_a_stale_heartbeat_does_not_undo_a_rotation_drain(store, jobs, settings,
     drains = [c for c in queued(store, W0) if isinstance(c, DrainCommand)]
     rotations = [e for e in store.read_events(swarm_stream("demo"), 0) if e["type"] == "memory_rotation"]
     assert len(drains) == 1 and len(rotations) == 1
+
+
+def test_launch_timeout_counts_from_job_start_not_submit(store, jobs, clock, tick):
+    """A job queued longer than LAUNCH_TIMEOUT is not cancelled the moment it starts."""
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    job = jobs.job_for(W0)
+    jobs.set_stage(job, "SCHEDULING", "PENDING")
+    for _ in range(70):  # 20 min in the queue
+        clock.advance(20)
+        tick()
+    jobs.set_stage(job, "RUNNING")
+    clock.advance(20)
+    tick()
+    clock.advance(LAUNCH_TIMEOUT - 30)
+    tick()
+    assert job not in jobs.cancels
+    clock.advance(30)  # LAUNCH_TIMEOUT since the last queued sighting, no heartbeat: a crash
+    assert "cancel" in kinds(tick()) and job in jobs.cancels
+
+
+def test_launch_timeout_without_queue_state_counts_from_launch(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    job = jobs.job_for(W0)  # the fake job is RUNNING from launch, like a local process
+    clock.advance(LAUNCH_TIMEOUT - 1)
+    tick()
+    assert job not in jobs.cancels
+    clock.advance(16)  # next job check (INSPECT_EVERY)
+    assert "cancel" in kinds(tick()) and job in jobs.cancels
+
+
+def test_stuck_agent_gets_resume_prompt_after_two_passes_once_per_30_min(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1, "resume_prompt": "go on"}), 0)
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
+    assert "nudge" not in kinds(tick())
+    clock.advance(5)
+    assert "nudge" in kinds(tick())
+    (p,) = store.prompts_for_worker(W0)
+    assert '"text":"go on"' in p["body"]
+    clock.advance(5)
+    assert "nudge" not in kinds(tick())  # one pending already
+    store.delete_prompts([p["id"]])
+    for _ in range(3):  # still stuck, prompt delivered: not again within 30 min
+        clock.advance(30)
+        heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
+        assert "nudge" not in kinds(tick())
+    clock.advance(NUDGE_EVERY)
+    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
+    assert "nudge" in kinds(tick())
+
+
+def test_stuck_agent_streak_resets_and_needs_a_resume_prompt(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1, "resume_prompt": "go on"}), 0)
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
+    assert "nudge" not in kinds(tick())  # not two passes in a row
+
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)  # no resume_prompt: nothing
+    for _ in range(3):
+        clock.advance(5)
+        heartbeat(store, clock, W0, [("researcher-0000", "stuck", None)])
+        assert "nudge" not in kinds(tick())
+    assert store.prompts_for_worker(W0) == []

@@ -62,6 +62,7 @@ INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh w
 INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
 LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
 LAUNCH_TIMEOUT = 900.0  # s, a RUNNING job that never heartbeats in this long is a crash
+NUDGE_EVERY = 1800.0  # s, min gap between resume prompts to one stuck agent
 RETIRE_GRACE = 120.0  # s, an emptied worker gets this long to drain before it is cancelled
 STABLE_AFTER = 600.0  # s, a heartbeat this long after launch resets the crash streak
 # Not written to the swarm stream: per agent, or repeated every pass while the condition holds.
@@ -366,6 +367,8 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     # Placement: fill live slots in order, never move a placed agent, open new slots as needed.
     if ts is not None:
         _place(p, spec, type_name, ts)
+        if ts.resume_prompt:
+            _nudge_stuck(p, spec.swarm, type_name, ts.resume_prompt)
 
     # Empty workers drain and are cancelled after a grace period.
     counts = Counter(a["worker"] for a in store.list_agents(spec.swarm, type_name))
@@ -440,6 +443,27 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
         fill(store.get_worker(wid))
 
 
+def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str) -> None:
+    """An agent stuck (its turn timed out) for two passes in a row gets the type's
+    resume_prompt, at most every NUDGE_EVERY and only with no prompt pending for it."""
+    store, pending = p.store, None
+    for a in store.list_agents(swarm, type_name):
+        stuck = a["hb_state"] == AgentState.stuck.value and not a["removing"] and agent_state(
+            a, store.get_worker(a["worker"]) if a["worker"] else None, p.now) == AgentState.stuck
+        n = min(a["stuck_passes"] + 1, 2) if stuck else 0
+        if n != a["stuck_passes"]:
+            store.update_agent(a["name"], stuck_passes=n)
+        if n < 2 or (a["nudged_at"] is not None and p.now - a["nudged_at"] < NUDGE_EVERY):
+            continue
+        pending = store.pending_counts(swarm) if pending is None else pending
+        if pending.get(a["name"]):
+            continue
+        prompt = PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, text=text)
+        store.add_prompt(a["name"], prompt.model_dump_json(), p.now)
+        store.update_agent(a["name"], nudged_at=p.now)
+        p.act("nudge", a["name"], "stuck: resume_prompt queued")
+
+
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec,
                  tools_version: str | None = None, comms: CommsSpec | None = None,
                  world: WorldSpec | None = None) -> None:
@@ -492,9 +516,12 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     if st.terminal:
         _job_ended(p, spec, w, ts, st)
         return
+    if st.stage == "SCHEDULING":  # queued (Slurm, HF Jobs): the launch timeout starts later
+        p.store.update_worker(w["id"], started_at=p.now)
     hb, seen = w["last_heartbeat"], last_seen(w)
     silent = seen is not None and p.now - seen > _DEAD  # no heartbeat, poll or event post
-    never = hb is None and st.stage != "SCHEDULING" and p.now - w["launched_at"] > LAUNCH_TIMEOUT
+    start = w["started_at"] or w["launched_at"]
+    never = hb is None and st.stage != "SCHEDULING" and p.now - start > LAUNCH_TIMEOUT
     if silent and getattr(p.jobs, "external", False):
         # compute external: nobody to cancel and nothing crashed on our side; the slot gets a
         # fresh env file and waits for the next external start, without backoff
@@ -674,6 +701,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         job_id=job_id,
         incarnation=incarnation,
         launched_at=p.now,
+        started_at=None,
         deadline=deadline,
         last_heartbeat=None,
         last_seen=None,

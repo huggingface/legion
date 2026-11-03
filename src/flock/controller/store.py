@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS agents (
   last_sync REAL,
   msgboard_principal TEXT,
   resume_pending INTEGER NOT NULL DEFAULT 0,
+  stuck_passes INTEGER NOT NULL DEFAULT 0,
+  nudged_at REAL,
   created_at REAL NOT NULL,
   last_heartbeat REAL
 );
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS workers (
   state TEXT NOT NULL DEFAULT 'launching',
   deadline REAL,
   launched_at REAL,
+  started_at REAL,
   last_heartbeat REAL,
   last_inspect REAL,
   draining INTEGER NOT NULL DEFAULT 0,
@@ -245,6 +248,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
         if "telemetry" not in cols:  # the last heartbeat's mem/restore/tools/knobs_rev (JSON)
             self._x("ALTER TABLE workers ADD COLUMN telemetry TEXT")
+        if "started_at" not in cols:  # launch-timeout clock: last time the job was seen queued
+            self._x("ALTER TABLE workers ADD COLUMN started_at REAL")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
@@ -257,6 +262,9 @@ class Store:
         for col in ("rev", "start_rev"):  # type spec revs from the last heartbeat
             if col not in cols:
                 self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
+        if "stuck_passes" not in cols:  # reconcile passes seen stuck (capped at 2), last nudge
+            self._x("ALTER TABLE agents ADD COLUMN stuck_passes INTEGER NOT NULL DEFAULT 0")
+            self._x("ALTER TABLE agents ADD COLUMN nudged_at REAL")
         cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
