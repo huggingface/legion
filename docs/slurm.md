@@ -25,6 +25,11 @@ sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-ctl-hierarchy "$SLURM_
 flock --run runs/hierarchy status             # or export FLOCK_RUN_DIR=runs/hierarchy
 ```
 
+Upgrading: copy new scripts to a NEW folder (a new `SLURM_DIR`), never over an old run's slurm
+folder: its controller keeps submitting workers from it, and its requeued jobs would source the
+new `common.sh`, which needs `SLURM_DIR` and the profile's `VENV`/`REPO`/`SECRETS_FILE` and dies
+without them.
+
 sbatch order: the world first, then the controller. The controller's first start waits for the
 world's `/manifest`, then runs `flock launch` (only when the swarm is not on it yet: a requeue
 applies nothing); it sbatch'es the workers itself. A job script takes the run directory (or a
@@ -70,8 +75,8 @@ SLURM_PARTITION=cpu                      # sbatch -p and the specs' ${SLURM_PART
 WORKER_CPUS=4                            # the specs' compute.cpus / compute.mem
 WORKER_MEM=7G
 SLURM_MAX_MEM_PER_CPU_MB=2000            # the partition's MaxMemPerCPU: more silently raises the CPU count; unset: not checked
-SLURM_NODE_MAX_CPUS=32                   # the largest job a node runs (FLOCK_SLURM_MAX_CPUS/_MEM); unset: not checked
-SLURM_NODE_MAX_MEM=60G
+FLOCK_SLURM_MAX_CPUS=32                  # the largest job a node runs (spec max_cpus/max_mem); unset: not checked
+FLOCK_SLURM_MAX_MEM=60G
 VENV=/shared/flock/venv                  # the job scripts: bin/flock, flock-controller, flock-worker, python
 REPO=/shared/flock/repo                  # a flock checkout (worlds/, the scripts' helpers)
 SECRETS_FILE=/shared/flock/secrets.env   # mode 600, sourced by every job
@@ -81,8 +86,10 @@ CONTAINER_MOUNTS=/shared/uv/python       # comma-separated, read-only at the sam
 
 Who reads what: the specs read `SLURM_PARTITION`, `WORKER_CPUS`, `WORKER_MEM`. The controller
 job checks `WORKER_MEM / WORKER_CPUS` against `SLURM_MAX_MEM_PER_CPU_MB` and hands
-`SLURM_PARTITION` and `SLURM_NODE_MAX_*` to the Slurm client as `FLOCK_SLURM_PARTITION` and
-`FLOCK_SLURM_MAX_CPUS/_MEM` (a launch over them is refused). The job scripts read the paths, the
+`SLURM_PARTITION` to the Slurm client as `FLOCK_SLURM_PARTITION`; the Slurm client and
+`flock init` read `FLOCK_SLURM_MAX_CPUS/_MEM` as they are (a size over them is refused).
+`cluster.env` is sourced as shell by jobs that hold secrets: it must be owned by the job's user
+and not group- or world-writable (the jobs refuse it otherwise). The job scripts read the paths, the
 image and the mounts. Without a partition anywhere, sbatch gets no `-p`.
 
 ## The launch contract
@@ -167,8 +174,8 @@ compute:
   secrets_file: null         # FLOCK_SLURM_SECRETS_FILE -> FLOCK_SECRETS_FILE (path only)
   container_root: null       # FLOCK_SLURM_CONTAINER_ROOT, e.g. /work (see Containers)
   container_image: null      # FLOCK_SLURM_CONTAINER_IMAGE -> FLOCK_CONTAINER_IMAGE
-  max_cpus: null             # FLOCK_SLURM_MAX_CPUS (profile SLURM_NODE_MAX_CPUS)
-  max_mem: null              # FLOCK_SLURM_MAX_MEM (profile SLURM_NODE_MAX_MEM)
+  max_cpus: null             # FLOCK_SLURM_MAX_CPUS (a profile key)
+  max_mem: null              # FLOCK_SLURM_MAX_MEM (a profile key)
   types:                     # per type: partition, cpus, mem, time, container_root
     interviewer: {cpus: 2, mem: 3800M}
 ```

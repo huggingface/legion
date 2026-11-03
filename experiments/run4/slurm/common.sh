@@ -100,7 +100,8 @@ publish_host() {
 }
 
 # free_port: a TCP port free on this node now, so the controller and the world can share a node.
-# shortcut: another process may take it before the server binds (rare); then the job fails and requeues
+# Another process may take it before the server binds (rare): controller.sbatch retries once with a
+# new port; world.sbatch's crash requeue (a fast failure) starts again with a new one.
 free_port() {
   "$VENV/bin/python" -I -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])'
 }
@@ -109,6 +110,12 @@ free_port() {
 # cluster.env (not secret): the cluster's values (docs/slurm.md "Cluster profile"). SLURM_PARTITION
 # is not exported: srun reads it as its --partition, and a step must stay in its job's partition.
 if [ -f "$RUN_DIR/cluster.env" ]; then
+  # sourced as shell into jobs holding secrets: ours and not writable by anyone else
+  _owner=$(stat -c %U "$RUN_DIR/cluster.env") && _mode=$(stat -c %a "$RUN_DIR/cluster.env") \
+    || die "$RUN_DIR/cluster.env: stat failed"
+  [ "$_owner" = "$(id -un)" ] || die "$RUN_DIR/cluster.env: owned by $_owner, not $(id -un)"
+  (( 8#$_mode & 8#022 )) && die "$RUN_DIR/cluster.env: mode $_mode is group/world-writable (chmod go-w)"
+  unset _owner _mode
   set -a
   # shellcheck disable=SC1091
   . "$RUN_DIR/cluster.env"

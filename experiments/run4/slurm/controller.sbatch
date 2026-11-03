@@ -96,11 +96,15 @@ WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # first launch only: how long `
 
 # ---------------------------------------------------------------- controller environment (fact sheet §2)
 export FLOCK_MODE=space                         # space mode: workers get FLOCK_URL as-is (main.py)
-export PORT=$CTL_PORT
-export FLOCK_URL="http://$CTL_HOST:$CTL_PORT"   # this node; also what workers are handed in space mode
-# What workers are told: they fill ${CTL_HOST} from <run>/hosts/controller.host (host:port, so the
-# port of a requeued controller is followed too) without a fleet-wide relaunch.
-export FLOCK_WORKER_URL='http://${CTL_HOST}:'"$CTL_PORT"
+use_port() {  # CTL_PORT, and the URLs built from it
+  CTL_PORT=$1
+  export PORT=$CTL_PORT
+  export FLOCK_URL="http://$CTL_HOST:$CTL_PORT"   # this node; also what workers are handed in space mode
+  # What workers are told: they fill ${CTL_HOST} from <run>/hosts/controller.host (host:port, so the
+  # port of a requeued controller is followed too) without a fleet-wide relaunch.
+  export FLOCK_WORKER_URL='http://${CTL_HOST}:'"$CTL_PORT"
+}
+use_port "$CTL_PORT"
 export FLOCK_COMPUTE=slurm                      # the Slurm backend (controller/slurm.py), checked above
 # /tmp is per job on this cluster (wiped at job end), so the `rm -rf` below can only hit this job's
 # files; the job id in the path keeps it safe even on a node where /tmp were shared.
@@ -122,11 +126,9 @@ export FLOCK_JOB_LABELS="run=$RUN"              # -> worker labels, so `list` fi
 # Worker size, partition and time are the spec's `compute:` (${WORKER_CPUS:-4}, ${WORKER_MEM:-7G},
 # ${SLURM_PARTITION:-} from cluster.env / run.env; the spec wins over FLOCK_SLURM_*). The cluster
 # profile's limits: SLURM_MAX_MEM_PER_CPU_MB (the partition's MaxMemPerCPU: more silently raises
-# the CPU count) is checked here; SLURM_NODE_MAX_CPUS/_MEM (the largest job a node can run) by
-# the Slurm client (slurm.py size_problem). Unset: not checked.
+# the CPU count) is checked here; FLOCK_SLURM_MAX_CPUS/_MEM (the largest job a node can run; the
+# profile's keys, exported by common.sh) by the Slurm client and `flock init`. Unset: not checked.
 export FLOCK_SLURM_PARTITION=${FLOCK_SLURM_PARTITION:-${SLURM_PARTITION:-}}
-export FLOCK_SLURM_MAX_CPUS=${FLOCK_SLURM_MAX_CPUS:-${SLURM_NODE_MAX_CPUS:-}}
-export FLOCK_SLURM_MAX_MEM=${FLOCK_SLURM_MAX_MEM:-${SLURM_NODE_MAX_MEM:-}}
 if [ -n "${SLURM_MAX_MEM_PER_CPU_MB:-}" ]; then
   _cpus=${WORKER_CPUS:-4} _mem=${WORKER_MEM:-7G}
   case $_cpus in ''|0|*[!0-9]*) die "WORKER_CPUS=$_cpus: must be a positive integer";; esac
@@ -154,20 +156,32 @@ rm -rf "$CTL_TMP" && mkdir -p "$FLOCK_DATA" "$HF_HOME"
 
 # ---------------------------------------------------------------- step 1: the controller
 [ "$STOPPING" = 0 ] || exit 0  # a signal arrived during the start-up (already requeued on USR1)
-publish_host controller "$CTL_PORT"   # <run>/hosts/controller.host = host:port (+ the <run>/controller.host symlink), every start
-log "controller.host=$CTL_HOST; FLOCK_URL=$FLOCK_URL; state=$FLOCK_STATE_URL; restarts=${SLURM_RESTART_COUNT:-0}"
-# Started while USR1 is ignored: SIG_IGN is inherited across fork and exec (a trap handler is
-# not), so the watcher's direct SIGUSR1 does not kill flock-controller before on_usr1 has sent
-# it the SIGTERM for its final push. The real handler is restored right after.
-trap '' USR1
-"$VENV/bin/flock-controller" >> "$RUN_DIR/logs/controller-$RUN.log" 2>&1 &
-CTL_PID=$!
-trap on_usr1 USR1
-log "flock-controller pid $CTL_PID; log $RUN_DIR/logs/controller-$RUN.log"
-
-t0=$(date +%s)
+start_controller() {
+  publish_host controller "$CTL_PORT"   # <run>/hosts/controller.host = host:port (+ the <run>/controller.host symlink), every start
+  log "controller.host=$CTL_HOST:$CTL_PORT; FLOCK_URL=$FLOCK_URL; state=$FLOCK_STATE_URL; restarts=${SLURM_RESTART_COUNT:-0}"
+  # Started while USR1 is ignored: SIG_IGN is inherited across fork and exec (a trap handler is
+  # not), so the watcher's direct SIGUSR1 does not kill flock-controller before on_usr1 has sent
+  # it the SIGTERM for its final push. The real handler is restored right after.
+  trap '' USR1
+  "$VENV/bin/flock-controller" >> "$RUN_DIR/logs/controller-$RUN.log" 2>&1 &
+  CTL_PID=$!
+  trap on_usr1 USR1
+  log "flock-controller pid $CTL_PID; log $RUN_DIR/logs/controller-$RUN.log"
+  t0=$(date +%s)
+}
+start_controller
+RETRIED=0
 until [ "$(http_status "http://127.0.0.1:$CTL_PORT/healthz")" = 200 ]; do  # /healthz: no auth (api.py)
-  kill -0 "$CTL_PID" 2>/dev/null || { log "flock-controller exited before becoming healthy"; wait "$CTL_PID"; exit 1; }
+  if ! kill -0 "$CTL_PID" 2>/dev/null; then
+    wait "$CTL_PID"
+    # Once: the free port may have been taken before the bind (exit 1 is not requeued by Slurm)
+    [ "$RETRIED" = 0 ] && [ "$STOPPING" = 0 ] || { log "flock-controller exited before becoming healthy"; exit 1; }
+    RETRIED=1
+    use_port "$(free_port)" || die "no free port on $(hostname)"
+    log "flock-controller exited before becoming healthy: once more on port $CTL_PORT"
+    start_controller
+    continue
+  fi
   [ $(( $(date +%s) - t0 )) -lt "$HEALTH_WAIT_S" ] || { log "no /healthz after ${HEALTH_WAIT_S}s"; stop_children; wait "$CTL_PID"; exit 1; }
   [ "$STOPPING" = 1 ] && break
   sleep 2

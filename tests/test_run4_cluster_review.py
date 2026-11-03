@@ -348,6 +348,11 @@ def test_worker_paths_trim_slashes_and_accept_only_shared_hub_token(tmp_path):
     assert mounts.stdout.splitlines()[-1].split(",") == [  # each once, read-only at its own path
         f"{d}:{d}:ro" for d in (tmp_path / "venv", tmp_path / "repo", tmp_path / "slurm", tmp_path / "uv",
                                 project / "runs/run4/hosts")], mounts.stderr
+    (project / "runs/run4/cluster.env").chmod(0o664)  # sourced as shell into jobs holding secrets
+    result = subprocess.run(["bash", "-c", show, "test", str(SLURM / "common.sh")],
+                            env={**env, "RUN": "run4", "RUNS": str(project / "runs")},
+                            text=True, capture_output=True, timeout=4, check=False)
+    assert result.returncode == 2 and "group/world-writable" in result.stderr
     (project / "runs/run4/cluster.env").unlink()
     result = subprocess.run(["bash", "-c", show, "test", str(SLURM / "common.sh")],
                             env={**env, "RUN": "run4", "RUNS": str(project / "runs"),
@@ -425,3 +430,35 @@ publish_host() { exit 0; }
     assert (result.returncode == 2 and "over SLURM_MAX_MEM_PER_CPU_MB=1000" in result.stderr) == dies, \
         result.stdout + result.stderr
     assert result.returncode == (2 if dies else 0), result.stderr
+
+
+def test_controller_retries_once_on_a_new_port(tmp_path):
+    env = shell_environment(tmp_path)
+    env.update(OPENAI_BASE_URLS="http://fake/v1", RUN3_BUCKET="hf://buckets/fake/b",
+               HOSTS_DIR=str(tmp_path / "run/hosts"), SECRETS_FILE="s", REPO=str(tmp_path),
+               STATE=str(tmp_path / "state"))
+    (tmp_path / "run/hosts").mkdir()
+    (tmp_path / "run/experiment").mkdir()
+    (tmp_path / "run/experiment/spec.yaml").write_text("swarm: s\n")
+    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
+die() { echo "$*" >&2; exit 2; }
+require_var() { :; }
+free_port() { echo x >> "$STATE/picks"; echo $((7000 + $(wc -l < "$STATE/picks"))); }
+publish_host() { echo "publish $1 $2" >> "$STATE/published"; }
+http_status() { case $1 in */healthz) [ -f "$STATE/up" ] && echo 200 || echo 000;; */swarms/s) echo 200;; *) echo 000;; esac; }
+''')
+    (tmp_path / "state").mkdir()
+    for name in ("sbatch", "sacct"):
+        executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
+    # the first start loses its port (exit 1 before healthy); the second binds and serves
+    executable(tmp_path / "venv/bin/flock-controller", '''#!/bin/bash
+echo "$PORT" >> "$STATE/ports"
+[ -f "$STATE/tried" ] || { touch "$STATE/tried"; exit 1; }
+touch "$STATE/up"; /bin/sleep 0.5
+''')
+    result = run_script(tmp_path, "controller.sbatch", env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "state/ports").read_text().split() == ["7001", "7002"]
+    assert (tmp_path / "state/published").read_text().splitlines() == [
+        "publish controller 7001", "publish controller 7002"]
+    assert "once more on port 7002" in result.stdout

@@ -373,28 +373,36 @@ def _sinfo(argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
 
 
-def check_capacity(spec: SwarmSpec, env: Mapping[str, str], run=_sinfo) -> Check:
+def check_capacity(spec: SwarmSpec, env: Mapping[str, str], run=None) -> Check:
     """Idle CPUs per partition (read-only `sinfo`) against the planned workers' CPUs. Short is a
     warning, not a failure: Spot capacity moves, and pending workers start as it frees up."""
     from flock.controller.slurm import resolve
+    from flock.models import size_problem
 
+    run = run or _sinfo
     need: dict[str, int] = {}
     for n, want in planned_agents(spec).items():
         ts = spec.types[n]
         workers = min(max_workers(ts), -(-want // max(1, ts.agents_per_worker)))
         cfg = resolve(spec.compute, n, env)
+        if problem := size_problem(cfg["cpus"], cfg["mem"], cfg.get("max_cpus"), cfg.get("max_mem")):
+            return Check("slurm capacity", False, f"type {n}: {problem}")
         p = cfg.get("partition") or ""
         need[p] = need.get(p, 0) + workers * int(cfg["cpus"])
     lines, short = [], False
     for p, cpus in need.items():
         try:
-            r = run(["sinfo", "-h", *(["-p", p] if p else []), "-o", "%C"])
+            r = run(["sinfo", "-h", *(["-p", p] if p else []), "-o", "%P %C"])
         except (OSError, subprocess.SubprocessError) as e:
             return Check("slurm capacity", None, f"skipped: sinfo: {type(e).__name__}: {e}")
         if r.returncode:
             return Check("slurm capacity", None, f"skipped: sinfo exit {r.returncode}: "
                                                  f"{(r.stderr or '').strip()[:200]}")
-        idle = sum(int(f[1]) for f in (ln.split("/") for ln in r.stdout.split()) if len(f) == 4)
+        # one row per partition (`cpu* 10/30/0/40`; `*`: the default): only this one's, since a
+        # node in several partitions is counted in each
+        rows = [ln.split() for ln in r.stdout.splitlines() if len(ln.split()) == 2]
+        idle = sum(int(c.split("/")[1]) for name, c in rows
+                   if (name.rstrip("*") == p if p else name.endswith("*")) and c.count("/") == 3)
         short |= idle < cpus
         lines.append(f"{'SHORT: ' if idle < cpus else ''}partition {p or '(default)'}: "
                      f"{cpus} CPUs planned, {idle} idle now")
@@ -404,22 +412,31 @@ def check_capacity(spec: SwarmSpec, env: Mapping[str, str], run=_sinfo) -> Check
 
 
 def check_mounts(env: Mapping[str, str]) -> Check:
-    """The worker venv's interpreter, symlinks resolved, sits in the venv or under a
-    CONTAINER_MOUNTS entry (the job scripts mount the venv itself): a venv python linking to
-    an unmounted uv Python dies with rc=127 in the container."""
-    mounts = [m.split(":")[0].rstrip("/") for m in env.get("CONTAINER_MOUNTS", "").split(",")
+    """Every hop of the worker venv's bin/python symlink chain sits in the venv or under a
+    CONTAINER_MOUNTS entry (the job scripts mount the venv itself). Hops, not the resolved
+    target: the container sees each link's path, and a mount of a symlinked dir shows its
+    target at the link's path. A venv python linking to an unmounted uv Python dies with
+    rc=127 in the container."""
+    mounts = [m.split(":")[0].strip() for m in env.get("CONTAINER_MOUNTS", "").split(",")
               if m.strip()]
     if not mounts and not env.get("CONTAINER_IMAGE"):
         return Check("container mounts", None, "no CONTAINER_IMAGE or CONTAINER_MOUNTS: no container")
+    if rel := [m for m in mounts if not os.path.isabs(m)]:
+        return Check("container mounts", False, f"CONTAINER_MOUNTS entries must be absolute "
+                                                f"paths (mounted at the same path): {', '.join(rel)}")
     venv = env.get("WORKER_VENV") or env.get("VENV")
     if not venv:
         return Check("container mounts", False, "a container but no WORKER_VENV or VENV to check")
-    py = Path(venv) / "bin" / "python"
-    real = py.resolve()
-    if not any(Path(m) in real.parents for m in [*mounts, Path(venv).resolve()]):
-        return Check("container mounts", False, f"{py} resolves to {real}, which is not under "
-                     f"the venv or CONTAINER_MOUNTS ({', '.join(mounts)})")
-    return Check("container mounts", True, f"{py} -> {py.resolve()} is mounted")
+    roots = [os.path.normpath(m) for m in [*mounts, os.path.abspath(venv)]]
+    hops = [os.path.normpath(os.path.join(os.path.abspath(venv), "bin", "python"))]
+    while os.path.islink(hops[-1]) and len(hops) < 40:
+        hops.append(os.path.normpath(os.path.join(os.path.dirname(hops[-1]),
+                                                  os.readlink(hops[-1]))))
+    bad = [h for h in hops if not any(h.startswith(r.rstrip("/") + "/") for r in roots)]
+    if bad:
+        return Check("container mounts", False, f"not under the venv or CONTAINER_MOUNTS "
+                     f"({', '.join(mounts)}): {', '.join(bad)}", [" -> ".join(hops)])
+    return Check("container mounts", True, " -> ".join(hops) + ": every hop is mounted")
 
 
 def check_world(spec: SwarmSpec, env: Mapping[str, str], run_dir: Path) -> Check:
@@ -487,6 +504,9 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
         derived[m[1]] = str((Path(experiment) / m[2]).resolve())  # world.dir, relative to --from
     write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived)
     values = {k: v for f in env_files for k, v in read_env_file(f).items()}  # later wins
+    if values.get("RUN3_SLURM_PARTITION") and not values.get("SLURM_PARTITION"):
+        rep.notes.append("RUN3_SLURM_PARTITION is now ignored: set SLURM_PARTITION in the cluster "
+                         "profile (cluster.env)")
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
     try:
         spec = read_spec(str(spec_file), env_files)

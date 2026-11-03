@@ -379,23 +379,27 @@ def test_slurm_capacity_from_a_fake_sinfo(tmp_path):
     calls = []
 
     def sinfo(idle):
-        def run(argv):
+        def run(argv):  # one row per partition; a node in both is counted in each
             calls.append(argv)
-            return rundir.subprocess.CompletedProcess(argv, 0, f"10/{idle}/0/40\n", "")
+            return rundir.subprocess.CompletedProcess(
+                argv, 0, f"cpu* 10/{idle}/0/40\ngpu 0/500/0/500\n", "")
         return run
 
     # 2 researchers, 2 per worker: 1 worker x 4 CPUs
     c = rundir.check_capacity(spec, {"FLOCK_SLURM_PARTITION": "cpu"}, run=sinfo(30))
     assert c.ok and not c.warn and c.lines == ["partition cpu: 4 CPUs planned, 30 idle now"]
-    assert calls[-1] == ["sinfo", "-h", "-p", "cpu", "-o", "%C"]
-    c = rundir.check_capacity(spec, {}, run=sinfo(2))
-    assert c.ok and c.warn and c.lines[0].startswith("SHORT: partition (default)")
-    assert calls[-1] == ["sinfo", "-h", "-o", "%C"]
+    assert calls[-1] == ["sinfo", "-h", "-p", "cpu", "-o", "%P %C"]
+    c = rundir.check_capacity(spec, {}, run=sinfo(2))  # the default (`*`) row only, not gpu's
+    assert c.ok and c.warn and c.lines == ["SHORT: partition (default): 4 CPUs planned, 2 idle now"]
+    assert calls[-1] == ["sinfo", "-h", "-o", "%P %C"]
     failing = lambda argv: rundir.subprocess.CompletedProcess(argv, 1, "", "no partition")
     assert rundir.check_capacity(spec, {}, run=failing).ok is None
+    # the profile's node limits (FLOCK_SLURM_MAX_*) are seen by init too
+    c = rundir.check_capacity(spec, {"FLOCK_SLURM_MAX_CPUS": "2"}, run=sinfo(30))
+    assert c.ok is False and "over max_cpus 2" in c.detail
 
 
-def test_venv_interpreter_must_be_under_a_container_mount(tmp_path):
+def test_container_mounts_follow_every_symlink_hop(tmp_path):
     uv, venv = tmp_path / "uv" / "python3.12", tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     uv.parent.mkdir()
@@ -408,3 +412,32 @@ def test_venv_interpreter_must_be_under_a_container_mount(tmp_path):
     c = rundir.check_mounts({"WORKER_VENV": str(venv),
                              "CONTAINER_MOUNTS": f"{venv}:{venv}:ro,{uv.parent}/"})
     assert c.ok, c.detail
+    c = rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": "uv,/repo"})
+    assert c.ok is False and "must be absolute" in c.detail and "uv" in c.detail
+    # a mounted symlinked dir: /shared -> real; the container sees /shared/python3.12
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "python3.12").write_text("")
+    (tmp_path / "shared").symlink_to(real)
+    (venv / "bin" / "python").unlink()
+    (venv / "bin" / "python").symlink_to(tmp_path / "shared" / "python3.12")
+    assert rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(tmp_path / "shared")}).ok
+    # only the target mounted: the link path /shared/... does not exist in the container
+    c = rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(real)})
+    assert c.ok is False and str(tmp_path / "shared" / "python3.12") in c.detail
+    # a chain: every hop must be mounted, the last one alone is not enough
+    (uv.parent / "python").symlink_to("python3.12")
+    (venv / "bin" / "python").unlink()
+    (venv / "bin" / "python").symlink_to(uv.parent / "python")
+    assert rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(uv.parent)}).ok
+
+
+def test_old_partition_variable_is_noted(tmp_path, monkeypatch):
+    monkeypatch.setattr(rundir, "_sinfo", lambda argv: pytest.fail("sinfo in a unit test"))
+    monkeypatch.setattr(rundir, "check_capacity", lambda spec, env: rundir.Check("slurm capacity", True))
+    src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
+    rundir.init(run, src, env={})
+    with (run / "run.env").open("a") as f:
+        f.write("RUN3_SLURM_PARTITION=hopper-cpu\n")
+    rep = rundir.init(run, env={})
+    assert any("RUN3_SLURM_PARTITION is now ignored" in n for n in rep.notes)
