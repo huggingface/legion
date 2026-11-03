@@ -29,6 +29,14 @@ def executable(path, text):
     return path
 
 
+def stub_common(tmp_path, **fns: str) -> None:
+    """A stub common.sh for the sbatch scripts; `fns` replace the default bodies."""
+    body = {"log": 'echo "$*"', "die": 'echo "$*" >&2; exit 2', "require_var": ":",
+            "publish_host": ":", "free_port": "echo 7860", "http_status": "echo 000",
+            "container_srun_args": "CTR_SRUN=()", **fns}
+    (tmp_path / "common.sh").write_text("".join(f"{k}() {{ {v}; }}\n" for k, v in body.items()))
+
+
 def shell_environment(tmp_path):
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -96,14 +104,7 @@ def test_world_failure_counts_fast_crashes_and_never_gives_up(tmp_path, code, re
                CHATBOT_WORLD_TOKEN="fake-world", SLURM_RESTART_COUNT="9")  # Spot requeues do not count
     (tmp_path / "run/world").mkdir(parents=True)
     (tmp_path / "run/world/crash-requeues").write_text(f"{restarts}\n")
-    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
-die() { echo "$*" >&2; exit 2; }
-require_var() { :; }
-publish_host() { :; }
-free_port() { echo 7860; }
-http_status() { echo 000; }
-container_srun_args() { CTR_SRUN=(); }
-''')
+    stub_common(tmp_path)
     executable(tmp_path / "venv/bin/srun", '#!/bin/bash\nexec "$@"\n')
     executable(tmp_path / "slurm/world-inner.sh",
                '#!/bin/bash\n' + ('kill -TERM "$PPID"\n' if stopping else '') + f'exit {code}\n')
@@ -158,14 +159,7 @@ def test_world_backoff_doubles_to_the_cap(tmp_path):
     env.update(RUN3_BUCKET="hf://buckets/fake/b", HF_TOKEN="x", CHATBOT_WORLD_TOKEN="x", WORLD_STABLE_S="600")
     (tmp_path / "run/world").mkdir(parents=True)
     (tmp_path / "run/world/crash-requeues").write_text("5\n")
-    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
-die() { echo "$*" >&2; exit 2; }
-require_var() { :; }
-publish_host() { :; }
-free_port() { echo 7860; }
-http_status() { echo 000; }
-container_srun_args() { CTR_SRUN=(); }
-''')
+    stub_common(tmp_path)
     executable(tmp_path / "venv/bin/srun", '#!/bin/bash\nexec "$@"\n')
     executable(tmp_path / "slurm/world-inner.sh", '#!/bin/bash\nexit 37\n')
     for _ in range(5):
@@ -192,13 +186,8 @@ def test_controller_applies_only_when_the_swarm_is_missing(tmp_path, swarm_code,
     exp = tmp_path / "run/experiment"
     exp.mkdir()
     (exp / "spec.yaml").write_text("swarm: ${CHATBOT_RUN:-s}\n")
-    (tmp_path / "common.sh").write_text(f'''log() {{ echo "$*"; }}
-die() {{ echo "$*" >&2; exit 2; }}
-require_var() {{ :; }}
-publish_host() {{ :; }}
-free_port() {{ echo 7860; }}
-http_status() {{ case $1 in */healthz) echo 200;; */swarms/s) echo {swarm_code};; */manifest) echo {world};; *) echo 000;; esac; }}
-''')
+    stub_common(tmp_path, http_status=f"case $1 in */healthz) echo 200;; */swarms/s) echo "
+                f"{swarm_code};; */manifest) echo {world};; *) echo 000;; esac")
     (tmp_path / "venv/bin/python").unlink()
     executable(tmp_path / "venv/bin/python", f'#!/bin/bash\nexec {shlex.quote(sys.executable)} "$@"\n')
     for name in ("sbatch", "sacct"):
@@ -418,12 +407,7 @@ def test_controller_mem_per_cpu_guard_comes_from_the_profile(tmp_path, limit, di
     env.update(SLURM_MAX_MEM_PER_CPU_MB=limit, WORKER_CPUS="4", WORKER_MEM="7G",  # 1792 MB per CPU
                OPENAI_BASE_URLS="http://fake/v1", RUN3_BUCKET="hf://buckets/fake/b",
                HOSTS_DIR=str(tmp_path / "run/hosts"), SECRETS_FILE="s")
-    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
-die() { echo "$*" >&2; exit 2; }
-require_var() { :; }
-free_port() { echo 7860; }
-publish_host() { exit 0; }
-''')  # stop right after the guard: publish_host is the next step
+    stub_common(tmp_path, publish_host="exit 0")  # stop right after the guard: the next step
     for name in ("sbatch", "sacct"):
         executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
     result = run_script(tmp_path, "controller.sbatch", env)
@@ -440,13 +424,11 @@ def test_controller_retries_once_on_a_new_port(tmp_path):
     (tmp_path / "run/hosts").mkdir()
     (tmp_path / "run/experiment").mkdir()
     (tmp_path / "run/experiment/spec.yaml").write_text("swarm: s\n")
-    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
-die() { echo "$*" >&2; exit 2; }
-require_var() { :; }
-free_port() { echo x >> "$STATE/picks"; echo $((7000 + $(wc -l < "$STATE/picks"))); }
-publish_host() { echo "publish $1 $2" >> "$STATE/published"; }
-http_status() { case $1 in */healthz) [ -f "$STATE/up" ] && echo 200 || echo 000;; */swarms/s) echo 200;; *) echo 000;; esac; }
-''')
+    stub_common(tmp_path,
+                free_port='echo x >> "$STATE/picks"; echo $((7000 + $(wc -l < "$STATE/picks")))',
+                publish_host='echo "publish $1 $2" >> "$STATE/published"',
+                http_status='case $1 in */healthz) [ -f "$STATE/up" ] && echo 200 || echo 000;; '
+                            '*/swarms/s) echo 200;; *) echo 000;; esac')
     (tmp_path / "state").mkdir()
     for name in ("sbatch", "sacct"):
         executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')

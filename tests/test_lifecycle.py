@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 
-import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -23,22 +22,12 @@ from flock.models import (
     WorkerHeartbeat,
 )
 
-from .conftest import TOKEN, make_spec
+from .conftest import TOKEN, make_spec, wire, write_spec
 from .test_spawn_api import spawn_spec
 from .test_worker_main import FakeController, make_worker
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
 runner = CliRunner()
-
-
-def _wire(monkeypatch, app):
-    monkeypatch.setattr(
-        "flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
-
-
-def _write(path, spec) -> str:
-    path.write_text(yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)))
-    return str(path)
 
 
 # ----------------------------------------------------------------- (a) stop --release
@@ -93,7 +82,7 @@ async def test_release_drain_syncs_every_agent_before_exit_and_reports_a_failed_
 
 def test_stop_release_drains_every_worker_waits_and_reports_unsynced(
         tmp_path, monkeypatch, app, store, jobs, settings, clock):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     tick = lambda: reconcile(store, jobs, clock(), settings)
     store.put_swarm(make_spec(), clock().timestamp())  # 3 agents, 2 per worker: 2 workers
     tick()
@@ -142,12 +131,12 @@ def test_launch_adopt_restores_the_swarm_from_the_controller_checkpoint(
                        leader={"loop": {"prompt": "go", "every": "30s"}},
                        agent={"replicas": 0, "replicas_ramp": {"start": 1, "add": 1,
                                                                "every": "1m", "max": 5}})
-    spec_file = _write(tmp_path / "spec.yaml", spec_)
+    spec_file = write_spec(tmp_path / "spec.yaml", spec_)
 
     # the old controller: a ramp step, a spawned child, loop state, cost
     old = Store(tmp_path / "old")
     old_app = create_app(old, TOKEN, clock=clock, loop_interval=0)
-    _wire(monkeypatch, old_app)
+    wire(monkeypatch, old_app)
     assert runner.invoke(cli.app, ["launch", spec_file]).exit_code == 0
     reconcile(old, jobs, clock(), settings)
     clock.advance(61)
@@ -167,7 +156,7 @@ def test_launch_adopt_restores_the_swarm_from_the_controller_checkpoint(
 
     new = Store(tmp_path / "new")
     app = create_app(new, TOKEN, clock=clock, loop_interval=0, buckets=buckets.__getitem__)
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     r = runner.invoke(cli.app, ["launch", spec_file, "--adopt"])
     assert r.exit_code == 0, r.output
     assert "adopted demo: 4 agents from hf://buckets/ns/sh/controller/demo" in r.output
@@ -205,8 +194,8 @@ def test_bucket_only_adopt_needs_no_checkpoint_and_the_guard_refuses_a_reused_bu
     buckets: dict[str, MemoryStore] = defaultdict(MemoryStore)
     buckets["hf://buckets/ns/sh"].files["demo/researcher/researcher-0000/meta.json"] = b"{}"
     app = create_app(store, TOKEN, clock=clock, buckets=buckets.__getitem__)
-    _wire(monkeypatch, app)
-    f = _write(tmp_path / "spec.yaml", make_spec())
+    wire(monkeypatch, app)
+    f = write_spec(tmp_path / "spec.yaml", make_spec())
     r = runner.invoke(cli.app, ["launch", f])  # (c) a fresh run over an old run's agents
     assert r.exit_code == 1 and "already holds agents of swarm 'demo'" in r.output, r.output
     r = runner.invoke(cli.app, ["launch", f, "--adopt"])  # (d) no checkpoint
@@ -215,12 +204,12 @@ def test_bucket_only_adopt_needs_no_checkpoint_and_the_guard_refuses_a_reused_bu
     r = runner.invoke(cli.app, ["launch", f, "--adopt", "--no-checkpoint"])
     assert r.exit_code == 0, r.output
     assert store.get_swarm("demo") is not None
-    f2 = _write(tmp_path / "other.yaml", make_spec("fresh", other={"replicas": 1}))
+    f2 = write_spec(tmp_path / "other.yaml", make_spec("fresh", other={"replicas": 1}))
     assert runner.invoke(cli.app, ["launch", f2]).exit_code == 0  # an empty prefix: created
 
 
 def test_two_launches_create_once(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     body = make_spec().model_dump(mode="json")
     with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
         codes = [c.put("/swarms/demo", json=body, headers={"If-None-Match": "*"}).status_code
@@ -233,8 +222,8 @@ def test_two_launches_create_once(tmp_path, monkeypatch, app, store):
 
 def test_launch_resumes_ignoring_replicas_and_refuses_another_spec(
         tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
-    f = _write(tmp_path / "spec.yaml", make_spec())
+    wire(monkeypatch, app)
+    f = write_spec(tmp_path / "spec.yaml", make_spec())
     assert runner.invoke(cli.app, ["launch", f]).exit_code == 0
     live = store.get_swarm("demo")["spec"]
     live.types["researcher"].replicas = 7  # what a ramp does to the stored count
@@ -246,21 +235,21 @@ def test_launch_resumes_ignoring_replicas_and_refuses_another_spec(
     assert r.exit_code == 0 and "held: nothing" in r.output, r.output
     assert "released" not in store.swarm_flags("demo")
     assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 7
-    _write(tmp_path / "spec.yaml", make_spec(researcher={"replicas": 3, "system_prompt": "new"}))
+    write_spec(tmp_path / "spec.yaml", make_spec(researcher={"replicas": 3, "system_prompt": "new"}))
     r = runner.invoke(cli.app, ["launch", f])
     assert r.exit_code == 1 and "run `flock update` first" in r.output
 
 
 def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions(
         tmp_path, monkeypatch, app, store, tick):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     ramp = {"start": 2, "add": 1, "every": "1h", "max": 10, "stagger": "0s"}
-    f = _write(tmp_path / "spec.yaml", make_spec(
+    f = write_spec(tmp_path / "spec.yaml", make_spec(
         r={"replicas": 0, "replicas_ramp": ramp}, b={"replicas": 2}))
     assert runner.invoke(cli.app, ["launch", f]).exit_code == 0
     tick()
     assert store.get_swarm("demo")["spec"].types["r"].replicas == 2
-    _write(tmp_path / "spec.yaml", make_spec(r={"replicas": 0, "replicas_ramp": ramp},
+    write_spec(tmp_path / "spec.yaml", make_spec(r={"replicas": 0, "replicas_ramp": ramp},
                                              b={"replicas": 1}))
     r = runner.invoke(cli.app, ["update", f, "--replicas", "spec", "--check"])
     assert r.exit_code == 0, r.output
@@ -292,8 +281,8 @@ def test_adopt_checkpoint_url_wins_and_own_url_never_drops_other_swarms(tmp_path
     _checkpoint(tmp_path, buckets[old_run], "demo")
     new = Store(tmp_path / "new")
     app = create_app(new, TOKEN, clock=clock, buckets=buckets.__getitem__, state_url=own)
-    _wire(monkeypatch, app)
-    f = _write(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
+    wire(monkeypatch, app)
+    f = write_spec(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
     r = runner.invoke(cli.app, ["launch", f, "--adopt"])  # its own (new) run prefix is empty
     assert r.exit_code == 1 and f"no controller checkpoint of swarm 'demo' at {own}" in r.output
     r = runner.invoke(cli.app, ["launch", f, "--adopt", "--checkpoint", old_run])
@@ -301,7 +290,7 @@ def test_adopt_checkpoint_url_wins_and_own_url_never_drops_other_swarms(tmp_path
     assert new.get_agent("tdemo-0000") is not None
     # the own prefix holding another swarm too: its next push would drop that one
     _checkpoint(tmp_path / "b", buckets[own], "demo2", "other")
-    f2 = _write(tmp_path / "s2.yaml", make_spec("demo2", tdemo2={"replicas": 1}))
+    f2 = write_spec(tmp_path / "s2.yaml", make_spec("demo2", tdemo2={"replicas": 1}))
     r = runner.invoke(cli.app, ["launch", f2, "--adopt"])
     assert r.exit_code == 1 and "drop them" in r.output and "other" in r.output, r.output
     assert new.get_swarm("demo2") is None
@@ -322,9 +311,9 @@ def test_a_failed_event_download_adopts_nothing_and_a_retry_works(tmp_path, monk
     _checkpoint(tmp_path, bucket, "demo")
     new = Store(tmp_path / "new")
     app = create_app(new, TOKEN, clock=clock, buckets=lambda url: bucket)
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     monkeypatch.setattr("flock.client._sleep", lambda s: None)  # the CLI retries a 502
-    f = _write(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
+    f = write_spec(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
     r = runner.invoke(cli.app, ["launch", f, "--adopt"])
     assert r.exit_code == 1 and "events download cut" in r.output
     assert new.get_swarm("demo") is None and new.get_agent("tdemo-0000") is None

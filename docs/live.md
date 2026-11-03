@@ -182,6 +182,8 @@ every health sample of the last 2 minutes, or needs more than `request_s` second
 (running requests / completions per second), or its metrics are missing or reset. It asks
 again every 2 minutes and writes `ramp_held {type, want, holds, reason}`; from the third hold
 in a row the event carries a `warning`. `flock update` keeps the live replicas by default.
+It needs 3 health samples in the last 150 s, so keep `FLOCK_HEALTH_INTERVAL` under 50 s (the
+default 30 s is fine); slower sampling holds every step ("metrics unavailable").
 
 ## Per-type concurrency (`max_working`)
 

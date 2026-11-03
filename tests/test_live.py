@@ -28,7 +28,7 @@ from flock.models import (
 from flock.tools.bundle import pack
 from flock.tools.toolset import Toolset
 
-from .test_cli import _wire
+from .conftest import wire
 from .worker_fakes import runtime, spec, until
 
 runner = CliRunner()
@@ -311,7 +311,7 @@ def _experiment(root: Path, *, replicas: int = 2, prompt: str = "You are a resea
 
 def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatch, app, store,
                                                            tick):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     exp = tmp_path / "exp"
     f = _experiment(exp)
     r = runner.invoke(cli.app, ["update", str(exp)])
@@ -347,7 +347,7 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
 
 
 def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, store, tick):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     exp = tmp_path / "exp"
     f = _experiment(exp, replicas=4)
     assert runner.invoke(cli.app, ["launch", str(f)]).exit_code == 0

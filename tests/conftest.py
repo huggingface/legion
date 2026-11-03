@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+import yaml
+from fastapi.testclient import TestClient
 
 from flock.controller.api import create_app
 from flock.controller.jobs import FakeJobsClient
@@ -43,6 +45,26 @@ def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
     return SwarmSpec.model_validate(
         {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh", "types": full}
     )
+
+
+def wire(monkeypatch, app) -> None:
+    """Every `flock.client` call goes to the in-process controller `app`."""
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+
+
+@pytest.fixture
+def api(monkeypatch, app):
+    """A `flock.client.Client` wired to the in-process controller."""
+    from flock.client import Client
+
+    wire(monkeypatch, app)
+    return Client()
+
+
+def write_spec(path, spec: SwarmSpec) -> str:
+    path.write_text(yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)))
+    return str(path)
 
 
 @pytest.fixture(autouse=True)

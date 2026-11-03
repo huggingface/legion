@@ -6,14 +6,13 @@ from __future__ import annotations
 import json
 
 import yaml
-from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from flock import cli
 from flock.client import Client
 from flock.models import AgentHeartbeat
 
-from .conftest import TOKEN, make_spec
+from .conftest import make_spec, wire
 from .test_api import W0, apply, hb_body
 from .test_providers_controller import CAP_PROVIDERS, _cap_client, _delivered, hb, pspec, put
 
@@ -87,7 +86,7 @@ runner = CliRunner()
 
 
 def test_cli_prompt_by_type(tmp_path, monkeypatch, app, store, tick):
-    monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0

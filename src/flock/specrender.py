@@ -1,7 +1,7 @@
 """Spec rendering at read time (docs/live.md, "Env files and --ref"): `${VAR}` /
 `${VAR:-default}` substituted in string values from `--env` files and the process
 environment, with where each value came from (`update --check`); `--ref` reads the folder at a
-git ref. Overlays (deep-merged over the spec) remain for library callers only (no CLI option)."""
+git ref."""
 from __future__ import annotations
 
 import atexit
@@ -42,20 +42,6 @@ def read_env_file(path: str | Path) -> dict[str, str]:
             value = value[1:-1]
         env[name] = value
     return env
-
-
-def merge(base: Any, over: Any) -> Any:
-    """Overlay semantics: mappings merge key by key, `null` deletes a key, anything else
-    (lists, scalars) replaces."""
-    if not (isinstance(base, dict) and isinstance(over, dict)):
-        return over
-    out = dict(base)
-    for k, v in over.items():
-        if v is None:
-            out.pop(k, None)
-        else:
-            out[k] = merge(out[k], v) if k in out else v
-    return out
 
 
 def substitute(data: Any, env: dict[str, str],
@@ -137,10 +123,8 @@ def yaml_lines(text: str) -> dict[str, int]:
     return out
 
 
-def render(spec_file: str | Path, env_files=(), overlays=(),
-           sources: dict[str, str] | None = None) -> Any:
-    """The spec's data as `flock launch` validates it: base, overlays in order, then
-    substitution. Env sources, later winning: the process environment, then each --env file
+def render(spec_file: str | Path, env_files=(), sources: dict[str, str] | None = None) -> Any:
+    """The spec's data as `flock launch` validates it, after substitution. Env sources, later winning: the process environment, then each --env file
     in order. `sources` gets where each value came from, per dotted path:
     `spec.yaml:12`, `run.env WORKER_MEM`, `env WORKER_MEM`, `spec.yaml:12 default of X`."""
     env: dict[str, str] = dict(os.environ)
@@ -151,8 +135,6 @@ def render(spec_file: str | Path, env_files=(), overlays=(),
         origin.update(dict.fromkeys(vals, Path(f).name))
     text = Path(spec_file).read_text(encoding="utf-8")
     data = load_spec_yaml(text)
-    for o in overlays:
-        data = merge(data, load_spec_yaml(Path(o).read_text(encoding="utf-8")) or {})
     used: dict[str, list[tuple[str, bool]]] = {}
     out = substitute(data, env, used)
     if sources is not None:

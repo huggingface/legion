@@ -17,7 +17,7 @@ from flock.world.__main__ import world_app
 from flock.world.host import derived_token, world_admin_token
 from flock.world.server import create_app
 
-from .conftest import TOKEN
+from .conftest import TOKEN, wire
 
 SECRET = "world-secret"
 ADMIN_SECRET = "admin-secret-value"
@@ -294,7 +294,7 @@ def _swarm(world_client, store, clock):
 def test_controller_proxies_the_admin_api_and_records_events(store, clock, monkeypatch):
     world = Knobbed()
     app, spec = _swarm(TestClient(create_app(world, SECRET)), store, clock)
-    monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    wire(monkeypatch, app)
     monkeypatch.setenv("USER", "carol")
     run = CliRunner()
     c = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})

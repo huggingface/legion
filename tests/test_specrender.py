@@ -1,4 +1,4 @@
-"""Spec rendering: ${VAR} substitution, value sources, overlays and --ref (flock.specrender)."""
+"""Spec rendering: ${VAR} substitution, value sources and --ref (flock.specrender)."""
 from __future__ import annotations
 
 import json
@@ -8,10 +8,10 @@ import pytest
 import yaml
 
 from flock import cli, ops
-from flock.specrender import merge, read_env_file, render, substitute
+from flock.specrender import read_env_file, render, substitute
 
-from .conftest import make_spec
-from .test_cli import _wire, runner
+from .conftest import make_spec, wire
+from .test_cli import runner
 
 
 def test_substitution_types_interpolates_defaults_and_escapes():
@@ -56,19 +56,8 @@ def test_env_files_win_over_the_process_environment(tmp_path, monkeypatch):
         read_env_file(tmp_path / "bad.env")
 
 
-def test_overlay_merges_maps_replaces_lists_and_null_deletes():
-    base = {"compute": "local", "world": {"dir": "w", "command": ["x"], "token_env": "T"},
-            "types": {"a": {"tools": ["x", "y"], "replicas": 0}}}
-    over = {"compute": {"kind": "slurm"}, "world": {"dir": None, "command": None, "url": "u"},
-            "types": {"a": {"tools": ["z"]}}, "bucket": "b"}
-    assert merge(base, over) == {
-        "compute": {"kind": "slurm"}, "world": {"token_env": "T", "url": "u"},
-        "types": {"a": {"tools": ["z"], "replicas": 0}}, "bucket": "b"}
-    assert base["world"]["dir"] == "w"  # the base is not modified
-
-
 def test_cli_apply_with_env_files_and_no_overlay(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     monkeypatch.delenv("NS", raising=False)
     data = make_spec().model_dump(mode="json")
     data["types"]["researcher"]["replicas"] = "${REPLICAS:-1}"
@@ -112,7 +101,7 @@ def test_value_sources_lines_env_files_defaults(tmp_path, monkeypatch):
 
 
 def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     monkeypatch.setenv("USER", "carlos")
     repo = tmp_path / "repo"
     exp = repo / "exp"

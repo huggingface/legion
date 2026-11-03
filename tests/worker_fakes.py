@@ -119,6 +119,9 @@ class MemoryStore:
     def list(self, prefix):
         return sorted(k for k in self.files if k.startswith(prefix))
 
+    def first(self, prefix):
+        return next(iter(self.list(prefix)), None)
+
     def list_info(self, prefix):
         return [(k, self.mtimes.get(k)) for k in self.list(prefix)]
 

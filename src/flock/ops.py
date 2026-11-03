@@ -16,7 +16,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -38,27 +38,22 @@ class SpecError(Exception):
         self.lines, self.done = lines, done or {}
 
 
-def _inline(base: Path, holder, field: str, target: str, where: str) -> None:
-    """Read `holder.<field>` (a path relative to the spec) into `holder.<target>`."""
-    name = getattr(holder, field)
-    if not name or getattr(holder, target) is not None:
-        return
-    src = Path(name)
-    src = src if src.is_absolute() else base / src
+def _read_rel(base: Path, rel: str, where: str) -> str:
+    """The text of `rel` (relative to the spec's folder `base`); SpecError when missing."""
+    src = base / rel  # an absolute `rel` replaces `base`
     if not src.is_file():
-        raise SpecError([f"{where}: {field} {src} not found"])
-    setattr(holder, target, src.read_text(encoding="utf-8"))
+        raise SpecError([f"{where} {src} not found"])
+    return src.read_text(encoding="utf-8")
 
 
-def read_spec(spec_file: str, env_files=(), overlays=(),
-              sources: dict[str, str] | None = None) -> SwarmSpec:
-    """Read a spec (overlay files merged: library callers only; then ${VAR} from --env files
-    and the environment substituted: flock.specrender, `sources` filled) and inline each type's
+def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = None) -> SwarmSpec:
+    """Read a spec (${VAR} from --env files and the environment substituted:
+    flock.specrender, `sources` filled) and inline each type's
     system_prompt_file (plus system_prompt_append_file) and loop prompt files, and the comms
     kickoff and protocol files (relative to the spec file). Raises SpecError."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(render(path, env_files, overlays, sources))
+        spec = SwarmSpec.model_validate(render(path, env_files, sources))
     except ValidationError as e:
         lines = []
         for err in e.errors():
@@ -69,36 +64,23 @@ def read_spec(spec_file: str, env_files=(), overlays=(),
         raise SpecError([f"{spec_file}: {e}"]) from None
     except (OSError, yaml.YAMLError) as e:  # unreadable file, broken YAML (a save in progress)
         raise SpecError([f"{spec_file}: {' '.join(str(e).split())}"]) from None
+    base = path.parent
     for name, ts in spec.types.items():
         if ts.system_prompt_file and ts.system_prompt is None:
-            src = Path(ts.system_prompt_file)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"type {name}: system_prompt_file {src} not found"])
-            ts.system_prompt = src.read_text(encoding="utf-8")
+            ts.system_prompt = _read_rel(base, ts.system_prompt_file,
+                                         f"type {name}: system_prompt_file")
         if ts.system_prompt_append_file:
-            src = Path(ts.system_prompt_append_file)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"type {name}: system_prompt_append_file {src} not found"])
-            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n"
-                                + src.read_text(encoding="utf-8")).lstrip("\n")
-        if ts.loop is not None:
-            _inline(path.parent, ts.loop, "prompt_file", "prompt", f"type {name}: loop")
-            if ts.loop.final is not None:
-                _inline(path.parent, ts.loop.final, "prompt_file", "prompt", f"type {name}: loop.final")
+            ts.system_prompt = ((ts.system_prompt or "").rstrip("\n") + "\n\n" + _read_rel(
+                base, ts.system_prompt_append_file, f"type {name}: system_prompt_append_file")
+                                ).lstrip("\n")
+        for lp, where in ((ts.loop, "loop"), (ts.loop and ts.loop.final, "loop.final")):
+            if lp is not None and lp.prompt_file and lp.prompt is None:
+                lp.prompt = _read_rel(base, lp.prompt_file, f"type {name}: {where}: prompt_file")
     c = spec.comms
     if c is not None:  # kickoff and protocol files, next to the spec (docs/comms.md)
-        def read(rel: str, what: str) -> str:
-            src = Path(rel)
-            src = src if src.is_absolute() else path.parent / src
-            if not src.is_file():
-                raise SpecError([f"comms.{what}: {src} not found"])
-            return src.read_text(encoding="utf-8")
-
         if c.kickoff_file:
-            c.kickoff = read(c.kickoff_file, "kickoff_file")
-        c.protocols_text = [read(f, "protocols") for f in c.protocols]
+            c.kickoff = _read_rel(base, c.kickoff_file, "comms.kickoff_file:")
+        c.protocols_text = [_read_rel(base, f, "comms.protocols:") for f in c.protocols]
     w = spec.world
     if w is not None and w.command is not None:  # the world runs in its dir (docs/world.md)
         d = Path(w.dir or ".")
@@ -171,6 +153,13 @@ def extra_warnings(spec: SwarmSpec) -> list[str]:
             and ts.resolved_model.extra]
 
 
+def preflight_lines(results: list[dict]) -> list[str]:
+    """One line per probed model: `MODEL: ok|unverified|FAIL[ N ms][ (error)]`."""
+    return [f"{r['model']}: " + ("unverified" if r.get("unverified") else "ok" if r["ok"] else "FAIL")
+            + (f" {r['latency_ms']} ms" if r.get("latency_ms") is not None else "")
+            + (f" ({r['error']})" if r.get("error") else "") for r in results]
+
+
 def unprobed(spec: SwarmSpec) -> list[str]:
     return sorted({ts.resolved_model.qualified for ts in spec.types.values()
                    if ts.resolved_model is not None})
@@ -207,8 +196,14 @@ def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
     return diff_specs(old, spec)
 
 
-def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, str] | None = None,
-           types: list[str] | None = None, agents: list[str] | None = None, adopt: bool = False,
+def is_swarm_name(target: str) -> bool:
+    """`flock launch TARGET`: no file, no path and no .yaml name: a stored swarm to resume."""
+    return not Path(target).exists() and "/" not in target \
+        and not target.endswith((".yaml", ".yml"))
+
+
+def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
+           source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None, adopt: bool = False,
            checkpoint: str | None = None, no_checkpoint: bool = False,
            preflight: bool | None = None, strict: bool = False,
            checked: tuple[Any, list[str]] | None = None) -> dict[str, Any]:
@@ -222,14 +217,22 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, source: dict[str, st
     "resumed" (the holds left) or "preflight" (the report) / "unverified" (models not probed),
     "tools" (the upload reply, plus "bytes") and "status" (the new swarm's). Refusals raise
     SpecError with these keys so far in `done`, as do failed controller calls. `checked`:
-    `check_spec`'s result when the caller already has it."""
+    `check_spec`'s result when the caller already has it. `compute: local`: first
+    `start_local` (with `env_files`), "local" its run; ended again when the launch fails."""
     bundle, warnings = checked or check_spec(spec, spec_file)
     done: dict[str, Any] = {"warnings": warnings}
+    if spec.compute.kind == "local" and (run := start_local(spec, spec_file, env_files, api.env)):
+        done["local"] = run
     try:
-        return _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt,
-                       checkpoint, no_checkpoint, preflight, strict)
-    except ClientError as e:
-        raise SpecError([str(e)], done) from None
+        try:
+            return _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt,
+                           checkpoint, no_checkpoint, preflight, strict)
+        except ClientError as e:
+            raise SpecError([str(e)], done) from None
+    except BaseException:  # also Ctrl-C during the preflight
+        if "local" in done:  # nothing created: do not leave a controller behind
+            end_local(done["local"], api.env)
+        raise
 
 
 def _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt, checkpoint,
@@ -323,11 +326,9 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
             rep = api.preflight(spec)
         except ClientError as e:
             raise SpecError([f"preflight error {e.status}: {e.detail}"]) from None
-        probed = [f"preflight {x['model']}: " + ("unverified" if x.get("unverified") else "ok"
-                                                 if x["ok"] else "FAIL") for x in rep["results"]]
-        bad = [f"preflight {x['model']}: {'unverified' if x.get('unverified') else 'FAIL'}"
-               + (f" ({x['error']})" if x.get("error") else "")
-               for x in rep["results"] if not x["ok"] and (strict or not x.get("unverified"))]
+        probed = [f"preflight {x}" for x in preflight_lines(rep["results"])]
+        bad = [line for line, x in zip(probed, rep["results"], strict=True)
+               if not x["ok"] and (strict or not x.get("unverified"))]
         if bad:
             raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
                                     "--skip-preflight)")])
@@ -365,6 +366,42 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     return out
 
 
+def stop(api: Client, swarm: str, *, types: list[str] | None = None,
+         agents: list[str] | None = None, interrupt: bool = False, reason: str = "",
+         release: bool = False, final: bool = False, delete: bool = False,
+         confirm: Callable[[], Any] | None = None,
+         progress: Callable[[int], None] | None = None) -> dict[str, Any]:
+    """`flock stop` (docs/live.md "Lifecycle"). Default: hold the swarm (or `types`/`agents`;
+    `interrupt` also cuts running turns) -> {"held": `api.stop`'s reply}; `release` also
+    drains every worker and waits (`release_wait`) -> plus {"unsynced": name -> error}.
+    `final`: stop the loops of `types` (default every type with one) after a final round ->
+    {"loops": replies}. `delete` (after `confirm()`): drop the swarm from the controller ->
+    {"deleted": reply}, or end this directory's local run of it -> {"ended": its record}.
+    Flags that do not combine raise SpecError."""
+    if delete:
+        if final or release or interrupt or types or agents:
+            raise SpecError(["--delete takes only --yes"])
+        if confirm is not None:
+            confirm()
+        if (run := local_run(api.env)) is not None and run.get("swarm") == swarm:
+            end_local(run, api.env)  # no DELETE first: the bundle is written from the rows it would drop
+            return {"ended": run}
+        return {"deleted": api.delete(swarm)}
+    if final:
+        if release or interrupt or agents:
+            raise SpecError(["--final takes only --type"])
+        spec = api.swarm(swarm)["spec"]
+        return {"loops": [api.stop_loop(swarm, t) for t in types
+                          or [n for n, ts in spec["types"].items() if ts.get("loop")]]}
+    if release and (types or agents):
+        raise SpecError(["--release frees the whole swarm: no --type or --agent"])
+    done = {"held": api.stop(swarm, types=types, agents=agents, interrupt=interrupt,
+                             reason=reason, release=release)}
+    if release:
+        done["unsynced"] = release_wait(api, swarm, progress=progress)
+    return done
+
+
 RELEASE_POLL = 5.0  # s between worker checks while `release_wait` waits
 _sleep = time.sleep  # tests replace it
 
@@ -385,15 +422,16 @@ LOCAL_START_S = 120.0  # s `start_local` waits for a local controller to come up
 LOCAL_DIR = Path(".flock")  # the local run's data dir and launch.log, in the working directory
 
 
-def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
+def start_local(spec: SwarmSpec, spec_file: str, env_files=(),
+                env: Mapping[str, str] = os.environ) -> dict | None:
     """`compute: local`: start this machine's controller and workers detached
     (flock.controller.localrun, output in .flock/launch.log) unless a live one in this directory
     already serves the swarm; wait for its `.flock/current`. Returns the run started (its
     `.flock/current` record), or None; SpecError when another swarm's local run is up or the
     controller does not start (the log's tail in the lines)."""
-    if os.environ.get("FLOCK_URL"):
+    if env.get("FLOCK_URL"):
         return None  # pointed at a controller explicitly
-    if (run := local_run()) is not None:
+    if (run := local_run(env)) is not None:
         if run.get("swarm") != spec.swarm:
             raise SpecError([(f"a local run of {run.get('swarm')} is up in this directory: "
                               f"`flock stop {run.get('swarm')} --release` first")])
@@ -403,10 +441,10 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
            "--data-dir", str(LOCAL_DIR), *(a for f in env_files for a in ("--env", f))]
     with (LOCAL_DIR / "launch.log").open("w") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                                start_new_session=True)
+                                start_new_session=True, env=dict(env))
     end = time.monotonic() + LOCAL_START_S
     while time.monotonic() < end:
-        if (run := local_run()) is not None and run.get("pid") == proc.pid:
+        if (run := local_run(env)) is not None and run.get("pid") == proc.pid:
             return run
         if proc.poll() is not None:
             break
@@ -417,11 +455,11 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=()) -> dict | None:
     raise SpecError([*log, "the local controller did not start"])
 
 
-def end_local(run: dict) -> None:
+def end_local(run: dict, env: Mapping[str, str] = os.environ) -> None:
     """SIGTERM a background local run and wait (up to LOCAL_START_S) until it is gone: it
     drains what is left, writes the run bundle (<run_dir>/run.json) and exits (docs/local.md)."""
     with contextlib.suppress(ProcessLookupError):
         os.kill(run["pid"], signal.SIGTERM)
     end = time.monotonic() + LOCAL_START_S
-    while local_run() is not None and time.monotonic() < end:
+    while local_run(env) is not None and time.monotonic() < end:
         _sleep(0.2)

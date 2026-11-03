@@ -17,8 +17,7 @@ from flock.world.hub import WorldHub
 from flock.world.protocol import TOKEN_ENV
 
 from . import test_loop_controller
-from .conftest import make_spec
-from .test_cli import _wire
+from .conftest import make_spec, wire
 from .test_health import FakeWorld
 from .test_loop_controller import A0, A1, prompts
 from .test_world import world_block
@@ -135,7 +134,7 @@ async def test_worker_loop_is_stopped_by_a_hold_and_restarted_with_its_rounds(si
 
 
 def test_cli_stop_launch_and_held_marker(app, store, monkeypatch, tick):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     store.put_swarm(make_spec(), 0.0)
     runner = CliRunner()
     r = runner.invoke(cli.app, ["stop", "demo", "--type", "researcher", "--reason", "deploy"])

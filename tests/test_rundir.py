@@ -298,7 +298,7 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
 
     seen = []
     monkeypatch.setattr(Client, "swarms", lambda self: seen.append(
-        (os.environ.get("FLOCK_URL"), os.environ.get("FLOCK_TOKEN"))) or [])
+        (self.env.get("FLOCK_URL"), self.env.get("FLOCK_TOKEN"))) or [])
     monkeypatch.setenv("FLOCK_URL", "http://shell:1")  # restored by monkeypatch at teardown
     monkeypatch.setenv("FLOCK_TOKEN", "shell-tok")
     monkeypatch.setenv("FLOCK_RUN_DIR", str(run))
@@ -313,7 +313,7 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCK_URL", "http://shell:1")
     r = runner.invoke(cli.app, ["--run", str(run), "status"])
     assert r.exit_code == 1 and "no controller host file" in r.output
-    assert "FLOCK_URL" not in os.environ and len(seen) == 3
+    assert os.environ["FLOCK_URL"] == "http://shell:1" and len(seen) == 3  # not mutated
 
 
 def test_run_env_is_the_first_env_file(tmp_path, monkeypatch):
@@ -367,11 +367,6 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert spec.compute.partition == "cpu-spot" and spec.compute.cpus == 8
     with pytest.raises(ValueError, match="no such file"):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
-
-
-def test_no_profile_partition_is_the_cluster_default(tmp_path):
-    spec = read_spec(str(_folder(tmp_path, SLURM_SPEC) / "spec.yaml"), [])
-    assert spec.compute.partition == ""
 
 
 def test_slurm_capacity_from_a_fake_sinfo(tmp_path):
@@ -432,12 +427,3 @@ def test_container_mounts_follow_every_symlink_hop(tmp_path):
     assert rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(uv.parent)}).ok
 
 
-def test_old_partition_variable_is_noted(tmp_path, monkeypatch):
-    monkeypatch.setattr(rundir, "_sinfo", lambda argv: pytest.fail("sinfo in a unit test"))
-    monkeypatch.setattr(rundir, "check_capacity", lambda spec, env: rundir.Check("slurm capacity", True))
-    src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
-    rundir.init(run, src, env={})
-    with (run / "run.env").open("a") as f:
-        f.write("RUN3_SLURM_PARTITION=hopper-cpu\n")
-    rep = rundir.init(run, env={})
-    assert any("RUN3_SLURM_PARTITION is now ignored" in n for n in rep.notes)

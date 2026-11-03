@@ -362,10 +362,10 @@ def test_cli_status_json_and_watch(app, store, monkeypatch):
 
     from flock import cli
 
-    from .test_cli import _wire
+    from .conftest import wire
 
     _seed_app(app, store)
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     runner = CliRunner()
     out = runner.invoke(cli.app, ["status", "demo", "--json"])
     assert out.exit_code == 0, out.output

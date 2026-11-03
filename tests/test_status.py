@@ -20,9 +20,8 @@ from flock.controller.reconcile import record_heartbeat, swarm_stream
 from flock.controller.slurm import SlurmJobsClient
 from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
-from .conftest import make_spec
+from .conftest import make_spec, wire
 from .test_api import W0, apply, hb_body
-from .test_cli import _wire
 from .test_reconcile import _nudge_spec, _stuck_tick
 
 runner = CliRunner()
@@ -105,7 +104,7 @@ async def test_status_filters_flag_agents_on_a_dead_server(app, store, clock, ti
         AgentHeartbeat(name="researcher-0000", state="idle", endpoint="g1"),
         AgentHeartbeat(name="researcher-0001", state="working", turn_id="t", endpoint="g2")])
     assert record_heartbeat(store, W0, hb, clock())
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     monkeypatch.setattr(Client, "health", lambda *_: {"ts": clock().timestamp(), "body": {
         "alerts": [], "types": {}, "workers": {}, "tools": {},
         "providers": {}, "provider_servers": {"v": {"g1": {"up": True, "dead": False},
@@ -280,7 +279,7 @@ def test_status_reads_an_old_format_sample(app, store, clock, monkeypatch):
            "workers": {"count": 2, "max_nonreclaim_frac": None, "min_eta_limit_s": None,
                        "restoring": 0, "relaunches": 0}}
     store.add_health_sample("demo", clock().timestamp(), "5m", old, 3600)
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     r = runner.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "Traceback" not in r.output, r.output
     for bad in ({"v": None}, [], {"v": {"g": 1}}):
@@ -317,7 +316,7 @@ def test_hidden_old_events_and_agents(monkeypatch):
     monkeypatch.setattr(Client, "_call", call)
     r = runner.invoke(cli.app, ["events", "l-0000", "--wait", "--timeout", "0"])
     assert r.exit_code == 0 and json.loads(r.stdout.splitlines()[0]) == evs[0]
-    assert "│ events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
+    assert "  events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
     r = runner.invoke(cli.app, ["agents", "s", "--parent", "l-0000"])
     lines = r.output.splitlines()
     assert lines[0].split() == ["name", "state", "provider", "worker", "turns", "pending", "cost",

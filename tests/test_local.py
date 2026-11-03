@@ -469,11 +469,11 @@ def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
     run = {"pid": 1, "run_dir": "x", "url": "http://127.0.0.1:1"}
     ended = []
     monkeypatch.setattr("flock.ops.start_local", lambda *a: run)
-    monkeypatch.setattr("flock.ops.end_local", ended.append)
+    monkeypatch.setattr("flock.ops.end_local", lambda r, env: ended.append(r))
 
     def interrupted(*a, **k):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("flock.ops.launch", interrupted)
+    monkeypatch.setattr("flock.ops._launch", interrupted)
     runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
     assert ended == [run]

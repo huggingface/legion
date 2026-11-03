@@ -14,7 +14,7 @@ import pytest
 from flock.controller.api import create_app
 from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage
 
-from .conftest import TOKEN, make_spec
+from .conftest import TOKEN, make_spec, wire
 from .test_api import W0, hb_body
 
 A0, A1 = "researcher-0000", "researcher-0001"
@@ -437,7 +437,6 @@ async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
 
 
 async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
-    from fastapi.testclient import TestClient
     from typer.testing import CliRunner
 
     from flock import cli
@@ -450,7 +449,7 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     for a in (A0, A1):
         await sim.turn(a, got[a])
     app = sim.c._transport.app
-    monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    wire(monkeypatch, app)
     run = CliRunner()
     r = run.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "loop researcher: running (controller, every 5s), round 1, 0/2" in r.output
