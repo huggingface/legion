@@ -1,4 +1,4 @@
-"""`compute: slurm` and `compute: external`: workers as Slurm jobs, or started by someone else.
+"""`compute: slurm`: workers as Slurm jobs.
 
 `SlurmJobsClient` speaks the `JobsClient` protocol (controller/jobs.py), so the reconcile loop,
 placement, heartbeats and events are unchanged. flock only shells out:
@@ -36,10 +36,6 @@ State mapping (squeue first; sacct once the job left squeue):
                                                      `preempted=True` (planned, no backoff)
   FAILED, OUT_OF_MEMORY, BOOT_FAIL, DEADLINE       -> ERROR "<STATE> exit <code>" (a crash)
 
-`ExternalJobsClient` launches nothing: `launch` writes the same env file (when `launch_dir` is
-set), logs what it expects to be started and returns an `external-...` id; `inspect` always
-says SCHEDULING, so the reconcile loop waits for heartbeats and never counts a missing
-external worker as a crash (reconcile.py).
 """
 
 from __future__ import annotations
@@ -280,7 +276,6 @@ class SlurmJobsClient:
     calls: Counter = field(default_factory=Counter)
     # reconcile passes the swarm's `compute` block to launch() (ComputeSpec keys)
     uses_compute_spec: bool = True
-    external: bool = False
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -465,45 +460,3 @@ class SlurmJobsClient:
             return []
         return lines[-n:]
 
-
-@dataclass
-class ExternalJobsClient:
-    """`compute: external`: the controller launches nothing. Each "launch" writes the slot's
-    env file (when a launch dir is configured) and logs what it waits for; the worker started
-    by someone else registers through its heartbeat."""
-
-    env: Mapping[str, str] = field(default_factory=lambda: os.environ)
-    calls: Counter = field(default_factory=Counter)
-    uses_compute_spec: bool = True
-    external: bool = True
-    waiting: dict[str, str] = field(default_factory=dict)  # job id -> worker id
-
-    def launch(self, worker_id: str, spec: TypeSpec, env: dict[str, str],
-               secrets: dict[str, str], labels: dict[str, str], timeout: float, *,
-               namespace: str, compute: ComputeSpec | None = None) -> str:
-        self.calls["launch"] += 1
-        cfg = resolve(compute, env.get("TYPE", ""), self.env)
-        settings, names = worker_env(worker_id, env, secrets, cfg)
-        where = ""
-        if cfg.get("launch_dir"):
-            path = env_file_path(cfg["launch_dir"], worker_id, env)
-            write_private(path, env_file_text(settings, names))
-            where = f"; env file {path}"
-        job_id = f"external-{uuid.uuid4().hex[:8]}"
-        self.waiting[job_id] = worker_id
-        log.info("waiting for an external start of %s (WORKER_ID=%s, FLOCK_URL=%s, secrets %s%s)",
-                 worker_id, worker_id, settings["FLOCK_URL"], " ".join(names), where)
-        return job_id
-
-    def inspect(self, job_id: str, *, namespace: str = "") -> JobState:
-        return JobState("SCHEDULING", "waiting for an external start")
-
-    def cancel(self, job_id: str, *, namespace: str = "") -> None:
-        self.calls["cancel"] += 1
-        self.waiting.pop(job_id, None)
-
-    def list(self, labels: dict[str, str], *, namespace: str = "") -> list[JobListing]:
-        return []
-
-    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> list[str]:
-        return []

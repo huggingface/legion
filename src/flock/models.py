@@ -829,17 +829,16 @@ class SlurmResources(_Removable):
 class ComputeSpec(_Removable):
     """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
     `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
-    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md). `external`: flock
-    launches nothing; workers started by someone else register with FLOCK_URL/FLOCK_TOKEN.
+    (`flock run`). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
-    The other keys are for `slurm` (and `launch_dir`/`host_file` for `external`); unset keys
+    The other keys are for `slurm`; unset keys
     fall back to the controller's FLOCK_SLURM_* env, then to built-in defaults. `types` sets
     per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["hf-jobs", "local", "slurm", "external"] = "hf-jobs"
+    kind: Literal["hf-jobs", "local", "slurm"] = "hf-jobs"
     partition: str | None = None
     account: str | None = None
     cpus: int | None = Field(default=None, ge=1)
@@ -1013,7 +1012,7 @@ class SwarmSpec(BaseModel):
             if missing:
                 raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
                                  "(or set `compute: local`, docs/local.md)")
-        elif kind in ("slurm", "external") and not self.bucket:
+        elif kind == "slurm" and not self.bucket:
             # agent state goes to an HF bucket on every remote backend, never to a shared disk
             raise ValueError(f"bucket is required for compute {kind}")
         if kind != "local" and self.world is not None and self.world.url is None:

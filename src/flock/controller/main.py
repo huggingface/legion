@@ -145,7 +145,7 @@ class Built:
 
 
 WORLD_FOLLOW_INTERVAL = 15.0  # s between reads of FLOCK_WORLD_HOST_FILE
-COMPUTE_KINDS = (None, "hf-jobs", "local", "slurm", "external")
+COMPUTE_KINDS = (None, "hf-jobs", "local", "slurm")
 
 
 def build(env: Mapping[str, str] = os.environ) -> Built:
@@ -181,11 +181,10 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         from flock.controller.local import LocalJobsClient
 
         jobs, compute = LocalJobsClient(root=data_dir), "local"
-    elif kind in ("slurm", "external"):  # docs/slurm.md
-        from flock.controller.slurm import ExternalJobsClient, SlurmJobsClient
+    elif kind == "slurm":  # docs/slurm.md
+        from flock.controller.slurm import SlurmJobsClient
 
-        compute = kind
-        jobs = SlurmJobsClient(env=env) if compute == "slurm" else ExternalJobsClient(env=env)
+        jobs, compute = SlurmJobsClient(env=env), "slurm"
     elif env.get("FLOCK_FAKE_JOBS") == "1":
         jobs = FakeJobsClient(network_group=dep.network_group)
     else:

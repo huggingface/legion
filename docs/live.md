@@ -113,7 +113,7 @@ Removing the swarm drops its history.
 Besides `spec_applied`, the swarm stream (`flock events <swarm>`) carries what the reconcile
 loop does, as `{target, detail}`: `launch`, `launch_failed`, `launch_refused`, `crash`
 (detail: stage, message, backoff), `crashloop`, `planned_restart` (job timeout, drain,
-preemption), `cancel`, `retire`, `remove_worker`, `external_wait`. Per-agent placement
+preemption), `cancel`, `retire`, `remove_worker`. Per-agent placement
 (`assign`, `unassign`) and conditions repeated every pass (`workers_full`, the launch rate
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).

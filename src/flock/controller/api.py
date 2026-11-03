@@ -651,7 +651,7 @@ def create_app(
     `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
     `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
     network group spans one namespace, so workers elsewhere could never reach the controller.
-    `compute`, when set ("hf-jobs", "local", "slurm" or "external"), is the only `compute.kind` a spec may ask for:
+    `compute`, when set ("hf-jobs", "local" or "slurm"), is the only `compute.kind` a spec may ask for:
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
     default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`).

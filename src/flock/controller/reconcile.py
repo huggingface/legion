@@ -504,8 +504,7 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
         # docs/slurm.md: the worker's last heartbeat said it was preempted and has synced.
         # End the slot without waiting for the scheduler (squeue/sacct lag, a watcher that
         # cancels 30 s later): the relaunch registers a fresh incarnation and restores.
-        if not getattr(p.jobs, "external", False):
-            p.cancel(w["job_id"], spec.namespace)
+        p.cancel(w["job_id"], spec.namespace)
         _job_ended(p, spec, w, ts, JobState("ERROR", "preempted: worker reported it",
                                             preempted=True))
         return
@@ -521,13 +520,6 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     silent = seen is not None and p.now - seen > _DEAD  # no heartbeat, poll or event post
     start = w["started_at"] or w["launched_at"]
     never = hb is None and st.stage != "SCHEDULING" and p.now - start > LAUNCH_TIMEOUT
-    if silent and getattr(p.jobs, "external", False):
-        # compute external: nobody to cancel and nothing crashed on our side; the slot gets a
-        # fresh env file and waits for the next external start, without backoff
-        p.act("external_wait", w["id"], "worker silent; waiting for an external start")
-        _job_ended(p, spec, w, ts, JobState("CANCELED", "external worker silent",
-                                            preempted=True))
-        return
     if silent or never:
         p.cancel(w["job_id"], spec.namespace)
         p.act("cancel", w["id"], w["job_id"])
@@ -667,7 +659,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     p.budget -= 1
     store.record_launch(p.now)
     try:
-        # backends configured per swarm (compute slurm/external) get the spec's compute block
+        # backends configured per swarm (compute slurm) get the spec's compute block
         extra = {"compute": spec.compute} if getattr(p.jobs, "uses_compute_spec", False) else {}
         job_id = p.jobs.launch(wid, ts, env, secrets, labels, timeout, namespace=spec.namespace,
                                **extra)

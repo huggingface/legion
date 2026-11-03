@@ -1,4 +1,4 @@
-# compute: slurm (and external)
+# compute: slurm
 
 Workers as Slurm jobs, sbatch'ed by the controller. The reconcile loop, placement, heartbeats,
 events and bucket sync are the same as for `hf-jobs`; only the backend that starts a worker
@@ -125,7 +125,7 @@ Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` w
 a hash of the settings in force, and `flock workers` shows it (`knobs`), so workers running
 an older configuration stand out.
 
-The controller: `FLOCK_COMPUTE=slurm` (or `external`). An unknown `FLOCK_COMPUTE` stops it at
+The controller: `FLOCK_COMPUTE=slurm`. An unknown `FLOCK_COMPUTE` stops it at
 start (it never falls back to HF Jobs); the first log line names the kind and the client.
 
 ## Job states
@@ -225,15 +225,6 @@ its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HO
 XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
 `FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
 `experiments/run3/slurm/Containerfile` builds the image.
-
-## compute: external
-
-The controller launches nothing. Each "launch" writes the slot's env file (when `launch_dir` is
-set) and logs `waiting for an external start of <worker> (...)`; the slot shows `external` in
-`flock workers` until a worker started by someone else (same env file, `FLOCK_TOKEN` from the
-secrets) heartbeats. A silent external worker sends the slot back to waiting with a fresh env
-file: never a crash, never backoff. Start workers from the newest
-`<launch_dir>/<worker>-*.env`: an older incarnation gets 409.
 
 ## Singletons on Spot (run 4 scripts)
 
