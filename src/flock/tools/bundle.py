@@ -131,7 +131,7 @@ def read_manifest(data: bytes) -> Manifest:
                 raise KeyError(MANIFEST_NAME)
             return Manifest.from_json(json.loads(f.read()))
     except KeyError as e:
-        raise ToolsError(f"bundle has no {MANIFEST_NAME} (made by `flock apply`?)") from e
+        raise ToolsError(f"bundle has no {MANIFEST_NAME} (made by `flock launch`?)") from e
     except (tarfile.TarError, OSError, EOFError, ValueError, TypeError) as e:
         raise ToolsError(f"not a tools bundle: {type(e).__name__}: {e}") from e
 

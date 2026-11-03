@@ -24,7 +24,7 @@ def test_apply_status_prompt(tmp_path, monkeypatch, app, store, tick):
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
 
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 0, r.output
     assert "demo" in r.output and "researcher" in r.output
     tick()
@@ -44,12 +44,13 @@ def test_apply_status_prompt(tmp_path, monkeypatch, app, store, tick):
     assert r.exit_code == 1
 
 
-def test_scale_agents_workers_remove(tmp_path, monkeypatch, app, store, tick):
+def test_update_replicas_agents_workers_remove(tmp_path, monkeypatch, app, store, tick):
     _wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
-    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
-    r = runner.invoke(cli.app, ["scale", "demo", "researcher", "5"])
+    assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
+    spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 5"))
+    r = runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"])
     assert r.exit_code == 0, r.output
     tick()
     r = runner.invoke(cli.app, ["agents", "demo", "--type", "researcher"])
@@ -71,7 +72,7 @@ def test_apply_inlines_system_prompt_file(tmp_path, monkeypatch, app, store):
     spec = make_spec(researcher={"replicas": 1, "system_prompt_file": "prompts/r.md"})
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)))
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 0, r.output
     stored = store.get_swarm("demo")["spec"].types["researcher"]
     assert stored.system_prompt == "You keep notes.md."
@@ -79,7 +80,7 @@ def test_apply_inlines_system_prompt_file(tmp_path, monkeypatch, app, store):
 
     bad = make_spec(researcher={"replicas": 1, "system_prompt_file": "prompts/nope.md"})
     spec_file.write_text(yaml.safe_dump(bad.model_dump(mode="json", exclude_none=True)))
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1 and "not found" in r.output
 
 
@@ -113,16 +114,16 @@ def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, stor
     _wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1 and "preflight failed" in r.output and "FAIL" in r.output
     assert "`extra` is kept in the spec but not sent" in r.output
     assert store.get_swarm("op") is None and len(seen) == 1
-    r = runner.invoke(cli.app, ["apply", "--skip-preflight", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", "--skip-preflight", str(spec_file)])
     assert r.exit_code == 0, r.output
     assert store.get_swarm("op") is not None and len(seen) == 1
     assert "provider gpu1 (openai_compat self-hosted): working 0, types worker" in r.output
-    r = runner.invoke(cli.app, ["preflight", str(spec_file)])
-    assert r.exit_code == 1 and "gpu1:Qwen/Q" in r.output
+    r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])
+    assert r.exit_code == 1 and "preflight gpu1:Qwen/Q: FAIL" in r.output
 
 
 def test_status_prints_zero_usage_warning(monkeypatch):
@@ -153,19 +154,20 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     _wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
-    r = runner.invoke(cli.app, ["preflight", str(spec_file)])
-    assert r.exit_code == 0 and "ok" in r.output and "responses" in r.output
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
-    assert r.exit_code == 0, r.output
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
+    assert r.exit_code == 0 and "ok" in r.output and "responses" in r.output, r.output
     assert store.get_swarm("op")["spec"].types["worker"].provider_name == "gpu1"
-    assert len(seen) == 4  # two probes, each a tool call plus a follow-up turn
+    assert len(seen) == 2  # one probe: a tool call plus a follow-up turn
+    r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `flock preflight`
+    assert r.exit_code == 0 and "preflight gpu1:Qwen/Q: ok" in r.output and len(seen) == 4
     # native-only specs skip preflight unless asked
     native = tmp_path / "native.yaml"
     native.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
-    r = runner.invoke(cli.app, ["apply", str(native)])
+    r = runner.invoke(cli.app, ["launch", str(native)])
     assert r.exit_code == 0 and len(seen) == 4
-    r = runner.invoke(cli.app, ["apply", "--preflight", str(native)])
-    assert r.exit_code == 0 and "no provider-backed models" in r.output
+    native.write_text(yaml.safe_dump(make_spec("demo2", other={}).model_dump(mode="json")))
+    r = runner.invoke(cli.app, ["launch", "--preflight", str(native)])
+    assert r.exit_code == 0 and "no provider-backed models" in r.output, r.output
 
 
 def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, store, clock):
@@ -181,20 +183,20 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
     _wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
-    r = runner.invoke(cli.app, ["preflight", str(spec_file)])
-    assert r.exit_code == 0 and "unverified" in r.output and "VLLM_API_KEY is not set" in r.output
-    assert runner.invoke(cli.app, ["preflight", "--strict", str(spec_file)]).exit_code == 1
-    r = runner.invoke(cli.app, ["apply", "--strict", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", "--strict", str(spec_file)])
     assert r.exit_code == 1 and "preflight failed" in r.output and store.get_swarm("op") is None
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 0, r.output
-    assert "warning: 1 model(s) unverified" in r.output and store.get_swarm("op") is not None
+    assert "warning: 1 model(s) unverified" in r.output and "VLLM_API_KEY is not set" in r.output
+    assert store.get_swarm("op") is not None
     assert not seen  # nothing was sent without a key
     # skipping preflight is never silent either
-    r = runner.invoke(cli.app, ["apply", "--skip-preflight", str(spec_file)])
+    store.delete_swarm("op")
+    r = runner.invoke(cli.app, ["launch", "--skip-preflight", str(spec_file)])
     assert r.exit_code == 0 and "gpu1:Qwen/Q: unverified (preflight skipped)" in r.output
-    r = runner.invoke(cli.app, ["apply", "--skip-preflight", "--strict", str(spec_file)])
-    assert r.exit_code == 1 and "--strict: not applying unverified models" in r.output
+    store.delete_swarm("op")
+    r = runner.invoke(cli.app, ["launch", "--skip-preflight", "--strict", str(spec_file)])
+    assert r.exit_code == 1 and "--strict: not launching unverified models" in r.output
 
 
 def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
@@ -202,7 +204,7 @@ def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "claude", "model": "q"}}}
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(bad))
-    r = runner.invoke(cli.app, ["apply", str(spec_file)])
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1
     assert "types.writer.model: harness 'claude' cannot use provider 'gpu1'" in r.output
 
@@ -245,7 +247,7 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
     git("commit", "-qm", "spec")
     sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True,
                          capture_output=True, text=True).stdout.strip()
-    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     (gen1,) = store.spec_history("demo")
     assert gen1["source"] == {"by": "carlos", "git_sha": sha, "ref": "exp", "dirty": False}
     assert json.loads(cli.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
@@ -259,8 +261,9 @@ def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     monkeypatch.setenv("USER", "carlos")
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
-    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
-    assert runner.invoke(cli.app, ["scale", "demo", "researcher", "5"]).exit_code == 0
+    assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
+    spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 5"))
+    assert runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"]).exit_code == 0
     r = runner.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[0], r.output
     assert store.spec_history("demo")[1]["source"]["by"] == "carlos"

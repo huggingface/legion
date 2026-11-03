@@ -55,10 +55,10 @@ uv run flock run examples/local.yaml --prompt "Introduce yourself in one sentenc
   spawned into is skipped. `--until 10m` stops after a duration. Without `--until` the run goes until
   Ctrl-C (a second Ctrl-C forces) or the spec's `limits.budget_usd`.
 - `--skip-preflight` skips the tool-call probe of each model (on by default for
-  provider-backed models, as with `flock apply`); `--grace 10` is how long in-flight turns get
+  provider-backed models, as with `flock launch`); `--grace 10` is how long in-flight turns get
   at stop; `--data-dir .flock` is where runs go.
 - A `tools/` folder next to the spec ([tools.md](tools.md)) is checked, uploaded and named in
-  the spec by its hash before the run starts, as `flock apply` does.
+  the spec by its hash before the run starts, as `flock launch` does.
 - `--watch` applies each saved change to the experiment folder (spec, prompt files, tools) to
   the running swarm, as `flock update` does; a broken save is shown and not applied. From a
   second terminal, `flock update <folder>` works the same way
@@ -113,8 +113,8 @@ idle agents stop at once, in-flight turns get `--grace` seconds. Then each remai
 SIGTERM: it interrupts its turns (a `turn_interrupted` event) and its harness kills the tool
 processes it started. Up to 5 s later, anything still alive is killed, including tool processes
 in their own session. Finally the run waits for the last events and writes the bundle. The
-budget check, the view and the bundle use the spec as currently applied, so a re-apply or
-`flock scale` during the run counts: `limits.budget_usd`, for example.
+budget check, the view and the bundle use the spec as currently applied, so a
+`flock update` during the run counts: `limits.budget_usd`, for example.
 
 ```
 .flock/hello-20261021-161443/
@@ -133,12 +133,12 @@ budget check, the view and the bundle use the spec as currently applied, so a re
 
 Change `compute: local` to `compute: hf-jobs` (and give `namespace` and `bucket` if the spec does
 not have them), deploy a controller ([README](../README.md#run-the-controller),
-[docs/deploy-job.md](deploy-job.md)) and `flock apply spec.yaml`. `flock run` refuses a
+[docs/deploy-job.md](deploy-job.md)) and `flock launch spec.yaml`. `flock run` refuses a
 `hf-jobs` spec, and a jobs controller refuses a `local` spec (HTTP 400), so a spec never runs
 on a backend it did not ask for.
 
 A long-lived local controller without the terminal view also exists:
-`FLOCK_TOKEN=... FLOCK_COMPUTE=local uv run flock-controller`, then `flock apply` a `local` spec.
+`FLOCK_TOKEN=... FLOCK_COMPUTE=local uv run flock-controller`, then `flock launch` a `local` spec.
 
 ## What differs locally
 
@@ -173,7 +173,8 @@ Different:
 4. **Faster loop.** Reconcile every 1 s (jobs: 5 s) and worker heartbeats every 5 s (jobs: 30 s;
    a type's `env: {HEARTBEAT_INTERVAL: ...}` overrides it).
 5. **The controller is in-process.** 127.0.0.1 on a free port, a new random token per run, no
-   status port, no state sync to a bucket, no jobs proxy auth. Each `flock run` is a new run
+   status port, no jobs proxy auth; the controller state syncs to a bucket only when
+   `FLOCK_STATE_URL` is set (a checkpoint `flock launch --adopt` can take over). Each `flock run` is a new run
    directory: a run does not resume a previous one.
 6. **Workers die with the controller.** A worker exits when the `flock run` process is gone
    (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. Ctrl-C reaches only

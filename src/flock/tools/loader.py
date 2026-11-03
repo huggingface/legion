@@ -8,7 +8,7 @@ A parameter named `ctx`, or annotated `flock.tools.Context`, is injected at call
 never shown to the model.
 
 `load_dir` imports the modules in this process; `describe` runs it in a fresh `python -I`
-subprocess (what `flock apply` uses), so a module's side effects, crashes and hangs stay
+subprocess (what `flock launch` uses), so a module's side effects, crashes and hangs stay
 there. `python -m flock.tools.loader <dir>` prints the manifest as JSON.
 """
 

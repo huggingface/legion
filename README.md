@@ -20,7 +20,7 @@ them.
   `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
   worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`
   (enforced for every harness: Claude in its SDK, Codex, Pi and `llm` in the worker).
-  `apply`, `scale` and `remove` edit the spec; a reconcile loop makes HF Jobs
+  `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name
   keeps the same harness session and workdir across worker restarts.
@@ -50,7 +50,7 @@ them.
   caps, depth) and swarm `limits:`. Each agent calls the controller with its
   own scoped token. See [docs/spawn.md](docs/spawn.md).
 - **Tools folder:** plain Python functions in `tools/` next to the spec become agent
-  tools (schema from type hints); `flock apply` ships them by content hash and a changed
+  tools (schema from type hints); `flock launch` ships them by content hash and a changed
   folder reaches running agents at their next turn, with no image or wheel rebuild. See
   [docs/tools.md](docs/tools.md).
 - **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
@@ -185,17 +185,19 @@ types:
 
 ```sh
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
-uv run flock apply demo.yaml
+uv run flock launch demo.yaml
 uv run flock status demo                 # counts by type and state, cost
 uv run flock prompt scribe-0007 "Summarize your workdir."
 uv run flock events scribe-0007 --follow # JSONL: turn_started, turn_ended, ...
-uv run flock scale demo scribe 200
+uv run flock stop demo --release      # drain, sync every agent, free the workers
+uv run flock launch demo              # resume
 uv run flock remove demo
 ```
 
 Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
-`workers <swarm>`, `preflight <spec>`. `apply` runs the preflight first when the
-spec has provider-backed models (`--skip-preflight` to bypass).
+`workers <swarm>`, `stop <swarm> [--release|--final]`, `update <folder> [--check]`. `launch`
+runs the preflight first when the spec has provider-backed models (`--skip-preflight` to
+bypass); `update --check` runs it alone.
 
 ### HTTP API
 

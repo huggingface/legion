@@ -320,24 +320,26 @@ class LoopEngine:
             else:
                 if self.store.swarm_flags(swarm).get("budget_stop"):
                     raise ValueError(f"swarm {swarm!r} is stopped by limits.budget_usd; raise it "
-                                     "(flock apply) before starting a loop again")
+                                     "(flock update) before starting a loop again")
                 if L is None or L["state"] in ("final", "done"):
                     self._start(sw["spec"], type_name, ts, now, restart=L is not None)
             return self.status(swarm, type_name, detail=False)
 
     def _put_budget(self, swarm: str, body: dict[str, Any]) -> None:
         """Write the budget-stop flags, keeping the swarm's pause holds."""
-        holds = self.store.swarm_flags(swarm).get("holds")
-        self.store.put_swarm_flags(swarm, {**body, **({"holds": holds} if holds else {})})
+        flags = self.store.swarm_flags(swarm)
+        self.store.put_swarm_flags(swarm, {**body, **{k: flags[k] for k in ("holds", "released")
+                                                      if flags.get(k)}})
 
     # ------------------------------------------------------------------ pause / resume
     def pause(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
               *, interrupt: bool = False, reason: str = "", by: str = "operator",
-              auto: bool = False) -> dict[str, Any]:
+              auto: bool = False, release: bool = False) -> dict[str, Any]:
         """Hold types and/or agents (both None: every type): no new prompt reaches them and
         their loops skip them without counting rounds, until `resume`. `interrupt` also stops
         the turns in flight (`stop`). An automatic hold never replaces an operator's one.
-        Returns the swarm's holds."""
+        `release` (`flock stop --release`) also marks the swarm released: reconcile drains
+        every worker and launches none until `resume(release=True)`. Returns the swarm's holds."""
         with self._lock:
             sw = self.store.get_swarm(swarm)
             if sw is None:
@@ -358,7 +360,11 @@ class LoopEngine:
                     if n not in h[key] or (not auto and h[key][n].get("auto")):
                         h[key][n] = entry
                         new[key].append(n)
-            if not new["types"] and not new["agents"]:
+            if release and not flags.get("released"):
+                flags["released"] = {"since": entry["since"], "reason": reason, "by": by}
+                self.store.put_control(swarm, "unsynced", {})  # this release's report starts empty
+                self._event(swarm, "released", {"reason": reason, "by": by})
+            elif not new["types"] and not new["agents"]:
                 return h
             self.store.put_swarm_flags(swarm, flags)
             self._event(swarm, "paused", {**new, "reason": reason, "by": by, "auto": auto,
@@ -385,13 +391,17 @@ class LoopEngine:
 
     def resume(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
                *, by: str = "operator", auto_only: bool = False,
-               reason: str | None = None) -> dict[str, Any]:
+               reason: str | None = None, release: bool = False) -> dict[str, Any]:
         """Lift holds: the named ones, or all (both None). `auto_only`: only the holds the
         controller made itself (world down), never an operator's. `reason`: only
         holds with that reason (each automatic source lifts its own). Queued prompts and wakes
-        go out on the next poll / tick. Returns the swarm's holds."""
+        go out on the next poll / tick. `release` also clears `released` (`flock launch`):
+        the workers relaunch. Returns the swarm's holds."""
         with self._lock:
             flags = self.store.swarm_flags(swarm)
+            if release and flags.pop("released", None) is not None:
+                self.store.put_swarm_flags(swarm, flags)
+                self._event(swarm, "unreleased", {"by": by})
             h = flags.get("holds")
             if not h:
                 return {"types": {}, "agents": {}}

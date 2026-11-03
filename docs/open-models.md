@@ -28,7 +28,7 @@ then as `<provider>:<model id>` (split on the first colon, so `hf:Qwen/Qwen3.8-2
 sends `Qwen/Qwen3.8-27B:ovhcloud` to the router), then taken as a harness-native id. Field names
 match swarmlab's providers, so a `providers:` block can be copied between the two.
 
-`flock apply` rejects, naming the type and field: an unknown provider prefix, a `models:` entry
+`flock launch` rejects, naming the type and field: an unknown provider prefix, a `models:` entry
 whose prefix is unknown, a provider-backed model without a price (unless `self_hosted`), and a
 harness on the wrong kind of provider.
 
@@ -56,7 +56,7 @@ run the preflight to find out for your model.
    `api_key_env`, e.g. `VLLM_API_KEY`. The controller sends it to that type's jobs as a secret.
 4. Declare the provider with `self_hosted: true` (price `[0, 0, 0]`, pinned into the spec) and
    `max_working` to cap how many agents are in a turn on it at once.
-5. `flock preflight spec.yaml`, then `flock apply spec.yaml`.
+5. `flock launch spec.yaml` (it probes the provider first; `flock update --check` probes again).
 
 For the HF router use `base_url: https://router.huggingface.co/v1`, `api_key_env: HF_TOKEN` and
 the router's per-token prices in `pricing` (they are not fetched for you; `GET /v1/models` lists
@@ -136,7 +136,7 @@ shows $0 today.
 
 ## Preflight
 
-`flock preflight spec.yaml` (or `POST /swarms/{swarm}/preflight` with the spec as the body)
+`flock update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as the body)
 makes the controller probe each distinct provider-backed model the way a harness starts: two
 turns, streamed on the Responses API for `openai_compat` (shaped like Codex's requests:
 `store: false`, encrypted reasoning, parallel tool calls), non-streamed Chat Completions with
@@ -147,14 +147,14 @@ with the tool's result and must complete. Per model it reports `ok`, `tool_call_
 `follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
 server that answers turn one and fails the follow-up (the HF router's automatic provider choice
 did, see below) fails preflight. A server that streams zero token usage passes with a warning,
-since flock then cannot count cost. `flock apply` runs preflight whenever the spec has
+since flock then cannot count cost. `flock launch` runs preflight whenever the spec has
 provider-backed models and refuses to apply on a failure; `--skip-preflight` bypasses it.
 
 Preflight never passes silently. A model that was not probed (its `api_key_env` is not in the
 controller's environment, or `--skip-preflight`) is reported as `unverified` with a warning
-line. Validation is best-effort: `apply` blocks on definite problems (a failed probe) and
+line. Validation is best-effort: `launch` blocks on definite problems (a failed probe) and
 proceeds on missing evidence (unverified), unless `--strict` is passed, which counts
-unverified as failure (`flock preflight --strict` exits 1 the same way).
+unverified as failure (`flock update --check --strict` exits 1 the same way).
 
 ## `max_working`
 

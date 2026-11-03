@@ -419,6 +419,7 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
     port = _free_port()
     b = _built(tmp_path, PORT=str(port), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z", FLOCK_STATE_SYNC_INTERVAL="0.1")
+    b.store.put_swarm(make_spec(researcher={"replicas": 0}), 1.0)  # an empty one never pushes
     took = await _serve_then_sigterm(b, long_poll=True)
     # the parked 30 s long-poll does not hold the exit past the graceful window
     assert took < main_mod.GRACEFUL_SHUTDOWN + 3
@@ -426,7 +427,7 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
     order = [next(i for i, m in enumerate(lines) if m.startswith(p))
              for p in ("SIGTERM: shutting down", "final push: ok (", "flock controller: exit")]
     assert order == sorted(order)
-    assert "final push: ok (1 files)" in lines  # state.db; no event files yet
+    assert any(m.startswith("final push: ok (") and m != "final push: ok (0 files)" for m in lines)
     pushes = b.state.pushes
     await asyncio.sleep(0.3)  # the periodic sync loop was cancelled: no push after exit
     assert b.state.pushes == pushes and "state.db" in bucket.list("state.db")
@@ -442,6 +443,7 @@ async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_pat
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(broken, d))
     b = _built(tmp_path / "one", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z")
+    b.store.put_swarm(make_spec(), 1.0)
     await _serve_then_sigterm(b)
     assert "final push: failed (RuntimeError: bucket down)" in caplog.text
     b.store.close()
@@ -451,6 +453,7 @@ async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_pat
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(slow, d))
     b = _built(tmp_path / "two", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z", FLOCK_FINAL_PUSH_TIMEOUT="0.3")
+    b.store.put_swarm(make_spec(), 1.0)
     took = await _serve_then_sigterm(b)
     release.set()
     assert "final push: failed (timeout after 0.3 s)" in caplog.text

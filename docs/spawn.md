@@ -27,7 +27,7 @@ uv run scripts/deploy-space.sh "$W" <you>/flock                     # returns wh
 export FLOCK_URL=https://<you>-flock.hf.space
 # 1. wait for the Space to build (a minute or two)
 until curl -fsS "$FLOCK_URL/healthz" >/dev/null; do sleep 10; done
-uv run flock apply examples/first-spawn.yaml
+uv run flock launch examples/first-spawn.yaml
 # 2. apply returns before reconcile creates the leader: wait for its row (a few seconds)
 until uv run flock agents first-spawn | grep -q '^leader-0000 '; do sleep 5; done
 uv run flock prompt leader-0000 "Start: spawn the 5 analyst children now."
@@ -98,7 +98,7 @@ limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
 Caps count a parent's existing children, so removing a child frees its place. A child's own
 per-prompt `max_turns` and `max_budget_usd` come from its type, as for replicas.
 
-`flock apply` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
+`flock launch` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
 reach itself, including spawning its own type), a spawnable type without `workers`, the list form
 without `max`, an unknown key under `spawn.<type>`, and negative `depth`, caps, `workers` or
 limits. The controller also refuses (409) a re-apply that lowers a type's `initial + max_extra`
@@ -307,7 +307,7 @@ keeps them until removed; it does nothing until prompted.
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
 - The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
-  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock apply` appends to
+  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock launch` appends to
   a shared prompt.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
 - Spawned rows are not mirrored to the bucket. If the controller loses its SQLite (no persistent

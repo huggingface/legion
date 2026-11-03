@@ -11,7 +11,7 @@ module interface. This folder prepares the run; nothing here has been launched.
 - One `spec.yaml` holds the cluster settings too: `compute.kind: ${COMPUTE_KIND:-slurm}`
   (`COMPUTE_KIND=local` for `flock run`), the worker size `${WORKER_CPUS:-4}`/`${WORKER_MEM:-7G}`,
   `bucket`/`namespace` from RUN3_BUCKET/RUN3_NAMESPACE, and both `world.command` (local) and
-  `world.url` (Slurm). `flock apply|update spec.yaml --env run.env` fills the `${VAR:-default}`
+  `world.url` (Slurm). `flock launch|update spec.yaml --env run.env` fills the `${VAR:-default}`
   placeholders (an `--env` file wins over the shell); the defaults give a placeholder spec offline.
   The 30-min smoke is `LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100` in run.env.
 - `types.agent.replicas_ramp`: 20 every 5 min to 100, then +20 every 10 minutes to 300; the
@@ -144,7 +144,7 @@ stopping; only fast crashes (up less than `WORLD_STABLE_S`, 600 s) count, in
 end: it sleeps 5 min, doubling to 30 min (`WORLD_RETRY_MAX_S`), and starts again, logging each
 attempt. Spot reclaims never count. A requeued controller does not wait for the world (it restores
 its state and follows the world's host); only the first launch waits, up to `WORLD_WAIT_S` (30 min),
-before `flock apply`. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S`,
+before `flock launch`. `WORLD_RESTORE_ATTEMPTS`, `WORLD_RESTORE_BACKOFF_S`,
 `WORLD_STABLE_S`, `WORLD_RETRY_MAX_S` and `WORLD_WAIT_S` configure these bounds. The controller snapshots state.db and uploads only changed event files after its
 first full sync. Test real restart timing on the cluster before launch.
 
@@ -173,7 +173,7 @@ to 4 peer helpers (20 + 80 = 100).
   namespace). It uses `FLOCK_URL` and the agent's own `FLOCK_AGENT_TOKEN`; `FLOCK_TOKEN` is
   never in the agent's environment. `tests/test_run4_spawner.py` covers this; its namespace
   case runs in the cluster dry run.
-- `flock apply`/`flock update` must come from a checkout with `system_prompt_append_file`
+- `flock launch`/`flock update` must come from a checkout with `system_prompt_append_file`
   (this commit or later): an older CLI drops the group sections without an error. The
   controller and workers only get the combined `system_prompt`.
 

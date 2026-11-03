@@ -171,7 +171,7 @@ container_srun_args() { CTR_SRUN=(); }
 @pytest.mark.parametrize(("swarm_code", "world", "waited", "calls"), [
     (200, "000", False, []),            # a requeue: the swarm is live, nothing is applied (S2)
     (404, "000", True, []),             # first start, world down: waits, gives up, applies nothing
-    (404, "200", False, ["apply"]),     # first start: flock apply spec.yaml once the world answers
+    (404, "200", False, ["launch"]),    # first start: flock launch spec.yaml once the world answers
     (500, "200", False, []),            # anything else: nothing
 ])
 def test_controller_applies_only_when_the_swarm_is_missing(tmp_path, swarm_code, world, waited, calls):
@@ -205,7 +205,7 @@ http_status() {{ case $1 in */healthz) echo 200;; */swarms/s) echo {swarm_code};
     assert not (tmp_path / "requeues").exists()  # never requeues itself over a missing world
     called = tmp_path / "calls"
     got = called.read_text().splitlines() if called.exists() else []
-    assert got == [f"apply {exp / 'spec.yaml'}" for _ in calls], result.stdout
+    assert got == [f"launch {exp / 'spec.yaml'}" for _ in calls], result.stdout
 
 
 def test_role_preparation_plan_and_existing_checkout_protection(tmp_path):

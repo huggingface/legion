@@ -14,7 +14,7 @@ The controller is the one `flock` reaches: FLOCK_URL / FLOCK_TOKEN (jobs mode, f
 session), else the local run's .flock/current (the single-job bootstrap runs it in the
 experiment folder). S is the rendered spec (`spec.local.yaml`, render.py): its
 `types.<type>.replicas` are set, then S is applied as `flock update S` does, so prompts,
-tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's `flock scale` up stays. Replica types outside the
+tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's raise (`flock update --replicas spec`) stays. Replica types outside the
 schedule (agent-pi) are written into S as the controller runs them, so a wave never resets them.
 A wave with `stagger_s` (waves.yaml: 10 s for wave 1 by default, 0 after) raises the count
 one agent at a time, that many seconds apart; `tick` and `run` block meanwhile. Every change is

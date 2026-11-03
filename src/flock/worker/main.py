@@ -782,7 +782,9 @@ class Worker:
                                agents=[a.heartbeat() for a in self.agents.values()],
                                mem=self.mem, restore=self.restore_progress(),
                                tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev,
-                               wants_rotation=self.wants_rotation)
+                               wants_rotation=self.wants_rotation,
+                               unsynced={a.name: a.unsynced for a in self.agents.values()
+                                         if a.unsynced})
 
     def restore_progress(self) -> RestoreProgress | None:
         """Restores in flight, summed over agents (BucketSync.restore_progress)."""
@@ -1128,8 +1130,14 @@ class Worker:
         agents = list(self.agents.values())
         cut = await asyncio.gather(*(rt.drain(deadline) for rt in agents), return_exceptions=True)
         self._interrupted.update(rt.name for rt, c in zip(agents, cut, strict=True) if c is True)
-        log.info("drain: %d agents finished and synced in %.1f s; bucket %s", len(self.agents),
-                 loop.time() - t0, self.sync.stats.since(snap) if self.sync else {})
+        for rt, c in zip(agents, cut, strict=True):
+            if isinstance(c, BaseException):  # the drain itself failed: its sync is not known
+                rt.unsynced = f"drain failed: {type(c).__name__}: {c}"[:300]
+        unsynced = [rt.name for rt in agents if rt.unsynced]
+        log.log(logging.WARNING if unsynced else logging.INFO,
+                "drain: %d agents finished in %.1f s, %s; bucket %s", len(self.agents),
+                loop.time() - t0, f"NOT synced: {', '.join(unsynced)}" if unsynced else "all synced",
+                self.sync.stats.since(snap) if self.sync else {})
         self._drained.set()
 
     async def abandon(self, why: str) -> None:

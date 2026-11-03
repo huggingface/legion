@@ -89,7 +89,7 @@ def test_cli_prompt_by_type(tmp_path, monkeypatch, app, store, tick):
     monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
-    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     tick()
     r = runner.invoke(cli.app, ["prompt", "--swarm", "demo", "--type", "researcher", "hello all"])
     assert r.exit_code == 0, r.output

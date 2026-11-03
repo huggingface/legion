@@ -104,6 +104,7 @@ class StateSync:
         self._uploaded: dict[str, tuple[int, int, str]] | None = None
         self._remote_tails: dict[str, list[str]] = {}  # tail parts in the bucket, per file
         self._mirrored: dict[str, tuple[int, int]] = {}  # health file -> (bytes, mtime_ns) sent
+        self._restored = False
 
     def restore(self) -> bool:
         """Before the Store opens: replace the local DB (and event files) with the bucket's copy.
@@ -138,6 +139,7 @@ class StateSync:
             else:
                 self.bucket.sync_down(name, self.data_dir / name)
         self._mirrored = dict(self._scan_mirrored())
+        self._restored = True
         log.info("state: restored %d swarms (%s), %d agents, %d workers from the bucket",
                  len(summary["swarms"]), ", ".join(summary["swarms"]), summary["agents"],
                  summary["workers"])
@@ -176,6 +178,8 @@ class StateSync:
         the number of files pushed (the DB plus the event files), 0 when nothing changed.
         `final` (the shutdown push): upload only the bytes appended to each event file."""
         with self._lock:
+            if self.pushes == 0 and not self._restored and not store.list_swarms():
+                return 0  # a fresh, empty controller never overwrites a checkpoint (`--adopt`)
             changes = store.changes()
             files = 0
             # health files change without the DB (in-memory samples): sent on their own
@@ -245,6 +249,26 @@ class StateSync:
                 self.bucket.delete(stale)
         self._uploaded.update(records)
         return n
+
+
+def adopt_checkpoint(bucket: BucketStore, store: Store, swarm: str) -> int | None:
+    """`flock launch --adopt`: copy one swarm from a controller checkpoint (`state.db` and
+    `events/<swarm>/` under the bucket prefix) into the running `store`. Returns the number
+    of agents adopted; None when there is no checkpoint holding `swarm`."""
+    if STATE_DB not in bucket.list(STATE_DB):
+        return None
+    with tempfile.TemporaryDirectory(prefix="flock-adopt-", dir=store.data_dir) as tmp:
+        snap = Path(tmp) / DB_NAME
+        bucket.download([(STATE_DB, snap)])
+        if swarm not in snapshot_summary(snap)["swarms"]:
+            return None
+        n = store.adopt(snap, swarm)
+    events = store.data_dir / EVENTS / swarm
+    bucket.sync_down(f"{EVENTS}/{swarm}", events)
+    merge_tails(events)
+    store.repair_events()
+    log.info("state: adopted swarm %s (%d agents) from the bucket checkpoint", swarm, n)
+    return n
 
 
 def snapshot_summary(path: str | Path) -> dict:

@@ -9,7 +9,7 @@
 # Fact sheet (notes/run3-slurm-facts.md) §3 controller, §5 restart, §7 proposed layout.
 # - Step 1: `flock-controller` (FastAPI on 7860, SQLite in FLOCK_DATA under /tmp, state pushed to
 #   FLOCK_STATE_URL every 60 s and once more on SIGTERM; restored at start).
-# - Step 2, once GET /healthz answers: `flock apply` the experiment's spec.yaml only when the
+# - Step 2, once GET /healthz answers: `flock launch` the experiment's spec.yaml only when the
 #   swarm is not on the controller (HTTP 404: the first start); on 200 (a Spot requeue restored
 #   it) nothing, so a requeue never undoes a stop or resets live counts. The controller runs the
 #   ramp (replicas_ramp). The step runs in a background subshell: the apply preflight can be
@@ -47,7 +47,7 @@ LOG_TAG=controller
 
 # ---------------------------------------------------------------- signals (first thing: a reclaim during start-up must requeue too)
 CTL_PID= ; APPLY_PID= ; REQUEUE=0 ; STOPPING=0
-stop_children() {  # SIGTERM to the apply step first (it may be mid `flock apply`), then the controller
+stop_children() {  # SIGTERM to the apply step first (it may be mid `flock launch`), then the controller
   STOPPING=1
   [ -n "$APPLY_PID" ] && kill -TERM "$APPLY_PID" 2>/dev/null
   [ -n "$CTL_PID" ] && kill -TERM "$CTL_PID" 2>/dev/null
@@ -94,7 +94,7 @@ EXPERIMENT=${RUN3_EXPERIMENT:-run4}              # experiments/<name>: run4, hie
 EXP=$RUN_DIR/experiment                         # a copy of experiments/$EXPERIMENT, taken at the first start
 SPEC=$EXP/spec.yaml                             # the one spec: compute, ramp and ${VAR}s inline
 HEALTH_WAIT_S=${HEALTH_WAIT_S:-300}
-WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # first launch only: how long `flock apply` waits for the world
+WORLD_WAIT_S=${WORLD_WAIT_S:-1800}               # first launch only: how long `flock launch` waits for the world
 
 # ---------------------------------------------------------------- controller environment (fact sheet §2)
 export FLOCK_MODE=space                         # space mode: workers get FLOCK_URL as-is (main.py)
@@ -195,21 +195,21 @@ apply_step() {  # runs in a background subshell (below)
   until world_host=$(tr -d '[:space:]' < "$HOSTS_DIR/world.host" 2>/dev/null) && [ -n "$world_host" ] &&
         [ "$(http_status "http://$world_host:7860/manifest" X-World-Token CHATBOT_WORLD_TOKEN)" = 200 ]; do
     [ $(( $(date +%s) - t0 )) -lt "$WORLD_WAIT_S" ] \
-      || { log "world unavailable after ${WORLD_WAIT_S}s: start world.sbatch, then flock apply by hand (README)"; return 1; }
+      || { log "world unavailable after ${WORLD_WAIT_S}s: start world.sbatch, then flock launch by hand (README)"; return 1; }
     sleep 10
   done
   log "world: http://$world_host:7860 answers /manifest"
-  log "swarm $swarm not on the controller: flock apply $SPEC ${RUN3_APPLY_ARGS:-}"
+  log "swarm $swarm not on the controller: flock launch $SPEC ${RUN3_APPLY_ARGS:-}"
   # shellcheck disable=SC2086
-  (cd "$EXP" && "$VENV/bin/flock" apply "$SPEC" ${RUN3_APPLY_ARGS:-}) >> "$RUN_DIR/logs/apply-$RUN.log" 2>&1 \
-    || { log "flock apply failed: see $RUN_DIR/logs/apply-$RUN.log"; return 1; }
+  (cd "$EXP" && "$VENV/bin/flock" launch "$SPEC" ${RUN3_APPLY_ARGS:-}) >> "$RUN_DIR/logs/apply-$RUN.log" 2>&1 \
+    || { log "flock launch failed: see $RUN_DIR/logs/apply-$RUN.log"; return 1; }
   log "applied: the controller ramps the replicas (replicas_ramp in the spec)"
 }
 if [ "$STOPPING" = 0 ]; then
-  # In the background: `flock apply` (preflight included) can take a while and bash would hold the
+  # In the background: `flock launch` (preflight included) can take a while and bash would hold the
   # USR1 trap until it returned. Started under `trap '' USR1` like the controller (see step 1).
   trap '' USR1
-  ( apply_step || log 'apply step failed: the controller keeps running; fix and `flock apply` by hand (README)' ) &
+  ( apply_step || log 'apply step failed: the controller keeps running; fix and `flock launch` by hand (README)' ) &
   APPLY_PID=$!
   trap on_usr1 USR1
   log "apply step pid $APPLY_PID"

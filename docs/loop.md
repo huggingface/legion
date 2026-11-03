@@ -21,7 +21,7 @@ types:
     replicas: 1000
     loop:
       prompt: "Round {round}: claim and paint. Repeat until the result says you are done, then call done."
-      # or prompt_file: prompts/round.md (read by `flock apply`, relative to the spec)
+      # or prompt_file: prompts/round.md (read by `flock launch`, relative to the spec)
       every: turn_end            # turn_end (default) | a duration: 30s, 2m
       on: [comms.mention]        # wake-ups from the board (see "Wake queue")
       wake:                      # how wake-ups spend rounds (all optional; these are the defaults)
@@ -46,7 +46,7 @@ limits:
 |---|---|
 | `prompt` / `prompt_file` | the loop prompt, a template rendered on the worker (placeholders below); one is required |
 | `every` | `turn_end`: the next loop prompt as soon as the agent's turn completes. A duration: an idle agent gets the next one that long after its previous loop prompt was sent |
-| `on` | wake sources (`comms.mention`, `comms.thread`, ...): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `flock apply` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key and `"on":` quoting is no longer needed |
+| `on` | wake sources (`comms.mention`, `comms.thread`, ...): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `flock launch` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key and `"on":` quoting is no longer needed |
 | `wake.min_gap` | per agent: at least this long between two wake prompts (default `30s`; `0s` turns it off). Wakes that arrive in the gap are coalesced into one prompt when it ends |
 | `wake.max`, `wake.window` | per agent: at most `max` wake prompts (default 10) per run of the loop, or per `window` when set; `null` for no cap. Past it, wakes are ignored (`wake()` returns false) |
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round, as before this setting |
@@ -153,7 +153,7 @@ what the controller's ledger knows, which is updated by heartbeats (every 30 s),
 is bounded by about one heartbeat of spend of the working agents; Eliza's `log_overshoot` makes
 the same point.
 
-**Live settings** (worlds-design §4.4). `flock apply` with a changed `loop:` takes effect at the
+**Live settings** (worlds-design §4.4). `flock launch` with a changed `loop:` takes effect at the
 next tick: controller-side settings (`every`, `while`, `final`) are read every tick,
 and worker-side loops get a fresh `loop_start` with the new prompt and limits (`loop_updated`
 event). The mode is recomputed on every tick from `every` and the provider's `max_working`, so a
@@ -173,15 +173,17 @@ so a controller restart resumes the loops; only queued wake-ups are lost.
 
 ### Pause and resume
 
-A hold stops new work reaching some agents without ending their loop. Unlike `flock loop
---stop` it resets nothing and runs no final round.
+A hold (`flock stop`) stops new work reaching some agents without ending their loop. Unlike
+`flock stop --final` it resets nothing and runs no final round.
 
 ```
-flock pause demo --type ds --reason "provider maintenance"     # one or more --type / --agent
-flock pause demo --agent ds-0003 --interrupt --reason "look"   # also stop the turn in flight
-flock pause demo --reason "..."                                # no --type/--agent: every type
-flock resume demo --type ds                                    # no --type/--agent: every hold
+flock stop demo --type ds --reason "provider maintenance"      # one or more --type / --agent
+flock stop demo --agent ds-0003 --interrupt --reason "look"    # also stop the turn in flight
+flock stop demo                                                # no --type/--agent: every type
+flock launch demo --type ds                                    # no --type/--agent: every hold
 ```
+
+`flock stop demo --release` also frees the compute (docs/live.md "Lifecycle").
 
 While an agent is held (its type or its name is held):
 
@@ -229,7 +231,7 @@ queued, is taken back from the wake count, and from the round count when it coun
 
 Why: in a thread of five agents each reply woke the four others, and each wake was a full round,
 so `max_rounds` went on board chatter in minutes. With the defaults one agent gets at most one
-wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock apply` and `flock run` warn when an `on:` source can never
+wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock launch` and `flock run` warn when an `on:` source can never
 fire: a `comms.*` source on a type that is not on the board (no `comms: true` or no swarm
 `comms:` block), a kind the swarm's `comms.wake` leaves out, or a source with no feeder.
 
@@ -359,7 +361,7 @@ PR), the start stagger, the per-round context block, and the final-submission bo
 
 ## Deferred, and what differs from the note
 
-Deferred to the world PR (accepted by the model, refused by `flock apply` and `PUT /swarms`
+Deferred to the world PR (accepted by the model, refused by `flock launch` and `PUT /swarms`
 with "needs a world (not in this version)"): `on: world.*`. Not done: a `run_stopping` hook to
 a world, per-call booking to tighten the budget overshoot, a `loop.start: manual` switch, and
 `limits.final_reserve_usd`: the note's §4.7 put the reserve under `limits`; here it is

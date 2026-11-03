@@ -1,4 +1,4 @@
-"""Live changes end to end in one process (docs/live.md): the real CLI (`flock apply`,
+"""Live changes end to end in one process (docs/live.md): the real CLI (`flock launch`,
 `flock update`), the real controller app and reconcile pass, two real Worker loops
 (FakeJobsClient, ASGI) running the `llm` harness against tests/fake_openai.py. The experiment
 folder changes while the swarm runs (system prompt, tools folder, replicas). Each change
@@ -81,7 +81,7 @@ async def test_update_reaches_running_agents(tmp_path, monkeypatch):
         return turn_slices(await turns(admin, agent, n))[-1]
 
     try:
-        await cli_run("apply", str(spec_file), "--skip-preflight")
+        await cli_run("launch", str(spec_file), "--skip-preflight")
         sw.tick()
         await until(lambda: len(sw.workers) == 2
                     and all(w.tools.version == v1 for w in sw.workers.values()), timeout=10)

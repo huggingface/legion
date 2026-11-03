@@ -57,12 +57,16 @@ def _changes(old: dict[str, Any], new: dict[str, Any]) -> list[tuple[str, Any, A
     return [(k, a.get(k), b.get(k)) for k in sorted(a.keys() | b.keys()) if a.get(k) != b.get(k)]
 
 
-def keep_replicas(old: SwarmSpec, new: SwarmSpec) -> list[str]:
+def keep_replicas(old: SwarmSpec, new: SwarmSpec, *, ramps_only: bool = False) -> list[str]:
     """Copy the live replica count of every type `old` already has into `new`; returns one
-    line per type whose spec value differed (`agent: replicas kept (spec 20, live 300)`)."""
+    line per type whose spec value differed (`agent: replicas kept (spec 20, live 300)`).
+    `ramps_only` (`update --replicas spec`): only where the file would lower a ramp type
+    (the ramp raised it; lower `replicas_ramp.max` instead)."""
     lines = []
     for name, ts in new.types.items():
         live = old.types[name].replicas if name in old.types else None
+        if ramps_only and (live is None or ts.replicas_ramp is None or live < ts.replicas):
+            continue
         if live is not None and live != ts.replicas:
             lines.append(f"{name}: replicas kept (spec {ts.replicas}, live {live})")
             ts.replicas = live

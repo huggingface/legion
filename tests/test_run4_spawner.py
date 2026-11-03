@@ -24,7 +24,7 @@ CHILD_TEXT = "You were started by another agent (your parent, `$FLOCK_PARENT`)"
 
 
 def run4_spec(spawners: int = 1):
-    spec = load_spec(str(EXP / "spec.yaml"))  # as `flock apply` reads it: prompts inlined
+    spec = load_spec(str(EXP / "spec.yaml"))  # as `flock launch` reads it: prompts inlined
     spec.types["agent-spawner"].replicas = spawners
     # The in-process controller has no world or board; the types are what is under test.
     data = spec.model_dump(mode="json")

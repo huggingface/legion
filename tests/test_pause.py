@@ -134,17 +134,17 @@ async def test_worker_loop_is_stopped_by_a_hold_and_restarted_with_its_rounds(si
     assert starts[A0]["kind"] == "loop_start" and starts[A0]["meta"]["round"] == 1
 
 
-def test_cli_pause_resume_and_held_marker(app, store, monkeypatch, tick):
+def test_cli_stop_launch_and_held_marker(app, store, monkeypatch, tick):
     _wire(monkeypatch, app)
     store.put_swarm(make_spec(), 0.0)
     runner = CliRunner()
-    r = runner.invoke(cli.app, ["pause", "demo", "--type", "researcher", "--reason", "deploy"])
+    r = runner.invoke(cli.app, ["stop", "demo", "--type", "researcher", "--reason", "deploy"])
     assert r.exit_code == 0 and "held: type researcher" in r.output, r.output
     r = runner.invoke(cli.app, ["status", "demo"])
     assert "HELD type researcher: deploy (by operator" in r.output, r.output
-    r = runner.invoke(cli.app, ["pause", "demo", "--reason", "x", "--type", "nope"])
+    r = runner.invoke(cli.app, ["stop", "demo", "--reason", "x", "--type", "nope"])
     assert r.exit_code != 0
-    r = runner.invoke(cli.app, ["resume", "demo"])
+    r = runner.invoke(cli.app, ["launch", "demo"])
     assert r.exit_code == 0 and "held: nothing" in r.output, r.output
     assert "HELD" not in runner.invoke(cli.app, ["status", "demo"]).output
 

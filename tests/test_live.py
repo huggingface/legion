@@ -355,7 +355,7 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
     f = _experiment(exp)
     r = runner.invoke(cli.app, ["update", str(exp)])
     assert r.exit_code == 1 and "no swarm 'demo' is running" in r.output
-    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
+    assert runner.invoke(cli.app, ["launch", str(f)]).exit_code == 0
     tick()
     v1 = store.get_swarm("demo")["spec"].tools_version
     r = runner.invoke(cli.app, ["update", str(exp)])
@@ -389,7 +389,7 @@ def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, s
     _wire(monkeypatch, app)
     exp = tmp_path / "exp"
     f = _experiment(exp, replicas=4)
-    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
+    assert runner.invoke(cli.app, ["launch", str(f)]).exit_code == 0
     tick()
     _experiment(exp, replicas=2, prompt="v2")
     before = store.get_swarm("demo")["spec"]

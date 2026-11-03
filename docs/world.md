@@ -48,7 +48,7 @@ carry both, and `compute:` is the only line that changes.
 
 ## What flock does
 
-**At apply** (`flock apply`, `flock run`, any re-apply):
+**At apply** (`flock launch`, `flock run`, any re-apply):
 
 1. With `compute: local` and a `command`, the controller starts the world as a child process. It
    runs in `dir` with these variables set: `FLOCK_WORLD_PORT`, `FLOCK_WORLD_HOST=127.0.0.1`,

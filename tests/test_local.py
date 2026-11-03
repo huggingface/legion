@@ -270,7 +270,7 @@ def test_flock_run_refuses_a_jobs_spec_and_a_bad_until(tmp_path):
     jobs_spec = tmp_path / "jobs.yaml"
     jobs_spec.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
     r = runner.invoke(cli.app, ["run", str(jobs_spec)])
-    assert r.exit_code == 1 and "compute: local" in r.output and "flock apply" in r.output
+    assert r.exit_code == 1 and "compute: local" in r.output and "flock launch" in r.output
     loc = tmp_path / "local.yaml"
     loc.write_text(yaml.safe_dump(local_spec().model_dump(mode="json")))
     r = runner.invoke(cli.app, ["run", str(loc), "--until", "soon"])

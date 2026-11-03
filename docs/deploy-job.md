@@ -72,7 +72,7 @@ scripts/deploy-job.sh "$W" --group flock-run3 [--flavor cpu-upgrade] [--timeout 
     [--secret OPENAI_API_KEY ...] [--dry-run]
 # controller job: 6ad7...   API: https://6ad7...--7860.hf.jobs   status: https://6ad7...--7861.hf.jobs
 export FLOCK_URL=https://6ad7...--7860.hf.jobs
-uv run flock apply spec.yaml          # spec.namespace must be the job's namespace
+uv run flock launch spec.yaml          # spec.namespace must be the job's namespace
 ```
 
 The script (`python -m flock.controller.jobdeploy`) launches `python:3.12-slim`. That

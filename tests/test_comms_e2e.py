@@ -1,9 +1,9 @@
-"""Comms end to end in one process: `flock apply` (the real CLI) with a `comms:` block, the real
+"""Comms end to end in one process: `flock launch` (the real CLI) with a `comms:` block, the real
 controller (ASGI) resolves the channel and posts the kickoff as `<swarm>-host` on the fake
 msgboard, the reconcile pass places a 2-agent `llm` swarm on one real Worker, and the real
 LLMAdapter talks to tests/fake_openai.py, whose model posts, is refused for a fast second post,
 reads, gets mentioned (a controller comms event), and searches. Then the protocols and rules
-change, `flock apply` runs again, and the running agents get both without a restart."""
+change, `flock update` runs, and the running agents get both without a restart."""
 
 from __future__ import annotations
 
@@ -132,7 +132,7 @@ async def test_comms_end_to_end(tmp_path, monkeypatch):
         # live settings: new protocol text and no gap; re-apply while the agents run
         (exp / "protocols" / "lead-agree.md").write_text("PROTO-V2: the lead posts a plan first.")
         spec_file.write_text(yaml.safe_dump(spec_raw(llm_url, board_url, "0s")))
-        await apply(spec_file)
+        await apply(spec_file, "update")
         await until(lambda: w.comms.spec.rules.min_post_gap == "0s", timeout=10)
         t = await prompt(A, f'call: post {{"text": "plan: probes first", "thread": {root}}}', 4)
         out, err = tool_result(t)

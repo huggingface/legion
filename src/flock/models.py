@@ -349,7 +349,7 @@ class CommsRules(_Removable):
 class CommsSpec(_Removable):
     """Swarm-level `comms:` (docs/comms.md). `url`, `invite_env` and `channel` are resolved
     once by the controller at apply (channel name -> `channel_id`); `kickoff_file` and
-    `protocols` are files next to the spec that `flock apply` inlines (`kickoff`,
+    `protocols` are files next to the spec that `flock launch` inlines (`kickoff`,
     `protocols_text`), because the controller and workers cannot read the caller's files."""
 
     model_config = {"extra": "forbid"}
@@ -363,10 +363,10 @@ class CommsSpec(_Removable):
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
     channel: str  # name, with or without `#`
     kickoff_file: str | None = None
-    kickoff: str | None = None  # the file's text, inlined by `flock apply` (or given inline)
+    kickoff: str | None = None  # the file's text, inlined by `flock launch` (or given inline)
     rules: CommsRules = Field(default_factory=CommsRules)
     protocols: list[str] = Field(default_factory=list)  # files appended to the instructions
-    protocols_text: list[str] = Field(default_factory=list)  # inlined by `flock apply`
+    protocols_text: list[str] = Field(default_factory=list)  # inlined by `flock launch`
     wake: list[Literal["mention", "thread", "dm", "channel"]] = Field(default_factory=lambda: ["mention", "thread"])
     search: Literal["board", "index"] | None = "board"
     # Written by the controller at apply; anything given by hand is replaced.
@@ -436,7 +436,7 @@ class WorldSpec(_Removable):
 
     model_config = {"extra": "forbid"}
 
-    dir: str | None = None  # relative to the spec file; `flock apply` / `flock run` resolve it
+    dir: str | None = None  # relative to the spec file; `flock launch` / `flock run` resolve it
     command: list[str] | None = None  # `{port}` and `{python}` are filled in by flock
     url: str | None = None
     token_env: str | None = None
@@ -672,10 +672,10 @@ class TypeSpec(BaseModel):
     reasoning: Reasoning | None = None  # overrides the alias's reasoning
     image: str | None = None  # None -> default worker image
     system_prompt_file: str | None = None  # written into the workdir as CLAUDE.md / AGENTS.md
-    # The file's contents, inlined by `flock apply` (the controller and workers cannot
+    # The file's contents, inlined by `flock launch` (the controller and workers cannot
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None
-    # A second file appended to the system prompt by `flock apply` (after a blank line): a
+    # A second file appended to the system prompt by `flock launch` (after a blank line): a
     # per-type section on top of a prompt several types share (e.g. a spawner and its
     # child types). The worker only sees the combined `system_prompt`.
     system_prompt_append_file: str | None = None
@@ -732,7 +732,7 @@ class TypeSpec(BaseModel):
     node_heap_mb: int | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
     # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
-    # `flock apply` refuses a name the folder does not define. None: no folder tools.
+    # `flock launch` refuses a name the folder does not define. None: no folder tools.
     tools: list[str] | Literal["all"] | None = None
     # Re-prompt this type's agents on a cadence, then a final round (docs/loop.md). None: off.
     loop: LoopSpec | None = None
@@ -947,9 +947,9 @@ class SwarmSpec(BaseModel):
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
     # The tools folder (docs/tools.md), relative to the spec file; None: `tools/` next to it.
-    # Read by `flock apply` only.
+    # Read by `flock launch` only.
     tools_dir: str | None = None
-    # Content hash of the tools bundle, written by `flock apply` after uploading the folder
+    # Content hash of the tools bundle, written by `flock launch` after uploading the folder
     # (anything given by hand is replaced). Workers fetch that version; None: no tools.
     tools_version: str | None = None
     # The team's message board (docs/comms.md); None: no comms.
@@ -965,7 +965,7 @@ class SwarmSpec(BaseModel):
     @classmethod
     def _valid_tools_version(cls, v: str | None) -> str | None:
         if v is not None and not TOOLS_VERSION_RE.match(v):
-            raise ValueError("tools_version is written by `flock apply` (16 hex digits)")
+            raise ValueError("tools_version is written by `flock launch` (16 hex digits)")
         return v
 
     @field_validator("providers")
@@ -1046,7 +1046,7 @@ class SwarmSpec(BaseModel):
                 raise ValueError(f"types.{name}: world: false but tools lists {', '.join(listed)}")
         c = self.comms
         if c is not None and c.protocols_text and len(c.protocols_text) != len(c.protocols):
-            raise ValueError("comms.protocols_text is written by `flock apply` (one per protocols file)")
+            raise ValueError("comms.protocols_text is written by `flock launch` (one per protocols file)")
         return self
 
     @field_validator("swarm")
@@ -1340,7 +1340,7 @@ class LoopFinal(_Removable):
     model_config = {"extra": "forbid"}
 
     prompt: str | None = None
-    prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
+    prompt_file: str | None = None  # inlined into `prompt` by `flock launch`
     reserve_usd: float = 0.0
 
     @field_validator("reserve_usd")
@@ -1395,7 +1395,7 @@ class LoopSpec(_Removable):
     model_config = {"extra": "forbid", "populate_by_name": True}
 
     prompt: str | None = None
-    prompt_file: str | None = None  # inlined into `prompt` by `flock apply`
+    prompt_file: str | None = None  # inlined into `prompt` by `flock launch`
     every: str = "turn_end"
     on: list[str] = Field(default_factory=list)  # comms.mention, comms.thread, world.event:*
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
@@ -1471,7 +1471,7 @@ def agent_cap(ts: TypeSpec) -> float | None:
 
 def loop_refusals(spec: SwarmSpec) -> list[str]:
     """Loop settings this version accepts in the model but cannot run: world-backed wakes and
-    prompt files not inlined. `flock apply` and the controller refuse a spec with any of them."""
+    prompt files not inlined. `flock launch` and the controller refuse a spec with any of them."""
     out: list[str] = []
     for name, ts in spec.types.items():
         lp = ts.loop
@@ -1480,9 +1480,9 @@ def loop_refusals(spec: SwarmSpec) -> list[str]:
         where = f"types.{name}.loop"
         out += [f"{where}.on: {x} {NEEDS_WORLD}" for x in lp.on if x.startswith("world.")]
         if lp.prompt is None:
-            out.append(f"{where}.prompt_file: not inlined (use `flock apply`, which reads it)")
+            out.append(f"{where}.prompt_file: not inlined (use `flock launch`, which reads it)")
         if lp.final is not None and lp.final.prompt is None:
-            out.append(f"{where}.final.prompt_file: not inlined (use `flock apply`, which reads it)")
+            out.append(f"{where}.final.prompt_file: not inlined (use `flock launch`, which reads it)")
     return out
 
 
@@ -1593,6 +1593,9 @@ class WorkerHeartbeat(BaseModel):
     # nonreclaimable memory passed FLOCK_MEM_ROTATE of the limit: the controller drains the
     # worker when its rotation budget allows (docs/slurm.md "Memory")
     wants_rotation: bool = False
+    # agents whose last push to the bucket failed (retried once), with the error; the drain's
+    # final heartbeat carries them so `flock stop --release` can name them
+    unsynced: dict[str, str] = Field(default_factory=dict)
 
 
 class Event(BaseModel):
@@ -1897,6 +1900,8 @@ class SwarmStatus(BaseModel):
     # pause holds (docs/loop.md "Pause and resume"): {types: {T: {since, reason, by, auto}},
     # agents: {A: ...}}; None when nothing is held
     held: dict[str, dict[str, dict[str, Any]]] | None = None
+    # `flock stop --release`: {since, reason, unsynced: {agent: error}}; None when not released
+    released: dict[str, Any] | None = None
     # bumped by every apply that changes the spec (docs/live.md)
     generation: int | None = None
 

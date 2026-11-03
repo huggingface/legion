@@ -218,7 +218,7 @@ def greet(name: str, ctx: Context) -> str:
 
 
 def test_flock_run_ships_the_tools_folder(tmp_path, fake_server):
-    """`flock run` uploads tools/ like `flock apply` (docs/tools.md): the spec is applied with
+    """`flock run` uploads tools/ like `flock launch` (docs/tools.md): the spec is applied with
     its tools_version, and an agent's turn calls the folder tool."""
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "greet.py").write_text(GREET)

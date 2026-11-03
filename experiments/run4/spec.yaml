@@ -1,4 +1,4 @@
-swarm: ${CHATBOT_RUN:-run4}             # ${VAR:-default}: flock apply --env run.env (README)
+swarm: ${CHATBOT_RUN:-run4}             # ${VAR:-default}: flock launch --env run.env (README)
 compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
   kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock run` on one machine
   partition: ${RUN3_SLURM_PARTITION:-hopper-cpu}
@@ -80,7 +80,7 @@ types:
       while: {until: '${LOOP_UNTIL:-48h}', max_rounds: '${LOOP_MAX_ROUNDS:-10000}'}  # smoke: LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100
       final: {prompt_file: prompts/final.md}
   # The spawner wave (README "Spawner wave"): the same agent, plus a group section. The operator
-  # sets agent-spawner replicas (`flock scale`); each may spawn up to 4 agent-child peers (spawn: below).
+  # sets agent-spawner replicas (edit + `flock update --replicas spec`); each may spawn up to 4 agent-child peers (spawn: below).
   agent-spawner:
     <<: *agent
     replicas_ramp: null                     # not ramped
