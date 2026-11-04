@@ -179,7 +179,7 @@ class StateSync:
         `final` (the shutdown push): upload only the bytes appended to each event file."""
         with self._lock:
             if self.pushes == 0 and not self._restored and not store.list_swarms():
-                return 0  # a fresh, empty controller never overwrites a checkpoint (`--adopt`)
+                return 0  # a fresh, empty controller never overwrites a checkpoint it did not restore
             changes = store.changes()
             files = 0
             # health files change without the DB (in-memory samples): sent on their own
@@ -249,37 +249,6 @@ class StateSync:
                 self.bucket.delete(stale)
         self._uploaded.update(records)
         return n
-
-
-def adopt_checkpoint(bucket: BucketStore, store: Store, swarm: str, *,
-                     own: bool = False) -> int | None:
-    """`flock launch --adopt`: copy one swarm from a controller checkpoint (`state.db` and
-    `events/<swarm>/` under the bucket prefix) into the running `store`. Returns the number
-    of agents adopted; None when there is no checkpoint holding `swarm`. `own`: the prefix is
-    this controller's FLOCK_STATE_URL, which its next push overwrites with its own swarms:
-    ValueError when the snapshot holds others it would drop. Event files come down first, so
-    a failed download leaves no rows behind (a retry starts clean)."""
-    if STATE_DB not in bucket.list(STATE_DB):
-        return None
-    with tempfile.TemporaryDirectory(prefix="flock-adopt-", dir=store.data_dir) as tmp:
-        snap = Path(tmp) / DB_NAME
-        bucket.download([(STATE_DB, snap)])
-        swarms = snapshot_summary(snap)["swarms"]
-        if swarm not in swarms:
-            return None
-        lost = [s for s in swarms if s != swarm and store.get_swarm(s) is None]
-        if own and lost:
-            raise ValueError(
-                f"the checkpoint is this controller's own state ({', '.join(lost)} too): its "
-                f"next push would keep only {swarm} and drop them. Restart the controller with "
-                "FLOCK_STATE_RESTORE=1 to restore all, or adopt with --checkpoint from a copy")
-        events = store.data_dir / EVENTS / swarm
-        bucket.sync_down(f"{EVENTS}/{swarm}", events)
-        merge_tails(events)
-        n = store.adopt(snap, swarm)
-    store.repair_events()
-    log.info("state: adopted swarm %s (%d agents) from the bucket checkpoint", swarm, n)
-    return n
 
 
 def snapshot_summary(path: str | Path) -> dict:

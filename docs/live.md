@@ -89,7 +89,6 @@ $ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --chec
 | free the workers, keep everything | `flock stop S --release` |
 | end the loops with their final round | `flock stop S --final [--type T]` |
 | continue after either | `flock launch S` (or `flock launch FOLDER`; `--type`/`--agent` lift one hold) |
-| take over a swarm another controller ran | `flock launch FOLDER --adopt` |
 
 `flock launch FOLDER` creates the swarm when the controller does not have it (with
 `If-None-Match: *`: of two launches racing, one creates and the other gets 412). When it has
@@ -106,18 +105,10 @@ agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, lo
 history stay on the controller; nothing launches until `flock launch S`, when each agent
 restores from the bucket by name. The world and controller jobs keep running.
 
-`--adopt` is for a controller that does not know the swarm (its state was lost or it is a new
-deployment). It restores the swarm from the controller checkpoint in the bucket (`state.db` and
-`events/<swarm>/`, pushed every 60 s by `FLOCK_STATE_URL`): from `--checkpoint URL` (an
-earlier run's state URL, e.g. `<bucket>/controller/<old RUN>`), else this controller's own
-`FLOCK_STATE_URL`, else `<bucket>/controller/<swarm>`. Adopting from the controller's own URL
-is refused when that checkpoint also holds other swarms (its next push would drop them):
-restart it with `FLOCK_STATE_RESTORE=1` instead. Every agent comes back with its cost,
-loop state, ramp step, spawn links and the naming counters; then `launch` resumes it as above.
-With no checkpoint `--adopt` is refused unless `--no-checkpoint` is also given: the swarm is
-then created from the spec and the agents restore from the bucket alone (costs, loops, ramp
-and spawn links start over). A fresh controller that never had a swarm never pushes, so it
-does not overwrite the checkpoint it is about to adopt.
+A controller that restarts restores its swarms from its own checkpoint (`state.db` and
+`events/<swarm>/`, pushed every 60 s to `FLOCK_STATE_URL`; `FLOCK_STATE_RESTORE=0` skips it).
+There is no takeover by another controller: a fresh launch whose bucket already holds the
+swarm's agents is refused; restart that run's controller, or pick a new swarm name or bucket.
 
 ## Generations
 

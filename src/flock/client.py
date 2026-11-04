@@ -278,21 +278,12 @@ class Client:
         """{"spec": stored spec, "status": status}; ClientError 404 when there is none."""
         return self._call("GET", f"/swarms/{swarm}")
 
-    def create(self, spec: SwarmSpec, *, adopt: bool = False,
-               source: dict[str, str] | None = None) -> dict:
-        """Create the swarm (refused with 412 when it exists: If-None-Match). `adopt` takes
-        over a bucket that already holds its agents; `source` is the X-Flock-Source header.
-        Returns its status."""
-        return self._call("PUT", f"/swarms/{spec.swarm}",
-                          params={"replicas": "spec", **({"adopt": 1} if adopt else {})},
+    def create(self, spec: SwarmSpec, *, source: dict[str, str] | None = None) -> dict:
+        """Create the swarm (refused with 412 when it exists: If-None-Match); `source` is the
+        X-Flock-Source header. Returns its status."""
+        return self._call("PUT", f"/swarms/{spec.swarm}", params={"replicas": "spec"},
                           json=spec.model_dump(mode="json"),
                           headers={**(source or {}), "If-None-Match": "*"})
-
-    def adopt(self, spec: SwarmSpec, checkpoint: str | None = None) -> dict:
-        """Restore a swarm this controller does not know from a controller checkpoint (its
-        own, or `checkpoint`, a FLOCK_STATE_URL); 404 when there is none."""
-        return self._call("POST", f"/swarms/{spec.swarm}/adopt", json=spec.model_dump(mode="json"),
-                          params={"checkpoint": checkpoint} if checkpoint else None, timeout=300)
 
     def preflight(self, spec: SwarmSpec) -> dict:
         """Probe the spec's provider-backed models; nothing is stored."""

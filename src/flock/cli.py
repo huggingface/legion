@@ -242,17 +242,6 @@ def launch(
         "--type", help="resume: lift only this type's hold (repeatable)")] = None,
     agent: Annotated[list[str] | None, typer.Option(
         "--agent", help="resume: lift only this agent's hold (repeatable)")] = None,
-    adopt: bool = typer.Option(
-        False, "--adopt", help="Take over a swarm this controller does not know: restore it "
-                               "from the controller checkpoint in its bucket."),
-    checkpoint: str = typer.Option(
-        None, "--checkpoint", metavar="STATE_URL",
-        help="With --adopt: the checkpoint to read (an earlier run's FLOCK_STATE_URL, e.g. "
-             "hf://buckets/ns/b/controller/<RUN>); default the controller's own, else "
-             "<bucket>/controller/<swarm>."),
-    no_checkpoint: bool = typer.Option(
-        False, "--no-checkpoint", help="With --adopt and no checkpoint: create the swarm from "
-                                       "the spec; agents restore from the bucket by name."),
     preflight: bool = typer.Option(
         None, "--preflight/--skip-preflight",
         help="Probe provider-backed models before creating (default: on when the spec has any)."),
@@ -263,14 +252,11 @@ def launch(
 ) -> None:
     """Start a swarm from an experiment folder (or spec file), or resume a stopped one
     (docs/live.md "Lifecycle"). Missing: creates it (refused when its bucket already holds
-    agents of that name, unless --adopt). Present: clears `flock stop`'s holds and release;
+    agents of that name). Present: clears `flock stop`'s holds and release;
     refused when the folder's spec differs from the stored one (replicas aside): run
     `flock update` first. Given a swarm name instead of a folder: resumes it."""
     api = _api()
     if ref is None and ops.is_swarm_name(target):
-        if adopt or checkpoint or no_checkpoint:
-            _fail([(f"--adopt, --checkpoint and --no-checkpoint need the experiment folder: "
-                   f"{target} is a swarm name (resume only)")])
         _show_held(api.resume(target, types=type_, agents=agent))
         return
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
@@ -280,9 +266,7 @@ def launch(
     checked = _checked(spec, spec_file)
     try:
         done = ops.launch(api, spec, spec_file, env_files=env_files, source=source, types=type_,
-                          agents=agent, adopt=adopt, checkpoint=checkpoint,
-                          no_checkpoint=no_checkpoint, preflight=preflight, strict=strict,
-                          checked=checked)
+                          agents=agent, preflight=preflight, strict=strict, checked=checked)
     except SpecError as e:
         _show_launch(spec.swarm, e.done, strict)
         if run := e.done.get("local"):
@@ -295,10 +279,6 @@ def _show_launch(swarm: str, done: dict, strict: bool) -> None:
     """What `ops.launch` did, in order (its warnings were shown by `_checked`)."""
     if run := done.get("local"):
         typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {ops.LOCAL_DIR}/launch.log)")
-    if a := done.get("adopted"):
-        typer.echo(f"adopted {swarm}: {a['agents']} agents from {a['checkpoint']}")
-    if why := done.get("adopt_skipped"):
-        typer.echo(f"{why}: creating from the spec (agents restore from the bucket)")
     if "resumed" in done:
         _show_held(done["resumed"])
     if "preflight" in done:
