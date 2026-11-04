@@ -15,7 +15,7 @@ casually: controller, worker and CLI all import it.
 
 ## Conventions
 - Python 3.11+, pydantic v2, httpx, typer, FastAPI. Keep it small; no new frameworks.
-- Build the env on local disk: `UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock" uv sync --all-extras`.
+- Install with `uv sync --all-extras`.
 - `ruff check` and `pytest` must pass before pushing.
 - Always pass `namespace=` to every `huggingface_hub` jobs call (saves a `whoami` per call).
 - Never launch an HF Job from tests. Experiments launch jobs only on `cpu-basic` unless the operator approved otherwise.
