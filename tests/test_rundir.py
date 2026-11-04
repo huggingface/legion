@@ -358,6 +358,8 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert (run / "cluster.env").read_text() == prof.read_text()
     assert any("cluster.env" in c for c in rep.created)
     assert _by_name(rep)["spec"].detail.startswith("from-profile:")  # the profile fills ${VAR}s
+    text = (run / "run.env").read_text()  # its keys say the profile's value, not `default: `
+    assert "# compute.partition (cluster.env: cpu-spot)\n#SLURM_PARTITION=\n" in text
     scripts = sorted(p.name for p in rundir.SLURM_SCRIPTS.iterdir())
     assert sorted(p.name for p in (run / "slurm").iterdir()) == scripts  # the job scripts' copy
     (run / "slurm" / "world.sbatch").write_text("# edited\n")
@@ -375,6 +377,38 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert spec.compute.partition == "cpu-spot" and spec.compute.cpus == 8
     with pytest.raises(ValueError, match="no such file"):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
+
+
+def test_spec_keys_never_show_a_secret_from_cluster_env():
+    data = {"a": "${SLURM_PARTITION:-}", "b": "${MY_API_KEY}", "c": "${INV:-x}",
+            "comms": {"invite_env": "INV"}}
+    cluster = {"SLURM_PARTITION": "cpu-spot", "MY_API_KEY": "sk-1", "INV": "inv-1"}
+    assert {n: c for n, (_, c) in rundir.spec_keys(data, cluster).items()} == {
+        "SLURM_PARTITION": "a (cluster.env: cpu-spot)", "MY_API_KEY": "b (cluster.env: set, not shown)",
+        "INV": "c (cluster.env: set, not shown)", "HF_TOKEN": "secret: bucket sync and the Hub"}
+    assert rundir.spec_keys(data)["SLURM_PARTITION"] == ("", "a (default: )")
+
+
+def test_cluster_env_is_0644_whatever_the_umask_and_the_doctor_checks_it_like_the_jobs(
+        tmp_path, monkeypatch):
+    src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
+    prof = tmp_path / "site.env"
+    prof.write_text("SLURM_PARTITION=cpu-spot\n")
+    monkeypatch.setattr(rundir, "check_capacity", lambda spec, env: rundir.Check("slurm capacity", True))
+    old = os.umask(0o002)  # a shared login node's
+    try:
+        rep = rundir.init(run, src, profile=prof, env={})
+    finally:
+        os.umask(old)
+    f = run / "cluster.env"
+    assert stat.S_IMODE(f.stat().st_mode) == 0o644 and _by_name(rep)["cluster.env"].ok
+    f.chmod(0o664)
+    c = _by_name(rundir.init(run, env={}))["cluster.env"]
+    assert c.ok is False and f"chmod go-w {f}" in c.detail
+    f.chmod(0o644)
+    monkeypatch.setattr(os, "getuid", lambda: f.stat().st_uid + 1)
+    c = rundir.check_cluster_env(f)
+    assert c.ok is False and "not you" in c.detail
 
 
 def test_slurm_capacity_from_a_fake_sinfo(tmp_path):

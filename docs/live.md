@@ -139,7 +139,7 @@ it.
 Besides `spec_applied`, the swarm stream (`flock status <swarm> --events`, names in docs/health.md "Events") carries what the reconcile
 loop does, as `{target, detail}`: `launch`, `launch_failed`, `launch_refused`, `crash`
 (detail: stage, message, backoff), `crashloop`, `planned_restart` (job timeout, drain,
-preemption), `cancel`, `retire`, `remove_worker`. Per-agent placement
+preemption), `end` (the same in a released swarm: no relaunch), `cancel`, `retire`, `remove_worker`. Per-agent placement
 (`assign`, `unassign`) and conditions repeated every pass (`workers_full`, the launch rate
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).

@@ -413,13 +413,14 @@ class Health:
                     f.write(json.dumps({"ts": now, "body": small}, sort_keys=True) + "\n")
 
     def latest(self, swarm: str) -> dict[str, Any] | None:
-        """The newest 30 s sample, else (after a restart) the newest stored slim one."""
+        """The newest 30 s sample, else (after a restart) the newest stored slim one, marked
+        `before_restart`: this controller has not taken one yet."""
         with self._lock:
             mem = self.samples.get(swarm)
             if mem:
                 return mem[-1]
         rows = self.store.health_samples(swarm, "5m", limit=1)
-        return rows[0] if rows else None
+        return {**rows[0], "before_restart": True} if rows else None
 
     def history(self, swarm: str, since: float) -> list[dict[str, Any]]:
         with self._lock:

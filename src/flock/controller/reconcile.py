@@ -646,7 +646,8 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "draining": 0,
         "preempted": 0,
     }
-    if not planned and store.swarm_flags(w["swarm"]).get("released"):
+    released = bool(store.swarm_flags(w["swarm"]).get("released"))
+    if not planned and released:
         # killed mid-drain (`stop --release`): no final heartbeat, so its agents' syncs are unknown
         why = f"worker {wid} ended before its final sync ({st.stage}: {st.message})"[:300]
         lost = {a["name"]: why for a in store.list_agents(worker=wid)}
@@ -655,7 +656,9 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
                               {**lost, **(store.get_control(w["swarm"], "unsynced") or {})})
     if planned:
         store.update_worker(wid, **common, consecutive_crashes=0, next_launch_at=p.now)
-        p.act("planned_restart", wid, f"{st.stage}: {st.message}")
+        # released (`stop --release`): it ends for good, nothing relaunches it until a launch
+        p.act("end" if released else "planned_restart", wid,
+              f"{st.stage}: {st.message}" if st.message else st.stage)
         if st.preempted:  # turns cut by the reclaim resume after the restore
             _interrupt_turns(p, w, st)
         return
