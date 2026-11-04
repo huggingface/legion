@@ -90,8 +90,9 @@ holding only copies of `auth.json` and `config.toml`. Workdirs:
 resuming, the workdir was copied A->B and machine A's directory was moved out of reach.
 
 ```sh
-ROOT=$AM_LOCAL/tmp/flock-codexrg OUT=$PWD/out/codex ./codex_resume.sh A
-ROOT=$AM_LOCAL/tmp/flock-codexrg OUT=$PWD/out/codex ./codex_resume.sh B rollout
+export ROOT=$(mktemp -d) OUT=$PWD/out/codex
+./codex_resume.sh A
+./codex_resume.sh B rollout
 # each turn: codex exec --json -m gpt-6-luna -c model_reasoning_effort="low" --skip-git-repo-check \
 #   --sandbox danger-full-access -c approval_policy="never" [resume <thread_id>] "<prompt>" < /dev/null
 ```
