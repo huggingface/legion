@@ -106,7 +106,8 @@ job checks `WORKER_MEM / WORKER_CPUS` against `SLURM_MAX_MEM_PER_CPU_MB` and han
 `flock init` read `FLOCK_SLURM_MAX_CPUS/_MEM` as they are (a size over them is refused).
 `cluster.env` is sourced as shell by jobs that hold secrets: it must be owned by the job's user
 and not group- or world-writable (the jobs refuse it otherwise). The job scripts read the paths, the
-image and the mounts. Without a partition anywhere, sbatch gets no `-p`.
+image and the mounts. Without a partition anywhere, sbatch gets no `-p`. `flock init` layers
+`cluster.env`, then `SECRETS_FILE` (owner-only, mode 600 or 400, else a failed check), then `run.env`, as the jobs do, for its board, provider and bucket checks.
 
 ## The launch contract
 
