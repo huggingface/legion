@@ -170,7 +170,8 @@ Different:
    type there; your `~/.pi/agent` is never touched, and its login is not used. These harnesses
    are wired the same way as `llm` but not yet tested locally.
 
-Known gaps: a worker that crashes is noticed by the reconcile loop's usual rules (60 s for a
-worker that never heartbeats, 90 s after its last heartbeat), not at once; `limits.budget_usd`
-is the only spec limit that stops a run (`alive` and `spawned_total` limit spawning, as on jobs);
-tested on Linux, not yet on macOS; Windows is not supported (process groups).
+A worker process that exits is noticed on the next reconcile pass and relaunched after
+`compute.crash_backoff` (2 s locally; docs/live.md "Worker liveness").
+
+Known gaps: `limits.budget_usd` is the only spec limit that stops a run (`alive` and
+`spawned_total` limit spawning, as on jobs); tested on Linux, not yet on macOS; Windows is not supported (process groups).
