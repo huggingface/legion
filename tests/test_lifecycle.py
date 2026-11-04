@@ -1,5 +1,5 @@
 """`flock launch` / `flock stop` (docs/live.md "Lifecycle"): release with verified final syncs,
-adopt from the controller checkpoint, the fresh-run guard, resume ignoring replicas, and
+the fresh-run guard, resume ignoring replicas, and
 `update --replicas spec` never lowering a ramp type."""
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from flock.models import (
 )
 
 from .conftest import TOKEN, make_spec, wire, write_spec
-from .test_spawn_api import spawn_spec
 from .test_worker_main import FakeController, make_worker
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
@@ -121,66 +120,6 @@ def test_stop_release_drains_every_worker_waits_and_reports_unsynced(
     assert store.swarm_flags("demo").get("released") is None
 
 
-# ----------------------------------------------------------------- (b) adopt
-
-
-def test_launch_adopt_restores_the_swarm_from_the_controller_checkpoint(
-        tmp_path, monkeypatch, jobs, settings, clock):
-    buckets: dict[str, MemoryStore] = defaultdict(MemoryStore)
-    spec_ = spawn_spec(limits={"budget_usd": 5.0},
-                       leader={"loop": {"prompt": "go", "every": "30s"}},
-                       agent={"replicas": 0, "replicas_ramp": {"start": 1, "add": 1,
-                                                               "every": "1m", "max": 5}})
-    spec_file = write_spec(tmp_path / "spec.yaml", spec_)
-
-    # the old controller: a ramp step, a spawned child, loop state, cost
-    old = Store(tmp_path / "old")
-    old_app = create_app(old, TOKEN, clock=clock, loop_interval=0)
-    wire(monkeypatch, old_app)
-    assert runner.invoke(cli.app, ["launch", spec_file]).exit_code == 0
-    reconcile(old, jobs, clock(), settings)
-    clock.advance(61)
-    reconcile(old, jobs, clock(), settings)
-    old_app.state.loops.tick()
-    assert old.get_swarm("demo")["spec"].types["agent"].replicas == 2
-    with TestClient(old_app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
-        assert c.post("/agents/leader-0000/spawn", json={"type": "analyst"}).status_code == 201
-    old.update_agent("leader-0000", cost=6.0)  # above limits.budget_usd
-    reconcile(old, jobs, clock(), settings)
-    counters = "SELECT spawned, removed_cost FROM swarms; SELECT * FROM agent_names ORDER BY name"
-    want = {"loops": old.get_loops("demo"), "ramp": old.get_control("demo", "ramp:agent"),
-            "names": sorted(a["name"] for a in old.list_agents("demo")),
-            "counters": [old._q(q) for q in counters.split("; ")]}
-    StateSync(buckets["hf://buckets/ns/sh/controller/demo"], tmp_path / "old").push(old)
-    old.close()  # the controller is gone
-
-    new = Store(tmp_path / "new")
-    app = create_app(new, TOKEN, clock=clock, loop_interval=0, buckets=buckets.__getitem__)
-    wire(monkeypatch, app)
-    r = runner.invoke(cli.app, ["launch", spec_file, "--adopt"])
-    assert r.exit_code == 0, r.output
-    assert "adopted demo: 4 agents from hf://buckets/ns/sh/controller/demo" in r.output
-    assert sorted(a["name"] for a in new.list_agents("demo")) == want["names"]
-    assert new.get_agent("leader-0000")["cost"] == 6.0
-    assert new.get_agent("leader-0000-analyst-0001")["parent"] == "leader-0000"
-    assert new.get_loops("demo") == want["loops"] and want["loops"]["leader"]["state"] == "running"
-    assert new.get_control("demo", "ramp:agent") == want["ramp"]
-    reconcile(new, jobs, clock(), settings)  # the ramp goes on from step 1, not from start
-    assert new.get_swarm("demo")["spec"].types["agent"].replicas == 2
-    assert [new._q(q) for q in counters.split("; ")] == want["counters"]  # naming counters
-    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
-        r2 = c.post("/agents/leader-0000/spawn", json={"type": "analyst"})
-    assert r2.status_code == 409 and r2.json()["reason"] == "budget"  # the cost cap still holds
-    app.state.loops.tick()
-    assert new.swarm_flags("demo")["budget_stop"] == "hard"
-    new.update_agent("leader-0000", cost=1.0)
-    new.put_swarm_flags("demo", {})
-    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
-        r2 = c.post("/agents/leader-0000/spawn", json={"type": "analyst"})
-    assert r2.json().get("name") == "leader-0000-analyst-0002", r2.text  # never reused
-    new.close()
-
-
 def test_a_fresh_empty_controller_never_overwrites_the_checkpoint(tmp_path):
     bucket = MemoryStore()
     s = Store(tmp_path / "fresh")
@@ -189,7 +128,7 @@ def test_a_fresh_empty_controller_never_overwrites_the_checkpoint(tmp_path):
     s.close()
 
 
-def test_bucket_only_adopt_needs_no_checkpoint_and_the_guard_refuses_a_reused_bucket(
+def test_the_guard_refuses_a_reused_bucket(
         tmp_path, monkeypatch, store, clock):
     buckets: dict[str, MemoryStore] = defaultdict(MemoryStore)
     buckets["hf://buckets/ns/sh"].files["demo/researcher/researcher-0000/meta.json"] = b"{}"
@@ -198,12 +137,8 @@ def test_bucket_only_adopt_needs_no_checkpoint_and_the_guard_refuses_a_reused_bu
     f = write_spec(tmp_path / "spec.yaml", make_spec())
     r = runner.invoke(cli.app, ["launch", f])  # (c) a fresh run over an old run's agents
     assert r.exit_code == 1 and "already holds agents of swarm 'demo'" in r.output, r.output
-    r = runner.invoke(cli.app, ["launch", f, "--adopt"])  # (d) no checkpoint
-    assert r.exit_code == 1 and "no controller checkpoint" in r.output
-    assert "--no-checkpoint" in r.output and store.get_swarm("demo") is None
-    r = runner.invoke(cli.app, ["launch", f, "--adopt", "--no-checkpoint"])
-    assert r.exit_code == 0, r.output
-    assert store.get_swarm("demo") is not None
+    assert "controller restores it on start" in r.output and "--adopt" not in r.output
+    assert store.get_swarm("demo") is None
     f2 = write_spec(tmp_path / "other.yaml", make_spec("fresh", other={"replicas": 1}))
     assert runner.invoke(cli.app, ["launch", f2]).exit_code == 0  # an empty prefix: created
 
@@ -262,64 +197,6 @@ def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions
 
 
 # ----------------------------------------------------------------- review fixes
-
-
-def _checkpoint(tmp_path, bucket, *swarms):
-    """A controller checkpoint holding `swarms` (one agent each), pushed to `bucket`."""
-    s = Store(tmp_path / "ckpt")
-    for name in swarms:
-        s.put_swarm(make_spec(name, **{f"t{name}": {"replicas": 1}}), 1.0)
-        s.insert_agent(f"t{name}-0000", name, f"t{name}", 0, 1.0)
-    StateSync(bucket, tmp_path / "ckpt").push(s)
-    s.close()
-
-
-def test_adopt_checkpoint_url_wins_and_own_url_never_drops_other_swarms(tmp_path, monkeypatch,
-                                                                        clock):
-    buckets: dict[str, MemoryStore] = defaultdict(MemoryStore)
-    old_run, own = "hf://buckets/ns/sh/controller/run-1", "hf://buckets/ns/sh/controller/run-2"
-    _checkpoint(tmp_path, buckets[old_run], "demo")
-    new = Store(tmp_path / "new")
-    app = create_app(new, TOKEN, clock=clock, buckets=buckets.__getitem__, state_url=own)
-    wire(monkeypatch, app)
-    f = write_spec(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
-    r = runner.invoke(cli.app, ["launch", f, "--adopt"])  # its own (new) run prefix is empty
-    assert r.exit_code == 1 and f"no controller checkpoint of swarm 'demo' at {own}" in r.output
-    r = runner.invoke(cli.app, ["launch", f, "--adopt", "--checkpoint", old_run])
-    assert r.exit_code == 0 and f"from {old_run}" in r.output, r.output
-    assert new.get_agent("tdemo-0000") is not None
-    # the own prefix holding another swarm too: its next push would drop that one
-    _checkpoint(tmp_path / "b", buckets[own], "demo2", "other")
-    f2 = write_spec(tmp_path / "s2.yaml", make_spec("demo2", tdemo2={"replicas": 1}))
-    r = runner.invoke(cli.app, ["launch", f2, "--adopt"])
-    assert r.exit_code == 1 and "drop them" in r.output and "other" in r.output, r.output
-    assert new.get_swarm("demo2") is None
-    new.close()
-
-
-class BrokenEvents(MemoryStore):
-    fail = True
-
-    def sync_down(self, prefix, local):
-        if self.fail:
-            raise OSError("events download cut")
-        super().sync_down(prefix, local)
-
-
-def test_a_failed_event_download_adopts_nothing_and_a_retry_works(tmp_path, monkeypatch, clock):
-    bucket = BrokenEvents()
-    _checkpoint(tmp_path, bucket, "demo")
-    new = Store(tmp_path / "new")
-    app = create_app(new, TOKEN, clock=clock, buckets=lambda url: bucket)
-    wire(monkeypatch, app)
-    monkeypatch.setattr("flock.client._sleep", lambda s: None)  # the CLI retries a 502
-    f = write_spec(tmp_path / "spec.yaml", make_spec("demo", tdemo={"replicas": 1}))
-    r = runner.invoke(cli.app, ["launch", f, "--adopt"])
-    assert r.exit_code == 1 and "events download cut" in r.output
-    assert new.get_swarm("demo") is None and new.get_agent("tdemo-0000") is None
-    bucket.fail = False
-    assert runner.invoke(cli.app, ["launch", f, "--adopt"]).exit_code == 0
-    new.close()
 
 
 def test_the_bucket_guard_stops_at_the_first_file(monkeypatch):

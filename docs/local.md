@@ -153,8 +153,7 @@ Different:
 5. **The controller runs next to you.** 127.0.0.1 on a free port, a new random token per run, no
    status port, no jobs proxy auth. The controller state syncs to `FLOCK_STATE_URL`, by
    default `<bucket>/controller/<swarm>` when the spec has a bucket and an HF token is found
-   (HF_TOKEN or the saved one; else off, said at start). A checkpoint `flock
-   launch --adopt` can take over; `FLOCK_STATE_URL=` turns it off. Each `flock launch` is a new run
+   (HF_TOKEN or the saved one; else off, said at start); `FLOCK_STATE_URL=` turns it off. Each `flock launch` is a new run
    directory: a run does not resume a previous one.
 6. **Workers die with the controller.** A worker exits when the controller process is gone
    (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. `flock stop --delete` makes the

@@ -67,8 +67,10 @@ def test_stored_spec_resumes(name: str, tmp_path: Path) -> None:
 
 
 def test_fixtures_cover_every_resumable_run() -> None:
-    stored_spec("hierarchy")  # skips when the dataset is unreachable
-    files = HfApi().list_repo_files(DATASET, repo_type="dataset", revision=REVISION)
+    try:
+        files = HfApi().list_repo_files(DATASET, repo_type="dataset", revision=REVISION)
+    except (OSError, HfHubHTTPError) as e:  # offline (OSError) or 401 / 404
+        pytest.skip(f"cannot list {DATASET}@{REVISION[:7]}: {e!r}"[:300])
     assert {Path(f).stem for f in files if f.startswith("stored_specs/")} == RESUMABLE
 
 

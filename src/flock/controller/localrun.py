@@ -104,8 +104,7 @@ def run_name(swarm: str, data_dir: Path, now: datetime | None = None) -> str:
 
 
 def state_env(env, spec: SwarmSpec, token=None) -> tuple[dict[str, str], str | None]:
-    """The env the run's checkpoint is read from (`launch --adopt`) and a line to print when
-    it is off: FLOCK_STATE_URL, by default <bucket>/controller/<swarm> when the spec has a
+    """The env the run's controller checkpoints to and a line to print when it is off: FLOCK_STATE_URL, by default <bucket>/controller/<swarm> when the spec has a
     bucket and an HF token is found (HF_TOKEN or the saved one, as HubBucketStore finds it);
     `FLOCK_STATE_URL=` is off. `token()` finds the token (tests)."""
     env = dict(env)
@@ -115,7 +114,7 @@ def state_env(env, spec: SwarmSpec, token=None) -> tuple[dict[str, str], str | N
         from huggingface_hub import get_token as token
     if not (env.get("HF_TOKEN") or token()):
         return env, ("checkpoint: off (no HF token for the bucket; set HF_TOKEN or "
-                     "FLOCK_STATE_URL to checkpoint for `flock launch --adopt`)")
+                     "FLOCK_STATE_URL to checkpoint the controller state)")
     env["FLOCK_STATE_URL"] = f"{spec.bucket.rstrip('/')}/controller/{spec.swarm}"
     return env, None
 
