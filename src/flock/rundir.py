@@ -500,6 +500,17 @@ def check_world(spec: SwarmSpec, env: Mapping[str, str], run_dir: Path) -> Check
 
 # ---------------------------------------------------------------- init
 
+def _bash_values(sf: Path, env: Mapping[str, str]) -> dict[str, str]:
+    """The secrets file's assigned names, valued as common.sh's `set -a; . file` leaves them."""
+    out = subprocess.run(["bash", "-c", 'set -a; . "$1"; set +a; env -0', "flock-init", str(sf)],
+                         capture_output=True, timeout=30, env=dict(env))
+    if out.returncode:
+        tail = (out.stderr.decode(errors="replace").strip().splitlines() or [""])[-1]
+        raise RuntimeError(f"{sf}: sourcing it with bash exited {out.returncode}: {tail}".rstrip(": "))
+    got = dict(kv.split("=", 1) for kv in out.stdout.decode(errors="replace").split("\0") if "=" in kv)
+    return {k: got[k] for k in read_env_file(sf) if k in got}
+
+
 def init(run_dir: str | Path, experiment: str | Path | None = None, *,
          secrets_file: str | Path | None = None, profile: str | Path | None = None,
          env: Mapping[str, str] = os.environ) -> InitReport:
@@ -550,7 +561,11 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
             rep.checks.append(Check("secrets file", False, f"{sf}: must be yours and mode 600 "
                                     f"(chmod 600 '{sf}'); the jobs refuse it"))
         else:
-            jobs_secrets = read_env_file(sf)
+            try:
+                jobs_secrets = _bash_values(sf, env)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                rep.checks.append(Check("secrets file", False, str(e) if isinstance(e, RuntimeError)
+                                        else f"{sf}: sourcing it with bash failed ({type(e).__name__})"))
     values = {**cluster, **jobs_secrets, **read_env_file(d / RUN_ENV)}  # the jobs' order
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
     try:
