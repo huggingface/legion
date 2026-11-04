@@ -86,9 +86,9 @@ $ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
 |---|---|
 | start a new run | `flock launch FOLDER` (refused when the bucket already holds agents of that swarm name) |
 | hold turns, keep compute | `flock stop S` (running turns finish; `--interrupt` cuts them; `--type`/`--agent` narrow it) |
-| free the workers, keep everything | `flock stop S --release` |
+| free all compute (workers, then the controller and world), keep everything | `flock stop S --release` |
 | end the loops with their final round | `flock stop S --final [--type T]` |
-| continue after either | `flock launch S` (or `flock launch FOLDER`; `--type`/`--agent` lift one hold) |
+| continue after either | `flock launch S` (or `flock launch FOLDER`, needed once a release ended the controller; `--type`/`--agent` lift one hold) |
 
 `flock launch FOLDER` creates the swarm when the controller does not have it (with
 `If-None-Match: *`: of two launches racing, one creates and the other gets 412). When it has
@@ -102,8 +102,14 @@ the worker's last heartbeat (`sync_failed` on the swarm stream, the worker's `la
 `status.released.unsynced`; a worker that ends unplanned mid-release, without that heartbeat,
 puts all its agents there). The command waits until no worker runs, then exits 0 when every
 agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, loops, spec and
-history stay on the controller; nothing launches until `flock launch S`, when each agent
-restores from the bucket by name. The world and controller jobs keep running.
+history stay on the controller; nothing launches until `flock launch`, when each agent
+restores from the bucket by name. Then it ends what the run started (`ops.down`): a final
+controller checkpoint (`POST /checkpoint`; when it fails it is reported and nothing is ended),
+the world's clean stop (it saves on SIGTERM), then the world and controller themselves (Slurm
+jobs, the HF Job, the local run: docs/slurm.md, docs/deploy-job.md, docs/local.md). A controller
+the run did not start (no run directory record, no local run, not an HF Job URL), or one serving
+other swarms that are not released, keeps running. `flock launch FOLDER` starts them again
+(`ops.up`), waits for the controller, which restores its checkpoint, and resumes.
 
 A controller that restarts restores its swarms from its own checkpoint (`state.db` and
 `events/<swarm>/`, pushed every 60 s to `FLOCK_STATE_URL`; `FLOCK_STATE_RESTORE=0` skips it).

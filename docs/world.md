@@ -32,7 +32,7 @@ a shared task board in SQLite with `list_tasks`, `add_task`, `claim_task`, `fini
 
 | key | what |
 |---|---|
-| `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). `compute: local` only. |
+| `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). The controller starts it with `compute: local`; with `compute: slurm` the run's world job does (docs/slurm.md "Deploying"), next to `url`. |
 | `world.dir` | Where `command` runs, relative to the spec file. Defaults to the spec's directory. |
 | `world.url` | A world that is already running (a Job, a Space, your laptop). Required with `compute: hf-jobs`. With `compute: local` it is used when there is no `command`. |
 | `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys, and handed to the workers. A started world without it gets a generated secret. |

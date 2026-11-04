@@ -190,8 +190,8 @@ uv run flock launch demo.yaml
 uv run flock status demo                 # counts by type and state, cost
 uv run flock prompt scribe-0007 "Summarize your workdir."
 uv run flock status scribe-0007 --events --follow  # agent.turn_started, agent.turn_ended, ...
-uv run flock stop demo --release      # drain, sync every agent, free the workers
-uv run flock launch demo              # resume
+uv run flock stop demo --release      # drain, sync every agent, free the workers (and a controller flock started)
+uv run flock launch demo              # resume (`launch demo.yaml` once the controller was ended)
 uv run flock stop demo --delete
 ```
 

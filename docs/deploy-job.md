@@ -75,6 +75,18 @@ export FLOCK_URL=https://6ad7...--7860.hf.jobs
 uv run flock launch spec.yaml          # spec.namespace must be the job's namespace
 ```
 
+`flock launch` does the same when no controller answers and `FLOCK_WHEEL_URL` is set (in the
+environment or the run's env files): it starts the controller job (network group
+`FLOCK_NETWORK_GROUP`, default the swarm name; `cpu-upgrade`, 48 h; secrets `FLOCK_TOKEN`,
+`HF_TOKEN`, `ANTHROPIC_API_KEY` and the spec's that are set), or waits for the group's job that is
+still starting, until it answers through the proxy, then creates or resumes the swarm (the
+controller restores its checkpoint). With `--run RUN_DIR` it records the job in
+`hosts/controller.host` (its URL) and `hosts/controller.job`; without, it prints the
+`export FLOCK_URL=...` line. `flock stop --release` then pushes a final checkpoint
+(`POST /checkpoint`; a failure is reported and nothing is cancelled) and cancels that job (the
+recorded one, else the one in `FLOCK_URL`), unless the controller also serves swarms that are not
+released. The world (`world.url`) is yours and keeps running.
+
 The script (`python -m flock.controller.jobdeploy`) launches `python:3.12-slim`. That
 image installs `huggingface_hub`, downloads the wheel from the bucket, installs
 `wheel[controller]` and runs `flock-controller`, so no image build is needed. Workers
