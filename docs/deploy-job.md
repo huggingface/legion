@@ -75,6 +75,12 @@ export FLOCK_URL=https://6ad7...--7860.hf.jobs
 uv run flock launch spec.yaml          # spec.namespace must be the job's namespace
 ```
 
+`flock launch` does this itself when no controller answers and `FLOCK_WHEEL_URL` is set: the
+controller job of group `FLOCK_NETWORK_GROUP` (default `flock`; `cpu-upgrade`, 48 h, the spec's
+secrets that are set), then `export FLOCK_URL=...` (`--run RUN_DIR` records it in
+`hosts/controller.host`); `flock stop --release` cancels it after a checkpoint (docs/live.md
+"Lifecycle").
+
 The script (`python -m flock.controller.jobdeploy`) launches `python:3.12-slim`. That
 image installs `huggingface_hub`, downloads the wheel from the bucket, installs
 `wheel[controller]` and runs `flock-controller`, so no image build is needed. Workers

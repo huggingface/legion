@@ -30,6 +30,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/flock"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/slurm" = "flock/slurm"  # `flock init` copies them into a slurm run directory
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

@@ -27,6 +27,7 @@ HF_HUB_VERSION = "2.2.0"  # matches jobs.HF_HUB_VERSION (workers)
 DATA_DIR = "/state/flock"  # job disk: ephemeral, synced to FLOCK_STATE_URL
 ROLE_LABEL = "flock-role"
 GROUP_LABEL = "flock-group"
+DEFAULT_GROUP = "flock"
 
 _BOOTSTRAP = r"""set -euo pipefail
 t0=$(date +%s)
@@ -123,16 +124,14 @@ def _running_controllers(api, namespace: str, group: str) -> list:
             in ("SCHEDULING", "RUNNING")]
 
 
-def _cancel_and_wait(api, namespace: str, group: str, wait: float = 180) -> bool:
+def _cancel_and_wait(api, namespace: str, group: str, wait: float = 180, say=print) -> bool:
     """Cancel the group's running controllers (SIGTERM: final state push); True once none run."""
-    old = _running_controllers(api, namespace, group)
-    for j in old:
-        print(f"cancelling controller {j.id} (final state push on SIGTERM)")
+    for j in _running_controllers(api, namespace, group):
+        say(f"cancelling controller {j.id} (final state push on SIGTERM)")
         api.cancel_job(job_id=j.id, namespace=namespace)
     deadline = time.monotonic() + wait
-    while old and time.monotonic() < deadline:
+    while (old := _running_controllers(api, namespace, group)) and time.monotonic() < deadline:
         time.sleep(5)
-        old = _running_controllers(api, namespace, group)
     return not old
 
 
@@ -164,7 +163,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
     p.add_argument("--down", action="store_true",
                    help="cancel the group's controller and delete its bucket state")
     p.add_argument("--flavor", default="cpu-upgrade")
-    p.add_argument("--group", default="flock", help="network group (workers join it)")
+    p.add_argument("--group", default=DEFAULT_GROUP, help="network group (workers join it)")
     p.add_argument("--timeout", default="48h", help="job timeout, e.g. 48h or 7d")
     p.add_argument("--namespace", help="HF namespace (default: whoami); specs must match it")
     p.add_argument("--state-url", help="default: <wheel bucket>/controller/<group>")

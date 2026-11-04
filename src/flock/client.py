@@ -252,6 +252,21 @@ class Client:
             except httpx.TransportError:
                 raise ClientError(unreachable(str(c.base_url).rstrip("/"), self.env)) from None
 
+    def answers(self) -> bool:
+        """Whether a controller answers at all (`flock launch` starts one when none does): one
+        GET /healthz, no retries."""
+        try:
+            with connect(self.env) as c:
+                r = c.get("/healthz", extensions={"timeout": httpx.Timeout(10).as_dict()})
+        except (httpx.HTTPError, ClientError):
+            return False
+        return r.status_code < 500
+
+    def checkpoint(self) -> dict:
+        """Push the controller's state to its bucket now: {"files": n}. ClientError 409 when it
+        has no state sync, 500 when the push failed."""
+        return self._call("POST", "/checkpoint", timeout=300)
+
     @property
     def as_agent(self) -> bool:
         """Running inside an agent (its scoped token or its worker's gateway): names are
