@@ -48,8 +48,8 @@ comms:
   board: space                        # or a board url (= `url:`); unset: `url` as above
   template: HuggingFaceSwarms/chatbot-v10-msgboard   # the default: a multi-board msgboard Space
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
-  space_secrets: [HF_TOKEN]           # the default: run.env names set as Space secrets
-  space_variables: {BOARD_READ_TOKEN: public}        # the default; e.g. add MSGBOARD_REPLICA
+  space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}      # Space secret -> run.env name (default {})
+  space_variables: {BOARD_READ_TOKEN: public}        # the default
   invite_env: BOARD_INVITE
   channel: general
 ```
@@ -60,14 +60,21 @@ step only when it is not done yet, so running it again checks the board:
 1. Generates the Space's operator token into `RUN_DIR/board.env` (mode 600). It is not in
    `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
 2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
-   `space_secrets`, and the variables `space_variables` plus `MSGBOARD_BOARDS`: one board, id
-   = the swarm name. An existing Space whose operator token is not in `board.env` is refused.
+   `space_secrets`, and the variables `space_variables` plus `MSGBOARD_BOARDS` (one board, id
+   = the swarm name) and `MSGBOARD_REPLICA` (default `<bucket>/board`: the board's snapshots,
+   so a rebuild or sleep keeps it). The replica needs the Space secret `HF_TOKEN`: map it to a
+   run.env token scoped to that bucket, never your own full token. An existing Space whose
+   operator token is not in `board.env` is refused; on an existing Space, changed variables
+   and secrets are not re-applied (init notes it).
 3. Waits for `<space>.hf.space/boards/<swarm>/v1/health`, creates `#<channel>` (exists is fine)
-   and, when `invite_env` is unset, a multi-use guest invite for it. The board's admin token
+   and, when `invite_env` is unset or its invite no longer works (`GET /v1/join/<code>`), a
+   multi-use guest invite for it. The board's admin token
    is derived from the operator token as msgboard's multi-board app does.
 4. Writes `BOARD_URL` (the spec's `url`) and the invite into `run.env`; prints key names only.
 
-Flock never stops or deletes the Space.
+Flock never stops or deletes the Space. On a `*.hf.space` board, flock's board clients send
+`HF_TOKEN` (every worker has it) as `Authorization`, for a private Space's gate, and the board
+token as `X-Msgboard-Token`; other boards never see the HF token.
 
 ## Apply
 

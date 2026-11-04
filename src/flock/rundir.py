@@ -355,8 +355,10 @@ def check_board(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
     if not env.get(c.invite_env):
         return Check("board", False, f"comms.invite_env: {c.invite_env} is not set in {RUN_ENV}")
     url = c.url.rstrip("/") + "/v1/health"
-    try:
-        code = httpx.get(url, timeout=10).status_code
+    hf = env.get("HF_TOKEN") if (httpx.URL(url).host or "").endswith(".hf.space") else None
+    try:  # a private Space's gate wants the HF token
+        code = httpx.get(url, timeout=10,
+                         **({"headers": {"Authorization": f"Bearer {hf}"}} if hf else {})).status_code
     except httpx.HTTPError as e:
         return Check("board", False, f"{url}: {type(e).__name__}: {e}")
     return Check("board", code == 200, f"{c.invite_env} set; {url} -> {code}; join not tested")
@@ -502,6 +504,15 @@ def _write_private(path: Path, text: str) -> None:
         f.write(text)
 
 
+def _replace_keys(path: Path, values: Mapping[str, str]) -> None:
+    """Set keys already set in run.env to new values (a replaced board invite)."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    new = [f"{m[2]}={_quote(values[m[2]])}" if (m := _LINE.match(x)) and not m[1] and m[2] in values
+           else x for x in lines]
+    if new != lines:
+        _write_private(path, "\n".join(new) + "\n")
+
+
 def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
                     rep: InitReport) -> tuple[Check, dict[str, str]]:
     """`comms.board: space`, each step skipped when done: the operator token (board.env), the
@@ -513,7 +524,7 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
     try:  # the comms block and swarm name as the spec reads them; url is what this makes
         raw = {k: v for k, v in data["comms"].items() if k != "url"}
         c = CommsSpec.model_validate({**substitute(raw, dict(env)), "url": "https://pending.invalid"})
-        swarm = substitute(data["swarm"], dict(env))
+        swarm, bucket = substitute([data["swarm"], data.get("bucket") or ""], dict(env))
     except Exception as e:  # noqa: BLE001 - the spec check reports the rest
         return Check("board space", False, f"comms: {' '.join(str(e).split())}"), {}
     hf = env.get("HF_TOKEN")
@@ -541,21 +552,36 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
             _write_private(bf, f"# {BOARD_ENV}: the board Space's operator token (admin on every "
                                f"board there). Never sourced by a job.\nBOARD_OPERATOR_TOKEN={master}\n")
             rep.created.append(f"{BOARD_ENV} BOARD_OPERATOR_TOKEN (generated)")
-        if not exists:
-            if missing := [n for n in c.space_secrets if not env.get(n)]:
+        if exists:
+            rep.notes.append(f"Space {space} exists: changed comms.space_variables or "
+                             "space_secrets are not re-applied (edit them in its settings)")
+        else:
+            boards = [{"id": swarm, "name": swarm, "storage_id": swarm, "require_existing": False}]
+            variables = {"MSGBOARD_BOARDS": json.dumps(boards), **c.space_variables}
+            if bucket:  # the board's snapshots: a rebuild or sleep would lose it otherwise
+                variables.setdefault("MSGBOARD_REPLICA", bucket.rstrip("/") + "/board")
+            if variables.get("MSGBOARD_REPLICA") and "HF_TOKEN" not in c.space_secrets:
+                return Check("board space", False, "MSGBOARD_REPLICA needs the Space secret HF_TOKEN: "
+                             "set comms.space_secrets: {HF_TOKEN: <run.env name of a token "
+                             "scoped to that bucket>}"), {}
+            if missing := [n for n in c.space_secrets.values() if not env.get(n)]:
                 return Check("board space", False, f"comms.space_secrets: unset in {RUN_ENV}: "
                                                    f"{', '.join(missing)}"), {}
-            boards = [{"id": swarm, "name": swarm, "storage_id": swarm, "require_existing": False}]
             api.duplicate_repo(
                 c.template, space, repo_type="space", private=True, exist_ok=True,
                 space_secrets=[{"key": "MSGBOARD_OPERATOR_TOKEN", "value": master},
-                               *({"key": n, "value": env[n]} for n in c.space_secrets)],
-                space_variables=[{"key": "MSGBOARD_BOARDS", "value": json.dumps(boards)},
-                                 *({"key": k, "value": v} for k, v in c.space_variables.items())])
+                               *({"key": k, "value": env[n]} for k, n in c.space_secrets.items())],
+                space_variables=[{"key": k, "value": v} for k, v in variables.items()])
             rep.created.append(f"Space {space} (private, from {c.template})")
         h = {"Authorization": f"Bearer {hf}"}  # the private Space's gate
         end = time.monotonic() + BOARD_WAIT_S
-        while (code := httpx.get(f"{url}/v1/health", headers=h, timeout=10).status_code) != 200:
+        while True:
+            try:
+                code: int | str = httpx.get(f"{url}/v1/health", headers=h, timeout=10).status_code
+            except httpx.HTTPError as e:  # building or restarting
+                code = type(e).__name__
+            if code == 200:
+                break
             if time.monotonic() > end:
                 return Check("board space", False, f"{url}/v1/health -> {code} after "
                                                    f"{BOARD_WAIT_S:.0f} s"), {}
@@ -565,7 +591,12 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         if r.status_code not in (200, 201, 409):  # 409 channel_exists
             return Check("board space", False, f"create #{c.channel}: {r.status_code} {r.text[:200]}"), {}
         out = {"BOARD_URL": url}
-        if not env.get(c.invite_env):
+        if (old := env.get(c.invite_env)) and (
+                (r := httpx.get(f"{url}/v1/join/{old}", headers=h, timeout=30)).status_code == 404
+                or r.status_code == 200 and r.json().get("status") != "active"):
+            rep.notes.append(f"{RUN_ENV} {c.invite_env}: the invite no longer works; replaced")
+            old = None
+        if not old:
             r = httpx.post(f"{url}/v1/invites", headers=h, timeout=30, json={
                 "kind": "agent", "role": "guest", "channels": [c.channel], "max_uses": None,
                 "label": f"flock {swarm}"})
@@ -673,6 +704,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
         board, made = provision_board(data, d, {**env, **values}, rep)
         rep.checks.append(board)
         if made:
+            _replace_keys(d / RUN_ENV, made)
             write_run_env(d / RUN_ENV, data, str(experiment or exp), {}, rep, made)
             values = {k: v for f in env_files for k, v in read_env_file(f).items()}
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
@@ -694,8 +726,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
                             warnings))
     secret_env = {**env, **values}
     rep.checks += [check_slots(spec), check_bucket(spec, secret_env, rep),
-                   check_providers(spec, secret_env),
-                   *([] if space else [check_board(spec, secret_env)]),
+                   check_providers(spec, secret_env), check_board(spec, secret_env),
                    check_venv(secret_env), check_world(spec, secret_env, d),
                    register_dashboard(spec, secret_env)]
     if spec.compute.kind == "slurm":

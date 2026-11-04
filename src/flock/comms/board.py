@@ -161,10 +161,17 @@ def _query(params: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in params.items() if v is not None}
 
 
-def _auth(token: str) -> dict[str, str]:
-    """The board reads X-Msgboard-Token first (Authorization stays free for a proxy login in
-    front of a private Space); Bearer too, for boards that predate that header."""
-    return {"X-Msgboard-Token": token, "Authorization": f"Bearer {token}"}
+def _auth(token: str | None, url: str) -> dict[str, str]:
+    """The board reads X-Msgboard-Token first. On an HF Space (`*.hf.space`, maybe private)
+    Authorization carries HF_TOKEN, for the Space's gate; elsewhere, or without HF_TOKEN, the
+    board token as Bearer too, for boards that predate X-Msgboard-Token."""
+    from flock.secrets_file import secret_env
+
+    hf = secret_env().get("HF_TOKEN") if (httpx.URL(url).host or "").endswith(".hf.space") else None
+    out = {"X-Msgboard-Token": token} if token else {}
+    if hf or token:
+        out["Authorization"] = f"Bearer {hf or token}"
+    return out
 
 
 class Credential(Protocol):
@@ -269,13 +276,11 @@ class AsyncBoard:
         and waits for it as long as needed; a tool call waits at most TOOL_WAIT_S."""
         method, path, kw = route
         self._check_gate()
-        headers = {}
-        if cred is not None:
+        if cred is not None and not same_board(cred.url, self.url):
             # a token is only ever sent to the board that issued it
-            if not same_board(cred.url, self.url):
-                raise BoardError(f"board: refusing to send a token issued by {cred.url} to "
-                                 f"{self.url}", code="wrong_board")
-            headers.update(_auth(cred.token))
+            raise BoardError(f"board: refusing to send a token issued by {cred.url} to "
+                             f"{self.url}", code="wrong_board")
+        headers = _auth(cred and cred.token, self.url)
         if method in ("POST", "PUT", "PATCH"):
             headers["Idempotency-Key"] = idem_key()
         for attempt in range(ATTEMPTS):
@@ -357,7 +362,7 @@ class SyncBoard:
     def request(self, route: tuple[str, str, dict], token: str | None = None, *,
                 key: str | None = None) -> dict:
         method, path, kw = route
-        headers = _auth(token) if token else {}
+        headers = _auth(token, str(self.http.base_url))
         if method in ("POST", "PUT", "PATCH"):
             headers["Idempotency-Key"] = key or idem_key()
         for attempt in range(ATTEMPTS):

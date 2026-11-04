@@ -364,7 +364,10 @@ class CommsSpec(_Removable):
     board: str | None = None
     template: str = "HuggingFaceSwarms/chatbot-v10-msgboard"
     space: str | None = None
-    space_secrets: list[str] = Field(default_factory=lambda: ["HF_TOKEN"])  # run.env names copied
+    # Space secret -> the run.env (or environment) name holding its value, e.g. {HF_TOKEN:
+    # BOARD_BUCKET_TOKEN}: a token scoped to the board's bucket, never the operator's own.
+    space_secrets: dict[str, str] = Field(default_factory=dict)
+    # Space variables; MSGBOARD_REPLICA defaults to `<bucket>/board` when the spec has a bucket.
     space_variables: dict[str, str] = Field(default_factory=lambda: {"BOARD_READ_TOKEN": "public"})
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
     channel: str  # name, with or without `#`

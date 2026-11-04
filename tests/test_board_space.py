@@ -18,7 +18,8 @@ from tests.fake_msgboard import Board, serve
 SPEC = {
     "swarm": "demo", "namespace": "HuggingFaceSwarms",
     "bucket": "hf://buckets/HuggingFaceSwarms/runs",
-    "comms": {"board": "space", "invite_env": "BOARD_INVITE", "channel": "general"},
+    "comms": {"board": "space", "invite_env": "BOARD_INVITE", "channel": "general",
+              "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
     "types": {"a": {"harness": "claude", "model": "claude-opus-5-5", "comms": True}},
 }
 
@@ -57,17 +58,23 @@ def _folder(tmp_path, spec=SPEC):
     return f
 
 
+ENV = {"HF_TOKEN": "hf_x", "BOARD_BUCKET_TOKEN": "hf_scoped"}
+
+
 def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     board, api, url = space
     run = tmp_path / "run"
-    rep = rundir.init(run, _folder(tmp_path), env={"HF_TOKEN": "hf_x"})
+    rep = rundir.init(run, _folder(tmp_path), env=ENV)
     checks = {c.name: c for c in rep.checks}
     assert checks["board space"].ok, checks["board space"].detail
-    assert checks["spec"].ok and "board" not in checks  # the provisioning replaces the health check
+    assert checks["spec"].ok and checks["board"].ok
     (src, to, kw), = api.calls
     assert (src, to) == ("HuggingFaceSwarms/chatbot-v10-msgboard", "HuggingFaceSwarms/board-demo")
-    assert kw["private"] and {s["key"] for s in kw["space_secrets"]} == {"MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"}
+    secrets = {s["key"]: s["value"] for s in kw["space_secrets"]}
+    assert kw["private"] and set(secrets) == {"MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"}
+    assert secrets["HF_TOKEN"] == "hf_scoped"  # the mapped, bucket-scoped token, not the operator's
     variables = {v["key"]: v["value"] for v in kw["space_variables"]}
+    assert variables["MSGBOARD_REPLICA"] == "hf://buckets/HuggingFaceSwarms/runs/board"
     assert json.loads(variables["MSGBOARD_BOARDS"]) == [
         {"id": "demo", "name": "demo", "storage_id": "demo", "require_existing": False}]
     assert variables["BOARD_READ_TOKEN"] == "public"
@@ -85,16 +92,63 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     spec = read_spec(str(run / "experiment" / "spec.yaml"), rundir.run_context(run)[1])
     assert spec.comms.url == url and op not in spec.model_dump_json()
     # again: the doctor; nothing new on the Hub or the board, same invite
-    rep = rundir.init(run, env={"HF_TOKEN": "hf_x"})
+    rep = rundir.init(run, env=ENV)
     assert {c.name: c for c in rep.checks}["board space"].ok and len(api.calls) == 1
+    assert any("not re-applied" in n for n in rep.notes)
     assert read_env_file(run / "run.env")["BOARD_INVITE"] == values["BOARD_INVITE"]
     assert list(board.channels.values()).count("general") == 1
+    # an invite that no longer works (the board lost it, or it was revoked) is replaced
+    del board.invites[values["BOARD_INVITE"]]
+    rep = rundir.init(run, env=ENV)
+    new = read_env_file(run / "run.env")["BOARD_INVITE"]
+    assert new != values["BOARD_INVITE"] and new in board.invites
+    assert any("no longer works" in n for n in rep.notes)
+    assert stat.S_IMODE((run / "run.env").stat().st_mode) == 0o600
+
+
+def test_replica_needs_a_mapped_hf_token(tmp_path, space):
+    _, api, _ = space
+    spec = {**SPEC, "comms": {k: v for k, v in SPEC["comms"].items() if k != "space_secrets"}}
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path, spec), env=ENV)
+    c = {c.name: c for c in rep.checks}["board space"]
+    assert c.ok is False and "space_secrets" in c.detail and not api.calls
+
+
+def test_health_wait_survives_connection_errors(tmp_path, space, monkeypatch):
+    import httpx
+
+    real, fails = httpx.get, []
+
+    def flaky(url, **kw):
+        if url.endswith("/v1/health") and not fails:
+            fails.append(url)
+            raise httpx.ConnectError("building")
+        return real(url, **kw)
+
+    monkeypatch.setattr(httpx, "get", flaky)
+    monkeypatch.setattr(rundir, "_sleep", lambda s: None)
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
+    assert fails and {c.name: c for c in rep.checks}["board space"].ok
+
+
+def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
+    from flock.comms.board import _auth
+
+    monkeypatch.setenv("HF_TOKEN", "hf_x")
+    space = "https://huggingfaceswarms-board-demo.hf.space/boards/demo"
+    assert _auth("fbt_b", space) == {"X-Msgboard-Token": "fbt_b", "Authorization": "Bearer hf_x"}
+    assert _auth(None, space) == {"Authorization": "Bearer hf_x"}  # join on a private Space
+    # elsewhere the HF token is never sent; old public boards still get the Bearer fallback
+    assert _auth("fbt_b", "https://board.invalid") == {"X-Msgboard-Token": "fbt_b",
+                                                        "Authorization": "Bearer fbt_b"}
+    monkeypatch.delenv("HF_TOKEN")
+    assert _auth("fbt_b", space)["Authorization"] == "Bearer fbt_b"
 
 
 def test_an_existing_space_without_its_operator_token_is_refused(tmp_path, space):
     _, api, _ = space
     api.spaces.add("HuggingFaceSwarms/board-demo")
-    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env={"HF_TOKEN": "hf_x"})
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
     c = {c.name: c for c in rep.checks}["board space"]
     assert c.ok is False and "BOARD_OPERATOR_TOKEN" in c.detail and not api.calls
 
