@@ -26,15 +26,14 @@ from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.store import Row, Store
 from flock.models import (
     CRASHLOOP_THRESHOLD,
-    DEAD_AFTER,
     LAUNCHES_PER_WINDOW,
     RATE_WINDOW,
-    UNKNOWN_AFTER,
     AgentState,
     AssignCommand,
     CommsSpec,
     DrainCommand,
     Event,
+    Liveness,
     PromptCommand,
     RampHold,
     SwarmSpec,
@@ -54,9 +53,8 @@ from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
 
 log = logging.getLogger("flock.reconcile")
 
-BACKOFF_BASE = 30.0  # s, first crash backoff
 BACKOFF_CAP = 900.0  # s, 15 min
-LAUNCH_BACKOFF_CAP = 300.0  # s, transient launch errors back off 30 s, 60 s, ... up to 5 min
+LAUNCH_BACKOFF_CAP = 300.0  # s, transient launch errors: crash_backoff, doubling up to 5 min
 INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh worker
 INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
 LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
@@ -68,8 +66,6 @@ RETIRE_GRACE = 120.0  # s, an emptied worker gets this long to drain before it i
 STABLE_AFTER = 600.0  # s, a heartbeat this long after launch resets the crash streak
 # Not written to the swarm stream: per agent, or repeated every pass while the condition holds.
 QUIET_ACTIONS = ("assign", "unassign", "budget_exhausted", "workers_full")
-_UNKNOWN = UNKNOWN_AFTER.total_seconds()
-_DEAD = DEAD_AFTER.total_seconds()
 
 
 @dataclass
@@ -131,35 +127,36 @@ def last_seen(w: Row) -> float | None:
     return max(hb, w.get("last_seen") or 0.0)
 
 
-def worker_state(w: Row, now: float) -> WorkerState:
+def worker_state(w: Row, now: float, lv: Liveness) -> WorkerState:
+    """`lv`: the swarm's timings (`Store.liveness`)."""
     if w["job_id"] is None:
         return WorkerState.dead
     seen = last_seen(w)
     if seen is None:
         return WorkerState.launching
     age = now - seen
-    if age > _DEAD:
+    if age > lv.dead_after:
         return WorkerState.dead
-    if age > _UNKNOWN:
+    if age > lv.unknown_after:
         return WorkerState.unknown
     return WorkerState.draining if w["draining"] or w["retire_at"] else WorkerState.running
 
 
-def agent_state(a: Row, w: Row | None, now: float) -> AgentState:
+def agent_state(a: Row, w: Row | None, now: float, lv: Liveness) -> AgentState:
     hb = a["last_heartbeat"]
     if w is None or w["job_id"] is None:
         return AgentState.dead if hb is not None else AgentState.unknown
-    if worker_state(w, now) == WorkerState.dead:
+    if worker_state(w, now, lv) == WorkerState.dead:
         return AgentState.dead
     if hb is None or (w["launched_at"] and hb < w["launched_at"]):
         return AgentState.unknown  # not yet reported by the current job
     age = now - hb
-    if age > _DEAD:
+    if age > lv.dead_after:
         # dead if the worker's heartbeats arrive without it; unknown if they are not arriving
         # (the worker is alive by its polls, see last_seen, but its reports are stale)
-        fresh = w["last_heartbeat"] is not None and now - w["last_heartbeat"] <= _UNKNOWN
+        fresh = w["last_heartbeat"] is not None and now - w["last_heartbeat"] <= lv.unknown_after
         return AgentState.dead if fresh else AgentState.unknown
-    if age > _UNKNOWN or not a["hb_state"]:
+    if age > lv.unknown_after or not a["hb_state"]:
         return AgentState.unknown
     return AgentState(a["hb_state"])
 
@@ -176,6 +173,8 @@ class _Pass:
     budget: int
     actions: list[Action] = field(default_factory=list)
     listed: dict[str, JobState] | None = None  # job stages from one list_jobs, if used
+    lv: Liveness = Liveness(0, 0, 0)  # noqa: RUF009 - a tuple; the swarm's, set per swarm
+    local: bool = False  # the swarm's compute is local, set per swarm
 
     def act(self, kind: str, target: str, detail: str = "") -> None:
         self.actions.append(Action(kind, target, detail))
@@ -196,16 +195,18 @@ class _Pass:
             log.warning("cancel %s failed: %s", job_id, type(exc).__name__)
 
 
-def _needs_check(w: Row, now: float) -> bool:
-    """Fresh, non-draining workers are trusted from heartbeats; others get a job-status check."""
+def _needs_check(w: Row, now: float, lv: Liveness, local: bool) -> bool:
+    """Fresh, non-draining workers are trusted from heartbeats; others get a job-status check.
+    A local worker is checked every pass (a process poll): its exit is a crash at once."""
     if w["job_id"] is None:
         return False
-    if w.get("preempted"):  # the worker synced and is exiting: end the slot now
+    if local or w.get("preempted"):  # preempted: the worker synced and is exiting, end it now
         return True
     seen = last_seen(w)
     if seen is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
         return False
-    if seen is not None and now - seen <= _UNKNOWN and not w["draining"] and not w["retire_at"]:
+    if seen is not None and now - seen <= lv.unknown_after and not w["draining"] \
+            and not w["retire_at"]:
         return False
     return w["last_inspect"] is None or now - w["last_inspect"] >= INSPECT_EVERY
 
@@ -223,9 +224,10 @@ def reconcile(
         spec: SwarmSpec = sw["spec"]
         if not sw["removing"]:
             spec = _ramp(p, spec)
-        p.listed = None
+        p.listed, p.lv, p.local = None, spec.compute.liveness(), spec.compute.kind == "local"
         first = len(p.actions)
-        if sum(_needs_check(w, t) for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
+        if sum(_needs_check(w, t, p.lv, p.local)
+               for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
             try:
                 listing = jobs.list({"swarm": spec.swarm}, namespace=spec.namespace)
                 p.listed = {j.job_id: JobState(j.stage, j.message) for j in listing}
@@ -279,9 +281,9 @@ def rotate_worker(store: Store, swarm: str, w: Row, now: float) -> None:
         type="memory_rotation", ts=datetime.fromtimestamp(now, UTC), agent="", data=data)])
 
 
-def rotatable(w: Row, now: float) -> bool:
+def rotatable(w: Row, now: float, lv: Liveness) -> bool:
     return (w["job_id"] is not None and not w["draining"] and not w["retire_at"]
-            and worker_state(w, now) == WorkerState.running)
+            and worker_state(w, now, lv) == WorkerState.running)
 
 
 def _rotate(p: _Pass, spec: SwarmSpec) -> None:
@@ -292,7 +294,7 @@ def _rotate(p: _Pass, spec: SwarmSpec) -> None:
     thresholds never waits for this budget (a preempted slot has already ended here)."""
     workers = p.store.list_workers(spec.swarm)
     tel = {w["id"]: json.loads(w.get("telemetry") or "{}") for w in workers}
-    want = [w for w in workers if tel[w["id"]].get("wants_rotation") and rotatable(w, p.now)]
+    want = [w for w in workers if tel[w["id"]].get("wants_rotation") and rotatable(w, p.now, p.lv)]
     if not want:
         return
     eta = {w["id"]: (tel[w["id"]].get("mem") or {}).get("eta_limit_s") for w in want}
@@ -538,7 +540,8 @@ def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None
     flags, loops = store.swarm_flags(swarm), store.loop_agents(swarm, type_name)
     for a in store.list_agents(swarm, type_name):
         stuck = a["hb_state"] == AgentState.stuck.value and not a["removing"] and agent_state(
-            a, store.get_worker(a["worker"]) if a["worker"] else None, p.now) == AgentState.stuck
+            a, store.get_worker(a["worker"]) if a["worker"] else None, p.now, p.lv
+        ) == AgentState.stuck
         since = (a["stuck_since"] or p.now) if stuck else None
         if stuck and a["stuck_since"] is None:
             p.act("stuck", a["name"], "turn timed out")  # `agent.stuck` on the swarm stream
@@ -591,9 +594,9 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
 
 
 def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> None:
-    if not _needs_check(w, p.now):
+    if not _needs_check(w, p.now, p.lv, p.local):
         if w["job_id"] is not None:
-            p.store.update_worker(w["id"], state=worker_state(w, p.now).value)
+            p.store.update_worker(w["id"], state=worker_state(w, p.now, p.lv).value)
         return
     p.store.update_worker(w["id"], last_inspect=p.now)
     if w.get("preempted"):
@@ -613,7 +616,7 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     if st.stage == "SCHEDULING":  # queued (Slurm, HF Jobs): the launch timeout starts later
         p.store.update_worker(w["id"], started_at=p.now)
     hb, seen = w["last_heartbeat"], last_seen(w)
-    silent = seen is not None and p.now - seen > _DEAD  # no heartbeat, poll or event post
+    silent = seen is not None and p.now - seen > p.lv.dead_after  # no heartbeat, poll or event post
     start = w["started_at"] or w["launched_at"]
     never = hb is None and st.stage != "SCHEDULING" and p.now - start > LAUNCH_TIMEOUT
     if silent or never:
@@ -621,7 +624,7 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
         p.act("cancel", w["id"], w["job_id"])
         _job_ended(p, spec, w, ts, JobState("CANCELED", "unresponsive"))
         return
-    p.store.update_worker(w["id"], state=worker_state(w, p.now).value,
+    p.store.update_worker(w["id"], state=worker_state(w, p.now, p.lv).value,
                           pending_reason=st.message if st.stage == "SCHEDULING" else None)
 
 
@@ -663,7 +666,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
             _interrupt_turns(p, w, st)
         return
     streak = w["consecutive_crashes"] + 1
-    backoff = min(BACKOFF_BASE * 2 ** (streak - 1), BACKOFF_CAP)
+    backoff = min(p.lv.crash_backoff * 2 ** (streak - 1), BACKOFF_CAP)
     store.update_worker(
         wid,
         **common,
@@ -781,7 +784,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
             p.act("launch_refused", f"{spec.swarm}/{type_name}", msg)
             return
         failures = store.launch_error(spec.swarm, type_name)[1] + 1
-        backoff = min(BACKOFF_BASE * 2 ** (failures - 1), LAUNCH_BACKOFF_CAP)
+        backoff = min(p.lv.crash_backoff * 2 ** (failures - 1), LAUNCH_BACKOFF_CAP)
         store.set_launch_error(spec.swarm, type_name, msg, failures)
         store.update_worker(wid, next_launch_at=p.now + backoff)
         p.act("launch_failed", wid, f"{msg}; backoff {backoff:.0f}s")

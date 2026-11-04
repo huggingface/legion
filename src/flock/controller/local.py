@@ -29,14 +29,15 @@ from pathlib import Path
 from typing import IO, Any
 
 from flock.controller.jobs import JobListing, JobState
-from flock.models import TypeSpec
+from flock.models import LOCAL_HEARTBEAT_INTERVAL, TypeSpec
 
 log = logging.getLogger("flock.local")
 
 WORKER_COMMAND = [sys.executable, "-m", "flock.worker.main"]
 # Defaults a local worker gets unless the type's env sets them: a laptop run wants agent states
 # within seconds, not the 30 s job heartbeat.
-LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": "5", "PYTHONUNBUFFERED": "1"}
+LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": f"{LOCAL_HEARTBEAT_INTERVAL.total_seconds():g}",
+                      "PYTHONUNBUFFERED": "1"}
 # The caller's own flock connection and auth never leak into a worker (it gets the
 # controller's): FLOCK_* is dropped except these documented harness settings.
 KEEP_FLOCK_ENV = frozenset({"FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI",
