@@ -219,9 +219,10 @@ class Tracker:
         self.read_events()
         agents = self.store.list_agents(self.swarm)
         workers = {w["id"]: w for w in self.store.list_workers(self.swarm)}
+        lv = spec.compute.liveness()
         states: dict[str, str] = {}
         for a in agents:
-            st = agent_state(a, workers.get(a["worker"]), now).value
+            st = agent_state(a, workers.get(a["worker"]), now, lv).value
             if a["name"] in self.open_turns and st in ("idle", "unknown"):
                 st = "working"  # turn_started seen, heartbeat not yet
             states[a["name"]] = st
@@ -236,7 +237,7 @@ class Tracker:
             "loops_settled": loops_settled(spec, status),
             "agents": agents,
             "states": states,
-            "workers": {wid: worker_state(w, now).value for wid, w in workers.items()},
+            "workers": {wid: worker_state(w, now, lv).value for wid, w in workers.items()},
             "pending": sum(pending.values()),
             "running": sum(1 for s in states.values() if s == "working"),
             "completed": sum(self.completed.values()),
@@ -289,7 +290,7 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
             tokens[model] = tokens.get(model, TokenUsage()) + u
         per_agent.append({
             "name": a["name"], "type": a["type"], "parent": a["parent"], "worker": a["worker"],
-            "state": agent_state(a, workers.get(a["worker"]), now).value,
+            "state": agent_state(a, workers.get(a["worker"]), now, spec.compute.liveness()).value,
             "turns_completed": tracker.completed[a["name"]], "turns_reported": a["turns"],
             "cost_usd": a["cost"], "tokens": {m: u.model_dump() for m, u in toks.items()},
             "events": len(evs), "events_file": f"events/{a['name']}.jsonl",

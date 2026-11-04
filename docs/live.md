@@ -201,6 +201,23 @@ A type with it runs its `turn_end` loop on the controller (docs/loop.md).
 
 Local runs: after editing the folder, run `flock update FOLDER`; there is no watch mode in the CLI yet.
 
+## Worker liveness
+
+How long the controller waits on a silent worker, set under `compute:` (durations such as
+`20s`, `2m`); unset keys take the backend's default. A worker is silent when neither a
+heartbeat, a command poll nor an event post arrives from it.
+
+| key | hf-jobs, slurm | local | meaning |
+|---|---|---|---|
+| `worker_unknown_after` | 90s | 15s | silent this long: the worker and its agents are `unknown` |
+| `worker_dead_after` | 180s | 30s | silent this long: `dead`; its job is cancelled and relaunched (a crash). Must be longer than `worker_unknown_after` |
+| `crash_backoff` | 30s | 2s | wait before relaunching a crashed slot, doubling per crash in a row (cap 15 min); also the first wait after a failed launch (cap 5 min) |
+
+The local defaults are 3 and 6 missed heartbeats at the local 5 s interval (the jobs ratio at
+30 s). A local worker is also checked on every reconcile pass, so a worker process that exits
+is a crash at once, without waiting for `worker_dead_after`. Raise the keys with a type's
+`HEARTBEAT_INTERVAL`, or for workers that block for long stretches.
+
 ## What takes effect when
 
 | change | takes effect |
@@ -213,7 +230,8 @@ Local runs: after editing the folder, run `flock update FOLDER`; there is no wat
 | `limits.budget_usd`, `limits.alive`, `spawn:` | at once (the controller) |
 | `replicas` | the next reconcile pass |
 | other type fields (`max_turns`, `max_budget_usd`, `tool_choice`, `turn_timeout`, ...) | the next turn boundary. A CLI harness takes the per-prompt limits, `model`, `env` and `secrets` at its next start, after `idle_grace` |
-| a type's `harness` (with agents), `compute`, `swarm` | refused |
+| `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
+| a type's `harness` (with agents), `compute.kind`, `swarm` | refused |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
 changes nothing until that turn ends. Changed type specs reach the workers in the

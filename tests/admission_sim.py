@@ -117,9 +117,9 @@ async def simulate(rounds: int = 60, max_working: int = 128, seed: int = 0,
             now = clock().timestamp()
             # driver: prompt agents the controller lists idle and that have nothing pending
             wrows = {w["id"]: w for w in store.list_workers("px")}
-            pending = store.pending_counts("px")
+            pending, lv = store.pending_counts("px"), store.liveness("px")
             for a in store.list_agents("px"):
-                if pending.get(a["name"]) or agent_state(a, wrows.get(a["worker"]), now) \
+                if pending.get(a["name"]) or agent_state(a, wrows.get(a["worker"]), now, lv) \
                         != AgentState.idle:
                     continue
                 cmd = PromptCommand(agent=a["name"], prompt_id=f"{a['name']}-{rnd}", text="paint")

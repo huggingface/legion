@@ -24,6 +24,7 @@ from flock.models import (
     AgentState,
     AssignCommand,
     Command,
+    ComputeSpec,
     DrainCommand,
     UnassignCommand,
     WorkerHeartbeat,
@@ -35,6 +36,7 @@ from .conftest import TOKEN, make_spec
 
 CMD = TypeAdapter(Command)
 W0, W1 = "demo-researcher-w0000", "demo-researcher-w0001"
+LV = ComputeSpec().liveness()  # make_spec's hf-jobs defaults: unknown 90 s, dead 180 s
 
 
 def queued(store: Store, wid: str) -> list:
@@ -120,17 +122,17 @@ def test_heartbeat_updates_states(store, jobs, clock, tick):
     store.put_swarm(make_spec(), 0)
     tick()
     w = store.get_worker(W0)
-    assert worker_state(w, clock().timestamp()) == WorkerState.launching
-    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp()) == "unknown"
+    assert worker_state(w, clock().timestamp(), LV) == WorkerState.launching
+    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp(), LV) == "unknown"
     clock.advance(20)
     heartbeat(
         store, clock, W0, [("researcher-0000", "working", "t-1"), ("researcher-0001", "idle", None)]
     )
     now = clock().timestamp()
     w = store.get_worker(W0)
-    assert worker_state(w, now) == WorkerState.running
-    assert agent_state(store.get_agent("researcher-0000"), w, now) == AgentState.working
-    assert agent_state(store.get_agent("researcher-0001"), w, now) == AgentState.idle
+    assert worker_state(w, now, LV) == WorkerState.running
+    assert agent_state(store.get_agent("researcher-0000"), w, now, LV) == AgentState.working
+    assert agent_state(store.get_agent("researcher-0001"), w, now, LV) == AgentState.idle
     assert store.get_agent("researcher-0000")["turn_id"] == "t-1"
 
 
@@ -141,11 +143,11 @@ def test_unknown_and_dead_by_age(store, jobs, clock, tick):
     a = store.get_agent("researcher-0000")
     t = clock().timestamp()
     w = store.get_worker(W0)
-    assert agent_state(a, w, t + 60) == AgentState.idle
-    assert agent_state(a, w, t + 91) == AgentState.unknown
-    assert worker_state(w, t + 91) == WorkerState.unknown
-    assert agent_state(a, w, t + 181) == AgentState.dead
-    assert worker_state(w, t + 181) == WorkerState.dead
+    assert agent_state(a, w, t + 60, LV) == AgentState.idle
+    assert agent_state(a, w, t + 91, LV) == AgentState.unknown
+    assert worker_state(w, t + 91, LV) == WorkerState.unknown
+    assert agent_state(a, w, t + 181, LV) == AgentState.dead
+    assert worker_state(w, t + 181, LV) == WorkerState.dead
 
 
 def test_unresponsive_worker_is_cancelled_and_relaunched(store, jobs, clock, tick):
@@ -175,7 +177,7 @@ def test_crash_relaunch_restores_and_resumes_interrupted(store, jobs, clock, tic
     assert "crash" in kinds(actions) and "launch" not in kinds(actions)
     w = store.get_worker(W0)
     assert w["crashes"] == 1 and w["consecutive_crashes"] == 1 and w["job_id"] is None
-    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp()) == "dead"
+    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp(), LV) == "dead"
     evs = store.read_events("researcher-0000", 0)
     assert [e["type"] for e in evs] == ["turn_interrupted"] and evs[0]["turn_id"] == "t-9"
     assert store.read_events("researcher-0001", 0) == []
