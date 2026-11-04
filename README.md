@@ -247,5 +247,7 @@ No network, no real jobs: the Hub client and the harness processes are faked.
 - Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in
   the controller image. Without the Space's persistent storage a redeploy wipes
   it; replicas come back from the spec, spawned agents do not.
+- The experiments under `experiments/` target the pre-cleanup layout; run them from commit
+  `8949085` (`git checkout 8949085`).
 
 Design, contract and decision log: [docs/design.md](docs/design.md).
