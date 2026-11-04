@@ -65,10 +65,14 @@ def _states(d: dict[str, int]) -> str:
     return " ".join(f"{k}:{v}" for k, v in sorted(d.items())) or "-"
 
 
+def _usd(v: float) -> str:
+    return f"${v:.4f}" if v < 0.01 else f"${v:.2f}"  # a short turn costs a fraction of a cent
+
+
 def _print_status(st: dict) -> None:
     typer.echo(
         f"{st['swarm']}  agents={st['agents_total']} workers={st['workers_total']} "
-        f"pending={st['pending_prompts']} cost=${st['cost_usd']:.2f}"
+        f"pending={st['pending_prompts']} cost={_usd(st['cost_usd'])}"
         + (f" gen {st['generation']}" if st.get("generation") else "")
     )
     rows = [
@@ -78,7 +82,7 @@ def _print_status(st: dict) -> None:
             t["replicas"],
             _states(t["agents_by_state"]),
             _states(t["workers_by_state"]),
-            f"${t['cost_usd']:.2f}",
+            _usd(t["cost_usd"]),
         ]
         for t in st["types"].values()
     ]
@@ -490,8 +494,7 @@ def _print_events(api: Client, name: str, only: str, after: int, follow: bool, w
 def _print_agents(rows: list[dict]) -> None:
     """Turns and cost as of each agent's last heartbeat: its age next to them."""
     _table([[a["name"], a["state"], a["type"], a["worker"], a["turns"], a["pending"],
-             f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
-             _ago(a["last_heartbeat"]),
+             _usd(a["cost_usd"]), _ago(a["last_heartbeat"]),
              (a.get("endpoint") or "-") + (" DEAD" if a.get("on_dead_server") else "")]
             for a in rows],
            ["name", "state", "type", "worker", "turns", "pending", "cost", "heartbeat",

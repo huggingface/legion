@@ -343,3 +343,13 @@ def test_status_prints_the_age_of_heartbeat_and_snapshot_numbers(monkeypatch):
     out = runner.invoke(cli.app, ["status", "s", "--type", "r"]).output
     assert "type r: idle:1  revs -  (health 34 s ago)" in out
     assert "$0.0000  12 s ago" in out  # turns and cost as of that heartbeat
+
+
+def test_costs_below_a_cent_keep_four_decimals(capsys):
+    t = {"name": "r", "health": "ok", "replicas": 2, "agents_by_state": {"idle": 2},
+         "workers_by_state": {}, "cost_usd": 0.0008}
+    cli._print_status({"swarm": "s", "agents_total": 2, "workers_total": 1, "pending_prompts": 0,
+                       "cost_usd": 0.0008, "types": {"r": t}})
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].endswith("cost=$0.0008") and out[2].endswith("$0.0008")  # not $0.00
+    assert cli._usd(1.234) == "$1.23" and cli._usd(0.01) == "$0.01"
