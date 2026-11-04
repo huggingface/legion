@@ -7,7 +7,7 @@
 # the run's cluster profile (cluster.env, copied by `flock init --profile`), the cluster's secrets
 # file when the profile names one (SECRETS_FILE, mode 600) and the run's config (run.env, mode 600;
 # later wins), sets umask 077 and defines log(), die(), require_var(), http_status(),
-# publish_host(), record_job(), free_port() and the container helpers (CONTAINER_IMAGE,
+# publish_host(), free_port() and the container helpers (CONTAINER_IMAGE,
 # container_srun_args). It runs on the HOST: a worker then starts in a container when one is set.
 #
 # Nothing here is passed with `sbatch --export`: every value is read from files in the run
@@ -82,19 +82,17 @@ RUN=${RUN_DIR##*/}
 case $RUN in *[!A-Za-z0-9._-]*|"") die "run directory name $RUN: use letters, digits, . _ - only";; esac
 SLURM_DIR=$RUN_DIR/slurm   # these scripts (mounted read-only in a container)
 RUN_ENV=$RUN_DIR/run.env
-HOSTS_DIR=$RUN_DIR/hosts   # *.host, *.job: a directory, so a container can mount it ro and see updates
+HOSTS_DIR=$RUN_DIR/hosts   # *.host: a directory, so a container can mount it ro and see updates
 SPEC=$RUN_DIR/experiment/spec.yaml   # the experiment folder's copy (`flock init`)
 export RUN RUN_DIR SLURM_DIR RUN_ENV HOSTS_DIR SPEC
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/launch" "$HOSTS_DIR" || die "cannot create $RUN_DIR"
 
-# write_file PATH TEXT: tmp + rename, so a reader (or a directory mount) sees the old or the new text
-write_file() {
-  printf '%s\n' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1" || die "cannot write $1"
+# publish_host NAME PORT: <run>/hosts/NAME.host = `<this node's hostname>:PORT` (tmp + rename: a
+# reader, or a directory mount, sees the old or the new file)
+publish_host() {
+  local f=$HOSTS_DIR/$1.host
+  printf '%s\n' "$(hostname)${2:+:$2}" > "$f.tmp" && mv -f "$f.tmp" "$f" || die "cannot write $f"
 }
-# publish_host NAME PORT: <run>/hosts/NAME.host = `<this node's hostname>:PORT`
-publish_host() { write_file "$HOSTS_DIR/$1.host" "$(hostname)${2:+:$2}"; }
-# record_job NAME: <run>/hosts/NAME.job = this job's id (`flock stop --release` cancels it)
-record_job() { [ -z "${SLURM_JOB_ID:-}" ] || write_file "$HOSTS_DIR/$1.job" "$SLURM_JOB_ID"; }
 
 # free_port: a TCP port free on this node now, so the controller and the world can share a node.
 # Another process may take it before the server binds (rare): controller.sbatch retries once with a

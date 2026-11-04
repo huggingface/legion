@@ -9,8 +9,7 @@
 #   port, {python} the venv's python; FLOCK_WORLD_PORT, FLOCK_WORLD_HOST=0.0.0.0, FLOCK_SWARM and
 #   FLOCK_WORLD_TOKEN (run.env) are set, every other FLOCK_* variable is dropped. Its output goes
 #   to <run>/logs/world-<run>.log.
-# - hosts/world.job = this job's id at start; hosts/world.host = host:port once the world answers
-#   GET /manifest (every start: a requeue may land on another node). The controller follows the
+# - hosts/world.host = host:port once the world answers GET /manifest (every start: a requeue may land on another node). The controller follows the
 #   file (FLOCK_WORLD_HOST_FILE; the spec's world.url uses ${WORLD_HOST}).
 # - The world keeps its own state (flock never reads it). A clean stop (`flock stop --release`
 #   sends `scancel --signal=TERM --batch`: this shell only) sends it SIGTERM and waits for it to
@@ -67,7 +66,6 @@ on_term() {  # clean stop: the world saves and exits; the job ends with it (no r
 }
 trap on_usr1 USR1
 trap on_term TERM INT
-record_job world
 
 # ---------------------------------------------------------------- serve
 WORLD_PORT=$(free_port) || die "no free port on $(hostname)"   # the controller may share this node

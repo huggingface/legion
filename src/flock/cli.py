@@ -284,8 +284,7 @@ def _show_launch(swarm: str, done: dict, strict: bool) -> None:
     if run := done.get("local"):
         typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {ops.LOCAL_DIR}/launch.log)")
     if started := done.get("up"):
-        jobs = ", ".join(f"{role} job {job}" for role, job in started["jobs"].items())
-        typer.echo(f"up: {jobs}; controller at {started['url']}")
+        typer.echo(f"up: {', '.join(started['jobs'].values())}; controller at {started['url']}")
         if "FLOCK_RUN_DIR" not in _api().env:  # no run dir records it
             typer.echo(f"export FLOCK_URL={started['url']}")
     if "resumed" in done:
@@ -315,9 +314,9 @@ def stop(
         "--agent", help="hold only this agent (repeatable)")] = None,
     interrupt: bool = typer.Option(False, "--interrupt", help="also cut the running turns"),
     release: bool = typer.Option(
-        False, "--release", help="drain every worker (each agent synced to the bucket), "
-                                 "checkpoint the controller, then end it and the world: nothing "
-                                 "runs until `flock launch`; reports agents not synced"),
+        False, "--release", help="drain every worker (each agent synced to the bucket), then "
+                                 "checkpoint and end the run's controller and world jobs (a "
+                                 "local run keeps its controller); reports agents not synced"),
     final: bool = typer.Option(
         False, "--final", help="stop the loops after their final round (default: every type "
                                "with a loop)"),
@@ -328,8 +327,9 @@ def stop(
 ) -> None:
     """Stop a swarm, keeping everything (docs/live.md "Lifecycle"). Default: hold, no new
     prompts or loop rounds, running turns finish, workers stay. `flock launch SWARM` resumes.
-    --release frees everything the run started (workers, then its controller and world after
-    a checkpoint); `flock launch FOLDER` starts them again and resumes."""
+    A local run (`compute: local`) ends its background controller (and writes its bundle) on
+    --delete only; --release ends a run's Slurm or HF Jobs controller and world after a
+    checkpoint (`flock launch FOLDER` starts them again)."""
     try:
         done = ops.stop(_api(), swarm, types=type_, agents=agent, interrupt=interrupt,
                         reason=reason, release=release, final=final, delete=delete,

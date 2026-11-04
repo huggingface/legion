@@ -6,8 +6,7 @@
 # `flock stop --release` cancels it after a verified checkpoint (docs/slurm.md "Deploying").
 # By hand: sbatch -J flock-ctl-<run> -o <run dir>/logs/%x-%j.out <run dir>/slurm/controller.sbatch <run dir>
 #
-# - `flock-controller` on a free port; <run>/hosts/controller.host = host:port and
-#   hosts/controller.job = this job's id. SQLite in FLOCK_DATA under /tmp; the state is pushed to
+# - `flock-controller` on a free port; <run>/hosts/controller.host = host:port. SQLite in FLOCK_DATA under /tmp; the state is pushed to
 #   FLOCK_STATE_URL (default <the spec's bucket>/controller/<run>) every 60 s and once more on
 #   SIGTERM, and restored at start, so a requeue or a later job continues the run.
 # - Workers are sbatch'ed BY the controller (FLOCK_COMPUTE=slurm) with <run>/slurm/worker.sbatch.
@@ -65,7 +64,6 @@ on_term() {  # scancel / preemption / time limit: a clean stop, no requeue
 }
 trap on_usr1 USR1
 trap on_term TERM INT
-record_job controller
 
 # ---------------------------------------------------------------- inputs
 require_var HF_TOKEN FLOCK_TOKEN
