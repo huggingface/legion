@@ -89,6 +89,7 @@ $ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
 | free the workers, keep everything | `flock stop S --release` |
 | end the loops with their final round | `flock stop S --final [--type T]` |
 | continue after either | `flock launch S` (or `flock launch FOLDER`; `--type`/`--agent` lift one hold) |
+| bring a released Slurm run back held, to change its spec first | `flock launch FOLDER --hold`, `flock update FOLDER`, then `flock launch FOLDER` |
 
 `flock launch FOLDER` creates the swarm when the controller does not have it (with
 `If-None-Match: *`: of two launches racing, one creates and the other gets 412). When it has
@@ -113,6 +114,11 @@ controller the run has no job for, or one serving other swarms that are not rele
 running. `flock launch FOLDER` with no controller answering (`ops.up`) starts them again, waits
 until the controller answers (it restores its checkpoint) and the world serves, then creates or
 resumes.
+`flock launch FOLDER --hold` (Slurm, no controller up) stops there: it writes
+`RUN_DIR/controller.hold`, and the controller job started with it restores every swarm held and
+released, as `flock stop --release` leaves it (`FLOCK_HOLD_ON_START=1`), pushes that checkpoint,
+then removes the file (a later requeue holds nothing). No worker starts, so `flock update` can
+change the spec first (a new provider URL); a plain `flock launch` then resumes.
 
 A controller that restarts restores its swarms from its own checkpoint (`state.db` and
 `events/<swarm>/`, pushed every 60 s to `FLOCK_STATE_URL`; `FLOCK_STATE_RESTORE=0` skips it).
