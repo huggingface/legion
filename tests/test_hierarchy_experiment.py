@@ -10,7 +10,7 @@ from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "hierarchy"
-REPOS = {"hierarchy": "HuggingFaceSwarms/chatbot-v5", "voting": "HuggingFaceSwarms/chatbot-v6"}  # one dataset each
+REPOS = {"hierarchy": "HuggingFaceSwarms/SwarmChat-v5", "voting": "HuggingFaceSwarms/SwarmChat-v6"}  # one dataset each
 SHARED = "You are one of several agents improving " + REPOS["hierarchy"]
 
 
