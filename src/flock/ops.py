@@ -95,14 +95,14 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
 
 
 # `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
-COMMS_WAKES = {"comms.mention": "mention", "comms.thread": "thread"}
+COMMS_WAKES = {f"comms.{k}": k for k in ("mention", "thread", "dm", "channel")}  # = controller.api.COMMS_WAKE_EVENTS values
 
 
 def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
     """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
     kind = COMMS_WAKES.get(src)
     if kind is None:
-        return "no feeder in this version (comms.mention and comms.thread are fed)"
+        return "no feeder in this version (comms.mention, comms.thread, comms.dm and comms.channel are fed)"
     if spec.comms is None or not comms_tools(ts, spec.comms):
         return ("no comms feeder: the type is not on the board (set `comms: true` and the "
                 "swarm-level `comms:` block)")

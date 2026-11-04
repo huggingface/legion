@@ -89,13 +89,14 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     (tmp_path / "prompts" / "final.md").write_text("Final: submit.\n")
     raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
     raw["types"]["researcher"]["loop"] = {
-        "prompt_file": "prompts/round.md", "every": "30s", "on": ["comms.mention"],
+        "prompt_file": "prompts/round.md", "every": "30s", "on": ["comms.mention", "comms.channel"],
         "final": {"prompt_file": "prompts/final.md", "reserve_usd": 0.5}}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
     assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
+    assert "loop.on comms.channel: no comms feeder" in r.output  # fed, so only the board is missing
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 
