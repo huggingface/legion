@@ -6,11 +6,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 
 from flock.controller.store import DB_NAME, Store
-
-FIXTURE = Path(__file__).parent / "fixtures" / "stored_specs" / "hierarchy.json"
+from tests.test_resume_gate import stored_spec
 
 # main @ 8949085: the grants table, dropped from the schema since
 GRANTS = """CREATE TABLE IF NOT EXISTS grants (
@@ -19,7 +17,7 @@ GRANTS = """CREATE TABLE IF NOT EXISTS grants (
 
 
 def test_old_db_with_removed_feature_rows_opens(tmp_path):
-    raw = json.loads(FIXTURE.read_text())
+    raw = json.loads(stored_spec("hierarchy").read_text())
     raw.update(policies={"mode": "enforce", "rules": [], "sinks": ["file:alerts.log"]},
                report={"every": "1h", "sinks": []})
     name = raw["swarm"]
