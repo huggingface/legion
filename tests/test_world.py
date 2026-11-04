@@ -42,7 +42,6 @@ from flock.worker.agents import AgentRuntime
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox
 from flock.world import Agent, ToolError, World, tool
-from flock.world.__main__ import world_app
 from flock.world.host import WorldError, WorldHost, check_tools, derived_token, fetch_manifest
 from flock.world.hub import WorldHub
 from flock.world.protocol import TOKEN_ENV, WorldManifest, credential_id
@@ -390,7 +389,7 @@ def _copy_taskboard(dst: Path) -> Path:
 def test_world_host_starts_keeps_replaces_and_stops_a_command_world(tmp_path):
     d = _copy_taskboard(tmp_path / "tb")
     host = WorldHost(log_dir=tmp_path / "logs")
-    w = WorldSpec(dir=str(d), command=["{python}", "-m", "flock.world", "serve",
+    w = WorldSpec(dir=str(d), command=["{python}", "-m", "flock.cli", "world", "serve",
                                        "taskboard:TaskBoard"])
     try:
         url, started = host.ensure("sw", w, "tok")
@@ -521,7 +520,7 @@ async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path)
     app = controller_app(store, TOKEN, secret_source={}, loop_interval=0, worlds=host)
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local",
-        "world": {"dir": str(d), "command": [sys.executable, "-m", "flock.world", "serve",
+        "world": {"dir": str(d), "command": [sys.executable, "-m", "flock.cli", "world", "serve",
                                              "taskboard:TaskBoard"]},
         "types": {"dev": {"harness": "claude", "model": "m"}}})
     transport = httpx.ASGITransport(app=app)
@@ -1077,7 +1076,7 @@ class Doctored(World):
 def test_doctor_warns_and_passes(capsys):
     s = Served(Doctored())
     try:
-        r = CliRunner().invoke(world_app, ["doctor", s.url, "--token", SECRET, "--calls", "5"])
+        r = CliRunner().invoke(cli.app, ["world", "doctor", s.url, "--token", SECRET, "--calls", "5"])
     finally:
         s.close()
     assert r.exit_code == 0, r.output
@@ -1109,5 +1108,5 @@ def test_doctor_flags_a_missing_read_and_a_failing_read_only_tool():
 
 
 def test_doctor_manifest_unreachable():
-    r = CliRunner().invoke(world_app, ["doctor", "http://127.0.0.1:1"])
+    r = CliRunner().invoke(cli.app, ["world", "doctor", "http://127.0.0.1:1"])
     assert r.exit_code == 1 and "FAIL" in r.output
