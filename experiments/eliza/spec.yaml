@@ -22,7 +22,7 @@ models:                                        # swap in any router model with t
     extra: {max_tokens: 32000, temperature: 0.6, chat_template_kwargs: {enable_thinking: false}}
 world:
   dir: ../../worlds/eliza                      # workspace: worlds/eliza/ws (or $ELIZA_WS)
-  command: ["{python}", -m, flock.world, serve, "eliza:ElizaWorld"]
+  command: ["{python}", -m, flock.cli, world, serve, "eliza:ElizaWorld"]
 comms:
   kind: msgboard
   url: https://msgboard.example.invalid        # placeholder: your board's URL
@@ -46,11 +46,20 @@ types:
     tool_output_chars: 32000                   # read_file of a whole bot (default 8000 cuts it)
     context_tokens: 64000                      # compaction threshold (default 32000)
     loop:
+      first: |
+        Start (round 0). One tool call per reply:
+        1. Call `read` (no arguments) to see the kickoff.
+        2. If you are ds-0000: call `post` with thread "new" and this text, then go to step 3:
+           "[plan] ds-0000=integrator (stdin loop, normalising, fallbacks, merges parts into agents/ds-0000/bot.py), ds-0001=ELIZA rules (keywords, decomposition, reflection I->you), ds-0002=memory (names, facts, recall), glm-0000=feelings and family topics, glm-0001=tester (realistic conversations with run_bot, reports GREEN/RED). Reply `agree <this message id>`."
+           Everyone else: do not post now.
+        3. Call `done` with summary "started".
       prompt_file: prompts/round.md
       every: 90s
+      stagger: 4s
       on: [comms.mention, comms.thread]       # board wake-ups (2 s debounce)
       wake: {min_gap: 30s, max: 10}            # the defaults: a wake is not a round
       while: {until: 2h, max_rounds: 80, agent_usd: {deepseek: 3.60, glm: 2.10}}
+      # stop_when: {all_agents_done: true}    # end early once every agent calls done(finished: true)
       final: {prompt_file: prompts/final.md, reserve_usd: 0.30}
   glm:
     <<: *dev

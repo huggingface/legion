@@ -59,9 +59,9 @@ through `.flock/current`, like the other commands do.
 (one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock launch experiments/run4/spec.yaml --env runs/run4/run.env
-$ COMPUTE_KIND=local flock launch experiments/run4/spec.yaml --env runs/run4/run.env
-$ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --check
+$ flock launch my-experiment/spec.yaml --env runs/run4/run.env
+$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/run4/run.env
+$ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
 ```
 
 - Every string value, inline prompts and commands included, may use `${VAR}` and

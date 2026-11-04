@@ -8,11 +8,9 @@ import pytest
 from flock.cli import load_spec
 from flock.models import ALL_COMMS_TOOLS, comms_tools
 
-from .test_hierarchy_experiment import check_one_spec
-
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "teams"
-REPO = "HuggingFaceSwarms/chatbot-v7"
+REPO = "HuggingFaceSwarms/SwarmChat-v7"
 RULES = (  # Carlos's six rules, verbatim, with the tool insertions
     "You are one of several agents improving " + REPO + ". Help the team deliver a working result.",
     "1. Establish the goal. Read the brief, recent discussion, existing plan, and open changes: check `channels`, `search` the board and `list_prs` first.",
@@ -38,7 +36,7 @@ def test_one_type_no_spawn_and_the_rules():
     run4 = load_spec(str(ROOT / "run4/spec.yaml")).types["agent"]
     assert set(spec.types) == {"agent"} and not spec.spawn
     agent = spec.types["agent"]
-    skip = {"system_prompt": True, "replicas_ramp": True}
+    skip = {"system_prompt": True}
     assert agent.replicas == 0 and agent.model_dump(exclude=skip) == run4.model_dump(exclude=skip)
     assert agent.system_prompt_append_file is None
     assert sorted(p.name for p in (EXP / "prompts").iterdir()) == ["final.md", "round.md", "system.md"]
@@ -52,13 +50,9 @@ def test_one_type_no_spawn_and_the_rules():
         assert rule in text, rule
     assert "Coordinate daily work" not in text and "All agents are equal" in text
     lower = text.lower()
-    for banned in ("spawn", "flock-agent remove", "flock remove", "$flock_parent", "vote", "voting", "#proposals",
-                   "chatbot-v5", "chatbot-v6", "[project", "enforce", "flock prompt"):
+    for banned in ("spawn", "flock remove", "$flock_parent", "vote", "voting", "#proposals",
+                   "swarmchat-v5", "swarmchat-v6", "[project", "enforce", "flock prompt"):
         assert banned not in lower, banned
     assert f"`{REPO}` on Hugging Face" in text
     assert f"`https://huggingface.co/datasets/{REPO}` into `chatbot-swarm`" in text
     assert spec.comms.url == "https://huggingfaceswarms-chatbot-v7-msgboard.hf.space"
-
-
-def test_one_spec_with_the_ramp(monkeypatch):
-    check_one_spec(EXP, monkeypatch, "agent", [(600 * i, 20 * (i + 1)) for i in range(12)] + [(7200, 250)])

@@ -11,14 +11,14 @@ the secrets file, host files, env files and logs.
 One run directory per run. `flock init` prepares it; the jobs and every later command read it.
 
 ```sh
-flock init $PWD/runs/hierarchy --from experiments/hierarchy --profile my-cluster.env --secrets secrets.env
+flock init $PWD/runs/hierarchy --from my-experiment --profile my-cluster.env --secrets secrets.env
 #   logs/ hosts/                 the jobs' logs and host files (controller.host, world.host)
 #   experiment/                  a copy of the folder (links followed): what is launched
 #   cluster.env                  a copy of the cluster profile (below)
 #   run.env (mode 600)           every ${VAR} the spec reads (commented: the spec's default),
 #                                the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
 $EDITOR runs/hierarchy/run.env   # fill what the checks report; then rerun `flock init runs/hierarchy`
-export SLURM_DIR=/shared/flock-slurm          # the job scripts (experiments/run4/slurm/ copied here)
+export SLURM_DIR=/shared/flock-slurm          # the job scripts (world.sbatch, controller.sbatch, ...)
 . runs/hierarchy/cluster.env
 sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-world-hierarchy "$SLURM_DIR/world.sbatch" $PWD/runs/hierarchy
 sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-ctl-hierarchy "$SLURM_DIR/controller.sbatch" $PWD/runs/hierarchy
@@ -325,4 +325,4 @@ only crashes within `WORLD_STABLE_S` of the start toward its cap of 5 (a longer 
 and, past the cap, retries with 5 min to 30 min backoff instead of ending. A requeued controller
 restores its state and follows the world's host without waiting for it. For non-preemptible
 placement set `WORLD_PARTITION`/`WORLD_QOS` and `CTL_PARTITION`/`CTL_QOS` in run.env and pass them
-to `sbatch` as `-p`/`--qos` (`experiments/run4/slurm/run.env.example`).
+to `sbatch` (`experiments/run4/slurm/run.env.example`).

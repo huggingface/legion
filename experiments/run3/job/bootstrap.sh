@@ -1,4 +1,4 @@
-# run3 in ONE HF Job (README.md "Single job"): `python -m flock.controller.localrun --until idle` in local mode inside the
+# run3 in ONE HF Job (README.md "Single job"): `flock run --until idle` in local mode inside the
 # container (controller, workers, agents and the world are child processes), plus the wave
 # runner. For smokes and up to ~50 agents; the 48 h run at scale is jobs mode (README.md).
 # Passed inline: hf jobs run ... python:3.12-slim bash -c "$(cat job/bootstrap.sh)".
@@ -11,7 +11,7 @@
 #          RUN3_WAVES       the wave schedule file in the experiment (default waves.yaml)
 #          CHATBOT_SYNC_S   seconds between bucket syncs (default 300)
 #          CHATBOT_CHECK_S  seconds between looks for control markers and due waves (default 30)
-#          CHATBOT_FLOCK_ARGS  extra `localrun` flags (e.g. --skip-preflight)
+#          CHATBOT_FLOCK_ARGS  extra `flock run` flags (e.g. --skip-preflight)
 # control: <bucket>/control/update   re-sync <bucket>/experiment/ over the folder, re-render,
 #                                    keep the live replica count, `flock update` (marker deleted)
 #          <bucket>/control/add      its content N: N more agents now (after the schedule: the
@@ -74,7 +74,7 @@ PIDS=()
 cd "$EXP"
 # test hook: a slow start-up (a cold venv) before the controller is up
 [ -n "${CHATBOT_TEST_START_DELAY_S:-}" ] && sleep "$CHATBOT_TEST_START_DELAY_S"
-"$PYTHON" -m flock.controller.localrun spec.local.yaml --until idle ${CHATBOT_FLOCK_ARGS:-} > "$H/logs/run.out" 2>&1 &
+"$PYTHON" -m flock.cli run spec.local.yaml --until idle ${CHATBOT_FLOCK_ARGS:-} > "$H/logs/run.out" 2>&1 &
 PIDS+=($!)
 log "flock run started (pids ${PIDS[*]})"
 
@@ -88,7 +88,7 @@ report() {  # flock's start lines and its latest status line, into the job log
   [ -f "$o" ] || return 0
   n=$(wc -l < "$o"); s=${seen:-0}
   [ "$n" -gt "$s" ] && tail -n +"$((s + 1))" "$o" | head -n "$((n - s))" | grep -aE \
-    '^(preflight|tools:|apply|prompt to|flock:|local run|stopping|run |bundle:)' | sed "s|^|run.out: |" || true
+    '^(preflight|tools:|apply|prompt to|flock run|stopping|run |bundle:|update:)' | sed "s|^|run.out: |" || true
   seen=$n
   tail -n 30 "$o" | grep -a '^\[' | tail -1 | sed "s|^|run.out: |" || true
 }

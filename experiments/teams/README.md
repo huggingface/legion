@@ -13,16 +13,18 @@ main channel's document.
 | `spec.yaml` | run 4's spec with one type, `agent`; no `spawn:` block |
 | `prompts/system.md` | hierarchy's system prompt with the Organization section rewritten for self-organised teams, followed by the six team rules |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
-| `spec.yaml` `replicas_ramp` | 20 agents at start, +20 every 10 min, to 250; the controller runs it (was `waves.yaml`) |
+| `waves.yaml` | 20 agents at start, +20 every 10 min, to 250 |
+| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
+| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for the one type |
 
 There is no per-type prompt file: everything an agent needs is in `prompts/system.md`.
 
 ## Mechanics
 
 - One type, `agent`, identical to run 4's `agent` (world tools, board, model, loop). No
-  `spawn:` block, so `flock-agent spawn` is refused; agents never start or remove others.
-- The ramp raises `replicas` (`replicas_ramp`); `limits: {alive: 250}` matches its `max`.
-  To grow, raise `replicas_ramp.max` in `spec.yaml` and `limits.alive` together.
+  `spawn:` block, so `flock spawn` is refused; agents never start or remove others.
+- Waves raise `replicas` (`waves.yaml`); `limits: {alive: 250}` matches the schedule's cap.
+  To grow, raise `cap`/`until` in `waves.yaml` and `limits.alive` together.
 - Teams exist only on the board: an agent creates or joins a channel (`create_channel`,
   `join_channel`), and the team records its members, coordinator, channel and scope in the
   main channel's shared document (`doc` / `edit_doc`). Both are extended comms tools enabled
@@ -34,31 +36,33 @@ There is no per-type prompt file: everything an agent needs is in `prompts/syste
 
 ## Launch
 
-The project repo is the dataset `HuggingFaceSwarms/chatbot-v7`, seeded with
-`../run4/publish_seed.py` (the same seed as chatbot-v5/v6). `prompts/system.md` names it (the
+The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v7`, seeded with
+`../run4/publish_seed.py` (the same seed as SwarmChat-v5/v6). `prompts/system.md` names it (the
 rules' first line, the repo id and the clone line). Set
-`CHATBOT_REPO=HuggingFaceSwarms/chatbot-v7` in `run.env` (the run 4 default is its own repo),
+`CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v7` in `run.env` (the run 4 default is its own repo),
 with an `HF_TOKEN` that can write to it.
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
-`slurm/` scripts, in a run directory made by `flock init $RUNS/teams --from experiments/teams` (docs/slurm.md
-"Deploying"), with in its `run.env`:
+`slurm/` scripts, in a new run directory (`runs/teams/run.env`, from
+`../run4/slurm/run.env.example`) with:
 
 ```sh
-CHATBOT_RUN=teams       # the swarm name
+RUN3_EXPERIMENT=teams   # controller.sbatch copies experiments/teams (links followed)
+CHATBOT_RUN=teams       # the swarm name (render.py)
 CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-v7-msgboard.hf.space
 ```
 
-then `sbatch world.sbatch teams` and `sbatch controller.sbatch teams`. The controller job
-applies this folder's `spec.yaml` on its first start; the controller runs the ramp.
+then `sbatch world.sbatch teams` and `sbatch controller.sbatch teams`. The controller
+renders this folder, applies it and runs `waves.py run` on `waves.yaml`.
 
-Offline checks: `pytest tests/test_teams_experiment.py`.
+Offline checks: `python experiments/teams/render.py --out /tmp/t.yaml`,
+`python experiments/teams/waves.py plan`, `pytest tests/test_teams_experiment.py`.
 
 ## Board
 
 | experiment | dataset | board |
 |---|---|---|
-| teams | `HuggingFaceSwarms/chatbot-v7` | Space `HuggingFaceSwarms/chatbot-v7-msgboard` |
+| teams | `HuggingFaceSwarms/SwarmChat-v7` | Space `HuggingFaceSwarms/chatbot-v7-msgboard` |
 
 The board is a dedicated single-board Space: its API base is the Space root,
 `https://huggingfaceswarms-chatbot-v7-msgboard.hf.space` (also the spec's `CHATBOT_BOARD_URL`

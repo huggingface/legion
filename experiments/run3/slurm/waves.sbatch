@@ -36,11 +36,10 @@ cp "$SPEC" "$EXP/$(basename "$SPEC")"   # next to spec.yaml: prompts and tools r
 SPEC=$EXP/$(basename "$SPEC")
 SWARM=$("$PY" -c 'import sys; from flock.cli import load_spec; print(load_spec(sys.argv[1]).swarm)' "$SPEC")
 if "$PY" -m flock status "$SWARM" >/dev/null 2>&1; then
-  log "swarm $SWARM exists: updating it (live replica counts kept)"
-  (cd "$EXP" && "$PY" -m flock update "$SPEC")
-else
-  (cd "$EXP" && "$PY" -m flock launch "$SPEC")
+  (cd "$EXP" && "$PY" waves.py pin --spec "$SPEC" --waves "$WAVES")  # keep the live counts
+  log "swarm $SWARM exists: re-applying with the live replica counts"
 fi
+(cd "$EXP" && "$PY" -m flock apply "$SPEC")
 log "applied $SWARM; waves from $(basename "$WAVES")"
 cd "$EXP"
 "$PY" waves.py run --spec "$SPEC" --waves "$WAVES" --log "$RUN_DIR/logs/waves.jsonl" &

@@ -77,10 +77,18 @@ def spec(cfg: dict, p: dict, into: Path, phase: int) -> dict:
             m["model"].split(":", 1) for m in models.values()) if pk == name}
     types = {}
     for t in p["letters"]:
+        first = p["agents"][t][0]
         for m, n in p["per"].items():
-            loop = {
+            loop = {"first": (
+                "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see "
+                f"the kickoff.\n2. If you are {first}: call `post` with thread \"new\" and this "
+                f"text, then go to step 3:\n   \"[team-{t}] Team {t.upper()} thread "
+                f"({', '.join(p['agents'][t])}). No lead: first agree on our own direction here "
+                "([direction?] proposals), then a [split] (one feature module of bot/ each); "
+                "answer with agree <id>.\"\n   Everyone else: do not post now.\n3. Call `done` "
+                "with summary \"started\".\n"),
                 "prompt_file": f"round-{t}.md" if phase == 2 else f"prompts/round-{t}.md",
-                "every": "turn_end", "on": ["comms.mention", "comms.thread"],
+                "every": "turn_end", "stagger": "2s", "on": ["comms.mention", "comms.thread"],
                 "wake": dict(cfg["wake"]),
                 "while": {"until": f"{round(hours * 60)}m", "max_rounds": cfg["max_rounds"]},
                 "final": {"prompt_file": "final.md" if phase == 2 else "prompts/final.md"}}

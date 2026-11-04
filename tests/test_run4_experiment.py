@@ -1,11 +1,13 @@
-"""Run-4 configuration (one spec.yaml: cluster settings and the two-phase ramp) and notifications."""
+"""Run-4 configuration, all-node capacity guard and notification integration."""
 from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
-from flock.cli import load_spec
+import httpx
+
 from flock.controller.loop import notice_line
 
 EXP = Path(__file__).resolve().parents[1] / "experiments/run4"
@@ -19,58 +21,26 @@ def module(name):
     return result
 
 
-def test_spec_fixed_prompt_and_ramp():
-    spec = load_spec(str(EXP / "spec.yaml"))
-    assert set(spec.types) == {"agent", "agent-spawner", "agent-child"}  # test_run4_spawner
-    agent = spec.types["agent"]
-    assert agent.harness.value == "pi" and agent.agents_per_worker == 12
-    assert agent.max_turns == 150 and agent.turn_timeout == "2h"
-    assert agent.worker_lifetime == "54h"
-    assert agent.loop.notices
-    assert agent.loop.prompt.strip() == "Continue your work."
-    assert "Keep the seed's input/output interface fixed" in agent.system_prompt
-    assert "5 min in total" in agent.system_prompt
-    assert not spec.comms.protocols
-    assert set(agent.tools) == {"world:run_bot", "world:open_pr", "world:review_pr",
-                                "world:merge_pr", "world:list_prs", "world:close_pr",
-                                "world:get_pr"}
-    ramp = agent.replicas_ramp  # was waves.yaml: 20 every 5 min to 100, then +20 every 10 min
-    events = [(t, n) for t, n, _ in ramp.schedule()]
-    assert ramp.max == 300 and events[:6] == [(0, 20), (300, 40), (600, 60), (900, 80),
-                                              (1200, 100), (1800, 120)]
-    assert events[-1] == (7200, 300) and [g for _, _, g in ramp.schedule()][:2] == [10, 0]
-    assert ramp.hold_if.above == 100 and ramp.hold_if.request_s == 15
-    assert spec.types["agent-spawner"].replicas_ramp is None
-    assert spec.types["agent-child"].replicas_ramp is None
-
-
-def test_env_file_fills_the_cluster_settings(monkeypatch, tmp_path):
-    """One spec.yaml: --env run.env fills compute, bucket and endpoints; the file wins over the
-    shell; COMPUTE_KIND=local and LOOP_UNTIL make the local smoke."""
-    for name in ("RUN3_BUCKET", "RUN3_NAMESPACE", "CHATBOT_RUN", "MODEL_WORKER", "COMPUTE_KIND",
-                 "LOOP_UNTIL", "LOOP_MAX_ROUNDS", "WORKER_MEM", "SLURM_PARTITION"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URLS", "http://shell/v1")
-    monkeypatch.setenv("WORKER_CPUS", "8")
-    (tmp_path / "run.env").write_text("MODEL_WORKER=fake-model\nRUN3_BUCKET=hf://buckets/x/y\n"
-                                      "OPENAI_BASE_URLS=http://first/v1,http://second/v1\n")
-    spec = load_spec(str(EXP / "spec.yaml"), [str(tmp_path / "run.env")])
-    assert spec.compute.model_dump(exclude_none=True) == {
-        "kind": "slurm", "partition": "", "cpus": 8, "mem": "7G", "time": "54:00:00"}
-    assert spec.bucket == "hf://buckets/x/y" and spec.namespace == "cmpatino"
-    assert spec.world.url == "http://${WORLD_HOST}:7860" and spec.world.token_env == "CHATBOT_WORLD_TOKEN"
-    assert spec.models["worker-pi"].model == "vllm:fake-model"
-    assert spec.providers["vllm"].base_urls == ["http://first/v1", "http://second/v1"]
-    tools = {"world:run_bot", "world:open_pr", "world:review_pr", "world:merge_pr",
-             "world:list_prs", "world:close_pr", "world:get_pr"}
-    for t in spec.types.values():
-        assert t.replicas == 0 and t.harness.value == "pi" and set(t.tools) == tools
-        assert t.loop.while_.until == "48h" and t.loop.while_.max_rounds == 10000
-    monkeypatch.setenv("COMPUTE_KIND", "local")
-    monkeypatch.setenv("LOOP_UNTIL", "30m")
-    smoke = load_spec(str(EXP / "spec.yaml"))
-    assert smoke.compute.kind == "local" and smoke.world.command
-    assert all(t.loop.while_.until == "30m" for t in smoke.types.values())
+def test_capacity_guard_checks_each_node_and_holds_on_missing_metrics():
+    guard = module("load_guard")
+    def response(waiting, completed):
+        return SimpleNamespace(raise_for_status=lambda: None, text=(
+            f"vllm:num_requests_running 10\nvllm:num_requests_waiting {waiting}\n"
+            f"vllm:request_success_total{{finished_reason=\"stop\"}} {completed}\n"))
+    clocks = iter([0, 0, 60, 60, 120, 120])
+    counters = {"one": 0, "two": 0}
+    def healthy(url):
+        counters[url] += 60
+        return response(0, counters[url])
+    ok, _ = guard.capacity_ok(["one", "two"], get=healthy, sleep=lambda _: None,
+                             clock=lambda: next(clocks))
+    assert ok and counters == {"one": 180, "two": 180}
+    clocks = iter([0, 0, 60, 60, 120, 120])
+    ok, message = guard.capacity_ok(["one", "two"], get=lambda url: response(url == "two", 100),
+                                   sleep=lambda _: None, clock=lambda: next(clocks))
+    assert not ok and message.startswith("HOLD")
+    ok, _ = guard.capacity_ok(["one"], get=lambda _: (_ for _ in ()).throw(httpx.ConnectError("down")))
+    assert not ok
 
 
 def test_notices_group_dm_channels_and_remain_bounded():
