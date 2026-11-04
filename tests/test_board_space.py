@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import stat
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,11 +25,20 @@ SPEC = {
 }
 
 
+TEMPLATE_VARS = {"MSGBOARD_BOARDS": "[template]", "MSGBOARD_REPLICA": "hf://buckets/x/template",
+                 "MSGBOARD_DEMO_BOTS": "1", "MSGBOARD_HF_ORGANIZATIONS": '["HuggingFaceSwarms"]',
+                 "MSGBOARD_SNAPSHOT_INTERVAL": "15"}
+
+
 class FakeApi:
     """HfApi's Space calls; a duplicated Space derives its board's admin token, as msgboard does."""
 
     def __init__(self, board: Board):
         self.board, self.spaces, self.calls = board, set(), []
+
+    def get_space_variables(self, repo_id):
+        assert repo_id == "HuggingFaceSwarms/chatbot-v10-msgboard"
+        return {k: SimpleNamespace(value=v) for k, v in TEMPLATE_VARS.items()}
 
     def repo_exists(self, repo_id, repo_type=None):
         return repo_id in self.spaces
@@ -77,7 +87,12 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert variables["MSGBOARD_REPLICA"] == "hf://buckets/HuggingFaceSwarms/runs/board"
     assert json.loads(variables["MSGBOARD_BOARDS"]) == [
         {"id": "demo", "name": "demo", "storage_id": "demo", "require_existing": False}]
-    assert variables["BOARD_READ_TOKEN"] == "public"
+    assert kw["space_hardware"] == "cpu-basic"
+    # the template's variables, minus its board list, replica and demo bots; then flock's
+    assert variables == {"MSGBOARD_HF_ORGANIZATIONS": '["HuggingFaceSwarms"]',
+                         "MSGBOARD_SNAPSHOT_INTERVAL": "15", "BOARD_READ_TOKEN": "public",
+                         "MSGBOARD_BOARDS": variables["MSGBOARD_BOARDS"],
+                         "MSGBOARD_REPLICA": "hf://buckets/HuggingFaceSwarms/runs/board"}
     assert "general" in board.channels.values()
     values = read_env_file(run / "run.env")
     assert values["BOARD_URL"] == url and values["BOARD_INVITE"] in board.invites
@@ -104,6 +119,16 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert new != values["BOARD_INVITE"] and new in board.invites
     assert any("no longer works" in n for n in rep.notes)
     assert stat.S_IMODE((run / "run.env").stat().st_mode) == 0o600
+
+
+def test_spec_variables_override_without_dropping_the_defaults(tmp_path, space):
+    _, api, _ = space
+    spec = {**SPEC, "comms": {**SPEC["comms"], "space_variables": {
+        "MSGBOARD_SNAPSHOT_INTERVAL": "60", "MSGBOARD_REPLICA": ""}}}
+    rundir.init(tmp_path / "run", _folder(tmp_path, spec), env=ENV)
+    variables = {v["key"]: v["value"] for v in api.calls[0][2]["space_variables"]}
+    assert variables["BOARD_READ_TOKEN"] == "public" and variables["MSGBOARD_SNAPSHOT_INTERVAL"] == "60"
+    assert variables["MSGBOARD_REPLICA"] == ""  # blanked: no replica
 
 
 def test_replica_needs_a_mapped_hf_token(tmp_path, space):
@@ -187,7 +212,8 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     assert b.files["runs/demo.json"] == {
         "id": "demo", "name": "Demo", "title": None, "setup": "One line.", "board_id": "demo",
         "board": ORG + "/", "board_public": "https://huggingface.co/spaces/HuggingFaceSwarms/board-demo",
-        "viewer": "https://huggingfaceswarms-flock-viewer-v8.hf.space", "viewer_public": None,
+        "viewer": "https://huggingfaceswarms-flock-viewer-v8.hf.space",
+        "viewer_public": "https://huggingface.co/spaces/HuggingFaceSwarms/flock-viewer-v8",
         "viewer_run": "HuggingFaceSwarms/runs/demo", "dataset": None, "code_repo": None,
         "spec_url": None}
     assert rundir.register_dashboard(_spec(dashboard={**DASH, "title": "T"}), {"HF_TOKEN": "t"}).ok

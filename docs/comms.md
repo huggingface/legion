@@ -49,7 +49,8 @@ comms:
   template: HuggingFaceSwarms/chatbot-v10-msgboard   # the default: a multi-board msgboard Space
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
   space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}      # Space secret -> run.env name (default {})
-  space_variables: {BOARD_READ_TOKEN: public}        # the default
+  space_variables: {MSGBOARD_SNAPSHOT_INTERVAL: "60"} # over the template's and flock's; "" blanks one
+  space_hardware: cpu-basic           # the default
   invite_env: BOARD_INVITE
   channel: general
 ```
@@ -60,9 +61,11 @@ step only when it is not done yet, so running it again checks the board:
 1. Generates the Space's operator token into `RUN_DIR/board.env` (mode 600). It is not in
    `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
 2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
-   `space_secrets`, and the variables `space_variables` plus `MSGBOARD_BOARDS` (one board, id
-   = the swarm name) and `MSGBOARD_REPLICA` (default `<bucket>/board`: the board's snapshots,
-   so a rebuild or sleep keeps it). The replica needs the Space secret `HF_TOKEN`: map it to a
+   `space_secrets`. A duplicate inherits none of the template's variables, so they are copied
+   (except its `MSGBOARD_BOARDS`, `MSGBOARD_REPLICA` and `MSGBOARD_DEMO_BOTS`), then flock's:
+   `BOARD_READ_TOKEN: public` (the overview reads through HF auth), `MSGBOARD_BOARDS` (one
+   board, id = the swarm name) and `MSGBOARD_REPLICA` (`<bucket>/board`: the board's
+   snapshots, so a rebuild or sleep keeps it), then `space_variables`. The replica needs the Space secret `HF_TOKEN`: map it to a
    run.env token scoped to that bucket, never your own full token. An existing Space whose
    operator token is not in `board.env` is refused; on an existing Space, changed variables
    and secrets are not re-applied (init notes it).

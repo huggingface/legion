@@ -17,7 +17,7 @@ dashboard:
 
 `flock init` writes (and on a re-run rewrites) `<registry>/runs/<swarm>.json`: one row in the
 overview's `experiments.json` format. `id` is the swarm, `board` the comms url (`board_id` the
-part after `/boards/`, `board_public` the Space page with `board: space`), `viewer_run`
+part after `/boards/`, `board_public` the Space page with `board: space`; `viewer_public` the viewer's Space page), `viewer_run`
 `<bucket ns>/<bucket>/<swarm>`. No token or invite goes in it. A failed write fails init.
 
 Refused: `dashboard` with `compute: local` or without `bucket` (spec check); in init, a `board`
