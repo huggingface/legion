@@ -14,7 +14,7 @@ The controller is the one `flock` reaches: FLOCK_URL / FLOCK_TOKEN (jobs mode, f
 session), else the local run's .flock/current (the single-job bootstrap runs it in the
 experiment folder). S is the rendered spec (`spec.local.yaml`, render.py): its
 `types.<type>.replicas` are set, then S is applied as `flock update S` does, so prompts,
-tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's raise (`flock update --replicas spec`) stays. Replica types outside the
+tools and everything else in the folder go with it. The count on the controller is the truth: a wave never lowers it, so an operator's `flock scale` up stays. Replica types outside the
 schedule (agent-pi) are written into S as the controller runs them, so a wave never resets them.
 A wave with `stagger_s` (waves.yaml: 10 s for wave 1 by default, 0 after) raises the count
 one agent at a time, that many seconds apart; `tick` and `run` block meanwhile. Every change is
@@ -137,12 +137,12 @@ def write_replicas(spec: Path, counts: dict[str, int]) -> None:
 
 def current(c, swarm: str, types: list[str]) -> dict[str, int]:
     """The replicas the controller runs now, by type."""
-    from flock.client import ClientError
+    from flock.cli import _request
 
-    try:
-        ts = c.swarm(swarm)["spec"]["types"]
-    except ClientError as e:
-        raise SystemExit(f"GET /swarms/{swarm}: {e.status} {e.body[:300]}") from None
+    r = _request(c, "GET", f"/swarms/{swarm}")
+    if r.status_code >= 400:
+        raise SystemExit(f"GET /swarms/{swarm}: {r.status_code} {r.text[:300]}")
+    ts = r.json()["spec"]["types"]
     return {t: int((ts.get(t) or {}).get("replicas") or 0) for t in types}
 
 
@@ -162,8 +162,7 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
     `only`: `total` is that one type's count (the schedule's types keep theirs; the cap counts
     them too). Every other replica type is written as the controller runs it, so applying the
     spec never changes it (e.g. agent-pi agents an operator added stay)."""
-    from flock.cli import load_spec, update_lines
-    from flock.ops import SpecError, read_spec, update
+    from flock.cli import SpecError, load_spec, update_swarm
 
     swarm = load_spec(str(spec)).swarm
     types = [only] if only else list(sched.split(0))
@@ -188,9 +187,7 @@ def apply(c, spec: Path, sched: Schedule, total: int, why: str, log: Path,
             time.sleep(stagger)
         write_replicas(spec, {**others, **split(k)})
         try:
-            # waves set replicas
-            rec["lines"] = update_lines(update(c, read_spec(str(spec)), str(spec),
-                                               replicas="spec"))
+            rec["lines"] = update_swarm(c, str(spec), replicas="spec")  # waves set replicas
         except SpecError as e:
             rec["error"] = e.lines
             break
@@ -251,68 +248,67 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--spec is required")
     if a.cmd in ("add", "set") and (a.n is None or a.n < 0):
         ap.error(f"{a.cmd} needs a number >= 0")
-    from flock.cli import load_spec
-    from flock.client import Client
+    from flock.cli import client, load_spec
 
     spec, log = a.spec.resolve(), a.log or a.spec.with_name(a.spec.name + ".waves.jsonl")
     swarm = load_spec(str(spec)).swarm
-    c = Client()
-    if a.cmd == "pin":
-        write_replicas(spec, current(c, swarm, spec_types(spec)))
-        return 0
-    if a.cmd in ("add", "set"):
-        if a.only and a.only not in spec_types(spec):
-            ap.error(f"--type {a.only}: not a replica type of {spec.name}")
-        have = sum(current(c, swarm, [a.only] if a.only else list(sched.split(0))).values())
-        why = f"{a.cmd} {a.n}" + (f" --type {a.only}" if a.only else "")
-        rec = apply(c, spec, sched, have + a.n if a.cmd == "add" else a.n, why, log,
-                    lower=a.cmd == "set", stagger=a.stagger, only=a.only)
-        _say(rec)
-        return 1 if "error" in rec else 0
-    if a.cmd == "run" and a.start is None and not _has_state(spec):
-        # the clock starts at the first answer from the controller, not at our own start:
-        # on a cold node the controller can come up after the second wave is due, and the
-        # first tick would apply both waves as one
-        waited = 0.0
-        while True:
-            try:
-                current(c, swarm, list(sched.split(0)))
-                break
-            except Exception as e:  # noqa: BLE001 - not up yet (or not applied yet)
-                if waited % 60 == 0:
-                    print(f"waiting for the controller ({type(e).__name__}); the waves "
-                          "clock starts when it answers", flush=True)
-                time.sleep(5)
-                waited += 5
-    fresh = a.start is None and not _has_state(spec)
-    start = _state(spec, a.start)
-    if fresh:
-        print(f"waves clock started at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))}",
-              flush=True)
-    while True:
-        elapsed = time.time() - start
-        have, nxt = current(c, swarm, list(sched.split(0))), sched.next(elapsed)
-        if a.cmd == "status":
-            print(json.dumps({"swarm": swarm, "replicas": have, "total": sum(have.values()),
-                              "cap": sched.cap, "elapsed_min": round(elapsed / 60, 1),
-                              "schedule_now": sched.target(elapsed),
-                              "next": {"in_min": round((nxt[0] - elapsed) / 60, 1),
-                                       "total": nxt[1]} if nxt else None}))
+    with client() as c:
+        if a.cmd == "pin":
+            write_replicas(spec, current(c, swarm, spec_types(spec)))
             return 0
-        due = sched.target(elapsed)
-        if due > sum(have.values()):
-            rec = apply(c, spec, sched, due, f"schedule {_clock(elapsed)}", log,
-                        stagger=sched.stagger(elapsed))
+        if a.cmd in ("add", "set"):
+            if a.only and a.only not in spec_types(spec):
+                ap.error(f"--type {a.only}: not a replica type of {spec.name}")
+            have = sum(current(c, swarm, [a.only] if a.only else list(sched.split(0))).values())
+            why = f"{a.cmd} {a.n}" + (f" --type {a.only}" if a.only else "")
+            rec = apply(c, spec, sched, have + a.n if a.cmd == "add" else a.n, why, log,
+                        lower=a.cmd == "set", stagger=a.stagger, only=a.only)
             _say(rec)
-            if a.cmd == "tick":
-                return 1 if "error" in rec else 0
-        elif a.cmd == "tick":
-            return 0
-        if nxt is None:
-            print(f"schedule over at {sum(have.values())} agents: `waves.py add N` from "
-                  "here", flush=True)
-            return 0
-        time.sleep(max(1.0, min(a.interval, nxt[0] - elapsed)))
+            return 1 if "error" in rec else 0
+        if a.cmd == "run" and a.start is None and not _has_state(spec):
+            # the clock starts at the first answer from the controller, not at our own start:
+            # on a cold node the controller can come up after the second wave is due, and the
+            # first tick would apply both waves as one
+            waited = 0.0
+            while True:
+                try:
+                    current(c, swarm, list(sched.split(0)))
+                    break
+                except Exception as e:  # noqa: BLE001 - not up yet (or not applied yet)
+                    if waited % 60 == 0:
+                        print(f"waiting for the controller ({type(e).__name__}); the waves "
+                              "clock starts when it answers", flush=True)
+                    time.sleep(5)
+                    waited += 5
+        fresh = a.start is None and not _has_state(spec)
+        start = _state(spec, a.start)
+        if fresh:
+            print(f"waves clock started at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start))}",
+                  flush=True)
+        while True:
+            elapsed = time.time() - start
+            have, nxt = current(c, swarm, list(sched.split(0))), sched.next(elapsed)
+            if a.cmd == "status":
+                print(json.dumps({"swarm": swarm, "replicas": have, "total": sum(have.values()),
+                                  "cap": sched.cap, "elapsed_min": round(elapsed / 60, 1),
+                                  "schedule_now": sched.target(elapsed),
+                                  "next": {"in_min": round((nxt[0] - elapsed) / 60, 1),
+                                           "total": nxt[1]} if nxt else None}))
+                return 0
+            due = sched.target(elapsed)
+            if due > sum(have.values()):
+                rec = apply(c, spec, sched, due, f"schedule {_clock(elapsed)}", log,
+                            stagger=sched.stagger(elapsed))
+                _say(rec)
+                if a.cmd == "tick":
+                    return 1 if "error" in rec else 0
+            elif a.cmd == "tick":
+                return 0
+            if nxt is None:
+                print(f"schedule over at {sum(have.values())} agents: `waves.py add N` from "
+                      "here", flush=True)
+                return 0
+            time.sleep(max(1.0, min(a.interval, nxt[0] - elapsed)))
 
 
 if __name__ == "__main__":

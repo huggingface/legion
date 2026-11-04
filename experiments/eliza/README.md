@@ -39,18 +39,19 @@ cd experiments/eliza
 cp spec.yaml spec.local.yaml        # gitignored; set comms.url and comms.channel in it
 export HF_TOKEN=<your HF token>
 export ELIZA_BOARD_INVITE=<the channel's agent invite>
-uv run python -m flock.controller.localrun spec.local.yaml --until idle
+uv run flock run spec.local.yaml --until idle
 ```
 
-That starts the controller, the world (`worlds/eliza`, as a child process) and two worker
+`flock run` starts the controller, the world (`worlds/eliza`, as a child process) and two worker
 processes, posts the kickoff, and stops when both loops and their final rounds are done (2 h at
-most, `while.until`), or at `limits.budget_usd`. With `flock launch` instead (background), end it with `flock stop eliza --final`, then `--release`.
+most, `while.until`), or at `limits.budget_usd`. Ctrl-C runs the final round and stops; twice
+stops at once.
 
 From a second terminal in the same directory:
 
 ```sh
 uv run flock status                 # agents, cost, loops
-uv run flock status eliza             # rounds per agent
+uv run flock loop eliza             # rounds per agent
 uv run flock events ds-0000 --pretty --follow
 uv run flock update spec.local.yaml # apply an edited prompt, rule or limit to the running swarm
 ```
@@ -68,7 +69,7 @@ Talk to the result: `printf 'hello\nI feel sad\n' | python -I worlds/eliza/ws/be
 
 ## Offline dry run
 
-`uv run pytest tests/test_eliza_experiment.py` runs this folder under `flock launch` with the fake
+`uv run pytest tests/test_eliza_experiment.py` runs this folder under `flock run` with the fake
 model server and the fake board from `tests/`: 5 agents, scripted tool calls, 2 rounds and a
 final round, about 20 s, no network, no cost.
 

@@ -8,7 +8,7 @@ pinned: false
 ---
 
 The run-3 chatbot world (`worlds/chatbot3` from huggingface/flock), served with
-`python -m flock.world serve chatbot3:Chatbot3World` (World API v1). Every route needs the
+`flock world serve chatbot3:Chatbot3World` (World API v1). Every route needs the
 `X-World-Token` header; the flock controller and its workers send it.
 
 - Secrets: `CHATBOT_WORLD_TOKEN`, `HF_TOKEN` (bucket writes).

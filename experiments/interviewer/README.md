@@ -15,7 +15,9 @@ script.
 | `prompts/coordinator.md`, `prompts/worker.md` | hierarchy's role prompts; workers may start interviewers |
 | `prompts/interviewer.md` | the interviewer's whole job (run 3's, adapted to `run_bot` and `record_verdict`) |
 | `prompts/round.md`, `prompts/final.md` | links to run 4's |
-| `spec.yaml` `replicas_ramp` | 10 coordinators every 10 min, to 50; the controller runs it (was `waves.yaml`) |
+| `waves.yaml` | 10 coordinators every 10 min, to 50 |
+| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
+| `spec.slurm.yaml`, `spec.smoke.yaml` | run 4's Slurm overlay (link); the smoke overlay for the looping types |
 
 ## Mechanics
 
@@ -23,7 +25,7 @@ script.
 - Interviewers: `spawn.coordinator` and `spawn.worker` each allow `interviewer: 2` alive at
   once. The coordinator's `depth: 2` lets its workers (born with depth 1) spawn; interviewers
   have no spawn entry (depth 0). A third live interviewer is refused with `max_children`.
-- The spawner runs `flock-agent spawn interviewer --prompt "<target> <its name> <team channel>"
+- The spawner runs `flock spawn interviewer --prompt "<target> <its name> <team channel>"
   --key <k>`. The interviewer type is `ephemeral: true`: flock removes it when its one
   session ends.
 - An interviewer is `harness: llm` with thinking off (`models.interviewer`, as run 3), tools
@@ -50,17 +52,19 @@ The project repo is the dataset `HuggingFaceSwarms/SwarmChat-v9`, seeded with
 to it, and `MODEL_INTERVIEWER` (the served model id; may be the same as `MODEL_WORKER`).
 
 Follow run 4's README ("Operator preparation", "Launch and stop boundaries") with its
-`slurm/` scripts, in a run directory made by `flock init $RUNS/interviewer --from experiments/interviewer` (docs/slurm.md
-"Deploying"), with in its `run.env`:
+`slurm/` scripts, in a new run directory (`runs/interviewer/run.env`, from
+`../run4/slurm/run.env.example`) with:
 
 ```sh
-CHATBOT_RUN=interviewer       # the swarm name
+RUN3_EXPERIMENT=interviewer   # controller.sbatch copies experiments/interviewer (links followed)
+CHATBOT_RUN=interviewer       # the swarm name (render.py)
 MODEL_INTERVIEWER=<served model id>
 ```
 
 then `sbatch world.sbatch interviewer` and `sbatch controller.sbatch interviewer`.
 
-Offline checks: `pytest tests/test_interviewer_experiment.py`.
+Offline checks: `python experiments/interviewer/render.py --out /tmp/i.yaml`,
+`python experiments/interviewer/waves.py plan`, `pytest tests/test_interviewer_experiment.py`.
 
 ## Board
 

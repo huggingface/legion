@@ -1,4 +1,4 @@
-"""Local smoke of run3's agent-pi type: `flock.controller.localrun` (compute local) with the chatbot3 world, the
+"""Local smoke of run3's agent-pi type: `flock run` (compute local) with the chatbot3 world, the
 fake OpenAI server scripted so each Pi agent calls flock-tool write_file, run_bot, add_probe and
 post from its bash tool, then ends the turn in plain text; the fake msgboard as the board.
 
@@ -50,6 +50,20 @@ board, bsrv, burl = fake_msgboard.serve(fake_msgboard.Board(channels={12: "run3-
 model_url = f"http://127.0.0.1:{srv.server_port}/v1"
 
 ME = 'ME=$(basename "$PWD"); '
+BOT = 'import sys\\nfor line in sys.stdin:\\n    print(\\"hello there\\", flush=True)\\n'
+steps = [
+    ["bash", {"command": ME + "flock-tool write_file --json - <<EOF\n"
+              '{"path": "agents/$ME/bot.py", "content": "' + BOT + '"}\nEOF'}],
+    ["bash", {"command": ME + "flock-tool run_bot --json - <<EOF\n"
+              '{"path": "agents/$ME/bot.py", "lines": ["hi", "how are you?"]}\nEOF'}],
+    ["bash", {"command": ME + "flock-tool add_probe --json - <<EOF\n"
+              '{"lines": ["hi", "how are you?"], "check": "not_repeat", '
+              '"evidence": "hello there", "path": "agents/$ME/bot.py"}\nEOF'}],
+    ["bash", {"command": ME + "flock-tool post --json - <<EOF\n"
+              '{"text": "[pi-smoke] $ME here: my bot repeats itself, anyone on greetings?", '
+              '"thread": "new"}\nEOF'}],
+]
+SCRIPT = "script: " + json.dumps(steps)
 ROUNDS = int(os.environ.get("PI_SMOKE_ROUNDS", "20"))
 ROUND = "script: " + json.dumps([  # every round: two world calls, then a plain-text end
     ["bash", {"command": "flock-tool best_status --json '{}'"}],
@@ -70,9 +84,9 @@ for name, t in d["types"].items():
         t["replicas"] = N
         lp = t["loop"]
         lp.pop("prompt_file", None)
-        # the fake model's script for every round (`first` and its setup script were removed)
-        t["loop"] = {**lp, "prompt": "Round {round}. " + ROUND,
-                     "every": "turn_end",
+        # the real Pi first prompt, then the fake model's script
+        t["loop"] = {**lp, "first": lp["first"] + "\n" + SCRIPT, "prompt": "Round {round}. " + ROUND,
+                     "every": "turn_end", "stagger": "1s",
                      "while": {"until": "10m", "max_rounds": ROUNDS}, "final": {"prompt": "bye"}}
 (exp / "spec.pi.yaml").write_text(yaml.safe_dump(d, sort_keys=False, width=100))
 
@@ -85,7 +99,7 @@ env.update(HOME=str(OUT / "home"), PATH=f"{node}:{os.environ['PI_PREFIX_BIN']}:{
 (OUT / "home").mkdir()
 out = open(OUT / "flock-run.out", "w")  # noqa: SIM115 (the process holds it)
 t0 = time.time()
-proc = subprocess.Popen([sys.executable, "-m", "flock.controller.localrun", "spec.pi.yaml", "--until",
+proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "run", "spec.pi.yaml", "--until",
                          f"{int(SECS)}s", "--skip-preflight"], cwd=exp, env=env, stdout=out,
                         stderr=subprocess.STDOUT, start_new_session=True)
 rss: dict[str, list[int]] = {}  # Pi pid -> VmRSS samples (kB)
@@ -133,7 +147,7 @@ def sample_rss() -> None:
 
 
 def _under(pid: int, ps: dict) -> bool:
-    """A flock worker started by our `flock.controller.localrun` (its parent chain reaches proc.pid)."""
+    """A flock worker started by our `flock run` (its parent chain reaches proc.pid)."""
     if b"flock.worker.main" not in ps[pid][1]:
         return False
     while pid in ps and pid > 1:

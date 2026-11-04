@@ -3,9 +3,9 @@
 # flock: the venv, the paths, the signal handling, and the whole single-job path.
 #   1. the Slurm-side tests: the sbatch/squeue/sacct/scancel contract (stubs), the worker's
 #      preemption drain (SIGUSR1/SIGTERM, exit 75, parallel sync), USR1 = TERM for the
-#      controller and `python -m flock.world serve`, the home-less /work defaults
+#      controller and `flock world serve`, the home-less /work defaults
 #   2. the smoke rehearsal: the fake model server and the fake board from tests/, the
-#      bootstrap's `python -m flock.controller.localrun` (compute local) with the smoke waves (minutes as seconds), a live
+#      bootstrap's `flock run` (compute local) with the smoke waves (minutes as seconds), a live
 #      server switch, the stop marker, and the bundle checked in a local "bucket"
 # Exits non-zero on any failure. About 2-3 minutes. Run it inside one Slurm job:
 #   srun -p <partition> -c 4 --mem=8G --time=00:20:00 experiments/run3/dryrun.sh

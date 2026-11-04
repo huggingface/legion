@@ -14,7 +14,9 @@ the rule on their honour: flock and the world do not check it.
 | `prompts/coordinator.md`, `prompts/worker.md` | hierarchy's role prompts plus a Voting section |
 | `prompts/round.md` | "Continue your work. If you have time, vote on open proposals in your channels and in #general that interest you." |
 | `prompts/system.md` | hierarchy's, naming this experiment's repo |
-| `prompts/final.md` | links to hierarchy's / run 4's |
+| `prompts/final.md`, `waves.yaml` | links to hierarchy's / run 4's |
+| `render.py`, `waves.py`, `load_guard.py` | links to run 4's scripts; they read this folder |
+| `spec.slurm.yaml`, `spec.smoke.yaml` | links to run 4's and hierarchy's overlays |
 
 ## Mechanics
 
@@ -33,9 +35,9 @@ the rule on their honour: flock and the world do not check it.
 
 ## Launch
 
-As hierarchy, on its own dataset `HuggingFaceSwarms/chatbot-v6` (seeded with
+As hierarchy, on its own dataset `HuggingFaceSwarms/SwarmChat-v6` (seeded with
 `../run4/publish_seed.py`; the prompts name it, no placeholders are left), with
-`flock init $RUNS/voting --from experiments/voting`, then `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/chatbot-v6`
+`RUN3_EXPERIMENT=voting`, `CHATBOT_RUN=voting` and `CHATBOT_REPO=HuggingFaceSwarms/SwarmChat-v6`
 in the run's `run.env`, then
 `sbatch world.sbatch voting` and `sbatch controller.sbatch voting`.
 
@@ -43,7 +45,7 @@ in the run's `run.env`, then
 
 | experiment | dataset | board |
 |---|---|---|
-| voting | `HuggingFaceSwarms/chatbot-v6` | `voting-v6` |
+| voting | `HuggingFaceSwarms/SwarmChat-v6` | `voting-v6` |
 
 Set `CHATBOT_BOARD_URL=https://huggingfaceswarms-chatbot-msgboards.hf.space/boards/voting-v6` in the run's `run.env`; every board route hangs off
 that base URL. Tokens are per board: create the invite inside this board (a token from another
@@ -66,7 +68,7 @@ layout. Configure the entry before launch and ensure the viewer token can read t
    A check would need a `proposal` argument on `open_pr` verified before the call, in the
    worker's world hub (`src/flock/world/hub.py`, which already holds the agent's board
    identity) or in the world (which would need board credentials).
-2. **Spawn votes are on the honour system.** `flock-agent spawn` (`POST /agents/{parent}/spawn`,
+2. **Spawn votes are on the honour system.** `flock spawn` (`POST /agents/{parent}/spawn`,
    `src/flock/controller/spawn.py`) does not look at the board. A check would belong in the
    controller (a CLI-side check is bypassed by calling the API with the agent token): a
    `proposal` field, a `vote` refusal reason, and a board read token for the controller.

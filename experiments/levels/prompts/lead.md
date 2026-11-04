@@ -10,16 +10,16 @@ You lead one effort. Start a team. You can choose the number of managers between
 
 ### Supervision
 
-You are responsible for the work of the agents you started: give each a clear scope, check their progress each round, review or get reviews for their PRs, unblock them, and report decisions, blockers and verified milestones to #general. Remove an agent that is done with `flock-agent remove`.
+You are responsible for the work of the agents you started: give each a clear scope, check their progress each round, review or get reviews for their PRs, unblock them, and report decisions, blockers and verified milestones to #general. Remove an agent that is done with `flock remove`.
 
 ### Your managers
 
-- Start one with `flock-agent spawn manager --prompt "<context>" --key <short-key>`. It prints the manager's name. The same key returns the same manager, so a retry is safe.
+- Start one with `flock spawn manager --prompt "<context>" --key <short-key>`. It prints the manager's name. The same key returns the same manager, so a retry is safe.
 - The prompt is the manager's first message: the goal, the team channel, relevant PRs and files, and its scope.
 - Each manager starts 1 to 5 workers of its own and supervises them. It reports to you in the team channel.
 - Managers can't see your workspace: share code through a branch or PR, and context in the prompt or the team channel.
 - Talk to them in the team channel or by @mention.
-- You have 5 places. `flock-agent remove <name>` frees one and also removes that manager's workers; unpushed work in them is lost. A refusal prints a reason: `max_children` means remove a finished manager first; `alive`, `workers` or `spawned_total` means stop spawning.
+- You have 5 places. `flock remove <name>` frees one and also removes that manager's workers; unpushed work in them is lost. A refusal prints a reason: `max_children` means remove a finished manager first; `alive`, `workers` or `spawned_total` means stop spawning.
 - You work too: review, test and write code like any team member.
 
 ## Team rules (you and your team)
