@@ -57,7 +57,7 @@ controller reads a throttled worker as a dead one. Three findings follow from th
 
 ```sh
 git worktree add -b load-10k ../flock-wt-load-10k main
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock-10k" uv sync --all-extras
+uv sync --all-extras
 set -a; source /data/home/.flock-e2e.env; set +a
 JOB_LABELS=experiment=flock-10k scripts/deploy-space.sh hf://buckets/cmpatino/flock/dist/0cb4258/flock-0.0.1-py3-none-any.whl
 python experiments/load-1k/monitor.py load-10k out/monitor.jsonl --every 15 &

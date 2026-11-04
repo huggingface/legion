@@ -53,9 +53,9 @@ drains at a shortened lifetime, a scale-down and a remove.
 Commands, in order:
 
 ```sh
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock-e2e" uv sync --all-extras
+uv sync --all-extras
 W=$(scripts/publish-wheel.sh)          # hf://buckets/cmpatino/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl
-set -a; source $AM_LOCAL/flock-e2e.env; set +a   # FLOCK_TOKEN, FLOCK_URL (never printed)
+set -a; source ~/.flock-e2e.env; set +a   # FLOCK_TOKEN, FLOCK_URL (never printed)
 scripts/deploy-space.sh "$W"
 curl -s $FLOCK_URL/healthz; flock status                  # check 1
 flock apply examples/e2e.yaml                                    # check 2

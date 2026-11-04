@@ -52,7 +52,7 @@ after its process exits. And this workspace's bucket mount slows hf_xet's first 
   `sync_bench.py` (local sync benchmark).
 
 ```sh
-UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/flock-1k" uv sync --all-extras
+uv sync --all-extras
 set -a; source /data/home/.flock-e2e.env; set +a
 W=$(scripts/publish-wheel.sh); JOB_LABELS=experiment=flock-1k scripts/deploy-space.sh "$W"
 flock apply examples/load-1k.yaml                                         # check 1
