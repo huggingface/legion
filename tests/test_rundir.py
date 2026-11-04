@@ -52,6 +52,7 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     src, run = _folder(tmp_path), tmp_path / "runs" / "r1"
     rep = rundir.init(run, src, env={})
     assert (run / "logs").is_dir() and (run / "hosts").is_dir()
+    assert not (run / "slurm").exists()  # job scripts for `compute: slurm` only
     assert (run / "experiment" / "prompts" / "system.md").read_text() == "You research.\n"
     env_file = run / "run.env"
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
@@ -293,6 +294,8 @@ def test_run_dir_resolution(tmp_path, monkeypatch):
     assert rundir.run_context(run)[0]["FLOCK_CURRENT"] == str(run / ".flock" / "current")
     (run / "hosts" / "controller.host").write_text("node3\n")
     assert rundir.run_context(run)[0]["FLOCK_URL"] == "http://node3:7860"
+    (run / "hosts" / "controller.host").write_text("https://abc--7860.hf.jobs\n")  # an HF Job's
+    assert rundir.run_context(run)[0]["FLOCK_URL"] == "https://abc--7860.hf.jobs"
     (run / "hosts" / "controller.host").write_text("node3:7999\n")
     assert rundir.run_context(run)[0]["FLOCK_URL"] == "http://node3:7999"
 
@@ -355,12 +358,17 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert (run / "cluster.env").read_text() == prof.read_text()
     assert any("cluster.env" in c for c in rep.created)
     assert _by_name(rep)["spec"].detail.startswith("from-profile:")  # the profile fills ${VAR}s
+    scripts = sorted(p.name for p in rundir.SLURM_SCRIPTS.iterdir())
+    assert sorted(p.name for p in (run / "slurm").iterdir()) == scripts  # the job scripts' copy
+    (run / "slurm" / "world.sbatch").write_text("# edited\n")
     with (run / "run.env").open("a") as f:
         f.write("WORKER_CPUS=8\n")  # run.env wins over the profile
     (run / "cluster.env").write_text(prof.read_text() + "# edited\n")
     again = rundir.init(run, profile=prof, env={})
     assert (run / "cluster.env").read_text().endswith("# edited\n")  # never overwritten
     assert any("cluster.env differs" in n for n in again.notes)
+    assert (run / "slurm" / "world.sbatch").read_text() == "# edited\n"  # kept, and said
+    assert any("slurm differs" in n and "edited world.sbatch" in n for n in again.notes)
     _, files = rundir.run_context(run)
     assert files == [str(run / "cluster.env"), str(run / "run.env")]
     spec = read_spec(str(run / "experiment" / "spec.yaml"), files)

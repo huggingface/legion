@@ -1,0 +1,140 @@
+#!/bin/bash
+# worker.sbatch <env file>: one flock worker slot as a CPU Slurm job.
+#
+# Submitted BY THE CONTROLLER's Slurm jobs client (FLOCK_COMPUTE=slurm; controller.sbatch points
+# FLOCK_SLURM_WORKER_SCRIPT at <run dir>/slurm/worker.sbatch), roughly as
+#   sbatch --parsable [-p <partition>] -c <cpus> --mem=<mem> --time=<time> --no-requeue \
+#          -J <worker id> --comment '<labels>' -o <run>/logs/<worker id>-%j.out \
+#          <run>/slurm/worker.sbatch <run>/launch/<worker id>-<incarnation>.env
+# The #SBATCH lines below are fallback defaults for a launch by hand (docs/slurm.md "The launch
+# contract": the env file's format).
+#
+# - The run directory is the env file's <run>/launch/..; common.sh sources cluster.env, the
+#   secrets file and run.env, then the env file (settings only, no secret values).
+# - CTL_HOST is read from <run>/hosts/controller.host and exported BEFORE the env file is read, so
+#   FLOCK_URL='http://${CTL_HOST}:<port>' expands inside flock-worker (the file's host:port wins).
+# - flock-worker gets the secrets the env file's comment names in a private 0600 file and never in
+#   its exec environment, so /proc/<pid>/environ never shows them (docs/slurm.md "Worker secrets
+#   file"). The file sits next to WORK_ROOT; flock-worker deletes it once read.
+# - CONTAINER (an image from CONTAINER_IMAGE_<type> / FLOCK_CONTAINER_IMAGE / CONTAINER_IMAGE):
+#   flock-worker runs in an Enroot/Pyxis container through `srun ... worker.sbatch --inner`: home
+#   not mounted, the shared disk read-only and limited to the venv, repo, slurm dir,
+#   CONTAINER_MOUNTS and <run>/hosts. Agent files go to /work/flock/agents/{work,llm} on the
+#   container root (node disk, deleted with the container; not /tmp, a tmpfs counted against the
+#   job memory). The paths carry no worker id, so a slot relaunched under a new id restores its
+#   agents to the same absolute paths: a Pi session resumes only from the cwd it was written from.
+#   Without an image flock-worker runs here, in this job's shell (exec), with the env file's paths.
+# - Spot reclaim (container): the watcher sends SIGUSR1 to this shell, to srun AND to every process
+#   of the step. flock-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
+#   handler (drain + sync) replaces it. The handler below forwards USR1 to the srun step, then
+#   SIGTERM 3 s later if the step is still alive (through slurmd: common.sh step_signal), and
+#   waits. NO requeue: the controller sees the job end and relaunches the slot. flock-worker may
+#   see USR1 two or three times: its handler is idempotent.
+# - A plain `scancel <id>` (the Slurm client's cancel) is fine: slurmd sends SIGTERM to
+#   flock-worker directly. Never `kill -TERM $SRUN_PID`: srun answers that with a SIGKILL.
+#
+#SBATCH --job-name=flock-worker
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=7G              # 1792 MB per CPU (under a MaxMemPerCPU of 2000, which more would silently exceed)
+#SBATCH --time=29:00:00
+#SBATCH --no-requeue
+#SBATCH --signal=B:TERM@60    # 60 s before the time limit (DEADLINE + drain should end the worker long before)
+
+set -uo pipefail  # no -e: the traps and the wait loop must keep running after a signal
+
+# run_worker: make the agent dirs, write the secrets file, exec flock-worker without the secrets
+# in its environment. Input: VENV WORK_ROOT FLOCK_LLM_HOME SECRET_NAMES and the secrets.
+run_worker() {
+  local f v
+  local -a unset_args=()
+  umask 077
+  mkdir -p "$WORK_ROOT" "$FLOCK_LLM_HOME" || { echo "worker.sbatch: cannot create $WORK_ROOT" >&2; exit 2; }
+  f=$(mktemp "$(dirname "$WORK_ROOT")/flock-worker-secrets.XXXXXX") || exit 2
+  for v in $SECRET_NAMES; do  # only the names that are set: an empty NAME= would shadow nothing useful
+    [ -z "${!v:-}" ] || printf '%s=%s\n' "$v" "${!v}" >> "$f" || exit 2
+    unset_args+=(-u "$v")
+  done
+  trap '' USR1  # until flock-worker's own handler
+  # FLOCK_WORLD_ADMIN_TOKEN (run.env): the world's /admin secret, never a worker's
+  exec env "${unset_args[@]}" -u FLOCK_WORLD_ADMIN_TOKEN FLOCK_WORKER_SECRETS_FILE="$f" \
+    FLOCK_WORKER_SECRETS_FILE_UNLINK=1 "$VENV/bin/flock-worker"
+}
+
+if [ "${1:-}" = --inner ]; then  # in the container (srun below): the batch shell's environment came along
+  export HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp
+  export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
+  mkdir -p "$HOME" "$HF_HOME" "$TMPDIR" && cd /work || exit 2
+  if [ -x /usr/local/bin/pi ]; then  # an image with the Pi CLI: its agent dir on /work, no worker id
+    export FLOCK_PI_CLI=/usr/local/bin/pi PI_CODING_AGENT_DIR=/work/pi/agents
+    mkdir -p "$PI_CODING_AGENT_DIR" || exit 2
+  fi
+  run_worker
+fi
+
+ENVFILE=${1:?usage: worker.sbatch <env file>  (<run dir>/launch/<worker id>-<incarnation>.env)}
+[ -f "$ENVFILE" ] || { echo "worker.sbatch: $ENVFILE: no such file" >&2; exit 2; }
+RUN_DIR=$(cd "$(dirname "$ENVFILE")/.." && pwd) || { echo "worker.sbatch: $ENVFILE: no run directory" >&2; exit 2; }
+# shellcheck disable=SC2034  # LOG_TAG is read by common.sh
+LOG_TAG=worker
+# shellcheck source=common.sh
+. "$RUN_DIR/slurm/common.sh" || exit 2
+
+# ---------------------------------------------------------------- controller address, then the worker env
+CTL_HOST_FILE=$HOSTS_DIR/controller.host
+[ -s "$CTL_HOST_FILE" ] || die "$CTL_HOST_FILE is missing: is controller.sbatch running?"
+CTL_HOST=$(tr -d '[:space:]' < "$CTL_HOST_FILE")
+export CTL_HOST
+source_env_600 "$ENVFILE"   # the controller's settings for this slot (no secret values)
+# The secrets this worker expects: the env file's comment (slurm.py env_file_text)
+SECRET_NAMES=$(sed -n 's/^# Secrets this worker expects[^:]*: //p' "$ENVFILE")
+export SECRET_NAMES
+# shellcheck disable=SC2086  # SECRET_NAMES: one name per word
+require_var FLOCK_URL WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW $SECRET_NAMES
+case $WORKER_ID in *[!A-Za-z0-9._-]*|"") die "WORKER_ID=$WORKER_ID: unexpected characters";; esac
+export SYNC_INTERVAL=${SYNC_INTERVAL:-180} HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30} LOG_LEVEL=${LOG_LEVEL:-INFO}
+select_worker_image "$TYPE"        # per-type image (common.sh)
+log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM type=$TYPE deadline=$DEADLINE ctl=$CTL_HOST container=${CONTAINER_IMAGE:-<none>}"
+if [ -z "$CONTAINER_IMAGE" ]; then
+  run_worker  # exec: flock-worker is this job's shell from here on (signals reach it directly)
+fi
+
+# ---------------------------------------------------------------- the container
+export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent>
+export FLOCK_LLM_HOME=/work/flock/agents/llm    # llm harness sessions
+container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for FLOCK_CTL_HOST_FILE
+
+SRUN_PID= ; STOPPING=0
+on_usr1() {  # Spot reclaim: the watcher cancels the job 30 s after this signal
+  [ "$STOPPING" = usr1 ] && return 0
+  STOPPING=usr1
+  log "SIGUSR1 (Spot reclaim): forwarding to the flock-worker step (srun pid ${SRUN_PID:-<none>}), SIGTERM in 3 s; no requeue"
+  [ -n "$SRUN_PID" ] || return 0
+  kill -USR1 "$SRUN_PID" 2>/dev/null
+  sleep 3
+  if kill -0 "$SRUN_PID" 2>/dev/null; then
+    log "flock-worker step still alive 3 s after USR1: SIGTERM"
+    step_signal TERM
+  fi
+}
+on_term() {
+  [ "$STOPPING" = 0 ] || return 0
+  STOPPING=term
+  log "SIGTERM (scancel by the controller, preemption or time limit): forwarding to flock-worker"
+  [ -n "$SRUN_PID" ] && step_signal TERM
+}
+trap on_usr1 USR1
+trap on_term TERM INT
+
+[ "$STOPPING" = 0 ] || { log "signal before flock-worker started: exit"; exit 0; }
+trap '' USR1  # srun starts with USR1 ignored, like every child here
+srun "${CTR_SRUN[@]}" bash "$SLURM_DIR/worker.sbatch" --inner &
+SRUN_PID=$!
+trap on_usr1 USR1
+while kill -0 "$SRUN_PID" 2>/dev/null; do
+  wait "$SRUN_PID"
+done
+wait "$SRUN_PID"; rc=$?   # the real status even when the last wait was cut by a trap
+log "flock-worker step exited with $rc"
+exit "$rc"
