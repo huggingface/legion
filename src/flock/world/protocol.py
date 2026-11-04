@@ -171,15 +171,15 @@ def fill_host(url: str, var: str, host: str) -> str:
 
 def origin_matches(origin: str, endpoint: str) -> bool:
     """A secret bound to `origin` may go to `endpoint`: the same URL, or, for a world.url with
-    ${WORLD_HOST} (a world whose host moves, docs/slurm.md), that URL with any one host name."""
+    ${WORLD_HOST} (a world whose host moves, docs/slurm.md), what fill_host can make of it (any host, or host:port in place of the url's port)."""
     if origin == endpoint:
         return True
     if WORLD_HOST_VAR not in origin:
         return False
     pre, _, post = origin.partition(WORLD_HOST_VAR)
-    host = endpoint[len(pre):len(endpoint) - len(post)] if endpoint.startswith(pre) and \
-        endpoint.endswith(post) and len(endpoint) > len(pre) + len(post) else ""
-    return bool(re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]+)?", host))
+    host, port = r"[A-Za-z0-9.-]+", r":[0-9]+"
+    rest = re.sub(r"^:\d+", "", post)  # a host:port file replaces this port
+    return bool(re.fullmatch(re.escape(pre) + host + "(?:" + re.escape(post) + "|" + port + re.escape(rest) + ")", endpoint))
 
 
 def manifest_error(exc: Exception) -> str:
