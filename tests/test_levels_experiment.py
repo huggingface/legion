@@ -6,6 +6,7 @@ from pathlib import Path
 
 from flock.cli import load_spec
 
+from .test_hierarchy_experiment import module
 from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
@@ -59,6 +60,17 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert "between 1 and 5" in manager and "flock spawn worker --prompt" in manager
     assert "flock spawn" not in worker and "You cannot start other agents" in worker
     assert "$FLOCK_PARENT" in manager and "$FLOCK_PARENT" in worker
+
+
+def test_render_and_waves_read_this_folder():
+    data = module(EXP, "render").render()  # jobs: the Slurm overlay
+    assert data["swarm"] == "levels" and data["compute"]["kind"] == "slurm"
+    assert set(data["types"]) == {"lead", "manager", "worker"}
+    smoke = module(EXP, "render").render("smoke", "slurm")
+    assert smoke["compute"]["kind"] == "slurm"
+    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
+    waves = module(EXP, "waves").load(EXP / "waves.yaml")
+    assert waves.type == "lead" and waves.cap == 20 and waves.events == [(0, 10), (600, 20)]
 
 
 async def test_three_levels_spawn_with_caps(client, app, store, tick):

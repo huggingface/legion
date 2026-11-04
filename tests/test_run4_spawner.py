@@ -1,6 +1,6 @@
 """Run 4's spawner wave: agent-spawner agents may spawn up to four agent-child peers, children
 cannot spawn, both get the shared system prompt plus their group section, a child's first
-prompt is the spawner's context, and an isolated Pi agent gets what `flock-agent spawn` needs."""
+prompt is the spawner's context, and an isolated Pi agent gets what `flock spawn` needs."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from pydantic import TypeAdapter
 
 from flock.cli import load_spec
@@ -23,7 +24,7 @@ CHILD_TEXT = "You were started by another agent (your parent, `$FLOCK_PARENT`)"
 
 
 def run4_spec(spawners: int = 1):
-    spec = load_spec(str(EXP / "spec.yaml"))  # as `flock launch` reads it: prompts inlined
+    spec = load_spec(str(EXP / "spec.yaml"))  # as `flock apply` reads it: prompts inlined
     spec.types["agent-spawner"].replicas = spawners
     # The in-process controller has no world or board; the types are what is under test.
     data = spec.model_dump(mode="json")
@@ -41,7 +42,7 @@ def as_agent(app, token) -> httpx.AsyncClient:
 def test_spec_types_are_clones_of_agent_with_the_spawn_policy_and_caps():
     spec = load_spec(str(EXP / "spec.yaml"))
     agent = spec.types["agent"]
-    skip = {"system_prompt", "system_prompt_append_file", "workers", "replicas_ramp"}
+    skip = {"system_prompt", "system_prompt_append_file", "workers"}
     for name in ("agent-spawner", "agent-child"):
         t = spec.types[name]
         assert t.replicas == 0
@@ -57,6 +58,22 @@ def test_spec_types_are_clones_of_agent_with_the_spawn_policy_and_caps():
     rule = spec.spawn["agent-spawner"]
     assert rule.types == {"agent-child": 4} and rule.depth == 1
     assert spec.limits.alive == 400 and spec.limits.spawned_total == 100
+
+
+def test_rendered_slurm_spec_has_both_types_without_aliases(monkeypatch):
+    import importlib.util
+
+    mod_spec = importlib.util.spec_from_file_location("run4_render_spawner", EXP / "render.py")
+    render = importlib.util.module_from_spec(mod_spec)
+    mod_spec.loader.exec_module(render)
+    data = render.render()
+    assert {"agent", "agent-spawner", "agent-child"} <= set(data["types"])
+    assert data["types"]["agent-child"]["loop"] is not data["types"]["agent"]["loop"]
+    assert data["types"]["agent-child"]["system_prompt_append_file"] == "prompts/group-child.md"
+    smoke = render.render("smoke")
+    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
+    assert data["types"]["agent"]["loop"]["while"]["until"] == "48h"
+    assert "&id" not in yaml.safe_dump(data)
 
 
 async def test_spawner_spawns_four_children_and_the_fifth_is_refused(client, app, store, tick):
@@ -112,7 +129,7 @@ async def test_spawner_spawns_four_children_and_the_fifth_is_refused(client, app
 
 
 async def test_isolated_pi_env_carries_the_agent_token_and_the_flock_cli(tmp_path, monkeypatch):
-    """What `flock-agent spawn` needs inside the Pi namespace: FLOCK_URL and the agent's own token
+    """What `flock spawn` needs inside the Pi namespace: FLOCK_URL and the agent's own token
     (never FLOCK_TOKEN) in the environment, and the venv's `flock` on PATH under a read-only
     mount of the chroot."""
     import shutil
@@ -207,14 +224,14 @@ def _agent_env(url: str, home: Path) -> dict[str, str]:
 
 
 def _check_spawn(tmp_path: Path, wrap=None) -> None:
-    """`flock-agent spawn` as an agent runs it (`wrap`: inside the namespace), against a fake
+    """`flock spawn` as an agent runs it (`wrap`: inside the namespace), against a fake
     controller: it posts under the agent's own name with the agent token, never the worker's."""
     import subprocess
     import sys
 
-    flock_cli = Path(sys.executable).parent / "flock-agent"
+    flock_cli = Path(sys.executable).parent / "flock"
     if not flock_cli.exists():
-        pytest.skip("the flock-agent console script is not installed next to this interpreter")
+        pytest.skip("the flock console script is not installed next to this interpreter")
     server, seen = _fake_controller()
     workspace, home = tmp_path / "cedar", tmp_path / "home"
     workspace.mkdir()
@@ -249,3 +266,38 @@ def test_flock_spawn_works_inside_the_pi_namespace(tmp_path):
                                  writable=[workspace, home], network=True)
 
     _check_spawn(tmp_path, wrap)
+
+
+def test_waves_add_spawners_uses_their_own_cap_and_the_capacity_guard(tmp_path, monkeypatch):
+    """`waves.py add 20 --type agent-spawner` on top of the finished 300-agent schedule: 20
+    spawners (their own cap, not the schedule's 300), agent kept at 300, guard consulted."""
+    import sys
+    from types import SimpleNamespace
+
+    import yaml
+
+    import flock.cli
+
+    from .test_run4_experiment import module
+
+    waves = module("waves")
+    sched = waves.load(EXP / "waves.yaml")
+    assert sched.type_caps == {"agent-spawner": 20}
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("types: {agent: {replicas: 300}, agent-spawner: {replicas: 0}, "
+                    "agent-child: {replicas: 0}}\n")
+    live = {"agent": 300, "agent-spawner": 0, "agent-child": 0}
+    applied, guard = [], []
+    monkeypatch.setattr(flock.cli, "load_spec", lambda _: SimpleNamespace(swarm="run4"))
+    monkeypatch.setattr(flock.cli, "update_swarm", lambda _c, path, **_: applied.append(
+        yaml.safe_load(Path(path).read_text())["types"]) or ["ok"])
+    monkeypatch.setattr(waves, "current", lambda _, __, names: {n: live[n] for n in names})
+    monkeypatch.setitem(sys.modules, "load_guard", SimpleNamespace(
+        capacity_ok=lambda: guard.append(1) or (True, "ok")))
+    rec = waves.apply(None, spec, sched, 25, "add 25 --type agent-spawner", tmp_path / "w.jsonl",
+                      only="agent-spawner")
+    assert rec["after"] == {"agent-spawner": 20} and rec["cap"] == 20 and guard == [1]
+    assert {t: v["replicas"] for t, v in applied[-1].items()} == {
+        "agent": 300, "agent-spawner": 20, "agent-child": 0}
+    with pytest.raises(ValueError, match="type_caps"):
+        waves.parse({"type": "agent", "type_caps": {"agent": 5}})

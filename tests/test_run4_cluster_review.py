@@ -148,6 +148,31 @@ async def test_busy_board_polling_rotates_once_per_cycle_on_a_busy_feed(monkeypa
     assert starts[-1] - starts[0] < 47 * spacing + 1
 
 
+def test_capacity_holds_persist_and_warn_without_growing(tmp_path, monkeypatch):
+    import json
+
+    import flock.cli
+
+    from .test_run4_experiment import module
+
+    waves = module("waves")
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("types: {agent: {replicas: 100}}\n")
+    state = spec.with_name(spec.name + ".waves.json")
+    state.write_text(json.dumps({"start": 123}))
+    monkeypatch.setattr(flock.cli, "load_spec", lambda _: SimpleNamespace(swarm="run4"))
+    monkeypatch.setattr(flock.cli, "update_swarm", lambda *_: pytest.fail("held wave must not apply"))
+    monkeypatch.setattr(waves, "current", lambda _, __, names: {n: 100 for n in names})
+    monkeypatch.setitem(sys.modules, "load_guard", SimpleNamespace(capacity_ok=lambda: (False, "HOLD: busy")))
+    schedule = waves.parse({"cap": 300, "type": "agent"})
+    for i in range(1, 4):
+        rec = waves.apply(None, spec, schedule, 120, "schedule", tmp_path / "waves.jsonl")
+        assert rec["held"] and rec["total"] == 100
+        assert rec.get("consecutive_holds") == i
+    assert "ACTION REQUIRED" in rec.get("warning", "")
+    assert json.loads(state.read_text())["start"] == 123
+
+
 def test_world_backoff_doubles_to_the_cap(tmp_path):
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", HF_TOKEN="x", CHATBOT_WORLD_TOKEN="x", WORLD_STABLE_S="600")

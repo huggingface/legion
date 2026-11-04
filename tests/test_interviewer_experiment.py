@@ -7,6 +7,7 @@ from pathlib import Path
 from flock.cli import load_spec
 from flock.models import comms_tools
 
+from .test_hierarchy_experiment import module
 from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
@@ -49,6 +50,17 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     for text in ("run_bot", "record_verdict", "`post` in it", "thread: \"new\"", "says busy",
                  "@mentions", "`dm`", "8 to 15"):
         assert text in interviewer, text
+
+
+def test_render_and_waves_read_this_folder():
+    data = module(EXP, "render").render()
+    assert data["swarm"] == "interviewer"
+    assert set(data["types"]) == {"coordinator", "worker", "interviewer"}
+    smoke = module(EXP, "render").render("smoke")
+    assert smoke["types"]["worker"]["loop"]["while"]["until"] == "30m"
+    waves = module(EXP, "waves").load(EXP / "waves.yaml")
+    assert waves.type == "coordinator" and waves.cap == 50
+    assert waves.events == [(0, 10), (600, 20), (1200, 30), (1800, 40), (2400, 50)]
 
 
 async def test_coordinators_and_workers_spawn_interviewers_with_caps(client, app, store, tick):
