@@ -174,6 +174,7 @@ class _Pass:
     actions: list[Action] = field(default_factory=list)
     listed: dict[str, JobState] | None = None  # job stages from one list_jobs, if used
     lv: Liveness = Liveness(0, 0, 0)  # noqa: RUF009 - a tuple; the swarm's, set per swarm
+    local: bool = False  # the swarm's compute is local, set per swarm
 
     def act(self, kind: str, target: str, detail: str = "") -> None:
         self.actions.append(Action(kind, target, detail))
@@ -223,9 +224,9 @@ def reconcile(
         spec: SwarmSpec = sw["spec"]
         if not sw["removing"]:
             spec = _ramp(p, spec)
-        p.listed, p.lv, local = None, spec.compute.liveness(), spec.compute.kind == "local"
+        p.listed, p.lv, p.local = None, spec.compute.liveness(), spec.compute.kind == "local"
         first = len(p.actions)
-        if sum(_needs_check(w, t, p.lv, local)
+        if sum(_needs_check(w, t, p.lv, p.local)
                for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
             try:
                 listing = jobs.list({"swarm": spec.swarm}, namespace=spec.namespace)
@@ -593,7 +594,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
 
 
 def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> None:
-    if not _needs_check(w, p.now, p.lv, spec.compute.kind == "local"):
+    if not _needs_check(w, p.now, p.lv, p.local):
         if w["job_id"] is not None:
             p.store.update_worker(w["id"], state=worker_state(w, p.now, p.lv).value)
         return

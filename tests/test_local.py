@@ -9,6 +9,7 @@ import io
 import json
 import os
 import random
+import re
 import sys
 import time
 from datetime import UTC, datetime
@@ -89,8 +90,14 @@ def test_liveness_defaults_per_backend_and_overrides():
     assert local_spec().model_dump(mode="json")["compute"] == {"kind": "local"}  # stored as before
     c = ComputeSpec(kind="local", worker_dead_after="1m", crash_backoff="500ms")
     assert c.liveness() == (15, 60, 0.5)
-    with pytest.raises(ValueError, match="must be shorter than worker_dead_after"):
-        ComputeSpec(kind="slurm", worker_dead_after="60s")  # below the 90 s unknown default
+    with pytest.raises(ValueError, match=re.escape("(90s (default)) must be shorter than "
+                                                   "worker_dead_after (60s)")):
+        ComputeSpec(kind="slurm", worker_dead_after="60s")
+    # under two heartbeats (30 s jobs, 5 s local) every healthy worker would look silent
+    with pytest.raises(ValueError, match="at least 60s: two heartbeats at the hf-jobs"):
+        ComputeSpec(worker_unknown_after="10s")
+    with pytest.raises(ValueError, match="at least 10s"):
+        ComputeSpec(kind="local", worker_unknown_after="5s")
 
 
 # --------------------------------------------------------------------------- controller check
