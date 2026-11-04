@@ -20,6 +20,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -536,7 +537,19 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
         derived[m[1]] = str((Path(experiment) / m[2]).resolve())  # world.dir, relative to --from
     write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived,
                   read_env_file(d / CLUSTER_ENV) if (d / CLUSTER_ENV).is_file() else None)
-    values = {k: v for f in env_files for k, v in read_env_file(f).items()}  # later wins
+    cluster = read_env_file(d / CLUSTER_ENV) if (d / CLUSTER_ENV).is_file() else {}
+    jobs_secrets: dict[str, str] = {}  # the profile's SECRETS_FILE, as common.sh's source_env_600
+    if sf := cluster.get("SECRETS_FILE") or env.get("SECRETS_FILE"):
+        sf = Path(sf)
+        st = sf.stat() if sf.is_file() else None
+        if st is None:
+            rep.checks.append(Check("secrets file", False, f"{sf}: no such file"))
+        elif st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) not in (0o600, 0o400):
+            rep.checks.append(Check("secrets file", False, f"{sf}: must be yours and mode 600 "
+                                    f"(chmod 600 '{sf}'); the jobs refuse it"))
+        else:
+            jobs_secrets = read_env_file(sf)
+    values = {**cluster, **jobs_secrets, **read_env_file(d / RUN_ENV)}  # the jobs' order
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
     try:
         spec = read_spec(str(spec_file), env_files)
