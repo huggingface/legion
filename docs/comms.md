@@ -31,7 +31,7 @@ types:
     tools: [summarise, comms:read, comms:search]
 ```
 
-Every field is optional except `url`, `invite_env` and `channel`. A type gets comms tools with
+Every field is optional except `url` (or `board`), `invite_env` and `channel`. A type gets comms tools with
 `comms: true` (all three; `search` only when `comms.search` is set) or by listing `comms:post`,
 `comms:read`, `comms:search` in `tools` (then only those). `tools: all` means all folder tools,
 not comms tools. `comms: false` with listed comms tools is refused. A type without either gets
@@ -40,6 +40,34 @@ no comms tools, so existing specs are unchanged.
 `flock launch` reads `kickoff_file` and the `protocols` files next to the spec and puts their text
 in the spec it sends (`comms.kickoff`, `comms.protocols_text`); the controller and the workers
 never read your files.
+
+## A board per run (`board: space`)
+
+```yaml
+comms:
+  board: space                        # or a board url (= `url:`); unset: `url` as above
+  template: HuggingFaceSwarms/chatbot-v10-msgboard   # the default: a multi-board msgboard Space
+  space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
+  space_secrets: [HF_TOKEN]           # the default: run.env names set as Space secrets
+  space_variables: {BOARD_READ_TOKEN: public}        # the default; e.g. add MSGBOARD_REPLICA
+  invite_env: BOARD_INVITE
+  channel: general
+```
+
+`flock init` (needs an `HF_TOKEN` that may create private Spaces in that namespace) does each
+step only when it is not done yet, so running it again checks the board:
+
+1. Generates the Space's operator token into `RUN_DIR/board.env` (mode 600). It is not in
+   `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
+2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
+   `space_secrets`, and the variables `space_variables` plus `MSGBOARD_BOARDS`: one board, id
+   = the swarm name. An existing Space whose operator token is not in `board.env` is refused.
+3. Waits for `<space>.hf.space/boards/<swarm>/v1/health`, creates `#<channel>` (exists is fine)
+   and, when `invite_env` is unset, a multi-use guest invite for it. The board's admin token
+   is derived from the operator token as msgboard's multi-board app does.
+4. Writes `BOARD_URL` (the spec's `url`) and the invite into `run.env`; prints key names only.
+
+Flock never stops or deletes the Space.
 
 ## Apply
 

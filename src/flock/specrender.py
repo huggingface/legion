@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from flock.models import _SpecLoader, load_spec_yaml
+from flock.models import _SpecLoader, board_url_default, load_spec_yaml
 from flock.world.protocol import WORLD_HOST_VAR
 
 # Only UPPERCASE names are variables, so inline prompt placeholders (`${spend}`) pass through;
@@ -134,7 +134,7 @@ def render(spec_file: str | Path, env_files=(), sources: dict[str, str] | None =
         env.update(vals)
         origin.update(dict.fromkeys(vals, Path(f).name))
     text = Path(spec_file).read_text(encoding="utf-8")
-    data = load_spec_yaml(text)
+    data = board_url_default(load_spec_yaml(text))
     used: dict[str, list[tuple[str, bool]]] = {}
     out = substitute(data, env, used)
     if sources is not None:
