@@ -2,7 +2,7 @@
 files and resume checks; then the real `pi` binary against tests/fake_openai.py.
 
 The `pi_bin` tests need Pi on PATH or FLOCK_PI_CLI pointing at it, e.g.
-`FLOCK_PI_CLI=$AM_LOCAL/pi/node_modules/.bin/pi pytest tests/test_worker_pi.py`.
+`FLOCK_PI_CLI=/path/to/pi/node_modules/.bin/pi pytest tests/test_worker_pi.py`.
 """
 
 from __future__ import annotations

@@ -19,7 +19,6 @@ experiments/pixel/
 
 ```sh
 cd experiments/pixel
-export UV_PROJECT_ENVIRONMENT=$AM_LOCAL/envs/flock-pixel
 uv sync && uv run pytest -q && uv run ruff check .
 CANVAS_DATA=/tmp/canvas uv run python -m canvas          # :8765, replay at /replay
 CANVAS_URL=http://127.0.0.1:8765 FLOCK_AGENT=me cli/canvas claim
