@@ -56,6 +56,7 @@ from flock.models import (
     Event,
     EventBatch,
     Harness,
+    Liveness,
     LoopRequest,
     LoopStatus,
     PreflightReport,
@@ -245,8 +246,8 @@ def agent_status(
     spec: SwarmSpec | None,
     pending: int,
     now: float,
-    children: list[str] | None = None,
-    state: AgentState | None = None,
+    children: list[str] | None,
+    state: AgentState,
 ):
     ts = spec.types.get(a["type"]) if spec else None
     return AgentStatus(
@@ -257,7 +258,7 @@ def agent_status(
         model=ts.model if ts else "unknown",
         provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},
-        state=state or agent_state(a, w, now),
+        state=state,
         idle_since=_dt(a["idle_since"]),
         turn_id=a["turn_id"],
         worker=a["worker"],
@@ -281,13 +282,13 @@ def agent_status(
     )
 
 
-def worker_status(w: Row, agents: list[str], now: float) -> WorkerStatus:
+def worker_status(w: Row, agents: list[str], now: float, lv: Liveness) -> WorkerStatus:
     return WorkerStatus(
         id=w["id"],
         swarm=w["swarm"],
         type=w["type"],
         job_id=w["job_id"],
-        state=worker_state(w, now),
+        state=worker_state(w, now, lv),
         deadline=_dt(w["deadline"]),
         agents=agents,
         last_heartbeat=_dt(w["last_heartbeat"]),
@@ -303,13 +304,14 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
     workers = {w["id"]: w for w in store.list_workers(spec.swarm)}
     agents = store.list_agents(spec.swarm)
     pending = store.pending_counts(spec.swarm)
+    lv = spec.compute.liveness()
     types: dict[str, TypeStatus] = {}
     for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
         ts = spec.types.get(type_name)
         mine = [a for a in agents if a["type"] == type_name]
-        by_state = Counter(agent_state(a, workers.get(a["worker"]), now).value for a in mine)
+        by_state = Counter(agent_state(a, workers.get(a["worker"]), now, lv).value for a in mine)
         w_state = Counter(
-            worker_state(w, now).value for w in workers.values() if w["type"] == type_name
+            worker_state(w, now, lv).value for w in workers.values() if w["type"] == type_name
         )
         types[type_name] = TypeStatus(
             name=type_name,
@@ -1159,7 +1161,8 @@ def create_app(
         now = clock().timestamp()
         store.add_prompt(name, cmd.model_dump_json(), now)
         w = store.get_worker(a["worker"]) if a["worker"] else None
-        live = w is not None and worker_state(w, now) == WorkerState.running
+        lv = store.liveness(a["swarm"])
+        live = w is not None and worker_state(w, now, lv) == WorkerState.running
         return PromptAck(
             prompt_id=cmd.prompt_id, agent=name, status="queued" if live else "pending"
         )
@@ -1199,7 +1202,7 @@ def create_app(
         state=idle) skips agents that already have an undelivered prompt. `build(agent)` makes
         each agent's command (the loop engine's per-agent loop prompts); `sent` collects the
         names that got one."""
-        now = clock().timestamp()
+        now, lv = clock().timestamp(), store.liveness(swarm)
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
         pending = store.pending_counts(swarm) if skip_pending else {}
@@ -1222,7 +1225,7 @@ def create_app(
             rows.append((a["name"], cmd.model_dump_json()))
             if sent is not None:
                 sent.append(a["name"])
-            if w is not None and worker_state(w, now) == WorkerState.running:
+            if w is not None and worker_state(w, now, lv) == WorkerState.running:
                 ack.queued += 1
             else:
                 ack.pending += 1
@@ -1275,7 +1278,7 @@ def create_app(
             if a["worker"]:
                 by_worker.setdefault(a["worker"], []).append(a["name"])
         return [
-            worker_status(w, by_worker.get(w["id"], []), now)
+            worker_status(w, by_worker.get(w["id"], []), now, store.liveness(w["swarm"]))
             for w in store.list_workers(swarm, type)
         ]
 
@@ -1289,7 +1292,7 @@ def create_app(
     def get_worker(worker_id: str) -> WorkerStatus:
         w = worker_or_404(worker_id)
         names = [a["name"] for a in store.list_agents(worker=worker_id)]
-        return worker_status(w, names, clock().timestamp())
+        return worker_status(w, names, clock().timestamp(), store.liveness(w["swarm"]))
 
     def stale(w: Row, incarnation: str | None) -> bool:
         """The caller is not the slot's current job. Workers that send no incarnation (older
@@ -1311,15 +1314,15 @@ def create_app(
             out.append((frozenset({type_name}), ts.max_working))
         return out
 
-    def busy(a: Row, w: Row | None, now: float) -> bool:
+    def busy(a: Row, w: Row | None, now: float, lv: Liveness) -> bool:
         """In a turn, or handed a prompt to start one, as far as the controller knows."""
-        if w is None or worker_state(w, now) == WorkerState.dead:
+        if w is None or worker_state(w, now, lv) == WorkerState.dead:
             live.pop(a["name"], None)
             return False
         seen = live.get(a["name"])
         if seen is not None:
             return seen[0] != "idle"
-        return agent_state(a, w, now) == AgentState.working
+        return agent_state(a, w, now, lv) == AgentState.working
 
     def turn_state(a: Row, w: Row | None, now: float) -> AgentState:
         """`agent_state`, with working/idle corrected by what the controller learned since the
@@ -1327,7 +1330,7 @@ def create_app(
         The one meaning of an agent's state for the bulk prompt's `state` filter and the
         agents routes (`flock status --state`, `flock prompt --state`): it neither re-prompts an
         agent whose turn is starting nor waits a heartbeat for one whose turn just ended."""
-        st = agent_state(a, w, now)
+        st = agent_state(a, w, now, store.liveness(a["swarm"]))
         seen = live.get(a["name"])
         if seen is None or st not in (AgentState.idle, AgentState.working):
             return st
@@ -1346,7 +1349,8 @@ def create_app(
                 continue
             if a["worker"] not in workers:
                 workers[a["worker"]] = store.get_worker(a["worker"]) if a["worker"] else None
-            if seen is None and agent_state(a, workers[a["worker"]], now) == AgentState.working:
+            lv = store.liveness(a["swarm"])
+            if seen is None and agent_state(a, workers[a["worker"]], now, lv) == AgentState.working:
                 continue
             live[name] = ("admitted", now)
 
@@ -1356,13 +1360,14 @@ def create_app(
         is the agents that get the pool's free slots: not busy, on a running worker, ordered
         by their oldest pending prompt across all workers (FIFO), at most `cap - busy` long."""
         workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
+        lv = store.liveness(spec.swarm)
         taken: set[str] = set()
         owner: dict[str, str | None] = {}
         types_of: dict[str, str] = {}
         for a in store.agent_states(spec.swarm, users):
             owner[a["name"]] = a["worker"]
             types_of[a["name"]] = a["type"]
-            if busy(a, workers.get(a["worker"]), now):
+            if busy(a, workers.get(a["worker"]), now, lv):
                 taken.add(a["name"])
         free = cap - len(taken)
         window: list[str] = []
@@ -1375,7 +1380,7 @@ def create_app(
                 if name in held:
                     continue  # paused: its prompt waits, and must not hold a slot meanwhile
                 if name in taken or w is None or w["job_id"] is None or w["draining"] \
-                        or w["retire_at"] or worker_state(w, now) != WorkerState.running:
+                        or w["retire_at"] or worker_state(w, now, lv) != WorkerState.running:
                     continue  # a worker that cannot start the turn must not hold a slot
                 window.append(name)
                 if len(window) >= free:

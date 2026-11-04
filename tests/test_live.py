@@ -28,7 +28,7 @@ from flock.models import (
 from flock.tools.bundle import pack
 from flock.tools.toolset import Toolset
 
-from .conftest import wire
+from .conftest import make_spec, wire
 from .worker_fakes import runtime, spec, until
 
 runner = CliRunner()
@@ -163,6 +163,26 @@ async def test_heartbeat_carries_a_changed_type_spec(client, store, tick, tmp_pa
     assert out["type_spec"]["system_prompt"] == "You are calc v2."
     assert out["spec_rev"] == type_spec_rev(spec.types["calc"]) != rev
     assert "type_spec" not in await beat(out["spec_rev"])
+
+
+async def test_an_update_changes_the_worker_liveness_timings(client, store, tick, clock):
+    spec = make_spec()
+    assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
+    tick()
+    wid = store.list_workers("demo")[0]["id"]
+    store.update_worker(wid, last_heartbeat=clock().timestamp())
+    clock.advance(100)
+
+    async def state() -> str:
+        return (await client.get(f"/workers/{wid}")).json()["state"]
+
+    assert await state() == "unknown"  # the 90 s default
+    spec.compute.worker_unknown_after, spec.compute.worker_dead_after = "2m", "4m"
+    assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
+    assert await state() == "running"
+    clock.advance(100)  # 200 s silent: dead by the old 180 s, not by the new 4 m
+    assert not [a for a in tick() if a.kind in ("cancel", "crash")]
+    assert await state() == "unknown"
 
 
 async def test_apply_refuses_a_harness_change_for_a_running_type(client, store, tick, tmp_path):
