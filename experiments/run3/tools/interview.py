@@ -1,4 +1,4 @@
-"""spawn_interviewer: an agent spawns a short-lived strong interviewer child (flock-agent spawn,
+"""spawn_interviewer: an agent spawns a short-lived strong interviewer child (flock spawn,
 docs/spawn.md) through the controller API, as itself (FLOCK_URL, FLOCK_AGENT_TOKEN in its env),
 for a booking made first with the world's book_interview. A folder tool cannot call the world
 (the world secret never reaches tools), so the world freezes the copy and checks the bar at

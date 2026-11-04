@@ -1,23 +1,26 @@
 #!/bin/bash
 # common.sh: sourced by controller.sbatch, world.sbatch and worker.sbatch (never run on its own).
 #
-# It resolves RUN and the run directory, sources the run's cluster profile (cluster.env, copied
-# by `flock init --profile`), the secrets file (mode 600) and the run's config (run.env; later
-# wins), sets umask 077 and defines log(), die(), require_var(),
+# It resolves RUN and the run directory, sources the secrets file (mode 600) and the run's
+# non-secret config (run.env), sets umask 077 and defines log(), die(), require_var(),
 # http_status() and the container helpers (CONTAINER_IMAGE, container_srun_args). The caller sets
 # RUN before sourcing (from $1 or the environment). It runs on the HOST: the world and the worker
 # then start their Python process in a container (srun --container-image), the controller does not.
 #
-# Nothing here is passed with `sbatch --export`: every value is read from files on the shared
-# disk inside the job (see docs/slurm.md). Secrets are never echoed. From the submitting
-# environment only SLURM_DIR (this folder) and, for a run given by name, RUNS. The rest comes
-# from cluster.env: VENV (bin/flock, flock-controller, flock-worker, hf, python), REPO (the flock
-# checkout, read-only for the jobs), SECRETS_FILE, CONTAINER_IMAGE, CONTAINER_MOUNTS.
-export SLURM_DIR=${SLURM_DIR%/}   # the controller's sbatch passes SLURM_* on to the workers
+# Nothing here is passed with `sbatch --export`: every value is read from files on /fsx inside
+# the job (see README.md). Secrets are never echoed.
+
+PRJ=/fsx/carlos_patino/prj-eliza
+VENV=$PRJ/venv                       # built elsewhere: bin/flock, flock-controller, flock-worker, hf, python
+REPO=$PRJ/flock                      # checkout of huggingface/flock, pinned run4 commit (read-only for the jobs)
+RUNS=$PRJ/runs                       # one directory per run: $RUNS/<RUN>/{logs,launch,experiment,...}
+SECRETS_FILE=$PRJ/secrets/secrets.env
+SLURM_DIR=$PRJ/slurm
+export PRJ VENV REPO RUNS SECRETS_FILE SLURM_DIR
 
 umask 077
 
-log() {  # one timestamped line on the job's stdout (the sbatch -o file)
+log() {  # one timestamped line on the job's stdout (the sbatch -o file on /fsx)
   printf '%s %s[%s]: %s\n' "$(date -u +%FT%TZ)" "${LOG_TAG:-$(basename "${BASH_SOURCE[-1]}")}" \
     "${SLURM_JOB_ID:-nojob}" "$*"
 }
@@ -77,54 +80,24 @@ step_signal() {
 }
 
 # ---------------------------------------------------------------- the run
-# The job's argument: the run directory (an absolute path), or a run name under $RUNS.
-[ -n "${RUN:-}" ] || die "RUN is not set: sbatch <script> <run dir>  (or RUN=<run dir> in the environment)"
-case $RUN in
-  /*) RUN_DIR=${RUN%/}; RUN=${RUN_DIR##*/};;
-  *) [ -n "${RUNS:-}" ] || die "RUN=$RUN is a name and RUNS is unset: pass the run directory"
-     RUN_DIR=${RUNS%/}/$RUN;;
-esac
+[ -n "${RUN:-}" ] || die "RUN is not set: sbatch <script> <run>  (or RUN=<run> in the environment)"
 case $RUN in *[!A-Za-z0-9._-]*|"") die "RUN=$RUN: use letters, digits, . _ - only";; esac
+RUN_DIR=$RUNS/$RUN
 RUN_ENV=$RUN_DIR/run.env
 HOSTS_DIR=$RUN_DIR/hosts   # controller.host, world.host: a directory, so a container can mount it ro and see updates
 export RUN RUN_DIR RUN_ENV HOSTS_DIR
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/launch" "$HOSTS_DIR" || die "cannot create $RUN_DIR"
 
-# publish_host NAME PORT: write `<this node's hostname>:PORT` to <run>/hosts/NAME.host (tmp +
-# rename) and keep <run>/NAME.host as a symlink to it (the path people and older notes use). A
-# directory mount sees a rename; a bind mount of the file itself would keep showing the old inode.
+# publish_host NAME: write this node's hostname to <run>/hosts/NAME.host (tmp + rename) and keep
+# <run>/NAME.host as a symlink to it (the path people and older notes use). A directory mount sees
+# a rename; a bind mount of the file itself would keep showing the old inode.
 publish_host() {
   local f=$HOSTS_DIR/$1.host
-  printf '%s\n' "$(hostname)${2:+:$2}" > "$f.tmp" && mv -f "$f.tmp" "$f" || die "cannot write $f"
+  printf '%s\n' "$(hostname)" > "$f.tmp" && mv -f "$f.tmp" "$f" || die "cannot write $f"
   ln -sfn "hosts/$1.host" "$RUN_DIR/$1.host" || die "cannot link $RUN_DIR/$1.host"
 }
 
-# free_port: a TCP port free on this node now, so the controller and the world can share a node.
-# Another process may take it before the server binds (rare): controller.sbatch retries once with a
-# new port; world.sbatch's crash requeue (a fast failure) starts again with a new one.
-free_port() {
-  "$VENV/bin/python" -I -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])'
-}
-
-# ---------------------------------------------------------------- cluster profile, secrets and run config
-# cluster.env (not secret): the cluster's values (docs/slurm.md "Cluster profile"). SLURM_PARTITION
-# is not exported: srun reads it as its --partition, and a step must stay in its job's partition.
-if [ -f "$RUN_DIR/cluster.env" ]; then
-  # sourced as shell into jobs holding secrets: ours and not writable by anyone else
-  _owner=$(stat -c %U "$RUN_DIR/cluster.env") && _mode=$(stat -c %a "$RUN_DIR/cluster.env") \
-    || die "$RUN_DIR/cluster.env: stat failed"
-  [ "$_owner" = "$(id -un)" ] || die "$RUN_DIR/cluster.env: owned by $_owner, not $(id -un)"
-  (( 8#$_mode & 8#022 )) && die "$RUN_DIR/cluster.env: mode $_mode is group/world-writable (chmod go-w)"
-  unset _owner _mode
-  set -a
-  # shellcheck disable=SC1091
-  . "$RUN_DIR/cluster.env"
-  set +a
-  export -n SLURM_PARTITION 2>/dev/null
-fi
-require_var VENV REPO SECRETS_FILE
-VENV=${VENV%/} REPO=${REPO%/}
-export VENV REPO SECRETS_FILE
+# ---------------------------------------------------------------- secrets and run config
 # secrets.env defines shared HF_TOKEN (only the experiment bucket + dataset), OPENAI_API_KEY,
 # CHATBOT_BOARD_INVITE, CHATBOT_WORLD_TOKEN, FLOCK_TOKEN. run.env (optional, not secret) holds
 # the run's endpoint, board, bucket and model settings: see run.env.example.
@@ -181,12 +154,12 @@ export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HF_HUB_DISABLE_PROGRESS_BARS
 export HF_HOME=/tmp/hf-${SLURM_JOB_ID:-nojob}
 
 # ---------------------------------------------------------------- containers (world and worker only)
-# The world's and the worker's Python run in an Enroot/Pyxis container: home not mounted, the
-# shared disk visible only as the read-only mounts below, files written on the container root (/work, on the
+# The world's and the worker's Python run in an Enroot/Pyxis container: home not mounted, /fsx
+# visible only as the read-only mounts below, files written on the container root (/work, on the
 # node's disk, deleted with the container). The controller stays on the host: it needs sbatch,
 # squeue, sacct and scancel, which do not work in the container (no Slurm client, munge socket).
 # Do not use /tmp inside the container for data: it is a tmpfs counted against the job memory.
-CONTAINER_IMAGE=${CONTAINER_IMAGE:-}   # cluster.env; run.env may override it
+CONTAINER_IMAGE=${CONTAINER_IMAGE:-$PRJ/images/pi-worker-node22.sqsh}   # run.env may override it
 # select_worker_image TYPE (worker.sbatch, after the env file): the worker's image is
 # CONTAINER_IMAGE_<TYPE> from run.env (TYPE with - and . as _, e.g. CONTAINER_IMAGE_agent_pi), else
 # FLOCK_CONTAINER_IMAGE (the env file; flock's Slurm client writes it, one image for all types, when
@@ -196,17 +169,13 @@ select_worker_image() {
   case $t in *[!A-Za-z0-9_]*|"") ;; *) v=CONTAINER_IMAGE_$t; [ -n "${!v:-}" ] && { CONTAINER_IMAGE=${!v}; return; } ;; esac
   CONTAINER_IMAGE=${FLOCK_CONTAINER_IMAGE:-$CONTAINER_IMAGE}
 }
-# container_mounts [DIR...]: the --container-mounts list: the venv, the flock repo, this slurm dir,
-# each CONTAINER_MOUNTS entry (cluster.env, comma-separated: e.g. the uv Python dir the venv's
-# bin/python links to; `flock init` checks it is mounted) and each DIR, read-only at their own path.
+UV_PYTHON_DIR=/fsx/carlos_patino/uv/python   # venv/bin/python links here (uv-managed, not ~/.local/share/uv)
+
+# container_mounts [DIR...]: the --container-mounts list. The venv, the uv Python, the flock repo
+# and this slurm dir (world-inner.sh, worker-inner.sh), plus each DIR, all read-only at their own path.
 container_mounts() {
   local m="" d
-  local -a profile
-  IFS=, read -ra profile <<< "${CONTAINER_MOUNTS:-}"
-  for d in "$VENV" "$REPO" "$SLURM_DIR" ${profile[@]+"${profile[@]}"} "$@"; do
-    d=${d%%:*} d=${d%/}
-    [ -n "$d" ] || continue
-    case ",$m," in *",$d:$d:ro,"*) continue;; esac
+  for d in "$VENV" "$UV_PYTHON_DIR" "$REPO" "$SLURM_DIR" "$@"; do
     [ -e "$d" ] || die "container mount source $d does not exist"
     m+="${m:+,}$d:$d:ro"
   done

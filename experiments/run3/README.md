@@ -25,7 +25,7 @@ Nothing here launches anything. Every value for the operator is a placeholder.
 | `job/` | `bootstrap.sh` (the single job), `launch.sh` (payload + the `hf jobs run` line) |
 | `slurm/` | Runbook C: sbatch templates (controller, world, waves, worker), Containerfile, env examples |
 | `dryrun.sh` | one-command rehearsal (fake model and board, smoke waves, Slurm-side tests) |
-| `world-space/` | the world as a Docker Space (`python -m flock.world serve`): `Dockerfile`, `start.sh`, `prepare.sh` |
+| `world-space/` | the world as a Docker Space (`flock world serve`): `Dockerfile`, `start.sh`, `prepare.sh` |
 
 The world is `worlds/chatbot3` (on `worlds/chatbot2`): `agents/<name>/` per agent (own-dir
 writes, everyone reads and runs everything), `best/` (beat-best gate: strictly better on the
@@ -103,7 +103,7 @@ a JSON line in `<spec>.waves.jsonl`. The schedule file is re-read at every tick.
 - **Jobs mode:** the operator session runs `python waves.py run --spec spec.jobs.local.yaml`
   with `FLOCK_URL`/`FLOCK_TOKEN` set; it stops when the schedule is over (300).
   `waves.py status` shows the count and the next wave; `waves.py add 100` or `set 250`
-  overrides (`set` may lower). Editing `replicas` and `flock update --replicas spec` also works; the next wave never
+  overrides (`set` may lower). `flock scale run3 agent N` also works; the next wave never
   lowers it. `waves.py add 25 --type agent-pi` adds Pi agents without touching `agent` /
   `agent-think`; waves, `add` and `pin` keep every other type at the controller's count.
 
@@ -158,7 +158,7 @@ agents each (40 agent workers at the cap, up to 40 interviewer workers), the wor
    CHATBOT_CHANNEL=<channel> CHATBOT_RUN=<suffix> RUN3_NAMESPACE=<ns>
    RUN3_BUCKET=hf://buckets/<ns>/<bucket> RUN3_WORLD_URL=https://<space host>
    python experiments/run3/render.py --variant jobs --out experiments/run3/spec.jobs.local.yaml`
-5. `flock launch experiments/run3/spec.jobs.local.yaml` (replicas 0: the swarm, the kickoff, the
+5. `flock apply experiments/run3/spec.jobs.local.yaml` (replicas 0: the swarm, the kickoff, the
    world check; no worker yet).
 6. Waves, in a session that stays up (tmux):
    `python experiments/run3/waves.py run --spec experiments/run3/spec.jobs.local.yaml`.
@@ -168,7 +168,7 @@ agents each (40 agent workers at the cap, up to 40 interviewer workers), the wor
 8. Renewal: workers restart on their own at 24 h + up to 4 h (sessions from the bucket). Renew
    the controller before its timeout: `scripts/deploy-job.sh "$W" --group run3 --replace`
    (heartbeats pause ~1 min; re-export `FLOCK_URL`).
-9. Stop: `flock stop run3 --final --type agent` (and `--type agent-think`; final round), then `flock stop run3 --delete`, then
+9. Stop: `flock loop run3 --type agent --stop` (and `--type agent-think`; final round), then `flock remove run3`, then
    `scripts/deploy-job.sh --down --group run3 "$W"`; stop the Space.
 
 ## Runbook C: CPU Slurm cluster
@@ -176,7 +176,7 @@ agents each (40 agent workers at the cap, up to 40 interviewer workers), the wor
 `slurm/README.md`: the controller job (host, bare venv, `FLOCK_COMPUTE=slurm`, it sbatches the
 workers), the world job, the waves job (`render.py --compute slurm`, apply, `waves.py run`),
 an optional Enroot image for workers and world, the Spot budget (~20 s after SIGUSR1) and the
-stop order (`flock stop --delete`, then `scancel`; the `control/*` markers are single-job only).
+stop order (`flock remove`, then `scancel`; the `control/*` markers are single-job only).
 `dryrun.sh` rehearses a node with the fake model and board. Mechanism and spec keys:
 `docs/slurm.md`.
 

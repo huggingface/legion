@@ -652,6 +652,7 @@ def create_app(
     world_transport: httpx.BaseTransport | None = None,
     health: Health | None = None,
     buckets: Callable[[str], Any] | None = None,
+    checkpoint: Callable[[], int] | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
@@ -672,7 +673,8 @@ def create_app(
     `health` (docs/health.md) gets every posted event batch; its probe/snapshot loop is run by
     the caller (main, localrun). Default: one that only counts.
     `buckets(url)` opens a bucket (a `BucketStore`): `flock launch` checks the spec's bucket for
-    agents of an earlier run. None: no bucket access (tests): no fresh-run guard."""
+    agents of an earlier run. None: no bucket access (tests): no fresh-run guard.
+    `checkpoint()` pushes the state to the bucket (POST /checkpoint); None: no state sync."""
     secret_source = os.environ if secret_source is None else secret_source
     worlds = WorldHost() if worlds is None else worlds
     health = Health(store, token=token, secrets=secret_source) if health is None else health
@@ -794,6 +796,18 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
         return _status_page(store, clock().timestamp(), health)
+
+    @api.post("/checkpoint")
+    async def push_checkpoint() -> dict:
+        """Push the controller's state to its bucket now (`flock stop --release`, before it
+        ends the controller): {"files": n}. 409 without state sync, 500 when the push fails."""
+        if checkpoint is None:
+            raise HTTPException(409, "no checkpoint: this controller has no state sync "
+                                     "(FLOCK_STATE_URL)")
+        try:
+            return {"files": await asyncio.to_thread(checkpoint)}
+        except Exception as e:  # noqa: BLE001 - any push failure is the caller's answer
+            raise HTTPException(500, f"checkpoint failed: {type(e).__name__}: {e}") from None
 
     # ------------------------------------------------------------- swarms
 

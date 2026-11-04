@@ -1,4 +1,4 @@
-"""spawn_interviewer: a team agent spawns a short-lived interviewer child (flock-agent spawn,
+"""spawn_interviewer: a team agent spawns a short-lived interviewer child (flock spawn,
 docs/spawn.md) through the controller API, as itself (FLOCK_URL, FLOCK_AGENT_TOKEN in its env).
 The world decides whether the interview happens: the candidate must be qualified and unchanged,
 and the team must have quota left (worlds/chatbot). The interviewer types are `ephemeral`: flock

@@ -4,8 +4,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
-import re
-import shlex
 import subprocess
 import sys
 from itertools import pairwise
@@ -29,20 +27,10 @@ def executable(path, text):
     return path
 
 
-def stub_common(tmp_path, **fns: str) -> None:
-    """A stub common.sh for the sbatch scripts; `fns` replace the default bodies."""
-    body = {"log": 'echo "$*"', "die": 'echo "$*" >&2; exit 2', "require_var": ":",
-            "publish_host": ":", "free_port": "echo 7860", "http_status": "echo 000",
-            "container_srun_args": "CTR_SRUN=()", **fns}
-    (tmp_path / "common.sh").write_text("".join(f"{k}() {{ {v}; }}\n" for k, v in body.items()))
-
-
 def shell_environment(tmp_path):
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
-    # `python -m flock.world ...` runs the test's `flock` stub (as `flock world ...`)
-    executable(venv / "bin/python", '#!/bin/bash\n[ "$1 $2" = "-m flock.world" ] && { shift 2; '
-               f'exec "$VENV/bin/flock" world "$@"; }}\nexec {shlex.quote(sys.executable)} "$@"\n')
+    (venv / "bin/python").symlink_to(sys.executable)
     executable(venv / "bin/sleep", '#!/bin/bash\ncase "$1" in 60) exec /bin/sleep 0.02;; *) echo "$1" >> "$SLEEPS";; esac\n')
     env = {"PATH": f"{venv / 'bin'}:{os.environ['PATH']}", "HOME": str(tmp_path),
            "VENV": str(venv), "SLEEPS": str(tmp_path / "sleeps"), "SLURM_JOB_ID": "123",
@@ -62,7 +50,7 @@ def run_script(tmp_path, name, env):
     # Only replace deployment paths; all process/exit/retry logic is the real script.
     # /work first: pytest's tmp dir may itself be under /work (a later pass would rewrite it).
     source = source.replace('/work', str(tmp_path / "work"))
-    source = re.sub(r'"\$\{SLURM_DIR:\?[^}]*\}/common\.sh"', str(tmp_path / "common.sh"), source)
+    source = source.replace('/fsx/carlos_patino/prj-eliza/slurm/common.sh', str(tmp_path / "common.sh"))
     target = tmp_path / name
     target.write_text(source)
     return subprocess.run(["bash", str(target), "run4"], env=env, text=True,
@@ -104,7 +92,13 @@ def test_world_failure_counts_fast_crashes_and_never_gives_up(tmp_path, code, re
                CHATBOT_WORLD_TOKEN="fake-world", SLURM_RESTART_COUNT="9")  # Spot requeues do not count
     (tmp_path / "run/world").mkdir(parents=True)
     (tmp_path / "run/world/crash-requeues").write_text(f"{restarts}\n")
-    stub_common(tmp_path)
+    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
+die() { echo "$*" >&2; exit 2; }
+require_var() { :; }
+publish_host() { :; }
+http_status() { echo 000; }
+container_srun_args() { CTR_SRUN=(); }
+''')
     executable(tmp_path / "venv/bin/srun", '#!/bin/bash\nexec "$@"\n')
     executable(tmp_path / "slurm/world-inner.sh",
                '#!/bin/bash\n' + ('kill -TERM "$PPID"\n' if stopping else '') + f'exit {code}\n')
@@ -159,7 +153,13 @@ def test_world_backoff_doubles_to_the_cap(tmp_path):
     env.update(RUN3_BUCKET="hf://buckets/fake/b", HF_TOKEN="x", CHATBOT_WORLD_TOKEN="x", WORLD_STABLE_S="600")
     (tmp_path / "run/world").mkdir(parents=True)
     (tmp_path / "run/world/crash-requeues").write_text("5\n")
-    stub_common(tmp_path)
+    (tmp_path / "common.sh").write_text('''log() { echo "$*"; }
+die() { echo "$*" >&2; exit 2; }
+require_var() { :; }
+publish_host() { :; }
+http_status() { echo 000; }
+container_srun_args() { CTR_SRUN=(); }
+''')
     executable(tmp_path / "venv/bin/srun", '#!/bin/bash\nexec "$@"\n')
     executable(tmp_path / "slurm/world-inner.sh", '#!/bin/bash\nexit 37\n')
     for _ in range(5):
@@ -168,13 +168,8 @@ def test_world_backoff_doubles_to_the_cap(tmp_path):
     assert backoffs == ["300", "600", "1200", "1800", "1800"]
 
 
-@pytest.mark.parametrize(("swarm_code", "world", "waited", "calls"), [
-    (200, "000", False, []),            # a requeue: the swarm is live, nothing is applied (S2)
-    (404, "000", True, []),             # first start, world down: waits, gives up, applies nothing
-    (404, "200", False, ["launch"]),    # first start: flock launch spec.yaml once the world answers
-    (500, "200", False, []),            # anything else: nothing
-])
-def test_controller_applies_only_when_the_swarm_is_missing(tmp_path, swarm_code, world, waited, calls):
+@pytest.mark.parametrize(("swarm_code", "waited", "calls"), [(200, False, ["pin", "run"]), (404, True, [])])
+def test_controller_waits_for_the_world_only_on_the_first_launch(tmp_path, swarm_code, waited, calls):
     import shlex
     env = shell_environment(tmp_path)
     env.update(RUN3_BUCKET="hf://buckets/fake/b", RUN3_NAMESPACE="fake", OPENAI_BASE_URLS="http://fake/v1",
@@ -185,14 +180,19 @@ def test_controller_applies_only_when_the_swarm_is_missing(tmp_path, swarm_code,
     (tmp_path / "run/hosts/world.host").write_text("w\n")
     exp = tmp_path / "run/experiment"
     exp.mkdir()
-    (exp / "spec.yaml").write_text("swarm: ${CHATBOT_RUN:-s}\n")
-    stub_common(tmp_path, http_status=f"case $1 in */healthz) echo 200;; */swarms/s) echo "
-                f"{swarm_code};; */manifest) echo {world};; *) echo 000;; esac")
+    (exp / "render.py").write_text("import sys; open(sys.argv[sys.argv.index('--out') + 1], 'w').write('swarm: s\\n')")
+    (exp / "waves.py").write_text("import os, sys; open(os.environ['CALLS'], 'a').write(sys.argv[1] + '\\n')")
+    (tmp_path / "common.sh").write_text(f'''log() {{ echo "$*"; }}
+die() {{ echo "$*" >&2; exit 2; }}
+require_var() {{ :; }}
+publish_host() {{ :; }}
+http_status() {{ case $1 in */healthz) echo 200;; */swarms/*) echo {swarm_code};; *) echo 000;; esac; }}
+''')
     (tmp_path / "venv/bin/python").unlink()
     executable(tmp_path / "venv/bin/python", f'#!/bin/bash\nexec {shlex.quote(sys.executable)} "$@"\n')
     for name in ("sbatch", "sacct"):
         executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
-    executable(tmp_path / "venv/bin/flock", '#!/bin/bash\necho "$1 $2" >> "$CALLS"\n')
+    executable(tmp_path / "venv/bin/flock", '#!/bin/bash\necho "$1" >> "$CALLS"\n')
     executable(tmp_path / "venv/bin/flock-controller", '#!/bin/bash\n/bin/sleep 1\n')
     executable(tmp_path / "venv/bin/date", '#!/bin/bash\nn=$(cat "$CLOCK" 2>/dev/null || echo 0)\nn=$((n+1))\necho "$n" > "$CLOCK"\necho "$n"\n')
     result = run_script(tmp_path, "controller.sbatch", env)
@@ -200,8 +200,7 @@ def test_controller_applies_only_when_the_swarm_is_missing(tmp_path, swarm_code,
     assert ("world unavailable after 2s" in result.stdout) == waited
     assert not (tmp_path / "requeues").exists()  # never requeues itself over a missing world
     called = tmp_path / "calls"
-    got = called.read_text().splitlines() if called.exists() else []
-    assert got == [f"launch {exp / 'spec.yaml'}" for _ in calls], result.stdout
+    assert (called.read_text().split() if called.exists() else []) == calls
 
 
 def test_role_preparation_plan_and_existing_checkout_protection(tmp_path):
@@ -312,42 +311,35 @@ def test_worker_paths_trim_slashes_and_accept_only_shared_hub_token(tmp_path):
     run_env.parent.mkdir(parents=True)
     run_env.write_text(f"WORKER_VENV={tmp_path}/venv/\nWORKER_REPO={tmp_path}/repo/\n")
     run_env.chmod(0o600)
-    # the cluster profile's copy: everything common.sh used to hard-code; run.env wins over it
-    (project / "runs/run4/cluster.env").write_text(
-        f"VENV={project}/venv\nREPO={project}/flock\nSECRETS_FILE={secrets}\n"
-        f"SLURM_PARTITION=cpu-spot\nCONTAINER_MOUNTS={tmp_path}/uv:{tmp_path}/uv:ro,{tmp_path}/venv/\n")
-    (tmp_path / "uv").mkdir()
-    (tmp_path / "repo").mkdir()
     for binary in ["flock", "flock-controller", "flock-worker", "hf"]:
         executable(tmp_path / "venv/bin" / binary, '#!/bin/sh\nexit 0\n')
-    show = ('. "$1"; printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$RUN_DIR" "${SLURM_PARTITION:-}" '
-            '"$(printenv SLURM_PARTITION)" "$VENV" "$REPO"')
-    for run in ("run4", str(project / "runs/run4")):  # a name under $RUNS, or the run dir
-        result = subprocess.run(["bash", "-c", show, "test", str(SLURM / "common.sh")],
-                                env={**env, "RUN": run, "RUNS": str(project / "runs")}, text=True,
-                                capture_output=True, timeout=4, check=False)
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.splitlines()[-5:] == [
-            str(project / "runs/run4"), "cpu-spot", "",  # not exported: srun would read it
-            str(tmp_path / "venv"), str(tmp_path / "repo")]
-        assert "shared-fixture" not in result.stdout + result.stderr
-    mounts = subprocess.run(["bash", "-c", '. "$1"; container_mounts "$RUN_DIR/hosts"', "test",
-                             str(SLURM / "common.sh")], env={**env, "RUN": "run4", "RUNS": str(project / "runs")},
-                            text=True, capture_output=True, timeout=4, check=False)
-    assert mounts.stdout.splitlines()[-1].split(",") == [  # each once, read-only at its own path
-        f"{d}:{d}:ro" for d in (tmp_path / "venv", tmp_path / "repo", tmp_path / "slurm", tmp_path / "uv",
-                                project / "runs/run4/hosts")], mounts.stderr
-    (project / "runs/run4/cluster.env").chmod(0o664)  # sourced as shell into jobs holding secrets
-    result = subprocess.run(["bash", "-c", show, "test", str(SLURM / "common.sh")],
-                            env={**env, "RUN": "run4", "RUNS": str(project / "runs")},
-                            text=True, capture_output=True, timeout=4, check=False)
-    assert result.returncode == 2 and "group/world-writable" in result.stderr
-    (project / "runs/run4/cluster.env").unlink()
-    result = subprocess.run(["bash", "-c", show, "test", str(SLURM / "common.sh")],
-                            env={**env, "RUN": "run4", "RUNS": str(project / "runs"),
-                                 "VENV": "", "REPO": ""},
-                            text=True, capture_output=True, timeout=4, check=False)
-    assert result.returncode == 2 and "VENV is empty" in result.stderr  # no profile, no paths
+    common = tmp_path / "common.sh"
+    common.write_text((SLURM / "common.sh").read_text().replace(
+        "PRJ=/fsx/carlos_patino/prj-eliza", "PRJ=" + str(project)))
+    result = subprocess.run(["bash", "-c", '. "$1"; printf "%s\\n%s\\n" "$VENV" "$REPO"', "test", str(common)],
+                            env=env, text=True, capture_output=True, timeout=4, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-2:] == [str(tmp_path / "venv"), str(tmp_path / "repo")]
+    assert "shared-fixture" not in result.stdout + result.stderr
+
+
+def test_calibrated_capacity_threshold_and_invalid_values(monkeypatch):
+    from .test_run4_experiment import module
+
+    guard = module("load_guard")
+    def measure(threshold):
+        times = iter([0, 60, 120])
+        completed = iter([0, 30, 60])
+        monkeypatch.setenv("RUN4_MAX_REQUEST_SECONDS", str(threshold))
+        return guard.capacity_ok(["fake"], sleep=lambda _: None, clock=lambda: next(times),
+                                 get=lambda _: SimpleNamespace(raise_for_status=lambda: None, text=(
+                                     "vllm:num_requests_running 10\nvllm:num_requests_waiting 0\n"
+                                     f"vllm:request_success_total {next(completed)}\n")))
+    assert not measure(15)[0]  # observed 20 s/request
+    assert measure(25)[0]
+    for invalid in [0, -1, "bad", "nan", "inf"]:
+        ok, message = measure(invalid)
+        assert not ok and "finite and positive" in message
 
 
 @pytest.mark.parametrize("stop_signal", ["USR1", "TERM"])
@@ -366,7 +358,7 @@ raise SystemExit(1)
     result = run_script(tmp_path, "world-inner.sh", env)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "operations").read_text().splitlines() == ["restore"]
-    assert "flock.world serve pid" not in result.stderr
+    assert "flock world serve pid" not in result.stderr
 
 
 def test_online_preflight_only_reads_metadata_and_sanitizes_failures(tmp_path):
@@ -399,48 +391,3 @@ def test_online_preflight_only_reads_metadata_and_sanitizes_failures(tmp_path):
     results = preflight.check(env, online=True, get=error, api=ReadOnlyApi())
     assert not any(row["ok"] for row in results if row["check"] in ["model_1", "metrics_1", "board"])
     assert "private-marker" not in str(results)
-
-
-@pytest.mark.parametrize(("limit", "dies"), [("1000", True), ("2000", False), ("", False)])
-def test_controller_mem_per_cpu_guard_comes_from_the_profile(tmp_path, limit, dies):
-    env = shell_environment(tmp_path)
-    env.update(SLURM_MAX_MEM_PER_CPU_MB=limit, WORKER_CPUS="4", WORKER_MEM="7G",  # 1792 MB per CPU
-               OPENAI_BASE_URLS="http://fake/v1", RUN3_BUCKET="hf://buckets/fake/b",
-               HOSTS_DIR=str(tmp_path / "run/hosts"), SECRETS_FILE="s")
-    stub_common(tmp_path, publish_host="exit 0")  # stop right after the guard: the next step
-    for name in ("sbatch", "sacct"):
-        executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
-    result = run_script(tmp_path, "controller.sbatch", env)
-    assert (result.returncode == 2 and "over SLURM_MAX_MEM_PER_CPU_MB=1000" in result.stderr) == dies, \
-        result.stdout + result.stderr
-    assert result.returncode == (2 if dies else 0), result.stderr
-
-
-def test_controller_retries_once_on_a_new_port(tmp_path):
-    env = shell_environment(tmp_path)
-    env.update(OPENAI_BASE_URLS="http://fake/v1", RUN3_BUCKET="hf://buckets/fake/b",
-               HOSTS_DIR=str(tmp_path / "run/hosts"), SECRETS_FILE="s", REPO=str(tmp_path),
-               STATE=str(tmp_path / "state"))
-    (tmp_path / "run/hosts").mkdir()
-    (tmp_path / "run/experiment").mkdir()
-    (tmp_path / "run/experiment/spec.yaml").write_text("swarm: s\n")
-    stub_common(tmp_path,
-                free_port='echo x >> "$STATE/picks"; echo $((7000 + $(wc -l < "$STATE/picks")))',
-                publish_host='echo "publish $1 $2" >> "$STATE/published"',
-                http_status='case $1 in */healthz) [ -f "$STATE/up" ] && echo 200 || echo 000;; '
-                            '*/swarms/s) echo 200;; *) echo 000;; esac')
-    (tmp_path / "state").mkdir()
-    for name in ("sbatch", "sacct"):
-        executable(tmp_path / "venv/bin" / name, '#!/bin/bash\nexit 97\n')
-    # the first start loses its port (exit 1 before healthy); the second binds and serves
-    executable(tmp_path / "venv/bin/flock-controller", '''#!/bin/bash
-echo "$PORT" >> "$STATE/ports"
-[ -f "$STATE/tried" ] || { touch "$STATE/tried"; exit 1; }
-touch "$STATE/up"; /bin/sleep 0.5
-''')
-    result = run_script(tmp_path, "controller.sbatch", env)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (tmp_path / "state/ports").read_text().split() == ["7001", "7002"]
-    assert (tmp_path / "state/published").read_text().splitlines() == [
-        "publish controller 7001", "publish controller 7002"]
-    assert "once more on port 7002" in result.stdout

@@ -997,7 +997,7 @@ class ComputeSpec(_Removable):
 class SwarmSpec(BaseModel):
     swarm: str
     # HF namespace jobs are launched under, and the bucket agents sync to (e.g.
-    # hf://buckets/cmpatino/flock). Required for compute hf-jobs; optional for compute local.
+    # hf://buckets/<namespace>/<bucket>). Required for compute hf-jobs; optional for compute local.
     namespace: str = ""
     bucket: str = ""
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)

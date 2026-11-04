@@ -33,7 +33,7 @@ fi
 # Secrets: flock-worker reads them from a 0600 file named by FLOCK_WORKER_SECRETS_FILE (docs/slurm.md,
 # "Worker secrets file") and removes those names from its os.environ; here they are also unset from
 # its exec environment, so /proc/<pid>/environ never shows them. The file lives next to WORK_ROOT on
-# the container root (node disk, deleted with the container; never /tmp or the shared disk) and flock-worker
+# the container root (node disk, deleted with the container; never /tmp or /fsx) and flock-worker
 # deletes it once read (UNLINK=1; a new step runs this script again and writes a new one). Only the
 # names that are set are written: an empty NAME= line would shadow a real value. CHATBOT_WORLD_TOKEN
 # (copied to FLOCK_WORLD_TOKEN by worker.sbatch) and FLOCK_WORLD_ADMIN_TOKEN (the world's /admin

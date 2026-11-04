@@ -60,8 +60,14 @@ types:
     tool_output_chars: 32000
     context_tokens: 64000
     loop:
+      first: "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n\
+        2. If you are ds-b-0000: call `post` with thread \"new\" and this text, then go to step 3:\n \
+        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree\
+        \ on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>.\"\
+        \n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
       prompt_file: ../../phase2/round.md
       every: 90s
+      stagger: 4s
       'on': [comms.mention, comms.thread]
       wake: {min_gap: 30s, max: 3, window: 30m}
       while:
@@ -86,8 +92,14 @@ types:
     tool_output_chars: 32000
     context_tokens: 64000
     loop:
+      first: "Start (round 0). One tool call per reply:\n1. Call `read` (no arguments) to see the kickoff.\n\
+        2. If you are ds-b-0000: call `post` with thread \"new\" and this text, then go to step 3:\n \
+        \  \"[team-b] Team B thread (ds-b-0000, ds-b-0001, glm-b-0000, glm-b-0001). No lead: first agree\
+        \ on our own direction here ([direction?] proposals), then a [split]; answer with agree <id>.\"\
+        \n   Everyone else: do not post now.\n3. Call `done` with summary \"started\".\n"
       prompt_file: ../../phase2/round.md
       every: 90s
+      stagger: 4s
       'on': [comms.mention, comms.thread]
       wake: {min_gap: 30s, max: 3, window: 30m}
       while:

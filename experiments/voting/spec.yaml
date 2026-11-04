@@ -1,15 +1,8 @@
 # Voting (README): the hierarchy experiment plus a vote before each PR and each worker batch.
 # World, board, model and loop are run 4's (experiments/run4/spec.yaml); only the types,
 # prompts and spawn policy differ. Same as ../hierarchy/spec.yaml apart from the name.
-swarm: ${CHATBOT_RUN:-voting}             # ${VAR:-default}: flock launch --env run.env (run 4 README)
-compute:                                    # ${VAR:-default}: run.env (or the shell) fills them; the spec wins
-  kind: ${COMPUTE_KIND:-slurm}              # COMPUTE_KIND=local: `flock launch` on one machine
-  partition: ${SLURM_PARTITION:-}           # cluster.env; empty: the cluster default
-  cpus: ${WORKER_CPUS:-4}                   # mem / cpus under the profile's SLURM_MAX_MEM_PER_CPU_MB
-  mem: ${WORKER_MEM:-7G}
-  time: '54:00:00'                          # matches worker_lifetime 54h; the run is 48h
-bucket: ${RUN3_BUCKET:-hf://buckets/cmpatino/eliza-swarm}
-namespace: ${RUN3_NAMESPACE:-cmpatino}
+swarm: ${CHATBOT_RUN:-voting}             # ${VAR:-default}: flock apply --env run.env (run 4 README)
+compute: local
 naming: words
 providers:
   vllm:
@@ -20,13 +13,11 @@ providers:
     timeout_s: 300
     max_retries: 5
     pricing: {"*": [0, 0, 0]}
-    metrics: true                           # vLLM /metrics: health and the ramp's hold_if
 models:
   worker-pi: {model: 'vllm:${MODEL_WORKER:-MODEL_WORKER}', reasoning: high}
 world:
-  dir: ${WORLD_DIR:-../../worlds/chatbot4}   # flock init writes WORLD_DIR (absolute) for a copied folder
+  dir: ../../worlds/chatbot4
   command: ['{python}', chatbot4.py, serve]
-  url: http://${WORLD_HOST}:7860              # Slurm: the world job's host (FLOCK_WORLD_HOST_FILE); local runs `command`
   token_env: CHATBOT_WORLD_TOKEN
 comms:
   kind: msgboard
@@ -47,10 +38,7 @@ types:
   coordinator: &agent
     harness: pi
     model: worker-pi
-    replicas: 0                             # the ramp raises it; `flock update` keeps the live count
-    replicas_ramp:                          # the controller raises replicas (was waves.yaml)
-      {start: 10, add: 10, every: 10m, max: 50, stagger: 10s,
-       hold_if: {waiting: 1, request_s: '${RUN4_MAX_REQUEST_SECONDS:-15}', above: 100}}  # was load_guard.py
+    replicas: 0                             # waves.yaml raises it
     agents_per_worker: 12
     system_prompt_file: prompts/system.md
     system_prompt_append_file: prompts/coordinator.md
@@ -77,14 +65,13 @@ types:
       every: turn_end
       notices: true
       on: [comms.mention, comms.thread, comms.dm, comms.channel]
-      while: {until: '${LOOP_UNTIL:-48h}', max_rounds: '${LOOP_MAX_ROUNDS:-10000}'}  # smoke: LOOP_UNTIL=30m LOOP_MAX_ROUNDS=100
+      while: {until: 48h, max_rounds: 10000}
       final: {prompt_file: prompts/final.md}
   worker:
     <<: *agent
-    replicas_ramp: null                     # not ramped
     system_prompt_append_file: prompts/worker.md
     workers: {initial: 0, max_extra: 17}    # 200 workers at 12 per worker, opened on demand
-# Workers have no spawn entry: depth 0, so `flock-agent spawn` is refused for them.
+# Workers have no spawn entry: depth 0, so `flock spawn` is refused for them.
 spawn:
   coordinator: {types: {worker: 4}, depth: 1}
 # 50 coordinators + 200 workers. spawned_total never frees a place: room for teams to be rebuilt.

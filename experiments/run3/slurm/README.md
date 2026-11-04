@@ -115,7 +115,7 @@ watcher signals every process, the scripts forward): each handler runs once.
 The `control/*` bucket markers are for the single-job path only. On Slurm:
 
 1. `scancel --name run3-waves` (no new waves).
-2. `$VENV/bin/python -m flock stop run3-<CHATBOT_RUN> --delete` (or `flock stop --release` to keep it resumable):
+2. `$VENV/bin/python -m flock remove run3-<CHATBOT_RUN>` (or `flock scale` to 0 per type):
    the controller drains the agents (final sync per agent) and cancels the workers itself.
    Wait until `flock workers` is empty.
 3. `scancel --name run3-world` (last workspace push), then `scancel --name run3-controller`

@@ -1,40 +1,56 @@
 # compute: slurm
 
-Workers as Slurm jobs, sbatch'ed by the controller. The reconcile loop, placement, heartbeats,
-events and bucket sync are the same as for `hf-jobs`; only the backend that starts a worker
-differs (`controller/slurm.py`). Agent state, the controller's state, the world's workspace
-and the run bundle stay in HF buckets; the shared disk holds only code, the venv or image,
-the secrets file, host files, env files and logs.
+Workers as Slurm jobs, sbatch'ed by the controller; the controller and the world are Slurm jobs
+too, which `flock launch` submits and `flock stop --release` cancels. The reconcile loop,
+placement, heartbeats, events and bucket sync are the same as for `hf-jobs`; only the backend
+that starts a worker differs (`controller/slurm.py`). Agent state, the controller's state and the
+run bundle stay in HF buckets. The shared disk holds code, the venv or image, the run directory
+(env files, host files, logs) and the world's own state when the world keeps it there: chatbot4
+uses `$CHATBOT_WS`, default `<world.dir>/ws`, so set a per-run `CHATBOT_WS` in run.env (runs from
+one checkout would share it).
 
 ## Deploying
 
-One run directory per run. `flock init` prepares it; the jobs and every later command read it.
+One run directory per run. `flock init` prepares it; `flock launch` starts its jobs; every later
+command reads it. The steps and their order are the same on every backend (docs/live.md
+"Lifecycle"):
 
 ```sh
-flock init $PWD/runs/hierarchy --from experiments/hierarchy --profile my-cluster.env --secrets secrets.env
-#   logs/ hosts/                 the jobs' logs and host files (controller.host, world.host)
-#   experiment/                  a copy of the folder (links followed): what is launched
-#   cluster.env                  a copy of the cluster profile (below)
-#   run.env (mode 600)           every ${VAR} the spec reads (commented: the spec's default),
-#                                the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
-$EDITOR runs/hierarchy/run.env   # fill what the checks report; then rerun `flock init runs/hierarchy`
-export SLURM_DIR=/shared/flock-slurm          # the job scripts (experiments/run4/slurm/ copied here)
-. runs/hierarchy/cluster.env
-sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-world-hierarchy "$SLURM_DIR/world.sbatch" $PWD/runs/hierarchy
-sbatch ${SLURM_PARTITION:+-p "$SLURM_PARTITION"} -J flock-ctl-hierarchy "$SLURM_DIR/controller.sbatch" $PWD/runs/hierarchy
-flock --run runs/hierarchy status             # or export FLOCK_RUN_DIR=runs/hierarchy
+flock init $PWD/runs/hierarchy --from my-experiment --profile my-cluster.env --secrets secrets.env
+#   logs/ hosts/        the jobs' logs and host files (controller.host, world.host)
+#   experiment/         a copy of the folder (links followed): what is launched
+#   slurm/              a copy of scripts/slurm: the job scripts `flock launch` submits
+#   cluster.env         a copy of the cluster profile (below)
+#   run.env (mode 600)  every ${VAR} the spec reads (commented: the spec's default),
+#                       the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
+$EDITOR runs/hierarchy/run.env              # fill what the checks report; rerun `flock init runs/hierarchy`
+export FLOCK_RUN_DIR=$PWD/runs/hierarchy    # or `flock --run runs/hierarchy ...` on each command
+flock launch runs/hierarchy/experiment      # sbatch the world and the controller, wait, create
+flock status hierarchy
+flock stop hierarchy --release              # drain, checkpoint, stop the world, cancel both jobs
+flock launch runs/hierarchy/experiment      # the jobs again: the controller restores, the swarm resumes
 ```
 
-Upgrading: copy new scripts to a NEW folder (a new `SLURM_DIR`), never over an old run's slurm
-folder: its controller keeps submitting workers from it, and its requeued jobs would source the
-new `common.sh`, which needs `SLURM_DIR` and the profile's `VENV`/`REPO`/`SECRETS_FILE` and dies
-without them.
+The jobs are named `flock-world-<run>` and `flock-ctl-<run>` (one of each per run:
+`--dependency=singleton`); `flock launch` submits one only when no job of that name is pending
+or running, with `-o logs/%x-%j.out`, `-p` from `WORLD_PARTITION` / `CTL_PARTITION`, else
+`SLURM_PARTITION`, and `--qos`, `-c`, `--mem` from `WORLD_QOS` / `CTL_QOS`, `WORLD_CPUS` /
+`CTL_CPUS`, `WORLD_MEM` / `CTL_MEM` when set (cluster.env or run.env). It waits up to 30 min (a
+node may have to scale up). The controller restores its checkpoint (`<bucket>/controller/<run>`,
+or `FLOCK_STATE_URL` in run.env) at every start, and sbatch'es the workers with
+`slurm/worker.sbatch`. `flock stop --release` sends a running world `scancel --signal=TERM
+--batch` and waits up to 11 min for it to end, then `scancel -n` both names.
 
-sbatch order: the world first, then the controller. The controller's first start waits for the
-world's `/manifest`, then runs `flock launch` (only when the swarm is not on it yet: a requeue
-applies nothing); it sbatch'es the workers itself. A job script takes the run directory (or a
-run name under `$RUNS`); `SLURM_DIR` comes from the submitting shell (the controller passes it on
-to the workers). The partition is the sbatch line's `-p`, never an `#SBATCH` line.
+The world job runs the spec's `world.command` in `world.dir` on its node (no container), the way
+a local run starts it (docs/world.md): `{port}` and `FLOCK_WORLD_PORT` are a free port,
+`{python}` the venv's python, `FLOCK_WORLD_TOKEN` comes from run.env. Once it answers
+`/manifest` it writes `hosts/world.host`, which the spec's `world.url` reaches through
+`http://${WORLD_HOST}:7860` (the controller fills host and port from the file).
+
+A job script takes the run directory and sources `<run dir>/slurm/common.sh`, so each run keeps
+the scripts it was set up with. `init` never overwrites an edited copy: for newer scripts,
+delete `RUN_DIR/slurm/` and run `flock init RUN_DIR` again (a running job keeps the copy it
+started with). The partition is the sbatch line's `-p`, never an `#SBATCH` line.
 
 `init` creates only what is missing. It never changes a set `run.env` key or an edited copy;
 it reports how they differ. `--secrets FILE` (mode 600) fills missing keys and prints names
@@ -78,10 +94,10 @@ SLURM_MAX_MEM_PER_CPU_MB=2000            # the partition's MaxMemPerCPU: more si
 FLOCK_SLURM_MAX_CPUS=32                  # the largest job a node runs (spec max_cpus/max_mem); unset: not checked
 FLOCK_SLURM_MAX_MEM=60G
 VENV=/shared/flock/venv                  # the job scripts: bin/flock, flock-controller, flock-worker, python
-REPO=/shared/flock/repo                  # a flock checkout (worlds/, the scripts' helpers)
-SECRETS_FILE=/shared/flock/secrets.env   # mode 600, sourced by every job
-CONTAINER_IMAGE=/shared/flock/images/worker.sqsh   # Enroot/Pyxis image for the world and workers
-CONTAINER_MOUNTS=/shared/uv/python       # comma-separated, read-only at the same path, besides VENV, REPO and SLURM_DIR
+REPO=/shared/flock/repo                  # optional: a flock checkout, mounted in the workers' container
+SECRETS_FILE=/shared/flock/secrets.env   # optional, mode 600, sourced by every job before run.env
+CONTAINER_IMAGE=/shared/flock/images/worker.sqsh   # optional: Enroot/Pyxis image for the workers
+CONTAINER_MOUNTS=/shared/uv/python       # comma-separated, read-only at the same path, besides VENV, REPO and the run's slurm/
 ```
 
 Who reads what: the specs read `SLURM_PARTITION`, `WORKER_CPUS`, `WORKER_MEM`. The controller
@@ -110,9 +126,9 @@ FLOCK_URL WORK_ROOT FLOCK_LLM_HOME PYTHONUNBUFFERED`, the type's `env`, and when
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
 `container_root`, `HOME HF_HOME TMPDIR`). A comment names the secrets the worker
 expects from the cluster's secrets file: `FLOCK_TOKEN HF_TOKEN` plus the launch's (provider
-key, board invite, `FLOCK_WORLD_TOKEN`). The worker script (the cluster's, or
-`experiments/run3/slurm/worker.sbatch`) sources the secrets file and the env file and runs
-`flock-worker`.
+key, board invite, `FLOCK_WORLD_TOKEN`). The worker script (the run's `slurm/worker.sbatch`;
+the controller job sets `FLOCK_SLURM_WORKER_SCRIPT` to it) sources the secrets file, run.env and
+the env file and runs `flock-worker`, handing it those secrets in a private file (below).
 
 ### Worker secrets file
 
@@ -306,23 +322,23 @@ name, optional port) receives it.
 
 ## Containers (Enroot/Pyxis)
 
-Workers and the world may run in a container (`srun --container-image`), the controller stays
-on the host (it needs `sbatch`). In the container `/tmp` is a RAM tmpfs counted against the
+Workers may run in a container (`srun --container-image`, when the profile or run.env names an
+image: `CONTAINER_IMAGE`, or `CONTAINER_IMAGE_<type>`); the controller (it needs `sbatch`) and
+the world stay on the host. In the container `/tmp` is a RAM tmpfs counted against the
 job's memory, so nothing goes there: with `container_root: /work` the env file sets
-`WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`
-(the world: `/work/world/ws`). The run-4 `worker.sbatch` overrides `WORK_ROOT FLOCK_LLM_HOME`
-with worker-id-free paths (`/work/flock/agents/{work,llm}`): a Pi session resumes only from the
-cwd it was written from, so an agent's workdir must not change when the controller relaunches
+`WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`.
+`worker.sbatch` overrides `WORK_ROOT FLOCK_LLM_HOME` in the container with worker-id-free paths
+(`/work/flock/agents/{work,llm}`): a Pi session resumes only from the cwd it was written from, so an agent's workdir must not change when the controller relaunches
 its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HOME,
 XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
 `FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
 `experiments/run3/slurm/Containerfile` builds the image.
 
-## Singletons on Spot (run 4 scripts)
+## Singletons on Spot
 
-The world and the controller are single jobs that Spot reclaim requeues. `world.sbatch` counts
-only crashes within `WORLD_STABLE_S` of the start toward its cap of 5 (a longer run resets it)
-and, past the cap, retries with 5 min to 30 min backoff instead of ending. A requeued controller
-restores its state and follows the world's host without waiting for it. For non-preemptible
-placement set `WORLD_PARTITION`/`WORLD_QOS` and `CTL_PARTITION`/`CTL_QOS` in run.env and pass them
-to `sbatch` as `-p`/`--qos` (`experiments/run4/slurm/run.env.example`).
+The world and the controller are single jobs that Spot reclaim requeues (`--dependency=singleton`:
+one of each per run). `world.sbatch` counts only crashes within `WORLD_STABLE_S` of the start
+toward its cap of 5 (a longer run resets it) and, past the cap, retries with 5 min to 30 min
+backoff instead of ending. A requeued controller restores its state and follows the world's host
+without waiting for it. For non-preemptible placement set `WORLD_PARTITION`/`WORLD_QOS` and
+`CTL_PARTITION`/`CTL_QOS` in run.env: `flock launch` passes them to `sbatch`.

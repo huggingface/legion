@@ -12,7 +12,7 @@ under +15% calls/s while p50 latency rises at least 40% (or that brings errors).
 shape (prompt sizes, tool calls, `max_turns` 12, continuous `every: turn_end`):
 
 - for each level C in `--levels` (default 8, 16, 32, 64): C agents in C/4 teams
-  (`render.py --teams`), `flock.controller.localrun` in local mode, the chatbot2 world on this machine, an
+  (`render.py --teams`), `flock run` in local mode, the chatbot2 world on this machine, an
   in-memory board (`tests/fake_msgboard.py`), for `--minutes` (default 5) per level;
 - between flock and the endpoint, a local proxy records every call (start, end, status,
   tokens);

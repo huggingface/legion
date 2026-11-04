@@ -59,9 +59,9 @@ through `.flock/current`, like the other commands do.
 (one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock launch experiments/run4/spec.yaml --env runs/run4/run.env
-$ COMPUTE_KIND=local flock launch experiments/run4/spec.yaml --env runs/run4/run.env
-$ flock update experiments/run4 --env runs/run4/run.env --ref origin/run5 --check
+$ flock launch my-experiment/spec.yaml --env runs/run4/run.env
+$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/run4/run.env
+$ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
 ```
 
 - Every string value, inline prompts and commands included, may use `${VAR}` and
@@ -103,7 +103,16 @@ the worker's last heartbeat (`sync_failed` on the swarm stream, the worker's `la
 puts all its agents there). The command waits until no worker runs, then exits 0 when every
 agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, loops, spec and
 history stay on the controller; nothing launches until `flock launch S`, when each agent
-restores from the bucket by name. The world and controller jobs keep running.
+restores from the bucket by name.
+
+A release then ends the run's controller and world jobs (`ops.down`; Slurm:
+[slurm.md](slurm.md#deploying), HF Jobs: [deploy-job.md](deploy-job.md#deploy)), in this order:
+a final controller checkpoint (`POST /checkpoint`; when it fails it is reported and nothing is
+ended), the world's clean stop (SIGTERM: it saves and exits), then the jobs. A local run, a
+controller the run has no job for, or one serving other swarms that are not released keeps
+running. `flock launch FOLDER` with no controller answering (`ops.up`) starts them again, waits
+until the controller answers (it restores its checkpoint) and the world serves, then creates or
+resumes.
 
 A controller that restarts restores its swarms from its own checkpoint (`state.db` and
 `events/<swarm>/`, pushed every 60 s to `FLOCK_STATE_URL`; `FLOCK_STATE_RESTORE=0` skips it).

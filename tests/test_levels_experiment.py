@@ -6,7 +6,6 @@ from pathlib import Path
 
 from flock.cli import load_spec
 
-from .test_hierarchy_experiment import check_one_spec
 from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
@@ -26,8 +25,7 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     spec = load_spec(str(EXP / "spec.yaml"))
     hierarchy = load_spec(str(ROOT / "hierarchy/spec.yaml")).types["worker"]
     assert set(spec.types) == {"lead", "manager", "worker"}
-    skip = {"system_prompt": True, "system_prompt_append_file": True, "workers": True,
-            "replicas_ramp": True}
+    skip = {"system_prompt": True, "system_prompt_append_file": True, "workers": True}
     for t in spec.types.values():  # hierarchy's agent: same model, tools, loop
         assert t.replicas == 0 and t.model_dump(exclude=skip) == hierarchy.model_dump(exclude=skip)
     assert set(spec.spawn) == {"lead", "manager"}  # workers: depth 0, no spawning
@@ -47,7 +45,7 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     assert "understanding engine" in system and "general mechanisms" in system
     lead, manager, worker = (spec.types[n].system_prompt for n in ("lead", "manager", "worker"))
     everything = lead + manager + worker
-    for gone in ("## Interviews", "flock-agent spawn interviewer", "verdict", "vote", "voting",
+    for gone in ("## Interviews", "flock spawn interviewer", "verdict", "vote", "voting",
                  "flock prompt", "SwarmChat-v9", "chatbot-v5"):
         assert gone not in everything, gone
     assert rules("lead") == rules("manager") == rules("worker")
@@ -55,17 +53,12 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     for text in ("Establish the goal", "Build the shared plan", "Claim and execute", "Reassess",
                  "Verify and hand off", "say so in the team channel"):
         assert text in rules("lead"), text
-    assert SUPERVISION + "#general. Remove an agent that is done with `flock-agent remove`." in lead
+    assert SUPERVISION + "#general. Remove an agent that is done with `flock remove`." in lead
     assert SUPERVISION + "your lead in the team channel." in manager
-    assert "between 1 and 5" in lead and "flock-agent spawn manager --prompt" in lead
-    assert "between 1 and 5" in manager and "flock-agent spawn worker --prompt" in manager
-    assert "flock-agent spawn" not in worker and "You cannot start other agents" in worker
+    assert "between 1 and 5" in lead and "flock spawn manager --prompt" in lead
+    assert "between 1 and 5" in manager and "flock spawn worker --prompt" in manager
+    assert "flock spawn" not in worker and "You cannot start other agents" in worker
     assert "$FLOCK_PARENT" in manager and "$FLOCK_PARENT" in worker
-
-
-def test_one_spec_with_the_ramp(monkeypatch):
-    spec = check_one_spec(EXP, monkeypatch, "lead", [(0, 10), (600, 20)])
-    assert set(spec.types) == {"lead", "manager", "worker"}
 
 
 async def test_three_levels_spawn_with_caps(client, app, store, tick):
@@ -76,7 +69,7 @@ async def test_three_levels_spawn_with_caps(client, app, store, tick):
     data = spec.model_dump(mode="json")  # no world or board in the in-process controller
     data.update(world=None, comms=None)
     for t in data["types"].values():
-        t.update(tools=[], comms=False, replicas_ramp=None)
+        t.update(tools=[], comms=False)
     assert (await client.put(f"/swarms/{spec.swarm}", json=data)).status_code == 200
     tick()
     [lead] = [a["name"] for a in (await client.get(f"/swarms/{spec.swarm}/agents")).json()["agents"]]

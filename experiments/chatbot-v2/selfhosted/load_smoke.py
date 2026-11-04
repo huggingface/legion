@@ -1,5 +1,5 @@
 """Load-sizing smoke for the self-hosted endpoint (load-smoke.md): run the real phase-1 task
-(worlds/chatbot2, a local in-memory board, `flock.controller.localrun` in local mode) against the endpoint with
+(worlds/chatbot2, a local in-memory board, `flock run` in local mode) against the endpoint with
 C agents for a few minutes per level, measure model calls/s, p50/p90 latency and errors through
 a recording proxy, and recommend an agent count (the knee x 0.8).
 
@@ -142,7 +142,7 @@ def level(c: int, minutes: float, warmup: float, work: Path, per_team: int) -> d
     env = {k: v for k, v in env.items() if not k.startswith("FLOCK_")}
     out = open(exp / "run.out", "w")  # noqa: SIM115 (closed below)
     t_start = time.time()
-    proc = subprocess.Popen([sys.executable, "-m", "flock.controller.localrun", "spec.yaml", "--until",
+    proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "run", "spec.yaml", "--until",
                              "idle"], cwd=exp, env=env, stdout=out, stderr=subprocess.STDOUT)
     try:
         proc.wait(timeout=60 * minutes + 240)
