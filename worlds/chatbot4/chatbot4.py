@@ -1702,4 +1702,6 @@ class Chatbot4World(World):
 
 if __name__ == "__main__":
     from flock.world.server import serve
-    serve("chatbot4:Chatbot4World", host="0.0.0.0", port=int(os.environ.get("PORT", "7860")))
+    # FLOCK_WORLD_PORT: the free port flock picked (a local run, the Slurm world job)
+    serve("chatbot4:Chatbot4World", host="0.0.0.0",
+          port=int(os.environ.get("FLOCK_WORLD_PORT") or os.environ.get("PORT") or 7860))
