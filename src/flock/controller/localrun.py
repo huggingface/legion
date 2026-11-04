@@ -522,7 +522,8 @@ async def run_local(opts: RunOptions) -> RunResult:
     worlds = WorldHost(log_dir=run_dir / "logs")  # a spec's `world.command` (docs/world.md)
     app = create_app(store, token, background=background, compute="local",
                      stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds,
-                     health=health)
+                     health=health,
+                     checkpoint=None if state is None else lambda: state.push(store, force=True))
     server = _Server(app, sock)
     started = datetime.now(UTC)
     t0 = time.monotonic()

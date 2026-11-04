@@ -1,7 +1,9 @@
 """Swarm operations shared by the `flock` CLI and Python callers: read an experiment folder
-(`read_spec`), check it, `launch` it (create or resume) and `update` the running swarm,
-all through `flock.client.Client`. Nothing here prints or asks: results are returned,
-refusals raise SpecError, failed controller calls raise ClientError.
+(`read_spec`), check it, `launch` it (create or resume; `up` first starts the run's controller
+and world when none answers), `update` the running swarm and `stop` it (`down` ends the
+controller and world after a release), all through `flock.client.Client`. Nothing here prints
+or asks: results are returned, refusals raise SpecError, failed controller calls raise
+ClientError.
 
     spec = read_spec("exp/spec.yaml", env_files)
     done = launch(Client(), spec, "exp/spec.yaml")
@@ -19,6 +21,7 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import ValidationError
@@ -205,24 +208,33 @@ def is_swarm_name(target: str) -> bool:
 def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
            source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None,
            preflight: bool | None = None, strict: bool = False,
-           checked: tuple[Any, list[str]] | None = None) -> dict[str, Any]:
-    """`flock launch` (docs/live.md "Lifecycle") on a spec read with `read_spec`. Missing on
-    the controller: created; refused when its bucket already holds agents of that name.
-    Present: its holds (all, or `types`/`agents`) and release are lifted; refused
-    when the spec differs from the stored one (replicas aside). Preflight runs by default
-    when the spec names a provider-backed model. Returns, in this order, what applies:
-    "warnings";
-    "resumed" (the holds left) or "preflight" (the report) / "unverified" (models not probed),
-    "tools" (the upload reply, plus "bytes") and "status" (the new swarm's). Refusals raise
-    SpecError with these keys so far in `done`, as do failed controller calls. `checked`:
-    `check_spec`'s result when the caller already has it. `compute: local`: first
-    `start_local` (with `env_files`), "local" its run; ended again when the launch fails."""
+           checked: tuple[Any, list[str]] | None = None,
+           say: Callable[[str], None] = lambda _: None) -> dict[str, Any]:
+    """`flock launch` (docs/live.md "Lifecycle") on a spec read with `read_spec`. First, when
+    no controller answers (always with `compute: local`): `up` starts the run's controller
+    (and world), which restores its checkpoint. Missing on the controller: created; refused
+    when its bucket already holds agents of that name. Present: its holds (all, or
+    `types`/`agents`) and release are lifted; refused when the spec differs from the stored
+    one (replicas aside). Preflight runs by default when the spec names a provider-backed
+    model. Returns, in this order, what applies: "warnings"; "local" (the local run `up`
+    started) or "up" (the jobs it started); "resumed" (the holds left) or "preflight" (the
+    report) / "unverified" (models not probed), "tools" (the upload reply, plus "bytes") and
+    "status" (the new swarm's). Refusals raise SpecError with these keys so far in `done`, as
+    do failed controller calls. `checked`: `check_spec`'s result when the caller already has
+    it. `env_files` also go to `up`; `say` gets its waiting lines. A local run is ended again
+    when the launch fails; jobs are not (a refused resume needs the controller for
+    `flock update`)."""
     bundle, warnings = checked or check_spec(spec, spec_file)
     done: dict[str, Any] = {"warnings": warnings}
-    if spec.compute.kind == "local" and (run := start_local(spec, spec_file, env_files, api.env)):
-        done["local"] = run
     try:
         try:
+            if spec.compute.kind == "local" or not api.answers():
+                try:
+                    started = up(api, spec, spec_file, env_files, say=say)
+                except SpecError as e:
+                    raise SpecError(e.lines, done) from None
+                if started:
+                    done["local" if spec.compute.kind == "local" else "up"] = started
             return _launch(api, spec, spec_file, bundle, done, source, types, agents,
                            preflight, strict)
         except ClientError as e:
@@ -361,7 +373,9 @@ def stop(api: Client, swarm: str, *, types: list[str] | None = None,
     `final`: stop the loops of `types` (default every type with one) after a final round ->
     {"loops": replies}. `delete` (after `confirm()`): drop the swarm from the controller ->
     {"deleted": reply}, or end this directory's local run of it -> {"ended": its record}.
-    Flags that do not combine raise SpecError."""
+    `release`, once no worker runs: `down` -> plus {"down": its reply}; its SpecError (a failed
+    final checkpoint: nothing ended) carries the keys so far. Flags that do not combine raise
+    SpecError."""
     if delete:
         if final or release or interrupt or types or agents:
             raise SpecError(["--delete takes only --yes"])
@@ -383,6 +397,10 @@ def stop(api: Client, swarm: str, *, types: list[str] | None = None,
                              reason=reason, release=release)}
     if release:
         done["unsynced"] = release_wait(api, swarm, progress=progress)
+        try:
+            done["down"] = down(api, swarm)
+        except SpecError as e:
+            raise SpecError(e.lines, done) from None
     return done
 
 
@@ -447,3 +465,247 @@ def end_local(run: dict, env: Mapping[str, str] = os.environ) -> None:
     end = time.monotonic() + LOCAL_START_S
     while local_run(env) is not None and time.monotonic() < end:
         _sleep(0.2)
+
+
+# ---------------------------------------------------------------- the run's controller and world
+
+UP_WAIT_S = 1800.0  # s `up` waits for the controller (a Slurm job may pend ~15 min for a node)
+STOP_WAIT_S = 660.0  # s `down` waits for a job to end (a world saving on SIGTERM; Slurm KillWait)
+JOB_POLL_S = 5.0
+SLURM_ROLES = {"world": "WORLD", "controller": "CTL"}  # run.env <P>_PARTITION/_QOS/_CPUS/_MEM
+LIVE_STAGES = ("SCHEDULING", "RUNNING")  # an HF Job that has not ended
+
+
+def _run_dir(api: Client) -> Path | None:
+    d = api.env.get("FLOCK_RUN_DIR")
+    return Path(d).resolve() if d else None
+
+
+def _values(api: Client, env_files=()) -> dict[str, str]:
+    """The environment, then the env files (later wins), as `read_spec` reads them."""
+    from flock.specrender import read_env_file
+
+    return {**api.env, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
+
+
+def _secret_names(spec: SwarmSpec) -> list[str]:
+    """The secrets the spec names: provider keys, the board invite, the world token, types'."""
+    names = [*(p.api_key_env for p in spec.providers.values()),
+             spec.comms.invite_env if spec.comms else None,
+             spec.world.token_env if spec.world else None,
+             *(s for ts in spec.types.values() for s in ts.secrets)]
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def _slurm(argv: list[str]) -> subprocess.CompletedProcess:
+    """sbatch/squeue/scancel with the controller's scrubbed environment: no token reaches
+    Slurm's accounting (the jobs read theirs from the run directory)."""
+    from flock.controller.slurm import CMD_TIMEOUT, scrubbed_env
+
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=CMD_TIMEOUT,
+                              check=False, env=scrubbed_env())
+    except (OSError, subprocess.SubprocessError) as e:
+        raise SpecError([f"{argv[0]}: {type(e).__name__}: {e}"]) from None
+
+
+def _queued(job: str) -> bool:
+    """Slurm still lists `job` (pending, running or ending)."""
+    r = _slurm(["squeue", "-h", "-j", job, "-o", "%T"])
+    if r.returncode and "Invalid job id" not in r.stderr:
+        raise SpecError([f"squeue -j {job}: exit {r.returncode}: {r.stderr.strip()[:300]}"])
+    return bool(r.stdout.strip())
+
+
+def _hf_api(env: Mapping[str, str]):  # tests replace it
+    from huggingface_hub import HfApi
+
+    return HfApi(token=env.get("HF_TOKEN") or None)
+
+
+def _hf_live(hf, job: str, namespace: str) -> bool:
+    st = hf.inspect_job(job_id=job, namespace=namespace).status.stage
+    return str(getattr(st, "value", st)) in LIVE_STAGES
+
+
+def _ends(alive: Callable[[], bool]) -> bool:
+    """Poll `alive` until it is False (True) or STOP_WAIT_S have passed (False)."""
+    end = time.monotonic() + STOP_WAIT_S
+    while alive():
+        if time.monotonic() >= end:
+            return False
+        _sleep(JOB_POLL_S)
+    return True
+
+
+def up(api: Client, spec: SwarmSpec, spec_file: str, env_files=(), *,
+       say: Callable[[str], None] = lambda _: None) -> dict | None:
+    """Start what serves `spec` (`flock launch` when no controller answers). `compute: local`:
+    `start_local` (the controller starts the world); its run, or None. `slurm`: sbatch the
+    run directory's slurm/world.sbatch (when the spec has a world command) and
+    slurm/controller.sbatch, each unless its job in hosts/<role>.job is still queued (never a
+    second one), and record the ids there. `hf-jobs`: the controller job
+    (flock.controller.jobdeploy; FLOCK_WHEEL_URL, network group FLOCK_NETWORK_GROUP or the
+    swarm), unless the group has one. Then wait (UP_WAIT_S; `say` gets a line per check) until
+    the controller answers, and the world its /manifest (hosts/world.host), and point `api` at
+    the controller. It restores its checkpoint on start. Returns {"jobs": role -> id, "url"}.
+    SpecError when it cannot start them or they do not come up."""
+    if spec.compute.kind == "local":
+        return start_local(spec, spec_file, env_files, api.env)
+    vals = _values(api, env_files)
+    if spec.compute.kind == "slurm":
+        return _up_slurm(api, spec, vals, say)
+    return _up_hf(api, spec, vals, say)
+
+
+def _up_slurm(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say) -> dict:
+    from flock.rundir import run_context
+
+    d = _run_dir(api)
+    if d is None:
+        raise SpecError(["no controller answers and no run directory to start one from",
+                         "`flock init RUN_DIR --from FOLDER`, then `flock --run RUN_DIR launch ...`"])
+    hosts, jobs = d / "hosts", {}
+    for role in [*(["world"] if spec.world and spec.world.command else []), "controller"]:
+        rec = hosts / f"{role}.job"
+        if (old := rec.read_text().strip() if rec.is_file() else "") and _queued(old):
+            jobs[role] = old  # still pending or starting: wait for it
+            continue
+        script = d / "slurm" / f"{role}.sbatch"
+        if not script.is_file():
+            raise SpecError([f"{script} is missing: run `flock init {d}` (it copies the job scripts)"])
+        (hosts / f"{role}.host").unlink(missing_ok=True)  # an ended job's: wait for the new one's
+        p = SLURM_ROLES[role]
+        opts = {"-p": vals.get(f"{p}_PARTITION") or vals.get("SLURM_PARTITION"),
+                "--qos": vals.get(f"{p}_QOS"), "-c": vals.get(f"{p}_CPUS"),
+                "--mem": vals.get(f"{p}_MEM")}
+        r = _slurm(["sbatch", "--parsable", "-J", f"flock-{'ctl' if p == 'CTL' else role}-{d.name}",
+                    "-o", str(d / "logs" / "%x-%j.out"),
+                    *(a for k, v in opts.items() if v for a in (k, v)), str(script), str(d)])
+        if r.returncode:
+            raise SpecError([f"sbatch {script}: exit {r.returncode}: {r.stderr.strip()[:300]}"])
+        jobs[role] = r.stdout.strip().split(";")[0]
+        rec.write_text(jobs[role] + "\n")
+        say(f"submitted {role} job {jobs[role]}")
+    end = time.monotonic() + UP_WAIT_S
+    while True:
+        api.env = {**api.env, **run_context(d)[0]}  # the controller's host:port once written
+        waiting = [r for r in jobs if not (hosts / f"{r}.host").is_file()
+                   or (r == "controller" and not api.answers())]
+        if not waiting:
+            return {"jobs": jobs, "url": api.env["FLOCK_URL"]}
+        if dead := [r for r in waiting if not _queued(jobs[r])]:
+            raise SpecError([f"{r} job {jobs[r]} ended before it came up: see "
+                             f"{d}/logs/flock-*-{jobs[r]}.out" for r in dead])
+        if time.monotonic() >= end:
+            raise SpecError([f"{' and '.join(waiting)} not up after {UP_WAIT_S:g} s",
+                             f"jobs {', '.join(jobs.values())} still queued: see `squeue`"])
+        say(f"waiting for the {' and '.join(waiting)} (Slurm jobs {', '.join(jobs.values())})")
+        _sleep(JOB_POLL_S)
+
+
+def _up_hf(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say) -> dict:
+    from flock.controller import jobdeploy as jd
+
+    wheel = vals.get("FLOCK_WHEEL_URL")
+    if not wheel:
+        raise SpecError(["no controller answers, and no FLOCK_WHEEL_URL to start one with",
+                         "publish a wheel (scripts/publish-wheel.sh) or deploy it (docs/deploy-job.md)"])
+    try:
+        hf = _hf_api(vals)
+        ns = spec.namespace or hf.whoami()["name"]
+        group = vals.get("FLOCK_NETWORK_GROUP") or spec.swarm
+        if running := jd._running_controllers(hf, ns, group):
+            job = running[0].id  # still starting: wait for it, never two in one group
+        else:
+            secrets = jd.collect_secrets(vals, [n for n in _secret_names(spec) if vals.get(n)])
+            job = hf.run_job(**jd.run_job_args(
+                wheel_url=wheel, group=group, namespace=ns, flavor="cpu-upgrade", timeout="48h",
+                state_url=vals.get("FLOCK_STATE_URL") or jd.default_state_url(wheel, group),
+                job_labels=vals.get("JOB_LABELS", ""), secrets=secrets)).id
+            say(f"started controller job {job} (group {group})")
+    except SystemExit as e:  # collect_secrets: a missing FLOCK_TOKEN or HF_TOKEN
+        raise SpecError([str(e)]) from None
+    except Exception as e:  # noqa: BLE001 - a Hub error or a bad wheel URL: the launch's answer
+        raise SpecError([f"controller job: {type(e).__name__}: {e}"]) from None
+    url = f"https://{job}--{jd.API_PORT}.hf.jobs"
+    api.env = {**api.env, "FLOCK_URL": url}
+    if (d := _run_dir(api)) is not None:  # `flock --run` finds it; `down` cancels it
+        (d / "hosts" / "controller.host").write_text(url + "\n")
+        (d / "hosts" / "controller.job").write_text(job + "\n")
+    end = time.monotonic() + UP_WAIT_S
+    while not api.answers():
+        if time.monotonic() >= end:
+            raise SpecError([f"controller job {job} does not answer at {url} after {UP_WAIT_S:g} s"])
+        say(f"waiting for controller job {job} (it installs the wheel first)")
+        _sleep(JOB_POLL_S)
+    return {"jobs": {"controller": job}, "url": url}
+
+
+def down(api: Client, swarm: str) -> dict[str, Any]:
+    """End what serves `swarm` once it is released (`flock stop --release`), in this order:
+    1. a final controller checkpoint (POST /checkpoint). When it fails, SpecError and nothing
+       is ended: the controller holds the only copy of its state (a local run without state
+       sync ends anyway: its run directory keeps everything);
+    2. the world's clean stop (Slurm: `scancel --signal=TERM --batch` and wait until the job
+       ends: the world saves on SIGTERM; local: the controller stops it as it ends);
+    3. the world and controller jobs cancelled and waited for (Slurm: the ids in hosts/*.job;
+       HF Jobs: the recorded job or the one in FLOCK_URL; local: `end_local`), their host
+       files removed so `launch` starts new ones.
+    Returns {"checkpoint": files pushed, "ended": [what]}, or {"kept": why} for a controller
+    this run has no record of starting or one serving swarms that are not released."""
+    spec = api.swarm(swarm)["spec"]
+    kind, run, d = spec["compute"]["kind"], local_run(api.env), _run_dir(api)
+    rec = {r: f.read_text().strip() for r in ("world", "controller")
+           if d and (f := d / "hosts" / f"{r}.job").is_file()}
+    host = urlsplit(api.env.get("FLOCK_URL") or "").hostname or ""  # <job>--7860.hf.jobs
+    hf_job = rec.get("controller") or (host.split("--")[0] if host.endswith(".hf.jobs") else "")
+    if not (run is not None and run.get("swarm") == swarm if kind == "local"
+            else "controller" in rec if kind == "slurm" else hf_job):
+        return {"kept": "no record of how this controller was started (a run directory's "
+                        "hosts/*.job, this directory's local run or an HF Job URL)"}
+    if others := [s["swarm"] for s in api.swarms() if s["swarm"] != swarm and not s.get("released")]:
+        return {"kept": f"it also serves {', '.join(others)}"}
+    try:
+        files = api.checkpoint()["files"]
+    except ClientError as e:
+        if not (kind == "local" and e.status == 409):
+            raise SpecError([f"final checkpoint failed: {e}",
+                             "nothing was ended: the controller keeps the only copy of its state",
+                             f"fix it, then `flock stop {swarm} --release` again"]) from None
+        files = 0
+    ended: list[str] = []
+    if kind == "local":
+        end_local(run, api.env)
+        ended.append(f"local run {run['run_dir']}")
+    elif kind == "slurm":
+        if (w := rec.get("world")) and _queued(w):
+            _scancel("--signal=TERM", "--batch", w)  # its clean stop: it saves, exits, the job ends
+            late = not _ends(lambda: _queued(w))
+            ended.append(f"world job {w}" + (f" (cancelled: running {STOP_WAIT_S:g} s after "
+                                             "SIGTERM)" if late else ""))
+        if live := [j for j in rec.values() if _queued(j)]:
+            _scancel(*live)
+        c = rec["controller"]
+        late = not _ends(lambda: _queued(c))
+        ended.append(f"controller job {c}" + (" (still listed by squeue)" if late else ""))
+    else:
+        vals = _values(api, api.env_files)
+        try:
+            hf = _hf_api(vals)
+            ns = spec.get("namespace") or hf.whoami()["name"]
+            hf.cancel_job(job_id=hf_job, namespace=ns)  # SIGTERM: one more final push
+            gone = _ends(lambda: _hf_live(hf, hf_job, ns))
+        except Exception as e:  # noqa: BLE001 - a Hub error: say so, the checkpoint is pushed
+            raise SpecError([f"cancel controller job {hf_job}: {type(e).__name__}: {e}"]) from None
+        ended.append(f"controller job {hf_job}" + ("" if gone else " (cancelled, still running)"))
+    if d is not None and kind != "local":
+        for name in ("world.host", "world.job", "controller.host", "controller.job"):
+            (d / "hosts" / name).unlink(missing_ok=True)
+    return {"checkpoint": files, "ended": ended}
+
+
+def _scancel(*args: str) -> None:
+    r = _slurm(["scancel", *args])
+    if r.returncode:
+        raise SpecError([f"scancel {' '.join(args)}: exit {r.returncode}: {r.stderr.strip()[:300]}"])

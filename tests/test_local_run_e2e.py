@@ -5,7 +5,8 @@ running the `llm` harness against tests/fake_openai.py. No HF token, bucket or n
    prompt, finish a turn, the run stops on its own, exits 0 and leaves the bundle (run.json,
    events.jsonl, events/<agent>.jsonl).
 2. `flock launch` starts it in the background; `flock prompt` / `events` / `status` find it
-   through `.flock/current`; `flock stop --release` ends it cleanly."""
+   through `.flock/current`; `flock stop --release` ends it cleanly (the bundle); the next
+   `flock launch` starts a new run."""
 
 from __future__ import annotations
 
@@ -144,11 +145,11 @@ def test_launch_in_background_release_resume_delete(tmp_path, fake_server):
         assert "second-terminal" in r.stdout
         r = flock("status", "hello")
         assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
-        r = flock("stop", "hello", "--release")  # workers freed, the controller stays
-        assert r.returncode == 0 and "released" in r.stdout, r.stdout + r.stderr
-        assert current.exists()
-        r = flock("launch", "spec.yaml")  # resumes the same swarm, as on any backend
-        assert r.returncode == 0 and "held: nothing" in r.stdout, r.stdout + r.stderr
+        r = flock("stop", "hello", "--release")  # workers freed, then the controller ended
+        assert r.returncode == 0 and "ended local run" in r.stdout, r.stdout + r.stderr
+        assert not current.exists()
+        r = flock("launch", "spec.yaml", "--skip-preflight")  # a new run: no bucket to restore from
+        assert r.returncode == 0 and "local run" in r.stdout, r.stdout + r.stderr
         r = flock("status", "hello")
         assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
         r = flock("stop", "hello", "--delete", "--yes")  # ends the run: the bundle
@@ -156,7 +157,7 @@ def test_launch_in_background_release_resume_delete(tmp_path, fake_server):
     finally:
         if (info := current.exists() and json.loads(current.read_text())):
             os.killpg(info["pid"], signal.SIGKILL)
-    run = _run_dir(tmp_path)
+    run, _ = sorted(p for p in (tmp_path / ".flock").iterdir() if p.is_dir())  # released, then new
     doc = json.loads((run / "run.json").read_text())
     assert doc["stop_reason"] == "interrupted"
     one = next(a for a in doc["agents"] if a["name"] == "writer-0001")

@@ -251,10 +251,13 @@ def launch(
     ref: str | None = REF_OPT,
 ) -> None:
     """Start a swarm from an experiment folder (or spec file), or resume a stopped one
-    (docs/live.md "Lifecycle"). Missing: creates it (refused when its bucket already holds
-    agents of that name). Present: clears `flock stop`'s holds and release;
+    (docs/live.md "Lifecycle"). When no controller answers, first starts the run's controller
+    (and world): a local run, Slurm jobs (`flock init` run dir) or an HF Job (FLOCK_WHEEL_URL),
+    and waits for it; it restores its checkpoint. Missing: creates it (refused when its bucket
+    already holds agents of that name). Present: clears `flock stop`'s holds and release;
     refused when the folder's spec differs from the stored one (replicas aside): run
-    `flock update` first. Given a swarm name instead of a folder: resumes it."""
+    `flock update` first. Given a swarm name instead of a folder: resumes it on the running
+    controller."""
     api = _api()
     if ref is None and ops.is_swarm_name(target):
         _show_held(api.resume(target, types=type_, agents=agent))
@@ -266,7 +269,8 @@ def launch(
     checked = _checked(spec, spec_file)
     try:
         done = ops.launch(api, spec, spec_file, env_files=env_files, source=source, types=type_,
-                          agents=agent, preflight=preflight, strict=strict, checked=checked)
+                          agents=agent, preflight=preflight, strict=strict, checked=checked,
+                          say=lambda line: typer.echo(f"  {line}"))
     except SpecError as e:
         _show_launch(spec.swarm, e.done, strict)
         if run := e.done.get("local"):
@@ -279,6 +283,11 @@ def _show_launch(swarm: str, done: dict, strict: bool) -> None:
     """What `ops.launch` did, in order (its warnings were shown by `_checked`)."""
     if run := done.get("local"):
         typer.echo(f"local run {run['run_dir']} at {run['url']} (log: {ops.LOCAL_DIR}/launch.log)")
+    if started := done.get("up"):
+        jobs = ", ".join(f"{role} job {job}" for role, job in started["jobs"].items())
+        typer.echo(f"up: {jobs}; controller at {started['url']}")
+        if "FLOCK_RUN_DIR" not in _api().env:  # no run dir records it
+            typer.echo(f"export FLOCK_URL={started['url']}")
     if "resumed" in done:
         _show_held(done["resumed"])
     if "preflight" in done:
@@ -306,8 +315,9 @@ def stop(
         "--agent", help="hold only this agent (repeatable)")] = None,
     interrupt: bool = typer.Option(False, "--interrupt", help="also cut the running turns"),
     release: bool = typer.Option(
-        False, "--release", help="drain every worker (each agent synced to the bucket), then "
-                                 "free the compute; waits and reports agents not synced"),
+        False, "--release", help="drain every worker (each agent synced to the bucket), "
+                                 "checkpoint the controller, then end it and the world: nothing "
+                                 "runs until `flock launch`; reports agents not synced"),
     final: bool = typer.Option(
         False, "--final", help="stop the loops after their final round (default: every type "
                                "with a loop)"),
@@ -318,8 +328,8 @@ def stop(
 ) -> None:
     """Stop a swarm, keeping everything (docs/live.md "Lifecycle"). Default: hold, no new
     prompts or loop rounds, running turns finish, workers stay. `flock launch SWARM` resumes.
-    A local run (`compute: local`) ends its background controller (and writes its bundle) on
-    --delete only."""
+    --release frees everything the run started (workers, then its controller and world after
+    a checkpoint); `flock launch FOLDER` starts them again and resumes."""
     try:
         done = ops.stop(_api(), swarm, types=type_, agents=agent, interrupt=interrupt,
                         reason=reason, release=release, final=final, delete=delete,
@@ -330,6 +340,8 @@ def stop(
                             f"  releasing: {n} workers still running (every agent syncs; "
                             "Ctrl-C stops waiting, not the release)"))
     except SpecError as e:
+        for name, err in sorted((e.done.get("unsynced") or {}).items()):
+            typer.echo(f"NOT synced: {name}: {err}", err=True)
         _fail(e.lines)
     if run := done.get("ended"):
         typer.echo(f"local run ended; bundle: {run['run_dir']}/run.json")
@@ -339,11 +351,19 @@ def stop(
         typer.echo(_loop_line(lp))
     if "held" in done:
         _show_held(done["held"])
+    down = done.get("down") or {}
+    if "kept" in down:
+        typer.echo(f"controller kept: {down['kept']}")
+    for what in down.get("ended", []):
+        typer.echo(f"ended {what}")
     if unsynced := done.get("unsynced"):
         _fail([*(f"NOT synced: {n}: {e}" for n, e in sorted(unsynced.items())),
                (f"released, but {len(unsynced)} agents' final sync failed: their bucket copies "
                "are older than their last turns")])
-    if "unsynced" in done:
+    if down.get("ended"):
+        typer.echo("released: every agent synced, controller checkpointed, nothing runs; "
+                   "`flock launch FOLDER` starts it again and resumes")
+    elif "unsynced" in done:
         typer.echo(f"released: every agent synced, compute freed; `flock launch {swarm}` resumes")
 
 
