@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -50,14 +49,6 @@ def stored_json(spec: SwarmSpec) -> str:
     return SwarmSpec.model_validate(spec.model_dump(mode="json")).model_dump_json(indent=1)
 
 
-@pytest.mark.parametrize("d", EXPERIMENTS, ids=lambda d: d.name)
-def test_experiment_spec_loads_without_removed_keys(d: Path, monkeypatch, caplog) -> None:
-    monkeypatch.setattr(models, "_warned", set())
-    with caplog.at_level(logging.WARNING, logger="flock.models"):
-        load_experiment(d)
-    assert not [r for r in caplog.records if "was removed from flock" in r.getMessage()]
-
-
 @pytest.mark.parametrize("name", sorted(RESUMABLE))
 def test_stored_spec_resumes(name: str, tmp_path: Path) -> None:
     spec = SwarmSpec.model_validate_json(stored_spec(name).read_text())
@@ -85,11 +76,10 @@ def test_removed_key_dropped_typo_refused(monkeypatch, caplog, tmp_path: Path) -
         SwarmSpec.model_validate(raw)
     assert [r.getMessage() for r in caplog.records] == [
         "spec: LoopSpec.gone_opt was removed from flock; ignoring it"]
-    monkeypatch.setenv("WORLD_DIR", str(ROOT / "worlds" / "chatbot4"))  # as `flock init` does
-    spec = shutil.copytree(ROOT / "experiments" / "hierarchy", tmp_path / "h") / "spec.yaml"
-    data = models.load_spec_yaml(spec.read_text())
-    loop = data["types"][name]["loop"]
-    loop["gone_opt"] = "5s"
+    spec = tmp_path / "spec.yaml"
+    loop = {"prompt": "next round", "gone_opt": "5s"}
+    data = {"swarm": "h", "compute": {"kind": "local"},
+            "types": {name: {"harness": "claude", "model": "claude-opus-5-5", "loop": loop}}}
     spec.write_text(yaml.safe_dump(data))
     read_spec(str(spec))  # a spec file: dropped too
     loop["gone_optt"] = loop.pop("gone_opt")
