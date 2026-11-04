@@ -390,6 +390,14 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     rep = rundir.init(run, env={})
     c = _by_name(rep)["secrets file"]
     assert not c.ok and "mode 600" in c.detail and "OPENAI_API_KEY" not in seen[-1]
+    sec.chmod(0o600)  # the jobs source it with bash: a command runs, it is not a literal
+    sec.write_text("HF_TOKEN=$(printf %s tok-from-shell)\n")
+    rundir.init(run, env={})
+    assert seen[-1]["HF_TOKEN"] == "tok-from-shell"
+    sec.write_text("HF_TOKEN=tok-secret\nexit 3\n")
+    rep = rundir.init(run, env={})
+    c = _by_name(rep)["secrets file"]
+    assert not c.ok and "exited 3" in c.detail and "tok-secret" not in repr(rep)
     with pytest.raises(ValueError, match="no such file"):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
 
