@@ -211,13 +211,13 @@ def test_board_checks_the_invite_and_health_without_joining(tmp_path, monkeypatc
     spec = _spec(tmp_path, {**SPEC, "comms": {"kind": "msgboard", "url": "https://b.invalid/x/",
                                               "invite_env": "INV", "channel": "general"}})
     seen = []
-    monkeypatch.setattr(httpx, "get", lambda url, timeout: seen.append(url) or httpx.Response(200))
+    monkeypatch.setattr(httpx, "get", lambda url, timeout, **kw: seen.append(url) or httpx.Response(200))
     monkeypatch.setattr("flock.controller.comms.resolve", lambda *a, **k: pytest.fail("joined"))
     c = rundir.check_board(spec, {"INV": "code"})
     assert c.ok and "join not tested" in c.detail and "code" not in c.detail
     assert seen == ["https://b.invalid/x/v1/health"]
     assert rundir.check_board(spec, {}).ok is False and seen == ["https://b.invalid/x/v1/health"]
-    monkeypatch.setattr(httpx, "get", lambda url, timeout: httpx.Response(503))
+    monkeypatch.setattr(httpx, "get", lambda url, timeout, **kw: httpx.Response(503))
     assert rundir.check_board(spec, {"INV": "code"}).ok is False
 
 

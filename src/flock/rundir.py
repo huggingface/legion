@@ -371,6 +371,8 @@ def check_board(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
     rotate the host token a running controller holds."""
     import httpx
 
+    from flock.comms.board import _auth
+
     c = spec.comms
     if c is None:
         return Check("board", None, "no comms block")
@@ -378,7 +380,7 @@ def check_board(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
         return Check("board", False, f"comms.invite_env: {c.invite_env} is not set in {RUN_ENV}")
     url = c.url.rstrip("/") + "/v1/health"
     try:
-        code = httpx.get(url, timeout=10).status_code
+        code = httpx.get(url, headers=_auth(None, url), timeout=10).status_code
     except httpx.HTTPError as e:
         return Check("board", False, f"{url}: {type(e).__name__}: {e}")
     return Check("board", code == 200, f"{c.invite_env} set; {url} -> {code}; join not tested")

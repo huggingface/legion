@@ -165,3 +165,17 @@ async def test_429_log_lines_never_carry_tokens_cookies_or_queries(monkeypatch, 
                 assert len(lines) == 1  # the 6th: the short line only
     finally:
         await board.aclose()
+
+
+def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
+    from flock.comms.board import _auth
+
+    monkeypatch.setenv("HF_TOKEN", "hf_x")
+    space = "https://huggingfaceswarms-board-demo.hf.space/boards/demo"
+    assert _auth("fbt_b", space) == {"X-Msgboard-Token": "fbt_b", "Authorization": "Bearer hf_x"}
+    assert _auth(None, space) == {"Authorization": "Bearer hf_x"}  # join on a private Space
+    # elsewhere the HF token is never sent; old public boards still get the Bearer fallback
+    assert _auth("fbt_b", "https://board.invalid") == {"X-Msgboard-Token": "fbt_b",
+                                                        "Authorization": "Bearer fbt_b"}
+    monkeypatch.delenv("HF_TOKEN")
+    assert _auth("fbt_b", space)["Authorization"] == "Bearer fbt_b"
