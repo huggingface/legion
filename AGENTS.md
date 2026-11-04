@@ -22,16 +22,23 @@ casually: controller, worker and CLI all import it.
 - Commit small; push your branch at the end of every turn that produced work.
 
 ## Tests
-The suite is already slow, so be conservative about adding to it.
+Be conservative about adding tests.
 - **Do not add tests by default.** Add one only when the user asks for it, or when a change to **core** flock
   (spec/models, controller, worker, CLI lifecycle, harness adapters, comms, checkpoint/resume) carries a clear
   regression risk that a test covers best. Do not add tests for specific worlds or experiments.
-- **Prefer one tiny real run over many isolated tests.** Exercise behaviour through the public surface (the CLI,
-  the controller API, the spec) with the smallest setup that shows it: a real controller and worker and a fake
-  model server, not a hand-built object around a private function.
-- **Fake only what cannot run here:** the Hub, HF Jobs, Slurm, model servers. Do not stand in for flock's own
-  objects with `MagicMock`, `SimpleNamespace` or monkeypatched internals; such tests keep passing when the real
-  code changes.
+- **Prefer one tiny real run over many isolated tests.** Use the smallest real setup that shows the behaviour:
+  a real controller and worker, a real spec, local compute and a fake model server.
+- **Use real objects, not stand-ins.** Do not use `MagicMock`, `SimpleNamespace`, `object.__new__` (building an
+  instance without its `__init__`) or monkeypatched internals in place of flock's own objects: they only have
+  what the test author thought of, so the test keeps passing when the real code changes. Fake only what cannot
+  run in the test environment: the Hub, HF Jobs, Slurm, model servers.
+- **Test through the public surface** (the CLI, the controller API, the spec, public functions) rather than
+  private methods: a test that calls a private method usually has to build the object around it by hand and
+  breaks on any refactor. Call a private function directly only when its behaviour cannot be reached
+  deterministically otherwise, such as a pure helper.
+- **No `slow` tests.** Keep runs tiny. Tests that need an optional dependency or tool (a harness CLI, an SDK,
+  Linux-only features) are gated with `pytest.importorskip` or `pytest.mark.skipif`, so they skip where they
+  cannot run.
 - **Scratch tests are fine while developing:** keep them in `scratch/` or `tmp/` and do not commit them.
 - **Run what you touched:** `pytest tests/test_<area>.py` (or `-k`) while iterating, and the full suite once
   before pushing.
