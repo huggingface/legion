@@ -896,9 +896,9 @@ class ComputeSpec(_Removable):
     The spec also accepts the short form `compute: local`.
 
     `worker_unknown_after`, `worker_dead_after` and `crash_backoff` are for every backend
-    (docs/live.md "Worker liveness"). The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
-    fills unset keys (then built-in defaults). `types` sets
-    per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
+    (docs/live.md "Worker liveness"). The other keys are for `slurm` and win over the
+    controller's FLOCK_SLURM_* env, which only fills unset keys (then built-in defaults).
+    `types` sets per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
 
     model_config = {"extra": "forbid"}
 

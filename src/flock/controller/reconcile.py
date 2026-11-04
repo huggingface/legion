@@ -54,7 +54,7 @@ from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
 log = logging.getLogger("flock.reconcile")
 
 BACKOFF_CAP = 900.0  # s, 15 min
-LAUNCH_BACKOFF_CAP = 300.0  # s, transient launch errors back off 30 s, 60 s, ... up to 5 min
+LAUNCH_BACKOFF_CAP = 300.0  # s, transient launch errors: crash_backoff, doubling up to 5 min
 INSPECT_EVERY = 15.0  # s, min gap between job-status checks for one non-fresh worker
 INSPECT_GRACE = 60.0  # s after launch before a worker with no heartbeat is checked at all
 LIST_THRESHOLD = 10  # more non-fresh workers than this in a swarm: one list_jobs, not N inspects
