@@ -172,7 +172,7 @@ class _Pass:
     settings: Settings
     budget: int
     actions: list[Action] = field(default_factory=list)
-    listed: dict[str, JobState] | None = None  # job stages from one list_jobs, if used
+    listed: dict[str, JobState] | None = None  # stages from one list; a job missing (ended) is inspected
     lv: Liveness = Liveness(0, 0, 0)  # noqa: RUF009 - a tuple; the swarm's, set per swarm
     local: bool = False  # the swarm's compute is local, set per swarm
 
@@ -180,8 +180,8 @@ class _Pass:
         self.actions.append(Action(kind, target, detail))
 
     def job_state(self, job_id: str, namespace: str) -> JobState | None:
-        if self.listed is not None:
-            return self.listed.get(job_id)
+        if self.listed is not None and job_id in self.listed:
+            return self.listed[job_id]
         try:
             return self.jobs.inspect(job_id, namespace=namespace)
         except Exception as exc:  # noqa: BLE001 - Hub hiccup: try again next pass
