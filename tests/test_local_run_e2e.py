@@ -48,6 +48,10 @@ def _env(tmp_path: Path) -> dict[str, str]:
     return {**env, "FAKE_KEY": "fake-key", "HOME": str(tmp_path / "home")}
 
 
+def _flock(*args: str) -> list[str]:  # the experiment tests use it
+    return [sys.executable, "-m", "flock.cli", *args]
+
+
 def _localrun(*args: str) -> list[str]:
     return [sys.executable, "-m", "flock.controller.localrun", *args]
 
