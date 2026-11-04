@@ -238,6 +238,11 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     url_board = {"invite_env": "BOARD_INVITE", "channel": "general", "url": ORG}
     assert rundir.register_dashboard(_spec(comms=url_board), {"HF_TOKEN": "t"}).ok
     assert b.files["runs/demo.json"]["board_public"] == "https://huggingface.co/spaces/acme/board-demo"
+    # dashboard.id: a second row next to an existing experiment's (e.g. a resumed copy of it)
+    other = {**url_board, "url": ORG.replace("/boards/demo", "/boards/demo-2")}  # its own board
+    c = rundir.register_dashboard(_spec(comms=other, dashboard={**DASH, "id": "demo-2"}), {"HF_TOKEN": "t"})
+    assert c.ok, c.detail
+    assert b.files["runs/demo-2.json"]["id"] == "demo-2" and b.files["runs/demo.json"]["id"] == "demo"
 
 
 @pytest.mark.parametrize("over, why", [

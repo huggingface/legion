@@ -666,7 +666,7 @@ def dashboard_row(spec: SwarmSpec) -> dict[str, Any]:
         return f"https://huggingface.co/spaces/{ns}/{m[1]}" if url and (m := spaces.fullmatch(url)) else None
 
     return {
-        "id": spec.swarm, "name": d.name or spec.swarm, "title": d.title, "setup": d.setup,
+        "id": d.id or spec.swarm, "name": d.name or spec.swarm, "title": d.title, "setup": d.setup,
         "board_id": board.split("/boards/")[1].split("/")[0] if board and "/boards/" in board else None,
         "board": board,
         "board_public": f"https://huggingface.co/spaces/{board_space(c, spec.swarm)}"
@@ -678,7 +678,7 @@ def dashboard_row(spec: SwarmSpec) -> dict[str, Any]:
 
 
 def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
-    """Write (or rewrite) `<dashboard.registry>/runs/<swarm>.json`, keeping its `created_at`.
+    """Write (or rewrite) `<dashboard.registry>/runs/<id>.json`, keeping its `created_at`.
     Refused when another run's row has the same `board_id` (the overview routes by it)."""
     d = spec.dashboard
     if d is None:
@@ -690,8 +690,8 @@ def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
         token = get_token()
     if not token:
         return Check("dashboard", False, f"needs HF_TOKEN to write to {d.registry}")
-    rel = f"runs/{spec.swarm}.json"
     row = dashboard_row(spec)
+    rel = f"runs/{row['id']}.json"
     # the overview sends its HF token to `board` and `viewer`: only Spaces of the registry's namespace
     ns, spaces = registry_spaces(d.registry)
     if bad := [k for k in ("board", "viewer") if not spaces.fullmatch(row[k] or "")]:

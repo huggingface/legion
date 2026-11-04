@@ -459,11 +459,12 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
 
 class DashboardSpec(_Removable):
     """Swarm-level `dashboard:` (docs/dashboard.md): `flock init` writes the run's flock-overview
-    row to `<registry>/runs/<swarm>.json`. The other row keys are derived from the spec."""
+    row to `<registry>/runs/<id>.json` (id: default the swarm). The other row keys are derived from the spec."""
 
     model_config = {"extra": "forbid"}
 
     registry: str  # hf://buckets/<ns>/<bucket>, the bucket the overview reads runs/ from
+    id: str | None = None  # the overview row's id (runs/<id>.json); default: the swarm name
     name: str | None = None  # default: the swarm name
     title: str | None = None
     setup: str | None = None  # one line

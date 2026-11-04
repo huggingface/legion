@@ -8,6 +8,7 @@ viewer reads.
 ```yaml
 dashboard:
   registry: hf://buckets/HuggingFaceSwarms/swarmchat-runs   # one registry bucket per task family
+  id: levels-v11                      # the row's id; default: the swarm name
   name: Levels (v11)                  # default: the swarm name
   title: Levels
   setup: Leads spawn managers, managers spawn workers.
@@ -15,8 +16,9 @@ dashboard:
   # optional, written as given: viewer_public, dataset, code_repo, spec_url
 ```
 
-`flock init` writes (and on a re-run rewrites) `<registry>/runs/<swarm>.json`: one row in the
-overview's `experiments.json` format. `id` is the swarm, `board` the comms url (`board_id` the
+`flock init` writes (and on a re-run rewrites) `<registry>/runs/<id>.json`: one row in the
+overview's `experiments.json` format. `id` is `dashboard.id` or else the swarm (set it to add a
+run next to an existing row, e.g. a resumed copy that keeps the swarm's name), `board` the comms url (`board_id` the
 part after `/boards/`), `board_public` and `viewer_public` (unless given) the Space pages of the
 board and the viewer, `viewer_run` `<bucket ns>/<bucket>/<swarm>`, `created_at` (UTC ISO 8601,
 from the first write; kept on re-runs). No token or invite goes in it. A failed write fails
