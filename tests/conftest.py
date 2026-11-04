@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 from datetime import UTC, datetime, timedelta
 
@@ -13,6 +14,9 @@ from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import Settings, reconcile
 from flock.controller.store import Store
 from flock.models import SwarmSpec
+
+from . import fake_openai
+from .tinyrun import TinyRun
 
 # Tests of the experiments under experiments/: those target the pre-cleanup layout (run them from
 # commit 8949085) and are not collected here; they go with the experiments in a later cleanup.
@@ -79,6 +83,23 @@ def write_spec(path, spec: SwarmSpec) -> str:
 def no_local_checkpoint(monkeypatch):
     """A local run checkpoints to <bucket>/controller/<swarm> by default: never from tests."""
     monkeypatch.setenv("FLOCK_STATE_URL", "")
+
+
+@pytest.fixture
+def tiny(tmp_path, monkeypatch):
+    """A tiny real run (tests/tinyrun.py) working in tmp_path, its model server started."""
+    srv = fake_openai.serve(0, str(tmp_path / "requests.jsonl"))
+    monkeypatch.chdir(tmp_path)
+    for k in [k for k in os.environ if k.startswith("FLOCK_")]:
+        monkeypatch.delenv(k)
+    monkeypatch.setenv("FLOCK_STATE_URL", "")  # see no_local_checkpoint
+    monkeypatch.setenv("FLOCK_HEALTH_INTERVAL", "1")  # a verdict within a second
+    monkeypatch.setenv("FAKE_KEY", "fake-key")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    run = TinyRun(tmp_path, f"http://127.0.0.1:{srv.server_port}/v1", monkeypatch)
+    yield run
+    run.close()
+    srv.shutdown()
 
 
 @pytest.fixture
