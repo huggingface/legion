@@ -304,6 +304,9 @@ def check_slots(spec: SwarmSpec) -> Check:
     bad, lines = False, []
     for n, want in planned_agents(spec).items():
         ts = spec.types[n]
+        if ts.workers is None:  # the controller does not cap it (reconcile.py)
+            lines.append(f"type {n}: {want} agents planned, workers unset: sized from agents")
+            continue
         room = max_workers(ts) * max(1, ts.agents_per_worker)
         bad |= want > room
         lines.append(f"{'OVER: ' if want > room else ''}type {n}: {want} agents planned, "
