@@ -1,8 +1,0 @@
-# Leads only; each spawns its managers, which spawn their workers. Change `add`, `every` and
-# `until`/`cap` here (and types.lead.workers.initial / limits in spec.yaml when going past 24 leads).
-type: lead
-cap: 20
-stagger_s: 10
-waves:
-  - {at: 0, add: 10}
-  - {every: 10m, add: 10, until: 20}

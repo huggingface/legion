@@ -1,0 +1,30 @@
+# Difficulty 25, scenario index 0 from the pinned Flock benchmark source.
+name: pi-router-agentescape-25
+harness: pi
+model: openai/Qwen/Qwen3.8-27B
+inference:
+  base_url: http://ip-10-53-9-64.ec2.internal:8000/v1
+  api_key_env: ROUTER_API_KEY
+  api_format: openai_chat_completions
+  reasoning_effort: low
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor
+  selector: agentescape-25-skeleton-0998524b
+  revision: 80833e8352a240e79db2bfd6385114ff753ecbec
+team_file: ../prompts/agentescape-team.md
+resources_dir: ../resources
+resources:
+  board:
+    channels: [general]
+tools_dir: ../tools
+tools:
+  - board.*
+agents:
+  count: 8
+environment:
+  backend: podman
+limits:
+  run_timeout_seconds: 3540
+  agent_timeout_seconds: 3480
+  agent_max_turns: 200
+output_dir: ../results
