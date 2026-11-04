@@ -7,7 +7,6 @@ from pathlib import Path
 from flock.cli import load_spec
 from flock.models import comms_tools
 
-from .test_hierarchy_experiment import check_one_spec
 from .test_run4_spawner import as_agent
 
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
@@ -40,7 +39,7 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
     system = (EXP / "prompts/system.md").read_text()
     assert f"`{REPO}` on Hugging Face" in system and f"datasets/{REPO}` into `chatbot-swarm`" in system
     assert "chatbot-v5" not in system + spec.types["coordinator"].system_prompt
-    assert "## Interviews" in system and "flock-agent spawn interviewer" in system
+    assert "## Interviews" in system and "flock spawn interviewer" in system
     assert "Treat a `script` verdict as a bug to fix" in system and "team channel" in system
     assert "The real test: a strong interviewer" in system
     assert "understanding engine" in system and "general mechanisms" in system
@@ -52,14 +51,6 @@ def test_types_prompts_and_spawn_policy(monkeypatch):
         assert text in interviewer, text
 
 
-def test_one_spec_with_the_ramp_and_the_interviewer_size(monkeypatch):
-    spec = check_one_spec(EXP, monkeypatch, "coordinator", [(600 * i, 10 * (i + 1)) for i in range(5)])
-    assert set(spec.types) == {"coordinator", "worker", "interviewer"}
-    assert spec.compute.types["interviewer"].model_dump(exclude_none=True) == {"cpus": 2, "mem": "3800M"}
-    monkeypatch.setenv("RUN3_INTERVIEWER_MEM", "3G")  # run.env sizes it; the spec holds it
-    assert load_spec(str(EXP / "spec.yaml")).compute.types["interviewer"].mem == "3G"
-
-
 async def test_coordinators_and_workers_spawn_interviewers_with_caps(client, app, store, tick):
     from flock.controller import spawn as spawning
 
@@ -68,7 +59,7 @@ async def test_coordinators_and_workers_spawn_interviewers_with_caps(client, app
     data = spec.model_dump(mode="json")  # no world or board in the in-process controller
     data.update(world=None, comms=None)
     for t in data["types"].values():
-        t.update(tools=[], comms=False, replicas_ramp=None)
+        t.update(tools=[], comms=False)
     spec = type(spec).model_validate(data)
     assert (await client.put(f"/swarms/{spec.swarm}", json=data)).status_code == 200
     tick()

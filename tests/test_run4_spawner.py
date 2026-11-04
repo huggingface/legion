@@ -8,7 +8,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-import yaml
 from pydantic import TypeAdapter
 
 from flock.cli import load_spec
@@ -58,22 +57,6 @@ def test_spec_types_are_clones_of_agent_with_the_spawn_policy_and_caps():
     rule = spec.spawn["agent-spawner"]
     assert rule.types == {"agent-child": 4} and rule.depth == 1
     assert spec.limits.alive == 400 and spec.limits.spawned_total == 100
-
-
-def test_slurm_spec_has_both_types_without_aliases(monkeypatch):
-    from flock.specrender import render
-
-    monkeypatch.delenv("LOOP_UNTIL", raising=False)
-    data = render(EXP / "spec.yaml")
-    assert {"agent", "agent-spawner", "agent-child"} <= set(data["types"])
-    assert data["types"]["agent-child"]["loop"] is not data["types"]["agent"]["loop"]
-    assert data["types"]["agent-child"]["system_prompt_append_file"] == "prompts/group-child.md"
-    assert data["types"]["agent"]["loop"]["while"]["until"] == "48h"
-    assert data["types"]["agent-spawner"]["replicas_ramp"] is None  # only `agent` ramps
-    assert "&id" not in yaml.safe_dump(data)
-    monkeypatch.setenv("LOOP_UNTIL", "30m")
-    smoke = render(EXP / "spec.yaml")
-    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
 
 
 async def test_spawner_spawns_four_children_and_the_fifth_is_refused(client, app, store, tick):

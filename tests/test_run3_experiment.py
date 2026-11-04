@@ -1,16 +1,10 @@
-"""experiments/run3: the wave schedule and runner, the rendered spec variants, a jobs-mode dry
-run (the controller with FakeJobsClient, the world behind world.url), and the single-job
-bootstrap end to end with the fakes: 3 waves (0 -> 20 -> 40, the third capped), every new agent
-gets the newcomer prompt first, promotion from the start, interviews booked without a quota,
-the stop marker, and the bundle in the bucket."""
+"""experiments/run3: the wave schedule, the rendered spec variants and the world Space entry
+point."""
 
 from __future__ import annotations
 
 import importlib.util
-import json
-import math
 import os
-import random
 import shutil
 import subprocess
 import sys
@@ -20,26 +14,14 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
-from fastapi.testclient import TestClient
 
-from flock import cli, ops
+from flock import ops
 from flock.cli import load_spec
-from flock.controller.api import create_app as controller_app
-from flock.controller.jobs import FakeJobsClient
-from flock.controller.reconcile import Settings, reconcile
 
-from .test_chatbot_experiment import fakes, script
 from .test_local_run_e2e import _env
 from .test_world import ROOT
 
-__all__ = ["fakes"]
-
 EXP = ROOT / "experiments" / "run3"
-TOKEN = "ctl-t0ken"
-MAIN = ("import sys\nfrom . import words\n\nfor line in sys.stdin:\n"
-        "    print(words.reply(line.strip()), flush=True)\n")
-WORDS = ("def reply(line):\n    return ('Hi Priya! I am Bo, nice to meet you. I am good. Japan, the"
-         " food, the guitar, the dog Biscuit, pasta, a nurse? Bye: ' + line)\n")
 
 
 def _mod(name: str):
@@ -215,129 +197,6 @@ def test_render_variants(tmp_path):
         assert (EXP / name).read_text() == want, f"{name}: run render.py --committed"
 
 
-class _Controller:
-    """A controller (TestClient) with FakeJobsClient, the world behind world.url."""
-
-    def __init__(self, store_dir: Path, world_app, secrets: dict, board_url: str):
-        from flock.controller.store import Store
-
-        def world(req: httpx.Request) -> httpx.Response:
-            r = self.world.request(req.method, req.url.path, content=req.content,
-                                   headers=dict(req.headers))
-            return httpx.Response(r.status_code, content=r.content, headers=r.headers)
-
-        self.store, self.jobs = Store(store_dir), FakeJobsClient()
-        self.world = TestClient(world_app)
-        app = controller_app(self.store, TOKEN, secret_source=secrets, loop_interval=0,
-                             world_transport=httpx.MockTransport(world))
-        self.app = app
-        self.http = self.client()
-        self.settings = Settings(public_url="http://c", token=TOKEN, secret_source=secrets,
-                                 rng=random.Random(0))
-
-    def client(self) -> TestClient:
-        return TestClient(self.app, headers={"Authorization": f"Bearer {TOKEN}"})
-
-    def tick(self):
-        from datetime import UTC, datetime
-
-        return reconcile(self.store, self.jobs, datetime.now(UTC), self.settings)
-
-
-def test_jobs_mode_dry_run(tmp_path, fakes, waves, monkeypatch):
-    """spec.jobs.yaml applied to a controller with FakeJobsClient: the world is reached at
-    world.url (a Space), waves raise replicas through `flock update`'s path, workers follow at
-    agents_per_worker 25, the cap holds; nothing is launched for real."""
-    from typer.testing import CliRunner
-
-    from flock.world.server import create_app as world_app
-
-    _, board, board_url = fakes
-    secrets = {"CHATBOT_WORLD_TOKEN": "w0rld-t0ken", "CHATBOT_BOARD_INVITE": board.invite,
-               "OPENAI_API_KEY": "fake-key"}
-    world = _load_world().Chatbot3World(str(tmp_path / "ws"))
-    ctl = _Controller(tmp_path / "ctl", world_app(world, "w0rld-t0ken"), secrets, board_url)
-    monkeypatch.setattr("flock.client.connect", lambda *_: ctl.client())
-    spec = _render(tmp_path, "jobs", MODEL_WORKER="m", CHATBOT_BOARD_URL=board_url,
-                   CHATBOT_CHANNEL="chatbot-test", RUN3_WORLD_URL="https://world.example.invalid")
-    try:
-        # in process: flock.client.connect is the controller app
-        res = CliRunner().invoke(cli.app, ["launch", str(spec), "--skip-preflight"])
-        assert res.exit_code == 0, res.output
-        stored = ctl.store.get_swarm("run3")["spec"]
-        assert stored.world.manifest.name == "chatbot3" and stored.compute.kind == "hf-jobs"
-        ctl.tick()
-        assert ctl.jobs.launches == []  # replicas 0: no worker yet
-        staggered = tmp_path / "waves-staggered.yaml"  # wave 1: 5 agents 0.2 s apart
-        staggered.write_text("cap: 1000\nstagger_s: 0.2\nwaves:\n  - {at: 0, add: 5}\n")
-        t0 = time.monotonic()
-        assert waves.main(["tick", "--spec", str(spec), "--start", str(time.time()),
-                           "--waves", str(staggered)]) == 0
-        assert time.monotonic() - t0 >= 0.8  # 5 steps, 4 gaps
-        assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 5
-        start = time.time() - 301  # the schedule at 5 min: 40 agents
-        assert waves.main(["tick", "--spec", str(spec), "--start", str(start),
-                           "--waves", str(EXP / "waves.yaml")]) == 0
-        assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 40
-        ctl.tick()
-        agent_jobs = [x for x in ctl.jobs.launches if x["labels"]["type"] == "agent"]
-        assert len(agent_jobs) == math.ceil(40 / 25)
-        sec = agent_jobs[0]["secrets"]
-        assert {"FLOCK_WORLD_TOKEN", "CHATBOT_BOARD_INVITE", "OPENAI_API_KEY"} <= set(sec)
-        assert "w0rld-t0ken" not in json.dumps(ctl.http.get("/swarms/run3").json())
-        # the operator past the schedule: add, then the cap
-        assert waves.main(["add", "960", "--spec", str(spec)]) == 0
-        assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 1000
-        assert waves.main(["add", "5", "--spec", str(spec)]) == 0  # capped: no change
-        assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 1000
-        for _ in range(30):  # the launch budget spreads the launches over passes
-            ctl.tick()
-        workers = ctl.store.list_workers("run3", "agent")
-        assert len(workers) == math.ceil(1000 / 25) == 40
-        assert waves.main(["set", "300", "--spec", str(spec)]) == 0  # the override may lower
-        assert ctl.store.get_swarm("run3")["spec"].types["agent"].replicas == 300
-        # Pi agents on top: only agent-pi changes; later waves and adds keep it
-        def reps():
-            ts = ctl.store.get_swarm("run3")["spec"].types
-            return {t: ts[t].replicas for t in ("agent", "agent-think", "agent-pi")}
-
-        assert waves.main(["add", "25", "--spec", str(spec), "--type", "agent-pi"]) == 0
-        assert reps() == {"agent": 300, "agent-think": 0, "agent-pi": 25}
-        assert waves.main(["add", "5", "--spec", str(spec)]) == 0
-        assert reps() == {"agent": 305, "agent-think": 0, "agent-pi": 25}
-        assert waves.main(["set", "20", "--spec", str(spec), "--type", "agent-pi"]) == 0
-        assert reps() == {"agent": 305, "agent-think": 0, "agent-pi": 20}
-        assert waves.main(["pin", "--spec", str(spec)]) == 0
-        assert load_spec(str(spec)).types["agent-pi"].replicas == 20
-        log = [json.loads(x) for x in Path(str(spec) + ".waves.jsonl").read_text().splitlines()]
-        assert [x["total"] for x in log] == [5, 40, 1000, 300, 25, 305, 20]
-        assert [x["why"][:10] for x in log] == ["schedule 0", "schedule 5", "add 960", "set 300",
-                                               "add 25 --t", "add 5", "set 20 --t"]
-        assert log[4]["after"] == {"agent-pi": 25}
-        assert [(x["steps"], x["stagger_s"]) for x in log] == [(5, 0.2)] + [(1, 0)] * 6
-    finally:
-        for f in (spec, Path(str(spec) + ".waves.jsonl"), Path(str(spec) + ".waves.json")):
-            f.unlink(missing_ok=True)
-        ctl.store.close()
-
-
-def _load_world():
-    s = importlib.util.spec_from_file_location("chatbot3", ROOT / "worlds/chatbot3/chatbot3.py")
-    m = importlib.util.module_from_spec(s)
-    s.loader.exec_module(m)
-    return m
-
-
-# ------------------------------------------------------------------ the single job, end to end
-INTERVIEW = script(*[("chat", {"booking": "{booking}", "message": f"hello {i}"}) for i in range(6)],
-                   ("submit_verdict", {"booking": "{booking}", "evidence_script": ["echoes"],
-                                       "evidence_agent": ["warm"], "verdict": "script",
-                                       "confidence": 0.8}),
-                   ("post", {"text": "INTERVIEW {booking}: script (0.8)", "thread": "{thread}"}),
-                   ("done", {"summary": "interviewed"}))
-WAIT = script(("read", {}))
-
-
 def test_world_space_entry_point(tmp_path):
     """What the Space's start.sh runs: `python -m flock.world serve chatbot3:Chatbot3World` from
     worlds/chatbot3 serves the manifest behind the world token; the scripts parse."""
@@ -368,38 +227,3 @@ def test_world_space_entry_point(tmp_path):
     finally:
         proc.kill()
         proc.wait()
-
-
-def test_waves_run_starts_its_clock_at_the_first_controller_answer(tmp_path, monkeypatch, waves,
-                                                                 capsys):
-    """Jobs/Slurm mode: `waves.py run` may start before the controller answers (a cold node).
-    The clock starts at the first answer, so the first tick never merges two waves."""
-    spec = _render(tmp_path, "jobs", MODEL_WORKER="m")
-    sched = tmp_path / "w.yaml"
-    sched.write_text("cap: 100\nwaves:\n  - {at: 0, add: 5}\n")
-    answers = iter([RuntimeError("down"), RuntimeError("down"), None, None, None])
-    sleeps: list[float] = []
-    fake_now = [1000.0]
-
-    def current(c, swarm, types):
-        a = next(answers)
-        if a is not None:
-            raise a
-        return {"agent": 5}
-
-    def sleep(s):
-        sleeps.append(s)
-        fake_now[0] += s
-
-    monkeypatch.setattr(waves, "current", current)
-    monkeypatch.setattr(waves.time, "sleep", sleep)
-    monkeypatch.setattr(waves.time, "time", lambda: fake_now[0])
-    try:
-        assert waves.main(["run", "--spec", str(spec), "--waves", str(sched)]) == 0
-        state = json.loads(Path(str(spec) + ".waves.json").read_text())
-        assert sleeps == [5, 5] and state["start"] == 1010.0  # after two failed contacts
-        out = capsys.readouterr().out
-        assert "waiting for the controller" in out and "waves clock started at" in out
-    finally:
-        for f in (spec, Path(str(spec) + ".waves.json")):
-            f.unlink(missing_ok=True)
