@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import stat
-from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -17,17 +16,12 @@ from flock.specrender import read_env_file
 from tests.fake_msgboard import Board, serve
 
 SPEC = {
-    "swarm": "demo", "namespace": "HuggingFaceSwarms",
-    "bucket": "hf://buckets/HuggingFaceSwarms/runs",
-    "comms": {"board": "space", "invite_env": "BOARD_INVITE", "channel": "general",
-              "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
+    "swarm": "demo", "namespace": "acme",
+    "bucket": "hf://buckets/acme/runs",
+    "comms": {"board": "space", "template": "acme/msgboard-template", "invite_env": "BOARD_INVITE",
+              "channel": "general", "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
     "types": {"a": {"harness": "claude", "model": "claude-opus-5-5", "comms": True}},
 }
-
-
-TEMPLATE_VARS = {"MSGBOARD_BOARDS": "[template]", "MSGBOARD_REPLICA": "hf://buckets/x/template",
-                 "MSGBOARD_DEMO_BOTS": "1", "MSGBOARD_HF_ORGANIZATIONS": '["HuggingFaceSwarms"]',
-                 "MSGBOARD_SNAPSHOT_INTERVAL": "15"}
 
 
 class FakeApi:
@@ -35,10 +29,6 @@ class FakeApi:
 
     def __init__(self, board: Board):
         self.board, self.spaces, self.calls = board, set(), []
-
-    def get_space_variables(self, repo_id):
-        assert repo_id == "HuggingFaceSwarms/chatbot-v10-msgboard"
-        return {k: SimpleNamespace(value=v) for k, v in TEMPLATE_VARS.items()}
 
     def repo_exists(self, repo_id, repo_type=None):
         return repo_id in self.spaces
@@ -79,20 +69,18 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert checks["board space"].ok, checks["board space"].detail
     assert checks["spec"].ok and checks["board"].ok
     (src, to, kw), = api.calls
-    assert (src, to) == ("HuggingFaceSwarms/chatbot-v10-msgboard", "HuggingFaceSwarms/board-demo")
+    assert (src, to) == ("acme/msgboard-template", "acme/board-demo")
     secrets = {s["key"]: s["value"] for s in kw["space_secrets"]}
     assert kw["private"] and set(secrets) == {"MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"}
     assert secrets["HF_TOKEN"] == "hf_scoped"  # the mapped, bucket-scoped token, not the operator's
     variables = {v["key"]: v["value"] for v in kw["space_variables"]}
-    assert variables["MSGBOARD_REPLICA"] == "hf://buckets/HuggingFaceSwarms/runs/board"
     assert json.loads(variables["MSGBOARD_BOARDS"]) == [
         {"id": "demo", "name": "demo", "storage_id": "demo", "require_existing": False}]
     assert kw["space_hardware"] == "cpu-basic"
-    # the template's variables, minus its board list, replica and demo bots; then flock's
-    assert variables == {"MSGBOARD_HF_ORGANIZATIONS": '["HuggingFaceSwarms"]',
-                         "MSGBOARD_SNAPSHOT_INTERVAL": "15", "BOARD_READ_TOKEN": "public",
-                         "MSGBOARD_BOARDS": variables["MSGBOARD_BOARDS"],
-                         "MSGBOARD_REPLICA": "hf://buckets/HuggingFaceSwarms/runs/board"}
+    # flock's only: none of the template's (no owner, org or admin unless the spec sets them),
+    # no BOARD_READ_TOKEN without a dashboard
+    assert variables == {"MSGBOARD_BOARDS": variables["MSGBOARD_BOARDS"],
+                         "MSGBOARD_REPLICA": "hf://buckets/acme/runs/board"}
     assert "general" in board.channels.values()
     values = read_env_file(run / "run.env")
     assert values["BOARD_URL"] == url and values["BOARD_INVITE"] in board.invites
@@ -121,14 +109,29 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert stat.S_IMODE((run / "run.env").stat().st_mode) == 0o600
 
 
-def test_spec_variables_override_without_dropping_the_defaults(tmp_path, space):
+def test_spec_variables_override_without_dropping_the_defaults(tmp_path, space, monkeypatch):
     _, api, _ = space
-    spec = {**SPEC, "comms": {**SPEC["comms"], "space_variables": {
-        "MSGBOARD_SNAPSHOT_INTERVAL": "60", "MSGBOARD_REPLICA": ""}}}
+    monkeypatch.setattr(rundir, "bucket_store", lambda url, token: FakeBucket())
+    spec = {**SPEC, "dashboard": DASH, "comms": {**SPEC["comms"], "space_variables": {
+        "MSGBOARD_OWNER_HF_USERNAME": "someone", "MSGBOARD_REPLICA": ""}}}
     rundir.init(tmp_path / "run", _folder(tmp_path, spec), env=ENV)
     variables = {v["key"]: v["value"] for v in api.calls[0][2]["space_variables"]}
-    assert variables["BOARD_READ_TOKEN"] == "public" and variables["MSGBOARD_SNAPSHOT_INTERVAL"] == "60"
-    assert variables["MSGBOARD_REPLICA"] == ""  # blanked: no replica
+    assert variables == {"BOARD_READ_TOKEN": "public",  # with dashboard: the overview reads it
+                         "MSGBOARD_BOARDS": variables["MSGBOARD_BOARDS"],
+                         "MSGBOARD_OWNER_HF_USERNAME": "someone",  # only because the spec says so
+                         "MSGBOARD_REPLICA": ""}  # blanked: no replica
+
+
+def test_board_space_needs_a_template(tmp_path, space):
+    from flock.models import CommsSpec
+
+    comms = {k: v for k, v in SPEC["comms"].items() if k != "template"}
+    with pytest.raises(ValueError, match="template"):
+        CommsSpec.model_validate({**comms, "url": "https://b.invalid"})
+    _, api, _ = space
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path, {**SPEC, "comms": comms}), env=ENV)
+    c = {c.name: c for c in rep.checks}["board space"]
+    assert c.ok is False and "template" in c.detail and not api.calls
 
 
 def test_replica_needs_a_mapped_hf_token(tmp_path, space):
@@ -160,7 +163,7 @@ def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
     from flock.comms.board import _auth
 
     monkeypatch.setenv("HF_TOKEN", "hf_x")
-    space = "https://huggingfaceswarms-board-demo.hf.space/boards/demo"
+    space = "https://acme-board-demo.hf.space/boards/demo"
     assert _auth("fbt_b", space) == {"X-Msgboard-Token": "fbt_b", "Authorization": "Bearer hf_x"}
     assert _auth(None, space) == {"Authorization": "Bearer hf_x"}  # join on a private Space
     # elsewhere the HF token is never sent; old public boards still get the Bearer fallback
@@ -172,7 +175,7 @@ def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
 
 def test_an_existing_space_without_its_operator_token_is_refused(tmp_path, space):
     _, api, _ = space
-    api.spaces.add("HuggingFaceSwarms/board-demo")
+    api.spaces.add("acme/board-demo")
     rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
     c = {c.name: c for c in rep.checks}["board space"]
     assert c.ok is False and "BOARD_OPERATOR_TOKEN" in c.detail and not api.calls
@@ -185,8 +188,9 @@ def test_board_url_form_and_space_without_init(tmp_path):
         read_spec(str(_folder(tmp_path / "s") / "spec.yaml"))
 
 
-ORG = "https://huggingfaceswarms-board-demo.hf.space/boards/demo"
-DASH = {"registry": "hf://buckets/HuggingFaceSwarms/overview", "name": "Demo", "setup": "One line."}
+ORG = "https://acme-board-demo.hf.space/boards/demo"
+DASH = {"registry": "hf://buckets/acme/overview", "name": "Demo", "setup": "One line.",
+        "viewer": "https://acme-viewer.hf.space"}
 
 
 def _spec(**over):
@@ -211,19 +215,23 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     assert c.ok, c.detail
     assert b.files["runs/demo.json"] == {
         "id": "demo", "name": "Demo", "title": None, "setup": "One line.", "board_id": "demo",
-        "board": ORG + "/", "board_public": "https://huggingface.co/spaces/HuggingFaceSwarms/board-demo",
-        "viewer": "https://huggingfaceswarms-flock-viewer-v8.hf.space",
-        "viewer_public": "https://huggingface.co/spaces/HuggingFaceSwarms/flock-viewer-v8",
-        "viewer_run": "HuggingFaceSwarms/runs/demo", "dataset": None, "code_repo": None,
-        "spec_url": None}
+        "board": ORG + "/", "board_public": "https://huggingface.co/spaces/acme/board-demo",
+        "viewer": "https://acme-viewer.hf.space",
+        "viewer_public": "https://huggingface.co/spaces/acme/viewer",  # from the registry's namespace
+        "viewer_run": "acme/runs/demo", "dataset": None, "code_repo": None, "spec_url": None}
     assert rundir.register_dashboard(_spec(dashboard={**DASH, "title": "T"}), {"HF_TOKEN": "t"}).ok
     assert b.files["runs/demo.json"]["title"] == "T"
+    # a board given by url: its page derived the same way
+    url_board = {"invite_env": "BOARD_INVITE", "channel": "general", "url": ORG}
+    assert rundir.register_dashboard(_spec(comms=url_board), {"HF_TOKEN": "t"}).ok
+    assert b.files["runs/demo.json"]["board_public"] == "https://huggingface.co/spaces/acme/board-demo"
 
 
 @pytest.mark.parametrize("over, why", [
     ({"comms": {**SPEC["comms"], "url": "https://elsewhere.invalid/boards/demo"}}, "board"),
-    ({"dashboard": {**DASH, "viewer": "https://someone-viewer.hf.space"}}, "viewer"),
-    ({"bucket": "hf://buckets/cmpatino/runs"}, "namespace"),
+    # nothing hard-coded: another org's Spaces are refused for an acme registry
+    ({"dashboard": {**DASH, "viewer": "https://huggingfaceswarms-flock-viewer-v8.hf.space"}}, "viewer"),
+    ({"bucket": "hf://buckets/someone/runs"}, "namespace"),
 ])
 def test_dashboard_refuses_rows_the_overview_drops(monkeypatch, over, why):
     monkeypatch.setattr(rundir, "bucket_store", lambda url, token: pytest.fail("written"))
@@ -237,6 +245,8 @@ def test_dashboard_write_failure_fails_the_check(monkeypatch):
     assert c.ok is False and "403" in c.detail
 
 
-def test_dashboard_refused_with_compute_local():
+def test_dashboard_refused_with_compute_local_and_needs_a_viewer():
     with pytest.raises(ValueError, match="compute: local"):
         _spec(compute="local")
+    with pytest.raises(ValueError, match="viewer"):
+        _spec(dashboard={k: v for k, v in DASH.items() if k != "viewer"})

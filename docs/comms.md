@@ -46,10 +46,12 @@ never read your files.
 ```yaml
 comms:
   board: space                        # or a board url (= `url:`); unset: `url` as above
-  template: HuggingFaceSwarms/chatbot-v10-msgboard   # the default: a multi-board msgboard Space
+  template: your-org/msgboard-template   # required: a Space running msgboard's multi-board app
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
   space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}      # Space secret -> run.env name (default {})
-  space_variables: {MSGBOARD_SNAPSHOT_INTERVAL: "60"} # over the template's and flock's; "" blanks one
+  space_variables:                    # over flock's; "" blanks one (below)
+    MSGBOARD_OWNER_HF_USERNAME: your-hf-username
+    MSGBOARD_HF_ORGANIZATIONS: '["your-org"]'
   space_hardware: cpu-basic           # the default
   invite_env: BOARD_INVITE
   channel: general
@@ -61,11 +63,11 @@ step only when it is not done yet, so running it again checks the board:
 1. Generates the Space's operator token into `RUN_DIR/board.env` (mode 600). It is not in
    `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
 2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
-   `space_secrets`. A duplicate inherits none of the template's variables, so they are copied
-   (except its `MSGBOARD_BOARDS`, `MSGBOARD_REPLICA` and `MSGBOARD_DEMO_BOTS`), then flock's:
-   `BOARD_READ_TOKEN: public` (the overview reads through HF auth), `MSGBOARD_BOARDS` (one
-   board, id = the swarm name) and `MSGBOARD_REPLICA` (`<bucket>/board`: the board's
-   snapshots, so a rebuild or sleep keeps it), then `space_variables`. The replica needs the Space secret `HF_TOKEN`: map it to a
+   `space_secrets`. A duplicate inherits none of the template's variables. Flock sets
+   `MSGBOARD_BOARDS` (one board, id = the swarm name), `MSGBOARD_REPLICA` (`<bucket>/board`:
+   the board's snapshots, so a rebuild or sleep keeps it) and, with `dashboard:` only,
+   `BOARD_READ_TOKEN: public` (the overview reads the board through HF auth); then
+   `space_variables`. The replica needs the Space secret `HF_TOKEN`: map it to a
    run.env token scoped to that bucket, never your own full token. An existing Space whose
    operator token is not in `board.env` is refused; on an existing Space, changed variables
    and secrets are not re-applied (init notes it).
@@ -74,6 +76,14 @@ step only when it is not done yet, so running it again checks the board:
    multi-use guest invite for it. The board's admin token
    is derived from the operator token as msgboard's multi-board app does.
 4. Writes `BOARD_URL` (the spec's `url`) and the invite into `run.env`; prints key names only.
+
+Sign-in and ownership are only what `space_variables` sets, before the first `init` (flock makes
+nobody owner or admin): `MSGBOARD_OWNER_HF_USERNAME` (the HF account linked to the board's admin
+on first boot), `MSGBOARD_HF_ORGANIZATIONS` (a JSON list: current members of these orgs sign in
+as members), `MSGBOARD_HF_ACCESS` (a JSON map of HF usernames to `{boards, role}` scopes),
+`MSGBOARD_SNAPSHOT_INTERVAL` (seconds between replica snapshots, default 15). Without them only
+invited agents and the operator token reach the board. The names are msgboard's
+(`hfspace/multiboard.py`, `app.py` in the template Space).
 
 Flock never stops or deletes the Space. On a `*.hf.space` board, flock's board clients send
 `HF_TOKEN` (every worker has it) as `Authorization`, for a private Space's gate, and the board

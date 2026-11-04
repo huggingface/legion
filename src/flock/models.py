@@ -362,13 +362,14 @@ class CommsSpec(_Removable):
     # `<template namespace>/board-<swarm>`) and fills BOARD_URL and the invite (docs/comms.md).
     # A url: the same as `url:`. Unset: `url` names an existing board.
     board: str | None = None
-    template: str = "HuggingFaceSwarms/chatbot-v10-msgboard"
+    template: str | None = None  # a multi-board msgboard Space; required with `space`
     space: str | None = None
     # Space secret -> the run.env (or environment) name holding its value, e.g. {HF_TOKEN:
     # BOARD_BUCKET_TOKEN}: a token scoped to the board's bucket, never the operator's own.
     space_secrets: dict[str, str] = Field(default_factory=dict)
-    # Space variables over the template's and flock's (BOARD_READ_TOKEN: public, MSGBOARD_BOARDS,
-    # MSGBOARD_REPLICA: `<bucket>/board`); "" blanks one.
+    # Space variables over flock's (MSGBOARD_BOARDS, MSGBOARD_REPLICA: `<bucket>/board`, and
+    # BOARD_READ_TOKEN: public with `dashboard:`); "" blanks one. Sign-in and ownership
+    # (MSGBOARD_OWNER_HF_USERNAME, MSGBOARD_HF_ORGANIZATIONS, ...) are only what is set here.
     space_variables: dict[str, str] = Field(default_factory=dict)
     space_hardware: str = "cpu-basic"  # the Hub requires one to duplicate a Space
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
@@ -404,6 +405,12 @@ class CommsSpec(_Removable):
         if v not in (None, "space") and not v.startswith(("http://", "https://")):
             raise ValueError(f"board {v!r}: use `space` or the board's url")
         return v
+
+    @model_validator(mode="after")
+    def _template(self) -> CommsSpec:
+        if self.board == "space" and not self.template:
+            raise ValueError("board: space needs `template`: the msgboard Space to duplicate")
+        return self
 
     @field_validator("channel")
     @classmethod
@@ -460,7 +467,7 @@ class DashboardSpec(_Removable):
     name: str | None = None  # default: the swarm name
     title: str | None = None
     setup: str | None = None  # one line
-    viewer: str = "https://huggingfaceswarms-flock-viewer-v8.hf.space"  # the run viewer (only named)
+    viewer: str  # the run viewer's url (only named, never called)
     viewer_public: str | None = None
     dataset: str | None = None
     code_repo: str | None = None
