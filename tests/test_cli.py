@@ -282,9 +282,3 @@ def test_hidden_world_app_and_plain_help():
     assert r.exit_code == 0 and "module:Class" in r.output
     out = runner.invoke(cli.app, ["--help"]).output
     assert "  world " not in out and "╭" not in out
-
-
-def test_launch_swarm_name_refuses_adopt():
-    for flag in (["--adopt"], ["--checkpoint", "hf://x"], ["--no-checkpoint"]):
-        r = runner.invoke(cli.app, ["launch", "demo", *flag])
-        assert r.exit_code == 1 and "swarm name" in r.output, r.output

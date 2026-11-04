@@ -327,40 +327,6 @@ class Store:
         finally:
             dst.close()
 
-    def adopt(self, snapshot: str | Path, swarm: str) -> int:
-        """Copy one swarm's rows from a controller snapshot (`launch --adopt`): every table
-        keyed by swarm, plus its agents' pending prompts and spawn keys and its workers'
-        queued commands. The snapshot is migrated first (it may come from an older
-        version). Returns the number of agents adopted."""
-        Store(Path(snapshot).parent).close()  # schema + _migrate on the downloaded copy
-        keyed = {"swarms": "name = ?", "pending_prompts": "agent IN (SELECT name FROM s.agents "
-                 "WHERE swarm = ?)", "spawn_keys": "parent IN (SELECT name FROM s.agents WHERE "
-                 "swarm = ?)", "commands": "worker IN (SELECT id FROM s.workers WHERE swarm = ?)"}
-        with self._lock:
-            self._db.execute("ATTACH DATABASE ? AS s", [str(snapshot)])
-            try:
-                with self.transaction():
-                    for (table,) in self._db.execute(
-                            "SELECT name FROM s.sqlite_master WHERE type = 'table' "
-                            "AND name IN (SELECT name FROM main.sqlite_master WHERE "
-                            "type = 'table' AND name NOT LIKE 'sqlite_%')").fetchall():
-                        mine = {r[1] for r in self._db.execute(f"PRAGMA main.table_info({table})")}
-                        cols = [r[1] for r in self._db.execute(f"PRAGMA s.table_info({table})")
-                                if r[1] in mine]
-                        where = keyed.get(table, "swarm = ?" if "swarm" in cols else None)
-                        if where is None:  # launches: this controller's own rate window
-                            continue
-                        keep = [c for c in cols if c != "id" or table not in keyed]  # new rowids
-                        names = ", ".join(keep)
-                        self._db.execute(f"INSERT OR REPLACE INTO main.{table} ({names}) "
-                                         f"SELECT {names} FROM s.{table} WHERE {where}", [swarm])
-                n = self._db.execute("SELECT COUNT(*) FROM agents WHERE swarm = ?",
-                                     [swarm]).fetchone()[0]
-            finally:
-                self._db.execute("DETACH DATABASE s")
-        self.listener("reconcile", "")
-        return n
-
     def repair_events(self) -> int:
         """After a restore, make each event file and its index agree: a file longer than the
         index (lines appended after the DB snapshot) is cut back, a missing or shorter one sets

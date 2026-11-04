@@ -268,8 +268,7 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         return HubBucketStore(url, token=env.get("HF_TOKEN") or None)
 
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
-                     compute=compute, health=health, buckets=buckets,
-                     state_url=env.get("FLOCK_STATE_URL") or None)
+                     compute=compute, health=health, buckets=buckets)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
     return Built(app, store, dep, jobs, state, settings, halt, timeout, health=health)
 

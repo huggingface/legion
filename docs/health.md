@@ -202,4 +202,4 @@ them); `flock.status.normalise` maps each to one schema:
 | `budget.stop`, `budget.cleared` | `budget_stop`, `budget_cleared` | swarm | `limits.budget_usd` |
 | `comms.dm`, `comms.mention`, `comms.joined`, ... | `comms_*` | agent | the board (docs/comms.md) |
 | `swarm.stopped`, `swarm.resumed`, `swarm.released`, `swarm.unreleased` | `paused`, `resumed`, `released`, `unreleased` | swarm | `flock stop` / `flock launch` |
-| `swarm.spec_applied`, `swarm.adopted`, `swarm.removed` | `spec_applied`, `adopted`, `remove_swarm` | swarm | the stored spec; `--adopt`; `--delete` done |
+| `swarm.spec_applied`, `swarm.removed` | `spec_applied`, `remove_swarm` | swarm | the stored spec; `--delete` done |

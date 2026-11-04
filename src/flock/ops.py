@@ -1,5 +1,5 @@
 """Swarm operations shared by the `flock` CLI and Python callers: read an experiment folder
-(`read_spec`), check it, `launch` it (create, adopt or resume) and `update` the running swarm,
+(`read_spec`), check it, `launch` it (create or resume) and `update` the running swarm,
 all through `flock.client.Client`. Nothing here prints or asks: results are returned,
 refusals raise SpecError, failed controller calls raise ClientError.
 
@@ -203,17 +203,15 @@ def is_swarm_name(target: str) -> bool:
 
 
 def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
-           source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None, adopt: bool = False,
-           checkpoint: str | None = None, no_checkpoint: bool = False,
+           source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None,
            preflight: bool | None = None, strict: bool = False,
            checked: tuple[Any, list[str]] | None = None) -> dict[str, Any]:
     """`flock launch` (docs/live.md "Lifecycle") on a spec read with `read_spec`. Missing on
-    the controller: created (with `adopt`, first restored from a controller checkpoint, its
-    own or `checkpoint`); refused when its bucket already holds agents of that name, unless
-    `adopt`. Present: its holds (all, or `types`/`agents`) and release are lifted; refused
+    the controller: created; refused when its bucket already holds agents of that name.
+    Present: its holds (all, or `types`/`agents`) and release are lifted; refused
     when the spec differs from the stored one (replicas aside). Preflight runs by default
     when the spec names a provider-backed model. Returns, in this order, what applies:
-    "warnings"; "adopted" (the adopt reply) or "adopt_skipped" (why, with `no_checkpoint`);
+    "warnings";
     "resumed" (the holds left) or "preflight" (the report) / "unverified" (models not probed),
     "tools" (the upload reply, plus "bytes") and "status" (the new swarm's). Refusals raise
     SpecError with these keys so far in `done`, as do failed controller calls. `checked`:
@@ -225,8 +223,8 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
         done["local"] = run
     try:
         try:
-            return _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt,
-                           checkpoint, no_checkpoint, preflight, strict)
+            return _launch(api, spec, spec_file, bundle, done, source, types, agents,
+                           preflight, strict)
         except ClientError as e:
             raise SpecError([str(e)], done) from None
     except BaseException:  # also Ctrl-C during the preflight
@@ -235,8 +233,7 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
         raise
 
 
-def _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt, checkpoint,
-            no_checkpoint, preflight, strict) -> dict[str, Any]:
+def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight, strict) -> dict[str, Any]:
 
     def refuse(*lines: str):
         raise SpecError(list(lines), done)
@@ -252,19 +249,6 @@ def _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt, ch
             refuse(f"error {e.status}: {e.detail}")
 
     old = stored()
-    if old is None and adopt:
-        try:
-            done["adopted"] = api.adopt(spec, checkpoint)
-        except ClientError as e:
-            if e.status != 404:
-                refuse(f"error {e.status}: {e.detail}")
-            if not no_checkpoint:
-                refuse(f"refused: {e.detail}",
-                       "pass --no-checkpoint to rebuild it from the bucket alone: agents restore "
-                       "by name, but costs, loops, ramp steps and spawn links start over")
-            done["adopt_skipped"] = e.detail
-        else:
-            old = stored()
     if old is not None:
         from flock.tools.bundle import version_of
 
@@ -288,7 +272,7 @@ def _launch(api, spec, spec_file, bundle, done, source, types, agents, adopt, ch
     if bundle is not None:
         up = done["tools"] = {**api.upload_tools(spec.swarm, bundle.data), "bytes": len(bundle.data)}
         spec.tools_version = up["version"]
-    done["status"] = api.create(spec, adopt=adopt, source=source or source_header(spec_file))
+    done["status"] = api.create(spec, source=source or source_header(spec_file))
     return done
 
 

@@ -298,7 +298,7 @@ def check_bucket(spec: SwarmSpec, env: Mapping[str, str], rep: InitReport) -> Ch
         return Check("bucket", False, f"{spec.bucket}: not writable: {type(e).__name__}: {e}")
     if found:
         rep.notes.append(f"bucket {spec.bucket} already holds data for swarm {spec.swarm} "
-                         f"({found}): `flock launch` refuses a fresh start (--adopt takes it over)")
+                         f"({found}): `flock launch` refuses a fresh start (pick a new swarm name or bucket)")
     return Check("bucket", True, f"{spec.bucket} writable")
 
 
