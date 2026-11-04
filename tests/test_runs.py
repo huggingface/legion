@@ -92,15 +92,13 @@ def test_lifecycle(tiny):
     assert f"local run ended; bundle: {run}/run.json" in out, out
     assert not Path(".flock/current").exists()
     doc = json.loads((run / "run.json").read_text())
-    assert doc["stop_reason"] == "interrupted" and doc["spec"]["compute"] == {"kind": "local"}
+    assert doc["stop_reason"] == "interrupted"
+    assert doc["spec"]["compute"]["kind"] == "local"
     assert {x["name"]: x["turns_completed"] for x in doc["agents"]} == {  # replicas kept: 2
         "writer-0000": 3, "writer-0001": 0}
     assert doc["totals"]["cost_usd"] == round(a["cost_usd"], 6)
 
 
-# shortcut: the workers outlive their controller, as on Slurm or HF Jobs (a local worker dies
-# with it, and its restarted controller relaunches it only after UNKNOWN_AFTER, 90 s)
-SURVIVE = 'FLOCK_LOCAL_PARENT_PID: ""'
 LOOP = """\
     loop:
       prompt: "bash: echo round {round}"
@@ -111,7 +109,7 @@ LOOP = """\
     model: fake:fake-model
     replicas: 0
     workers: {max_extra: 1}
-    env: {HEARTBEAT_INTERVAL: "1", FLOCK_LOCAL_PARENT_PID: ""}
+    env: {HEARTBEAT_INTERVAL: "1"}
 spawn:
   writer: {types: {helper: 1}, depth: 1}
 """
@@ -124,7 +122,7 @@ def test_controller_restart(tiny, tmp_path):
     round reaches each agent."""
     data = tmp_path / "ctl"
     port = tiny.controller(data)
-    tiny.flock("launch", tiny.spec(replicas=2, extra=LOOP, env=SURVIVE), "--skip-preflight")
+    tiny.flock("launch", tiny.spec(replicas=2, extra=LOOP), "--skip-preflight")
     tiny.turns("writer-0000", 1)  # the loop's first round
     tiny.flock("prompt", "writer-0000", SPAWN)
     child = tiny.wait(lambda: tiny.agent("writer-0000")["children"])[0]
@@ -149,7 +147,8 @@ def test_controller_restart(tiny, tmp_path):
     assert child in tiny.flock("status", "tiny", "--parent", "writer-0000")
 
     # the loop engine goes on: a round past the one before the crash reaches each writer and
-    # its model, in the same session; no round is sent twice
+    # its model, in the same session (the workers died with the controller and were relaunched);
+    # no round is sent twice (rounds due while the swarm was down are skipped)
     for n in writers:
         first = tiny.wait(lambda n=n: [e["data"]["round"] for e in tiny.events(n, "loop.prompt")
                                        if datetime.fromisoformat(e["ts"]) > restarted
@@ -158,7 +157,7 @@ def test_controller_restart(tiny, tmp_path):
                                                if u[-1] == f"bash: echo round {k}"])
         assert said[0][0] == "bash: echo round 1", said
         sent = [e["data"]["round"] for e in tiny.events(n, "loop.prompt")]
-        assert sent == list(range(1, len(sent) + 1)), sent
+        assert sent == sorted(set(sent)), sent
 
     # stop --delete on a controller: the swarm is removed
     assert json.loads(tiny.flock("stop", "tiny", "--delete", "--yes")) == {

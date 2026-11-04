@@ -24,7 +24,7 @@ from flock.client import Client
 # USD per 1M tokens, so one fake turn (~100 tokens in, 7 out) costs about $0.1
 SPEC = """\
 swarm: tiny
-compute: local
+compute: {{kind: local, worker_unknown_after: 10s, worker_dead_after: 11s, crash_backoff: 100ms}}
 providers:
   fake: {{type: openai_compat, base_url: "{url}", api_key_env: FAKE_KEY,
           pricing: {{"*": [1000, 1000, 1000]}}}}
