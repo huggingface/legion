@@ -79,10 +79,12 @@ class TinyRun:
         out = self.flock("status", name, "--events", "--json", "--only", only)
         return [json.loads(x) for x in out.splitlines()]
 
-    def requests(self, agent: str) -> list[dict]:
-        """The model requests made for `agent` (its system message names it)."""
+    def said(self, agent: str) -> list[list[str]]:
+        """The user messages of each model request made for `agent` (its system message names
+        it), in order."""
         bodies = [json.loads(x)["body"] for x in self.log.read_text().splitlines()]
-        return [b for b in bodies if b["messages"][0]["content"].startswith(f"You are {agent},")]
+        return [[m["content"] for m in b["messages"] if m["role"] == "user"] for b in bodies
+                if b["messages"][0]["content"].startswith(f"You are {agent},")]
 
     def controller(self, data: Path, port: int = 0) -> int:
         """Start `flock-controller` for `compute: local` with its state in `data` (a controller

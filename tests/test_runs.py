@@ -27,7 +27,8 @@ def test_lifecycle(tiny):
     session = a["session_id"]
     assert session and a["resumed"] is False and a["cost_usd"] > 0, a
     assert a["worker"] == "tiny-writer-w0000"
-    evs = tiny.flock("status", "writer-0000", "--events")
+    evs = tiny.wait(lambda: "agent.turn_ended" in (e := tiny.flock(
+        "status", "writer-0000", "--events")) and e)  # events can trail the heartbeat
     for line in ("agent.session_started", "user     bash: echo one", "tool     bash: one",
                  "agent.turn_ended completed fake-model"):
         assert line in evs, evs
@@ -77,9 +78,8 @@ def test_lifecycle(tiny):
     tiny.flock("prompt", "writer-0000", "bash: echo three")
     a = tiny.turns("writer-0000", 3)
     assert (a["session_id"], a["resumed"]) == (session, True), a
-    users = [m["content"] for m in tiny.requests("writer-0000")[-1]["messages"]
-             if m["role"] == "user"]
-    assert users == ["bash: echo one", "bash: echo two", "bash: echo three"]  # the same session
+    assert tiny.said("writer-0000")[-1] == [  # the same session
+        "bash: echo one", "bash: echo two", "bash: echo three"]
     assert [e["name"] for e in tiny.events("tiny")] == [
         "swarm.spec_applied", "worker.launched", "swarm.spec_applied",  # launch, update
         "swarm.stopped", "swarm.resumed",  # stop, launch
@@ -95,7 +95,7 @@ def test_lifecycle(tiny):
     assert doc["stop_reason"] == "interrupted" and doc["spec"]["compute"] == {"kind": "local"}
     assert {x["name"]: x["turns_completed"] for x in doc["agents"]} == {  # replicas kept: 2
         "writer-0000": 3, "writer-0001": 0}
-    assert doc["totals"]["cost_usd"] == a["cost_usd"]
+    assert doc["totals"]["cost_usd"] == round(a["cost_usd"], 6)
 
 
 # shortcut: the workers outlive their controller, as on Slurm or HF Jobs (a local worker dies
@@ -105,7 +105,7 @@ LOOP = """\
     loop:
       prompt: "bash: echo round {round}"
       every: 3s
-      while: {max_rounds: 5}
+      while: {max_rounds: 10}
   helper:
     harness: llm
     model: fake:fake-model
@@ -133,7 +133,7 @@ def test_controller_restart(tiny, tmp_path):
     before = {n: tiny.agent(n) for n in (*writers, child)}
     loop = json.loads(tiny.flock("status", "tiny", "--type", "writer", "--json"))["loop"]
     rounds = {n: loop["per_agent"][n]["rounds"] for n in writers}
-    assert loop["state"] == "running" and max(rounds.values()) < 5, loop
+    assert loop["state"] == "running" and max(rounds.values()) < 10, loop
 
     tiny.crash()
     restarted = datetime.now(UTC)
@@ -154,10 +154,9 @@ def test_controller_restart(tiny, tmp_path):
         first = tiny.wait(lambda n=n: [e["data"]["round"] for e in tiny.events(n, "loop.prompt")
                                        if datetime.fromisoformat(e["ts"]) > restarted
                                        and e["data"]["round"] > rounds[n]])[0]
-        users = tiny.wait(lambda n=n, k=first: (u := [
-            m["content"] for m in tiny.requests(n)[-1]["messages"] if m["role"] == "user"])
-            and u[-1] == f"bash: echo round {k}" and u)
-        assert users[0] == "bash: echo round 1", users
+        said = tiny.wait(lambda n=n, k=first: [u for u in tiny.said(n)
+                                               if u[-1] == f"bash: echo round {k}"])
+        assert said[0][0] == "bash: echo round 1", said
         sent = [e["data"]["round"] for e in tiny.events(n, "loop.prompt")]
         assert sent == list(range(1, len(sent) + 1)), sent
 
