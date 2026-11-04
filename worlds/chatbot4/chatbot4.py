@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 
+import snapshot
 from repository import Hub, Repository
 from sandbox import run
 
@@ -139,6 +140,14 @@ class Chatbot4World(World):
         previous = _LIVE.get(str(self.ws.resolve()))
         if previous is not None:  # flush and stop its outbox before reading the saved state
             previous.close()
+        # CHATBOT_BUCKET (hf://buckets/<ns>/<bucket>/<run>): its world.tar.gz (snapshot.py) is
+        # this world's state across jobs: restored into an empty workspace before anything
+        # reads it, pushed every CHATBOT_BUCKET_PUSH_S and at close.
+        self.bucket = os.environ.get("CHATBOT_BUCKET", "").strip().rstrip("/")
+        self.push_every = float(os.environ.get("CHATBOT_BUCKET_PUSH_S", "300"))
+        self.push_lock = threading.Lock()
+        if self.bucket:
+            self._restore()
         # Lock order: Hub write lane slot, then main_lock, then self.lock (the state lock).
         self.lock = threading.RLock()
         # The compare-and-swap on main: held by merges across the Hub merge and the fetch that
@@ -292,6 +301,8 @@ class Chatbot4World(World):
                 self._save()
         self.syncer = threading.Thread(target=self._sync_loop, name="chatbot4-hub-sync", daemon=True)
         self.syncer.start()
+        if self.bucket:
+            threading.Thread(target=self._push_loop, name="chatbot4-bucket", daemon=True).start()
         if not self.save_sync:
             self.saver = threading.Thread(target=self._saver, name="chatbot4-save", daemon=True)
             self.saver.start()
@@ -351,8 +362,40 @@ class Chatbot4World(World):
         self.lanes.close(max(0.0, end - time.monotonic()))
         self.flush()
         self.store.checkpoint()
+        if self.bucket:
+            self._push()
         if _LIVE.get(str(self.ws.resolve())) is self:
             del _LIVE[str(self.ws.resolve())]
+
+    # -- world archive in CHATBOT_BUCKET ----------------------------------------------------
+
+    def _restore(self):
+        """Fill an empty workspace from the bucket's archive (none there: a first start). A
+        workspace that already holds a world must be this bucket's (the marker), so its
+        pushes never overwrite another run's archive."""
+        marker = self.ws / ".chatbot-bucket"
+        if marker.exists() or (self.ws / "repo.git").exists():
+            owner = marker.read_text().strip() if marker.exists() else "no bucket"
+            if owner != self.bucket:
+                raise RuntimeError(f"CHATBOT_WS {self.ws} holds the world of {owner}, not of "
+                                   f"CHATBOT_BUCKET {self.bucket}: use an empty directory")
+            return  # this bucket's world, as new as its last push or newer
+        found = snapshot.transfer("restore", self.ws, self.bucket)
+        log.warning("world state: %s/world.tar.gz %s", self.bucket,
+                    "restored" if found else "not found: a first start")
+        marker.write_text(self.bucket + "\n")
+
+    def _push(self):
+        """world.tar.gz to the bucket now; a failure is logged and the next push retries."""
+        with self.push_lock:
+            try:
+                snapshot.transfer("push", self.ws, self.bucket)
+            except Exception:  # the state stays in the workspace
+                log.exception("world state: push to %s failed", self.bucket)
+
+    def _push_loop(self):
+        while not self.stopping.wait(self.push_every):
+            self._push()
 
     # -- new-PR budget ---------------------------------------------------------------------
 

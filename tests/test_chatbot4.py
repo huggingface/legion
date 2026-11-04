@@ -280,6 +280,34 @@ def test_world_archive_restores_git_reviews_and_merge_hook(setup, tmp_path, monk
     assert json.loads((restored / "eval-queue.jsonl").read_text())["merged_sha"] == result["merged_sha"]
 
 
+def test_bucket_restores_an_empty_workspace_and_pushes_at_close(setup, tmp_path, monkeypatch):
+    """CHATBOT_BUCKET: an empty workspace is restored from world.tar.gz before the world reads
+    it, close() pushes it back, and a workspace of another bucket is refused."""
+    from .test_controller_job import FakeBucket
+
+    world, clone, remote = setup
+    world.close()
+    bucket, hub = FakeBucket(tmp_path / "bucket"), LocalHub(remote)
+    monkeypatch.setattr("snapshot.HubBucketStore", lambda url, token=None: bucket)
+    monkeypatch.setattr(chatbot4, "Hub", lambda repo_id: hub)
+    monkeypatch.setattr(chatbot4, "Repository", lambda root, url, hub: Repository(root, str(remote), hub))
+    monkeypatch.setenv("CHATBOT_BUCKET", "hf://buckets/fake/v8")
+    first = Chatbot4World(tmp_path / "ws1")  # nothing in the bucket yet: a first start
+    rec = submit(first, clone)
+    approve(first, rec)
+    first.close()
+    assert bucket.list("world.tar.gz") == ["world.tar.gz"]
+    restored = Chatbot4World(tmp_path / "ws2")
+    try:
+        assert restored.list_prs()[0]["reviews"]["birch"]["head_sha"] == rec["head_sha"]
+        assert restored.merge_pr(Agent("cedar"), rec["pr"])["merged_sha"] == git(remote, "rev-parse", "main")
+    finally:
+        restored.close()
+    monkeypatch.setenv("CHATBOT_BUCKET", "hf://buckets/fake/other")
+    with pytest.raises(RuntimeError, match="holds the world of hf://buckets/fake/v8"):
+        Chatbot4World(tmp_path / "ws2")
+
+
 def test_bot_cannot_send_signals_to_other_processes(setup):
     _, clone, _ = setup
     (clone / "bot/modules/signals.py").write_text(

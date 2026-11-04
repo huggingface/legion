@@ -308,7 +308,9 @@ merged and closed PRs leave memory an hour after they ended (`ended_at`), for th
 `state` merged, closed or all still return them. While the knob `save.legacy_json` is on
 (default) it also writes the whole state to `prs.json`, keeps every PR in memory (so a rollback
 to `prs.json` loses nothing), and warns at start when the two differ.
-The archive (`snapshot.py`) carries a `backup_to` copy of `state.db`.
+The archive (`snapshot.py`) carries a `backup_to` copy of `state.db`. With `CHATBOT_BUCKET` set (`hf://buckets/<ns>/<bucket>/<run>`),
+chatbot4 restores an empty `CHATBOT_WS` from its `world.tar.gz` before it serves, and pushes it
+every `CHATBOT_BUCKET_PUSH_S` (300) and at exit; a workspace of another bucket is refused.
 
 **Lanes for external writes.** A world that writes to an outside service with one token (a
 Git host, an API) can give each kind of write its own lane, from `flock.world.lanes`:
