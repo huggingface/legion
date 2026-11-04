@@ -23,7 +23,7 @@ RENAMED = {
     "final_done": "loop.final_done", "paused": "swarm.stopped", "remove_swarm": "swarm.removed",
     "launch": "worker.launched", "launch_failed": "worker.launch_failed",
     "launch_refused": "type.launch_refused", "crash": "worker.crashed",
-    "crashloop": "worker.crashloop", "planned_restart": "worker.restarted",
+    "crashloop": "worker.crashloop", "planned_restart": "worker.restarted", "end": "worker.ended",
     "cancel": "worker.cancelled", "retire": "worker.retired", "remove_worker": "worker.removed",
     "release": "worker.released", "memory_rotation": "worker.rotated",
     "sync_failed": "worker.sync_failed",

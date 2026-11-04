@@ -253,14 +253,20 @@ class Client:
                 raise ClientError(unreachable(str(c.base_url).rstrip("/"), self.env)) from None
 
     def answers(self) -> bool:
-        """Whether a controller answers at all (`flock launch` starts one when none does): one
-        GET /healthz, no retries."""
+        """Whether a flock controller answers (`flock launch` starts one when none does): one
+        GET /healthz, no retries, that returns its own fields (not another app on the port).
+        A run dir with no controller host file (nor FLOCK_URL, nor a live local run) has none:
+        False without a call, never the localhost default."""
+        if self.env.get("FLOCK_RUN_DIR") and not self.env.get("FLOCK_URL") \
+                and local_run(self.env) is None:
+            return False
         try:
             with connect(self.env) as c:
                 r = c.get("/healthz", extensions={"timeout": httpx.Timeout(10).as_dict()})
-        except (httpx.HTTPError, ClientError):
+            body = r.json() if r.status_code == 200 else None
+        except (httpx.HTTPError, ClientError, ValueError):  # ValueError: not JSON
             return False
-        return r.status_code < 500
+        return isinstance(body, dict) and "ok" in body and "process" in body
 
     def checkpoint(self) -> dict:
         """Push the controller's state to its bucket now: {"files": n}. ClientError 409 when it

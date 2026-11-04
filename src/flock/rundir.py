@@ -18,6 +18,7 @@ import asyncio
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -83,9 +84,10 @@ def run_context(run_dir: str | Path) -> tuple[dict[str, str], list[str]]:
 
 # ---------------------------------------------------------------- what the spec reads
 
-def spec_keys(data: Any) -> dict[str, tuple[str | None, str]]:
+def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, tuple[str | None, str]]:
     """Name -> (default or None, one-line comment) for every ${VAR} in the raw spec's values
-    (comments in the file are not values), then every secret it names, in spec order."""
+    (comments in the file are not values), then every secret it names, in spec order. A key
+    `cluster` (cluster.env) sets is commented with its value there; a secret's is not shown."""
     out: dict[str, tuple[str | None, str]] = {}
     paths: dict[str, list[str]] = {}
 
@@ -105,16 +107,23 @@ def spec_keys(data: Any) -> dict[str, tuple[str | None, str]]:
                 walk(x, path)
 
     walk(data, "")
-    for name, (default, _) in out.items():
-        where = paths[name][0] + (f" (+{len(paths[name]) - 1} more)" if len(paths[name]) > 1 else "")
-        out[name] = (default, f"{where} (default: {default})" if default is not None
-                     else f"{where} (required: no default)")
     named = [("HF_TOKEN", "bucket sync and the Hub")]
     named += [(p.get("api_key_env"), f"providers.{n}.api_key_env")
               for n, p in (data.get("providers") or {}).items() if isinstance(p, dict)]
     named.append(((data.get("comms") or {}).get("invite_env"), "comms.invite_env"))
     named += [(s, f"types.{n}.secrets") for n, t in (data.get("types") or {}).items()
               if isinstance(t, dict) for s in t.get("secrets") or []]
+    cluster = cluster or {}
+    for name, (default, _) in out.items():
+        where = paths[name][0] + (f" (+{len(paths[name]) - 1} more)" if len(paths[name]) > 1 else "")
+        if name in cluster:
+            from flock.controller.localrun import SECRET_NAME
+
+            secret = name in TOKENS or SECRET_NAME.search(name) or name in {n for n, _ in named}
+            note = f"cluster.env: {'set, not shown' if secret else cluster[name]}"
+        else:
+            note = f"default: {default}" if default is not None else "required: no default"
+        out[name] = (default, f"{where} ({note})")
     for name, where in named:
         if isinstance(name, str) and "${" not in name and name not in out and name not in TOKENS:
             out[name] = (None, f"secret: {where}")
@@ -140,12 +149,13 @@ def _quote(v: str) -> str:
 
 
 def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
-                  rep: InitReport, derived: Mapping[str, str] | None = None) -> None:
+                  rep: InitReport, derived: Mapping[str, str] | None = None,
+                  cluster: Mapping[str, str] | None = None) -> None:
     """Create or complete run.env (mode 600): a missing key is appended, commented out when it
-    has no value (the spec's default then applies); `fill` (the --secrets file) sets keys that
-    are missing or commented out. A set key is never changed: a different `fill` value is
-    reported by name only. `derived`: values init works out (an absolute WORLD_DIR), written
-    like `fill`."""
+    has no value (the spec's default, or `cluster`'s value from cluster.env, then applies);
+    `fill` (the --secrets file) sets keys that are missing or commented out. A set key is never
+    changed: a different `fill` value is reported by name only. `derived`: values init works
+    out (an absolute WORLD_DIR), written like `fill`."""
     derived = derived or {}
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     if path.exists() and path.stat().st_mode & 0o077:
@@ -156,7 +166,7 @@ def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
         if m := _LINE.match(line):
             (commented if m[1] else set_keys).setdefault(m[2], i)
     current = read_env_file(path) if path.exists() else {}
-    keys = spec_keys(data)
+    keys = spec_keys(data, cluster)
     tokens = token_names(data)
     world_tok = next((current[n] for n in tokens[1:] if current.get(n)), secrets.token_urlsafe(32))
     new: list[str] = []
@@ -245,12 +255,26 @@ def copy_profile(src: Path | None, dst: Path, rep: InitReport) -> None:
         raise ValueError(f"--profile {src}: no such file")
     if not dst.exists():
         shutil.copyfile(src, dst)
+        dst.chmod(0o644)  # whatever the umask: the jobs refuse a group-writable one
         rep.created.append(f"{dst} (copy of {src})")
     elif dst.read_bytes() != src.read_bytes():
         rep.notes.append(f"{dst} differs from {src} (kept)")
 
 
 # ---------------------------------------------------------------- checks
+
+def check_cluster_env(path: Path) -> Check:
+    """cluster.env by the rule the Slurm jobs apply before they source it as shell
+    (scripts/slurm/common.sh): owned by this user, not group/world-writable."""
+    st = path.stat()
+    if st.st_uid != os.getuid():
+        return Check("cluster.env", False, f"{path}: owned by uid {st.st_uid}, not you: the "
+                     "jobs refuse it; remove it and rerun `flock init` with --profile")
+    if st.st_mode & 0o022:
+        return Check("cluster.env", False, f"{path}: mode {st.st_mode & 0o777:o} is group/"
+                     f"world-writable: the jobs refuse it; run: chmod go-w {shlex.quote(str(path))}")
+    return Check("cluster.env", True, f"{path}: yours, mode {st.st_mode & 0o777:o}")
+
 
 def planned_agents(spec: SwarmSpec) -> dict[str, int]:
     """Most agents each type can have: replicas or its ramp's max, plus what its spawners may
@@ -507,7 +531,8 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     if experiment and m and m[1] and m[2] and not Path(m[2]).is_absolute() \
             and (Path(experiment) / m[2]).is_dir() and not (exp / m[2]).is_dir():
         derived[m[1]] = str((Path(experiment) / m[2]).resolve())  # world.dir, relative to --from
-    write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived)
+    write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived,
+                  read_env_file(d / CLUSTER_ENV) if (d / CLUSTER_ENV).is_file() else None)
     values = {k: v for f in env_files for k, v in read_env_file(f).items()}  # later wins
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
     try:
@@ -533,4 +558,6 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     if spec.compute.kind == "slurm":  # the job scripts `flock launch` submits; an edited copy is kept
         copy_experiment(SLURM_SCRIPTS, d / "slurm", rep, need=None)
         rep.checks += [check_capacity(spec, secret_env), check_mounts(secret_env)]
+        if (d / CLUSTER_ENV).is_file():
+            rep.checks.append(check_cluster_env(d / CLUSTER_ENV))
     return rep

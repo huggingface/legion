@@ -192,6 +192,7 @@ them); `flock.status.normalise` maps each to one schema:
 | `agent.spawned`, `agent.child_removed` | `spawned`, `child_removed` | parent agent | a child spawned or removed |
 | `worker.launched`, `worker.launch_failed` | `launch`, `launch_failed` | swarm | a worker job submitted or refused |
 | `worker.crashed`, `worker.crashloop`, `worker.restarted` | `crash`, `crashloop`, `planned_restart` | swarm | a worker job ended |
+| `worker.ended` | `end` | swarm | a released swarm's worker job ended as planned: nothing relaunches it |
 | `worker.cancelled`, `worker.retired`, `worker.removed`, `worker.released` | `cancel`, `retire`, `remove_worker`, `release` | swarm | a worker taken down |
 | `worker.rotated`, `worker.sync_failed` | `memory_rotation`, `sync_failed` | swarm | memory rotation; a final sync failed |
 | `type.launch_refused` | `launch_refused` | swarm | a type's launches stop until the next apply |

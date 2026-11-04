@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 
-from flock.client import ClientError
+from flock.client import Client, ClientError
 from flock.models import Event
 
 from .conftest import make_spec
@@ -29,3 +30,34 @@ def test_404_raises_client_error(api):
         api.agent("nobody-0001")
     assert e.value.status == 404 and str(e.value).startswith("error 404: ")
     assert e.value.detail != e.value.body  # the controller's `detail`, unwrapped
+
+
+def test_answers_only_a_flock_controller(api, monkeypatch):
+    assert api.answers()  # the in-process controller's /healthz
+    for reply in ({"text": "<html>a Gradio app</html>"}, {"json": {"status": "ready"}},
+                  {"json": ["ok", "process"]}, {"status_code": 404, "json": {"ok": 1, "process": 1}}):
+        def other_app(*_, kw=reply):  # another app on the port
+            return httpx.Client(base_url="http://localhost:7860", transport=httpx.MockTransport(
+                lambda req: httpx.Response(**{"status_code": 200, **kw})))
+        monkeypatch.setattr("flock.client.connect", other_app)
+        assert not api.answers()
+
+
+def test_a_run_without_a_controller_host_never_falls_back_to_localhost(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no .flock/current here either
+    run = tmp_path / "run"
+    (run / "hosts").mkdir(parents=True)
+    calls = []
+
+    def refused(env):
+        calls.append(env.get("FLOCK_URL"))
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr("flock.client.connect", refused)
+    assert Client.for_run(run, need_host=False, env={"FLOCK_URL": "http://x:1"}).answers() is False
+    assert calls == []  # no request at all: `launch` goes to `up`
+    with pytest.raises(ClientError, match="launch first"):
+        Client.for_run(run, env={})
+    (run / "hosts" / "controller.host").write_text("node3:7999\n")
+    assert Client.for_run(run, env={}).answers() is False
+    assert calls == ["http://node3:7999"]  # the host file's controller is asked

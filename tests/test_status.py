@@ -7,7 +7,8 @@ import itertools
 import json
 import os
 import subprocess
-from datetime import timedelta
+import time
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from typer.testing import CliRunner
@@ -274,7 +275,8 @@ def test_status_reads_an_old_format_sample(app, store, clock, monkeypatch):
     """After a restart `latest()` may be a stored slim sample from an older controller:
     summed `providers`, no `provider_servers`, `workers` as aggregates."""
     store.put_swarm(make_spec(), clock().timestamp())
-    old = {"world": None, "types": {}, "tools": {}, "tokens": {"by_type": {}}, "alerts": [],
+    old = {"world": None, "tools": {}, "tokens": {"by_type": {}}, "alerts": [],
+           "types": {"researcher": {"by_state": {"dead": 2}, "gens": {}, "stuck": []}},
            "providers": {"v": {"waiting": 3.0, "running": 5.0, "kv": 0.4}},
            "workers": {"count": 2, "max_nonreclaim_frac": None, "min_eta_limit_s": None,
                        "restoring": 0, "relaunches": 0}}
@@ -282,6 +284,8 @@ def test_status_reads_an_old_format_sample(app, store, clock, monkeypatch):
     wire(monkeypatch, app)
     r = runner.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "Traceback" not in r.output, r.output
+    # its per-type counts are from before the restart (agents `dead` then): not shown
+    assert "dead:2" not in r.output and "predates the controller's restart" in r.output
     for bad in ({"v": None}, [], {"v": {"g": 1}}):
         assert fs.servers({"body": {"provider_servers": bad}}) in ({}, {"v": {}})
         assert fs.dead_servers({"body": {"provider_servers": bad}}) == set()
@@ -322,3 +326,30 @@ def test_hidden_old_events_and_agents(monkeypatch):
     assert lines[0].split() == ["name", "state", "provider", "worker", "turns", "pending", "cost",
                                 "last_heartbeat"]
     assert lines[1].split()[:3] == ["l-0000-a-0001", "working", "-"]  # awk '$2=="working"'
+
+
+def test_status_prints_the_age_of_heartbeat_and_snapshot_numbers(monkeypatch):
+    now = time.time()
+    hb = datetime.fromtimestamp(now - 12, UTC).isoformat()
+    rows = [{"name": "r-0001", "state": "idle", "type": "r", "worker": "w0", "turns": 0,
+             "pending": 0, "cost_usd": 0.0, "last_heartbeat": hb}]
+    snap = {"ts": now - 34, "body": {"alerts": [], "workers": {}, "tools": {},
+                                     "types": {"r": {"by_state": {"idle": 1}, "gens": {}, "stuck": []}}}}
+    st = {"swarm": "s", "agents_total": 1, "workers_total": 1, "pending_prompts": 0,
+          "cost_usd": 0.0, "types": {}}
+    monkeypatch.setattr(fs, "view", lambda *a, **k: {
+        "verdict": {"level": "ok", "reasons": []}, "status": st, "health": snap,
+        "workers": [], "agents": rows})
+    out = runner.invoke(cli.app, ["status", "s", "--type", "r"]).output
+    assert "type r: idle:1  revs -  (health 34 s ago)" in out
+    assert "$0.0000  12 s ago" in out  # turns and cost as of that heartbeat
+
+
+def test_costs_below_a_cent_keep_four_decimals(capsys):
+    t = {"name": "r", "health": "ok", "replicas": 2, "agents_by_state": {"idle": 2},
+         "workers_by_state": {}, "cost_usd": 0.0008}
+    cli._print_status({"swarm": "s", "agents_total": 2, "workers_total": 1, "pending_prompts": 0,
+                       "cost_usd": 0.0008, "types": {"r": t}})
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].endswith("cost=$0.0008") and out[2].endswith("$0.0008")  # not $0.00
+    assert cli._usd(1.234) == "$1.23" and cli._usd(0.01) == "$0.01"

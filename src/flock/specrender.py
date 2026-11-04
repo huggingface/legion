@@ -27,19 +27,21 @@ _VAR = re.compile(r"\$\$(?=\{)|\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
 
 def read_env_file(path: str | Path) -> dict[str, str]:
-    """NAME=value lines (`export ` prefix, `#` comments and surrounding quotes allowed).
+    """NAME=value lines (`export ` prefix, `#` comments, also after a value, and quotes allowed).
     shortcut: no shell expansion inside values; use a real shell `. run.env` if one needs it."""
     env = {}
     for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        name, sep, value = line.removeprefix("export ").partition("=")
-        name, value = name.strip(), value.strip()
+        name, sep, raw = line.removeprefix("export ").partition("=")
+        name, value = name.strip(), raw.strip()
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError(f"{path}:{n}: expected NAME=value")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        if value and value[0] in "'\"" and (end := value.find(value[0], 1)) > 0:
+            value = value[1:end]  # what follows the closing quote is a comment
+        else:
+            value = re.split(r"\s+#", raw, maxsplit=1)[0].strip()  # `NAME=v  # note`, as a shell reads it
         env[name] = value
     return env
 

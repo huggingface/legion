@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
 
+from flock import status as fs
 from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import (
     LAUNCH_TIMEOUT,
@@ -229,6 +230,19 @@ def test_drained_completed_is_planned_restart(store, jobs, clock, tick):
     jobs.set_stage(jobs.job_for(W0), "COMPLETED")
     actions = tick()  # draining workers are inspected even with a fresh heartbeat
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
+
+
+def test_drained_completed_in_a_released_swarm_ends(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    store.put_swarm_flags("demo", {"released": {"since": 0, "reason": "", "by": "op"}})
+    assert "release" in kinds(tick())  # the drain
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)], draining=True)
+    jobs.set_stage(jobs.job_for(W0), "COMPLETED")
+    assert kinds(tick()) == ["end"]  # no restart, no launch
+    (ev,) = [e for e in store.read_events("_swarm.demo", 0) if e["type"] == "end"]
+    assert fs.normalise(ev, "demo")["name"] == "worker.ended" and ev["data"]["detail"] == "COMPLETED"
 
 
 def test_completed_without_drain_is_a_crash(store, jobs, clock, tick):
