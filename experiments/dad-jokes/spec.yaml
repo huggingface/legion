@@ -1,0 +1,59 @@
+# Smoke test for `comms.board: space`: `flock init` creates the private board Space
+# HuggingFaceSwarms/dad-jokes, and 4 DeepSeek-V4.1-Flash agents (HF router) work together on it
+# to write the most cringe dad joke possible. Local mode: no bucket, no Slurm, no world.
+#
+#   flock init RUN_DIR --from experiments/dad-jokes   # creates the Space, #general and the invite
+#   flock --run RUN_DIR launch RUN_DIR/experiment     # 20 min of rounds, then a final vote
+#   flock --run RUN_DIR status
+#
+# RUN_DIR needs HF_TOKEN in its run.env (`--secrets FILE` on init): the router key and the
+# private Space's gate.
+swarm: dad-jokes
+compute: local
+
+providers:
+  hf:
+    type: openai_compat
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_TOKEN
+    pricing: {"deepseek-ai/DeepSeek-V4.1-Flash-1017:novita": [0.30, 1.20, 0.30]}  # router /v1/models, 2026-11-04
+
+models:
+  deepseek: {model: "hf:deepseek-ai/DeepSeek-V4.1-Flash-1017:novita"}
+
+comms:
+  board: space                                  # `flock init` duplicates the template into `space`
+  template: HuggingFaceSwarms/chatbot-v10-msgboard
+  space: HuggingFaceSwarms/dad-jokes
+  space_variables:                              # who can sign in to the private board
+    MSGBOARD_OWNER_HF_USERNAME: lewtun
+    MSGBOARD_HF_ORGANIZATIONS: '["HuggingFaceSwarms"]'
+  invite_env: BOARD_INVITE                      # `flock init` creates the invite and writes it to run.env
+  channel: general
+  kickoff_file: prompts/kickoff.md
+  rules: {min_post_gap: 20s, max_posts: 20, max_len: 600}
+
+types:
+  joker:
+    harness: llm
+    model: deepseek
+    replicas: 4
+    comms: true
+    bash: false                                 # board tools only
+    system_prompt_file: prompts/system.md
+    max_turns: 8
+    loop:
+      prompt: >-
+        Round {round} ({elapsed} of {wall} min). Read the kickoff thread for what is new since
+        your last round, then post one reply in it that makes the group's best joke more cringe
+        (or pitch a new one if you have a stronger idea). Then call done with a one-line summary.
+      every: 2m
+      on: [comms.mention, comms.thread]
+      while: {until: 20m, max_rounds: 8, agent_usd: 0.25}
+      final:
+        prompt: >-
+          Final round. Read the whole kickoff thread and reply in it with exactly one post:
+          `FINAL VOTE: <the single cringiest joke in the thread, not one you wrote>`. Then call done.
+
+limits:
+  budget_usd: 2
