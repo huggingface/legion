@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
@@ -895,7 +895,8 @@ class ComputeSpec(_Removable):
     (`flock launch` runs them on this machine). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
-    The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
+    `worker_unknown_after`, `worker_dead_after` and `crash_backoff` are for every backend
+    (docs/live.md "Worker liveness"). The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
     fills unset keys (then built-in defaults). `types` sets
     per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
 
@@ -932,6 +933,30 @@ class ComputeSpec(_Removable):
     # controller's FLOCK_SLURM_MAX_CPUS/_MEM, from the cluster profile, still apply at launch)
     max_cpus: int | None = Field(default=None, ge=1)
     max_mem: str | None = None
+    # worker liveness (docs/live.md "Worker liveness"); None: the backend's default (`liveness`)
+    worker_unknown_after: str | None = None
+    worker_dead_after: str | None = None
+    crash_backoff: str | None = None
+
+    @field_validator("worker_unknown_after", "worker_dead_after", "crash_backoff")
+    @classmethod
+    def _timing(cls, v: str | None) -> str | None:
+        return None if v is None else _positive_duration(v)
+
+    @model_validator(mode="after")
+    def _unknown_before_dead(self) -> ComputeSpec:
+        lv = self.liveness()
+        if lv.unknown_after >= lv.dead_after:
+            raise ValueError(f"worker_unknown_after ({lv.unknown_after:g}s) must be shorter than "
+                             f"worker_dead_after ({lv.dead_after:g}s)")
+        return self
+
+    def liveness(self) -> Liveness:
+        """Worker liveness timings in seconds: the keys set here, else the backend's defaults."""
+        dflt = (LOCAL_LIVENESS if self.kind == "local"
+                else (UNKNOWN_AFTER, DEAD_AFTER, CRASH_BACKOFF))
+        keys = (self.worker_unknown_after, self.worker_dead_after, self.crash_backoff)
+        return Liveness(*(parse_duration(v or d).total_seconds() for v, d in zip(keys, dflt)))
 
 
 class SwarmSpec(BaseModel):
@@ -1944,8 +1969,22 @@ class PreflightReport(BaseModel):
 # --------------------------------------------------------------------------- constants
 
 HEARTBEAT_INTERVAL = timedelta(seconds=30)
+# Worker liveness defaults; a spec's `compute:` overrides them (ComputeSpec.liveness).
 UNKNOWN_AFTER = timedelta(seconds=90)
 DEAD_AFTER = timedelta(seconds=180)
+CRASH_BACKOFF = timedelta(seconds=30)  # first relaunch wait, doubling per crash in a row
+# compute local: 3 and 6 missed local heartbeats (5 s), the jobs ratio; an exited worker
+# process is caught on the next reconcile pass anyway, so these only time out a hung one
+LOCAL_LIVENESS = (timedelta(seconds=15), timedelta(seconds=30), timedelta(seconds=2))
+
+
+class Liveness(NamedTuple):
+    """A swarm's worker liveness timings, in seconds (`ComputeSpec.liveness`)."""
+
+    unknown_after: float
+    dead_after: float
+    crash_backoff: float
+
 CRASHLOOP_THRESHOLD = 5
 LAUNCHES_PER_WINDOW = 400  # per 5-minute Hub rate-limit window, PRO assumption
 RATE_WINDOW = timedelta(minutes=5)
