@@ -8,6 +8,8 @@ import pytest
 from flock.cli import load_spec
 from flock.models import ALL_COMMS_TOOLS, comms_tools
 
+from .test_hierarchy_experiment import module
+
 ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "teams"
 REPO = "HuggingFaceSwarms/SwarmChat-v7"
@@ -56,3 +58,13 @@ def test_one_type_no_spawn_and_the_rules():
     assert f"`{REPO}` on Hugging Face" in text
     assert f"`https://huggingface.co/datasets/{REPO}` into `chatbot-swarm`" in text
     assert spec.comms.url == "https://huggingfaceswarms-chatbot-v7-msgboard.hf.space"
+
+
+def test_render_and_waves_read_this_folder():
+    data = module(EXP, "render").render()  # jobs: the Slurm overlay
+    assert data["swarm"] == "teams" and set(data["types"]) == {"agent"} and "spawn" not in data
+    smoke = module(EXP, "render").render("smoke", "slurm")  # the Slurm smoke
+    assert smoke["types"]["agent"]["loop"]["while"]["until"] == "30m"
+    waves = module(EXP, "waves").load(EXP / "waves.yaml")
+    assert waves.type == "agent" and waves.cap == 250
+    assert waves.events == [(600 * i, 20 * (i + 1)) for i in range(12)] + [(7200, 250)]
