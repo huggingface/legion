@@ -279,3 +279,21 @@ def test_dashboard_refused_with_compute_local_and_needs_a_viewer():
         _spec(compute="local")
     with pytest.raises(ValueError, match="viewer"):
         _spec(dashboard={k: v for k, v in DASH.items() if k != "viewer"})
+
+
+async def test_worker_join_sends_the_hf_token_only_to_hf_spaces(monkeypatch):
+    import httpx
+
+    from flock.worker.identity import join
+
+    monkeypatch.setenv("HF_TOKEN", "hf_x")
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.host, req.headers.get("authorization")))
+        return httpx.Response(200, json={"token": "t", "principal": {"id": 3, "external_id": "a"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        await join("https://x.hf.space/boards/b", "code", "a", client=c)
+        await join("https://board.invalid/boards/b", "code", "a", client=c)
+    assert seen == [("x.hf.space", "Bearer hf_x"), ("board.invalid", None)]
