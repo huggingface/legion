@@ -137,12 +137,14 @@ def test_slots_count_ramp_max_and_spawned_children(tmp_path):
     spec = {**SPEC, "types": {
         "lead": {**t, "replicas": 0, "workers": {"initial": 1},
                  "replicas_ramp": {"start": 1, "add": 1, "every": "1m", "max": 3}},
-        "helper": {**t, "replicas": 0, "workers": {"initial": 0, "max_extra": 2}}},
+        "helper": {**t, "replicas": 0, "workers": {"initial": 0, "max_extra": 2}},
+        "free": {**t, "replicas": 0, "replicas_ramp": {"start": 1, "add": 1, "every": "1m", "max": 9}}},
         "spawn": {"lead": {"types": {"helper": 2}}}}
     c = rundir.check_slots(_spec(tmp_path, spec))
     assert c.ok is False and sorted(c.lines) == [
         "OVER: type helper: 6 agents planned, 2 workers x 2 = 4 slots",
-        "OVER: type lead: 3 agents planned, 1 workers x 2 = 2 slots"]
+        "OVER: type lead: 3 agents planned, 1 workers x 2 = 2 slots",
+        "type free: 9 agents planned, workers unset: sized from agents"]
 
 
 def test_tokens_must_match(tmp_path):
