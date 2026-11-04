@@ -192,6 +192,7 @@ compute:
   container_image: null      # FLOCK_SLURM_CONTAINER_IMAGE -> FLOCK_CONTAINER_IMAGE
   max_cpus: null             # FLOCK_SLURM_MAX_CPUS (a profile key)
   max_mem: null              # FLOCK_SLURM_MAX_MEM (a profile key)
+  worker_dead_after: 180s    # no env; also worker_unknown_after, crash_backoff (docs/live.md)
   types:                     # per type: partition, cpus, mem, time, container_root
     interviewer: {cpus: 2, mem: 3800M}
 ```
@@ -275,7 +276,8 @@ crashlooping). The new job registers with a fresh incarnation (the old process g
 exits without syncing), restores every agent from the bucket, and the interrupted agents get
 the type's `resume_prompt`. Without the flag (a hard kill), the unrequested `CANCELLED` (or
 `PREEMPTED`, `NODE_FAIL`, exit 75) gives the same planned restart once the job is checked
-(after 90 s of silence); `TIMEOUT` is planned as before.
+(after `compute.worker_unknown_after` of silence, 90 s by default); `TIMEOUT` is planned as
+before.
 
 The controller and `python -m flock.world serve` treat SIGUSR1 like SIGTERM, once (one final state push
 for the controller).

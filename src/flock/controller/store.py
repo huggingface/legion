@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from flock.models import Event, SwarmSpec, TokenUsage
+from flock.models import ComputeSpec, Event, Liveness, SwarmSpec, TokenUsage
 
 DB_NAME = "controller.db"
 
@@ -220,6 +220,7 @@ class Store:
         # HMAC key for per-agent tokens (controller/spawn.py), derived from the controller
         # token and never stored: the table holds only hashes.
         self.agent_token_key: bytes | None = None
+        self._liveness: dict[str, Liveness] = {}  # swarm -> its spec's timings (`liveness`)
 
     def _migrate(self) -> None:
         """Additive column changes for databases created by an older version."""
@@ -365,11 +366,13 @@ class Store:
                 )
             # Re-applying the spec clears crashlooping, launch_refused and their streaks.
             self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
+        self._liveness[spec.swarm] = spec.compute.liveness()
         self.listener("reconcile", "")
 
     def update_swarm_spec(self, spec: SwarmSpec) -> None:
         """Replace a stored spec in place (no re-apply side effects): a world that moved."""
         self._x("UPDATE swarms SET spec = ? WHERE name = ?", [spec.model_dump_json(), spec.swarm])
+        self._liveness[spec.swarm] = spec.compute.liveness()
 
     def record_spec(self, spec: SwarmSpec, now: float, source: dict[str, Any],
                     diff: list[str], new: bool) -> int:
@@ -405,6 +408,17 @@ class Store:
             row["spec"] = SwarmSpec.model_validate_json(row["spec"])
         return row
 
+    def liveness(self, swarm: str) -> Liveness:
+        """The swarm's worker liveness timings, kept from its last spec write: every state
+        check reads them, so the spec is not parsed each time. Defaults for an unknown swarm."""
+        lv = self._liveness.get(swarm)
+        if lv is None:
+            row = self.get_swarm(swarm)
+            lv = (row["spec"].compute if row else ComputeSpec()).liveness()
+            if row:
+                self._liveness[swarm] = lv
+        return lv
+
     def list_swarms(self) -> list[Row]:
         rows = self._q("SELECT * FROM swarms ORDER BY name")
         for row in rows:
@@ -418,6 +432,7 @@ class Store:
     def delete_swarm(self, name: str) -> None:
         with self.transaction():
             self._x("DELETE FROM swarms WHERE name = ?", [name])
+            self._liveness.pop(name, None)
             self._x("DELETE FROM types WHERE swarm = ?", [name])
             self._x("DELETE FROM tool_bundles WHERE swarm = ?", [name])
             self._x("DELETE FROM loops WHERE swarm = ?", [name])

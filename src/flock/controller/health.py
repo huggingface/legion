@@ -500,7 +500,9 @@ class Health:
         types: dict[str, Any] = {}
         baseline = self._since or now
         agents = self.store.list_agents(swarm)
-        states = {a["name"]: agent_state(a, workers.get(a["worker"]), now).value for a in agents}
+        lv = spec.compute.liveness()
+        states = {a["name"]: agent_state(a, workers.get(a["worker"]), now, lv).value
+                  for a in agents}
         pending = self.store.pending_counts(swarm)
         if prev_tick and now > prev_tick:
             self._sample_states(swarm, agents, states, pending, min(now - prev_tick, 2 * SAMPLE_S),
