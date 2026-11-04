@@ -18,6 +18,7 @@ import asyncio
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -245,12 +246,26 @@ def copy_profile(src: Path | None, dst: Path, rep: InitReport) -> None:
         raise ValueError(f"--profile {src}: no such file")
     if not dst.exists():
         shutil.copyfile(src, dst)
+        dst.chmod(0o644)  # whatever the umask: the jobs refuse a group-writable one
         rep.created.append(f"{dst} (copy of {src})")
     elif dst.read_bytes() != src.read_bytes():
         rep.notes.append(f"{dst} differs from {src} (kept)")
 
 
 # ---------------------------------------------------------------- checks
+
+def check_cluster_env(path: Path) -> Check:
+    """cluster.env by the rule the Slurm jobs apply before they source it as shell
+    (scripts/slurm/common.sh): owned by this user, not group/world-writable."""
+    st = path.stat()
+    if st.st_uid != os.getuid():
+        return Check("cluster.env", False, f"{path}: owned by uid {st.st_uid}, not you: the "
+                     "jobs refuse it; remove it and rerun `flock init` with --profile")
+    if st.st_mode & 0o022:
+        return Check("cluster.env", False, f"{path}: mode {st.st_mode & 0o777:o} is group/"
+                     f"world-writable: the jobs refuse it; run: chmod go-w {shlex.quote(str(path))}")
+    return Check("cluster.env", True, f"{path}: yours, mode {st.st_mode & 0o777:o}")
+
 
 def planned_agents(spec: SwarmSpec) -> dict[str, int]:
     """Most agents each type can have: replicas or its ramp's max, plus what its spawners may
@@ -533,4 +548,6 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     if spec.compute.kind == "slurm":  # the job scripts `flock launch` submits; an edited copy is kept
         copy_experiment(SLURM_SCRIPTS, d / "slurm", rep, need=None)
         rep.checks += [check_capacity(spec, secret_env), check_mounts(secret_env)]
+        if (d / CLUSTER_ENV).is_file():
+            rep.checks.append(check_cluster_env(d / CLUSTER_ENV))
     return rep
