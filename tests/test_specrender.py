@@ -56,6 +56,12 @@ def test_env_files_win_over_the_process_environment(tmp_path, monkeypatch):
         read_env_file(tmp_path / "bad.env")
 
 
+def test_env_file_trailing_comments_as_a_shell_reads_them(tmp_path):
+    f = tmp_path / "cluster.env"
+    f.write_text("P=cpu   # the partition\nU=https://h/a#b\nQ='x # y'  # quoted\nE=  # empty\n")
+    assert read_env_file(f) == {"P": "cpu", "U": "https://h/a#b", "Q": "x # y", "E": ""}
+
+
 def test_cli_apply_with_env_files_and_no_overlay(tmp_path, monkeypatch, app, store):
     wire(monkeypatch, app)
     monkeypatch.delenv("NS", raising=False)
