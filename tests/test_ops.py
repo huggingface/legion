@@ -51,21 +51,3 @@ def test_start_local_refuses_another_swarms_run(tmp_path, monkeypatch):
     assert ops.start_local(make_spec("other"), "spec.yaml") is None  # already serves it
     monkeypatch.setenv("FLOCK_URL", "http://elsewhere:1")
     assert ops.start_local(make_spec(), "spec.yaml") is None  # an explicit controller
-
-
-def test_release_wait_polls_until_no_worker_runs(monkeypatch):
-    class Fake:
-        def __init__(self):
-            self.live = [[{"job_id": "j1"}, {"job_id": "j2"}], [{"job_id": "j2"}],
-                         [{"job_id": None}]]
-
-        def workers(self, swarm):
-            return self.live.pop(0)
-
-        def swarm(self, swarm):
-            return {"status": {"released": {"unsynced": {"a-0001": "503"}}}}
-
-    seen: list[int] = []
-    monkeypatch.setattr(ops, "_sleep", lambda s: None)
-    assert ops.release_wait(Fake(), "demo", progress=seen.append) == {"a-0001": "503"}
-    assert seen == [2, 1]

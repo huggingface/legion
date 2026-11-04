@@ -4,8 +4,7 @@ running the `llm` harness against tests/fake_openai.py. No HF token, bucket or n
 1. `python -m flock.controller.localrun --prompt ... --until idle`: 3 agents each get the
    prompt, finish a turn, the run stops on its own, exits 0 and leaves the bundle (run.json,
    events.jsonl, events/<agent>.jsonl).
-2. `flock launch` starts it in the background; `flock prompt` / `events` / `status` find it
-   through `.flock/current`; `flock stop --release` ends it cleanly."""
+`flock launch` in the background, through its lifecycle: tests/test_runs.py."""
 
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-import yaml
 
 from . import fake_openai
 
@@ -48,10 +46,6 @@ def fake_server(tmp_path):
 def _env(tmp_path: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("FLOCK_")}
     return {**env, "FAKE_KEY": "fake-key", "HOME": str(tmp_path / "home")}
-
-
-def _flock(*args: str) -> list[str]:
-    return [sys.executable, "-m", "flock.cli", *args]
 
 
 def _localrun(*args: str) -> list[str]:
@@ -116,53 +110,6 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
             turns[x["agent"]] = turns.get(x["agent"], 0) + x["turns"]
     assert turns == dict.fromkeys(AGENTS, 1)
     assert json.loads((ctl / "run.json").read_text())["status"] == "ended"
-
-
-def test_launch_in_background_release_resume_delete(tmp_path, fake_server):
-    (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url))
-    env = _env(tmp_path)
-
-    def flock(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(_flock(*args), cwd=tmp_path, env=env, capture_output=True,
-                              check=False, text=True, timeout=120)
-
-    current = tmp_path / ".flock" / "current"
-    try:
-        r = flock("launch", "spec.yaml", "--skip-preflight")
-        assert r.returncode == 0 and "local run" in r.stdout, r.stdout + r.stderr
-        assert current.exists()
-        r = flock("prompt", "writer-0001", "bash: echo second-terminal")
-        assert r.returncode == 0, r.stdout + r.stderr
-        end = time.monotonic() + 40
-        while True:
-            r = flock("status", "writer-0001", "--events")
-            assert r.returncode == 0, r.stderr
-            if "agent.turn_ended" in r.stdout:
-                break
-            assert time.monotonic() < end, r.stdout
-            time.sleep(0.5)
-        assert "second-terminal" in r.stdout
-        r = flock("status", "hello")
-        assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
-        r = flock("stop", "hello", "--release")  # workers freed, the controller stays
-        assert r.returncode == 0 and "released" in r.stdout, r.stdout + r.stderr
-        assert current.exists()
-        r = flock("launch", "spec.yaml")  # resumes the same swarm, as on any backend
-        assert r.returncode == 0 and "held: nothing" in r.stdout, r.stdout + r.stderr
-        r = flock("status", "hello")
-        assert r.returncode == 0 and "writer" in r.stdout, r.stdout + r.stderr
-        r = flock("stop", "hello", "--delete", "--yes")  # ends the run: the bundle
-        assert r.returncode == 0 and "bundle:" in r.stdout, r.stdout + r.stderr
-    finally:
-        if (info := current.exists() and json.loads(current.read_text())):
-            os.killpg(info["pid"], signal.SIGKILL)
-    run = _run_dir(tmp_path)
-    doc = json.loads((run / "run.json").read_text())
-    assert doc["stop_reason"] == "interrupted"
-    one = next(a for a in doc["agents"] if a["name"] == "writer-0001")
-    assert one["turns_completed"] == 1
-    assert yaml.safe_load(yaml.safe_dump(doc["spec"]))["compute"] == {"kind": "local"}
-    assert not current.exists()
 
 
 def test_flock_run_ctrl_c_kills_running_tools(tmp_path, fake_server):

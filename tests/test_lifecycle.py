@@ -155,26 +155,6 @@ def test_two_launches_create_once(tmp_path, monkeypatch, app, store):
 # ----------------------------------------------------------------- (e) resume, (f) update
 
 
-def test_launch_resumes_ignoring_replicas_and_refuses_another_spec(
-        tmp_path, monkeypatch, app, store):
-    wire(monkeypatch, app)
-    f = write_spec(tmp_path / "spec.yaml", make_spec())
-    assert runner.invoke(cli.app, ["launch", f]).exit_code == 0
-    live = store.get_swarm("demo")["spec"]
-    live.types["researcher"].replicas = 7  # what a ramp does to the stored count
-    store.update_swarm_spec(live)
-    assert runner.invoke(cli.app, ["stop", "demo", "--release"] + ["--reason", "x"],
-                         catch_exceptions=False).exit_code == 0  # no workers: nothing to wait for
-    assert store.swarm_flags("demo")["released"]["reason"] == "x"
-    r = runner.invoke(cli.app, ["launch", f])
-    assert r.exit_code == 0 and "held: nothing" in r.output, r.output
-    assert "released" not in store.swarm_flags("demo")
-    assert store.get_swarm("demo")["spec"].types["researcher"].replicas == 7
-    write_spec(tmp_path / "spec.yaml", make_spec(researcher={"replicas": 3, "system_prompt": "new"}))
-    r = runner.invoke(cli.app, ["launch", f])
-    assert r.exit_code == 1 and "run `flock update` first" in r.output
-
-
 def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions(
         tmp_path, monkeypatch, app, store, tick):
     wire(monkeypatch, app)

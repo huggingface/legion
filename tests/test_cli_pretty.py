@@ -5,10 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from typer.testing import CliRunner
-
 from flock import cli
-from flock.client import Client
 from flock.models import Event
 from flock.status import normalise
 from flock.worker.events import SessionLog
@@ -56,18 +53,3 @@ def test_pretty_lines(tmp_path):
         "08:54:50   t-1 agent.turn_ended completed claude-haiku-5-5 in=120 out=30",
         "08:54:50     - agent.spawned child=leader-0000-analyst-0001 type=analyst depth=0 key=c1",
     ]
-
-
-def test_events_flag(tmp_path, monkeypatch):
-    evs = stream(tmp_path)
-    pages = {"/agents/leader-0000": AGENT, "/agents/leader-0000/events": {"events": evs,
-                                                                         "next": len(evs)}}
-    monkeypatch.setattr(Client, "_call", lambda _, m, path, **k: pages[path])
-    r = CliRunner().invoke(cli.app, ["status", "leader-0000", "--events"])
-    assert r.exit_code == 0 and r.output.splitlines()[1].endswith("analyst children now.")
-    r = CliRunner().invoke(cli.app, ["status", "leader-0000", "--events", "--json",
-                                     "--only", "agent.turn"])
-    (ended,) = [json.loads(x) for x in r.output.splitlines()]
-    assert ended == {"name": "agent.turn_ended", "ts": evs[4]["ts"], "swarm": "s",
-                     "agent": "leader-0000", "type": "leader",
-                     "data": {**evs[4]["data"]["data"], "turn_id": "t-1"}}

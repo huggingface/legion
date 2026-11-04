@@ -15,6 +15,7 @@ def test_lifecycle(tiny):
     spec = tiny.spec(replicas=1)
     out = tiny.flock("launch", spec, "--skip-preflight")
     assert "local run " in out and "tiny  agents=0" in out and "gen 1" in out, out
+    assert "writer  ok      1" in out, out
     assert "warning: fake:fake-model: unverified (preflight skipped)" in out
     run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
 
@@ -51,7 +52,8 @@ def test_lifecycle(tiny):
 
     # stop holds: a prompt waits, launch SWARM resumes and it is delivered
     tiny.flock("stop", "tiny", "--type", "nope", code=1)
-    assert tiny.flock("stop", "tiny", "--reason", "lunch").strip() == "tiny: held: type writer"
+    out = tiny.flock("stop", "tiny", "--type", "writer", "--reason", "lunch")
+    assert out.strip() == "tiny: held: type writer", out
     tiny.flock("prompt", "writer-0000", "bash: echo two")
     out = tiny.flock("status", "tiny")
     assert "HELD type writer: lunch (by operator" in out and "pending=1" in out, out
@@ -62,8 +64,9 @@ def test_lifecycle(tiny):
 
     # stop --release frees the workers and keeps everything; launch FOLDER resumes the
     # sessions, refused while the folder differs from the running spec (replicas aside)
-    out = tiny.flock("stop", "tiny", "--release")
-    assert "released: every agent synced, compute freed; `flock launch tiny` resumes" in out, out
+    out = tiny.flock("stop", "tiny", "--release", "--reason", "night")
+    assert "releasing: 1 workers still running" in out, out  # it waited for the worker
+    assert "released: every agent synced, compute freed; `flock launch tiny` resumes" in out
     assert "controller kept: a local run keeps its controller" in out
     out = tiny.flock("status", "tiny")
     assert "RELEASED since" in out and "workers: dead:1" in out, out
@@ -82,6 +85,7 @@ def test_lifecycle(tiny):
         "swarm.stopped", "swarm.resumed",  # stop, launch
         "swarm.released", "swarm.stopped", "worker.released", "worker.ended",  # --release
         "swarm.unreleased", "swarm.resumed", "worker.launched"]  # launch
+    assert tiny.events("tiny", "swarm.released")[0]["data"]["reason"] == "night"
 
     # stop --delete ends the local run: the bundle
     out = tiny.flock("stop", "tiny", "--delete", "--yes")
