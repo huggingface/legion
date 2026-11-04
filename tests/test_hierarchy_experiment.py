@@ -1,6 +1,8 @@
 """The hierarchy experiment: coordinators spawn up to four workers; workers cannot spawn."""
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
 
 from flock.cli import load_spec
@@ -12,6 +14,13 @@ ROOT = Path(__file__).resolve().parents[1] / "experiments"
 EXP = ROOT / "hierarchy"
 REPOS = {"hierarchy": "HuggingFaceSwarms/SwarmChat-v5", "voting": "HuggingFaceSwarms/SwarmChat-v6"}  # one dataset each
 SHARED = "You are one of several agents improving " + REPOS["hierarchy"]
+
+
+def module(exp: Path, name: str):
+    spec = importlib.util.spec_from_file_location(f"{exp.name}_{name}", exp / f"{name}.py")
+    mod = sys.modules[spec.name] = importlib.util.module_from_spec(spec)  # dataclasses need it
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def check_types(exp: Path):
@@ -58,6 +67,17 @@ def test_types_prompts_and_spawn_policy():
     assert spec.limits.alive >= 50 + 4 * 50
     assert spec.types["coordinator"].workers.initial * 12 >= 50
     assert spec.types["worker"].workers.max_extra * 12 >= 200
+
+
+def test_render_and_waves_read_this_folder():
+    data = module(EXP, "render").render()
+    assert data["swarm"] == "hierarchy" and set(data["types"]) == {"coordinator", "worker"}
+    assert "coordinator.md" in data["types"]["coordinator"]["system_prompt_append_file"]
+    smoke = module(EXP, "render").render("smoke")
+    assert all(t["loop"]["while"]["until"] == "30m" for t in smoke["types"].values())
+    waves = module(EXP, "waves").load(EXP / "waves.yaml")
+    assert waves.type == "coordinator" and waves.cap == 50
+    assert waves.events == [(0, 10), (600, 20), (1200, 30), (1800, 40), (2400, 50)]
 
 
 async def test_coordinator_spawns_four_workers_and_workers_cannot_spawn(client, app, store, tick):

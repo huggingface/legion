@@ -1,6 +1,6 @@
 """experiments/chatbot-v2/selfhosted: the render (N teams, price 0, no $ caps, continuous
 cadence), the load smoke's analysis, and an offline run of a rendered 4-team swarm under
-a local run with the fakes: phase 1 isolates every team from the 3 others, the rounds come
+`flock run` with the fakes: phase 1 isolates every team from the 3 others, the rounds come
 back to back (`every: turn_end`), price 0 never stops anything; phase 2 (a second run on the
 same, merged workspace) reads across teams and promotes."""
 
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -17,8 +18,8 @@ import yaml
 
 from flock.cli import load_spec
 
-from .test_chatbot_experiment import _norm, fakes, script
-from .test_local_run_e2e import _env
+from .test_chatbot_experiment import _norm, _results, _wlog, fakes, script
+from .test_local_run_e2e import _bundle_events, _env, _flock
 from .test_world import ROOT
 
 __all__ = ["fakes"]
@@ -125,6 +126,84 @@ def _scripted(exp: Path, f: str, model_url: str, board_url: str, invite_env: str
 
 def _ts(e: dict) -> float:
     return dt.datetime.fromisoformat(e["ts"]).timestamp()
+
+
+def test_four_teams_offline_continuous_price_zero(tmp_path, fakes, monkeypatch):
+    model_url, board, board_url = fakes
+    exp, _ = _render(tmp_path, monkeypatch, "--teams", "4", "--per-team", "ds=1,glm=1",
+                     MODEL_DS="fake-model", MODEL_GLM="fake-model",
+                     SELFHOSTED_BASE_URL=model_url)
+    teams = "abcd"
+    agents = [f"{m}-{t}-0000" for t in teams for m in ("ds", "glm")]
+    p1 = {t: script(("write_file", {"path": f"teams/{t}/agents/{{me}}/bot/__main__.py",
+                                    "content": MAIN}),
+                    ("write_file", {"path": f"teams/{t}/agents/{{me}}/bot/words.py",
+                                    "content": WORDS}),
+                    *[("read_file", {"path": f"teams/{u}/agents/ds-{u}-0000/bot/words.py"})
+                      for u in teams if u != t],
+                    ("list_files", {"prefix": "teams/"}),
+                    ("promote_best", {"path": f"teams/{t}/agents/{{me}}/bot", "reason": "x"}),
+                    ("done", {"summary": "phase 1"})) for t in teams}
+    wait = {t: script(("done", {"summary": "round"})) for t in teams}
+    _scripted(exp, "spec.yaml", model_url, board_url, "FAKE_INVITE", p1, wait)
+    ws = tmp_path / "ws"
+    env = {**_env(tmp_path), "FAKE_INVITE": board.invite, "CHATBOT_WORLD_TOKEN": "w0rld-t0ken",
+           "CHATBOT_WS": str(ws), "CHATBOT_CONFIG": str(exp / "world.yaml"),
+           "SELFHOSTED_API_KEY": "fake-key"}
+    r = subprocess.run(_flock("run", "spec.yaml", "--until", "idle", "--skip-preflight"),
+                       cwd=exp, env=env, capture_output=True, text=True, timeout=240, check=False)
+    assert r.returncode == 0 and "stopping (idle)" in r.stdout, r.stdout[-3000:] + r.stderr
+    (run,) = [p for p in (exp / ".flock").iterdir() if p.is_dir()]
+    for a in agents:  # phase 1: each of the 3 other teams refused, the listing only its own
+        t, res = a.split("-")[1], _results(run, a)
+        assert sum(" belongs to team " in x and "until the merge" in x for x in res) == 3, res
+        listing = next(x for x in res if '\\"total\\"' in x)
+        assert all((f"teams/{u}/" in listing) == (u == t) for u in teams), listing
+        assert any("promotion opens after the merge" in x for x in res)
+        # continuous: each round goes out right after the previous round's turn ended
+        ev = _bundle_events(run, a)
+        ends = [_ts(e) for e in ev if e["type"] == "turn_ended"]
+        sent = [(_ts(e), e["data"]["data"]["round"]) for e in ev if e["type"] == "loop_prompt"
+                and e["data"]["data"]["kind"] == "loop"]
+        assert [n for _, n in sent] == [1, 2, 3, 4, 5], sent
+        gaps = [ts - max(x for x in ends if x <= ts) for ts, n in sent if n > 1]
+        assert gaps and max(gaps) < 1.5, gaps
+        assert {e["data"]["data"]["why"] for e in ev if e["type"] == "loop_prompt"
+                and e["data"]["data"]["kind"] == "loop" and e["data"]["data"]["round"] > 1} == {
+            "turn_end"}
+    doc = json.loads((run / "run.json").read_text())
+    assert doc["budget"]["stop"] is None and doc["budget"]["cost_usd"] == 0, doc["budget"]
+    assert doc["budget"]["budget_usd"] is None
+    assert all(doc["loops"][f"{m}-{t}"]["state"] == "done" for t in teams for m in ("ds", "glm"))
+
+    # phase 2: the operator's merge (here: the world restarted on a merged workspace)
+    (ws / "phase.json").write_text(json.dumps({"phase": "merged", "before": "teams", "ts": 0}))
+    p2 = {t: script(*[("read_file", {"path": f"teams/{u}/agents/ds-{u}-0000/bot/words.py",
+                                     "start": 1, "end": 1}) for u in teams if u != t],
+                    ("copy_file", {"src": f"teams/{teams[(teams.index(t) + 1) % 4]}/agents/"
+                                          f"ds-{teams[(teams.index(t) + 1) % 4]}-0000/bot",
+                                   "path": f"teams/{t}/agents/{{me}}/next"}),
+                    ("promote_best", {"path": f"teams/{t}/agents/{{me}}/bot", "reason": "p2"}),
+                    ("done", {"summary": "phase 2", "finished": True})) for t in teams}
+    _scripted(exp, "phase2/spec.yaml", model_url, board_url, "FAKE_INVITE", None, p2)
+    d = yaml.safe_load((exp / "phase2" / "spec.yaml").read_text())
+    for t in d["types"].values():
+        if t.get("loop"):
+            t["loop"]["stop_when"] = {"all_agents_done": True}
+    (exp / "phase2" / "spec.yaml").write_text(yaml.safe_dump(d, sort_keys=False))
+    r = subprocess.run(_flock("run", "phase2/spec.yaml", "--until", "idle", "--skip-preflight",
+                              "--data-dir", ".flock2"), cwd=exp, env=env, capture_output=True,
+                       text=True, timeout=240, check=False)
+    assert r.returncode == 0 and "stopping (idle)" in r.stdout, r.stdout[-3000:] + r.stderr
+    (run2,) = [p for p in (exp / ".flock2").iterdir() if p.is_dir()]
+    for a in agents:
+        res = _results(run2, a)
+        assert not any("belongs to team" in x for x in res), res
+        assert sum("lines 1-1 of" in x for x in res) == 3
+        assert (ws / f"teams/{a.split('-')[1]}/agents/{a}/next/words.py").read_text() == WORDS
+    log = _wlog(ws)
+    assert sum(x["action"] == "promote" for x in log) == 1  # identical bots: the rest tie
+    assert sum(x["action"] == "promote_refused" and "a tie" in x.get("why", "") for x in log) == 7
 
 
 def test_job_bootstrap_renders_the_variant(tmp_path, fakes):
