@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pydantic import TypeAdapter
 
 from flock import status as fs
-from flock.controller.jobs import FakeJobsClient
+from flock.controller.jobs import FakeJobsClient, JobState
 from flock.controller.reconcile import (
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
@@ -395,6 +395,21 @@ def test_job_checks_are_bounded(store, jobs, clock, tick):
     clock.advance(16)
     tick()
     assert jobs.inspects == 5 and jobs.lists == 1  # few left: inspect them one by one
+
+
+def test_jobs_missing_from_the_batch_listing_are_inspected(store, jobs, clock, tick, monkeypatch):
+    store.put_swarm(make_spec(researcher={"replicas": 30, "agents_per_worker": 1}), 0)
+    tick()
+    for job_id in list(jobs.states):  # ended long ago: gone from the listing, sacct knows
+        jobs.states[job_id] = JobState("DELETED")
+    monkeypatch.setattr(jobs, "list", lambda labels, *, namespace: [])
+    clock.advance(70)
+    tick()
+    assert jobs.inspects == 30
+    assert all(w["job_id"] is None for w in store.list_workers("demo"))
+    clock.advance(600)  # past the crash backoff
+    tick()
+    assert len(jobs.launches) == 60
 
 
 def test_hub_errors_do_not_break_the_pass(store, jobs, clock, tick, monkeypatch):
