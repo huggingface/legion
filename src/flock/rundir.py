@@ -30,6 +30,7 @@ import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -653,7 +654,8 @@ def dashboard_row(spec: SwarmSpec) -> dict[str, Any]:
 
 
 def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
-    """Write (or rewrite) `<dashboard.registry>/runs/<swarm>.json`."""
+    """Write (or rewrite) `<dashboard.registry>/runs/<swarm>.json`, keeping its `created_at`.
+    Refused when another run's row has the same `board_id` (the overview routes by it)."""
     d = spec.dashboard
     if d is None:
         return Check("dashboard", None, "no dashboard block")
@@ -676,10 +678,20 @@ def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
         return Check("dashboard", False, f"viewer_run {row['viewer_run']} is not in the registry's "
                                          f"namespace ({d.registry})")
     try:
+        store = bucket_store(d.registry, token)
         with tempfile.TemporaryDirectory() as t:
+            got = [(r, Path(t) / r) for r in store.list("runs/") if r.endswith(".json")]
+            store.download(got)
+            rows = {r: json.loads(p.read_text(encoding="utf-8")) for r, p in got}
+            if taken := sorted(r for r, x in rows.items() if r != rel and row["board_id"]
+                               and x.get("board_id") == row["board_id"]):
+                return Check("dashboard", False, f"board_id {row['board_id']} is already used in "
+                             f"{d.registry} by {', '.join(taken)}: rename the swarm (or its board)")
+            row["created_at"] = (rows.get(rel, {}).get("created_at")
+                                 or datetime.now(UTC).isoformat(timespec="seconds"))
             f = Path(t) / "row.json"
             f.write_text(json.dumps(row, indent=1) + "\n", encoding="utf-8")
-            bucket_store(d.registry, token).upload([(f, rel)])
+            store.upload([(f, rel)])
     except Exception as e:  # noqa: BLE001 - any Hub error is the check's answer
         return Check("dashboard", False, f"{d.registry}/{rel}: {type(e).__name__}: {e}")
     return Check("dashboard", True, f"{d.registry}/{rel} written")

@@ -77,6 +77,10 @@ step only when it is not done yet, so running it again checks the board:
    is derived from the operator token as msgboard's multi-board app does.
 4. Writes `BOARD_URL` (the spec's `url`) and the invite into `run.env`; prints key names only.
 
+With `dashboard:`, the template must be a multi-board msgboard Space that has the read-only view
+(`BOARD_READ_TOKEN`; upstream msgboard does not have it yet, the chatbot-vN-msgboard Spaces do):
+otherwise the overview's board pane gets a 401 and nothing reports it.
+
 Sign-in and ownership are only what `space_variables` sets, before the first `init` (flock makes
 nobody owner or admin): `MSGBOARD_OWNER_HF_USERNAME` (the HF account linked to the board's admin
 on first boot), `MSGBOARD_HF_ORGANIZATIONS` (a JSON list: current members of these orgs sign in

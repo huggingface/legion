@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import stat
+from datetime import datetime, timedelta
 
 import pytest
 import yaml
@@ -199,8 +200,16 @@ def _spec(**over):
 
 
 class FakeBucket:
-    def __init__(self, fail=False):
-        self.fail, self.files = fail, {}
+    def __init__(self, fail=False, files=None):
+        self.fail, self.files = fail, dict(files or {})
+
+    def list(self, prefix):
+        return [r for r in self.files if r.startswith(prefix)]
+
+    def download(self, files):
+        for r, p in files:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(self.files[r]))
 
     def upload(self, files):
         if self.fail:
@@ -213,14 +222,18 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     monkeypatch.setattr(rundir, "bucket_store", lambda url, token: b)
     c = rundir.register_dashboard(_spec(), {"HF_TOKEN": "t"})
     assert c.ok, c.detail
+    created = b.files["runs/demo.json"].pop("created_at")
+    assert datetime.fromisoformat(created).utcoffset() == timedelta(0)  # UTC ISO 8601
     assert b.files["runs/demo.json"] == {
         "id": "demo", "name": "Demo", "title": None, "setup": "One line.", "board_id": "demo",
         "board": ORG + "/", "board_public": "https://huggingface.co/spaces/acme/board-demo",
         "viewer": "https://acme-viewer.hf.space",
         "viewer_public": "https://huggingface.co/spaces/acme/viewer",  # from the registry's namespace
         "viewer_run": "acme/runs/demo", "dataset": None, "code_repo": None, "spec_url": None}
+    b.files["runs/demo.json"]["created_at"] = "2026-01-01T00:00:00+00:00"
     assert rundir.register_dashboard(_spec(dashboard={**DASH, "title": "T"}), {"HF_TOKEN": "t"}).ok
-    assert b.files["runs/demo.json"]["title"] == "T"
+    assert b.files["runs/demo.json"]["title"] == "T"  # rewritten, first write's time kept
+    assert b.files["runs/demo.json"]["created_at"] == "2026-01-01T00:00:00+00:00"
     # a board given by url: its page derived the same way
     url_board = {"invite_env": "BOARD_INVITE", "channel": "general", "url": ORG}
     assert rundir.register_dashboard(_spec(comms=url_board), {"HF_TOKEN": "t"}).ok
@@ -237,6 +250,17 @@ def test_dashboard_refuses_rows_the_overview_drops(monkeypatch, over, why):
     monkeypatch.setattr(rundir, "bucket_store", lambda url, token: pytest.fail("written"))
     c = rundir.register_dashboard(_spec(**over), {"HF_TOKEN": "t"})
     assert c.ok is False and why in c.detail
+
+
+def test_dashboard_refuses_a_board_id_another_run_uses(monkeypatch):
+    b = FakeBucket(files={"runs/other.json": {"id": "other", "board_id": "demo"}})
+    monkeypatch.setattr(rundir, "bucket_store", lambda url, token: b)
+    c = rundir.register_dashboard(_spec(), {"HF_TOKEN": "t"})
+    assert c.ok is False and "board_id demo is already used" in c.detail and "runs/other.json" in c.detail
+    assert "runs/demo.json" not in b.files
+    del b.files["runs/other.json"]  # the same run's own row is no conflict
+    b.files["runs/demo.json"] = {"id": "demo", "board_id": "demo"}
+    assert rundir.register_dashboard(_spec(), {"HF_TOKEN": "t"}).ok
 
 
 def test_dashboard_write_failure_fails_the_check(monkeypatch):
