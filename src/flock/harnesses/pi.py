@@ -43,7 +43,7 @@ def attach_pi_setup(trial, inference):
         await trial.agent.exec_as_agent(
             trial.agent_environment,
             f"mkdir -p {directory} && printf %s {shlex.quote(HF_CHAT_EXTENSION)} "
-            f"> {directory}/shepherd-hf.js",
+            f"> {directory}/flock-hf.js",
             timeout_sec=30,
         )
         prepared = True

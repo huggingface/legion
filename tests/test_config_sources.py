@@ -5,8 +5,8 @@ from harbor.models.registry import DatasetMetadata
 from harbor.models.task.id import GitTaskId
 from pydantic import ValidationError
 
-from shepherd.config import Config, TaskSettings
-from shepherd.sources import resolve_task
+from flock.config import Config, TaskSettings
+from flock.sources import resolve_task
 
 
 @pytest.mark.parametrize("dataset", ["unversioned", "name@@version"])
@@ -37,7 +37,7 @@ def test_unsupported_or_unsafe_configuration_is_rejected(update):
 @pytest.mark.parametrize("count", [0, 2])
 @pytest.mark.parametrize("dataset", ["terminal-bench-2.1@2.1.0", None])
 async def test_selector_must_match_once(monkeypatch, count, dataset):
-    from shepherd import sources
+    from flock import sources
 
     task = Config.load(Path("examples/pi-hf.yaml")).task
     task.dataset = dataset
@@ -63,7 +63,7 @@ async def test_selector_must_match_once(monkeypatch, count, dataset):
 
 
 async def test_preserves_registry_and_separate_task_commit(monkeypatch):
-    from shepherd import sources
+    from flock import sources
 
     task = Config.load(Path("examples/pi-hf.yaml")).task
 
@@ -88,7 +88,7 @@ async def test_preserves_registry_and_separate_task_commit(monkeypatch):
 
 
 async def test_repository_discovery_preserves_identity_and_pinned_task(monkeypatch):
-    from shepherd import sources
+    from flock import sources
 
     task = Config.load(Path("examples/pi-hf-agentescape.yaml")).task
     assert task.dataset is None

@@ -71,7 +71,7 @@ class TrialNetworks:
         self.candidates = candidate_subnets(json.loads(stdout))
 
     async def create(self, participant, overlay):
-        name = f"shepherd-{self.run_id}-{participant}"
+        name = f"flock-{self.run_id}-{participant}"
         self.names.append(name)
         while self.candidates:
             subnet = str(self.candidates.pop())
@@ -80,7 +80,7 @@ class TrialNetworks:
                 "network",
                 "create",
                 "--label",
-                f"io.shepherd.run={self.run_id}",
+                f"io.flock.run={self.run_id}",
                 "--subnet",
                 subnet,
                 name,
@@ -115,7 +115,7 @@ class TrialNetworks:
                 continue
             network = json.loads(stdout)[0]
             if (network.get("Labels") or network.get("labels") or {}).get(
-                "io.shepherd.run"
+                "io.flock.run"
             ) != self.run_id:
                 errors.append(f"Network ownership mismatch: {name}")
                 continue

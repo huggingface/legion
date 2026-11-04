@@ -1,4 +1,4 @@
-from shepherd.results import safe_error
+from flock.results import safe_error
 
 
 def test_safe_error_redacts_environment_and_runtime_credentials(monkeypatch):

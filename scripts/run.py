@@ -1,4 +1,4 @@
-"""Run a Shepherd experiment.
+"""Run a Flock experiment.
 
 uv run scripts/run.py --config examples/pi-hf-qwen.yaml
 """
@@ -8,9 +8,9 @@ import asyncio
 import sys
 from pathlib import Path
 
-from shepherd.config import Config
-from shepherd.launch import run_experiment
-from shepherd.results import safe_error
+from flock.config import Config
+from flock.launch import run_experiment
+from flock.results import safe_error
 
 
 async def main(config: Config):

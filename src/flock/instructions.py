@@ -53,8 +53,8 @@ def build_agent_instructions(
             "## Tools",
             "Use the selected tools below through your shell. They return JSON.",
             'Errors print {"error": "..."} and exit with code 1.',
-            "Run `shepherd-tool NAME --json '{...}'` or pass JSON through stdin with `--json -`.",
-            "Examples show required arguments. Run `shepherd-tool --list` for full argument schemas, including optional parameters and defaults.",
+            "Run `flock-tool NAME --json '{...}'` or pass JSON through stdin with `--json -`.",
+            "Examples show required arguments. Run `flock-tool --list` for full argument schemas, including optional parameters and defaults.",
         ]
     )
     for name, definition in manifest["tools"].items():
@@ -65,5 +65,5 @@ def build_agent_instructions(
         }
         arguments_json = shlex.quote(json.dumps(arguments, ensure_ascii=False))
         lines.append(f"\n- `{name}`: {definition['description']}")
-        lines.append(f"  Example: `shepherd-tool {name} --json {arguments_json}`")
+        lines.append(f"  Example: `flock-tool {name} --json {arguments_json}`")
     return "\n".join(lines) + "\n"

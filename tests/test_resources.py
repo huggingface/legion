@@ -5,7 +5,7 @@ import httpx
 import pytest
 from msgboard.client import Client
 
-from shepherd.resources import Resources
+from flock.resources import Resources
 
 
 @pytest.fixture

@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from msgboard.client import BoardError, Client
 
-from shepherd.tools.bundle import build_tool_bundle
-from shepherd.tools.runner import load_module
+from flock.tools.bundle import build_tool_bundle
+from flock.tools.runner import load_module
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 board_tools = load_module(TOOLS_DIR / "board.py")
@@ -91,7 +91,7 @@ def invoke_bundle(directory, name, arguments, env):
         [
             sys.executable,
             "-S",
-            str(directory / "bin/shepherd-tool"),
+            str(directory / "bin/flock-tool"),
             name,
             "--json",
             json.dumps(arguments),
@@ -99,7 +99,7 @@ def invoke_bundle(directory, name, arguments, env):
         env={
             **os.environ,
             **env,
-            "SHEPHERD_TOOLS_MANIFEST": str(directory / "manifest.json"),
+            "FLOCK_TOOLS_MANIFEST": str(directory / "manifest.json"),
         },
         capture_output=True,
         text=True,

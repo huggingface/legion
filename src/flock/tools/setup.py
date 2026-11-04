@@ -4,7 +4,7 @@ import asyncio
 
 from harbor.trial.hooks import TrialEvent
 
-TOOLS_ROOT = "/opt/shepherd-tools"
+TOOLS_ROOT = "/opt/flock-tools"
 TOOLS_MANIFEST = f"{TOOLS_ROOT}/manifest.json"
 
 
@@ -19,16 +19,16 @@ def attach_tool_setup(trial, bundle):
             environment = trial.agent_environment
             agent = trial.agent
             await agent.ensure_system_dependencies(environment, ("python3",))
-            await environment.upload_file(bundle.archive, "/opt/shepherd-tools.tar.gz")
+            await environment.upload_file(bundle.archive, "/opt/flock-tools.tar.gz")
             await agent.exec_as_root(
                 environment,
-                f"mkdir -p {TOOLS_ROOT} && python3 -m tarfile -e /opt/shepherd-tools.tar.gz {TOOLS_ROOT} "
+                f"mkdir -p {TOOLS_ROOT} && python3 -m tarfile -e /opt/flock-tools.tar.gz {TOOLS_ROOT} "
                 f"&& chmod -R a+rX {TOOLS_ROOT} "
-                f"&& ln -sf {TOOLS_ROOT}/bin/shepherd-tool /usr/local/bin/shepherd-tool",
+                f"&& ln -sf {TOOLS_ROOT}/bin/flock-tool /usr/local/bin/flock-tool",
                 timeout_sec=60,
             )
             await agent.exec_as_agent(
-                environment, "shepherd-tool --list", env=agent.extra_env, timeout_sec=30
+                environment, "flock-tool --list", env=agent.extra_env, timeout_sec=30
             )
         prepared = True
 

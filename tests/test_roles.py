@@ -4,7 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from shepherd.config import AgentSettings, Config
+from flock.config import AgentSettings, Config
 
 
 def test_role_groups_expand_in_configuration_order_and_roundtrip():

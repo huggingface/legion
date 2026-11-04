@@ -23,7 +23,7 @@ from the submitting shell; `HF_TOKEN` is supplied to Git for Hugging Face access
 The launcher uses the existing environment and isolates Podman storage in job-local
 `/tmp`. It schedules native health checks without requiring a user systemd session.
 
-Logs go to `shepherd-JOBID.log`; experiment artifacts go to the configured
+Logs go to `flock-JOBID.log`; experiment artifacts go to the configured
 `output_dir`. Inspect jobs with `squeue --me` and `sacct -j JOBID`, or cancel with
 `scancel JOBID`. CPU nodes use Spot instances: reclamation interrupts the run.
 Automatic requeue and experiment resume are not supported; partial artifacts on

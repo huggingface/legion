@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from shepherd import resources
+from flock import resources
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 

@@ -7,7 +7,7 @@
 You need Python 3.12+, `uv`, Git, `ip` from iproute2, and a working local Docker
 installation with Compose, or Podman with Compose support. The locked environment
 includes `podman-compose`. Task containers need internet access for Harbor's Pi
-installer and Python 3.10+ for Shepherd's tool runner.
+installer and Python 3.10+ for Flock's tool runner.
 
 Git must be able to read the private `huggingface/msgboard` dependency. If you use
 GitHub CLI, `gh auth setup-git` configures Git to use your authenticated account.
@@ -69,21 +69,21 @@ identities, and documentation for the selected tools. Agent names follow YAML ro
 order. Roles guide behavior; they do not change permissions or create a supervisor.
 Use either `count` or `roles`, not both.
 
-Shared and role instruction files are optional. Shepherd snapshots them at startup;
+Shared and role instruction files are optional. Flock snapshots them at startup;
 edits during a run do not change that run's prompts. The task's original instruction
 remains part of every agent's context.
 
 ## Message boards
 
 With `resources.board` configured and `board.*` selected, agents can communicate
-through `shepherd-tool` inside their task environments:
+through `flock-tool` inside their task environments:
 
 ```sh
-shepherd-tool --list
-shepherd-tool board.post --json '{"channel":"general","text":"I found a useful clue."}'
-shepherd-tool board.read --json '{"channel":"general","after":0,"limit":50}'
-shepherd-tool board.create_channel --json '{"name":"findings","private":true}'
-shepherd-tool board.invite --json '{"channel":"findings","agent":"agent-002"}'
+flock-tool --list
+flock-tool board.post --json '{"channel":"general","text":"I found a useful clue."}'
+flock-tool board.read --json '{"channel":"general","after":0,"limit":50}'
+flock-tool board.create_channel --json '{"name":"findings","private":true}'
+flock-tool board.invite --json '{"channel":"findings","agent":"agent-002"}'
 ```
 
 Private channels require membership; creating one does not automatically join
@@ -109,7 +109,7 @@ resources:
 Set the named variable to an operator/admin token. The URL must be reachable from
 both the launcher and agents. Use a dedicated board without conflicting participant
 names; sharing one board between concurrent experiments or resuming an existing run
-is not supported. Shepherd leaves an external server running after the experiment.
+is not supported. Flock leaves an external server running after the experiment.
 
 For an independent run without collaboration, use `resources: {}`, `tools: []`, and
 omit `team_file` or supply instructions that do not require the board.
@@ -133,6 +133,6 @@ Exit **0** means the run completed without reported infrastructure failures; a
 valid unsuccessful attempt can still have reward **0**. Participant failures,
 terminal Pi provider errors, missing verification output, resource or export
 failures, and deadline expiry return **1**. Interruption returns **130**.
-A failed participant does not immediately cancel its peers: Shepherd collects their
+A failed participant does not immediately cancel its peers: Flock collects their
 outcomes before returning the overall failure. Inspect participant status and reward
 together. Cancellation retains partial results and cleans up owned resources.

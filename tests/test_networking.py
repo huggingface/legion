@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from shepherd import networking
+from flock import networking
 
 
 def test_subnets_exclude_vpn_routes_from_all_tables():
@@ -48,7 +48,7 @@ async def test_allocator_handles_concurrent_reservation_and_owns_cleanup(
                     [
                         {
                             ("labels" if engine == "podman" else "Labels"): {
-                                "io.shepherd.run": "test-run"
+                                "io.flock.run": "test-run"
                             }
                         }
                     ]
@@ -64,10 +64,10 @@ async def test_allocator_handles_concurrent_reservation_and_owns_cleanup(
     assert creates == 2
     assert json.loads(path.read_text())["networks"]["default"] == {
         "external": True,
-        "name": "shepherd-test-run-agent-001",
+        "name": "flock-test-run-agent-001",
     }
     await networks.stop()
-    assert calls[-1] == (engine, "network", "rm", "shepherd-test-run-agent-001")
+    assert calls[-1] == (engine, "network", "rm", "flock-test-run-agent-001")
 
 
 @pytest.mark.parametrize("failure", ["ownership", "daemon"])
@@ -80,7 +80,7 @@ async def test_cleanup_reports_failures_and_never_deletes_foreign_networks(
         calls.append(args)
         if failure == "daemon":
             return 1, "", "Cannot connect to the Docker daemon"
-        return 0, json.dumps([{"Labels": {"io.shepherd.run": "another-run"}}]), ""
+        return 0, json.dumps([{"Labels": {"io.flock.run": "another-run"}}]), ""
 
     monkeypatch.setattr(networking, "command", command)
     networks = networking.TrialNetworks("test-run")

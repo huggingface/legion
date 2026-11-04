@@ -95,7 +95,7 @@ def build_tool_bundle(directory: Path, names: list[str], destination: Path):
         "tools/__init__.py",
         "tools/runner.py",
     ):
-        add(f"shepherd/{name}", (package_root / name).read_bytes())
+        add(f"flock/{name}", (package_root / name).read_bytes())
     manifest = {
         "tools": definitions,
         "dependencies": versions,
@@ -103,8 +103,8 @@ def build_tool_bundle(directory: Path, names: list[str], destination: Path):
     }
     add("manifest.json", json.dumps(manifest, sort_keys=True, indent=2).encode())
     add(
-        "bin/shepherd-tool",
-        b"#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).resolve().parents[1]))\nfrom shepherd.tools.runner import main\nsys.exit(main())\n",
+        "bin/flock-tool",
+        b"#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).resolve().parents[1]))\nfrom flock.tools.runner import main\nsys.exit(main())\n",
     )
     with destination.open("wb") as output:
         with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as zipped:

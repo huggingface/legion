@@ -1,10 +1,10 @@
-# Shepherd
+# Flock
 
 Run a team of Pi agents on separate copies of the same Harbor task, with a shared
 message board for collaboration. Agents exchange findings while working independently,
 and each receives its own verifier result.
 
-Shepherd supports Harbor tasks hosted on Hugging Face, OpenAI-compatible model
+Flock supports Harbor tasks hosted on Hugging Face, OpenAI-compatible model
 endpoints, and local Linux Docker or Podman. Add your own tools as Python functions.
 
 ## Installation
@@ -95,7 +95,7 @@ task:
   selector: my-task
 ```
 
-No changes to Shepherd are needed. The [task integration guide](docs/tasks.md)
+No changes to Flock are needed. The [task integration guide](docs/tasks.md)
 covers task structure, validation, and publishing.
 
 ## Adding tools
@@ -111,7 +111,7 @@ def add(x: int, y: int = 0) -> dict:
 TOOLS = {"add": add}
 ```
 
-Add `calculator.add` to your experiment's `tools` list. Shepherd makes it available
+Add `calculator.add` to your experiment's `tools` list. Flock makes it available
 to every agent and includes its documentation in their instructions.
 
 See the [tools guide](tools/README.md) for invocation examples, supported types,

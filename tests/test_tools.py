@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.trial.hooks import TrialEvent
 
-from shepherd.instructions import build_agent_instructions
-from shepherd.tools.bundle import build_tool_bundle
-from shepherd.tools.runner import load_selected, validate_value
-from shepherd.tools.setup import attach_tool_setup
+from flock.instructions import build_agent_instructions
+from flock.tools.bundle import build_tool_bundle
+from flock.tools.runner import load_selected, validate_value
+from flock.tools.setup import attach_tool_setup
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def test_bundle_is_reproducible_and_runs_generic_async_tools(tools):
     with tarfile.open(first.archive) as archive:
         assert "tools/unused.py" not in archive.getnames()
         archive.extractall(destination, filter="data")
-    env = {**os.environ, "SHEPHERD_TOOLS_MANIFEST": str(destination / "manifest.json")}
+    env = {**os.environ, "FLOCK_TOOLS_MANIFEST": str(destination / "manifest.json")}
     for name, args, expected in [
         ("sample.add", {"x": 3}, {"sum": 5}),
         ("sample.echo", {"values": ["hello"]}, {"values": ["hello"], "label": None}),
@@ -88,7 +88,7 @@ def test_bundle_is_reproducible_and_runs_generic_async_tools(tools):
             [
                 sys.executable,
                 "-S",
-                str(destination / "bin/shepherd-tool"),
+                str(destination / "bin/flock-tool"),
                 name,
                 "--json",
                 json.dumps(args),
@@ -113,7 +113,7 @@ async def test_setup_hook_is_generic_and_runs_once(tools):
         ensure_system_dependencies=AsyncMock(),
         exec_as_root=AsyncMock(),
         exec_as_agent=AsyncMock(),
-        extra_env={"SHEPHERD_TOOLS_MANIFEST": "/opt/shepherd-tools/manifest.json"},
+        extra_env={"FLOCK_TOOLS_MANIFEST": "/opt/flock-tools/manifest.json"},
     )
     environment = SimpleNamespace(upload_file=AsyncMock())
     trial = SimpleNamespace(
@@ -126,7 +126,7 @@ async def test_setup_hook_is_generic_and_runs_once(tools):
     await callbacks[TrialEvent.AGENT_START](None)
     environment.upload_file.assert_awaited_once()
     agent.exec_as_agent.assert_awaited_once_with(
-        environment, "shepherd-tool --list", env=agent.extra_env, timeout_sec=30
+        environment, "flock-tool --list", env=agent.extra_env, timeout_sec=30
     )
 
 

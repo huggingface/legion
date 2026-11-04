@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from msgboard.client import Client
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from shepherd.results import write_json
+from flock.results import write_json
 
 
 class Options(BaseModel):
@@ -142,7 +142,7 @@ class Resource:
                 await init.wait()
         self.operator_token = (self.data_dir / "operator.token").read_text().strip()
         self.secrets.append(self.operator_token)
-        self.socket_directory = tempfile.TemporaryDirectory(prefix="shepherd-board-")
+        self.socket_directory = tempfile.TemporaryDirectory(prefix="flock-board-")
         self.socket_path = Path(self.socket_directory.name) / "board.sock"
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -200,7 +200,7 @@ class Resource:
         mounts = []
         hosts = [urlsplit(self.url).hostname]
         if self.socket_path:
-            env["MSGBOARD_SOCKET"] = "/run/shepherd-board.sock"
+            env["MSGBOARD_SOCKET"] = "/run/flock-board.sock"
             mounts = [
                 {
                     "type": "bind",

@@ -8,7 +8,7 @@ from .results import safe_error
 
 
 def load_module(path):
-    spec = importlib.util.spec_from_file_location(f"_shepherd_tool_{path.stem}", path)
+    spec = importlib.util.spec_from_file_location(f"_flock_tool_{path.stem}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

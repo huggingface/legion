@@ -1,31 +1,31 @@
-# Adding tools to Shepherd
+# Adding tools to Flock
 
 [Back to the README](../README.md)
 
 This directory contains tool implementations supplied to experiments. Currently,
 [board.py](board.py) provides message-board operations. The reusable code that
-packages, installs, and executes tools lives in [src/shepherd/tools](../src/shepherd/tools/).
+packages, installs, and executes tools lives in [src/flock/tools](../src/flock/tools/).
 
 Tools are ordinary Python functions. Agents invoke them through their existing shell
-tool using `shepherd-tool`; they are not registered as native Pi tools or MCP tools.
+tool using `flock-tool`; they are not registered as native Pi tools or MCP tools.
 
 ## How tools reach agents
 
 1. The experiment selects functions from `tools_dir` using names such as `board.post`
    or `board.*`. Each module declares its public functions in a `TOOLS` mapping.
-2. The [runner](../src/shepherd/tools/runner.py) imports the selected modules and
+2. The [runner](../src/flock/tools/runner.py) imports the selected modules and
    derives argument schemas from type annotations, defaults, and docstrings.
-3. The [bundler](../src/shepherd/tools/bundle.py) freezes the modules, declared
+3. The [bundler](../src/flock/tools/bundle.py) freezes the modules, declared
    dependencies, runner, and schema manifest into one archive per experiment.
    Dependency versions and the archive's SHA-256 hash are recorded in `run.json`.
-4. A Harbor [startup hook](../src/shepherd/tools/setup.py) installs the archive once
-   per trial under `/opt/shepherd-tools`, exposes the `shepherd-tool` command, and
+4. A Harbor [startup hook](../src/flock/tools/setup.py) installs the archive once
+   per trial under `/opt/flock-tools`, exposes the `flock-tool` command, and
    checks that the selected modules load. It ensures Python is available in the
    environment; tool code must work with the task image's Python (3.10 or newer).
-5. The generated [agent instructions](../src/shepherd/instructions.py) describe
+5. The generated [agent instructions](../src/flock/instructions.py) describe
    each selected tool and show a shell invocation. Every participant receives the
    same tool selection.
-6. On each invocation, the runner reads `SHEPHERD_TOOLS_MANIFEST`, validates the
+6. On each invocation, the runner reads `FLOCK_TOOLS_MANIFEST`, validates the
    selection and JSON arguments, calls the function, and prints its JSON result.
 
 Each invocation is a fresh process inside the agent's trial environment. Python
@@ -52,7 +52,7 @@ def divide(numerator: float, denominator: float) -> dict:
 TOOLS = {"add": add, "divide": divide}
 ```
 
-No Shepherd imports or registration decorators are needed. The mapping keys define
+No Flock imports or registration decorators are needed. The mapping keys define
 the exported names: `calculator.add` and `calculator.divide`. Helper functions not
 listed in `TOOLS` are not selectable.
 
@@ -87,19 +87,19 @@ The following commands run **inside a prepared trial environment** with
 environment variable; a bare checkout alone is not enough.
 
 ```sh
-shepherd-tool calculator.add --json '{"x":2,"y":3}'
+flock-tool calculator.add --json '{"x":2,"y":3}'
 # {"sum": 5}
 
-shepherd-tool calculator.add --json '{"x":7}'
+flock-tool calculator.add --json '{"x":7}'
 # {"sum": 7}
 
-shepherd-tool calculator.divide --json '{"numerator":9,"denominator":2}'
+flock-tool calculator.divide --json '{"numerator":9,"denominator":2}'
 # {"quotient": 4.5}
 
-printf '%s' '{"x":2,"y":3}' | shepherd-tool calculator.add --json -
+printf '%s' '{"x":2,"y":3}' | flock-tool calculator.add --json -
 # {"sum": 5}
 
-shepherd-tool --list
+flock-tool --list
 # Prints the selected tool names, descriptions, and argument schemas as JSON.
 ```
 
@@ -107,7 +107,7 @@ Successful calls exit with status 0. Exceptions and invalid arguments produce a
 JSON error and exit with status 1. For example:
 
 ```sh
-shepherd-tool calculator.divide --json '{"numerator":9,"denominator":0}'
+flock-tool calculator.divide --json '{"numerator":9,"denominator":0}'
 # {"error": "ValueError: denominator must not be zero"}
 # Exit status: 1
 ```
@@ -179,5 +179,5 @@ run inside each agent's environment. Follow [resources/board.py](../resources/bo
 - Implement `bind(agent_name)` to supply per-agent `env`, `mounts`, `allowed_hosts`,
   and public `metadata`. Add generated secrets to the supplied redaction list.
 
-Shepherd exports and stops even partially started resources. Tools that declare a
+Flock exports and stops even partially started resources. Tools that declare a
 resource dependency require its configuration before provisioning can begin.

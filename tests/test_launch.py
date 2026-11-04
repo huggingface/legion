@@ -8,9 +8,9 @@ from harbor.models.task.id import GitTaskId
 from harbor.models.trial.result import AgentInfo, TrialResult
 from msgboard.client import Client
 
-from shepherd import launch
-from shepherd.config import AgentSettings, Config
-from shepherd.sources import ResolvedTask
+from flock import launch
+from flock.config import AgentSettings, Config
+from flock.sources import ResolvedTask
 
 
 @pytest.mark.parametrize("effort", [None, "off", "low"])
@@ -533,7 +533,7 @@ async def test_partial_network_setup_waits_for_trial_cleanup(prepared, monkeypat
     monkeypatch.setattr(launch, "TrialNetworks", FailingNetworks)
 
     async def factory(config):
-        assert config.agent.env["MSGBOARD_SOCKET"] == "/run/shepherd-board.sock"
+        assert config.agent.env["MSGBOARD_SOCKET"] == "/run/flock-board.sock"
         assert config.environment.mounts[0]["read_only"]
         return FakeTrial(config, events, mode="wait")
 
@@ -561,7 +561,7 @@ async def test_no_resources_or_tools_runs_independently(
     class IndependentTrial(FakeTrial):
         async def run(self):
             assert set(self.hooks) == ({TrialEvent.AGENT_START} if reasoning else set())
-            assert set(self.config.agent.env) == {"HF_TOKEN", "SHEPHERD_TOOLS_MANIFEST"}
+            assert set(self.config.agent.env) == {"HF_TOKEN", "FLOCK_TOOLS_MANIFEST"}
             assert not self.config.environment.mounts
             from harbor.models.verifier.result import VerifierResult
 

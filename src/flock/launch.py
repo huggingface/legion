@@ -54,7 +54,7 @@ def build_trial_config(config, resolved, run_dir, name, agent_instructions):
             model_api_format=inference.api_format,
             env={
                 inference.api_key_env: os.environ[inference.api_key_env],
-                "SHEPHERD_TOOLS_MANIFEST": TOOLS_MANIFEST,
+                "FLOCK_TOOLS_MANIFEST": TOOLS_MANIFEST,
             },
             extra_allowed_hosts=[
                 urlsplit(inference.base_url).hostname,
@@ -138,7 +138,7 @@ async def _run_experiment(config: Config):
         "started_at": now(),
         "configuration": config.model_dump(mode="json"),
         "versions": {
-            name: importlib.metadata.version(name) for name in ("shepherd", "harbor")
+            name: importlib.metadata.version(name) for name in ("flock", "harbor")
         },
         "pi_version": PI_VERSION,
         "tools": {"sha256": bundle.sha256, **bundle.manifest},

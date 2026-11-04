@@ -2,8 +2,8 @@
 
 [Back to the README](../README.md)
 
-Shepherd consumes ready-to-run Harbor tasks. Adding a task does not require an
-AgentEscape adapter or a change to Shepherd's runner.
+Flock consumes ready-to-run Harbor tasks. Adding a task does not require an
+AgentEscape adapter or a change to Flock's runner.
 
 1. Create a self-contained task following the [Harbor task format](https://docs.harborframework.com/tasks/overview).
    A typical single-container task has this layout:
@@ -33,7 +33,7 @@ AgentEscape adapter or a change to Shepherd's runner.
    ```
 
    Use the backend you intend to run. The agent image must support Harbor's Pi
-   installer and, when using Shepherd tools, the Python tool runner.
+   installer and, when using Flock tools, the Python tool runner.
 
 3. Publish the task directory under `tasks/` in a Hugging Face dataset repository.
    Include the files it needs inside that directory; references to sibling task
@@ -49,7 +49,7 @@ AgentEscape adapter or a change to Shepherd's runner.
    ```
 
    Omit `task.dataset` for this direct-discovery layout. If the repository instead
-   provides a Harbor registry, specify its `name@version` entry. Shepherd resolves
+   provides a Harbor registry, specify its `name@version` entry. Flock resolves
    the selector, downloads the selected task, and gives each agent its own trial.
    No local generation step or `task.path` setting is needed.
 

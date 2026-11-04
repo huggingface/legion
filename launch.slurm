@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=shepherd
+#SBATCH --job-name=flock
 #SBATCH --partition=hopper-cpu
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -9,15 +9,15 @@
 #SBATCH --time=02:00:00
 #SBATCH --no-requeue
 #SBATCH --open-mode=append
-#SBATCH --output=shepherd-%j.log
+#SBATCH --output=flock-%j.log
 set -euo pipefail
 umask 077
 
 # sbatch copies this script; resolve paths from the submission directory.
-cd "${SLURM_SUBMIT_DIR:?Submit with sbatch from the Shepherd repository}"
+cd "${SLURM_SUBMIT_DIR:?Submit with sbatch from the Flock repository}"
 
 if [[ $# != 1 || ! -f scripts/run.py || ! -x .venv/bin/python ]]; then
-    echo 'Usage (from Shepherd): sbatch launch.slurm path/to/config.yaml' >&2
+    echo 'Usage (from Flock): sbatch launch.slurm path/to/config.yaml' >&2
     exit 2
 fi
 if [[ ${SLURM_JOB_NUM_NODES:-1} != 1 || ${SLURM_NTASKS:-1} != 1 ]]; then
@@ -34,7 +34,7 @@ fi
 "$PYTHON" - "$CONFIG_PATH" <<'PY'
 import sys
 from pathlib import Path
-from shepherd.config import Config
+from flock.config import Config
 config = Config.load(Path(sys.argv[1]))
 if config.environment.backend != 'podman':
     raise SystemExit('The Slurm launcher requires environment.backend: podman')
@@ -53,7 +53,7 @@ if [[ -n "${HF_TOKEN:-}" ]]; then
 fi
 export GIT_TERMINAL_PROMPT=0
 
-LOCAL=$(mktemp -d /tmp/shepherd.XXXXXX)
+LOCAL=$(mktemp -d /tmp/flock.XXXXXX)
 export XDG_RUNTIME_DIR="$LOCAL/runtime"
 export HF_XET_CACHE="$LOCAL/xet"
 mkdir -p "$XDG_RUNTIME_DIR" "$LOCAL/bin"

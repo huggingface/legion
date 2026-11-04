@@ -20,7 +20,7 @@ TOOL_SELECTION = re.compile(r"[A-Za-z][A-Za-z0-9_]*\.(?:[A-Za-z][A-Za-z0-9_]*|\*
 
 
 def load_module(path):
-    spec = importlib.util.spec_from_file_location(f"_shepherd_tool_{path.stem}", path)
+    spec = importlib.util.spec_from_file_location(f"_flock_tool_{path.stem}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -162,7 +162,7 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     try:
-        path = Path(os.environ["SHEPHERD_TOOLS_MANIFEST"])
+        path = Path(os.environ["FLOCK_TOOLS_MANIFEST"])
         manifest = json.loads(path.read_text())
         names = list(manifest["tools"])
         if args.list:

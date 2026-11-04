@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "shepherd"
+name = "flock"
 version = "0.1.0"
 description = "Parallel Harbor agents collaborating through a dedicated message board"
 readme = "README.md"
@@ -19,16 +19,16 @@ dependencies = [
 ]
 
 [project.scripts]
-shepherd-tool = "shepherd.tools.runner:main"
+flock-tool = "flock.tools.runner:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/shepherd"]
+packages = ["src/flock"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src/shepherd/**", "/scripts/**", "/tools/*.py", "/tools/README.md", "/resources/*.py", "/prompts/*.md", "/tests/**", "/examples/pi-*.yaml", "/launch.slurm", "/docs/**", "/README.md", "/pyproject.toml", "/uv.lock"]
+include = ["/src/flock/**", "/scripts/**", "/tools/*.py", "/tools/README.md", "/resources/*.py", "/prompts/*.md", "/tests/**", "/examples/pi-*.yaml", "/launch.slurm", "/docs/**", "/README.md", "/pyproject.toml", "/uv.lock"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
