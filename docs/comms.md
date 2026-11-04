@@ -145,7 +145,8 @@ One event per message and agent, the mention first. Also on the stream: `comms_j
 `comms_join_failed`, `comms_refused`.
 
 **Wake-ups.** The controller passes every `comms_mention` and `comms_thread_reply` it receives to
-the loop's wake queue as `wake(agent, "comms.mention")` or `wake(agent, "comms.thread")`: an agent
+the loop's wake queue as `wake(agent, "comms.mention")` or `wake(agent, "comms.thread")` (and
+`comms_dm` / `comms_channel_message`, when `comms.wake` lists them, as `comms.dm` / `comms.channel`): an agent
 whose type has `loop.on: [comms.mention, comms.thread]` gets its loop prompt early (2 s debounce,
 one prompt per burst, never while it is working, at most one per `loop.wake.min_gap` (30 s) and
 `loop.wake.max` (10) per run, not a round by default; each one is a `loop_wake` event;
