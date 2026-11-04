@@ -254,6 +254,10 @@ def launch(
         False, "--strict", help="Treat models that were not probed (unverified) as failures."),
     env_files: list[str] | None = ENV_OPT,
     ref: str | None = REF_OPT,
+    hold: bool = typer.Option(
+        False, "--hold", help="Slurm, no controller up: start the run's controller and world "
+                              "with every swarm held and released; `flock update`, then "
+                              "`flock launch` resumes it"),
 ) -> None:
     """Start a swarm from an experiment folder (or spec file), or resume a stopped one
     (docs/live.md "Lifecycle"). When no controller answers, first starts the run's controller
@@ -265,6 +269,8 @@ def launch(
     controller."""
     api = _api()
     if ref is None and ops.is_swarm_name(target):
+        if hold:
+            _fail(["--hold takes the experiment folder (it starts the run's controller)"])
         _show_held(api.resume(target, types=type_, agents=agent))
         return
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
@@ -275,7 +281,7 @@ def launch(
     try:
         done = ops.launch(api, spec, spec_file, env_files=env_files, source=source, types=type_,
                           agents=agent, preflight=preflight, strict=strict, checked=checked,
-                          say=lambda line: typer.echo(f"  {line}"))
+                          say=lambda line: typer.echo(f"  {line}"), hold=hold)
     except SpecError as e:
         _show_launch(spec.swarm, e.done, strict)
         if run := e.done.get("local"):
@@ -294,6 +300,12 @@ def _show_launch(swarm: str, done: dict, strict: bool) -> None:
             typer.echo(f"export FLOCK_URL={started['url']}")
     if "resumed" in done:
         _show_held(done["resumed"])
+    if "held" in done:  # --hold
+        if done["held"] is None:
+            typer.echo(f"{swarm}: not on the controller (no checkpoint of it was restored)")
+        else:
+            _show_held(done["held"])
+            typer.echo(f"released; `flock update` the spec, then `flock launch` resumes {swarm}")
     if "preflight" in done:
         _print_preflight(done["preflight"], strict)
     _warn_unverified(done.get("unverified", []), "preflight skipped")
