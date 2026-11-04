@@ -362,14 +362,12 @@ class CommsSpec(_Removable):
     # `<template namespace>/board-<swarm>`) and fills BOARD_URL and the invite (docs/comms.md).
     # A url: the same as `url:`. Unset: `url` names an existing board.
     board: str | None = None
-    template: str | None = None  # a multi-board msgboard Space; required with `space`
+    template: str | None = None  # a msgboard Space (one board at its root); required with `space`
     space: str | None = None
     # Space secret -> the run.env (or environment) name holding its value, e.g. {HF_TOKEN:
     # BOARD_BUCKET_TOKEN}: a token scoped to the board's bucket, never the operator's own.
     space_secrets: dict[str, str] = Field(default_factory=dict)
-    # Space variables over flock's (MSGBOARD_BOARDS, MSGBOARD_REPLICA: `<bucket>/board`, and
-    # BOARD_READ_TOKEN: public with `dashboard:`); "" blanks one. Sign-in and ownership
-    # (MSGBOARD_OWNER_HF_USERNAME, MSGBOARD_HF_ORGANIZATIONS, ...) are only what is set here.
+    # Space variables over flock's (MSGBOARD_REPLICA: `<bucket>/board`); "" blanks one.
     space_variables: dict[str, str] = Field(default_factory=dict)
     space_hardware: str = "cpu-basic"  # the Hub requires one to duplicate a Space
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
