@@ -50,8 +50,7 @@ export LOCAL_KEY=unused                      # the key variable must exist; any 
 uv run flock launch examples/local.yaml
 uv run flock prompt --swarm hello --type writer "Introduce yourself in one sentence."
 uv run flock status hello
-uv run flock stop hello --release      # drain the workers, then end the run (the bundle)
-uv run flock launch examples/local.yaml  # a new run (resumes the swarm only from a bucket checkpoint)
+uv run flock stop hello --release      # drain the workers; `flock launch hello` resumes
 uv run flock stop hello --delete --yes # end the controller, write the bundle
 ```
 
@@ -60,13 +59,9 @@ runs the same thing in the foreground and exits when done.
 
 - `flock prompt --swarm <swarm> --type <type> "text"` sends a prompt to every agent of a type
   (optional; without it the agents wait for prompts).
-- `flock stop <swarm>` holds the swarm; `flock stop <swarm> --release` drains the workers, pushes
-  a final checkpoint when the controller syncs to a bucket (a failed one ends nothing), then ends
-  the run like `--delete`: nothing keeps running, as on every backend. `flock launch FOLDER`
-  then starts a new run, which restores the swarm from that checkpoint (without a bucket it
-  starts it afresh); agents' workdirs and sessions stay in the old run directory, since local
-  workers do not sync to the bucket. `flock stop <swarm> --delete` ends the controller and writes
-  the bundle. A run also ends at the spec's `limits.budget_usd`. The test harness (`python -m flock.controller.localrun`) additionally has
+- `flock stop <swarm>` holds the swarm; `flock stop <swarm> --release` drains the workers and keeps
+  the controller (`flock launch <swarm>` resumes); `flock stop <swarm> --delete` ends the
+  controller and writes the bundle. A run also ends at the spec's `limits.budget_usd`. The test harness (`python -m flock.controller.localrun`) additionally has
   `--until idle|10m` and `--grace S`.
 - A `tools/` folder next to the spec ([tools.md](tools.md)) is checked, uploaded and named in
   the spec by its hash before the run starts, as `flock launch` does.
@@ -159,7 +154,7 @@ Different:
    status port, no jobs proxy auth. The controller state syncs to `FLOCK_STATE_URL`, by
    default `<bucket>/controller/<swarm>` when the spec has a bucket and an HF token is found
    (HF_TOKEN or the saved one; else off, said at start); `FLOCK_STATE_URL=` turns it off. Each `flock launch` is a new run
-   directory: only the controller's checkpoint (with a bucket) carries over from a previous one.
+   directory: a run does not resume a previous one.
 6. **Workers die with the controller.** A worker exits when the controller process is gone
    (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. `flock stop --delete` makes the
    controller drain and stop the workers itself. A local worker handles SIGTERM by

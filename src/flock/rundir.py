@@ -5,7 +5,7 @@ run's env file and controller. Nothing here prints; secret values never appear i
     RUN_DIR/experiment/   a copy of the experiment folder (links followed): what is launched
     RUN_DIR/cluster.env   a copy of the cluster profile (--profile): read before run.env
     RUN_DIR/run.env       mode 600: every ${VAR} the spec reads, the secrets it names, per-run tokens
-    RUN_DIR/logs/, hosts/ the jobs' logs, host files (controller.host, world.host) and job ids (*.job)
+    RUN_DIR/logs/, hosts/ the jobs' logs and host files (hosts/controller.host, world.host)
     RUN_DIR/slurm/        `compute: slurm`: a copy of scripts/slurm (the job scripts `flock launch` submits)
 
 `init` creates only what is missing and never overwrites a run.env key or an edited copy: it

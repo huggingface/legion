@@ -1,20 +1,23 @@
 # compute: slurm
 
-Workers as Slurm jobs, sbatch'ed by the controller; the controller and the world as Slurm jobs
-that `flock launch` submits and `flock stop --release` cancels. The reconcile loop, placement, heartbeats,
-events and bucket sync are the same as for `hf-jobs`; only the backend that starts a worker
-differs (`controller/slurm.py`). Agent state, the controller's state, the world's workspace
-and the run bundle stay in HF buckets; the shared disk holds only code, the venv or image,
-the secrets file, host files, env files and logs.
+Workers as Slurm jobs, sbatch'ed by the controller; the controller and the world are Slurm jobs
+too, which `flock launch` submits and `flock stop --release` cancels. The reconcile loop,
+placement, heartbeats, events and bucket sync are the same as for `hf-jobs`; only the backend
+that starts a worker differs (`controller/slurm.py`). Agent state, the controller's state and the
+run bundle stay in HF buckets. The shared disk holds code, the venv or image, the run directory
+(env files, host files, logs) and the world's own state when the world keeps it there: chatbot4
+uses `$CHATBOT_WS`, default `<world.dir>/ws`, so set a per-run `CHATBOT_WS` in run.env (runs from
+one checkout would share it).
 
 ## Deploying
 
 One run directory per run. `flock init` prepares it; `flock launch` starts its jobs; every later
-command reads it. The steps are the same on every backend:
+command reads it. The steps and their order are the same on every backend (docs/live.md
+"Lifecycle"):
 
 ```sh
 flock init $PWD/runs/hierarchy --from my-experiment --profile my-cluster.env --secrets secrets.env
-#   logs/ hosts/        the jobs' logs, host files (controller.host, world.host), job ids (*.job)
+#   logs/ hosts/        the jobs' logs and host files (controller.host, world.host)
 #   experiment/         a copy of the folder (links followed): what is launched
 #   slurm/              a copy of scripts/slurm: the job scripts `flock launch` submits
 #   cluster.env         a copy of the cluster profile (below)
@@ -28,29 +31,21 @@ flock stop hierarchy --release              # drain, checkpoint, stop the world,
 flock launch runs/hierarchy/experiment      # the jobs again: the controller restores, the swarm resumes
 ```
 
-`flock launch`, when no controller answers for the run, submits `slurm/world.sbatch` (when the
-spec has a `world.command`) and `slurm/controller.sbatch`: `sbatch -J flock-world-<run>` /
-`-J flock-ctl-<run>`, `-o logs/%x-%j.out`, `-p` from `WORLD_PARTITION` / `CTL_PARTITION`, else
+The jobs are named `flock-world-<run>` and `flock-ctl-<run>` (one of each per run:
+`--dependency=singleton`); `flock launch` submits one only when no job of that name is pending
+or running, with `-o logs/%x-%j.out`, `-p` from `WORLD_PARTITION` / `CTL_PARTITION`, else
 `SLURM_PARTITION`, and `--qos`, `-c`, `--mem` from `WORLD_QOS` / `CTL_QOS`, `WORLD_CPUS` /
-`CTL_CPUS`, `WORLD_MEM` / `CTL_MEM` when set (cluster.env or run.env). Each job id goes to
-`hosts/<role>.job`; a job still queued from an earlier launch is waited for, never submitted
-twice. It waits (up to 30 min: a node may have to scale up) until the controller answers and
-the world wrote `hosts/world.host` (once it answers `/manifest`), then creates the swarm or
-resumes it. The controller restores its checkpoint (`<bucket>/controller/<run>`, or
-`FLOCK_STATE_URL` in run.env) at every start, so a launch after a release, a requeue or a crash
-continues the run. It sbatch'es the workers itself, with `slurm/worker.sbatch`.
-
-`flock stop --release`, once every worker has drained: pushes a final controller checkpoint
-(`POST /checkpoint`; when it fails, it says so and cancels nothing: the controller holds the only
-copy), stops the world cleanly (`scancel --signal=TERM --batch`: the world gets SIGTERM, saves
-and exits; waited for up to 11 min), cancels whatever still runs (`scancel`) and removes the
-host and job files. Nothing of the run is left in the queue.
+`CTL_CPUS`, `WORLD_MEM` / `CTL_MEM` when set (cluster.env or run.env). It waits up to 30 min (a
+node may have to scale up). The controller restores its checkpoint (`<bucket>/controller/<run>`,
+or `FLOCK_STATE_URL` in run.env) at every start, and sbatch'es the workers with
+`slurm/worker.sbatch`. `flock stop --release` sends a running world `scancel --signal=TERM
+--batch` and waits up to 11 min for it to end, then `scancel -n` both names.
 
 The world job runs the spec's `world.command` in `world.dir` on its node (no container), the way
-a local run starts it (docs/world.md): `{port}` is a free port, `{python}` the venv's python,
-`FLOCK_WORLD_TOKEN` comes from run.env. The spec's `world.url` reaches it through the host file
-(`http://${WORLD_HOST}:7860`: the controller fills host and port from `hosts/world.host`). flock
-never reads the world's state: a world that keeps state saves it on SIGTERM.
+a local run starts it (docs/world.md): `{port}` and `FLOCK_WORLD_PORT` are a free port,
+`{python}` the venv's python, `FLOCK_WORLD_TOKEN` comes from run.env. Once it answers
+`/manifest` it writes `hosts/world.host`, which the spec's `world.url` reaches through
+`http://${WORLD_HOST}:7860` (the controller fills host and port from the file).
 
 A job script takes the run directory and sources `<run dir>/slurm/common.sh`, so each run keeps
 the scripts it was set up with. `init` never overwrites an edited copy: for newer scripts,
