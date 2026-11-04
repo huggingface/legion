@@ -583,8 +583,9 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         else:
             # a duplicate inherits none of the template's variables
             variables = {
-                # the board's snapshots: a rebuild or sleep would lose it otherwise
-                **({"MSGBOARD_REPLICA": bucket.rstrip("/") + "/board"} if bucket else {}),
+                # the board's snapshots (a rebuild or sleep would lose it otherwise), one folder
+                # per swarm: the Space app uses the prefix as given, and runs often share a bucket
+                **({"MSGBOARD_REPLICA": f"{bucket.rstrip('/')}/board/{swarm}"} if bucket else {}),
                 **c.space_variables}
             if variables.get("MSGBOARD_REPLICA") and "HF_TOKEN" not in c.space_secrets:
                 return Check("board space", False, "MSGBOARD_REPLICA needs the Space secret HF_TOKEN: "
@@ -603,14 +604,22 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         h = {"Authorization": f"Bearer {hf}"}  # the private Space's gate
         end = time.monotonic() + BOARD_WAIT_S
         while True:
+            # msgboard's Space app answers 200 {"status": "starting", "error": ...} while it
+            # restores or waits for the replica lease (other calls get 503): only "ok" is ready
             try:
-                code: int | str = httpx.get(f"{url}/v1/health", headers=h, timeout=10).status_code
-            except httpx.HTTPError as e:  # building or restarting
-                code = type(e).__name__
-            if code == 200:
-                break
+                r = httpx.get(f"{url}/v1/health", headers=h, timeout=10)
+                body = r.json() if r.status_code == 200 else None
+            except (httpx.HTTPError, ValueError) as e:  # building or restarting; not JSON yet
+                state: int | str = type(e).__name__
+            else:
+                if not isinstance(body, dict):
+                    state = r.status_code
+                elif body.get("status") == "ok":
+                    break
+                else:
+                    state = f"{body.get('status')}" + (f": {body['error']}" if body.get("error") else "")
             if time.monotonic() > end:
-                return Check("board space", False, f"{url}/v1/health -> {code} after "
+                return Check("board space", False, f"{url}/v1/health -> {state} after "
                                                    f"{BOARD_WAIT_S:.0f} s"), {}
             _sleep(10)
         h["X-Msgboard-Token"] = master  # the operator token is the board's admin token

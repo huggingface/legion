@@ -65,13 +65,16 @@ step only when it is not done yet, so running it again checks the board:
    `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
 2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
    `space_secrets`. A duplicate inherits none of the template's variables. Flock sets
-   `MSGBOARD_REPLICA` (`<bucket>/board`: the board's snapshots, so a rebuild or sleep keeps it),
-   then `space_variables` (e.g. `MSGBOARD_SNAPSHOT_INTERVAL`, seconds between snapshots, default
+   `MSGBOARD_REPLICA` (`<bucket>/board/<swarm>`: the board's snapshots, so a rebuild or sleep
+   keeps it; one folder per swarm, so runs sharing a bucket never share a board), then
+   `space_variables` (e.g. `MSGBOARD_SNAPSHOT_INTERVAL`, seconds between snapshots, default
    15). The replica needs the Space secret `HF_TOKEN`: map it to a run.env token scoped to that
    bucket, never your own full token. An existing Space whose operator token is not in
    `board.env` is refused; on an existing Space, changed variables and secrets are not
    re-applied (init notes it).
-3. Waits for `<space>.hf.space/v1/health` and, with the operator token (the board's admin),
+3. Waits until `<space>.hf.space/v1/health` says `"status": "ok"` (msgboard answers `starting`
+   while it restores a snapshot or waits for the replica lease) and, with the operator token
+   (the board's admin),
    creates `#<channel>` (exists is fine) and, when `invite_env` is unset or its invite no longer
    works (`GET /v1/join/<code>`), a multi-use guest invite for it.
 4. Writes `BOARD_URL` (the spec's `url`) and the invite into `run.env`; prints key names only.

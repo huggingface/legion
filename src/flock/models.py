@@ -367,7 +367,7 @@ class CommsSpec(_Removable):
     # Space secret -> the run.env (or environment) name holding its value, e.g. {HF_TOKEN:
     # BOARD_BUCKET_TOKEN}: a token scoped to the board's bucket, never the operator's own.
     space_secrets: dict[str, str] = Field(default_factory=dict)
-    # Space variables over flock's (MSGBOARD_REPLICA: `<bucket>/board`); "" blanks one.
+    # Space variables over flock's (MSGBOARD_REPLICA: `<bucket>/board/<swarm>`); "" blanks one.
     space_variables: dict[str, str] = Field(default_factory=dict)
     space_hardware: str = "cpu-basic"  # the Hub requires one to duplicate a Space
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)

@@ -78,7 +78,7 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     variables = {v["key"]: v["value"] for v in kw["space_variables"]}
     assert kw["space_hardware"] == "cpu-basic"
     # flock's only: none of the template's
-    assert variables == {"MSGBOARD_REPLICA": "hf://buckets/acme/runs/board"}
+    assert variables == {"MSGBOARD_REPLICA": "hf://buckets/acme/runs/board/demo"}
     assert "general" in board.channels.values()
     values = read_env_file(run / "run.env")
     assert values["BOARD_URL"] == url and values["BOARD_INVITE"] in board.invites
@@ -125,6 +125,16 @@ def test_spec_variables_override_without_dropping_the_defaults(tmp_path, space, 
                          "MSGBOARD_REPLICA": ""}  # blanked: no replica
 
 
+def test_swarms_sharing_a_bucket_get_their_own_replica(tmp_path, space):
+    _, api, _ = space
+    for name in ("demo", "demo-2"):
+        rep = rundir.init(tmp_path / name, _folder(tmp_path / name, {**SPEC, "swarm": name}), env=ENV)
+        assert {c.name: c for c in rep.checks}["board space"].ok
+    replicas = [{v["key"]: v["value"] for v in kw["space_variables"]}["MSGBOARD_REPLICA"]
+                for _, _, kw in api.calls]
+    assert replicas == ["hf://buckets/acme/runs/board/demo", "hf://buckets/acme/runs/board/demo-2"]
+
+
 def test_board_space_needs_a_template(tmp_path, space):
     from flock.models import CommsSpec
 
@@ -160,6 +170,39 @@ def test_health_wait_survives_connection_errors(tmp_path, space, monkeypatch):
     monkeypatch.setattr(rundir, "_sleep", lambda s: None)
     rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
     assert fails and {c.name: c for c in rep.checks}["board space"].ok
+
+
+def test_health_wait_holds_while_the_board_is_starting(tmp_path, space, monkeypatch):
+    import httpx
+
+    board, _, _ = space
+    real, starting = httpx.get, []
+
+    def slow(url, **kw):  # msgboard's Space app while it restores: 200, but not ready
+        if url.endswith("/v1/health") and len(starting) < 2:
+            starting.append(url)
+            return httpx.Response(200, json={"status": "starting", "error": None})
+        return real(url, **kw)
+
+    monkeypatch.setattr(httpx, "get", slow)
+    monkeypatch.setattr(rundir, "_sleep", lambda s: None)
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
+    assert len(starting) == 2 and {c.name: c for c in rep.checks}["board space"].ok
+    assert "general" in board.channels.values()
+
+
+def test_health_wait_reports_a_board_that_never_starts(tmp_path, space, monkeypatch):
+    import httpx
+
+    board, _, _ = space
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: httpx.Response(
+        200, json={"status": "starting", "error": "ValueError: bad operator token"}))
+    monkeypatch.setattr(rundir, "_sleep", lambda s: None)
+    monkeypatch.setattr(rundir, "BOARD_WAIT_S", 0)
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
+    c = {c.name: c for c in rep.checks}["board space"]
+    assert c.ok is False and "starting: ValueError: bad operator token" in c.detail
+    assert "general" not in board.channels.values()  # nothing posted to a board that is not up
 
 
 def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
