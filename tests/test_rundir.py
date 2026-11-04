@@ -377,6 +377,19 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert files == [str(run / "cluster.env"), str(run / "run.env")]
     spec = read_spec(str(run / "experiment" / "spec.yaml"), files)
     assert spec.compute.partition == "cpu-spot" and spec.compute.cpus == 8
+    sec = tmp_path / "secrets.env"  # the profile's SECRETS_FILE: the checks see it, as the jobs do
+    sec.write_text("OPENAI_API_KEY=sk-hidden\nSWARM=from-secrets\n")
+    sec.chmod(0o600)
+    (run / "cluster.env").write_text(prof.read_text() + f"SECRETS_FILE={sec}\n")
+    seen = []
+    monkeypatch.setattr(rundir, "check_venv", lambda e: seen.append(dict(e)) or rundir.Check("venv", True, ""))
+    rep = rundir.init(run, env={})
+    assert seen[-1]["OPENAI_API_KEY"] == "sk-hidden" and "secrets file" not in _by_name(rep)
+    assert "sk-hidden" not in repr(rep)
+    sec.chmod(0o644)
+    rep = rundir.init(run, env={})
+    c = _by_name(rep)["secrets file"]
+    assert not c.ok and "mode 600" in c.detail and "OPENAI_API_KEY" not in seen[-1]
     with pytest.raises(ValueError, match="no such file"):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
 
