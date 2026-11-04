@@ -8,6 +8,7 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -487,12 +488,18 @@ def _print_events(api: Client, name: str, only: str, after: int, follow: bool, w
 
 
 def _print_agents(rows: list[dict]) -> None:
+    """Turns and cost as of each agent's last heartbeat: its age next to them."""
     _table([[a["name"], a["state"], a["type"], a["worker"], a["turns"], a["pending"],
              f"${a['cost_usd']:.4f}",  # a short turn costs a fraction of a cent
-             (a.get("endpoint") or "-") + (" DEAD" if a.get("on_dead_server") else ""),
-             a["last_heartbeat"]] for a in rows],
-           ["name", "state", "type", "worker", "turns", "pending", "cost", "server",
-            "last_heartbeat"])
+             _ago(a["last_heartbeat"]),
+             (a.get("endpoint") or "-") + (" DEAD" if a.get("on_dead_server") else "")]
+            for a in rows],
+           ["name", "state", "type", "worker", "turns", "pending", "cost", "heartbeat",
+            "server"])
+
+
+def _ago(iso: str | None) -> str:
+    return "-" if not iso else f"{time.time() - datetime.fromisoformat(iso).timestamp():.0f} s ago"
 
 
 def _num(v: Any, fmt: str = "{:.0f}") -> str:
@@ -539,7 +546,8 @@ def _print_health(h: dict | None, workers: list[dict]) -> None:
         return
     b = h["body"]
     w = b.get("world")
-    typer.echo(f"snapshot {time.time() - h['ts']:.0f} s old, generation {h.get('generation')}; "
+    age = time.time() - h["ts"]
+    typer.echo(f"snapshot {age:.0f} s old, generation {h.get('generation')}; "
                + ("no world" if not w else f"world {'up' if w['up'] else 'DOWN'} "
                   f"{_num(w.get('manifest_ms'))} ms"
                   + (f" slurm {w['slurm_state']}" if w.get("slurm_state") else "")))
@@ -556,9 +564,12 @@ def _print_health(h: dict | None, workers: list[dict]) -> None:
                    f"{r['max']}){nxt}" + (f", held {r['holds']}x" if r["holds"] else ""))
     for a in b["alerts"]:
         typer.echo(f"  ! {a['msg']}")
-    for name, t in b["types"].items():
+    if h.get("before_restart") and b["types"]:
+        typer.echo("type counts: not shown, the snapshot predates the controller's restart")
+    for name, t in ({} if h.get("before_restart") else b["types"]).items():
         gens = " ".join(f"{r[:8]}:{n}" for r, n in sorted(t["gens"].items(), key=lambda x: -x[1]))
-        typer.echo(f"type {name}: {_states(t['by_state'])}  revs {gens or '-'}")
+        typer.echo(f"type {name}: {_states(t['by_state'])}  revs {gens or '-'}  "
+                   f"(health {age:.0f} s ago)")
     ws = sorted(((wid, wk) for wid, wk in b["workers"].items() if isinstance(wk, dict)),
                 key=lambda x: (x[1].get("eta_limit_s") is None, x[1].get("eta_limit_s") or 0))
     if ws:
