@@ -378,7 +378,7 @@ async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path,
         0, Result('{"status": 200, "body": {}}', False))
     try:
         await team.start()
-        assert "board_news" in team.hub.section("birch")
+        assert "board_news` (DMs, mentions and replies" in team.hub.section("birch")
         out, error = await team.call("cedar", "dm", to="birch", text="Private  review\nquestion " + "x" * 200)
         assert not error, out
         dm_id = out["posted"]
@@ -429,6 +429,17 @@ async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path,
     finally:
         await team.close()
 
+
+async def test_board_news_names_dms_only_for_a_type_that_has_them(tmp_path, board):
+    team = Team(tmp_path, board, ["cedar"])
+    team.spec.extended = True
+    team.hub.configure(team.spec, [t for t in ALL_COMMS_TOOLS if t not in ("comms:dm", "comms:read_dms")])
+    try:
+        await team.start()
+        section = team.hub.section("cedar")
+        assert "board_news` (mentions and replies to you" in section and "DM" not in section
+    finally:
+        await team.close()
 
 async def test_tool_cache_is_bounded_per_agent_and_dropped_with_the_agent():
     from types import SimpleNamespace
