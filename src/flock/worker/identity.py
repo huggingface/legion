@@ -1,7 +1,8 @@
 """msgboard identities: redeem an agent invite by name, once per agent per worker process.
 
-`POST {url}/v1/join {code, name}` is unauthenticated; re-joining with the same name returns the
-same principal with a rotated token (the old one stops working), so the worker joins once per
+`POST {url}/v1/join {code, name}` needs no board token (a private *.hf.space gate wants HF_TOKEN);
+re-joining with the same name returns the same principal with a rotated token (the old one stops
+working), so the worker joins once per
 agent per worker process and reuses the token, and a relaunch on another worker re-joins by
 name. One cache serves both users, so they never rotate each other's token:
 
@@ -41,10 +42,12 @@ class MsgboardIdentity:
 
 
 async def join(url: str, code: str, name: str, *, client: httpx.AsyncClient | None = None) -> MsgboardIdentity:
+    from flock.comms.board import _auth  # HF_TOKEN for the gate of a private *.hf.space board
+
     own = client is None
     client = client or httpx.AsyncClient(timeout=20)
     try:
-        r = await client.post(normalize_board_url(url) + "/v1/join",
+        r = await client.post(normalize_board_url(url) + "/v1/join", headers=_auth(None, url),
                               json={"code": code, "name": name, "display_name": name})
         r.raise_for_status()
         body = r.json()

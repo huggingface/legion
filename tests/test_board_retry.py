@@ -179,3 +179,19 @@ def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
                                                         "Authorization": "Bearer fbt_b"}
     monkeypatch.delenv("HF_TOKEN")
     assert _auth("fbt_b", space)["Authorization"] == "Bearer fbt_b"
+
+
+async def test_worker_join_sends_the_hf_token_only_to_hf_spaces(monkeypatch):
+    from flock.worker.identity import join
+
+    monkeypatch.setenv("HF_TOKEN", "hf_x")
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.host, req.headers.get("authorization")))
+        return httpx.Response(200, json={"token": "t", "principal": {"id": 3, "external_id": "a"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        await join("https://x.hf.space/boards/b", "code", "a", client=c)
+        await join("https://board.invalid/boards/b", "code", "a", client=c)
+    assert seen == [("x.hf.space", "Bearer hf_x"), ("board.invalid", None)]
