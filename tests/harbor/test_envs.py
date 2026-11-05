@@ -86,21 +86,24 @@ async def test_no_secret_value_in_any_argv(monkeypatch, tmp_path, backend):
     monkeypatch.setattr(docker.DockerEnvironment, "_collect_streamed_output", collect)
     (tmp_path / "environment").mkdir()
     env = EnvironmentFactory.create_environment_from_config(
-        TrialEnvironmentConfig(type=backend, import_path=ENVIRONMENTS[backend]),
+        TrialEnvironmentConfig(type=backend, import_path=ENVIRONMENTS[backend],
+                               kwargs={"secret_names": ["HF_TOKEN", "PLAIN", "DOCKER_TOKEN"]}),
         environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
         trial_paths=TrialPaths(tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="python:3.12"))
     await asyncio.gather(
         env.exec("pi --print hi", env={"HF_TOKEN": "s3cret-a", "PLAIN": "x=1", "PATH": "/t/bin",
-                                       "DOCKER_HOST": "tcp://x"}, user="agent"),
+                                       "STORAGE_DRIVER": "vfs", "DOCKER_TOKEN": "s3cret-c"},
+                 user="agent"),
         env.exec("true", env={"HF_TOKEN": "s3cret-b"}, cwd="/app"))
     await env._run_docker_compose_command(["ps"])
     (a, env_a), (b, env_b), (ps, env_ps) = runs
     for argv in (a, b, ps):
         assert not any("s3cret" in arg for arg in argv), argv
-    assert a[a.index("exec"):][:11] == ("exec", "-e", "HF_TOKEN", "-e", "PLAIN", "-e",
-                                        "PATH=/t/bin", "-e", "DOCKER_HOST=tcp://x", "-u", "agent")
+    assert a[a.index("exec"):][:13] == ("exec", "-e", "HF_TOKEN", "-e", "PLAIN", "-e",
+                                        "PATH=/t/bin", "-e", "STORAGE_DRIVER=vfs", "-e",
+                                        "DOCKER_TOKEN", "-u", "agent")
     assert (env_a["HF_TOKEN"], env_a["PLAIN"], env_b["HF_TOKEN"]) == ("s3cret-a", "x=1", "s3cret-b")
-    # a task's PATH or DOCKER_HOST never steers the host's compose
-    assert env_a.get("PATH") != "/t/bin" and env_a.get("DOCKER_HOST") != "tcp://x"
+    # only the agent's own names move: a task's PATH or STORAGE_DRIVER never steers the host
+    assert env_a.get("PATH") != "/t/bin" and "STORAGE_DRIVER" not in env_a
     assert "-e" in b and "PLAIN" not in env_b and "HF_TOKEN" not in env_ps

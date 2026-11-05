@@ -11,18 +11,19 @@ from harbor.environments.podman import PodmanEnvironment
 from flock.secrets_file import secret_env
 
 _EXEC_ENV = contextvars.ContextVar("flock_exec_env", default=None)
-# what a task's value (e.g. its [verifier.env]) would steer the host's compose and podman with,
-# in the compose process's environment: these stay `-e NAME=value` (they are no secrets)
-_HOST_NAMES = {"PATH", "HOME", "TMPDIR"}
-_HOST_PREFIXES = ("LD_", "PYTHON", "XDG_", "CONTAINER", "PODMAN_", "DOCKER_", "COMPOSE_")
 
 
 class _EnvOffArgv:
     """Harbor's `compose exec -e NAME=value` (the agent's env: the inference key, resource
-    tokens) puts the value in an argv every user of the node reads (`ps`). Here it passes
-    `-e NAME`, and the value goes in the compose process's own environment, which podman and
-    docker read a bare NAME from (podman-compose 1.5: `--env NAME`); names that would steer the
-    host's compose or podman there keep `-e NAME=value`."""
+    tokens) puts the value in an argv every user of the node reads (`ps`). For the agent's env
+    names (`secret_names`, from the adapter) it passes `-e NAME`, and the value goes in the
+    compose process's own environment, which podman and docker read a bare NAME from
+    (podman-compose 1.5: `--env NAME`). Any other name (a task's PATH or STORAGE_DRIVER, which
+    would steer the host's compose there) keeps `-e NAME=value`."""
+
+    def __init__(self, *args, secret_names=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self._secret_names = frozenset(secret_names)
 
     async def _run_docker_compose_command(self, command, *args, **kwargs):
         if command[:1] != ["exec"]:
@@ -30,8 +31,7 @@ class _EnvOffArgv:
         command, values, i = list(command), {}, 1
         while i + 1 < len(command) and command[i] in ("-w", "-e", "-u"):  # flags, then service
             name, eq, value = command[i + 1].partition("=")
-            if command[i] == "-e" and eq and name not in _HOST_NAMES \
-                    and not name.startswith(_HOST_PREFIXES):
+            if command[i] == "-e" and eq and name in self._secret_names:
                 values[name], command[i + 1] = value, name
             i += 2
         token = _EXEC_ENV.set(values)  # per task: concurrent execs keep their own

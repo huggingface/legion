@@ -270,6 +270,8 @@ class HarborAdapter:
         await self._drop_network(self._network)  # the last Trial's: it has ended
         networks = None
         if config.environment.backend != "hf-sandbox":  # a sandbox is an HF Job: no local network
+            # the agent's env (inference key, resource tokens): kept out of every exec's argv
+            tc.environment.kwargs["secret_names"] = sorted(tc.agent.env)
             # one network per Trial, outside host and VPN routes: docker's default pools run
             # out after about 30 compose projects on a host
             self._network = networks = launch.TrialNetworks(
