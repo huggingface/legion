@@ -29,7 +29,7 @@ from typer.testing import CliRunner
 from flock import cli
 from flock.controller.api import create_app as controller_app
 from flock.controller.jobs import FakeJobsClient
-from flock.controller.reconcile import Settings, reconcile
+from flock.controller.reconcile import FAST_END, Settings, reconcile
 from flock.models import (
     AssignCommand,
     SwarmSpec,
@@ -974,6 +974,7 @@ async def test_reapply_to_another_world_never_sends_the_old_secret(store, tmp_pa
         await hub.aclose()
 
         # the worker drains (needs_restart), its job completes: relaunched with secret B
+        clock.advance(FAST_END)  # after a run of normal length: at once
         hb["draining"] = True
         await c.post(f"/workers/{wid}/heartbeat", json=hb)
         jobs.set_stage(launch["job_id"], "COMPLETED")

@@ -64,6 +64,11 @@ NUDGE_EVERY = 1800.0  # s, min gap between resume prompts to one stuck agent
 NUDGE_MAX = 3  # resume prompts to one agent until it completes a turn
 RETIRE_GRACE = 120.0  # s, an emptied worker gets this long to drain before it is cancelled
 STABLE_AFTER = 600.0  # s, a heartbeat this long after launch resets the crash streak
+# s, a planned end (drain, timeout) this soon after the job started backs off like a crash:
+# 2x the default 30 s heartbeat, so the job never ran a heartbeat cycle past its first, and the
+# 15 s inspect lag of a draining worker stays inside it. Fixed, not per type: it only has to tell
+# a worker that ends at once (a restart storm, 89 jobs in 7 min) from a run that did work.
+FAST_END = 60.0
 # Not written to the swarm stream: per agent, or repeated every pass while the condition holds.
 QUIET_ACTIONS = ("assign", "unassign", "budget_exhausted", "workers_full")
 
@@ -662,10 +667,16 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
             store.put_control(w["swarm"], "unsynced",
                               {**lost, **(store.get_control(w["swarm"], "unsynced") or {})})
     if planned:
-        store.update_worker(wid, **common, consecutive_crashes=0, next_launch_at=p.now)
+        lived = p.now - (w["started_at"] or w["launched_at"] or p.now)
+        # preempted: the scheduler's doing, relaunched at once to restore
+        fast = w["fast_ends"] + 1 if lived < FAST_END and not (released or st.preempted) else 0
+        backoff = min(p.lv.crash_backoff * 2 ** (fast - 1), BACKOFF_CAP) if fast else 0.0
+        store.update_worker(wid, **common, consecutive_crashes=0, fast_ends=fast,
+                            next_launch_at=p.now + backoff)
         # released (`stop --release`): it ends for good, nothing relaunches it until a launch
+        why = f"{st.stage}: {st.message}" if st.message else st.stage
         p.act("end" if released else "planned_restart", wid,
-              f"{st.stage}: {st.message}" if st.message else st.stage)
+              f"{why}; ended {lived:.0f}s after start, backoff {backoff:.0f}s" if fast else why)
         if st.preempted:  # turns cut by the reclaim resume after the restore
             _interrupt_turns(p, w, st)
         return

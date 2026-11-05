@@ -211,7 +211,7 @@ heartbeat, a command poll nor an event post arrives from it.
 |---|---|---|---|
 | `worker_unknown_after` | 90s | 15s | silent this long: the worker and its agents are `unknown` |
 | `worker_dead_after` | 180s | 30s | silent this long: `dead`; its job is cancelled and relaunched (a crash). Must be longer than `worker_unknown_after` |
-| `crash_backoff` | 30s | 2s | wait before relaunching a crashed slot, doubling per crash in a row (cap 15 min); also the first wait after a failed launch (cap 5 min) |
+| `crash_backoff` | 30s | 2s | wait before relaunching a crashed slot, doubling per crash in a row (cap 15 min); also the first wait after a failed launch (cap 5 min), and after a drain or job timeout less than 60 s after the job started (doubling per such end in a row, never `crashlooping`; a preemption relaunches at once) |
 
 The local defaults are 3 and 6 missed heartbeats at the local 5 s interval (the jobs ratio at
 30 s). A local worker is also checked on every reconcile pass, so a worker process that exits

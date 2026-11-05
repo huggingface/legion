@@ -246,6 +246,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN telemetry TEXT")
         if "started_at" not in cols:  # launch-timeout clock: last time the job was seen queued
             self._x("ALTER TABLE workers ADD COLUMN started_at REAL")
+        if "fast_ends" not in cols:  # planned ends in a row soon after start (reconcile.FAST_END)
+            self._x("ALTER TABLE workers ADD COLUMN fast_ends INTEGER NOT NULL DEFAULT 0")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}

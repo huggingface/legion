@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+from flock.controller.reconcile import FAST_END
 from flock.models import AgentHeartbeat, Event, TokenUsage, WorkerHeartbeat
 
 from .conftest import make_spec
@@ -262,7 +263,7 @@ async def test_parked_poll_of_a_finished_job_gets_nothing_from_its_replacement(
     await asyncio.sleep(0.05)
     assert not parked.done()
     jobs.set_stage(jobs.job_for(W0), "COMPLETED")  # the drained worker exited
-    clock.advance(16)
+    clock.advance(FAST_END)  # after a run of normal length
     tick()  # planned restart: new job, new incarnation, assigns queued
     new = jobs.launches[-1]["env"]["WORKER_INCARNATION"]
     assert new != old and len(jobs.launches) == 2
