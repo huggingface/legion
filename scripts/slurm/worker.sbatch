@@ -28,7 +28,8 @@
 #   container, which cannot run inside Enroot, so flock-worker runs here (never in CONTAINER) as
 #   a child of this shell, with shepherd's podman setup (f3970bc launch.slurm): the job's own
 #   podman storage under /tmp, podman's health checks run by flock.harbor.podman_healthchecks,
-#   and at exit the job's containers and storage removed. Unverified on compute nodes.
+#   shepherd's git credential helper for huggingface.co (the token from a 0600 file there), and
+#   at exit the job's containers stopped. Unverified on compute nodes.
 # - Spot reclaim (container): the watcher sends SIGUSR1 to this shell, to srun AND to every process
 #   of the step. flock-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
 #   handler (drain + sync) replaces it. The handler below forwards USR1 to the srun step, then
@@ -67,18 +68,17 @@ run_worker() {
     FLOCK_WORKER_SECRETS_FILE_UNLINK=1 "$VENV/bin/flock-worker"
 }
 
-# podman_cleanup (EXIT, harbor): stop the health checks, then remove this job's containers and
-# podman storage (the wrapper's --root: never the user's). Unverified: rootless storage files
-# belong to subordinate ids, hence `podman unshare`.
+# podman_cleanup (EXIT, harbor): stop the health checks and this job's containers (the wrapper's
+# --root: never the user's storage), quickly: Slurm's KillWait (30 s on hopper-cpu) runs from the
+# scancel, the worker's drain included.
+# shortcut: the storage stays for the job's own /tmp (a per-job tmpfs on hopper-cpu) to take;
+# on a cluster with a shared /tmp, remove it here with `podman unshare rm -rf` (sub-uid files)
 podman_cleanup() {
   local p=$PODMAN_LOCAL/bin/podman  # by path: a plain `podman` here would be the user's storage
   [ -z "${HEALTH_PID:-}" ] || kill "$HEALTH_PID" 2>/dev/null
-  if [ -x "$p" ]; then
-    timeout 15 "$p" stop --all --time 5 >/dev/null 2>&1
-    timeout 15 "$p" rm --all --force >/dev/null 2>&1
-    timeout 60 "$p" unshare rm -rf "$PODMAN_LOCAL/graphroot" "$PODMAN_LOCAL/runroot" >/dev/null 2>&1
-  fi
-  rm -rf "$PODMAN_LOCAL"
+  [ -x "$p" ] || return 0
+  timeout 10 "$p" stop --all --time 5 >/dev/null 2>&1
+  timeout 10 "$p" rm --all --force >/dev/null 2>&1
 }
 
 if [ "${1:-}" = --inner ]; then  # in the container (srun below): the batch shell's environment came along
@@ -126,6 +126,18 @@ if [ "${FLOCK_HARNESS:-}" = harbor ]; then
   trap podman_cleanup EXIT
   export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
   mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
+  # Harbor clones task repos with git: HF_TOKEN for huggingface.co only (shepherd's helper), read
+  # from a 0600 file, as the worker's environment never holds it
+  if [ -n "${HF_TOKEN:-}" ]; then
+    printf '%s\n' "$HF_TOKEN" > "$PODMAN_LOCAL/hf-token" || die "cannot write $PODMAN_LOCAL/hf-token"
+    git_slot=${GIT_CONFIG_COUNT:-0}
+    export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper" \
+      "GIT_CONFIG_VALUE_${git_slot}="
+    git_slot=$((git_slot + 1))
+    export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper" \
+      "GIT_CONFIG_VALUE_${git_slot}=!f() { if [ \"\$1\" = get ]; then echo username=hf_user; printf password=; cat '$PODMAN_LOCAL/hf-token'; fi; }; f"
+    export GIT_CONFIG_COUNT=$((git_slot + 1))
+  fi
   # Explicit engine flags work on the cluster's Podman 4.9 and avoid user storage.
   cat > "$PODMAN_LOCAL/bin/podman" <<EOF
 #!/bin/bash
