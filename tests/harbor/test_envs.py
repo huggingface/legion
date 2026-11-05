@@ -91,12 +91,16 @@ async def test_no_secret_value_in_any_argv(monkeypatch, tmp_path, backend):
         trial_paths=TrialPaths(tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="python:3.12"))
     await asyncio.gather(
-        env.exec("pi --print hi", env={"HF_TOKEN": "s3cret-a", "PLAIN": "x=1"}, user="agent"),
+        env.exec("pi --print hi", env={"HF_TOKEN": "s3cret-a", "PLAIN": "x=1", "PATH": "/t/bin",
+                                       "DOCKER_HOST": "tcp://x"}, user="agent"),
         env.exec("true", env={"HF_TOKEN": "s3cret-b"}, cwd="/app"))
     await env._run_docker_compose_command(["ps"])
     (a, env_a), (b, env_b), (ps, env_ps) = runs
     for argv in (a, b, ps):
         assert not any("s3cret" in arg for arg in argv), argv
-    assert a[a.index("exec"):][:7] == ("exec", "-e", "HF_TOKEN", "-e", "PLAIN", "-u", "agent")
+    assert a[a.index("exec"):][:11] == ("exec", "-e", "HF_TOKEN", "-e", "PLAIN", "-e",
+                                        "PATH=/t/bin", "-e", "DOCKER_HOST=tcp://x", "-u", "agent")
     assert (env_a["HF_TOKEN"], env_a["PLAIN"], env_b["HF_TOKEN"]) == ("s3cret-a", "x=1", "s3cret-b")
+    # a task's PATH or DOCKER_HOST never steers the host's compose
+    assert env_a.get("PATH") != "/t/bin" and env_a.get("DOCKER_HOST") != "tcp://x"
     assert "-e" in b and "PLAIN" not in env_b and "HF_TOKEN" not in env_ps
