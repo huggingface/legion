@@ -18,6 +18,7 @@ DEPENDENCIES = ["httpx"]
 REQUIRES = ["world"]
 
 Scalar = str | int | float | bool | None
+MAX_BYTES, MAX_FILES = 128 << 20, 10000  # as flock.world.workspace, which the world enforces
 # Never run a command the clone configured, or let its diff settings change the patch format.
 SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "diff.noprefix=false",
             "-c", "diff.mnemonicPrefix=false", "-c", "diff.relative=false")
@@ -71,19 +72,32 @@ def _capture(path, patch):
     or every file (v1). The world checks the base and the files; nothing here is trusted."""
     root = _git(path, "rev-parse", "--show-toplevel").decode().strip()
     base = _git(root, "merge-base", "HEAD", "refs/remotes/origin/main").decode().strip()
-    if not patch:
-        names = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-        files = {
-            name: base64.b64encode(Path(root, name).read_bytes()).decode("ascii")
-            for name in dict.fromkeys(names.decode().split("\0"))
-            if name and Path(root, name).is_file()
-        }
-        return {"base_sha": base, "files": files}
     with tempfile.TemporaryDirectory() as tmp:
-        # A private index: the clone's own index and staged state stay as they are.
+        # A private index of what the world gets: the clone's own index stays as it is.
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
         _git(root, "read-tree", "HEAD", env=env)
         _git(root, "add", "--all", env=env)
+        names, total = [], 0
+        for entry in _git(root, "ls-files", "--stage", "-z", env=env).decode().split("\0"):
+            if not entry:
+                continue
+            meta, name = entry.split("\t", 1)
+            mode = meta.split()[0]
+            if mode == "120000":
+                raise ValueError(f"{name} is a symlink: the world takes regular files only; "
+                                 "remove it or add it to .gitignore")
+            if mode == "160000":
+                raise ValueError(f"{name} is a nested git repository (e.g. a git worktree): "
+                                 "move it out of the clone or add it to .gitignore")
+            names.append(name)
+            total += os.lstat(os.path.join(root, name)).st_size
+        if len(names) > MAX_FILES or total > MAX_BYTES:
+            raise ValueError("the clone is over 128 MiB or 10,000 files: remove large or "
+                             "generated files, or add them to .gitignore")
+        if not patch:  # regular files only (modes checked above): nothing follows a link
+            files = {name: base64.b64encode(Path(root, name).read_bytes()).decode("ascii")
+                     for name in names}
+            return {"base_sha": base, "files": files}
         diff = _git(root, "diff", "--cached", "--binary", "--full-index", "--find-renames",
                     "--no-ext-diff", "--no-textconv", "--no-color", base, env=env)
     return {"base_sha": base, "patch": base64.b64encode(diff).decode("ascii")}

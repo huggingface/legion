@@ -145,7 +145,9 @@ async def test_unix_transport_proxies_each_agent_and_uploads_its_clone(
     assert not Path(binding["mounts"][0]["source"]).exists()
 
 
-async def test_http_transport_token_acts_only_as_its_agent(served, tmp_path, monkeypatch):
+async def test_http_transport_token_acts_only_as_its_agent(
+    served, clone, tmp_path, monkeypatch
+):
     monkeypatch.setenv("FLOCK_WORLD_TOKEN", SECRET)
     resource = WorldResource({"url": served.url, "transport": "http"},
                              state_dir=tmp_path, agents=["agent-001"], secrets=[])
@@ -157,6 +159,14 @@ async def test_http_transport_token_acts_only_as_its_agent(served, tmp_path, mon
             monkeypatch.setenv(key, value)
         assert world_tools.call("submit", {"path": "main"}) == {"by": "agent-001", "path": "main"}
         assert served.uploads == []  # "main" is in the tool's skip list: nothing to upload
+        (clone / "link").symlink_to("README.md")
+        with pytest.raises(ValueError, match="link is a symlink"):
+            world_tools.call("submit", {"path": str(clone)})
+        (clone / "link").unlink()
+        git(clone, "worktree", "add", "-q", "--detach", "review")
+        with pytest.raises(ValueError, match="review is a nested git repository"):
+            world_tools.call("submit", {"path": str(clone)})
+        assert served.uploads == []
         monkeypatch.setenv("WORLD_AGENT", "agent-002")
         with pytest.raises(RuntimeError, match="unauthorized"):
             world_tools.call("submit", {"path": "main"})
