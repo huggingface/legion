@@ -22,7 +22,8 @@ flock init $PWD/runs/hierarchy --from my-experiment --profile my-cluster.env --s
 #   slurm/              a copy of scripts/slurm: the job scripts `flock launch` submits
 #   cluster.env         a copy of the cluster profile (below)
 #   run.env (mode 600)  every ${VAR} the spec reads (commented: the spec's default),
-#                       the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
+#                       the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN,
+#                       and FLOCK_WORLD_ADMIN_TOKEN for a `url` world (`python -m flock.world set`)
 $EDITOR runs/hierarchy/run.env              # fill what the checks report; rerun `flock init runs/hierarchy`
 export FLOCK_RUN_DIR=$PWD/runs/hierarchy    # or `flock --run runs/hierarchy ...` on each command
 flock launch runs/hierarchy/experiment      # sbatch the world and the controller, wait, create

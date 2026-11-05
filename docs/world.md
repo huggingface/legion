@@ -416,8 +416,9 @@ by, reason}`):
 - a world flock starts (`command`, `compute: local`): the controller derives the secret from
   its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
 - any other world (`url`; Slurm, a Space): set `FLOCK_WORLD_ADMIN_TOKEN` in the world's
-  environment and in the controller's secrets (the run's secrets file on Slurm,
-  `experiments/run4/slurm/secrets.env.example`), and keep it from the workers.
+  environment and in the controller's secrets, and keep it from the workers. `flock init`
+  generates it in `run.env` (its own value, never the world token); on Slurm `world.sbatch`
+  passes it to the world and `worker.sbatch` strips it.
 
 ```bash
 python -m flock.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
