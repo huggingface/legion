@@ -1,5 +1,9 @@
 # v8 experiment
 
+> Running this experiment needs chatbot4's v8 changes: the `seed-v8` seed and its settings, and the
+> world's restore/push through `CHATBOT_BUCKET`. They live on branch `v8-port` (commits `1dc549e`,
+> `33a776b`), not here; without them the world fails to start (no seed-v8) and a resume cannot restore its state.
+
 Run 4's setup (chatbot4 world, board, Pi on vLLM, loop) with the changes the v4–v7 boards and
 evals pointed to. In all four campaigns the score jumped in the first hours, then stayed flat or
 fell while hundreds of agents kept merging: first-match routing let teams outrank each other, no
