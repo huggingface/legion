@@ -150,7 +150,7 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
             continue
         if was.harbor.config["task"] == ts.harbor.config["task"]:
             ts.harbor.task = was.harbor.task
-        if was.harbor.folders == ts.harbor.folders:
+        if was.harbor.folders is not None and was.harbor.folders == ts.harbor.folders:
             for key in ("tools_dir", "resources_dir"):
                 ts.harbor.config[key] = was.harbor.config[key]
 
