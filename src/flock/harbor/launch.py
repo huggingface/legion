@@ -1,7 +1,14 @@
-# from shepherd f3970bc:src/flock/launch.py (lines 32-71, build_trial_config only)
-"""Build one agent's Harbor TrialConfig exactly as shepherd's launcher does."""
+# from shepherd f3970bc:src/flock/launch.py
+"""Experiment resources around ordinary concurrent Harbor trials."""
 
+import asyncio
+import importlib.metadata
 import os
+import shutil
+import signal
+import threading
+import uuid
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from harbor.models.trial.config import (
@@ -10,9 +17,17 @@ from harbor.models.trial.config import (
     TaskConfig,
     TrialConfig,
 )
+from harbor.trial.trial import Trial
 
-from .config import PI_VERSION
-from .tools.setup import TOOLS_MANIFEST
+from .config import PI_VERSION, Config
+from .harnesses.pi import attach_pi_setup, terminal_pi_error
+from .instructions import build_agent_instructions
+from .networking import TrialNetworks
+from .resources import Resources
+from .results import now, safe_error, write_json
+from .sources import download_task, resolve_task
+from .tools.bundle import build_tool_bundle
+from .tools.setup import TOOLS_MANIFEST, attach_tool_setup
 
 
 def build_trial_config(config, resolved, run_dir, name, agent_instructions):
@@ -55,3 +70,282 @@ def build_trial_config(config, resolved, run_dir, name, agent_instructions):
         ),
         extra_instructions=[agent_instructions],
     )
+
+
+async def run_experiment(config: Config):
+    """Return (result directory, exit code); always finalize owned resources."""
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    # Embedded callers retain ownership of any existing signal handler.
+    handle_sigterm = (
+        threading.current_thread() is threading.main_thread()
+        and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    )
+
+    def cancel():
+        if not current.cancelling():
+            current.cancel()
+
+    if handle_sigterm:
+        loop.add_signal_handler(signal.SIGTERM, cancel)
+    try:
+        return await _run_experiment(config)
+    finally:
+        if handle_sigterm:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+
+async def _run_experiment(config: Config):
+    config.check_credentials()
+    config.check_model_connection()
+    instructions = (
+        config.team_file.read_text(encoding="utf-8")
+        if config.team_file is not None
+        else ""
+    )
+    role_instructions = {
+        name: role.role_file.read_text(encoding="utf-8")
+        if role.role_file is not None
+        else ""
+        for name, role in (config.agents.roles or {}).items()
+    }
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    run_id = f"{config.name[:24]}-{timestamp}-{uuid.uuid4().hex[:6]}"
+    run_dir = config.output_dir / run_id
+    run_dir.mkdir(parents=True, mode=0o700)
+    state = run_dir / "state"
+    state.mkdir(mode=0o700)
+    bundle = build_tool_bundle(config.tools_dir, config.tools, state / "tools.tar.gz")
+    inputs = run_dir / "inputs"
+    inputs.mkdir()
+    roster = config.agents.roster()
+    names = list(roster)
+    participants = [
+        {"name": name, "role": role, "status": "pending", "rewards": None}
+        for name, role in roster.items()
+    ]
+    secrets = [os.environ[config.inference.api_key_env]]
+    resources = Resources(
+        config.resources_dir,
+        config.resources,
+        run_dir=run_dir,
+        agents=names,
+        secrets=secrets,
+        required=bundle.manifest["requires"],
+    )
+    manifest = {
+        "run_id": run_id,
+        "status": "running",
+        "started_at": now(),
+        "configuration": config.model_dump(mode="json"),
+        "versions": {
+            name: importlib.metadata.version(name) for name in ("flock", "harbor")
+        },
+        "pi_version": PI_VERSION,
+        "tools": {"sha256": bundle.sha256, **bundle.manifest},
+        "resources": resources.records,
+        "participants": participants,
+        "artifacts": {"tool_bundle": "state/tools.tar.gz"},
+    }
+    if config.team_file is not None:
+        (inputs / "instructions.md").write_text(instructions, encoding="utf-8")
+        manifest["artifacts"]["instructions"] = "inputs/instructions.md"
+    for name, role in (config.agents.roles or {}).items():
+        if role.role_file is not None:
+            snapshot = inputs / "roles" / f"{name}.md"
+            snapshot.parent.mkdir(exist_ok=True)
+            snapshot.write_text(role_instructions[name], encoding="utf-8")
+            manifest["artifacts"].setdefault("role_instructions", {})[name] = str(
+                snapshot.relative_to(run_dir)
+            )
+    manifest_path = run_dir / "run.json"
+    write_json(manifest_path, manifest)
+    print(f"Results: {run_dir}", flush=True)
+    networks = None
+    tasks = []
+    group = None
+    code = 0
+
+    def save():
+        write_json(manifest_path, manifest)
+
+    async def run_participant(record, trial_config):
+        record.update(status="running", started_at=now())
+        save()
+        trial = None
+        result = None
+        try:
+            trial = await Trial.create(trial_config)
+            attach_pi_setup(trial, config.inference)
+            if config.tools:
+                attach_tool_setup(trial, bundle)
+            result = await trial.run()
+            record["status"] = (
+                "failed" if result.failure_cause is not None else "completed"
+            )
+        except asyncio.CancelledError:
+            record["status"] = "cancelled"
+            raise
+        except Exception as exc:
+            record.update(status="failed", error=safe_error(exc, secrets))
+        finally:
+            if result is None and trial is not None:
+                try:
+                    result = trial.result
+                except (AttributeError, RuntimeError):
+                    # Harbor may fail before initializing its result object.
+                    pass
+            if result is not None:
+                result_data = result.model_dump(mode="json")
+                verifier = result_data.get("verifier_result")
+                record["rewards"] = verifier.get("rewards") if verifier else None
+                record["trial_id"] = result_data.get("id")
+                record["agent_execution"] = result_data.get("agent_execution")
+                if result_data.get("step_results"):
+                    record["steps"] = [
+                        {
+                            "name": step["step_name"],
+                            "rewards": (step.get("verifier_result") or {}).get(
+                                "rewards"
+                            ),
+                            "agent_execution": step.get("agent_execution"),
+                            "error": safe_error(
+                                RuntimeError(
+                                    step["exception_info"]["exception_message"]
+                                ),
+                                secrets,
+                            )
+                            if step.get("exception_info")
+                            else None,
+                        }
+                        for step in result_data["step_results"]
+                    ]
+                if result.exception_info:
+                    record["error"] = safe_error(
+                        RuntimeError(result.exception_info.exception_message), secrets
+                    )
+                result_path = (
+                    run_dir / "trials" / trial_config.trial_name / "result.json"
+                )
+                if result_path.exists():
+                    record["result_path"] = str(result_path.relative_to(run_dir))
+            if record["rewards"] is None and not record.get("steps"):
+                record["missing_reward_reason"] = record.get(
+                    "error", "Verification did not produce a reward"
+                )
+            if record["status"] == "completed":
+                pi_error = terminal_pi_error(
+                    run_dir / "trials" / trial_config.trial_name / "agent" / "pi.txt",
+                    max_turns=config.limits.agent_max_turns,
+                )
+                if pi_error:
+                    record.update(
+                        status="failed",
+                        error=safe_error(RuntimeError(pi_error), secrets),
+                    )
+                elif record.get("missing_reward_reason"):
+                    record.update(
+                        status="failed", error=record["missing_reward_reason"]
+                    )
+            record["finished_at"] = now()
+            save()
+
+    try:
+        async with asyncio.timeout(config.limits.run_timeout_seconds):
+            resolved = await resolve_task(config.task)
+            manifest["source"] = resolved.manifest()
+            source_path = await download_task(resolved, state / "sources")
+            shutil.copy2(source_path / "instruction.md", inputs / "task.md")
+            manifest["artifacts"]["task_instruction"] = "inputs/task.md"
+            networks = TrialNetworks(run_id, engine=config.environment.backend)
+            await networks.start()
+            await resources.start()
+            manifest["networks"] = networks.allocations
+            for record in participants:
+                name = record["name"]
+                agent_instructions = build_agent_instructions(
+                    name,
+                    roster,
+                    bundle.manifest,
+                    instructions,
+                    role_instructions.get(record["role"], ""),
+                )
+                instructions_file = inputs / f"{name}-instructions.md"
+                instructions_file.write_text(agent_instructions, encoding="utf-8")
+                record["instructions_path"] = str(
+                    instructions_file.relative_to(run_dir)
+                )
+                trial_config = build_trial_config(
+                    config, resolved, run_dir, name, agent_instructions
+                )
+                record["resources"] = resources.bind(name, trial_config)
+                if networks:
+                    overlay = await networks.create(
+                        name, state / f"{name}-network.json"
+                    )
+                    trial_config.environment.extra_docker_compose = [overlay]
+                tasks.append(
+                    asyncio.create_task(
+                        run_participant(record, trial_config), name=name
+                    )
+                )
+            save()
+            group = asyncio.gather(*tasks)
+            done, _ = await asyncio.wait(
+                [group, *resources.watchers], return_when=asyncio.FIRST_COMPLETED
+            )
+            for watcher in resources.watchers:
+                if watcher in done:
+                    await watcher
+            await group
+            failed = [
+                record["name"]
+                for record in participants
+                if record["status"] == "failed"
+            ]
+            code = int(bool(failed))
+            manifest["status"] = "failed" if failed else "completed"
+            if failed:
+                manifest["error"] = "Participants failed: " + ", ".join(failed)
+    except TimeoutError:
+        code = 1
+        manifest.update(status="timed_out", error="Experiment deadline exceeded")
+    except asyncio.CancelledError:
+        code = 130
+        manifest.update(status="interrupted", error="Experiment interrupted")
+    except Exception as exc:
+        code = 1
+        manifest.update(status="failed", error=safe_error(exc, secrets))
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if group:
+            await asyncio.gather(group, return_exceptions=True)
+        for record in participants:
+            if record["status"] in ("pending", "running", "cancelled"):
+                record.update(
+                    status="timed_out"
+                    if manifest["status"] == "timed_out"
+                    else "cancelled",
+                    finished_at=now(),
+                    missing_reward_reason=manifest.get("error", "Run stopped"),
+                )
+        if await resources.finish():
+            code = code or 1
+            if manifest["status"] == "completed":
+                manifest["status"] = "failed"
+        try:
+            if networks:
+                await networks.stop()
+        except Exception as exc:
+            code = code or 1
+            if manifest["status"] == "completed":
+                manifest["status"] = "failed"
+            manifest["network_cleanup_error"] = safe_error(exc, secrets)
+        manifest["finished_at"] = now()
+        manifest["exit_code"] = code
+        save()
+    return run_dir, code
