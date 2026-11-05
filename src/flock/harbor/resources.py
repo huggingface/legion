@@ -16,7 +16,10 @@ def load_module(path):
 
 
 class Resources:
-    def __init__(self, directory, options, *, run_dir, agents, secrets, required=()):
+    # flock: with `incremental`, a resource with an `add` hook starts with no agents and is told
+    # each agent placed here through add() (another worker's agents, spawned, re-assigned)
+    def __init__(self, directory, options, *, run_dir, agents, secrets, required=(),
+                 incremental=False):
         missing = set(required) - options.keys()
         if missing:
             raise ValueError(
@@ -38,7 +41,7 @@ class Resources:
             self.providers[name] = module.Resource(
                 settings,
                 state_dir=run_dir / "state" / "resources" / name,
-                agents=agents,
+                agents=[] if incremental and hasattr(module.Resource, "add") else agents,  # flock:
                 secrets=secrets,
             )
             self.records[name] = {"status": "pending", "metadata": {}, "artifacts": {}}
@@ -95,6 +98,29 @@ class Resources:
             metadata[resource_name] = binding.get("metadata", {})
         config.environment.mounts = mounts or None
         return metadata
+
+    # flock: the optional hooks; shepherd's launcher calls none of them
+    async def add(self, names):
+        """Agents that now run here: each resource with `add` sets them up (idempotent)."""
+        for provider in self.providers.values():
+            if hasattr(provider, "add"):
+                await provider.add(names)
+
+    async def remove(self, names):
+        """Agents that left: each resource with `remove` lets them go."""
+        for provider in self.providers.values():
+            if hasattr(provider, "remove"):
+                await provider.remove(names)
+
+    def watch(self, emit):
+        """Run each resource's `watch(emit)`; it calls emit(agent, kind, data) per event, passed on
+        as emit(agent, {"resource", "kind", "data"}). Stopped by finish()."""
+        for name, provider in self.providers.items():
+            if hasattr(provider, "watch"):
+                def forward(agent, kind, data, resource=name):
+                    emit(agent, {"resource": resource, "kind": kind, "data": data})
+
+                self.watchers.append(asyncio.create_task(provider.watch(forward)))
 
     async def finish(self):
         """Export every started resource, then stop in reverse order, retaining errors."""

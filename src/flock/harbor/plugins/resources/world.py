@@ -6,7 +6,8 @@ credential enters the container and any World API v1 world works. `transport: ht
 without mounts, e.g. hf-sandbox): WORLD_URL, WORLD_AGENT and the agent's own token, which a
 flock.world server accepts only for that agent's tool calls (flock.world.protocol.agent_token).
 The same secret and agent name are the same identity in every run: use one world per run, and
-change the world secret between runs.
+change the world secret between runs. Agents placed after start (flock's `add` / `remove`
+hooks) get their token and socket then.
 """
 
 import asyncio
@@ -119,10 +120,11 @@ class Resource:
         if not self.secret:
             raise ValueError(f"Set {self.options.token_env} to the secret of world.url")
         self.tokens = {name: agent_token(self.secret, name) for name in agents}
+        self.secrets = secrets
         secrets.extend([self.secret, *self.tokens.values()])
         self.metadata = {}
         self.client = self.proxy_client = self.socket_directory = None
-        self.sockets, self.servers = {}, []
+        self.sockets, self.servers = {}, {}
 
     async def _health(self):
         r = await self.client.get("/healthz")
@@ -154,16 +156,35 @@ class Resource:
         self.socket_directory = tempfile.TemporaryDirectory(prefix="flock-world-")
         self.proxy_client = httpx.Client(timeout=httpx.Timeout(1800, connect=10))
         for name in self.tokens:
-            path = Path(self.socket_directory.name) / f"{name}.sock"
-            server = socketserver.ThreadingUnixStreamServer(
-                str(path), _proxy(self.url, self.proxy_client, self.secret, name)
-            )
-            server.daemon_threads = True
-            # The containing host directory is private; the socket is mounted alone.
-            path.chmod(0o666)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            self.servers.append(server)
-            self.sockets[name] = path
+            self._serve(name)
+
+    def _serve(self, name):
+        path = Path(self.socket_directory.name) / f"{name}.sock"
+        server = socketserver.ThreadingUnixStreamServer(
+            str(path), _proxy(self.url, self.proxy_client, self.secret, name)
+        )
+        server.daemon_threads = True
+        # The containing host directory is private; the socket is mounted alone.
+        path.chmod(0o666)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.servers[name] = server
+        self.sockets[name] = path
+
+    async def add(self, names):
+        for name in names:
+            if name not in self.tokens:
+                self.tokens[name] = agent_token(self.secret, name)
+                self.secrets.append(self.tokens[name])
+                if self.options.transport == "unix":
+                    self._serve(name)
+
+    async def remove(self, names):
+        for name in names:
+            self.tokens.pop(name, None)
+            if (server := self.servers.pop(name, None)) is not None:
+                await asyncio.to_thread(server.shutdown)
+                server.server_close()
+                self.sockets.pop(name).unlink(missing_ok=True)
 
     def bind(self, name):
         if self.options.transport == "http":
@@ -210,7 +231,7 @@ class Resource:
         return {"metrics": "metrics.json"}
 
     async def stop(self):
-        for server in self.servers:
+        for server in self.servers.values():
             await asyncio.to_thread(server.shutdown)
             server.server_close()
         if self.proxy_client:
