@@ -91,6 +91,7 @@ $EDITOR runs-flock/v8/run.env
 #   MODEL_WORKER=<v8's model id>
 #   CHATBOT_BUCKET=hf://buckets/HuggingFaceSwarms/chatbot-agent-workspaces/v8
 #   CHATBOT_WS=<run dir>/world/ws          # an empty, per-run directory on the shared disk
+#   CHATBOT_TMP_DIR=/tmp                   # optional: the world's temp checkouts on local disk
 #   WORLD_VENV=<a venv with Python 3.12+>  # if the profile's VENV is older
 flock init runs-flock/v8                   # the doctor: rerun until no FAIL (the bucket note
                                            # "already holds the swarm's data" is expected)

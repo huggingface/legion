@@ -109,8 +109,12 @@ class Repository:
     def fetch(self):
         """Fetch main only. The world writes refs/pr/N itself after every push (update_ref), so
         PR refs never come from the Hub here; a wildcard over refs/pr/* is also refused by the
-        Hub's git backend once there are many PRs (hang-up / 'expected acknowledgments')."""
+        Hub's git backend once there are many PRs (hang-up / 'expected acknowledgments').
+        A fetch that started after this call is as fresh as this one: waiters behind it return."""
+        asked = time.monotonic()
         with self.refs_lock:
+            if self.fetched > asked:
+                return
             started = time.monotonic()
             self.hub_fetch("origin", "+refs/heads/main:refs/heads/main")
             self.fetched = started

@@ -88,6 +88,16 @@ def _key(key):
     return json.dumps(key) if isinstance(key, str) else json.dumps({key: 0})[1:-4]
 
 
+@contextlib.contextmanager
+def _timed(steps, name):
+    """Add the block's seconds to steps[name] (merge_pr's timing line)."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        steps[name] = steps.get(name, 0.0) + time.monotonic() - start
+
+
 @atexit.register
 def _close_all():
     for world in list(_LIVE.values()):
@@ -142,6 +152,10 @@ class Chatbot4World(World):
         protect_supervisor()
         self.ws = Path(ws or os.environ.get("CHATBOT_WS", HERE / "ws"))
         self.ws.mkdir(parents=True, exist_ok=True)
+        # Temporary checkouts and builds (CHATBOT_TMP_DIR, e.g. a node-local /tmp; default: the
+        # workspace). They share the repository's objects through alternates, never hardlinks.
+        self.tmp_dir = Path(os.environ.get("CHATBOT_TMP_DIR") or self.ws)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
         previous = _LIVE.get(str(self.ws.resolve()))
         if previous is not None:  # flush and stop its outbox before reading the saved state
             previous.close()
@@ -1189,7 +1203,7 @@ class Chatbot4World(World):
 
     def _build(self, agent, snapshot, base, title, main):
         """Commit the upload on base, replayed onto main (outside the world lock)."""
-        with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+        with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             self.repo.checkout(base, tree)
             self._files(snapshot, tree)
@@ -1463,9 +1477,23 @@ class Chatbot4World(World):
         A PR based on an older main is rebased onto main by the world (no need to rebase it
         yourself); its approvals carry over when the rebase leaves the diff unchanged. A
         conflict with main, or a rebase that changes the diff, is refused."""
+        steps, outcome, started = {}, "error", time.monotonic()
+        try:
+            result = self._merge(agent, pr, steps)
+            outcome = "already_merged" if result.get("already_merged") else "merged"
+            return result
+        except BaseException as exc:
+            outcome = getattr(exc, "code", None) or type(exc).__name__
+            raise
+        finally:  # one line per call: where a merge spends its time
+            log.info("merge_pr pr=%s outcome=%s total=%.1f %s", pr, outcome,
+                     time.monotonic() - started, " ".join(f"{k}={v:.1f}" for k, v in steps.items()))
+
+    def _merge(self, agent, pr, steps):
         self._identity(agent)
         self._check_paused("merge")
-        self.repo.refresh(FETCH_TTL)
+        with _timed(steps, "ttl_refresh"):
+            self.repo.refresh(FETCH_TTL)
         with self.lock:
             rec = self._pr(pr)
             self._approved(rec)
@@ -1473,26 +1501,31 @@ class Chatbot4World(World):
                 return self._merged_event(rec)
             checked, checked_base = rec["head_sha"], rec["base_sha"]
         # The PR alone first, outside the merge lane: one that fails (or hangs) holds no slot.
-        with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+        with _timed(steps, "precheck"), tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             self.repo.checkout(checked, tree)
             self._bot_contract(tree, self.repo.changed(checked_base, checked))
+        lane_at = time.monotonic()
         # The merge lane's slot is taken before the locks (see _hub_write) and held through the
         # rebase, the checks and the Hub merge, so world merges run one at a time, each on the
         # main the last one left. It is separate from the push lane, so a merge never waits
         # behind pushes, opens and closes.
         with self._hub_write(agent, "merge", pr, lane="merge"):
+            steps["lane_wait"] = time.monotonic() - lane_at
             # Main as the Hub has it, also after a merge that landed but whose call failed; the
             # rebase and the compare-and-swap below use this local ref.
-            self.repo.refresh(0)
+            with _timed(steps, "refresh"):
+                self.repo.refresh(0)
             with self.lock:
                 rec = self._pr(pr)
                 if any(p[2] == pr for p in self.pending.values()):
                     raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
                 main, base, head = self.repo.sha(), rec["base_sha"], rec["head_sha"]
                 view = {**rec, "reviews": dict(rec["reviews"])}
-            new = self._check_merge(agent, pr, view, main, checked)
+            new = self._check_merge(agent, pr, view, main, checked, steps)
+            lock_at = time.monotonic()
             with self.main_lock:
+                steps["main_lock_wait"] = time.monotonic() - lock_at
                 with self.lock:
                     rec = self._pr(pr)
                     if (self.repo.sha() != main or rec["head_sha"] != head
@@ -1503,15 +1536,18 @@ class Chatbot4World(World):
                 try:
                     if new != head:  # the Hub merges refs/pr/N as it is: publish the rebase first
                         # A stale lease (e.g. a rebase pushed just before a restart) adopts the Hub head.
-                        self._lease_push(agent, pr, new, f"refs/pr/{pr}", head, time.monotonic())
-                        self.repo.update_ref(f"refs/pr/{pr}", new)
-                        self.repo.update_ref(f"refs/flock/pr/{pr}/{new}", new)
+                        with _timed(steps, "push"):
+                            self._lease_push(agent, pr, new, f"refs/pr/{pr}", head, time.monotonic())
+                        with _timed(steps, "update_ref"):  # waits for refs_lock
+                            self.repo.update_ref(f"refs/pr/{pr}", new)
+                            self.repo.update_ref(f"refs/flock/pr/{pr}/{new}", new)
                         with self.lock:  # reviews stay: they match the rebased head by patch-id
                             rec.update(base_sha=main, head_sha=new)
                             self._dirty("prs", pr)
                             self._save()
                     try:
-                        self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {new}; base {main}; contract passed")
+                        with _timed(steps, "hub_merge"):
+                            self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {new}; base {main}; contract passed")
                     except ToolError as exc:
                         # The Hub may have merged before failing (a 5xx or timeout after commit).
                         try:
@@ -1526,10 +1562,12 @@ class Chatbot4World(World):
                             raise self._mark_hub_final(pr, exc.code) from None
                         raise
                     # Local main must move before main_lock is released: opens compare against it.
-                    self.repo.fetch()
-                    merged = self.repo.sha()
-                    mismatch = (self.repo.git("rev-parse", f"{merged}^{{tree}}")
-                                != self.repo.git("rev-parse", f"{new}^{{tree}}"))
+                    with _timed(steps, "fetch"):
+                        self.repo.fetch()
+                    with _timed(steps, "tree_check"):
+                        merged = self.repo.sha()
+                        mismatch = (self.repo.git("rev-parse", f"{merged}^{{tree}}")
+                                    != self.repo.git("rev-parse", f"{new}^{{tree}}"))
                     if mismatch:  # e.g. the Hub merged an older refs/pr head, or main moved outside
                         log.error("PR #%s: main %s after the Hub merge is not the checked tree of %s",
                                   pr, merged[:12], new[:12])
@@ -1557,20 +1595,22 @@ class Chatbot4World(World):
                         if rec["state"] == "merging":  # failed before the record was settled
                             rec["state"] = "open"
 
-    def _check_merge(self, agent, pr, rec, main, checked):
+    def _check_merge(self, agent, pr, rec, main, checked, steps):
         """What merging rec makes main, checked (the caller holds a merge lane slot, no lock):
         the PR head, or on an older base the PR's change replayed onto main, whose approvals
         must still hold; then the bot contract (unless that head is `checked` already) and the
         shared tests. Returns the head to merge."""
         base, head = rec["base_sha"], rec["head_sha"]
-        with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+        with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
-            self.repo.checkout(head, tree)
+            with _timed(steps, "checkout"):
+                self.repo.checkout(head, tree)
             new = head
             if base != main:
-                self.repo.git("reset", "-q", "--soft", base, at=tree)  # the PR's change, staged on its base
                 try:
-                    new = self.repo.commit(tree, base, rec["author"], rec["title"], onto=main)
+                    with _timed(steps, "replay"):
+                        self.repo.git("reset", "-q", "--soft", base, at=tree)  # the PR's change, staged on its base
+                        new = self.repo.commit(tree, base, rec["author"], rec["title"], onto=main)
                 except ToolError as exc:
                     if exc.code != "stale_base":
                         raise
@@ -1588,14 +1628,17 @@ class Chatbot4World(World):
                     raise ToolError(f"PR #{pr} conflicts with main {main[:12]}{where}: fetch main, "
                                     "rebase onto origin/main and update the PR", "conflict") from None
                 try:
-                    self._approved({**rec, "base_sha": main, "head_sha": new})
+                    with _timed(steps, "approvals"):
+                        self._approved({**rec, "base_sha": main, "head_sha": new})
                 except ToolError:
                     raise ToolError(f"rebasing PR #{pr} onto main {main[:12]} changes its diff, so it "
                                     "needs a fresh review: rebase onto origin/main, update the PR and "
                                     "ask for a review", "rebase_changed") from None
             if new != checked:
-                self._bot_contract(tree, self.repo.changed(main, new), in_lane=True)
-            self._shared_tests(pr, tree, main)
+                with _timed(steps, "contract"):
+                    self._bot_contract(tree, self.repo.changed(main, new), in_lane=True)
+            with _timed(steps, "shared_tests"):
+                self._shared_tests(pr, tree, main)
         return new
 
     def _bot_contract(self, tree, names, in_lane=False):
@@ -1623,7 +1666,7 @@ class Chatbot4World(World):
                         MERGE_TESTS, pr, main[:12])
             return
         if self.main_tests[0] != main:
-            with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+            with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
                 self.repo.checkout(main, Path(tmp) / "main")
                 self.main_tests = (main, run_tests(Path(tmp) / "main", MERGE_TESTS,
                                                    MERGE_TESTS_TIMEOUT_S)["ok"])
@@ -1899,7 +1942,7 @@ class Chatbot4World(World):
     @tool(pool="slow")
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:
         """Run main, pr:<number>, or a local clone path. 300 seconds for the whole conversation."""
-        with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+        with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             snapshot = UPLOAD.get()
             if ref_or_path == "main" or ref_or_path.startswith("pr:"):
@@ -1933,6 +1976,10 @@ class Chatbot4World(World):
 
 if __name__ == "__main__":
     from flock.world.server import serve
+    # Nothing else configures logging in the world process: its warnings went to stderr as bare
+    # messages (logging's last resort); this handler keeps that and adds INFO (merge_pr timings).
+    logging.getLogger("chatbot4").addHandler(logging.StreamHandler())
+    logging.getLogger("chatbot4").setLevel(logging.INFO)
     # FLOCK_WORLD_PORT: the free port flock picked (a local run, the Slurm world job)
     serve("chatbot4:Chatbot4World", host="0.0.0.0",
           port=int(os.environ.get("FLOCK_WORLD_PORT") or os.environ.get("PORT") or 7860))

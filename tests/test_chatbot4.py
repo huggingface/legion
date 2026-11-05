@@ -1245,6 +1245,66 @@ def test_the_lane_holder_gets_a_bot_runner_in_a_burst(setup, monkeypatch):
     assert world.merge_pr(Agent("oak"), second["pr"])["rebased_from"] == second["base_sha"]
 
 
+def test_merge_pr_logs_one_timing_line_per_call(setup, caplog):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                     lambda c: _module(c, "time", None))
+    caplog.set_level("INFO", logger="chatbot4")
+    world.merge_pr(Agent("oak"), second["pr"])
+    with pytest.raises(ToolError):
+        world.merge_pr(Agent("oak"), second["pr"])  # merged now: refused before any step
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("merge_pr ")]
+    assert len(lines) == 2 and lines[0].startswith(f"merge_pr pr={second['pr']} outcome=merged total=")
+    steps = dict(item.split("=") for item in lines[0].split()[3:])
+    assert set(steps) == {"total", "ttl_refresh", "precheck", "lane_wait", "refresh", "checkout",
+                          "replay", "approvals", "contract", "shared_tests", "main_lock_wait",
+                          "push", "update_ref", "hub_merge", "fetch", "tree_check"}
+    assert all(float(v) >= 0 for v in steps.values())
+    assert lines[1].startswith(f"merge_pr pr={second['pr']} outcome=tool_error total=")
+
+
+def test_temporary_checkouts_go_to_chatbot_tmp_dir(setup, tmp_path, monkeypatch):
+    world, clone, remote = setup
+    monkeypatch.setenv("CHATBOT_TMP_DIR", str(tmp_path / "local-tmp"))
+    world = Chatbot4World(world.ws, world.repo)
+    real, dests = world.repo.checkout, []
+    monkeypatch.setattr(world.repo, "checkout", lambda ref, dest: (dests.append(dest), real(ref, dest))[1])
+    world, _clone, second = _two_prs((world, clone, remote), lambda c: _module(c, "weather", None),
+                                     lambda c: _module(c, "time", None))
+    assert world.merge_pr(Agent("oak"), second["pr"])["rebased_from"] == second["base_sha"]
+    assert world.run_bot("main", ["hi"])["ok"]
+    assert len(dests) >= 6 and all((tmp_path / "local-tmp") in d.parents for d in dests)
+    assert list((tmp_path / "local-tmp").iterdir()) == []  # each one removed after use
+
+
+def test_waiting_fetches_reuse_a_fetch_that_started_after_them(setup, monkeypatch):
+    import threading
+
+    world, _clone, _remote = setup
+    repo, real, calls = world.repo, world.repo.hub_fetch, []
+    first_in, release = threading.Event(), threading.Event()
+
+    def hub_fetch(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        if len(calls) == 1:
+            first_in.set()
+            assert release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "hub_fetch", hub_fetch)
+    threads = [threading.Thread(target=repo.fetch, name=f"t{i}") for i in range(6)]
+    threads[0].start()
+    assert first_in.wait(10)
+    for t in threads[1:]:  # they ask while the first fetch runs: it may predate their question
+        t.start()
+    time.sleep(0.3)
+    release.set()
+    for t in threads:
+        t.join(10)
+    assert len(calls) == 2  # the running one, then one for all who waited
+    repo.fetch()  # a later call fetches again
+    assert len(calls) == 3
+
+
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
     world, clone, _ = setup
     main = world.repo.sha()
