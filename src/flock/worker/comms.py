@@ -906,7 +906,11 @@ class CommsHub(ExtendedComms):
             else:
                 tool = str(req.get("tool"))
                 handler = self.routes.get(tool.split(":", 1)[0], self.call)
-                r = await handler(agent, tool, req.get("args") or {})
+                try:
+                    r = await handler(agent, tool, req.get("args") or {})
+                except Exception as e:  # a reply, not a dropped connection
+                    log.exception("comms gateway: %s failed", tool)
+                    r = Result(json.dumps({"error": f"{tool}: {type(e).__name__}: {e}"}), True)
                 if not tool.startswith("controller:"):  # the `flock` CLI has no use for news
                     r = self.with_news(agent, tool, r)
             writer.write(json.dumps({"output": r.output, "error": r.error,
