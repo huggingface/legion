@@ -309,6 +309,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         raise ValueError("inference.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
                          "sandboxes) and would reach every agent's container: name an "
                          "inference-only token, e.g. HF_INFERENCE_TOKEN")
+    if remote and spec.environment.kwargs.get("forward_hf_token"):
+        raise ValueError("environment.kwargs.forward_hf_token would put the workers' Hub token "
+                         "in every sandbox: leave it unset")
     for name, options in spec.resources.items():
         if options.get("token_env") == ADMIN_TOKEN_ENV:
             raise ValueError(f"resources.{name}.token_env: {ADMIN_TOKEN_ENV} is the world's "

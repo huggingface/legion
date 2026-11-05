@@ -291,6 +291,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
      or d.update(compute="slurm"), "HF_TOKEN is the workers' Hub token"),
     (lambda d: d["resources"]["board"].update(token_env="FLOCK_WORLD_ADMIN_TOKEN"),
      "FLOCK_WORLD_ADMIN_TOKEN is the world's admin secret"),
+    (lambda d: d["environment"]["kwargs"].update(forward_hf_token=True), "forward_hf_token"),
 ])
 def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
     data = load_spec_yaml(COMPILE)
