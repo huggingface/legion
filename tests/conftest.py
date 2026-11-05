@@ -94,6 +94,7 @@ def tiny(tmp_path, monkeypatch):
         monkeypatch.delenv(k)
     monkeypatch.setenv("FLOCK_STATE_URL", "")  # see no_local_checkpoint
     monkeypatch.setenv("FLOCK_HEALTH_INTERVAL", "1")  # a verdict within a second
+    monkeypatch.setenv("FLUSH_INTERVAL", "0.2")  # workers send their events within 0.2 s
     monkeypatch.setenv("FAKE_KEY", "fake-key")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     run = TinyRun(tmp_path, f"http://127.0.0.1:{srv.server_port}/v1", monkeypatch)

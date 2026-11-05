@@ -34,7 +34,7 @@ types:
     model: fake:fake-model
     replicas: {replicas}
     agents_per_worker: 2
-    env: {{HEARTBEAT_INTERVAL: "1"{env}}}
+    env: {{HEARTBEAT_INTERVAL: "0.5"{env}}}
 """
 
 

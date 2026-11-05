@@ -182,6 +182,7 @@ class WorkerConfig:
             bucket=env.get("BUCKET") or None,
             work_root=Path(env.get("WORK_ROOT", "/work/agents")),
             sync_interval=float(env.get("SYNC_INTERVAL", 180)),
+            flush_interval=float(env.get("FLUSH_INTERVAL", 3.0)),
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
             drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
             incarnation=env.get("WORKER_INCARNATION") or None,

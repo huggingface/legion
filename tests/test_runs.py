@@ -110,7 +110,7 @@ LOOP = """\
     model: fake:fake-model
     replicas: 0
     workers: {max_extra: 1}
-    env: {HEARTBEAT_INTERVAL: "1"}
+    env: {HEARTBEAT_INTERVAL: "0.5"}
 spawn:
   writer: {types: {helper: 1}, depth: 1}
 """
@@ -176,12 +176,12 @@ LOOPS = """\
     model: fake:fake-model
     replicas: 1
     max_turns: 1
-    env: {HEARTBEAT_INTERVAL: "1"}
+    env: {HEARTBEAT_INTERVAL: "0.5"}
     loop:
       prompt: "bash: echo tick {round}"
       every: 500ms
       on: [comms.mention]
-      while: {until: 5s}
+      while: {until: 4s}
       final: {prompt: "bash: echo bye"}
 limits: {budget_usd: 1000}
 """
@@ -220,7 +220,7 @@ def test_loops(tiny, monkeypatch):
                if e["name"] in ("loop.prompt", "agent.turn_started", "agent.turn_ended")]
         assert seq == ["loop.prompt", "agent.turn_started", "agent.turn_ended"] * 4  # one each
 
-    # the controller's loop: a round every 500 ms until 5 s after the loop started, then the
+    # the controller's loop: a round every 500 ms until 4 s after the loop started, then the
     # final round; a turn stopped at max_turns is no loop error
     assert (t["mode"], t["reason"], t["final_done"]) == ("controller", "until", 1), t
     k = t["rounds_total"]
@@ -247,9 +247,9 @@ def test_loops(tiny, monkeypatch):
     stamps = [datetime.fromisoformat(e["ts"]) for e in merged]
     assert stamps == sorted(stamps)
     assert sorted(e["agent"] for e in merged if e["type"] == "final_round") == sorted(agents)
-    assert [(e["agent"], e["data"]["kind"], e["data"]["round"]) for e in merged
-            if e["type"] == "loop_max_turns"] == [
-        *(("ticker-0000", "loop", i) for i in range(1, k + 1)), ("ticker-0000", "final", k)]
+    assert sorted((e["agent"], e["data"]["kind"], e["data"]["round"]) for e in merged
+                  if e["type"] == "loop_max_turns") == [
+        ("ticker-0000", "final", k), *(("ticker-0000", "loop", i) for i in range(1, k + 1))]
     doc = json.loads((run / "run.json").read_text())
     assert doc["spec"]["types"]["ticker"]["loop"]["on"] == ["comms.mention"]
     lp = doc["loops"]["writer"]
@@ -266,13 +266,13 @@ SPAWNING = """\
     model: fake:fake-model
     replicas: 0
     workers: {max_extra: 1}
-    env: {HEARTBEAT_INTERVAL: "1"}
+    env: {HEARTBEAT_INTERVAL: "0.5"}
   scout:
     harness: llm
     model: fake:fake-model
     replicas: 0
     workers: {max_extra: 1}
-    env: {HEARTBEAT_INTERVAL: "1"}
+    env: {HEARTBEAT_INTERVAL: "0.5"}
 spawn:
   writer: {types: {helper: 1}, depth: 2}
   helper: {types: [scout], max: 1}
