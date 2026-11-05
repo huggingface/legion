@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 pytest.importorskip("harbor")
@@ -159,5 +160,37 @@ async def test_http_transport_token_acts_only_as_its_agent(served, tmp_path, mon
         monkeypatch.setenv("WORLD_AGENT", "agent-002")
         with pytest.raises(RuntimeError, match="unauthorized"):
             world_tools.call("submit", {"path": "main"})
+    finally:
+        await resource.stop()
+
+
+async def test_socket_proxy_names_the_agent_and_opens_only_its_routes(
+    served, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FLOCK_WORLD_TOKEN", SECRET)
+    resource = WorldResource({"url": served.url}, state_dir=tmp_path, agents=["agent-001"],
+                             secrets=[])
+    try:
+        await resource.start()
+        path = resource.bind("agent-001")["mounts"][0]["source"]
+        spoofed = {"X-Flock-Agent": "agent-002", "X-Flock-Type": "interviewer",
+                   "X-World-Token": "guess"}
+        transport = httpx.HTTPTransport(uds=path)
+        with httpx.Client(base_url="http://world", transport=transport) as client:
+            r = client.post("/tools/submit", json={"args": {"path": "main"}}, headers=spoofed)
+            assert r.json()["result"]["by"] == "agent-001"
+            hook = {"event": "agent_done", "agent": "agent-002"}
+            assert client.post("/hooks", json=hook).status_code == 403
+            assert client.get("/metrics").status_code == 403
+
+        def status(request):
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.connect(path)
+                sock.sendall(request)
+                return int(sock.recv(64).split()[1])
+
+        assert status(b"POST /tools/../hooks HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}") == 403
+        too_big = b"POST /tools/submit HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n"
+        assert status(too_big) == 413
     finally:
         await resource.stop()

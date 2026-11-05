@@ -5,11 +5,14 @@ served by a launcher-side proxy that adds the world secret and the agent's name,
 credential enters the container and any World API v1 world works. `transport: http` (backends
 without mounts, e.g. hf-sandbox): WORLD_URL, WORLD_AGENT and the agent's own token, which a
 flock.world server accepts only for that agent's tool calls (flock.world.protocol.agent_token).
+The same secret and agent name are the same identity in every run: use one world per run, and
+change the world secret between runs.
 """
 
 import asyncio
 import http.server
 import os
+import re
 import socketserver
 import tempfile
 import threading
@@ -22,13 +25,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from flock.harbor.results import write_json
 from flock.world.protocol import AGENT_HEADER, TOKEN_HEADER, WorldManifest, agent_token
+from flock.world.workspace import MAX_BYTES
 
 SOCKET = "/run/flock-world.sock"
 HEALTH_EVERY_S, HEALTH_MISSES = 5, 12  # a minute of failed health checks fails the run
-# What the proxy passes on: tracing headers in, the body's type and a retry hint out.
-FORWARD_IN = ("content-type", "accept", "x-request-id", "x-flock-type", "x-flock-swarm",
-              "x-flock-turn")
+# What the proxy passes on: the body's type and tracing headers in, the type and a retry hint
+# out. Never the agent's own X-Flock-* identity headers: the proxy names the agent.
+FORWARD_IN = ("content-type", "accept", "x-request-id", "x-flock-turn")
 FORWARD_OUT = ("content-type", "retry-after")
+UPLOAD_MAX = MAX_BYTES * 4 // 3 + (4 << 20)  # flock.world.server's cap on a tool request body
 
 
 class Options(BaseModel):
@@ -56,17 +61,37 @@ class Options(BaseModel):
 
 
 def _proxy(url, client, token, agent):
+    base = httpx.URL(url)
+    prefix = re.escape(base.path.rstrip("/"))
+    allowed = {"GET": re.compile(prefix + "/manifest"),
+               "POST": re.compile(prefix + r"/tools/[A-Za-z_][A-Za-z0-9_]{0,63}")}
+
     class Handler(http.server.BaseHTTPRequestHandler):
+        timeout = 60  # a client that stops sending or reading
+
         def forward(self):
-            # A request target such as "@host/x" would move the credentials to another host.
-            if not self.path.startswith("/"):
-                self.send_error(400)
+            # Only an agent's own routes, checked on the URL as sent (dot segments resolved):
+            # never /hooks, /metrics or /admin, which the world secret would open.
+            try:
+                target = httpx.URL(url + self.path) if self.path.startswith("/") else None
+            except httpx.InvalidURL:
+                target = None
+            if (target is None or target.host != base.host or target.port != base.port
+                    or target.query or not allowed[self.command].fullmatch(target.path)):
+                self.send_error(403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= UPLOAD_MAX:
+                self.send_error(413 if length > 0 else 400)
                 return
             headers = {k: v for k, v in self.headers.items() if k.lower() in FORWARD_IN}
             headers.update({TOKEN_HEADER: token, AGENT_HEADER: agent})
-            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            body = self.rfile.read(length)
             try:
-                r = client.request(self.command, url + self.path, content=body, headers=headers)
+                r = client.request(self.command, target, content=body, headers=headers)
             except httpx.HTTPError as exc:
                 self.send_error(502, f"world unreachable ({type(exc).__name__})")
                 return
