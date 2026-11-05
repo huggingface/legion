@@ -10,6 +10,9 @@
 #   FLOCK_STATE_URL (default <the spec's bucket>/controller/<run>) every 60 s and once more on
 #   SIGTERM, and restored at start, so a requeue or a later job continues the run.
 # - Workers are sbatch'ed BY the controller (FLOCK_COMPUTE=slurm) with <run>/slurm/worker.sbatch.
+# - <run>/controller.hold (`flock launch --hold` writes it): this start restores every swarm held
+#   and released (FLOCK_HOLD_ON_START=1); the file is removed once the controller answers, so a
+#   later requeue holds nothing.
 # - Spot reclaim: SIGUSR1 -> SIGTERM to flock-controller (bounded final push), wait, then
 #   `scontrol requeue`. The watcher kills the job 30 s after SIGUSR1, so the final push is bounded
 #   well under that (FLOCK_FINAL_PUSH_TIMEOUT below). The watcher sends SIGUSR1 to EVERY process
@@ -134,6 +137,8 @@ export FLOCK_SLURM_RUN=$RUN FLOCK_SLURM_VENV=$VENV FLOCK_SLURM_SECRETS_FILE=${SE
 export FLOCK_WORLD_HOST_FILE=$HOSTS_DIR/world.host   # world.sbatch writes it once the world answers
 
 rm -rf "$CTL_TMP" && mkdir -p "$FLOCK_DATA" "$HF_HOME"
+HOLD_FILE=$RUN_DIR/controller.hold
+[ -f "$HOLD_FILE" ] && export FLOCK_HOLD_ON_START=1
 
 # ---------------------------------------------------------------- the controller
 [ "$STOPPING" = 0 ] || exit 0  # a signal arrived during the start-up (already requeued on USR1)
@@ -168,6 +173,10 @@ until [ "$(http_status "http://127.0.0.1:$CTL_PORT/healthz")" = 200 ]; do  # /he
   sleep 2
 done
 log "controller healthy at $FLOCK_URL/healthz: \`flock launch\` creates or resumes the swarm"
+if [ "${FLOCK_HOLD_ON_START:-}" = 1 ] && [ "$STOPPING" = 0 ]; then  # held and pushed before it answered
+  rm -f "$HOLD_FILE"
+  log "every swarm restored held (flock launch --hold): \`flock update\`, then \`flock launch\`"
+fi
 
 # ---------------------------------------------------------------- wait (returns early on a signal: loop)
 rc=0

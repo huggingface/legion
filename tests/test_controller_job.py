@@ -338,6 +338,28 @@ def test_build_restores_state_before_opening_the_store(tmp_path, monkeypatch):
     b.store.close()
 
 
+def test_hold_on_start_restores_every_swarm_held_and_released(tmp_path, monkeypatch):
+    """`flock launch --hold`: the restored swarm is held and released, in the checkpoint before
+    the controller serves, and no worker launches until `flock launch` lifts it."""
+    bucket = FakeBucket(tmp_path / "bucket")
+    src = Store(tmp_path / "src")
+    src.put_swarm(make_spec(), 1.0)
+    StateSync(bucket, tmp_path / "src").push(src)
+    src.close()
+    import flock.controller.main as main_mod
+
+    monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
+    bucket.ops.clear()
+    b = _built(tmp_path, FLOCK_STATE_URL="hf://buckets/ns/flock/controller/run", FLOCK_HOLD_ON_START="1")
+    flags = b.store.swarm_flags("demo")
+    assert set(flags["holds"]["types"]) == set(make_spec().types) and flags["released"]["by"] == "launch --hold"
+    assert "upload" in bucket.ops  # pushed at once
+    b.settings.secret_source = {"ANTHROPIC_API_KEY": "sk-test"}
+    reconcile(b.store, b.jobs, datetime(2026, 10, 20, tzinfo=UTC), b.settings)
+    assert b.jobs.launches == []
+    b.store.close()
+
+
 def test_a_snapshot_without_swarms_is_not_restored(tmp_path, caplog):
     """After `flock stop --delete` of the last swarm, the next push writes an empty snapshot: a new
     controller in the same group must start empty, not resurrect the removed swarm."""
