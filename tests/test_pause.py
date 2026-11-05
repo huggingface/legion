@@ -90,7 +90,9 @@ async def test_interrupt_on_an_already_held_swarm_still_stops_the_turns(sim):
     await sim.heartbeat(working=(A0, A1))
     await pause(sim, reason="look")  # held; the turns in flight run on
     assert await sim.commands() == []
-    await pause(sim, interrupt=True, reason="look")  # `flock stop --interrupt`: nothing new to hold
+    await pause(sim, agents=[A0], interrupt=True, reason="look")  # held already, by its type
+    assert [(c["kind"], c["agent"]) for c in await sim.commands()] == [("stop", A0)]  # A1 runs on
+    await pause(sim, interrupt=True, reason="look")  # `flock stop --interrupt`: every type
     assert sorted((c["kind"], c["agent"]) for c in await sim.commands()) == [("stop", A0), ("stop", A1)]
 
 

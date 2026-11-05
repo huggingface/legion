@@ -375,7 +375,8 @@ class LoopEngine:
                 loops = self.store.get_loops(swarm)
                 now = self.clock().timestamp()
                 for a in self.store.list_agents(swarm):
-                    if (a["worker"] and not a["removing"] and self.store.held(a, flags)
+                    named = a["type"] in (types or []) or a["name"] in (agents or [])
+                    if (named and a["worker"] and not a["removing"] and self.store.held(a, flags)
                             and self.turn_state(a, workers.get(a["worker"]), now)
                             == AgentState.working):
                         # a worker-side loop would re-prompt the stopped turn: end it first
