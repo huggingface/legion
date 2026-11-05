@@ -225,6 +225,39 @@ async def test_world_hub_captures_local_workdir_and_preserves_identity(setup):
         served.close()
 
 
+async def test_capture_timeout_falls_back_to_v1_or_is_a_tool_error(setup, monkeypatch):
+    from types import SimpleNamespace
+
+    from flock.world import workspace
+
+    from .test_world import Served, hub_for
+
+    world, clone, _ = setup
+    real = subprocess.run
+    slow = {"diff"}  # only the v2 diff is slow; flipped to everything for the v1 case
+
+    def run_(cmd, *a, **kw):
+        if slow & set(cmd) and str(clone) in cmd:  # not the world's own git calls
+            raise subprocess.TimeoutExpired(cmd, 30)
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(workspace.subprocess, "run", run_)
+    served = Served(world)
+    try:
+        hub = hub_for(served, runtime=lambda _: SimpleNamespace(workdir=clone.parent, turn_id="t"))
+        try:
+            args = {"branch": "hello", "title": "New greeting", "description": "tested"}
+            r = await hub.call("cedar", "world:open_pr", args)
+            assert not r.error, r.output  # v2 timed out, v1 went through
+            slow.add("rev-parse")
+            r = await hub.call("cedar", "world:open_pr", {**args, "branch": "two"})
+            assert r.error and "timed out after 30 s" in r.output
+        finally:
+            await hub.aclose()
+    finally:
+        served.close()
+
+
 def test_bot_cannot_read_world_credentials_or_write_files(setup, monkeypatch):
     _, clone, _ = setup
     monkeypatch.setenv("HF_TOKEN", "private-world-token")
