@@ -1,10 +1,13 @@
 """Tiny real runs (tests/tinyrun.py): a `compute: local` swarm through its whole lifecycle, a
-controller that crashes mid-loop and comes back, and one run per feature: loops, spawn, the
-tools folder, comms on the fake board (tests/fake_msgboard.py), and one turn per harness."""
+controller that crashes mid-loop and comes back, one run per feature: loops, spawn, the tools
+folder, comms on the fake board (tests/fake_msgboard.py), one turn per harness; and the remote
+backends on fakes: Slurm (tests/fixtures/slurm_stubs) and HF Jobs (tests/fake_hub.py)."""
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
 import time
 from datetime import UTC, datetime
@@ -12,9 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from flock.controller.jobs import BOOTSTRAP_IMAGE, bootstrap_command
+from flock.controller.slurm import read_env_file
 from flock.tools.bundle import pack
 
-from . import fake_msgboard
+from . import fake_hub, fake_msgboard
 from .test_worker_adapters import FAKE_APP_SERVER
 
 
@@ -563,3 +568,138 @@ def test_one_turn_per_harness(tiny, tmp_path, monkeypatch):
         assert ended["status"] == "completed" and ended["tokens"]["fake-model"]["output"] > 0
         said = [e["data"]["message"] for e in evs if e["name"] == "agent.message"]
         assert said[-1]["role"] == "assistant" and said[-1]["content"][-1]["text"] == reply
+
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch) -> fake_hub.Hub:
+    """tests/fake_hub.py for the processes the test starts (HF_ENDPOINT)."""
+    h, srv, url = fake_hub.serve(tmp_path / "hub")
+    monkeypatch.setenv("HF_ENDPOINT", url)
+    yield h
+    srv.shutdown()
+
+
+# The cluster's worker script (scripts/slurm/worker.sbatch) cut down: the env file the controller
+# wrote, then the secrets file it names. No BUCKET: the agents' state stays on this disk.
+WORKER_SBATCH = """\
+#!/bin/bash
+set -a; . "$1"; . "$FLOCK_SECRETS_FILE"; set +a
+unset BUCKET
+exec env PYTHONPATH="{pythonpath}" {python} -m flock.worker.main
+"""
+
+
+def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
+    """compute: slurm on the stub cluster (tests/fixtures/slurm_stubs; a job runs at once):
+    launch, a turn; the node's Spot notice (SIGUSR1 to every process of the job, twice) cuts the
+    next turn; the slot is relaunched under the same job name, no crash, and the agent resumes
+    its session with the resume prompt; stop --release ends the job."""
+    monkeypatch.setenv("SLURM_STUB_RUN", "1")
+    script, secrets, host = (tmp_path / n for n in ("worker.sbatch", "secrets.env", "ctl.host"))
+    script.write_text(WORKER_SBATCH.format(python=sys.executable,
+                                           pythonpath=os.environ.get("PYTHONPATH", "")))
+    script.chmod(0o755)
+    secrets.write_text("FLOCK_TOKEN=tiny-token\nFAKE_KEY=fake-key\n")
+    secrets.chmod(0o600)
+    host.write_text("127.0.0.1\n")
+    port = tiny.controller(tmp_path / "ctl", compute="slurm")
+    out = tiny.flock("launch", tiny.spec(), "--skip-preflight", code=1)  # compute: local
+    assert "compute 'slurm'" in out, out
+    compute = (f"{{kind: slurm, partition: cpu, account: acct, worker_script: {script}, "
+               f"log_dir: {tmp_path}/logs, launch_dir: {tmp_path}/launch, host_file: {host}, "
+               f"container_root: {tmp_path}/node, secrets_file: {secrets}}}")
+    spec = tiny.spec(compute=compute, env='FLUSH_INTERVAL: "0.2"', extra=(
+        '    resume_prompt: "bash: echo resumed"\nbucket: hf://buckets/ns/tiny\n'))
+    tiny.flock("launch", spec, "--skip-preflight")
+    assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
+    tiny.flock("prompt", "writer-0000", "bash: echo one")
+    session = tiny.turns("writer-0000", 1)["session_id"]
+
+    # the job: sbatch's line, an env file without secrets, sbatch's scrubbed environment
+    w = "tiny-writer-w0000"
+    (first,) = slurm.ids()
+    argv = slurm.argv(first)
+    env_file = Path(argv[-1])
+    assert argv == ["--parsable", "-p", "cpu", "-A", "acct", "-c", "4", "--mem=7G",
+                    "--time=29:00:00", "--no-requeue", "-J", w,
+                    f"--comment=swarm=tiny,type=writer,worker={w}",
+                    "-o", f"{tmp_path}/logs/{w}-%j.out", str(script), str(env_file)]
+    assert env_file.parent == tmp_path / "launch" and env_file.stat().st_mode & 0o777 == 0o600
+    env = read_env_file(env_file)
+    node = f"{tmp_path}/node/flock/{w}"
+    assert {k: env[k] for k in ("FLOCK_URL", "FLOCK_CTL_HOST_FILE", "WORKER_ID", "SWARM",
+                                "TYPE", "BUCKET", "RUN", "WORK_ROOT", "HOME")} == {
+        "FLOCK_URL": f"http://${{CTL_HOST}}:{port}", "FLOCK_CTL_HOST_FILE": str(host),
+        "WORKER_ID": w, "SWARM": "tiny", "TYPE": "writer", "BUCKET": "hf://buckets/ns/tiny",
+        "RUN": tmp_path.name, "WORK_ROOT": f"{node}/work", "HOME": f"{node}/home"}
+    assert env_file.read_text().splitlines()[1].endswith(": FLOCK_TOKEN HF_TOKEN FAKE_KEY")
+    environ = (slurm.dir / "jobs" / f"{first}.environ").read_text().splitlines()
+    assert any(x.startswith("PATH=") for x in environ)
+    for secret in ("tiny-token", "fake-key"):
+        assert not any(secret in x for x in [env_file.read_text(), *argv, *environ]), secret
+
+    # the Spot notice mid-turn: the worker drains once and exits 75; the same job name again
+    tiny.flock("prompt", "writer-0000", "bash: sleep 60")
+    tiny.wait(lambda: tiny.agent("writer-0000")["state"] == "working")
+    for _ in range(2):
+        os.killpg(int((slurm.dir / "jobs" / f"{first}.pid").read_text()), signal.SIGUSR1)
+    second = tiny.wait(lambda: [i for i in slurm.ids() if i != first])[0]
+    argv2 = slurm.argv(second)
+    assert argv2[:-1] == argv[:-1] and argv2[-1] != argv[-1]  # same name, new incarnation
+    log = (tmp_path / "logs" / f"{w}-{first}.out").read_text()
+    assert log.count("preempted (") == 1 and "preempted (SIGUSR1)" in log, log
+    tiny.wait(lambda: tiny.results("writer-0000")[-1].startswith("resumed"))
+    a = tiny.wait(lambda: (a := tiny.agent("writer-0000"))["resumed"] and a)
+    assert (a["session_id"], a["worker"]) == (session, w), a
+    assert tiny.said("writer-0000")[-1] == ["bash: echo one", "bash: sleep 60",
+                                            "bash: echo resumed"]
+    # a planned restart, from the worker's last heartbeat or the job's exit 75 (whichever is
+    # first): the old job ends FAILED, or CANCELLED by the controller
+    evs = [(e["name"], e["data"]["detail"]) for e in tiny.events("tiny", "worker.")]
+    assert [n for n, _ in evs] == ["worker.launched", "worker.restarted", "worker.launched"]
+    assert (evs[0][1], evs[2][1]) == (first, second)
+    assert evs[1][1].startswith("ERROR: preempted: "), evs
+
+    # release: the worker drains and its job ends; a controller started by hand stays
+    out = tiny.flock("stop", "tiny", "--release")
+    assert "released: every agent synced, compute freed" in out, out
+    assert "controller kept: no job of this run serves it" in out
+    ended = [(slurm.dir / "jobs" / f"{i}.state").read_text().strip() for i in (first, second)]
+    assert ended in (["FAILED", "COMPLETED"], [f"CANCELLED by {os.getuid()}", "COMPLETED"])
+    [wk] = json.loads(tiny.flock("status", "tiny", "--json"))["workers"]
+    assert (wk["state"], wk["crashes"]) == ("dead", 0), wk
+
+
+def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
+    """compute: hf-jobs on the fake Hub (tests/fake_hub.py; a job runs on this machine): the
+    controller starts the worker job (bootstrap image, the job env, the secrets apart), a turn,
+    then stop --release drains the worker and its job completes."""
+    monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/tiny/flock.whl")  # bootstrap mode
+    tiny.controller(tmp_path / "ctl", compute="hf-jobs")
+    tiny.flock("launch", tiny.spec(compute="hf-jobs", env='FLUSH_INTERVAL: "0.2"',
+                                   extra="namespace: ns\nbucket: hf://buckets/ns/tiny\n"),
+               "--skip-preflight")
+    assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
+    tiny.flock("prompt", "writer-0000", "bash: echo one")
+    assert tiny.turns("writer-0000", 1)["cost_usd"] > 0
+
+    w = "tiny-writer-w0000"
+    [(job, sent)] = hub.jobs.items()
+    assert (sent["namespace"], sent["dockerImage"], sent["command"]) == (
+        "ns", BOOTSTRAP_IMAGE, bootstrap_command())
+    env = sent["environment"]
+    assert {k: env[k] for k in ("WORKER_ID", "SWARM", "TYPE", "BUCKET", "FLOCK_WHEEL_URL",
+                                "FLOCK_HARNESS")} == {
+        "WORKER_ID": w, "SWARM": "tiny", "TYPE": "writer", "BUCKET": "hf://buckets/ns/tiny",
+        "FLOCK_WHEEL_URL": "hf://buckets/ns/tiny/flock.whl", "FLOCK_HARNESS": "llm"}
+    assert sent["secrets"] == {"FLOCK_TOKEN": "tiny-token", "FAKE_KEY": "fake-key"}
+    assert not {"tiny-token", "fake-key"} & set(env.values())
+    assert {k: sent["labels"][k] for k in ("swarm", "type", "worker")} == {
+        "swarm": "tiny", "type": "writer", "worker": w}
+    assert sent["timeoutSeconds"] > 24 * 3600
+
+    out = tiny.flock("stop", "tiny", "--release")
+    assert "released: every agent synced, compute freed" in out, out
+    assert hub.info(job)["status"]["stage"] == "COMPLETED"
+    assert [(e["name"], e["data"]["detail"]) for e in tiny.events("tiny", "worker.")] == [
+        ("worker.launched", job), ("worker.released", job), ("worker.ended", "COMPLETED")]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import random
+import stat
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -69,6 +71,45 @@ def api(monkeypatch, app):
 def write_spec(path, spec: SwarmSpec) -> str:
     path.write_text(yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)))
     return str(path)
+
+
+STUBS = Path(__file__).parent / "fixtures" / "slurm_stubs"
+
+
+class Slurm:
+    """The stub cluster: job files under `dir/jobs/<id>.*`."""
+
+    def __init__(self, root: Path) -> None:
+        self.dir = root
+
+    def ids(self) -> list[str]:
+        return sorted(p.stem for p in (self.dir / "jobs").glob("*.state"))
+
+    def argv(self, job_id: str) -> list[str]:
+        return (self.dir / "jobs" / f"{job_id}.argv").read_text().splitlines()
+
+    def set(self, job_id: str, state: str, exit_code: str = "0:0") -> None:
+        (self.dir / "jobs" / f"{job_id}.state").write_text(state + "\n")
+        (self.dir / "jobs" / f"{job_id}.exit").write_text(exit_code + "\n")
+
+    def flag(self, job_id: str, name: str) -> None:
+        (self.dir / "jobs" / f"{job_id}.{name}").touch()
+
+    def calls(self) -> list[str]:
+        p = self.dir / "calls"
+        return p.read_text().splitlines() if p.exists() else []
+
+
+@pytest.fixture
+def slurm(tmp_path, monkeypatch) -> Slurm:
+    """The stub cluster (tests/fixtures/slurm_stubs) first on PATH, its jobs in tmp_path/slurm."""
+    d = tmp_path / "slurm"
+    d.mkdir()
+    for f in STUBS.iterdir():  # executable even if the checkout lost the mode bits
+        f.chmod(f.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{STUBS}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("SLURM_STUB_DIR", str(d))
+    return Slurm(d)
 
 
 @pytest.fixture(autouse=True)

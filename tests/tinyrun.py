@@ -21,10 +21,11 @@ from typer.testing import CliRunner
 from flock import cli
 from flock.client import Client
 
+LOCAL = "{kind: local, worker_unknown_after: 10s, worker_dead_after: 11s, crash_backoff: 100ms}"
 # USD per 1M tokens, so one fake turn (~100 tokens in, 7 out) costs about $0.1
 SPEC = """\
 swarm: tiny
-compute: {{kind: local, worker_unknown_after: 10s, worker_dead_after: 11s, crash_backoff: 100ms}}
+compute: {compute}
 providers:
   fake: {{type: openai_compat, base_url: "{url}", api_key_env: FAKE_KEY,
           pricing: {{"*": [1000, 1000, 1000]}}}}
@@ -44,10 +45,11 @@ class TinyRun:
         self.log = root / "requests.jsonl"  # every model request (fake_openai)
         self.procs: list[subprocess.Popen] = []
 
-    def spec(self, replicas: int = 1, extra: str = "", env: str = "") -> str:
+    def spec(self, replicas: int = 1, extra: str = "", env: str = "", compute: str = LOCAL) -> str:
         """Write spec.yaml (SPEC, `env` added to the type's env, plus `extra` YAML at the end
         of the type) and return its name."""
-        text = SPEC.format(url=self.url, replicas=replicas, env=env and f", {env}") + extra
+        text = SPEC.format(url=self.url, replicas=replicas, env=env and f", {env}",
+                           compute=compute) + extra
         (self.root / "spec.yaml").write_text(text)
         return "spec.yaml"
 
@@ -101,17 +103,17 @@ class TinyRun:
         return [[m["content"] for m in b["messages"] if m["role"] == "user"] for b in bodies
                 if b["messages"][0]["content"].startswith(f"You are {agent},")]
 
-    def controller(self, data: Path, port: int = 0) -> int:
-        """Start `flock-controller` for `compute: local` with its state in `data` (a controller
-        that can crash, unlike the local run's) on `port` (0: a free one), point the CLI at it
-        and wait until it answers. Returns the port."""
+    def controller(self, data: Path, port: int = 0, compute: str = "local") -> int:
+        """Start `flock-controller` for `compute` with its state in `data` (a controller that
+        can crash, unlike the local run's) on `port` (0: a free one), point the CLI at it and
+        wait until it answers. Returns the port."""
         if not port:
             with socket.socket() as s:
                 s.bind(("127.0.0.1", 0))
                 port = s.getsockname()[1]
         url = f"http://127.0.0.1:{port}"  # also what its workers use (not SPACE_HOST)
         env = {**os.environ, "FLOCK_URL": url, "FLOCK_TOKEN": "tiny-token", "FLOCK_COMPUTE":
-               "local", "FLOCK_DATA": str(data), "PORT": str(port),
+               compute, "FLOCK_DATA": str(data), "PORT": str(port),
                "FLOCK_RECONCILE_INTERVAL": "0.5"}
         with (data.parent / "controller.log").open("ab") as log:
             self.procs.append(subprocess.Popen(
