@@ -40,7 +40,7 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({}, "loop needs prompt or prompt_file"),
     ({"prompt": "x", "every": "often"}, "bad duration"),
     ({"prompt": "x", "every": "0s"}, "duration > 0"),
-    ({"prompt": "x", "on": ["board.mention"]}, "expected comms.<name>"),
+    ({"prompt": "x", "on": ["slack.mention"]}, "expected board.<name>"),
     ({"prompt": "x", "while": {"max_rounds": 0}}, ">= 1"),
     ({"prompt": "x", "while": {"until": "soon"}}, "bad until"),
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),

@@ -719,6 +719,27 @@ class RampSpec(_Removable):
         return out
 
 
+class HarborSpec(BaseModel):
+    """A `harness: harbor` type's Trial inputs, written by the compile step
+    (`flock.harbor.spec.compile_spec`), never by hand: each agent is one long-lived Harbor Trial
+    on shepherd's task path. The worker composes the agent's instructions from `team`,
+    `role_text`, `roster` and the tools with shepherd's `build_agent_instructions`."""
+
+    model_config = {"extra": "forbid"}
+
+    task: dict[str, Any]  # ResolvedTask.manifest(): registry commit, dataset, the pinned task
+    # a partial flock.harbor Spec (model, inference, task, environment, limits) for
+    # shepherd's build_trial_config
+    config: dict[str, Any]
+    team: str = ""  # the team_file's text
+    role: str | None = None  # the role named in the instructions (None: agents.count)
+    role_text: str = ""  # the role_file's text
+    roster: dict[str, str | None] = Field(default_factory=dict)  # every replica's name -> role
+    tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
+    tools_sha256: str | None = None
+    resources: dict[str, dict[str, Any]] = Field(default_factory=dict)  # resource options
+
+
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
@@ -799,6 +820,8 @@ class TypeSpec(BaseModel):
     # World tools (docs/world.md): every tool of the swarm's `world:` unless `tools` lists
     # `world:<name>` entries (then only those); false: none.
     world: bool | None = None
+    # harness harbor only (and required there): written by the compile step
+    harbor: HarborSpec | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
     # replaced. None means a harness-native model.
     resolved_model: ResolvedModel | None = None
@@ -893,6 +916,9 @@ class TypeSpec(BaseModel):
             raise ValueError("bash: false contradicts tool_choice: bash (it forces the bash tool)")
         if self.ephemeral and self.replicas:
             raise ValueError("ephemeral: true is for spawned agents only; set replicas: 0")
+        if (self.harness.value == "harbor") != (self.harbor is not None):
+            raise ValueError("the `harbor:` block goes with harness harbor, which needs it "
+                             "(written by the compile step of a flock.harbor spec)")
         return self
 
     @field_validator("workers")
@@ -1386,7 +1412,8 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
 # Placeholders the worker fills in loop prompts; any other `{name}` is left as written.
 LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
 NEEDS_WORLD = "needs a world (not in this version)"
-_LOOP_SOURCE_RE = re.compile(r"^(comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
+# board.*: the board resource's events (harness harbor); comms.*: the worker's comms hub
+_LOOP_SOURCE_RE = re.compile(r"^(board|comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 
 class LoopWhile(_Removable):
@@ -1501,7 +1528,7 @@ class LoopSpec(_Removable):
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock launch`
     every: str = "turn_end"
-    on: list[str] = Field(default_factory=list)  # comms.mention, comms.thread, world.event:*
+    on: list[str] = Field(default_factory=list)  # comms.mention, board.mention, world.event:*
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
     wake: LoopWake = Field(default_factory=LoopWake)
@@ -1530,7 +1557,8 @@ class LoopSpec(_Removable):
     def _sources(cls, v: list[str]) -> list[str]:
         for x in v:
             if not _LOOP_SOURCE_RE.match(x):
-                raise ValueError(f"{x!r}: expected comms.<name>, world.<name> or artifacts.<name>")
+                raise ValueError(f"{x!r}: expected board.<name>, comms.<name>, world.<name> or "
+                                 "artifacts.<name>")
         return v
 
     @model_validator(mode="after")

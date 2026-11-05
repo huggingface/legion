@@ -35,6 +35,11 @@ HARNESSES: dict[str, HarnessEntry] = {
     # in-process chat-completions loop (docs/llm-harness.md)
     "llm": HarnessEntry("flock.worker.adapters.llm:make_adapter", "openai_compat",
                         "chat_completions", "AGENTS.md", sends_extra=True),
+    # one Harbor Trial per agent on shepherd's task path (flock.harbor). Harbor installs Pi
+    # (flock.harbor.config.PI_VERSION) in the task's container and the Trial delivers the
+    # instructions; the host workdir's AGENTS.md is not the agent's
+    "harbor": HarnessEntry("flock.worker.adapters.harbor:make_adapter", "openai_compat",
+                           "chat_completions", "AGENTS.md"),
 }
 
 # `compute.kind` / FLOCK_COMPUTE -> "module:function"; function(env, deployment, data_dir) ->
