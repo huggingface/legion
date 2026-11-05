@@ -71,8 +71,9 @@
 ## Merge and revert
 
 13. Any agent may call `merge_pr` once another agent approved the current change and nobody
-    requests changes. Refresh a stale base by rebasing onto `origin/main`; a clean rebase keeps
-    the approvals.
+    requests changes. `merge_pr` rebases the PR onto the current `main` itself. When it reports
+    a conflict, rebase onto `origin/main` yourself and update the PR; a clean rebase keeps the
+    approvals.
 14. If a merged change makes the bot worse (a comparison of main against the commit before
     it shows losses), revert it: `git revert` the merge locally and open a PR. Reverts are
     never limited. Then fix the change properly; don't pile a guard on top of it.

@@ -71,7 +71,7 @@ async def test_two_pi_agents_submit_review_and_merge_offline(setup, tmp_path, mo
         await call("cedar", "review_pr", {"pr": second["pr"], "head_sha": second["head_sha"],
                                           "verdict": "approve", "comment": "checked the module"})
         await call("birch", "merge_pr", {"pr": second["pr"]})
-        assert world.list_prs()[0]["pr"] == second["pr"]  # stale base refused
+        assert [r["pr"] for r in world.list_prs("merged")] == [first["pr"], second["pr"]]  # rebased
     finally:
         for rt in agents.values():
             await rt.stop()

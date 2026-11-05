@@ -53,6 +53,24 @@ sys.addaudithook(audit)
 runpy.run_module('bot', run_name='__main__')
 '''
 
+# The repository's own tests matching a pattern under tests/ (python -m unittest discover -s
+# tests -p <pattern>, as agents run them). Same limits as the bot, without its audit hook:
+# tests read data files; isolation is the boundary.
+TESTS_SHIM = r'''
+import sys, os, resource, unittest
+root = os.path.realpath(sys.argv[1])
+resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))
+resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+sys.dont_write_bytecode = True
+sys.path.insert(0, root)
+tests = os.path.join(root, 'tests')
+suite = (unittest.defaultTestLoader.discover(tests, pattern=sys.argv[2], top_level_dir=tests)
+         if os.path.isdir(tests) else unittest.TestSuite())
+sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
+'''
+
 
 def run(root: Path, lines: list[str], timeout: float = 300) -> dict:
     if not lines or len(lines) > 200 or any(not isinstance(x, str) or '\n' in x or '\r' in x
@@ -80,3 +98,24 @@ def run(root: Path, lines: list[str], timeout: float = 300) -> dict:
         ok = status == "ok" and len(replies) == len(lines) and all(x.strip() for x in replies)
         return {"ok": ok, "status": status, "replies": replies,
                 "stderr": err.read(4096).decode(errors="replace"), "timeout_s": timeout}
+
+
+def run_tests(root: Path, pattern: str, timeout: float = 60) -> dict:
+    """Run root's tests/ files matching pattern, isolated like run(). ok when they pass (or
+    none match); status "timeout" past timeout; output: their combined output (1 MiB)."""
+    with tempfile.TemporaryDirectory() as tmp, open(Path(tmp) / "out", "w+b") as out:
+        argv = isolate_command([sys.executable, "-I", "-S", "-c", TESTS_SHIM, str(root.resolve()), pattern],
+                               Path(tmp) / "root", cwd=root.resolve(), readonly=[root.resolve()],
+                               python_only=True)
+        proc = subprocess.Popen(argv, cwd=tmp, env={}, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=out, start_new_session=True)
+        try:
+            proc.wait(timeout=timeout)
+            status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            status = "timeout"
+        out.seek(0)
+        return {"ok": status == "ok", "status": status,
+                "output": out.read(1 << 20).decode(errors="replace")}

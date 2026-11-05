@@ -63,7 +63,7 @@ Use Pi's own shell, search and editing tools on your local clone. World tools: r
 - Find before you read: search for the relevant code, then read just that range.
 - Keep changes focused. Add a test, check that your code compiles, and run the tests, `run_bot` and a comparison with main before submitting. The world refuses a PR that does not compile or changes the fixed runtime.
 - Another agent must review and approve the PR's current change. Keep at most two open PRs at once.
-- Don't rebase just because main moved. Rebase only when your PR is approved and `merge_pr` says it's stale; a clean rebase keeps the approval.
+- Don't rebase just because main moved: `merge_pr` rebases an approved PR onto main itself. Rebase only when `merge_pr` reports a conflict; a clean rebase keeps the approval.
 - Batch fixes into one update per review round, and don't push new work onto an approved PR: merge it first, then open the next change.
 - New PRs that add a module are limited swarm-wide to roughly the merge rate. When `open_pr` refuses with open_budget, improve an existing module instead, add to the deck, review, or improve your open PR. Fixes, reverts and changes to existing modules are never limited.
 - A PR takes at most two reviewers per change. If `review_pr` refuses with review_full, pick another PR (`list_prs` with `needs_review` true).

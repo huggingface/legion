@@ -260,11 +260,16 @@ class Repository:
             try:
                 self.git(*who, "cherry-pick", "--allow-empty", "--keep-redundant-commits", sha, at=tree)
             except ToolError:
+                unmerged = subprocess.run(["git", "-C", str(tree), "diff", "--name-only", "-z",
+                                           "--diff-filter=U"], env=self.env, capture_output=True,
+                                          timeout=60, check=False).stdout.decode(errors="replace")
                 subprocess.run(["git", "-C", str(tree), "cherry-pick", "--abort"], env=self.env,
                                capture_output=True, timeout=60, check=False)
-                raise ToolError(f"your branch is based on {parent}, main is {onto}, and your "
-                                "changes conflict with main: pull, rebase onto origin/main, "
-                                "then open again", "stale_base") from None
+                error = ToolError(f"your branch is based on {parent}, main is {onto}, and your "
+                                  "changes conflict with main: pull, rebase onto origin/main, "
+                                  "then open again", "stale_base")
+                error.files = [name for name in unmerged.split("\0") if name]  # the conflicting paths
+                raise error from None
             sha = self.git("rev-parse", "HEAD", at=tree)
         self.git("fetch", "--no-write-fetch-head", str(tree), sha)
         return sha

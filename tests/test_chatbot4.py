@@ -135,21 +135,6 @@ def test_update_invalidates_approval(setup):
     assert world.merge_pr(Agent("birch"), new["pr"])["merged_sha"]
 
 
-def test_two_prs_stale_base_and_rebase(setup):
-    world, clone, _ = setup
-    one, two = submit(world, clone, branch="first"), submit(world, clone, "birch", "second")
-    approve(world, one)
-    approve(world, two, "cedar")
-    world.merge_pr(Agent("birch"), one["pr"])
-    with pytest.raises(ToolError, match="stale"):
-        world.merge_pr(Agent("cedar"), two["pr"])
-    git(clone, "fetch", "origin")
-    git(clone, "reset", "--soft", "origin/main")
-    updated = submit(world, clone, "birch", "second", two["pr"])
-    approve(world, updated, "cedar")
-    assert world.merge_pr(Agent("cedar"), two["pr"])
-
-
 def test_requested_changes_block_and_can_be_resolved(setup):
     world, clone, _ = setup
     rec = submit(world, clone)
@@ -685,34 +670,42 @@ def test_open_pr_work_runs_outside_the_world_lock(setup, monkeypatch):
     assert results["slow"]["base_sha"] == world.repo.sha()
 
 
-def test_racing_merges_never_both_land(setup, monkeypatch):
+def test_concurrent_merges_run_one_at_a_time_and_both_land(setup, monkeypatch):
     import threading
 
     world, clone, remote = setup
-    one = submit(world, clone, branch="one")
-    (clone / "bot/modules/two.py").write_text('def respond(text, memory):\n    return None\n')
-    two = submit(world, clone, "birch", "two")
+    other = clone.parent / "other"
+    git(clone.parent, "clone", "-q", str(remote), str(other))
+    _module(other, "one", None)
+    one = submit(world, other, "birch", "one")
+    _module(clone, "two", None)
+    two = submit(world, clone, "cedar", "two")
     approve(world, one, "pine")
     approve(world, two, "pine")
-    barrier, real, outcomes = threading.Barrier(2, timeout=20), world._run, []
-    monkeypatch.setattr(world, "_run", lambda *a, **k: (barrier.wait(), real(*a, **k))[1])
+    entered, real, outcomes = threading.Event(), world._shared_tests, {}
+
+    def slow_tests(*args):  # runs in the merge lane: the second merge arrives meanwhile
+        entered.set()
+        time.sleep(2)
+        return real(*args)
+
+    monkeypatch.setattr(world, "_shared_tests", slow_tests)
 
     def merge(rec):
-        try:
-            outcomes.append(world.merge_pr(Agent("oak"), rec["pr"])["merged_sha"])
-        except ToolError as exc:
-            outcomes.append(exc)
+        outcomes[rec["pr"]] = world.merge_pr(Agent("oak"), rec["pr"])
 
-    threads = [threading.Thread(target=merge, args=(rec,)) for rec in (one, two)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(30)
-    merged = [o for o in outcomes if isinstance(o, str)]
-    refused = [o for o in outcomes if isinstance(o, ToolError)]
-    assert len(merged) == 1 and len(refused) == 1 and "changed" in str(refused[0])
-    assert git(remote, "rev-parse", "main") == merged[0]
-    assert len(world.list_prs("merged")) == 1
+    first = threading.Thread(target=merge, args=(one,))
+    first.start()
+    assert entered.wait(10)
+    second = threading.Thread(target=merge, args=(two,))
+    second.start()
+    first.join(30)
+    second.join(30)
+    a, b = outcomes[one["pr"]], outcomes[two["pr"]]
+    assert world.lanes.metrics()["merge"]["waits_total"] >= 1  # the second waited for the first
+    assert "rebased_from" not in a and b["rebased_from"] == two["base_sha"]
+    assert b["parent_sha"] == a["merged_sha"] and git(remote, "rev-parse", "main") == b["merged_sha"]
+    assert len(world.list_prs("merged")) == 2
 
 
 def test_main_moving_while_the_hub_pr_is_created_keeps_one_pr(setup, monkeypatch):
@@ -830,7 +823,7 @@ def _rebase(clone):
 
 
 def _two_prs(setup, edit_one, edit_two):
-    """pine's PR merges first; cedar's PR (from the fixture clone) is approved and goes stale."""
+    """pine's PR merges first; cedar's PR (from the fixture clone) is approved, on the old main."""
     world, clone, remote = setup
     other = clone.parent / "other"
     git(clone.parent, "clone", "-q", str(remote), str(other))
@@ -842,8 +835,6 @@ def _two_prs(setup, edit_one, edit_two):
     approve(world, first)
     world.review_pr(Agent("birch"), second["pr"], second["head_sha"], "approve", "Looks right")
     world.merge_pr(Agent("pine"), first["pr"])
-    with pytest.raises(ToolError, match="stale PR: .*approvals carry over"):
-        world.merge_pr(Agent("cedar"), second["pr"])
     return world, clone, second
 
 
@@ -1003,6 +994,111 @@ def test_old_reviews_do_not_carry_a_rebase_next_to_a_change_of_main(setup):
         world.merge_pr(Agent("cedar"), second["pr"])
     approve(world, updated)
     assert world.merge_pr(Agent("cedar"), second["pr"])["merged_sha"]
+
+
+def test_merge_pr_rebases_a_stale_pr_onto_main_keeping_its_approvals(setup):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    remote, main = setup[2], world.repo.sha()
+    result = world.merge_pr(Agent("cedar"), second["pr"])
+    head = result["head_sha"]
+    assert result["rebased_from"] == second["base_sha"] and result["reviewers"] == ["birch"]
+    assert result["parent_sha"] == main == git(remote, "rev-parse", f"{head}^")
+    assert git(remote, "rev-parse", f"refs/pr/{second['pr']}") == head
+    assert git(remote, "log", "-1", "--format=%an|%s", head) == "cedar|Improve greetings"
+    assert {"time.py", "weather.py"} <= set(git(remote, "ls-tree", "--name-only", "main:bot/modules").split())
+    rec = world.state["prs"][str(second["pr"])]
+    assert (rec["state"], rec["base_sha"], rec["head_sha"]) == ("merged", main, head)
+    queue = json.loads((world.ws / "eval-queue.jsonl").read_text().splitlines()[-1])
+    assert (queue["parent_sha"], queue["head_sha"], queue["merged_sha"]) == (main, head, result["merged_sha"])
+
+
+def test_merge_pr_refuses_a_stale_pr_that_conflicts_with_main(setup):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "greeting", "Hey!"),
+                                    lambda c: _module(c, "greeting", "Hi!"))
+    remote, main, pr = setup[2], world.repo.sha(), second["pr"]
+    with pytest.raises(ToolError, match=r"conflicts with main \w+ in bot/modules/greeting.py:") as err:
+        world.merge_pr(Agent("oak"), pr)
+    assert err.value.code == "conflict" and git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", f"refs/pr/{pr}") == second["head_sha"]
+    assert world.state["prs"][str(pr)]["head_sha"] == second["head_sha"]
+    inbox = world.call("list_prs", {}, Agent("cedar"))["inbox"]  # the author is told, once
+    assert inbox[-1] == (f"your PR #{pr} conflicts with main in bot/modules/greeting.py; rebase "
+                         "onto origin/main and update it (just now)")
+    with pytest.raises(ToolError, match="conflicts with main"):
+        world.merge_pr(Agent("pine"), pr)  # a retry on the same main tells nobody again
+    assert not world.state["inbox"].get("cedar")
+    third = setup[1].parent / "third"  # main moves: the next conflict is news again
+    git(third.parent, "clone", "-q", str(remote), str(third))
+    _module(third, "extra", None)
+    _commit(third)
+    git(third, "push", "-q", "origin", "HEAD:main")
+    world.repo.fetch()
+    with pytest.raises(ToolError, match="conflicts with main"):
+        world.merge_pr(Agent("pine"), pr)
+    assert [e["kind"] for e in world.state["inbox"]["cedar"]] == ["conflict"]
+
+
+def test_merge_pr_refuses_a_rebase_that_changes_the_diff(setup):
+    _hotspot(setup)
+
+    def both(clone):  # main makes the same edit of line 3: the rebased diff is line 5 only
+        _edit_line(clone, 3, "same")
+        _edit_line(clone, 5, "pr")
+
+    world, _clone, second = _two_prs(setup, lambda c: _edit_line(c, 3, "same"), both)
+    remote, main = setup[2], world.repo.sha()
+    with pytest.raises(ToolError, match="changes its diff, so it needs a fresh review") as err:
+        world.merge_pr(Agent("cedar"), second["pr"])
+    assert err.value.code == "rebase_changed" and git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", f"refs/pr/{second['pr']}") == second["head_sha"]
+
+
+def _deck_file(clone, name, deck_id):
+    (clone / f"deck/{name}.jsonl").write_text(
+        json.dumps({"id": deck_id, "area": "test", "turns": [f"hello from {name}"]}) + "\n")
+
+
+def test_merge_pr_refuses_a_rebase_that_breaks_the_shared_tests(setup_v8):
+    # Each PR adds a deck file with the same new id: each passes alone, together they fail.
+    world, clone, second = _two_prs(setup_v8, lambda c: _deck_file(c, "one", "dup-1"),
+                                    lambda c: _deck_file(c, "two", "dup-1"))
+    remote, main = setup_v8[2], world.repo.sha()
+    with pytest.raises(ToolError, match=r"shared tests \(tests/test_deck.py\).*'dup-1'") as err:
+        world.merge_pr(Agent("cedar"), second["pr"])
+    assert err.value.code == "shared_tests" and git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", f"refs/pr/{second['pr']}") == second["head_sha"]
+    # Once main itself fails them (a push outside the world), they no longer refuse a PR.
+    third = clone.parent / "third"
+    git(clone.parent, "clone", "-q", str(remote), str(third))
+    _deck_file(third, "three", "dup-1")
+    _commit(third, "red main")
+    git(third, "push", "-q", "origin", "HEAD:main")
+    world.repo.fetch()
+    assert world.merge_pr(Agent("cedar"), second["pr"])["merged_sha"] == git(remote, "rev-parse", "main")
+
+
+def test_a_hub_merge_failure_after_the_rebase_keeps_the_record_on_the_rebased_head(setup, monkeypatch):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    remote, main, real = setup[2], world.repo.sha(), world.repo.hub.merge
+
+    def fail(pr, comment):
+        raise ToolError("Hub request failed; retry later", "hub_error")
+
+    monkeypatch.setattr(world.repo.hub, "merge", fail)
+    with pytest.raises(ToolError, match="Hub request failed"):
+        world.merge_pr(Agent("cedar"), second["pr"])
+    head = git(remote, "rev-parse", f"refs/pr/{second['pr']}")
+    rec = world.state["prs"][str(second["pr"])]
+    assert head != second["head_sha"] and git(remote, "rev-parse", f"{head}^") == main
+    assert (rec["state"], rec["base_sha"], rec["head_sha"]) == ("open", main, head)
+    assert git(remote, "rev-parse", "main") == main
+    monkeypatch.setattr(world.repo.hub, "merge", real)
+    world = Chatbot4World(world.ws, world.repo)  # restart: the saved record has the rebased head
+    assert world.list_prs(needs_review=True) == []  # the approval still counts
+    result = world.merge_pr(Agent("cedar"), second["pr"])
+    assert "rebased_from" not in result and (result["parent_sha"], result["head_sha"]) == (main, head)
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):

@@ -29,7 +29,8 @@
    that leaves the diff unchanged keeps them. To refresh a stale base, fetch main and
    rebase your local topic branch onto `origin/main`, resolve conflicts, rerun tests
    and update the PR. If your edits are uncommitted, commit them locally first.
-   The world rejects a stale base at merge instead of silently replacing new work.
+   You need not rebase only because main moved: `merge_pr` replays the PR onto the
+   current main itself and refuses it if that conflicts or changes the diff.
    Close a PR you abandon with `close_pr` (`pr` and a short `reason`); this frees one
    of your two open-PR slots.
 8. Any agent, including the author, may call `merge_pr` after another agent has

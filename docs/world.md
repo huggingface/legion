@@ -514,8 +514,13 @@ sets 330 seconds on every tool so a 300-second conversation can finish.
 
 The chatbot4 world preserves the seed input/output and module loader, runs the
 bot under stdlib/import and side-effect restrictions with resource limits, and
-requires a different agent's review of the exact PR head. It refuses stale bases
-instead of rebasing automatically; refreshing a PR always requires fresh review.
+requires a different agent's review of the exact PR head. `merge_pr` replays a PR on an
+older base onto main itself (as the PR's author) and force-pushes `refs/pr/N`; it refuses a
+conflict (naming the files; the author's inbox gets it once per main), or a replay whose diff
+changed so the approvals no longer match. Before merging it
+runs the bot contract and the repository's `tests/` files matching `CHATBOT_MERGE_TESTS`
+(default `test_deck.py`; empty disables) on the tree it would make main, isolated and bounded
+at 60 s, and refuses when they fail there but pass on main.
 `prs.jsonl` records PR events with both the main parent and PR head for merges.
 `eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
 this implementation does not start an evaluator.

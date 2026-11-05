@@ -23,7 +23,7 @@ from typing import ClassVar, Literal
 
 import snapshot
 from repository import Hub, Repository
-from sandbox import run
+from sandbox import run, run_tests
 
 from flock.isolation import protect_supervisor
 from flock.world import Agent, ToolError, World, tool
@@ -75,6 +75,10 @@ COLD_AFTER = 3600.0  # merged/closed PR records leave memory for the cold table 
 VERDICTS_MAX = 2000  # interview verdicts kept (oldest dropped)
 VERDICT_NOTES = 600  # note characters kept per verdict
 DESCRIPTION_CHARS = 4000  # PR description characters returned by get_pr  # Hub 400: the PR is already closed / merged
+# merge_pr runs the repository's tests/ files matching this unittest pattern on the tree it is
+# about to make main ("" disables): the cheap checks of what two PRs can break together.
+MERGE_TESTS = os.environ.get("CHATBOT_MERGE_TESTS", "test_deck.py").strip()
+MERGE_TESTS_TIMEOUT_S = 60.0  # past this the shared tests are skipped (logged), not failed
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
 
@@ -113,7 +117,8 @@ class Chatbot4World(World):
     concurrent = True
     capabilities: ClassVar[list[str]] = ["workspace-upload-v1", "workspace-upload-v2"]
     description = ("Edit your local git clone, then submit with open_pr. Another agent must "
-                   "approve the PR's current change (a clean rebase keeps the approval) before merge. Bot input/output and module loading "
+                   "approve the PR's current change (a clean rebase keeps the approval) before merge; "
+                   "merge_pr rebases a PR onto the current main itself. Bot input/output and module loading "
                    "are fixed; edit bot/modules/. run_bot allows 300 seconds per conversation. "
                    "Tool results may carry an `inbox` with news about your PRs (reviews, "
                    "merges, closes, updates); handle it first. New PRs are limited swarm-wide to "
@@ -218,6 +223,8 @@ class Chatbot4World(World):
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
         # Merge contract checks get their own runners, so run_bot load never blocks merges.
         self.merge_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_MERGE_SLOTS", "4")))
+        self.main_tests = (None, False)  # (main sha, the shared tests pass on it), see _shared_tests
+        self.conflicts = {}  # PR number -> the main sha its author was told it conflicts with
         self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
         # Pause open_pr/merge_pr: CHATBOT_PRS_PAUSED=1 at start, or the flag file, checked per call.
@@ -1450,7 +1457,11 @@ class Chatbot4World(World):
     @tool(pool="slow")
     @logs_refusals
     def merge_pr(self, agent: Agent, pr: int) -> dict:
-        """Merge an independently approved PR after checking its base and bot contract."""
+        """Merge an independently approved PR after checking its bot contract and shared tests.
+
+        A PR based on an older main is rebased onto main by the world (no need to rebase it
+        yourself); its approvals carry over when the rebase leaves the diff unchanged. A
+        conflict with main, or a rebase that changes the diff, is refused."""
         self._identity(agent)
         self._check_paused("merge")
         self.repo.refresh(FETCH_TTL)
@@ -1459,69 +1470,169 @@ class Chatbot4World(World):
             self._approved(rec)
             if self._reconcile(rec["author"]) and rec["state"] == "merged":
                 return self._merged_event(rec)
-            main, head = self.repo.sha(), rec["head_sha"]
-            if main != rec["base_sha"]:
-                raise ToolError("stale PR: fetch main, rebase and update the PR; approvals carry "
-                                "over if your diff is unchanged, otherwise ask for a fresh review")
+            checked, checked_base = rec["head_sha"], rec["base_sha"]
+        # The PR alone first, outside the merge lane: one that fails (or hangs) holds no slot.
+        with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+            tree = Path(tmp) / "tree"
+            self.repo.checkout(checked, tree)
+            self._bot_contract(tree, self.repo.changed(checked_base, checked))
+        self.repo.refresh(0)  # outside the lock; the rebase and the compare-and-swap use local refs
+        # The merge lane's slot is taken before the locks (see _hub_write) and held through the
+        # rebase, the checks and the Hub merge, so world merges run one at a time, each on the
+        # main the last one left. It is separate from the push lane, so a merge never waits
+        # behind pushes, opens and closes.
+        with self._hub_write(agent, "merge", pr, lane="merge"):
+            with self.lock:
+                rec = self._pr(pr)
+                if any(p[2] == pr for p in self.pending.values()):
+                    raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
+                main, base, head = self.repo.sha(), rec["base_sha"], rec["head_sha"]
+                view = {**rec, "reviews": dict(rec["reviews"])}
+            new = self._check_merge(agent, pr, view, main, checked)
+            with self.main_lock:
+                with self.lock:
+                    rec = self._pr(pr)
+                    if (self.repo.sha() != main or rec["head_sha"] != head
+                            or any(p[2] == pr for p in self.pending.values())):
+                        raise ToolError("main or the PR changed during checks; retry merge_pr")
+                    reviewers = self._approved({**rec, "base_sha": main, "head_sha": new})
+                    rec["state"] = "merging"  # no update, review, close or merge while the Hub calls run
+                try:
+                    if new != head:  # the Hub merges refs/pr/N as it is: publish the rebase first
+                        try:
+                            self.repo.push(new, f"refs/pr/{pr}", expected=head)
+                        except ToolError as exc:
+                            if exc.code != "stale_lease":
+                                raise
+                            raise ToolError(f"PR #{pr}'s head on the Hub is newer than the world's "
+                                            f"record; update it with open_pr pr={pr}, then merge",
+                                            "stale_lease") from None
+                        self.repo.update_ref(f"refs/pr/{pr}", new)
+                        self.repo.update_ref(f"refs/flock/pr/{pr}/{new}", new)
+                        with self.lock:  # reviews stay: they match the rebased head by patch-id
+                            rec.update(base_sha=main, head_sha=new)
+                            self._dirty("prs", pr)
+                            self._save()
+                    try:
+                        self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {new}; base {main}; contract passed")
+                    except ToolError as exc:
+                        # The Hub may have merged before failing (a 5xx or timeout after commit).
+                        try:
+                            self.repo.fetch()
+                        except ToolError:
+                            pass
+                        with self.lock:
+                            rec["state"] = "open"
+                            if self._reconcile(rec["author"]) and rec["state"] == "merged":
+                                return self._merged_event(rec)
+                        if exc.code in FINAL_CODES:  # already closed or merged on the Hub
+                            raise self._mark_hub_final(pr, exc.code) from None
+                        raise
+                    # Local main must move before main_lock is released: opens compare against it.
+                    self.repo.fetch()
+                    merged = self.repo.sha()
+                    if self.repo.git("rev-parse", f"{merged}^{{tree}}") != self.repo.git("rev-parse", f"{new}^{{tree}}"):
+                        log.error("PR #%s: main %s after the Hub merge is not the checked tree of %s",
+                                  pr, merged[:12], new[:12])  # e.g. the Hub merged an older refs/pr head
+                    with self.lock:
+                        rec.update(state="merged", merged_sha=merged)
+                        self._dirty("prs", pr)
+                        self._note_merge()
+                        if rec["author"] != agent.name:
+                            self._unnotify(rec["author"], pr, "mergeable")
+                            self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
+                        for name in sorted(set(reviewers) - {agent.name}):
+                            self._notify(name, pr, "merged", f"PR #{pr} you approved was merged by {agent.name}")
+                        self._save()
+                        event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
+                                 "parent_sha": main, "head_sha": new, "merged_sha": merged}
+                        rebased = {"rebased_from": base} if new != head else {}
+                        self._event("merged", agent, **event, **rebased)
+                        # Append-only integration hook, consumed by the separate evaluation workstream.
+                        with open(self.ws / "eval-queue.jsonl", "a") as out:
+                            out.write(json.dumps({"ts": time.time(), **event}) + "\n")
+                        return {**event, **rebased}
+                finally:
+                    with self.lock:
+                        if rec["state"] == "merging":  # failed before the record was settled
+                            rec["state"] = "open"
+
+    def _check_merge(self, agent, pr, rec, main, checked):
+        """What merging rec makes main, checked (the caller holds a merge lane slot, no lock):
+        the PR head, or on an older base the PR's change replayed onto main, whose approvals
+        must still hold; then the bot contract (unless that head is `checked` already) and the
+        shared tests. Returns the head to merge."""
+        base, head = rec["base_sha"], rec["head_sha"]
         with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
             tree = Path(tmp) / "tree"
             self.repo.checkout(head, tree)
-            self._contract(tree, self.repo.changed(main, head))
-            verdict = self._run(tree, ["Hello", "My name is Sam", "", "What is my name?", "Bye"],
-                                self.merge_slots)
-            if not verdict["ok"]:
-                raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
-        self.repo.refresh(0)  # outside the lock; the compare-and-swap below uses local refs
-        # The merge lane's slot is taken before the lock (see _hub_write); it is separate from
-        # the push lane, so a merge never waits behind pushes, opens and closes.
-        with self._hub_write(agent, "merge", pr, lane="merge"), self.main_lock:
-            with self.lock:
-                rec = self._pr(pr)
-                reviewers = self._approved(rec)
-                if (self.repo.sha() != main or rec["head_sha"] != head
-                        or any(p[2] == pr for p in self.pending.values())):
-                    raise ToolError("main or the PR changed during checks; update and review again")
-                rec["state"] = "merging"  # no update, review, close or merge while the Hub call runs
-            try:
+            new = head
+            if base != main:
+                self.repo.git("reset", "-q", "--soft", base, at=tree)  # the PR's change, staged on its base
                 try:
-                    self.repo.hub.merge(pr, f"Approved by {', '.join(reviewers)}; head {head}; base {main}; contract passed")
+                    new = self.repo.commit(tree, base, rec["author"], rec["title"], onto=main)
                 except ToolError as exc:
-                    # The Hub may have merged before failing (a 5xx or timeout after commit).
-                    try:
-                        self.repo.fetch()
-                    except ToolError:
-                        pass
-                    with self.lock:
-                        rec["state"] = "open"
-                        if self._reconcile(rec["author"]) and rec["state"] == "merged":
-                            return self._merged_event(rec)
-                    if exc.code in FINAL_CODES:  # already closed or merged on the Hub
-                        raise self._mark_hub_final(pr, exc.code) from None
-                    raise
-                # Local main must move before main_lock is released: opens compare against it.
-                self.repo.fetch()
-                merged = self.repo.sha()
-                with self.lock:
-                    rec.update(state="merged", merged_sha=merged)
-                    self._dirty("prs", pr)
-                    self._note_merge()
-                    if rec["author"] != agent.name:
-                        self._unnotify(rec["author"], pr, "mergeable")
-                        self._notify(rec["author"], pr, "merged", f"your PR #{pr} was merged by {agent.name}")
-                    for name in sorted(set(reviewers) - {agent.name}):
-                        self._notify(name, pr, "merged", f"PR #{pr} you approved was merged by {agent.name}")
-                    self._save()
-                    event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
-                             "parent_sha": main, "head_sha": head, "merged_sha": merged}
-                    self._event("merged", agent, **event)
-                    # Append-only integration hook, consumed by the separate evaluation workstream.
-                    with open(self.ws / "eval-queue.jsonl", "a") as out:
-                        out.write(json.dumps({"ts": time.time(), **event}) + "\n")
-                    return event
-            finally:
-                with self.lock:
-                    if rec["state"] == "merging":  # failed before the record was settled
-                        rec["state"] = "open"
+                    if exc.code != "stale_base":
+                        raise
+                    files = ", ".join(exc.files[:5]) + (f" and {len(exc.files) - 5} more"
+                                                        if len(exc.files) > 5 else "")
+                    where = f" in {files}" if files else ""
+                    with self.lock:  # tell the author once per main, however often merges retry
+                        if self.conflicts.get(pr) != main:
+                            self.conflicts[pr] = main
+                            if rec["author"] != agent.name:
+                                self._notify(rec["author"], pr, "conflict",
+                                             f"your PR #{pr} conflicts with main{where}; rebase "
+                                             "onto origin/main and update it")
+                                self._save()
+                    raise ToolError(f"PR #{pr} conflicts with main {main[:12]}{where}: fetch main, "
+                                    "rebase onto origin/main and update the PR", "conflict") from None
+                try:
+                    self._approved({**rec, "base_sha": main, "head_sha": new})
+                except ToolError:
+                    raise ToolError(f"rebasing PR #{pr} onto main {main[:12]} changes its diff, so it "
+                                    "needs a fresh review: rebase onto origin/main, update the PR and "
+                                    "ask for a review", "rebase_changed") from None
+            if new != checked:
+                self._bot_contract(tree, self.repo.changed(main, new))
+            self._shared_tests(pr, tree, main)
+        return new
+
+    def _bot_contract(self, tree, names):
+        """The merge contract: the fixed interface, names compile, the bot answers."""
+        self._contract(tree, names)
+        verdict = self._run(tree, ["Hello", "My name is Sam", "", "What is my name?", "Bye"],
+                            self.merge_slots)
+        if not verdict["ok"]:
+            raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
+
+    def _shared_tests(self, pr, tree, main):
+        """Refuse a merge that turns the shared tests (MERGE_TESTS) red: two PRs can each pass
+        them alone and fail them together (the same new deck id). Tests that also fail on main,
+        or time out, do not refuse it: that is not this PR's doing."""
+        if not MERGE_TESTS:
+            return
+        result = run_tests(tree, MERGE_TESTS, MERGE_TESTS_TIMEOUT_S)
+        if result["ok"]:
+            return
+        if result["status"] == "timeout":
+            log.warning("shared tests %s timed out on PR #%s; merging without them", MERGE_TESTS, pr)
+            return
+        if self.main_tests[0] != main:
+            with tempfile.TemporaryDirectory(dir=self.ws) as tmp:
+                self.repo.checkout(main, Path(tmp) / "main")
+                self.main_tests = (main, run_tests(Path(tmp) / "main", MERGE_TESTS,
+                                                   MERGE_TESTS_TIMEOUT_S)["ok"])
+        if not self.main_tests[1]:
+            log.warning("shared tests %s fail on main %s too; not refusing PR #%s",
+                        MERGE_TESTS, main[:12], pr)
+            return
+        failed = [line if len(line) <= 240 else f"{line[:150]} ... {line[-80:]}"
+                  for line in result["output"].splitlines()
+                  if line.startswith(("FAIL:", "ERROR:")) or "Error: " in line][:6]
+        raise ToolError(f"the shared tests (tests/{MERGE_TESTS}) pass on main {main[:12]} and fail "
+                        f"with PR #{pr} on it: {' | '.join(failed) or result['status']}; fix it on "
+                        "top of origin/main and update the PR", "shared_tests")
 
     def _merged_event(self, rec):
         return {"pr": rec["pr"], "author": rec["author"], "head_sha": rec["head_sha"],
