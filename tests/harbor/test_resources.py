@@ -4,6 +4,9 @@ import json
 
 import httpx
 import pytest
+
+pytest.importorskip("harbor")
+
 from msgboard.client import Client
 
 from flock.harbor.resources import Resources

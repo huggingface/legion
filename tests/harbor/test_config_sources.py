@@ -2,6 +2,9 @@
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("harbor")
+
 from harbor.models.registry import DatasetMetadata
 from harbor.models.task.id import GitTaskId
 from pydantic import ValidationError

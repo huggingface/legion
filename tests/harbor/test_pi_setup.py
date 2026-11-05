@@ -3,6 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+pytest.importorskip("harbor")
+
 from harbor.trial.hooks import TrialEvent
 
 from flock.harbor.config import InferenceSettings

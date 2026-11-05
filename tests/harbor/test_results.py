@@ -1,4 +1,8 @@
 # from shepherd f3970bc:tests/test_results.py
+import pytest
+
+pytest.importorskip("harbor")
+
 from flock.harbor.results import safe_error
 
 

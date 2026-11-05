@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("harbor", reason="needs the harbor extra (Python 3.12+)")
-
 from flock.harbor import resources
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"

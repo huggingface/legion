@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+pytest.importorskip("harbor")
+
 from flock.harbor import networking
 
 
