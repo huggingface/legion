@@ -104,9 +104,7 @@ def tools() -> dict:
 
 
 def call(tool: str, args: dict[str, Scalar | list[Scalar] | dict[str, Scalar]] | None = None):
-    """Call a world tool (see world.tools) with its arguments, as yourself.
-
-    A tool that takes a local clone (e.g. a path argument) uploads it from your workspace."""
+    """Call a world tool (see world.tools) as yourself; a clone path it takes is uploaded."""
     with _client() as world:
         manifest = _body(world.get("/manifest"))
         spec = next((t for t in manifest.get("tools", []) if t.get("name") == tool), None)

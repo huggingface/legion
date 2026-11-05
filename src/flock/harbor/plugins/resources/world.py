@@ -1,4 +1,4 @@
-"""A running World API world (docs/world.md) that every agent shares; flock never starts or stops it.
+"""A running World API world (docs/world.md), shared by every agent; flock never starts or stops it.
 
 Each agent acts only as itself. `transport: unix` (docker, podman): a per-agent Unix socket,
 served by a launcher-side proxy that adds the agent's token and name, so no world credential
