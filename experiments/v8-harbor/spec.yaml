@@ -1,0 +1,101 @@
+# v8-harbor: experiments/v8 (same six lanes, prompts, loop and board rules) on HF Jobs, with the
+# world from the Harbor task chatbot4-v8 (dataset swarmchat-harbor) running as a job in the
+# run's network group. Differences from v8, all on purpose: scale (ramp maxes from run.env),
+# compute, the model server (HF router, same model id), the board (a per-run Space) and the
+# dataset name in prompts/system.md. See README.md.
+swarm: ${RUN_NAME:-v8h}                     # never `v8`: its bucket prefixes and board id are live
+namespace: HuggingFaceSwarms
+bucket: ${RUN_BUCKET}                       # a throwaway bucket, e.g. hf://buckets/HuggingFaceSwarms/v8h-test
+compute: hf-jobs
+naming: words
+providers:
+  hf:
+    type: openai_compat
+    base_url: https://router.huggingface.co/v1
+    api_key_env: HF_TOKEN                   # set FLOCK_WORKER_HF_TOKEN on the controller: workers get it as HF_TOKEN
+    timeout_s: 300
+    max_retries: 5
+models:
+  worker-pi:
+    model: 'hf:${MODEL_WORKER:-deepseek-ai/DeepSeek-V4.1-Flash-1017:novita}'   # v8's model id
+    reasoning: high
+    pricing: [0.30, 1.20, 0.30]             # novita, USD per 1M tokens (router /v1/models, 2026-11-05)
+world:
+  url: ${WORLD_URL}                         # http://<HF_NETWORK_GROUP_PREFIX>world:7860, the world job's alias
+  token_env: CHATBOT_WORLD_TOKEN
+comms:
+  kind: msgboard
+  extended: true
+  board: space                              # flock init duplicates the template into a private Space
+  template: ${BOARD_TEMPLATE}               # a single-board msgboard Space app; never a v8 board
+  space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}
+  space_variables:                          # a duplicate inherits no template variables
+    MSGBOARD_AGENT_INVITE_CAN_CREATE_CHANNELS: 'true'  # v8's agents created the lane channels (copy the template's value)
+  invite_env: CHATBOT_BOARD_INVITE
+  channel: general
+  wake: [mention, thread, channel]
+  rules:
+    min_post_gap: 10s
+    max_len: 1200
+    threads: per_topic
+    no_group_mentions: true
+    max_channels_per_agent: 3
+    max_channels: 40
+  protocols: []
+types:
+  answers: &lane
+    harness: pi
+    model: worker-pi
+    image: ${AGENT_IMAGE}                   # flock's Dockerfile.worker, pinned by digest
+    flavor: ${WORKER_FLAVOR:-cpu-basic}
+    replicas: 0
+    replicas_ramp: {start: 1, add: 1, every: 10m, max: '${ANSWERS_MAX:-1}'}
+    agents_per_worker: ${AGENTS_PER_WORKER:-1}   # v8: 12; one agent per job is the isolation on HF Jobs (no unshare)
+    system_prompt_file: prompts/system.md
+    system_prompt_append_file: prompts/lanes/answers.md
+    comms: true
+    tools: ['world:run_bot', 'world:open_pr', 'world:review_pr', 'world:merge_pr', 'world:list_prs', 'world:close_pr', 'world:get_pr',
+            'comms:post', 'comms:read', 'comms:search', 'comms:channels', 'comms:create_channel',
+            'comms:join_channel', 'comms:react', 'comms:doc', 'comms:edit_doc']
+    persist_workdir: true
+    env:
+      GIT_CONFIG_COUNT: '3'
+      GIT_CONFIG_KEY_0: pack.windowMemory
+      GIT_CONFIG_VALUE_0: 256m
+      GIT_CONFIG_KEY_1: pack.threads
+      GIT_CONFIG_VALUE_1: '1'
+      GIT_CONFIG_KEY_2: gc.auto
+      GIT_CONFIG_VALUE_2: '0'
+    max_turns: 150
+    turn_timeout: 2h
+    worker_lifetime: ${WORKER_LIFETIME:-8h}
+    lifetime_jitter: 0s
+    resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
+    loop:
+      prompt_file: prompts/round.md
+      every: turn_end
+      notices: true
+      on: [comms.mention, comms.thread, comms.channel]
+      while: {until: '${RUN_FOR:-3h}', max_rounds: 10000, agent_usd: '${AGENT_USD:-15}'}  # agent_usd: not in v8 (it was $0)
+      final: {prompt_file: prompts/final.md}
+  understanding:
+    <<: *lane
+    replicas_ramp: {start: 1, add: 1, every: 10m, max: '${UNDERSTANDING_MAX:-1}'}
+    system_prompt_append_file: prompts/lanes/understanding.md
+  conversation:
+    <<: *lane
+    replicas_ramp: {start: 1, add: 1, every: 10m, max: '${CONVERSATION_MAX:-1}'}
+    system_prompt_append_file: prompts/lanes/conversation.md
+  routing:
+    <<: *lane
+    replicas_ramp: {start: 1, add: 1, every: 20m, max: '${ROUTING_MAX:-1}'}
+    system_prompt_append_file: prompts/lanes/routing.md
+  quality:
+    <<: *lane
+    replicas_ramp: {start: 1, add: 1, every: 15m, max: '${QUALITY_MAX:-1}'}
+    system_prompt_append_file: prompts/lanes/quality.md
+  safety:
+    <<: *lane
+    replicas_ramp: {start: 1, add: 1, every: 30m, max: '${SAFETY_MAX:-1}'}
+    system_prompt_append_file: prompts/lanes/safety.md
+limits: {alive: 250}
