@@ -1216,7 +1216,7 @@ def main() -> None:
 
     if enabled():
         protect_supervisor()
-    elif sys.platform.startswith("linux"):  # agents must not read the worker's FLOCK_TOKEN
+    elif sys.platform.startswith("linux"):  # hardening only: not a boundary against a same-UID agent
         try:
             protect_supervisor()
         except RuntimeError as e:

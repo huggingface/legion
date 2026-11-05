@@ -271,6 +271,23 @@ def test_hf_jobs_launch_starts_the_controller_job_and_release_cancels_it(
     assert out["down"] == {"checkpoint": 1, "ended": ["group flock's controller job"]}
 
 
+def test_hf_jobs_launch_refuses_to_send_the_controllers_hf_token_to_workers(
+        tmp_path, monkeypatch):
+    hf = FakeHf([])
+    monkeypatch.setattr(ops, "_hf_api", lambda env: hf)
+    env = {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf", "FLOCK_WHEEL_URL": "hf://buckets/ns/flock/w.whl"}
+    f = write_spec(tmp_path / "spec.yaml", make_spec(researcher={"replicas": 1, "secrets": ["HF_TOKEN"]}))
+    with pytest.raises(SpecError, match="FLOCK_WORKER_HF_TOKEN"):
+        ops.launch(Client(env), read_spec(f), f, preflight=False)
+    assert hf.kwargs is None  # no controller job started
+    # with the variable set, the same spec starts the controller job
+    monkeypatch.setattr(ops, "_sleep", lambda s: None)
+    monkeypatch.setattr(Client, "answers", lambda self: True)
+    api = Client({**env, "FLOCK_WORKER_HF_TOKEN": "w"})
+    ops._up_hf(api, read_spec(f), api.env, lambda m: None)
+    assert hf.kwargs["secrets"]["FLOCK_WORKER_HF_TOKEN"] == "w"
+
+
 def test_a_controller_with_no_job_a_local_one_or_one_with_other_swarms_is_kept(api, tmp_path, store, clock):
     f = write_spec(tmp_path / "spec.yaml", make_spec())
     ops.launch(api, read_spec(f), f, preflight=False)

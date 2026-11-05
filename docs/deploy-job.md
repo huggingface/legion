@@ -90,7 +90,7 @@ still bootstrap from the same wheel. The job gets:
 |---|---|
 | network | `--network-group <group> --network-alias controller` |
 | ports | `--expose 7860` (API, HF token), `--expose-public 7861` (status) |
-| secrets | `FLOCK_TOKEN`, `HF_TOKEN`, `ANTHROPIC_API_KEY` (from `ANTHROPIC_API_KEY` or `ANTHROPIC_KEY`), each `--secret NAME` (spec secrets such as `OPENAI_API_KEY`, `MSGBOARD_INVITE_*`); `FLOCK_WORKER_HF_TOKEN`, if set, becomes the workers' `HF_TOKEN` instead of the controller's job-launching one |
+| secrets | `FLOCK_TOKEN`, `HF_TOKEN`, `ANTHROPIC_API_KEY` (from `ANTHROPIC_API_KEY` or `ANTHROPIC_KEY`), each `--secret NAME` (spec secrets such as `OPENAI_API_KEY`, `MSGBOARD_INVITE_*`); `FLOCK_WORKER_HF_TOKEN`, if set, becomes the workers' `HF_TOKEN` instead of the controller's job-launching one (`flock launch` refuses a spec that names `HF_TOKEN` as a worker secret or provider key while it is unset) |
 | env | `FLOCK_MODE=job`, `FLOCK_NETWORK_GROUP`, `FLOCK_NAMESPACE`, `FLOCK_STATE_URL`, `FLOCK_WHEEL_URL`, `FLOCK_WORKER_BOOTSTRAP=1`, `FLOCK_JOB_LABELS` (from `JOB_LABELS`) |
 | labels | `flock-role=controller`, `flock-group=<group>` (no `swarm` label, so it is never adopted as a worker) |
 

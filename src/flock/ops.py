@@ -630,6 +630,11 @@ def _up_hf(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say) -> dict:
     if not wheel:
         raise SpecError(["no controller answers, and no FLOCK_WHEEL_URL to start one with",
                          "publish a wheel (scripts/publish-wheel.sh) or deploy it (docs/deploy-job.md)"])
+    if "HF_TOKEN" in _secret_names(spec) and not vals.get("FLOCK_WORKER_HF_TOKEN"):
+        raise SpecError(["the spec sends HF_TOKEN to workers, which would be the controller's "
+                         "job-launching token",
+                         "set FLOCK_WORKER_HF_TOKEN (a narrower token; to opt in, $HF_TOKEN) "
+                         "or name another key in the spec"])
     try:
         hf = _hf_api(vals)
         ns = spec.namespace or hf.whoami()["name"]

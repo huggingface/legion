@@ -5,14 +5,14 @@
 # dataset name in prompts/system.md. See README.md.
 swarm: ${RUN_NAME:-v8h}                     # never `v8`: its bucket prefixes and board id are live
 namespace: HuggingFaceSwarms
-bucket: ${RUN_BUCKET}                       # a throwaway bucket, e.g. hf://buckets/HuggingFaceSwarms/v8h-test
+bucket: ${RUN_BUCKET}                       # the agents' bucket, e.g. hf://buckets/HuggingFaceSwarms/v8h-test (not the controller's: v8h-ctl)
 compute: hf-jobs
 naming: words
 providers:
   hf:
     type: openai_compat
     base_url: https://router.huggingface.co/v1
-    api_key_env: HF_TOKEN                   # set FLOCK_WORKER_HF_TOKEN on the controller: workers get it as HF_TOKEN
+    api_key_env: HF_ROUTER_TOKEN            # an inference-only token: the only key agents hold
     timeout_s: 300
     max_retries: 5
 models:
