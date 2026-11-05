@@ -1,0 +1,59 @@
+# v8 (experiments/v8 on v8-port: six lanes, prompts) in shepherd's config shape: it loads with
+# flock.harbor.config as copied from shepherd f3970bc. Each agent runs the Harbor task
+# chatbot4-v8-agent in its own container; the shared chatbot4 world and the board are resources,
+# reached through the world.* and board.* tools. Differences from v8: prompts/system.md names
+# $CHATBOT_REPO and shepherd's tool calls, and arrives in the first prompt (not as a system
+# prompt); no board rules, notifications or ramps; one agent per lane.
+#
+# NOT YET (marked, so they are not lost):
+# - hf-sandbox: shepherd's loader takes only environment.backend docker|podman. For hf-sandbox,
+#   set the backend there and resources.world.transport: http (no mounts). http needs a world
+#   image rebuilt from this branch (re-vendor flock.world): older worlds refuse agent tokens.
+# - The flock loop is not read by flock.harbor.config (another workstream designs how flock drives
+#   Trials). v8's: prompts/round.md each turn end, while 3 h / agent_usd 15, final
+#   prompts/final.md, resume_prompt 'Your previous turn was interrupted. Read your notes, check
+#   your clone and PRs, and continue.'
+# - Placeholders (CHANGE-ME): the published task repo and commit, the board and the world URLs.
+name: v8-harbor
+harness: pi
+model: huggingface/deepseek-ai/DeepSeek-V4.1-Flash-1017:novita   # v8-harbor's model id
+inference:
+  base_url: https://router.huggingface.co/v1
+  api_key_env: HF_TOKEN                       # inference only; never a token that can write CHATBOT_REPO
+  api_format: openai_chat_completions
+  reasoning_effort: high
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/CHANGE-ME-tasks   # tasks/chatbot4-v8-agent
+  selector: chatbot4-v8-agent
+  revision: main                              # CHANGE-ME: the published commit SHA
+team_file: prompts/system.md
+resources_dir: ../../src/flock/harbor/plugins/resources
+resources:
+  board:
+    url: https://CHANGE-ME-board.hf.space     # a dedicated board; operator token in MSGBOARD_OPERATOR_TOKEN
+    channels: [general]
+  world:
+    url: https://CHANGE-ME-world.hf.space     # a running chatbot4 world (v8-harbor environment/)
+    token_env: CHATBOT_WORLD_TOKEN            # = the world's FLOCK_WORLD_TOKEN; one world per run,
+                                              # a new secret each run (same secret + name = same agent)
+    # transport: http                         # hf-sandbox; the default unix suits docker/podman
+tools_dir: ../../src/flock/harbor/plugins/tools
+tools:
+  - board.*
+  - board_extra.*                             # react, doc, edit_doc: v8's board tools beyond shepherd's
+  - world.*
+agents:
+  roles:
+    understanding: {role_file: prompts/lanes/understanding.md}
+    answers: {role_file: prompts/lanes/answers.md}
+    conversation: {role_file: prompts/lanes/conversation.md}
+    routing: {role_file: prompts/lanes/routing.md}
+    quality: {role_file: prompts/lanes/quality.md}
+    safety: {role_file: prompts/lanes/safety.md}
+environment:
+  backend: docker
+limits:
+  run_timeout_seconds: 11400                  # v8-harbor's RUN_FOR 3 h, plus 10 min
+  agent_timeout_seconds: 10800
+  agent_max_turns: 150                        # v8's max_turns (per round there)
+output_dir: out

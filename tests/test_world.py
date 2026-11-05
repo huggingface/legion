@@ -44,7 +44,7 @@ from flock.worker.events import Outbox
 from flock.world import Agent, ToolError, World, tool
 from flock.world.host import WorldError, WorldHost, check_tools, derived_token, fetch_manifest
 from flock.world.hub import WorldHub
-from flock.world.protocol import TOKEN_ENV, WorldManifest, credential_id
+from flock.world.protocol import TOKEN_ENV, WorldManifest, agent_token, credential_id
 from flock.world.server import create_app
 
 from .conftest import TOKEN, Clock
@@ -208,6 +208,19 @@ def test_server_protocol():
                                   "data": {"status": "completed"}}, headers=H).json() == {"ok": True}
     assert rec.hooks_seen == [("turn", "dev-0001", {"status": "completed", "turn": "t-1"})]
     assert c.post("/hooks", json={"event": "unknown"}, headers=H).json()["ignored"]
+
+
+def test_an_agent_token_acts_only_as_its_agent_on_manifest_and_tools():
+    c = TestClient(create_app(Recorder(), SECRET))
+    own = {"X-World-Token": agent_token(SECRET, "dev-0001"), "X-Flock-Agent": "dev-0001"}
+    assert c.get("/manifest", headers=own).json()["name"] == "rec"
+    assert c.post("/tools/echo", json={"args": {"text": "a"}}, headers=own).json()["result"] \
+        == {"text": "a", "by": "dev-0001"}
+    for method, path, headers in [("POST", "/tools/echo", {**own, "X-Flock-Agent": "dev-0002"}),
+                                  ("GET", "/manifest", {"X-World-Token": own["X-World-Token"]}),
+                                  ("GET", "/metrics", own), ("POST", "/hooks", own)]:
+        r = c.request(method, path, json={"args": {"text": "a"}}, headers=headers)
+        assert r.status_code == 401, (method, path)
 
 
 def test_taskboard_claims_are_exclusive_and_released_when_an_agent_is_done(tmp_path):

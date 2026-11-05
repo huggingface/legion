@@ -58,6 +58,7 @@ from flock.world.protocol import (
     TOKEN_HEADER,
     TURN_HEADER,
     TYPE_HEADER,
+    agent_token,
 )
 from flock.world.workspace import MAX_BYTES
 
@@ -71,6 +72,7 @@ SLOW_THREADS = 64  # tools that block for seconds or minutes (`@tool(pool="slow"
 FAST_MAX_WAIT_ENV, FAST_MAX_WAIT_S = "FLOCK_WORLD_FAST_MAX_WAIT_S", 2.0
 SLOW_QUEUE_ENV, SLOW_QUEUE = "FLOCK_WORLD_SLOW_QUEUE", 8
 RETRY_AFTER_ENV, RETRY_AFTER_S = "FLOCK_WORLD_RETRY_AFTER_S", 30.0
+REFUSAL_LOG_EVERY_S = 10.0  # at most one WARNING per pool this often about refused calls
 # Parked mode: a world whose construction raises is built again after 30 s, doubling to 10 min.
 PARK_FIRST_S, PARK_CAP_S = 30.0, 600.0
 ADMIN_MAX_BYTES = 64 << 10  # an /admin request body
@@ -92,6 +94,7 @@ class _Metrics:
         self.waits: dict[str, deque] = {p: deque(maxlen=MAX_SAMPLES) for p in ("fast", "slow")}  # pool -> (t, wait_s)
         self.lags: deque = deque(maxlen=MAX_SAMPLES)  # (t, event-loop lag in s)
         self.overloaded = 0
+        self.refused = {"fast": 0, "slow": 0}  # pool -> calls refused with 429 since start
         self.uploads = {"v1": 0, "v2": 0}  # workspace uploads received, by format
         self.cpu_mark = (time.monotonic(), sum(os.times()[:2]))
 
@@ -137,6 +140,7 @@ class _Metrics:
         for pool, stats in pools.items():
             waits = sorted(w for _, w in list(self._trim(self.waits[pool], now)))
             stats.update(queue_wait_p95_s=_pct(waits, 0.95),
+                         overloaded_429_total=self.refused[pool],
                          queue_wait_max_s=max(waits[-1] if waits else 0.0, stats["queue_wait_oldest_s"]))
         lags = [g for _, g in self._trim(self.lags, now)]
         wall, cpu = time.monotonic(), sum(os.times()[:2])
@@ -235,7 +239,8 @@ def _error(code: str, message: str, status: int = 200,
 
 class _Auth:
     """`X-World-Token`: the world secret on every route but `/healthz` (none) and `/admin/*`
-    (the admin secret). An empty world secret: open; an empty admin secret: /admin is 403."""
+    (the admin secret), or on `/manifest` and `/tools/*` the caller's `agent_token` for its
+    `X-Flock-Agent`. An empty world secret: open; an empty admin secret: /admin is 403."""
 
     def __init__(self, app: Any, token: str, admin: str) -> None:
         self.app, self.token, self.admin = app, token, admin
@@ -249,7 +254,11 @@ class _Auth:
                 await _error("forbidden", f"no admin secret: set {ADMIN_TOKEN_ENV} on the world",
                              403)(scope, receive, send)
                 return
-            if need and not hmac.compare_digest(Headers(scope=scope).get(TOKEN_HEADER, ""), need):
+            headers = Headers(scope=scope)
+            got, agent = headers.get(TOKEN_HEADER, ""), headers.get(AGENT_HEADER, "")
+            own = bool(agent) and (path == "/manifest" or path.startswith("/tools/")) \
+                and hmac.compare_digest(got, agent_token(need, agent))
+            if need and not (hmac.compare_digest(got, need) or own):
                 await _error("unauthorized", f"missing or wrong {TOKEN_HEADER}", 401)(
                     scope, receive, send)
                 return
@@ -383,6 +392,16 @@ def create_app(world: World | Callable[[Admin], World], token: str | None) -> Fa
             return f"calls wait {stats['queue_wait_oldest_s']:.1f} s for a thread"
         return None
 
+    refusal_log = {p: [-math.inf, 0] for p in limiters}  # pool -> [last WARNING at, refused then]
+
+    def log_refusal(pool: str, name: str, why: str) -> None:
+        """A WARNING with the reason, at most every REFUSAL_LOG_EVERY_S per pool (event loop)."""
+        now, (last, mark) = metrics.clock(), refusal_log[pool]
+        if now - last >= REFUSAL_LOG_EVERY_S:
+            log.warning("%s pool overloaded (%s): refused %s; %d more since the last line",
+                        pool, why, name, metrics.refused[pool] - mark - 1)
+            refusal_log[pool] = [now, metrics.refused[pool]]
+
     def pool_stats() -> dict[str, dict[str, float]]:
         now = metrics.clock()
         with queued_lock:
@@ -495,9 +514,12 @@ def create_app(world: World | Callable[[Admin], World], token: str | None) -> Fa
             return resp
         t0 = metrics.clock()
         pool = getattr(world, "pool", lambda _: "fast")(name)
+        pool = pool if pool in limiters else "fast"
         # Decided from the path alone, before the body (an upload can be 100+ MB) is read.
-        if why := overloaded(pool if pool in limiters else "fast"):
+        if why := overloaded(pool):
             metrics.overloaded += 1
+            metrics.refused[pool] += 1
+            log_refusal(pool, name, why)
             n = 0
             async for chunk in request.stream():  # drained unparsed: the client reads the 429
                 n += len(chunk)
