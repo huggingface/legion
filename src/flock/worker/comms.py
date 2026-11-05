@@ -158,6 +158,19 @@ class Source:
         return (self.url, self.channel_id, msg_id)
 
 
+def _refusal(r: httpx.Response) -> str:
+    """Why the board refused a join, in its own `error.code`/`message` (200 chars). Never the
+    request, and never the rest of the body: a validation error can echo the invite."""
+    try:
+        body = r.json()
+    except ValueError:
+        return "non-JSON reply (an HF Space gate or proxy?)"
+    err = body.get("error") if isinstance(body, dict) else None
+    err = err if isinstance(err, dict) else {}
+    why = ": ".join(str(err[k]) for k in ("code", "message") if err.get(k))
+    return (why or "no error code in the reply")[:200]
+
+
 def _ok(out: Any, t0: float) -> Result:
     return Result(json.dumps(out, ensure_ascii=False), False, time.monotonic() - t0)
 
@@ -459,7 +472,8 @@ class CommsHub(ExtendedComms):
             ident = await self.identities.join(m.name, c.url, code, again=m.rejoin)
         except httpx.HTTPStatusError as e:
             fresh()
-            raise BoardError(f"join refused: HTTP {e.response.status_code}", e.response.status_code,
+            raise BoardError(f"join refused: HTTP {e.response.status_code}: {_refusal(e.response)}",
+                             e.response.status_code,
                              retry_after=parse_retry_after(e.response.headers.get("retry-after"))) from None
         except (httpx.HTTPError, KeyError, ValueError) as e:
             fresh()

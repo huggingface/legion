@@ -915,3 +915,24 @@ async def test_a_rate_limited_join_waits_at_least_retry_after_and_backs_off(monk
         assert m.join_failures == 3 and m.retry_at - now[0] == 120.0  # the envelope grew
     finally:
         await hub.aclose()
+
+
+@pytest.mark.parametrize("reply, why", [
+    (httpx.Response(404, text="<html>Space not found</html>"),
+     "HTTP 404: non-JSON reply (an HF Space gate or proxy?)"),
+    (httpx.Response(403, json={"error": {"code": "invite_exhausted", "message": "x" * 300,
+                                         "details": {"code": "INVITE-SECRET"}}}),
+     "HTTP 403: invite_exhausted: " + "x" * (200 - len("invite_exhausted: "))),
+])
+async def test_a_refused_join_names_the_boards_reason_never_the_request(reply, why):
+    hub = CommsHub(swarm="sw", env={"INV": "INVITE-SECRET"},
+                   transport=httpx.MockTransport(lambda request: reply))
+    hub.configure(CommsSpec(url="http://b.invalid", invite_env="INV", channel="team", channel_id=12),
+                  list(COMMS_TOOLS))
+    try:
+        await hub.on_prompt("dev-0000", "llm")
+        err = hub.members["dev-0000"].error
+        assert err == f"join refused: {why}" and "INVITE-SECRET" not in err
+    finally:
+        await hub.aclose()
+
