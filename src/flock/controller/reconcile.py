@@ -175,6 +175,7 @@ class _Pass:
     listed: dict[str, JobState] | None = None  # stages from one list; a job missing (ended) is inspected
     lv: Liveness = Liveness(0, 0, 0)  # noqa: RUF009 - a tuple; the swarm's, set per swarm
     local: bool = False  # the swarm's compute is local, set per swarm
+    list_failed: bool = False  # the batch list raised: a missing job is unknown, not ended
 
     def act(self, kind: str, target: str, detail: str = "") -> None:
         self.actions.append(Action(kind, target, detail))
@@ -182,6 +183,8 @@ class _Pass:
     def job_state(self, job_id: str, namespace: str) -> JobState | None:
         if self.listed is not None and job_id in self.listed:
             return self.listed[job_id]
+        if self.list_failed:  # no per-job inspect storm behind a broken listing; next pass
+            return None
         try:
             return self.jobs.inspect(job_id, namespace=namespace)
         except Exception as exc:  # noqa: BLE001 - Hub hiccup: try again next pass
@@ -225,6 +228,7 @@ def reconcile(
         if not sw["removing"]:
             spec = _ramp(p, spec)
         p.listed, p.lv, p.local = None, spec.compute.liveness(), spec.compute.kind == "local"
+        p.list_failed = False
         first = len(p.actions)
         if sum(_needs_check(w, t, p.lv, p.local)
                for w in store.list_workers(spec.swarm)) > LIST_THRESHOLD:
@@ -233,7 +237,7 @@ def reconcile(
                 p.listed = {j.job_id: JobState(j.stage, j.message) for j in listing}
             except Exception as exc:  # noqa: BLE001
                 log.warning("list_jobs for %s failed: %s", spec.swarm, type(exc).__name__)
-                p.listed = {}
+                p.listed, p.list_failed = {}, True
         for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
             ts = None if sw["removing"] else spec.types.get(type_name)
             _reconcile_type(p, spec, type_name, ts)

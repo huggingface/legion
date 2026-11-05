@@ -1166,6 +1166,16 @@ class SwarmSpec(BaseModel):
     @model_validator(mode="after")
     def _job_fields(self) -> SwarmSpec:
         kind = self.compute.kind
+        unknown = self.compute.liveness().unknown_after
+        for name, ts in self.types.items():  # a type's own HEARTBEAT_INTERVAL slows its heartbeats
+            try:
+                hb = float(ts.env["HEARTBEAT_INTERVAL"])
+            except (KeyError, ValueError):
+                continue
+            if 2 * hb > unknown:
+                raise ValueError(f"types.{name}.env.HEARTBEAT_INTERVAL ({hb:g}s): two heartbeats "
+                                 f"({2 * hb:g}s) exceed worker_unknown_after ({unknown:g}s); "
+                                 f"raise worker_unknown_after or lower the interval")
         if kind == "hf-jobs":
             missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
             if missing:

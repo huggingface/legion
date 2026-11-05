@@ -100,6 +100,12 @@ def test_liveness_defaults_per_backend_and_overrides():
         ComputeSpec(kind="local", worker_unknown_after="5s")
 
 
+def test_a_types_heartbeat_interval_is_checked_against_unknown_after():
+    with pytest.raises(ValueError, match=r"types\.w\.env\.HEARTBEAT_INTERVAL \(30s\).*60s.*\(15s\)"):
+        local_spec(env={"HEARTBEAT_INTERVAL": "30"})
+    assert local_spec(env={"HEARTBEAT_INTERVAL": "7"}).types["w"].env["HEARTBEAT_INTERVAL"] == "7"
+
+
 # --------------------------------------------------------------------------- controller check
 
 
