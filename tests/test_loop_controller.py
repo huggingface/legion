@@ -400,6 +400,31 @@ async def test_raising_until_never_reopens_under_a_budget_stop(sim):
     assert await sim.commands() == []  # no second final round paid from the reserve
 
 
+@pytest.mark.parametrize("final", [True, False])
+async def test_a_hand_stop_during_the_final_round_stays_stopped_after_until_was_raised(sim, final):
+    loop = {"prompt": "p", "every": "10s", "while": {"until": "60s"}, "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick(61)
+    fin = prompts(await sim.commands())
+    await sim.apply({**loop, "while": {"until": "600s"}})
+    r = await sim.c.post("/swarms/demo/loop", json={"type": "researcher", "action": "stop",
+                                                    "final": final})
+    assert r.status_code == 200, r.text
+    for a in (A0, A1):
+        await sim.turn(a, fin[a])
+    await sim.heartbeat()
+    sim.tick()
+    sim.tick(10)
+    (lp,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (lp["state"], lp["reason"]) == ("done", "manual")
+    assert await sim.commands() == []  # no round 2
+
+
 async def test_agent_usd_takes_an_agent_out(sim):
     # claude-opus-5-5 output: $20 per 1M tokens, so 25,000 tokens = $0.50
     await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_usd": 0.5}})

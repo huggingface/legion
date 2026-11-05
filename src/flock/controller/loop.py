@@ -316,8 +316,11 @@ class LoopEngine:
                     L = self._new_loop(sw["spec"], type_name, ts, now)
                 if L["state"] == "running":
                     self._stop(swarm, type_name, ts, L, "manual", final=final, now=now)
-                elif L["state"] == "final" and not final:
-                    self._finish(swarm, type_name, L, now, "final round skipped")
+                elif L["state"] == "final":  # a hand stop: a raised `until` must not reopen it
+                    L["reason"] = "manual"
+                    self.store.put_loop(swarm, type_name, L)
+                    if not final:
+                        self._finish(swarm, type_name, L, now, "final round skipped")
             else:
                 if self.store.swarm_flags(swarm).get("budget_stop"):
                     raise ValueError(f"swarm {swarm!r} is stopped by limits.budget_usd; raise it "
