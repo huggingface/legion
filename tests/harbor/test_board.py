@@ -67,6 +67,19 @@ async def test_agent_created_channels_permissions_retry_and_export(
     assert all(secret not in serialized for secret in board.secrets)
 
 
+async def test_reactions_and_channel_docs(board, monkeypatch):
+    # flock's additions to shepherd's board tools (v8 uses them).
+    monkeypatch.setenv("MSGBOARD_TOKEN", board.provision(["agent-001"])[0]["token"])
+    posted = board_tools.post("who takes the plan?")
+    message_id = posted.get("message", posted)["id"]
+    assert board_tools.react(message_id, "👍")["reactions"][0]["count"] == 1
+    assert board_tools.doc()["version"] == 0
+    assert board_tools.edit_doc("# plan", 0)["version"] == 1
+    assert board_tools.doc()["body"] == "# plan"
+    with pytest.raises(BoardError, match="doc_conflict"):
+        board_tools.edit_doc("# stale", 0)
+
+
 async def test_two_boards_are_isolated(board, tmp_path):
     other = BoardRuntime(tmp_path / "other-state")
     try:
