@@ -18,14 +18,6 @@ from flock.models import SwarmSpec
 from . import fake_openai
 from .tinyrun import TinyRun
 
-# Tests of the experiments under experiments/: those target the pre-cleanup layout (run them from
-# commit 8949085) and are not collected here; they go with the experiments in a later cleanup.
-collect_ignore = [f"test_{name}.py" for name in (
-    "chatbot2_experiment", "chatbot2_selfhosted", "chatbot_experiment", "eliza_experiment",
-    "hierarchy_experiment", "interviewer_experiment", "levels_experiment", "run3_experiment",
-    "run4_cluster_review", "run4_experiment", "run4_spawner", "teams_experiment",
-    "voting_experiment")]
-
 TOKEN = "test-token"
 T0 = datetime(2026, 10, 14, 9, 0, tzinfo=UTC)
 

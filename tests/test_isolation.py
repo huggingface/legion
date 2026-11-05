@@ -96,17 +96,30 @@ def test_unmounted_symlink_target_fails_with_the_path_named(tmp_path, monkeypatc
         isolation.plan([str(link), "-c", "pass"], cwd=tmp_path, python_only=True)
 
 
-def test_failed_isolation_never_executes_bot_without_it(tmp_path, monkeypatch):
-    from . import test_chatbot4  # world import path
+@pytest.fixture
+def bot(tmp_path) -> Path:
+    """A 3-line bot: one reply per input line."""
+    f = tmp_path / "bot" / "bot.py"
+    f.parent.mkdir()
+    f.write_text("import sys\nfor line in sys.stdin:\n    print('Hello!', flush=True)\n")
+    return f
 
-    sandbox = sys.modules["sandbox"]
-    assert test_chatbot4.Chatbot4World
+
+def run_bot(bot: Path, root: Path, lines: list[str]) -> subprocess.CompletedProcess:
+    """`bot` under `isolation.command`: no network, its folder read-only, an empty env."""
+    argv = isolation.command([sys.executable, "-I", "-S", str(bot)], root, cwd=bot.parent,
+                             readonly=[bot.parent], python_only=True)
+    return subprocess.run(argv, input="".join(x + "\n" for x in lines), env={}, text=True,
+                          capture_output=True, timeout=30, check=False)
+
+
+def test_failed_isolation_never_executes_bot_without_it(tmp_path, monkeypatch, bot):
     fake = tmp_path / "unshare"
     fake.write_text("#!/bin/sh\nexit 125\n")
     fake.chmod(0o700)
     monkeypatch.setattr(isolation.shutil, "which", lambda _: str(fake))
-    result = sandbox.run(ROOT / "worlds/chatbot4/seed", ["Hello"])
-    assert not result["ok"] and result["status"] == "exit 125" and not result["replies"]
+    result = run_bot(bot, tmp_path / "root", ["Hello"])
+    assert result.returncode == 125 and not result.stdout
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux prctl")
@@ -233,12 +246,9 @@ print('isolated')
         assert result.returncode == 0 and result.stdout == "isolated\n", result.stderr
 
 
-def test_real_bot_runs_inside_namespaces(tmp_path, kernel_namespaces):
-    from . import test_chatbot4
-
-    assert test_chatbot4.Chatbot4World
-    result = sys.modules["sandbox"].run(ROOT / "worlds/chatbot4/seed", ["Hello", "Bye"])
-    assert result["ok"] and result["replies"] == ["Hello!", "Hello!"], result
+def test_real_bot_runs_inside_namespaces(tmp_path, kernel_namespaces, bot):
+    result = run_bot(bot, tmp_path / "root", ["Hello", "Bye"])
+    assert result.returncode == 0 and result.stdout == "Hello!\nHello!\n", result.stderr
 
 
 async def test_pi_start_uses_namespace_wrapper_and_explicit_environment(tmp_path, monkeypatch):
