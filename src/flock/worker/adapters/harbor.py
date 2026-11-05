@@ -252,6 +252,8 @@ class HarborAdapter:
         tc.agent.override_timeout_sec = (
             trial_seconds + parse_duration(self.spec.turn_timeout).total_seconds())
         tc.environment.kwargs = dict(config.environment.kwargs)
+        if config.environment.backend == "hf-sandbox":  # + kwargs.namespace, secret_env's token
+            tc.environment.import_path = "flock.harbor.envs:HFSandbox"
         if self.resources is not None:
             await self.resources.add([self.agent])  # joins here (again: after a move)
             if self._closes:  # a close during the add removed the agent before it was added

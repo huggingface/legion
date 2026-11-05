@@ -140,7 +140,9 @@ class Agents(AgentSettings):
 
 class Environment(EnvironmentSettings):
     backend: Literal["docker", "podman", "hf-sandbox"] = "docker"
-    kwargs: dict[str, Any] = Field(default_factory=dict)  # Harbor's EnvironmentConfig.kwargs
+    # Harbor's EnvironmentConfig.kwargs; hf-sandbox: flavor, job_timeout, forward_hf_token, and
+    # flock's `namespace` (the org sandboxes bill to; flock.harbor.envs)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 class Inference(InferenceSettings):

@@ -169,6 +169,7 @@ async def test_twenty_agents_share_the_host_and_their_sandbox_commands_overlap(w
     for a, trial in zip(adapters, world.trials, strict=True):
         assert trial.config.agent.env["FAKE_TOKEN"] == f"tok-{a.agent}"
         assert trial.config.task.path == host.task_path
+        assert trial.config.environment.import_path == "flock.harbor.envs:HFSandbox"
     assert adapters[0].trial_status() == {"id": "agent-0000-t1", "attempt": 1, "alive": True}
 
     await asyncio.gather(*(a.close() for a in adapters))
