@@ -523,7 +523,8 @@ runs the bot contract and the repository's `tests/` files matching `CHATBOT_MERG
 at 60 s, and refuses when they fail there but pass on main.
 `prs.jsonl` records PR events with both the main parent and PR head for merges.
 `eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
-this implementation does not start an evaluator.
+this implementation does not start an evaluator. A merge whose main afterwards is not the tree
+the world checked carries `tree_mismatch: true` in both (and an ERROR in the world's log).
 
 Run 4 uses one explicit `HF_TOKEN` for the experiment bucket and dataset. It is
 required by the PR backend and should grant access only to those resources. The

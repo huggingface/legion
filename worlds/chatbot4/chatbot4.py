@@ -223,7 +223,8 @@ class Chatbot4World(World):
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
         # Merge contract checks get their own runners, so run_bot load never blocks merges.
         self.merge_slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_MERGE_SLOTS", "4")))
-        self.main_tests = (None, False)  # (main sha, the shared tests pass on it), see _shared_tests
+        # (main sha, the shared tests pass on it; None: they timed out there), see _shared_tests
+        self.main_tests = (None, False)
         self.conflicts = {}  # PR number -> the main sha its author was told it conflicts with
         self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
@@ -1282,7 +1283,7 @@ class Chatbot4World(World):
         if ref == f"refs/pr/{pr}":
             with self.lock:
                 rec = self.state["prs"].get(str(pr))
-                if rec is None or rec["state"] != "open" or rec["head_sha"] != expected:
+                if rec is None or rec["state"] not in ("open", "merging") or rec["head_sha"] != expected:
                     raise ToolError("the PR was merged or closed during the update")
                 rec["head_sha"] = hub
                 self._dirty("prs", pr)
@@ -1476,12 +1477,14 @@ class Chatbot4World(World):
             tree = Path(tmp) / "tree"
             self.repo.checkout(checked, tree)
             self._bot_contract(tree, self.repo.changed(checked_base, checked))
-        self.repo.refresh(0)  # outside the lock; the rebase and the compare-and-swap use local refs
         # The merge lane's slot is taken before the locks (see _hub_write) and held through the
         # rebase, the checks and the Hub merge, so world merges run one at a time, each on the
         # main the last one left. It is separate from the push lane, so a merge never waits
         # behind pushes, opens and closes.
         with self._hub_write(agent, "merge", pr, lane="merge"):
+            # Main as the Hub has it, also after a merge that landed but whose call failed; the
+            # rebase and the compare-and-swap below use this local ref.
+            self.repo.refresh(0)
             with self.lock:
                 rec = self._pr(pr)
                 if any(p[2] == pr for p in self.pending.values()):
@@ -1499,14 +1502,8 @@ class Chatbot4World(World):
                     rec["state"] = "merging"  # no update, review, close or merge while the Hub calls run
                 try:
                     if new != head:  # the Hub merges refs/pr/N as it is: publish the rebase first
-                        try:
-                            self.repo.push(new, f"refs/pr/{pr}", expected=head)
-                        except ToolError as exc:
-                            if exc.code != "stale_lease":
-                                raise
-                            raise ToolError(f"PR #{pr}'s head on the Hub is newer than the world's "
-                                            f"record; update it with open_pr pr={pr}, then merge",
-                                            "stale_lease") from None
+                        # A stale lease (e.g. a rebase pushed just before a restart) adopts the Hub head.
+                        self._lease_push(agent, pr, new, f"refs/pr/{pr}", head, time.monotonic())
                         self.repo.update_ref(f"refs/pr/{pr}", new)
                         self.repo.update_ref(f"refs/flock/pr/{pr}/{new}", new)
                         with self.lock:  # reviews stay: they match the rebased head by patch-id
@@ -1531,9 +1528,11 @@ class Chatbot4World(World):
                     # Local main must move before main_lock is released: opens compare against it.
                     self.repo.fetch()
                     merged = self.repo.sha()
-                    if self.repo.git("rev-parse", f"{merged}^{{tree}}") != self.repo.git("rev-parse", f"{new}^{{tree}}"):
+                    mismatch = (self.repo.git("rev-parse", f"{merged}^{{tree}}")
+                                != self.repo.git("rev-parse", f"{new}^{{tree}}"))
+                    if mismatch:  # e.g. the Hub merged an older refs/pr head, or main moved outside
                         log.error("PR #%s: main %s after the Hub merge is not the checked tree of %s",
-                                  pr, merged[:12], new[:12])  # e.g. the Hub merged an older refs/pr head
+                                  pr, merged[:12], new[:12])
                     with self.lock:
                         rec.update(state="merged", merged_sha=merged)
                         self._dirty("prs", pr)
@@ -1545,7 +1544,8 @@ class Chatbot4World(World):
                             self._notify(name, pr, "merged", f"PR #{pr} you approved was merged by {agent.name}")
                         self._save()
                         event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
-                                 "parent_sha": main, "head_sha": new, "merged_sha": merged}
+                                 "parent_sha": main, "head_sha": new, "merged_sha": merged,
+                                 **({"tree_mismatch": True} if mismatch else {})}
                         rebased = {"rebased_from": base} if new != head else {}
                         self._event("merged", agent, **event, **rebased)
                         # Append-only integration hook, consumed by the separate evaluation workstream.
@@ -1594,15 +1594,17 @@ class Chatbot4World(World):
                                     "needs a fresh review: rebase onto origin/main, update the PR and "
                                     "ask for a review", "rebase_changed") from None
             if new != checked:
-                self._bot_contract(tree, self.repo.changed(main, new))
+                self._bot_contract(tree, self.repo.changed(main, new), in_lane=True)
             self._shared_tests(pr, tree, main)
         return new
 
-    def _bot_contract(self, tree, names):
-        """The merge contract: the fixed interface, names compile, the bot answers."""
+    def _bot_contract(self, tree, names, in_lane=False):
+        """The merge contract: the fixed interface, names compile, the bot answers. In the merge
+        lane the bot runs without a merge runner: the lane bounds those runs, and callers' first
+        contracts hold the runners."""
         self._contract(tree, names)
-        verdict = self._run(tree, ["Hello", "My name is Sam", "", "What is my name?", "Bye"],
-                            self.merge_slots)
+        lines = ["Hello", "My name is Sam", "", "What is my name?", "Bye"]
+        verdict = run(tree, lines) if in_lane else self._run(tree, lines, self.merge_slots)
         if not verdict["ok"]:
             raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
 
@@ -1610,13 +1612,15 @@ class Chatbot4World(World):
         """Refuse a merge that turns the shared tests (MERGE_TESTS) red: two PRs can each pass
         them alone and fail them together (the same new deck id). Tests that also fail on main,
         or time out, do not refuse it: that is not this PR's doing."""
-        if not MERGE_TESTS:
+        if not MERGE_TESTS or self.main_tests == (main, None):  # timed out on this main already
             return
         result = run_tests(tree, MERGE_TESTS, MERGE_TESTS_TIMEOUT_S)
         if result["ok"]:
             return
         if result["status"] == "timeout":
-            log.warning("shared tests %s timed out on PR #%s; merging without them", MERGE_TESTS, pr)
+            self.main_tests = (main, None)
+            log.warning("shared tests %s timed out on PR #%s; merging without them on main %s",
+                        MERGE_TESTS, pr, main[:12])
             return
         if self.main_tests[0] != main:
             with tempfile.TemporaryDirectory(dir=self.ws) as tmp:

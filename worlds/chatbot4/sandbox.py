@@ -72,6 +72,21 @@ sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
 '''
 
 
+def _isolated(root: Path, tmp: str, args: list[str], data: bytes, timeout: float, out, err) -> str:
+    """Run `python -I -S -c *args` isolated, root read-only, data on stdin; the status."""
+    argv = isolate_command([sys.executable, "-I", "-S", "-c", *args], Path(tmp) / "root",
+                           cwd=root.resolve(), readonly=[root.resolve()], python_only=True)
+    proc = subprocess.Popen(argv, cwd=tmp, env={}, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                            start_new_session=True)
+    try:
+        proc.communicate(data, timeout=timeout)
+        return "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return "timeout"
+
+
 def run(root: Path, lines: list[str], timeout: float = 300) -> dict:
     if not lines or len(lines) > 200 or any(not isinstance(x, str) or '\n' in x or '\r' in x
                                            or len(x) > 16000 for x in lines):
@@ -79,19 +94,8 @@ def run(root: Path, lines: list[str], timeout: float = 300) -> dict:
     with (tempfile.TemporaryDirectory() as tmp,
           open(Path(tmp) / "out", "w+b") as out,
           open(Path(tmp) / "err", "w+b") as err):
-        argv = isolate_command([sys.executable, "-I", "-S", "-c", SHIM, str(root.resolve())],
-                               Path(tmp) / "root", cwd=root.resolve(), readonly=[root.resolve()],
-                               python_only=True)
-        proc = subprocess.Popen(argv, cwd=tmp,
-                                env={}, stdin=subprocess.PIPE, stdout=out, stderr=err,
-                                start_new_session=True)
-        try:
-            proc.communicate(('\n'.join(lines) + '\n').encode(), timeout=timeout)
-            status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            status = "timeout"
+        status = _isolated(root, tmp, [SHIM, str(root.resolve())],
+                           ('\n'.join(lines) + '\n').encode(), timeout, out, err)
         out.seek(0)
         err.seek(0)
         replies = out.read(1 << 20).decode(errors="replace").splitlines()
@@ -104,18 +108,7 @@ def run_tests(root: Path, pattern: str, timeout: float = 60) -> dict:
     """Run root's tests/ files matching pattern, isolated like run(). ok when they pass (or
     none match); status "timeout" past timeout; output: their combined output (1 MiB)."""
     with tempfile.TemporaryDirectory() as tmp, open(Path(tmp) / "out", "w+b") as out:
-        argv = isolate_command([sys.executable, "-I", "-S", "-c", TESTS_SHIM, str(root.resolve()), pattern],
-                               Path(tmp) / "root", cwd=root.resolve(), readonly=[root.resolve()],
-                               python_only=True)
-        proc = subprocess.Popen(argv, cwd=tmp, env={}, stdin=subprocess.DEVNULL, stdout=out,
-                                stderr=out, start_new_session=True)
-        try:
-            proc.wait(timeout=timeout)
-            status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            status = "timeout"
+        status = _isolated(root, tmp, [TESTS_SHIM, str(root.resolve()), pattern], b"", timeout, out, out)
         out.seek(0)
         return {"ok": status == "ok", "status": status,
                 "output": out.read(1 << 20).decode(errors="replace")}

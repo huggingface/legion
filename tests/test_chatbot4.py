@@ -47,10 +47,11 @@ class LocalHub:
     def close(self, pr, comment):
         self.closed = [*getattr(self, "closed", []), pr]
 
-    def merge(self, pr, comment):
+    def merge(self, pr, comment):  # like the Hub: a three-way merge of refs/pr/N into main
         main, head = git(self.remote, "rev-parse", "main"), git(self.remote, "rev-parse", f"refs/pr/{pr}")
+        tree = git(self.remote, "merge-tree", "--write-tree", main, head).split()[0]
         sha = git(self.remote, "-c", "user.name=world", "-c", "user.email=world@flock.invalid",
-                  "commit-tree", f"{head}^{{tree}}", "-p", main, "-p", head, "-m", comment)
+                  "commit-tree", tree, "-p", main, "-p", head, "-m", comment)
         git(self.remote, "update-ref", "refs/heads/main", sha, main)
 
 
@@ -1059,6 +1060,7 @@ def _deck_file(clone, name, deck_id):
         json.dumps({"id": deck_id, "area": "test", "turns": [f"hello from {name}"]}) + "\n")
 
 
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
 def test_merge_pr_refuses_a_rebase_that_breaks_the_shared_tests(setup_v8):
     # Each PR adds a deck file with the same new id: each passes alone, together they fail.
     world, clone, second = _two_prs(setup_v8, lambda c: _deck_file(c, "one", "dup-1"),
@@ -1099,6 +1101,148 @@ def test_a_hub_merge_failure_after_the_rebase_keeps_the_record_on_the_rebased_he
     assert world.list_prs(needs_review=True) == []  # the approval still counts
     result = world.merge_pr(Agent("cedar"), second["pr"])
     assert "rebased_from" not in result and (result["parent_sha"], result["head_sha"]) == (main, head)
+
+
+def _push_to_main(setup, name):
+    """A change of main from outside the world (another clone pushes it)."""
+    _world, clone, remote = setup
+    outside = clone.parent / f"outside-{name}"
+    git(clone.parent, "clone", "-q", str(remote), str(outside))
+    _module(outside, name, None)
+    _commit(outside)
+    git(outside, "push", "-q", "origin", "HEAD:main")
+
+
+def test_main_moving_during_the_checks_refuses_and_touches_nothing(setup, monkeypatch):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                     lambda c: _module(c, "time", None))
+    remote, pr, real = setup[2], second["pr"], world._shared_tests
+
+    def main_moves(*args):
+        _push_to_main(setup, "extra")
+        world.repo.fetch()  # another tool's refresh
+        return real(*args)
+
+    monkeypatch.setattr(world, "_shared_tests", main_moves)
+    with pytest.raises(ToolError, match="changed during checks"):
+        world.merge_pr(Agent("oak"), pr)
+    assert git(remote, "rev-parse", f"refs/pr/{pr}") == world.state["prs"][str(pr)]["head_sha"] == second["head_sha"]
+
+
+def test_a_pr_updated_during_the_checks_refuses_and_keeps_the_update(setup, monkeypatch):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    remote, pr, real, updated = setup[2], second["pr"], world._shared_tests, {}
+    main = world.repo.sha()
+
+    def author_updates(*args):
+        _module(clone, "time", "Noon")
+        updated.update(submit(world, clone, branch="two", pr=pr))
+        return real(*args)
+
+    monkeypatch.setattr(world, "_shared_tests", author_updates)
+    with pytest.raises(ToolError, match="changed during checks"):
+        world.merge_pr(Agent("oak"), pr)
+    assert git(remote, "rev-parse", f"refs/pr/{pr}") == world.state["prs"][str(pr)]["head_sha"] == updated["head_sha"]
+    assert git(remote, "rev-parse", "main") == main
+
+
+def test_a_stale_lease_after_a_restart_adopts_the_hub_head(setup, monkeypatch):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                     lambda c: _module(c, "time", None))
+    remote, pr, real = setup[2], second["pr"], world.repo.hub.merge
+
+    def fail(pr, comment):
+        raise ToolError("Hub request failed; retry later", "hub_error")
+
+    monkeypatch.setattr(world.repo.hub, "merge", fail)
+    with pytest.raises(ToolError):
+        world.merge_pr(Agent("oak"), pr)
+    assert git(remote, "rev-parse", f"refs/pr/{pr}") != second["head_sha"]
+    # A crash after the force-push, before the record was saved: record and local ref are older.
+    with world.lock:
+        world.state["prs"][str(pr)].update(base_sha=second["base_sha"], head_sha=second["head_sha"])
+        world._dirty("prs", pr)
+    world.flush()
+    world.repo.update_ref(f"refs/pr/{pr}", second["head_sha"])
+    monkeypatch.setattr(world.repo.hub, "merge", real)
+    world = Chatbot4World(world.ws, world.repo)
+    time.sleep(1.1)  # the next replay gets a new committer date, so a new sha
+    result = world.merge_pr(Agent("oak"), pr)
+    assert result["head_sha"] == git(remote, "rev-parse", f"refs/pr/{pr}")
+    assert result["merged_sha"] == git(remote, "rev-parse", "main")
+    assert world.metrics()["stale_lease_adoptions_total"] == 1
+
+
+def test_a_hub_merge_that_lands_then_errors_is_seen_by_the_next_merge(setup, monkeypatch):
+    import threading
+
+    world, clone, remote = setup
+    other = clone.parent / "other"
+    git(clone.parent, "clone", "-q", str(remote), str(other))
+    _module(other, "weather", None)
+    a = submit(world, other, "pine", "a")
+    _module(clone, "time", None)
+    b = submit(world, clone, "cedar", "b")
+    approve(world, a)
+    approve(world, b)
+    a_merging, b_checked, out = threading.Event(), threading.Event(), {}
+    real_contract, real_merge = world._bot_contract, world.repo.hub.merge
+
+    def contract(*args, **kwargs):
+        real_contract(*args, **kwargs)
+        if threading.current_thread().name == "B":
+            b_checked.set()
+
+    def merge(pr, comment):
+        if pr == a["pr"]:  # A holds the lane; B checks its PR alone, then waits for the lane
+            a_merging.set()
+            assert b_checked.wait(20)
+            time.sleep(0.3)
+            real_merge(pr, comment)  # landed on the Hub, but the call fails (not a ToolError)
+            raise ConnectionError("reset by peer")
+        return real_merge(pr, comment)
+
+    monkeypatch.setattr(world, "_bot_contract", contract)
+    monkeypatch.setattr(world.repo.hub, "merge", merge)
+
+    def run(name, rec):
+        try:
+            out[name] = world.merge_pr(Agent("oak"), rec["pr"])
+        except Exception as exc:  # noqa: BLE001
+            out[name] = exc
+
+    threads = [threading.Thread(target=run, args=(n, r), name=n) for n, r in (("A", a), ("B", b))]
+    threads[0].start()
+    assert a_merging.wait(20)
+    threads[1].start()
+    for t in threads:
+        t.join(60)
+    assert isinstance(out["A"], ConnectionError) and isinstance(out["B"], dict), out
+    landed = git(remote, "rev-parse", "main^1")  # A's merge on the Hub, B's parent
+    assert out["B"]["parent_sha"] == landed and "tree_mismatch" not in out["B"]
+    assert git(remote, "rev-parse", "main^{tree}") == git(remote, "rev-parse", f"{out['B']['head_sha']}^{{tree}}")
+
+
+def test_the_lane_holder_gets_a_bot_runner_in_a_burst(setup, monkeypatch):
+    import threading
+
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                     lambda c: _module(c, "time", None))
+    world.merge_slots = threading.BoundedSemaphore(1)
+    real_commit, held = world.repo.commit, threading.Event()
+
+    def commit(*args, **kwargs):  # other merge_pr calls' first contracts take every runner now
+        def hold():
+            with world.merge_slots:
+                held.set()
+                time.sleep(12)
+        threading.Thread(target=hold, daemon=True).start()
+        assert held.wait(5)
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(world.repo, "commit", commit)
+    assert world.merge_pr(Agent("oak"), second["pr"])["rebased_from"] == second["base_sha"]
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
