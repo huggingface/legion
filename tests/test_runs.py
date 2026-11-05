@@ -1,5 +1,6 @@
-"""Tiny real runs (tests/tinyrun.py): a `compute: local` swarm through its whole lifecycle, and
-a controller that crashes mid-loop and comes back."""
+"""Tiny real runs (tests/tinyrun.py): a `compute: local` swarm through its whole lifecycle, a
+controller that crashes mid-loop and comes back, and one run per feature: loops, spawn, and
+comms on the fake board (tests/fake_msgboard.py)."""
 
 from __future__ import annotations
 
@@ -8,6 +9,10 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
+
+from . import fake_msgboard
 
 
 def test_lifecycle(tiny):
@@ -320,3 +325,122 @@ def test_spawn(tiny):
         {"child": scout, "type": "scout", "reason": "parent_removed"}]
     types = json.loads(tiny.flock("status", "tiny", "--json"))["status"]["types"]
     assert types["helper"]["agents_by_state"] == types["scout"]["agents_by_state"] == {}
+
+
+COMMS = """\
+    comms: true
+    loop: {prompt: "bash: echo round {round} {why}", every: 1h, on: [comms.mention],
+           while: {max_rounds: 5}}
+  quiet:
+    harness: llm
+    model: fake:fake-model
+    replicas: 1
+    comms: true
+    env: {HEARTBEAT_INTERVAL: "0.5"}
+    loop: {prompt: "bash: echo round {round} {why}", every: 1h, while: {max_rounds: 5}}
+comms: {kind: msgboard, url: "URL", invite_env: TINY_INVITE, channel: flock-test,
+        kickoff_file: prompts/kickoff.md, protocols: [protocols/lead.md],
+        rules: {min_post_gap: GAP, max_len: 500, threads: per_topic, no_group_mentions: true}}
+"""
+
+
+@pytest.fixture
+def board(monkeypatch):
+    """tests/fake_msgboard.py on a free port; its invite in TINY_INVITE (the workers' secret)."""
+    b, srv, b.url = fake_msgboard.serve()
+    monkeypatch.setenv("TINY_INVITE", b.invite)
+    yield b
+    srv.shutdown()
+
+
+def test_comms(tiny, board, tmp_path):
+    """Two writers and a quiet agent on the fake board: the kickoff once, joins at the first
+    prompt, a post, a fast second post refused, read, a reply in the thread that mentions two
+    agents (only the type with `loop.on: [comms.mention]` wakes), search; then new protocol text
+    and no post gap reach the running workers."""
+    a, b = "writer-0000", "writer-0001"
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "protocols").mkdir()
+    (tmp_path / "prompts" / "kickoff.md").write_text("Kickoff: build the bot.")
+    (tmp_path / "protocols" / "lead.md").write_text("PROTO-V1: one agent leads a topic.")
+
+    def spec(gap: str) -> str:
+        return tiny.spec(replicas=2, extra=COMMS.replace("URL", board.url).replace("GAP", gap),
+                         env='FLOCK_COMMS_RATE: "50"')  # a worker's board calls, per second
+
+    out = tiny.flock("launch", spec("30s"), "--skip-preflight")
+    assert "no comms feeder" not in out, out
+    [kick] = board.msgs
+    assert (kick["sender"]["external_id"], kick["body"]) == ("tiny-host", "Kickoff: build the bot.")
+    assert board.joins == ["tiny-host"]
+    for n in (a, b, "quiet-0000"):  # the loop's first round: each joins at its first prompt
+        tiny.turns(n, 1)
+    assert sorted(board.joins) == sorted(["tiny-host", a, b, "quiet-0000"])
+    assert [e["data"]["channel_id"] for e in tiny.events(a, "comms.joined")] == [12]
+
+    def call(agent: str, n: int, tool: str, args: str) -> dict:
+        """`agent` calls the comms tool in its n-th turn; the result, parsed."""
+        tiny.flock("prompt", agent, f"call: {tool} {args}")
+        tiny.turns(agent, n)
+        return json.loads(tiny.results(agent)[-1])
+
+    out = call(a, 2, "post", '{"text": "taking the fallback ladder", "thread": "new"}')
+    root = out["posted"]
+    assert out["thread"] == root and board.msgs[-1]["sender"]["external_id"] == a
+    out = call(a, 3, "post", '{"text": "and another thing", "thread": "new"}')
+    assert out["error"].startswith("refused: wait") and len(board.msgs) == 2  # never sent
+    out = call(b, 2, "read", "{}")
+    assert [(m["id"], m["from"]) for m in out["messages"]][1:] == [(root, a)]
+    assert out["messages"][0]["id"] == kick["id"]
+    out = call(b, 3, "post", f'{{"text": "@{a} @quiet-0000 I can help with the ladder", "thread": {root}}}')
+    assert out["thread"] == root
+    mention = {"msg_id": out["posted"], "thread": root, "from": b}
+    # both are mentioned; only the writer's loop wakes on it, a wake is not a round
+    tiny.turns(a, 4)
+    assert tiny.said(a)[-1][-1] == "bash: echo round 1 wake: comms.mention"
+    assert [e["data"] for e in tiny.events("quiet-0000", "comms.mention")] == [mention]
+    assert [e["data"] for e in tiny.events(a, "comms.mention")] == [mention]
+    out = call(a, 5, "search", '{"query": "help ladder zebra"}')
+    assert out["dropped"] == ["zebra"] and [(h["author"], h["thread"]) for h in out["results"]] == [
+        (b, root)]
+
+    reqs = [json.loads(x)["body"] for x in tiny.log.read_text().splitlines()]
+    system = reqs[0]["messages"][0]["content"]
+    assert "PROTO-V1: one agent leads" in system and "#flock-test" in system
+    assert {t["function"]["name"] for t in reqs[0]["tools"]} == {"bash", "post", "read", "search"}
+    pollers = {who for _, p, q, who in board.requests if p == "/v1/activity" and "wait" in q}
+    assert len(pollers) == 2  # one long-poll per worker
+    tokens = list(board.tokens)
+    run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
+    files = [p for p in (run / "agents").rglob("*") if p.is_file()]
+    assert files and not any(t in p.read_text(errors="replace") for p in files for t in tokens)
+    tiny.flock("prompt", b, "bash: env")  # nor in the agents' environment
+    tiny.turns(b, 4)
+    assert "FLOCK_AGENT=" in tiny.results(b)[-1]
+    assert not any(t in tiny.results(b)[-1] for t in tokens)
+
+    # live: new protocol text and no post gap reach the running workers
+    (tmp_path / "protocols" / "lead.md").write_text("PROTO-V2: the lead posts a plan first.")
+    spec("0s")
+    updated = datetime.now(UTC)
+    tiny.flock("update", "spec.yaml")
+
+    def beat() -> datetime:  # the writers' worker's last heartbeat
+        st = json.loads(tiny.flock("status", "tiny", "--json"))
+        return datetime.fromisoformat(
+            next(w["last_heartbeat"] for w in st["workers"] if w["type"] == "writer"))
+
+    first = tiny.wait(lambda: (t := beat()) > updated and t)
+    tiny.wait(lambda: beat() > first)  # so the answer to `first` (the new rules) was applied
+    out = call(a, 6, "post", f'{{"text": "plan: probes first", "thread": {root}}}')
+    assert out["thread"] == root, out
+    system = json.loads(tiny.log.read_text().splitlines()[-1])["body"]["messages"][0]["content"]
+    assert "PROTO-V2" in system and "PROTO-V1" not in system
+    assert [m["sender"]["external_id"] for m in board.msgs].count("tiny-host") == 1  # kickoff once
+    assert [e["name"] for e in tiny.events("tiny", "worker.")] == ["worker.launched"] * 2
+
+    # the mention woke the writer once (its 2 s debounce is long past)
+    assert [(e["data"]["round"], e["data"]["why"]) for e in tiny.events(a, "loop.prompt")] == [
+        (1, "start"), (1, "wake: comms.mention")]
+    assert [e["data"]["why"] for e in tiny.events("quiet-0000", "loop.prompt")] == ["start"]
+    assert [e["data"]["reason"] for e in tiny.events(a, "loop.wake")] == ["comms.mention"]
