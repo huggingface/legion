@@ -69,6 +69,7 @@ LOOP_ERROR_BACKOFF = 2.0  # s before re-sending the loop prompt after a failed t
 LOOP_TRANSIENT_BACKOFF = 2.0  # s, first retry; doubles per consecutive transient failure
 LOOP_TRANSIENT_BACKOFF_CAP = 120.0  # s
 LOOP_TRANSIENT_LIMIT = 20  # consecutive transient retries before they count as errors
+VERIFY_WAIT = 300.0  # s drain and unassign give a harbor Trial's verifier, then cancel it
 
 
 def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float:
@@ -104,7 +105,12 @@ class AgentState(BaseModel):
     comms_news: list[dict] = Field(default_factory=list)
 
 
-def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path, why: str) -> str:
+def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path | None,
+                   why: str) -> str:
+    """`session_log` None: the harness cannot read this worker's files (a harbor Trial)."""
+    if session_log is None:
+        return (f"Your previous session ({old_session}) could not be resumed: {why}. "
+                "Its transcript is not available here; continue your work from the task.")
     where = f"{transcript} (harness transcript) and {session_log}" if transcript else str(session_log)
     return (
         f"Your previous session ({old_session}) could not be resumed: {why}. "
@@ -548,7 +554,9 @@ class AgentRuntime:
                 sid = await self.adapter.start(self.workdir, None, self.spec, env=env)
                 kind, self.resumed = "session_restarted", False
                 self.state.harness_cum = {}
-                first.append(restart_prompt(old, transcript, self.log.path, str(e)))
+                readable = self.spec.harness.value != "harbor"  # a Trial sees no worker paths
+                first.append(restart_prompt(old, transcript, self.log.path if readable else None,
+                                            str(e)))
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
             self.start_rev = self.rev
@@ -926,19 +934,20 @@ class AgentRuntime:
             finally:
                 self._stop_req = None
         self._defer_buffer("draining")
-        await self.close()
+        await self.close(VERIFY_WAIT)
         await self.sync_now("drain")
         return cut
 
     async def unassign(self) -> None:
         self.allow_starts = False
         await self.stop("unassign")
-        await self.close()
+        await self.close(VERIFY_WAIT)
         await self.sync_now("unassign")
 
     async def close(self, timeout: float | None = None) -> None:
         """End what outlives a burst (harbor: the Trial, whose verifier then runs; after
-        `timeout` s it is cancelled and Harbor stops its environment unverified)."""
+        `timeout` s, at once for 0, it is cancelled and Harbor stops its environment
+        unverified)."""
         if (close := getattr(self.adapter, "close", None)) is None:
             return
         try:

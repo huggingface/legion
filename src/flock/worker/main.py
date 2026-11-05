@@ -108,8 +108,6 @@ log = logging.getLogger("flock.worker")
 DEFAULT_DRAIN_WINDOW = timedelta(minutes=10)
 PREEMPT_EXIT = 75  # EX_TEMPFAIL: the job ended because its machine was taken away
 DEFAULT_DRAIN_BUDGET = 20.0  # s, FLOCK_DRAIN_BUDGET_S: the whole preemption handler
-# s an exit (terminate, abandon) gives each harbor Trial to verify, then as much to stop it
-EXIT_CLOSE_S = 10.0
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -1040,11 +1038,12 @@ class Worker:
         self._drained.set()
 
     async def _stop_all(self, reason: str) -> None:
-        """Stop every agent, then end what outlives it (harbor Trials), all in parallel: no
-        container or sandbox outlives this worker."""
+        """Stop every agent and cancel what outlives it (harbor Trials, unverified, also one
+        still starting: stop waits for its start), all in parallel: no container or sandbox
+        outlives this worker."""
         agents = list(self.agents.values())
-        await asyncio.gather(*(rt.stop(reason) for rt in agents), return_exceptions=True)
-        await asyncio.gather(*(rt.close(EXIT_CLOSE_S) for rt in agents), return_exceptions=True)
+        await asyncio.gather(*(rt.stop(reason) for rt in agents),
+                             *(rt.close(0) for rt in agents), return_exceptions=True)
 
     async def preempt(self, reason: str) -> None:
         """The machine goes away in seconds (docs/slurm.md): everything below fits in
@@ -1077,10 +1076,13 @@ class Worker:
         async def one(rt: AgentRuntime) -> None:
             if rt.turn_id is not None or rt.awaiting:
                 self._interrupted.add(rt.name)
+            # the Trial must not outlive the machine: cancelled now, unverified (also one still
+            # starting: stop waits for its start); Harbor pulls its sessions as it stops it
+            closing = asyncio.ensure_future(rt.close(0))
             await rt.stop("preempted")
+            await asyncio.wait({closing}, timeout=max(0.5, (t0 + budget - loop.time()) / 2))
             await rt.sync_now("preempt")
-            # the Trial must not outlive the machine: half the time left to verify, half to stop
-            await rt.close(max(0.5, (t0 + budget - loop.time()) / 2))
+            await closing
 
         snap = self.sync.stats.snapshot() if self.sync else {}
         try:

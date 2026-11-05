@@ -9,8 +9,12 @@ background for as long as the agent lives here:
   Pi is installed.
 - `send` queues the prompt for the next turn (prompts sent during a turn join the next one);
   a Trial that ended on its own (limits.trial_hours) is replaced by a new one for it.
-- `stop` kills a turn in flight and ends the burst's event stream; the Trial stays up.
-- `close` ends the Trial: FlockPi returns, Harbor runs the verifier and stops the environment.
+- `stop` kills a turn in flight and ends the burst's event stream; the Trial stays up. When
+  /logs/agent is not mounted (hf-sandbox), it also downloads the sessions for the next push.
+- `close` ends the Trial: FlockPi returns, Harbor runs the verifier and stops the environment;
+  `close(0)` cancels it unverified, and a Trial still starting is cancelled.
+On docker and podman each Trial gets its own network, as shepherd's launch gives each
+participant one (TrialNetworks), removed when the next Trial starts or at `close`.
 A Trial that fails (an idle probe, 3 failed turns in a row, a crash) is reported as `error`
 and `exited`, after a failed turn for any prompt queued for it; the next prompt starts a new
 one. When its first turn on restored sessions failed, the next `start` of that session raises
@@ -35,7 +39,7 @@ from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 
 log = logging.getLogger(__name__)
 
-CANCEL_WAIT = 60.0  # s close() waits for a cancelled Trial's environment to stop (no timeout)
+CANCEL_WAIT = 60.0  # s close() waits for a cancelled Trial's environment to stop
 
 
 class HarborAdapter:
@@ -62,6 +66,9 @@ class HarborAdapter:
         self._open = False  # a burst is reading events (an `exited` is owed)
         self._closing = False
         self._resume_failed: str | None = None  # the last Trial's --continue failed: why
+        self._closes = 0  # close() calls: a start that saw one begin does not run its Trial
+        self._network: Any = None  # the latest Trial's TrialNetworks (docker, podman)
+        self._network_id = uuid.uuid4().hex[:8]  # names and labels this adapter's networks
 
     def session_files(self, session_id: str | None) -> list[Path]:
         """Every Pi session file of the agent: one Pi session dir per agent, and `--continue`
@@ -84,15 +91,19 @@ class HarborAdapter:
         the tools and the resources, as shepherd sets them."""
         self.spec = spec
         files = self.session_files(session_id)
-        if session_id and not files:
-            raise ResumeError(f"no Pi session files under {self.home / 'sessions'}")
-        if session_id and self._resume_failed:
-            why, self._resume_failed = self._resume_failed, None
-            raise ResumeError(why)
-        if self._starting is not None and not self._starting.done():
-            await asyncio.shield(self._starting)  # its failure is reported in this burst
-        if not self.alive():
-            await self._new_trial(restore=bool(session_id and files))
+        try:
+            if session_id and not files:
+                raise ResumeError(f"no Pi session files under {self.home / 'sessions'}")
+            if session_id and self._resume_failed:
+                why, self._resume_failed = self._resume_failed, None
+                raise ResumeError(why)
+            if self._starting is not None and not self._starting.done():
+                await asyncio.shield(self._starting)  # its failure is reported in this burst
+            if not self.alive():
+                await self._new_trial(restore=bool(session_id and files))
+        except ResumeError:
+            self.session_id = None  # the runtime's fresh start gets a new id
+            raise
         self._open = True
         self.session_id = session_id or self.session_id or str(uuid.uuid4())
         return self.session_id
@@ -109,13 +120,20 @@ class HarborAdapter:
         agent = getattr(self.trial, "agent", None)
         if agent is not None and getattr(agent, "busy", False):
             await agent.kill()
+        # unmounted: the next push gets this burst's sessions (a closing Trial's come with
+        # Harbor's download as it ends)
+        if self._open and self.alive() and not self._closing and agent.channel.ready.is_set():
+            await agent.pull_sessions()
         self._exit()
 
     async def close(self, timeout: float | None = None) -> Any:
         """End the Trial: FlockPi returns, Harbor runs the verifier and stops the environment;
-        returns its TrialResult (None if none). After `timeout` s, or when this call is
-        cancelled, the Trial is cancelled instead: Harbor stops the environment unverified
-        (waited for up to `timeout` s more; CANCEL_WAIT without one)."""
+        returns its TrialResult (None if none). After `timeout` s (0: at once; None: no limit),
+        or when this call is cancelled, the Trial is cancelled instead: Harbor stops the
+        environment unverified, waited for up to CANCEL_WAIT s (a further cancel stops the
+        wait). A Trial still starting is cancelled at once; a start that has not created its
+        Trial yet fails."""
+        self._closes += 1
         starting = self._starting
         if starting is not None and not starting.done():
             starting.cancel()
@@ -123,15 +141,21 @@ class HarborAdapter:
         run = self._run
         if run is not None and not run.done():
             self._closing = True
-            self._prompts.put_nowait(None)
             try:
-                await asyncio.wait({run}, timeout=timeout)
+                if timeout != 0 and self.trial.agent.channel.ready.is_set():
+                    self._prompts.put_nowait(None)
+                    await asyncio.wait({run}, timeout=timeout)
             finally:
-                if not run.done():
-                    run.cancel()
-                    await asyncio.wait({run}, timeout=CANCEL_WAIT if timeout is None else timeout)
-                self._closing = False
-                self._prompts = asyncio.Queue()
+                try:
+                    if not run.done():
+                        if not run.cancelling():  # a second cancel would cut Harbor's cleanup
+                            run.cancel()
+                        await asyncio.wait({run}, timeout=CANCEL_WAIT)
+                finally:
+                    self._closing = False
+                    self._prompts = asyncio.Queue()
+        if run is None or run.done():
+            await self._drop_network()
         return self.result
 
     async def events(self) -> AsyncIterator[AdapterEvent]:
@@ -198,6 +222,7 @@ class HarborAdapter:
         h = self.spec.harbor
         if h is None:
             raise RuntimeError("harness harbor needs the type's `harbor:` block")
+        closes = self._closes
         if self.host is not None:
             await self.host.prepare(self.spec)
             self.resources, self.bundle = self.host.resources, self.host.bundle
@@ -208,6 +233,9 @@ class HarborAdapter:
                             h.task["dataset"], getattr(self.host, "task_path", None))
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
+        # shortcut: build_trial_config and the board resource read the inference key and the
+        # board token from os.environ, which a Slurm worker lacks (they are in its secrets file,
+        # secret_env()); read them through secret_env() with the compute commit
         tc = launch.build_trial_config(config, task, self.root, self.agent, self._instructions())
         tc.trial_name = f"{self.agent}-t{self.attempt}"
         tc.agent.name, tc.agent.import_path = None, "flock.harbor.agent:FlockPi"
@@ -219,9 +247,22 @@ class HarborAdapter:
             self.resources.bind(self.agent, tc)
             if tc.environment.mounts and config.environment.backend == "hf-sandbox":
                 raise RuntimeError("hf-sandbox has no mounts: use the resources' http transport")
+        await self._drop_network()  # the last Trial's: it has ended
+        if config.environment.backend != "hf-sandbox":  # a sandbox is an HF Job: no local network
+            # one network per Trial, outside host and VPN routes: docker's default pools run
+            # out after about 30 compose projects on a host
+            self._network = networks = launch.TrialNetworks(
+                self._network_id, engine=config.environment.backend)
+            await networks.start()
+            self.root.mkdir(parents=True, exist_ok=True)
+            tc.environment.extra_docker_compose = [await networks.create(
+                tc.trial_name, self.root / f"{tc.trial_name}-network.json")]
         self._creating = True
         try:
             trial = await launch.Trial.create(tc)
+            if self._closes != closes:  # closed while this Trial was being created
+                await self._drop_network()
+                raise RuntimeError(f"Trial {tc.trial_name} not started: the agent was closed")
             launch.attach_pi_setup(trial, config.inference)
             if self.bundle is not None:
                 launch.attach_tool_setup(trial, self.bundle)
@@ -246,6 +287,16 @@ class HarborAdapter:
             why = channel.restore_error or _why(trial, run)
             raise (ResumeError if channel.restore_error else RuntimeError)(
                 f"Trial {tc.trial_name} did not start: {why}")
+
+    async def _drop_network(self) -> None:
+        """Remove the latest Trial's network once its environment has stopped."""
+        networks, self._network = self._network, None
+        if networks is None:
+            return
+        try:
+            await networks.stop()
+        except Exception as e:  # noqa: BLE001 - a leftover network holds a subnet, not the run
+            log.warning("%s: Trial network not removed: %s", self.agent, e)
 
     def _ended(self, trial: Any, task: asyncio.Task) -> None:
         """Done callback of a Trial's run(): roll over after trial_hours, report a failure

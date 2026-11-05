@@ -1,5 +1,6 @@
 """HarborAdapter + FlockPi on fakes: a FakeTrial (test_launch's) that runs the real FlockPi
-against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt."""
+against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt.
+Container networks are faked at their command boundary (flock.harbor.networking.command)."""
 
 import asyncio
 import json
@@ -19,7 +20,7 @@ from harbor.models.trial.result import ExceptionInfo
 from harbor.models.verifier.result import VerifierResult
 
 from flock.harbor import agent as flock_agent
-from flock.harbor import launch
+from flock.harbor import launch, networking
 from flock.harbor.agent import FlockPi
 from flock.harbor.spec import Spec, compile_spec
 from flock.worker.adapters.base import ResumeError
@@ -40,7 +41,7 @@ class Fakes:
     """What every fake Trial and environment of a test shares, and what they record."""
 
     def __init__(self):
-        self.trials, self.pi, self.root, self.uploads = [], [], [], []
+        self.trials, self.pi, self.root, self.uploads, self.net = [], [], [], [], []
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.fail = None  # pi call number -> "exit" | "provider"
         self.hold = set()  # pi call numbers that wait for release(n) or a kill
@@ -116,6 +117,8 @@ class FakeEnv:
         }
         if failure == "provider":
             message.update(content=[], errorMessage="429 Too Many Requests")
+        if failure == "server":  # a 500 before any token
+            message.update(content=[], errorMessage="500 Internal Server Error", usage={})
         (self.logs_dir / "pi.txt").write_text(
             json.dumps({"type": "message_end", "message": message}) + "\n"
         )
@@ -143,7 +146,9 @@ class Trial(FakeTrial):
         try:
             return await self._life()
         except asyncio.CancelledError:
-            await asyncio.sleep(0.05)  # Harbor stops the environment, then re-raises
+            if not self.fakes.mounted:  # Harbor downloads /logs/agent, stops the environment
+                shutil.copytree(self.agent_environment.logs_dir, self.logs_dir, dirs_exist_ok=True)
+            await asyncio.sleep(0.05)
             self.cancelled = True
             raise
 
@@ -179,7 +184,16 @@ def fakes(monkeypatch):
         shared.trials.append(trial)
         return trial
 
+    async def command(*args):  # docker or podman, and `ip route`
+        shared.net.append(args)
+        if args[0] == "ip":
+            return 0, "[]", ""
+        if args[2] == "inspect":  # flock-<run id>-<participant>
+            return 0, json.dumps([{"Labels": {"io.flock.run": args[3].split("-")[1]}}]), ""
+        return 0, "", ""
+
     monkeypatch.setattr(launch.Trial, "create", create)
+    monkeypatch.setattr(networking, "command", command)
     return shared
 
 
@@ -192,12 +206,16 @@ def clock(monkeypatch):
     return now
 
 
-def adapter(tmp_path, **limits) -> HarborAdapter:
+def type_spec(backend="docker", **limits):
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
+    spec.environment.backend = backend
     for key, value in limits.items():
         setattr(spec.limits, key, value)
-    ts = compile_spec(spec, TASK).types["agent"]
-    return make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    return compile_spec(spec, TASK).types["agent"]
+
+
+def adapter(tmp_path, **kw) -> HarborAdapter:
+    return make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", type_spec(**kw))
 
 
 async def read(events, until, count=1):
@@ -490,10 +508,92 @@ async def test_a_failed_continue_restarts_the_session(fakes, tmp_path):
     assert "resume failed" in evs[2].error
     with pytest.raises(ResumeError, match="--continue failed"):
         await a.start(a.workdir, "s-1", a.spec)
-    _, events = await start(a)  # the runtime's session_restarted: fresh, nothing put back
+    sid, events = await start(a)  # the runtime's session_restarted: fresh, nothing put back
+    assert sid != "s-1"
     await a.send("again")
     assert (await read(events, "turn_ended"))[-1].status == "completed"
     assert len(fakes.trials) == 2 and len(fakes.uploads) == 1 and "TASK" in fakes.pi[1]
+
+
+async def test_a_model_error_on_the_first_resumed_turn_keeps_the_session(fakes, tmp_path):
+    a = adapter(tmp_path)
+    (a.home / "sessions").mkdir(parents=True)
+    (a.home / "sessions" / "s.jsonl").write_text('{"call": 0}\n')
+    _, events = await start(a, "s-1")
+    fakes.fail = lambda n: "server" if n == 1 else None
+    await a.send("go on")
+    assert (await read(events, "turn_ended"))[-1].status == "error"
+    assert a.alive() and a.trial.agent.channel.restore_error is None
+    await a.stop()
+    await read(events, "exited")
+    assert await a.start(a.workdir, "s-1", a.spec) == "s-1"  # no ResumeError
+    await a.send("again")
+    assert (await read(a.events(), "turn_ended"))[-1].status == "completed"
+    assert len(fakes.trials) == 1 and "--continue" in fakes.pi[1]
+
+
+async def test_stop_pulls_unmounted_sessions_for_the_next_push(fakes, tmp_path):
+    fakes.mounted = False
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    for prompt in ("a", "b"):
+        await a.send(prompt)
+        await read(events, "turn_ended")
+    assert lines(a) == 1  # the second turn's session is not downloaded yet (SYNC)
+    await a.stop()
+    assert lines(a) == 2 and a.alive()
+
+
+async def test_keep_sessions_copies_changed_files_only(fakes, tmp_path):
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    await a.send("a")
+    await read(events, "turn_ended")
+    kept = a.home / "sessions" / "s.jsonl"
+    inode = kept.stat().st_ino
+    a.trial.agent.keep_sessions()
+    assert kept.stat().st_ino == inode  # unchanged: not copied again
+    with (a.trial.logs_dir / "pi" / "sessions" / "s.jsonl").open("a") as out:
+        out.write("{}\n")
+    a.trial.agent.keep_sessions()
+    assert kept.stat().st_ino != inode and lines(a) == 2
+
+
+async def test_each_trial_gets_its_own_network_removed_after_it(fakes, tmp_path, clock):
+    a = adapter(tmp_path, trial_hours=1)
+    _, events = await start(a)
+    clock[0] += 3600  # t1 ends; the next prompt starts t2
+    await asyncio.wait_for(asyncio.shield(a._run), 5)
+    await a.send("a")
+    await read(events, "turn_ended")
+    await a.close()
+    calls = [c[2:] for c in fakes.net if c[0] == "docker" and c[2] != "inspect"]
+    t1, t2 = (f"flock-{a._network_id}-agent-0000-t{n}" for n in (1, 2))
+    assert [(c[0], c[-1]) for c in calls] == [
+        ("create", t1), ("rm", t1), ("create", t2), ("rm", t2)]
+    (overlay,) = fakes.trials[1].config.environment.extra_docker_compose
+    assert json.loads(overlay.read_text())["networks"]["default"] == {"external": True, "name": t2}
+
+
+async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path):
+    a = adapter(tmp_path, backend="hf-sandbox")
+    await start(a)
+    await a.close()
+    assert fakes.net == [] and fakes.trials[0].config.environment.extra_docker_compose == []
+
+
+async def test_close_now_cancels_unverified_and_keeps_the_sessions(fakes, tmp_path):
+    fakes.mounted = False
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    for prompt in ("a", "b"):
+        await a.send(prompt)
+        await read(events, "turn_ended")
+    assert lines(a) == 1
+    await asyncio.wait_for(a.close(0), 5)
+    trial = fakes.trials[0]
+    assert not a.alive() and trial.cancelled and not trial.verified
+    assert lines(a) == 2  # Harbor's download as it stopped the Trial
 
 
 async def test_close_cancels_a_slow_verifier_after_its_timeout(fakes, tmp_path):
@@ -545,23 +645,116 @@ def test_read_turn_counts_compaction(tmp_path):
 
 
 def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path):
-    """KILL_PI on a fake /proc, `kill` stubbed: nothing on this machine is signalled."""
+    """KILL_PI on a fake /proc, `kill` stubbed: nothing on this machine is signalled. It ends
+    `pi` and its tool processes (12 -> 11 -> 20 -> 21), not the rest."""
     import subprocess
 
     proc = tmp_path / "proc"
     script = flock_agent.KILL_PI.replace("/proc", str(proc))
-    for pid, argv in [("11", ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
-                      ("12", ["bash", "-c", "set -o pipefail; pi --print 'hi'"]),
-                      ("13", ["sleep", "100"]), ("14", ["bash", "-c", script])]:
+    for pid, ppid, argv in [("11", "12", ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
+                            ("12", "1", ["bash", "-c", "set -o pipefail; pi --print 'hi'"]),
+                            ("20", "11", ["bash", "-c", "make test"]), ("21", "20", ["make"]),
+                            ("13", "1", ["sleep", "100"]), ("14", "1", ["bash", "-c", script])]:
         (proc / pid).mkdir(parents=True)
         (proc / pid / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (proc / pid / "stat").write_text(f"{pid} (a) b) S {ppid} {pid} 0\n")  # comm may hold ") "
 
     def run():
-        return subprocess.run(["bash", "-c", f"kill() {{ echo $1; }}; {script}"],
+        return subprocess.run(["sh", "-c", f'kill() {{ echo "$@"; }}; {script}'],
                               capture_output=True, text=True)
 
     killed = run()
-    assert killed.returncode == 0 and killed.stdout.split() == ["11", "12"]
+    assert killed.returncode == 0 and sorted(killed.stdout.split()) == ["11", "12", "20", "21"]
     for pid in ("11", "12"):
         (proc / pid / "cmdline").unlink()
     assert run().returncode == 1  # nothing to kill: reported
+
+
+def runtime(tmp_path):
+    from flock.worker.agents import AgentRuntime
+    from flock.worker.events import Outbox
+
+    a = adapter(tmp_path)
+    spec = a.spec.model_copy(update={"idle_grace": "200ms"})
+    return AgentRuntime("agent-0000", "agent", spec, swarm="sw", work_root=a.workdir.parent,
+                        adapter=a, outbox=Outbox()), a
+
+
+async def test_a_restart_prompt_names_no_worker_path(fakes, tmp_path):
+    from ..worker_fakes import event_types, until
+
+    rt, _ = runtime(tmp_path)
+    await rt.setup(restore=False)
+    rt.state.session_id = "gone"  # no session files: ResumeError, then a fresh session
+    await rt.prompt("one")
+    await until(lambda: rt.state.turns == 1)
+    assert "session_restarted" in event_types(rt) and rt.state.session_id != "gone"
+    assert "transcript is not available here" in fakes.pi[0]
+    assert str(rt.log.path) not in fakes.pi[0]  # the Trial cannot read the worker's files
+
+
+async def test_drain_cancels_a_slow_verifier(fakes, tmp_path, monkeypatch):
+    from flock.worker import agents
+
+    from ..worker_fakes import until
+
+    monkeypatch.setattr(agents, "VERIFY_WAIT", 0.1)
+    rt, a = runtime(tmp_path)
+    await rt.setup(restore=False)
+    await rt.prompt("one")
+    await until(lambda: rt.state.turns == 1)
+    fakes.verify_gate = asyncio.Event()  # never opens
+    await asyncio.wait_for(rt.drain(), 3)
+    trial = fakes.trials[0]
+    assert not a.alive() and trial.cancelled and not trial.verified
+
+
+def harbor_worker(tmp_path, *texts, sync=None):
+    """A worker with agent-0000 (this file's fakes) assigned, then sent `texts`; its bursts
+    stay open 2 s after a turn."""
+    from flock.models import AssignCommand, PromptCommand
+
+    from ..test_worker_main import FakeController, make_worker
+
+    ctrl = FakeController()
+    ctrl.batches = [
+        [AssignCommand(agent="agent-0000", type="researcher", restore=False,
+                       spec=type_spec().model_copy(update={"idle_grace": "2s"}))],
+        [PromptCommand(agent="agent-0000", prompt_id=f"p{n}", text=t) for n, t in enumerate(texts)],
+    ]
+    worker, _ = make_worker(tmp_path, ctrl, sync=sync)
+    worker.adapter_factory = lambda name, sp: make_adapter(worker.cfg.work_root / name, name, sp)
+    return worker
+
+
+@pytest.mark.parametrize("path", ["terminate", "preempt"])
+async def test_an_exit_while_a_trial_starts_cancels_it(fakes, tmp_path, path):
+    from ..worker_fakes import until
+
+    fakes.start_gate = asyncio.Event()  # never opens: Pi is never ready
+    worker = harbor_worker(tmp_path, "go")
+    worker.cfg.drain_budget = 2.0
+    run = asyncio.create_task(worker.run())
+    await until(lambda: len(fakes.trials) == 1)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await asyncio.wait_for(getattr(worker, path)("test"), 3)
+    assert fakes.trials[0].cancelled and loop.time() - t0 < 1  # not at the end of the budget
+    await asyncio.wait_for(run, 3)
+
+
+async def test_preempt_pushes_the_last_turns_unmounted_sessions(fakes, tmp_path):
+    from ..worker_fakes import MemoryStore, RecordingSync, until
+
+    fakes.mounted = False
+    store = MemoryStore()
+    worker = harbor_worker(tmp_path, "a", sync=RecordingSync(store))
+    run = asyncio.create_task(worker.run())
+    await until(lambda: "agent-0000" in worker.agents and worker.agents["agent-0000"].state.turns)
+    rt = worker.agents["agent-0000"]
+    await rt.prompt("b")
+    await until(lambda: rt.state.turns == 2)
+    await worker.preempt("test")
+    await asyncio.wait_for(run, 3)
+    (session,) = [k for k in store.files if k.endswith("s.jsonl")]
+    assert len(store.files[session].splitlines()) == 2  # the turn after the last SYNC download

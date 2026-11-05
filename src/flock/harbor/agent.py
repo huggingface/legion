@@ -11,8 +11,9 @@ are copied to the channel's `home`, where flock's BucketSync pushes them. While 
 probes the environment every PROBE seconds; a failed probe ends the Trial with an error.
 run() returns when the channel closes, after `trial_seconds` (queued prompts wait for the next
 Trial), after MAX_ERRORS failed turns in a row (rate-limited ones do not count), or when the
-first turn on restored sessions fails (`restore_error`); the Trial then runs its verifier. The
-worker's loop engine and controller do loops, steering, budgets and stops.
+first turn on restored sessions fails without a model error (`restore_error`); the Trial then
+runs its verifier. The worker's loop engine and controller do loops, steering, budgets and
+stops.
 """
 
 import asyncio
@@ -38,13 +39,19 @@ from .results import safe_error
 PROBE = 60  # seconds between idle probes (`exec true`); also hf-sandbox activity
 MAX_ERRORS = 3  # failed turns in a row before the Trial ends
 SYNC = 600  # seconds between session downloads when /logs/agent is not mounted (hf-sandbox)
+PULL_WAIT = 15  # seconds pull_sessions() may take
 STOP_GRACE = 30  # seconds stop() waits for a killed turn to report
-# Ends `pi` without procps (absent from slim images): its /proc command lines. `[p]` keeps this
-# shell's own command line from matching; it fails when no process matched.
+# Ends `pi` and its tool processes without procps (absent from slim images): `pi --print`
+# command lines and their descendants (parent pids from /proc/*/stat, read before any kill so
+# none is reparented first). `[p]` keeps this shell's own command line from matching; it fails
+# when no `pi` matched.
 KILL_PI = (
-    "n=0; for d in /proc/[0-9]*; do "
-    "case \"$(tr '\\0' ' ' 2>/dev/null < $d/cmdline)\" in "
-    "*[p]'i --print'*) kill ${d#/proc/} 2>/dev/null && n=$((n+1));; esac; done; [ $n -gt 0 ]"
+    "k=' '; t=; for d in /proc/[0-9]*; do p=${d#/proc/}; "
+    "read -r s 2>/dev/null < $d/stat || continue; s=${s##*) }; set -- $s; t=\"$t $p:$2\"; "
+    "case \"$(tr '\\0' ' ' 2>/dev/null < $d/cmdline)\" in *[p]'i --print'*) k=\"$k$p \";; esac; "
+    "done; [ \"$k\" != ' ' ] || exit 1; n=0; while [ $n != ${#k} ]; do n=${#k}; "
+    "for e in $t; do case \"$k\" in *\" ${e%:*} \"*) ;; *\" ${e#*:} \"*) k=\"$k${e%:*} \";; esac; "
+    "done; done; kill $k 2>/dev/null; true"
 )
 
 
@@ -123,9 +130,10 @@ class FlockPi(Pi):
                 if prompt is None:
                     return
                 text = f"{instruction}\n\n{prompt}" if fresh else prompt
-                ended, used = await self._turn(text, fresh, environment, totals)
+                ended, used, model_error = await self._turn(text, fresh, environment, totals)
                 transient = ended.data.get("reason") == "model_transport"
-                if check and ended.status == "error" and not transient and not used:
+                # the model's own error (a 500) says nothing about the restored sessions
+                if check and ended.status == "error" and not model_error and not used:
                     ch.restore_error = f"--continue failed: {ended.error}"[:500]
                     self.why = "resume failed"  # the adapter's next start raises ResumeError
                     return
@@ -170,7 +178,8 @@ class FlockPi(Pi):
         return "\n\n".join(texts)
 
     async def _turn(self, text, first, environment, totals):
-        """One `pi` call; reports it and returns (its turn_ended event, used tokens)."""
+        """One `pi` call; reports it and returns (its turn_ended event, used tokens, Pi's
+        own error if any)."""
         ch = self.channel
         self.busy, self._killed = True, False
         self.idle.clear()
@@ -215,7 +224,7 @@ class FlockPi(Pi):
             ended = AdapterEvent("turn_ended", status=status, data=data,
                                  error=error if status == "error" else None)
             ch.emit(ended)
-            return ended, usage != TokenUsage()
+            return ended, usage != TokenUsage(), pi_error
         finally:
             self.busy = False
             self.idle.set()
@@ -234,15 +243,37 @@ class FlockPi(Pi):
                 self._synced = time.monotonic()
         self.keep_sessions()
 
+    async def pull_sessions(self):
+        """Unmounted (hf-sandbox): download the session files now (at most PULL_WAIT s) and
+        keep them, so a push between turns is not up to SYNC s old. A failure is an `error`."""
+        env = self._env
+        if env is None or env.is_path_mounted(self.environment_logs_dir, self.logs_dir):
+            return
+        remote = (self.environment_logs_dir / self._SESSIONS_DIRECTORY).as_posix()
+        try:
+            await asyncio.wait_for(
+                env.download_dir(remote, self.logs_dir / self._SESSIONS_DIRECTORY), PULL_WAIT)
+        except Exception as exc:
+            self._synced = float("-inf")  # maybe half a file here: the next turn downloads again
+            self.channel.emit(AdapterEvent("error", error=f"session sync: {safe_error(exc)[:300]}"))
+            return
+        self._synced = time.monotonic()
+        self.keep_sessions()
+
     def keep_sessions(self):
         """The host's copy of the session files to the channel's home, where BucketSync pushes
         them; also when the Trial ended (Harbor then downloaded /logs/agent)."""
         home = self.channel.home / "sessions"
         home.mkdir(parents=True, exist_ok=True)
         for path in (self.logs_dir / self._SESSIONS_DIRECTORY).glob("*.jsonl"):
+            kept, now = home / path.name, path.stat()
+            with suppress(FileNotFoundError):
+                old = kept.stat()
+                if (old.st_size, old.st_mtime_ns) == (now.st_size, now.st_mtime_ns):
+                    continue  # unchanged since the last copy (copy2 keeps the mtime)
             temporary = home / f".{path.name}.tmp"  # BucketSync never sees half a file
             shutil.copy2(path, temporary)
-            os.replace(temporary, home / path.name)
+            os.replace(temporary, kept)
 
     async def _restore(self, environment):
         """Upload the saved sessions, so the first turn continues them."""

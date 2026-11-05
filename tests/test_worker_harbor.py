@@ -1,18 +1,20 @@
 """Worker wiring for harness harbor on a fake adapter: close() on drain and unassign (before the
-final sync), no workdir instruction files, the heartbeat's `trial`, and the worker's HarborHost
-reaching each harbor adapter and closing at exit."""
+final sync), no workdir instruction files, the heartbeat's `trial`, the worker's HarborHost
+reaching each harbor adapter and closing at exit, and a local harbor worker's kill grace."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
-from flock.models import AssignCommand, PromptCommand
+from flock.controller import local
+from flock.models import AssignCommand, Harness, PromptCommand
 from flock.worker.adapters.harbor import HarborAdapter
-from flock.worker.agents import AgentRuntime
+from flock.worker.agents import VERIFY_WAIT, AgentRuntime
 from flock.worker.events import Outbox
-from flock.worker.main import EXIT_CLOSE_S, PREEMPT_EXIT, default_adapter_factory
+from flock.worker.main import PREEMPT_EXIT, default_adapter_factory
 
 from .test_worker_main import FakeController, make_worker
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, event_types, spec, until
@@ -38,6 +40,7 @@ class TrialAdapter(ScriptedAdapter):
         c["peak"] = max(c["peak"], c["now"])
         await asyncio.sleep(0.05)
         c["now"] -= 1
+        self.log.append(("closed", self.home.name))
         if self.fail_close:
             raise RuntimeError("verifier crashed")
 
@@ -62,7 +65,8 @@ async def test_drain_closes_the_trial_before_the_final_sync(tmp_path):
     assert rt.heartbeat().trial == {"id": "a-t1", "attempt": 1, "alive": True}
     assert list(rt.workdir.iterdir()) == []  # the Trial has its instructions from Harbor
     await rt.drain()
-    assert [k for k, _ in order[-3:]] == ["stop", "close", "push"] and a.timeouts == [None]
+    assert [k for k, _ in order[-4:]] == ["stop", "close", "closed", "push"]
+    assert a.timeouts == [VERIFY_WAIT]
     assert rt.heartbeat().trial["alive"] is False
 
 
@@ -73,7 +77,8 @@ async def test_unassign_closes_the_trial_and_syncs_when_close_fails(tmp_path):
     await rt.prompt("go")
     await until(lambda: rt.state.turns == 1)
     await rt.unassign()
-    assert [k for k, _ in order[-2:]] == ["close", "push"] and a.closed == 1
+    assert [k for k, _ in order[-3:]] == ["close", "closed", "push"] and a.closed == 1
+    assert a.timeouts == [VERIFY_WAIT]
     assert "error" in event_types(rt)
 
 
@@ -121,10 +126,24 @@ async def test_every_exit_path_closes_the_trials_in_parallel(tmp_path, path):
     await getattr(worker, path)("test")
     assert await asyncio.wait_for(run, 5) == (PREEMPT_EXIT if path == "preempt" else 0)
     assert all(a.closed == 1 for a in adapters.values()) and closing["peak"] == 2
-    timeouts = [t for a in adapters.values() for t in a.timeouts]
-    if path == "preempt":  # within the drain budget, after each agent's last sync
-        assert all(0 < t < worker.cfg.drain_budget for t in timeouts)
+    assert [t for a in adapters.values() for t in a.timeouts] == [0, 0]  # cancelled, unverified
+    if path == "preempt":  # the sync gets the sessions Harbor pulled as the Trial stopped
         for n in names:
-            assert order.index(("push", n)) < order.index(("close", n))
-    else:
-        assert timeouts == [EXIT_CLOSE_S] * 2
+            assert order.index(("closed", n)) < order.index(("push", n))
+
+
+def test_a_local_harbor_worker_gets_time_to_stop_its_trials(tmp_path, monkeypatch):
+    """SIGTERM, then 0.3 s until the worker has stopped its Trials: a harbor worker is not
+    SIGKILLed after the 0.1 s grace that other workers get."""
+    monkeypatch.setattr(local, "HARBOR_STOP_GRACE", 5.0)
+    script = "trap 'sleep 0.3; exit 3' TERM; echo up; sleep 30 & wait"
+    jobs = local.LocalJobsClient(root=tmp_path, command=["sh", "-c", script])
+    codes = {}
+    for harness in (Harness.pi, Harness.harbor):
+        ts = spec().model_copy(update={"harness": harness})
+        job = jobs.launch(harness.value, ts, {"WORKER_ID": harness.value}, {}, {}, 60, namespace="")
+        while "up" not in "".join(jobs.logs_tail(job, namespace="")):
+            time.sleep(0.01)
+        jobs.kill_all(grace=0.1)
+        codes[harness.value] = jobs.procs[job].popen.returncode
+    assert codes == {"pi": -9, "harbor": 3}
