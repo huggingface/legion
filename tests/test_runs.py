@@ -1,6 +1,6 @@
 """Tiny real runs (tests/tinyrun.py): a `compute: local` swarm through its whole lifecycle, a
-controller that crashes mid-loop and comes back, and one run per feature: loops, spawn, and
-comms on the fake board (tests/fake_msgboard.py)."""
+controller that crashes mid-loop and comes back, and one run per feature: loops, spawn, the
+tools folder, and comms on the fake board (tests/fake_msgboard.py)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from flock.tools.bundle import pack
 
 from . import fake_msgboard
 
@@ -325,6 +327,85 @@ def test_spawn(tiny):
         {"child": scout, "type": "scout", "reason": "parent_removed"}]
     types = json.loads(tiny.flock("status", "tiny", "--json"))["status"]["types"]
     assert types["helper"]["agents_by_state"] == types["scout"]["agents_by_state"] == {}
+
+
+ADD = '''
+def add(a: int, b: int) -> int:
+    """Add two integers and return the sum."""
+    return a + b
+'''
+MUL = ADD + '''
+
+def mul(a: int, b: int) -> int:
+    """Multiply two integers."""
+    return a * b
+'''
+
+
+def test_tools_folder(tiny, tmp_path):
+    """`flock launch` ships the folder's tools/ (a turn calls `add`); the folder changes (a new
+    `mul`, a new system prompt, every tool selected) and `flock update` takes it to the running
+    worker, whose next turn uses it, with a note that the system prompt changed."""
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "tools" / "calc.py").write_text(ADD)
+    (tmp_path / "prompts" / "system.md").write_text("You are calc v1.")
+    folder = "    system_prompt_file: prompts/system.md\n    tools: {}\n"
+    v1 = pack(tmp_path / "tools").version
+    out = tiny.flock("launch", tiny.spec(extra=folder.format("[add]")), "--skip-preflight")
+    assert f"tools: version {v1} (" in out and "): add" in out, out
+    run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
+
+    def turn(n: int) -> tuple[list[dict], list[dict]]:
+        """Turn t-n: its turn_started/turn_ended data and its messages."""
+        evs = [e for e in tiny.events("writer-0000") if e["data"].get("turn_id") == f"t-{n}"]
+        return ([e["data"] for e in evs if e["name"].startswith("agent.turn_")],
+                [e["data"]["message"] for e in evs if e["name"] == "agent.message"])
+
+    tiny.flock("prompt", "writer-0000", 'call: add {"a": 2, "b": 40}')
+    tiny.turns("writer-0000", 1)
+    ends, msgs = turn(1)
+    assert [d["tools_version"] for d in ends] == [v1, v1] and ends[1]["status"] == "completed"
+    call, res, final = msgs[1:]
+    assert call["content"][0] == {"type": "toolCall", "id": "call_0", "name": "add",
+                                  "arguments": {"a": 2, "b": 40}}
+    assert (res["toolName"], res["content"][0]["text"], res["toolsVersion"], res["isError"]) == (
+        "add", "42", v1, False)
+    assert final["content"] == [{"type": "text", "text": "done: 42"}]
+    reqs = [json.loads(x)["body"] for x in tiny.log.read_text().splitlines()]
+    offered = {t["function"]["name"]: t["function"] for t in reqs[0]["tools"]}
+    assert set(offered) == {"bash", "add"}
+    assert offered["add"]["description"] == "Add two integers and return the sum."
+    assert offered["add"]["parameters"] == {
+        "type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+        "required": ["a", "b"], "additionalProperties": False}
+    assert "You are calc v1." in reqs[0]["messages"][0]["content"]
+    assert (reqs[1]["messages"][-1]["role"], reqs[1]["messages"][-1]["content"]) == (
+        "tool", "42")  # the model got the result
+    assert (run / "agents" / "_tools" / v1 / "calc.py").is_file()  # the worker's, not the agent's
+
+    (tmp_path / "tools" / "calc.py").write_text(MUL)
+    (tmp_path / "prompts" / "system.md").write_text("You are calc v2.")
+    tiny.spec(extra=folder.format("all"))
+    v2 = pack(tmp_path / "tools").version
+    assert tiny.flock("update", "spec.yaml").splitlines() == [
+        f"tools: {v1} -> {v2} (+mul)", "prompts changed: writer (system_prompt)",
+        'types.writer.tools: ["add"] -> all']
+    log = run / "logs" / "tiny-writer-w0000.log"  # the same heartbeat brings the new spec
+    tiny.wait(lambda: f"tools version {v2} ready" in log.read_text())
+    tiny.flock("prompt", "writer-0000", 'call: mul {"a": 6, "b": 7}')
+    tiny.turns("writer-0000", 2)
+    ends, msgs = turn(2)
+    assert [d["tools_version"] for d in ends] == [v2, v2]
+    res = msgs[2]
+    assert (res["toolName"], res["content"][0]["text"], res["toolsVersion"]) == ("mul", "42", v2)
+    req = [json.loads(x)["body"] for x in tiny.log.read_text().splitlines()][-2]  # the call
+    assert "You are calc v2." in req["messages"][0]["content"]
+    assert "You are calc v1." not in req["messages"][0]["content"]
+    assert req["messages"][-1] == {"role": "user", "content": (
+        '[flock] Since your last turn: your system prompt changed.\n\ncall: mul {"a": 6, "b": 7}')}
+    assert {t["function"]["name"] for t in req["tools"]} == {"bash", "add", "mul"}
+    assert [e["name"] for e in tiny.events("tiny", "worker.")] == ["worker.launched"]  # no restart
 
 
 COMMS = """\
