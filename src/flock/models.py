@@ -358,6 +358,18 @@ class CommsSpec(_Removable):
     # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
     poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # unset: 300
     url: str
+    # `space`: `flock init` duplicates `template` into a private per-run Space (`space`, default
+    # `<template namespace>/board-<swarm>`) and fills BOARD_URL and the invite (docs/comms.md).
+    # A url: the same as `url:`. Unset: `url` names an existing board.
+    board: str | None = None
+    template: str | None = None  # a msgboard Space (one board at its root); required with `space`
+    space: str | None = None
+    # Space secret -> the run.env (or environment) name holding its value, e.g. {HF_TOKEN:
+    # BOARD_BUCKET_TOKEN}: a token scoped to the board's bucket, never the operator's own.
+    space_secrets: dict[str, str] = Field(default_factory=dict)
+    # Space variables over flock's (MSGBOARD_REPLICA: `<bucket>/board/<swarm>`); "" blanks one.
+    space_variables: dict[str, str] = Field(default_factory=dict)
+    space_hardware: str = "cpu-basic"  # the Hub requires one to duplicate a Space
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
     channel: str  # name, with or without `#`
     kickoff_file: str | None = None
@@ -385,6 +397,19 @@ class CommsSpec(_Removable):
             raise ValueError(f"invite_env {v!r} must be an env var name (the invite never goes in the spec)")
         return v
 
+    @field_validator("board")
+    @classmethod
+    def _board(cls, v: str | None) -> str | None:
+        if v not in (None, "space") and not v.startswith(("http://", "https://")):
+            raise ValueError(f"board {v!r}: use `space` or the board's url")
+        return v
+
+    @model_validator(mode="after")
+    def _template(self) -> CommsSpec:
+        if self.board == "space" and not self.template:
+            raise ValueError("board: space needs `template`: the msgboard Space to duplicate")
+        return self
+
     @field_validator("channel")
     @classmethod
     def _channel(cls, v: str) -> str:
@@ -407,6 +432,15 @@ class CommsSpec(_Removable):
         return list(dict.fromkeys(v))
 
 
+def board_url_default(data: Any) -> Any:
+    """`comms.board` -> `comms.url` in raw spec data, before ${VAR} substitution: `space` reads
+    BOARD_URL (written by `flock init`), a url is the url. An explicit `url` wins."""
+    c = data.get("comms") if isinstance(data, dict) else None
+    if isinstance(c, dict) and c.get("board") and "url" not in c:
+        c["url"] = "${BOARD_URL}" if c["board"] == "space" else c["board"]
+    return data
+
+
 def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
     """The built-in comms tools a type gets: the `comms:*` entries of its `tools`, else all of
     them with `comms: true` (search only when the swarm's `comms.search` is set)."""
@@ -419,6 +453,31 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
         return []
     return [t for t in (ALL_COMMS_TOOLS if comms.extended else COMMS_TOOLS)
             if t != "comms:search" or comms.search]
+
+
+class DashboardSpec(_Removable):
+    """Swarm-level `dashboard:` (docs/dashboard.md): `flock init` writes the run's flock-overview
+    row to `<registry>/runs/<id>.json` (id: default the swarm). The other row keys are derived from the spec."""
+
+    model_config = {"extra": "forbid"}
+
+    registry: str  # hf://buckets/<ns>/<bucket>, the bucket the overview reads runs/ from
+    id: str | None = None  # the overview row's id (runs/<id>.json); default: the swarm name
+    name: str | None = None  # default: the swarm name
+    title: str | None = None
+    setup: str | None = None  # one line
+    viewer: str  # the run viewer's url (only named, never called)
+    viewer_public: str | None = None
+    dataset: str | None = None
+    code_repo: str | None = None
+    spec_url: str | None = None
+
+    @field_validator("registry")
+    @classmethod
+    def _registry(cls, v: str) -> str:
+        if not v.startswith("hf://buckets/"):
+            raise ValueError(f"registry {v!r} must be an hf://buckets/<ns>/<bucket> url")
+        return v.rstrip("/")
 
 
 # --------------------------------------------------------------------------- world (docs/world.md)
@@ -987,6 +1046,8 @@ class SwarmSpec(BaseModel):
     comms: CommsSpec | None = None
     # The swarm's world (docs/world.md); None: no world.
     world: WorldSpec | None = None
+    # The run's flock-overview row (docs/dashboard.md); None: not registered.
+    dashboard: DashboardSpec | None = None
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
     # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
     # reserved and never reused while the swarm exists).
@@ -1074,6 +1135,9 @@ class SwarmSpec(BaseModel):
                                  "(command or url)")
             if ts.world is False and listed:
                 raise ValueError(f"types.{name}: world: false but tools lists {', '.join(listed)}")
+        if self.dashboard is not None and (self.compute.kind == "local" or not self.bucket):
+            raise ValueError("dashboard: needs the run's state in a bucket (`bucket:`, compute "
+                             "hf-jobs or slurm); compute: local keeps it on this machine")
         c = self.comms
         if c is not None and c.protocols_text and len(c.protocols_text) != len(c.protocols):
             raise ValueError("comms.protocols_text is written by `flock launch` (one per protocols file)")
