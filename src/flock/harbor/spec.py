@@ -378,17 +378,18 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
 
 
 def pack_folders(tools_dir, resources_dir):
-    """The run's tools and resources folders (`tools/`, `resources/`; a missing one left out)
-    as one flock tools bundle (flock.tools.bundle): `flock launch` uploads it to the controller
-    as the swarm's tools version, and every worker fetches it by that content hash and unpacks
-    it in its own run dir (flock.worker.harbor)."""
+    """The run's tools and resources folders (`tools/`, `resources/`; a missing one left out,
+    a link inside either refused) as one flock tools bundle (flock.tools.bundle): `flock launch`
+    uploads it to the controller as the swarm's tools version, and every worker fetches it by
+    that content hash and unpacks it in its own run dir (flock.worker.harbor)."""
     from flock.tools.bundle import pack
     from flock.tools.loader import Manifest
 
     with tempfile.TemporaryDirectory() as d:
         for name, src in (("tools", Path(tools_dir)), ("resources", Path(resources_dir))):
-            if src.is_dir():  # links followed, as `flock init` copies a folder
-                shutil.copytree(src, Path(d) / name, ignore=shutil.ignore_patterns("__pycache__"))
+            if src.is_dir():  # a link inside is kept, so `pack` refuses it (the folder may be one)
+                shutil.copytree(src, Path(d) / name, symlinks=True,
+                                ignore=shutil.ignore_patterns("__pycache__"))
         return pack(d, Manifest())  # no flock folder tools: Harbor's bundle carries the tools
 
 

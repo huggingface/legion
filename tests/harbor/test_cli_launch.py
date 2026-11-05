@@ -1,12 +1,15 @@
 """A Harbor spec through flock's commands: `flock launch` and `flock update` compile it (the
-task pinned once, the tool bundle's sha recorded), a resume keeps the run's pin, and a running
-type's Trial inputs are fixed; a local run drives it end to end (controller, a worker process
+task pinned once, the tool bundle's sha recorded), a resume keeps the run's pin and folder paths
+(a moved folder, `--ref`), and a running type's Trial inputs are fixed; links inside the shipped
+folders are refused, and `flock init` warns of them and writes the compiled secrets; a local run drives it end to end (controller, a worker process
 that unpacks the shipped tools and resources folders, HarborAdapter, FlockPi) on
 test_adapter.py's fakes."""
 
 import asyncio
 import json
+import os
 import shutil
+import subprocess
 import sys
 from io import StringIO
 from pathlib import Path
@@ -18,10 +21,11 @@ pytest.importorskip("harbor")
 
 from harbor.models.task.id import GitTaskId
 
-from flock import cli
+import flock.harbor
+from flock import cli, rundir
 from flock.controller import localrun
 from flock.harbor import sources
-from flock.ops import check_spec, read_spec
+from flock.ops import SpecError, check_spec, read_spec
 
 from ..conftest import wire
 from .test_worker_host import RESOURCE, TOOL
@@ -36,7 +40,7 @@ task:
   revision: main
 team_file: team.md
 resources_dir: resources
-resources: {fake: {mount: true}}
+resources: RESOURCES
 tools_dir: tools
 tools: [sample.*]
 agents: {count: COUNT}
@@ -46,12 +50,14 @@ limits: {run_timeout_seconds: 900}
 """
 
 
-def experiment(root: Path, count=2, team="Work together.") -> Path:
+def experiment(root: Path, count=2, team="Work together.", resources="{fake: {mount: true}}"
+               ) -> Path:
     for folder, name, text in [("resources", "fake", RESOURCE), ("tools", "sample", TOOL)]:
         (root / folder).mkdir(parents=True, exist_ok=True)
         (root / folder / f"{name}.py").write_text(text)
     (root / "team.md").write_text(team)
-    (root / "spec.yaml").write_text(SPEC.replace("COUNT", str(count)))
+    (root / "spec.yaml").write_text(SPEC.replace("COUNT", str(count)).replace("RESOURCES",
+                                                                             resources))
     return root
 
 
@@ -74,6 +80,9 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
     wire(monkeypatch, app)
     monkeypatch.setenv("FLOCK_URL", "http://controller.invalid")  # no local controller started
     exp = experiment(tmp_path / "exp")
+    git = ["git", "-C", str(exp), "-c", "user.name=t", "-c", "user.email=t@t"]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "exp"]):  # for --ref
+        subprocess.run(git + args, check=True, capture_output=True)
     r = runner.invoke(cli.app, ["launch", str(exp), "--skip-preflight"])
     assert r.exit_code == 0, r.output
     tick()
@@ -91,7 +100,19 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
     assert r.exit_code == 0 and "held: nothing" in r.output, r.output
     r = runner.invoke(cli.app, ["update", str(exp)])
     assert r.exit_code == 0 and r.output.strip() == "no changes", r.output
+    moved = tmp_path / "moved"  # the run folder copied elsewhere, or --ref's copy: the same run
+    shutil.copytree(exp, moved)
+    r = runner.invoke(cli.app, ["launch", str(moved), "--skip-preflight"])
+    assert r.exit_code == 0 and "held: nothing" in r.output, r.output
+    for args in ([str(moved)], [str(exp), "--ref", "HEAD"]):
+        r = runner.invoke(cli.app, ["update", *args])
+        assert r.exit_code == 0 and r.output.strip() == "no changes", r.output
+    assert store.get_swarm("crew")["spec"].types["agent"].harbor.config == h.config
 
+    (exp / "tools" / "sample.py").write_text(TOOL + "# v2\n")
+    r = runner.invoke(cli.app, ["update", str(exp)])
+    assert r.exit_code == 1 and "harbor (tools_sha256, folders): a running" in r.output, r.output
+    (exp / "tools" / "sample.py").write_text(TOOL)
     experiment(exp, team="Work alone.")
     r = runner.invoke(cli.app, ["update", str(exp)])
     assert r.exit_code == 1 and "types.agent.harbor (team): a running Harbor type" in r.output
@@ -99,6 +120,28 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
     r = runner.invoke(cli.app, ["update", str(exp), "--replicas", "spec"])
     assert r.exit_code == 0 and "types.agent.replicas: 2 -> 3" in r.output, r.output
     assert store.get_swarm("crew")["spec"].types["agent"].harbor.task == h.task
+
+
+def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
+    """A linked tools folder ships; a link inside it is refused at launch, and `flock init`,
+    which copies what it points to, warns of it. Init's run.env names the board's default
+    token, known once the spec is compiled."""
+    exp = experiment(tmp_path / "exp",
+                     resources="{fake: {mount: true}, board: {url: https://board.example}}")
+    board = Path(flock.harbor.__file__).with_name("plugins") / "resources" / "board.py"
+    shutil.copy(board, exp / "resources" / "board.py")
+    shutil.move(exp / "tools", tmp_path / "shared")
+    (exp / "tools").symlink_to(tmp_path / "shared")
+    assert read_spec(str(exp / "spec.yaml")).types["agent"].harbor.folders
+    (tmp_path / "token").write_text("s3cret")
+    (tmp_path / "shared" / "creds").symlink_to(tmp_path / "token")
+    with pytest.raises(SpecError, match="symlinks are not allowed"):
+        read_spec(str(exp / "spec.yaml"))
+    rep = rundir.init(tmp_path / "run", exp, env={"PATH": os.environ["PATH"],
+                                                  "HOME": str(tmp_path)})
+    (links,) = [c for c in rep.checks if c.name == "links"]
+    assert links.warn and links.lines == [f"tools/creds -> {tmp_path / 'token'}"]
+    assert "\n#MSGBOARD_OPERATOR_TOKEN=\n" in (tmp_path / "run" / "run.env").read_text()
 
 
 def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):

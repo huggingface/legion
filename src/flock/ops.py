@@ -134,18 +134,25 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
             raise SpecError([f"{path}: tools: {e}"]) from None
     try:
         folders = pack_folders(spec.tools_dir, spec.resources_dir).version
-    except ToolsError as e:  # a symlink, or over the bundle limits
+    except ToolsError as e:  # a link inside a folder, or over the bundle limits
         raise SpecError([f"{path}: tools_dir, resources_dir: {e}"]) from None
     return compile_spec(spec, task, bundle, folders)
 
 
 def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
     """A Harbor type keeps the task revision its run pinned while the spec names the same task
-    (a branch that moved since is not a change). Changes `spec` in place."""
+    (a branch that moved since is not a change), and the folder paths it was launched from
+    while the folders' content is the same (the run folder moved or copied, `--ref`'s copy:
+    workers unpack the shipped folders). Changes `spec` in place."""
     for name, ts in spec.types.items():
         was = old.types.get(name)
-        if ts.harbor and was and was.harbor and was.harbor.config["task"] == ts.harbor.config["task"]:
+        if not (ts.harbor and was and was.harbor):
+            continue
+        if was.harbor.config["task"] == ts.harbor.config["task"]:
             ts.harbor.task = was.harbor.task
+        if was.harbor.folders == ts.harbor.folders:
+            for key in ("tools_dir", "resources_dir"):
+                ts.harbor.config[key] = was.harbor.config[key]
 
 
 # `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
@@ -248,8 +255,8 @@ def source_header(spec_file: str | Path | None) -> dict[str, str]:
 def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
     """What `launch` on a stored swarm refuses: the folder's spec against the stored one,
     without the live replicas (the ramp rewrites them) and `world.dir` (absolute: the same
-    folder copied elsewhere) and a Harbor type's task revision (`keep_pins`). Changes `spec` in
-    place."""
+    folder copied elsewhere) and a Harbor type's task revision and folder paths (`keep_pins`).
+    Changes `spec` in place."""
     from flock.live import diff_specs, keep_replicas
 
     keep_replicas(old, spec)

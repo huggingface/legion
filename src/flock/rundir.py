@@ -238,6 +238,20 @@ def _files(root: Path) -> dict[str, Path]:
             if p.is_file() and "__pycache__" not in p.parts}
 
 
+def outside_links(src: Path) -> list[str]:
+    """Links below `src`'s top level that point outside it: `copy_experiment` copies what they
+    point to (a secret file, say) as a plain file, which `flock launch` may then ship. A top-level
+    link (v8-harbor's `tools`) and links within its own target are not listed."""
+    root, out = src.resolve(), []
+    for top in src.iterdir():
+        within = (root, top.resolve())
+        for d, dirs, files in os.walk(top):  # the top link followed, the ones below it not
+            for p in (Path(d) / n for n in dirs + files):
+                if p.is_symlink() and not any(p.resolve().is_relative_to(w) for w in within):
+                    out.append(f"{p.relative_to(src)} -> {os.readlink(p)}")
+    return sorted(out)
+
+
 def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
                     need: str | None = "spec.yaml") -> None:
     """Copy the experiment folder (links followed; any folder holding `need`) into an absent or
@@ -257,6 +271,10 @@ def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
         raise ValueError(f"{dst} is missing or empty: pass --from EXPERIMENT_FOLDER")
     if need and not (src / need).is_file():
         raise ValueError(f"{src}: no spec.yaml (an experiment folder holds spec.yaml + prompts/)")
+    if links := outside_links(src):
+        rep.checks.append(Check("links", True, "copied as files from outside the folder (check "
+                                "none is a secret: launch ships tools/ and resources/)", links,
+                                warn=True))
     shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))
     rep.created.append(f"{dst} (copy of {src})")
@@ -826,6 +844,13 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
                          ("worker slots", "bucket", "providers", "board", "world", "dashboard")),
                        check_venv({**env, **values})]
         return rep
+    # secrets known once compiled (a Harbor resource's default token_env): their lines too
+    more = {s for ts in spec.types.values() for s in ts.secrets} - set(spec_keys(data))
+    if more:
+        compiled = {n: {"secrets": [s for s in ts.secrets if s in more]}
+                    for n, ts in spec.types.items()}
+        write_run_env(d / RUN_ENV, {"types": compiled}, str(experiment or exp),
+                      {k: v for k, v in fill.items() if k in more}, rep)
     unset = [n for n, (default, why) in spec_keys(data).items()  # `NAME=` substitutes ""
              if default is None and not why.startswith("secret:") and not values.get(n)
              and not env.get(n)]

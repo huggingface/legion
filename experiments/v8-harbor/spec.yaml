@@ -30,7 +30,8 @@ team_file: prompts/system.md
 resources_dir: resources                       # links to flock's plugins; `flock init` copies them
 resources:
   board:
-    url: https://CHANGE-ME-board.hf.space     # a dedicated board; operator token in MSGBOARD_OPERATOR_TOKEN
+    url: https://CHANGE-ME-board.hf.space     # a dedicated board
+    token_env: MSGBOARD_OPERATOR_TOKEN        # its operator token (the worker's, never an agent's)
     channels: [general]
   world:
     url: https://CHANGE-ME-world.hf.space     # a running chatbot4 world (v8-harbor environment/)
