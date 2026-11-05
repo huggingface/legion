@@ -20,6 +20,7 @@ controller do loops, steering, budgets and stops.
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import time
@@ -146,7 +147,10 @@ class FlockPi(Pi):
                 elif not transient:  # a 429 storm is the loop's to back off, not a failure
                     errors += 1
             self.why = f"{MAX_ERRORS} failed turns in a row"
-            if check:  # none worked on the restored sessions: the next start begins a fresh one
+            # none worked on the restored sessions, and the model refused the history itself (a
+            # 500 or 401 outage over two Trial starts must not wipe every agent's context): the
+            # next start begins a fresh one
+            if check and re.search(r"\b(400|413|422)\b", ended.error or ""):
                 ch.restore_error = f"{self.why} on the restored sessions: {ended.error}"[:500]
         finally:
             # A filled context stops Harbor recounting only the last turn after run().

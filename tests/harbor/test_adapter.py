@@ -120,6 +120,8 @@ class FakeEnv:
             message.update(content=[], errorMessage="429 Too Many Requests")
         if failure == "server":  # a 500 before any token
             message.update(content=[], errorMessage="500 Internal Server Error", usage={})
+        if failure == "rejected":  # the model refuses the request (e.g. the history)
+            message.update(content=[], errorMessage="400 Bad Request", usage={})
         (self.logs_dir / "pi.txt").write_text(
             json.dumps({"type": "message_end", "message": message}) + "\n"
         )
@@ -535,18 +537,26 @@ async def test_a_model_error_on_the_first_resumed_turn_keeps_the_session(fakes, 
     assert len(fakes.trials) == 1 and "--continue" in fakes.pi[1]
 
 
-async def test_three_failed_turns_on_a_restored_session_start_a_fresh_one(fakes, tmp_path):
+@pytest.mark.parametrize("failure", ["rejected", "server"])
+async def test_three_failed_turns_on_a_restored_session(fakes, tmp_path, failure):
+    """Three 400s on the restored session: the next start begins a fresh one. Three 500s (an
+    outage) say nothing about the history: the next start restores it again."""
     a = adapter(tmp_path)
     (a.home / "sessions").mkdir(parents=True)
     (a.home / "sessions" / "s.jsonl").write_text('{"call": 0}\n')
     _, events = await start(a, "s-1")
-    fakes.fail = lambda n: "server"  # the model rejects every turn on the restored session
+    fakes.fail = lambda n: failure  # every turn on the restored session fails
     for prompt in "abc":
         await a.send(prompt)
         await read(events, "turn_ended")
     assert [e.kind for e in await read(events, "exited")] == ["error", "exited"]
-    with pytest.raises(ResumeError, match="3 failed turns in a row on the restored sessions"):
-        await a.start(a.workdir, "s-1", a.spec)
+    if failure == "rejected":
+        with pytest.raises(ResumeError, match="3 failed turns in a row on the restored sessions"):
+            await a.start(a.workdir, "s-1", a.spec)
+        return
+    assert await a.start(a.workdir, "s-1", a.spec) == "s-1"
+    assert len(fakes.trials) == 2 and a.trial.agent.channel.restore
+    await a.close()
 
 
 async def test_stop_pulls_unmounted_sessions_for_the_next_push(fakes, tmp_path):
