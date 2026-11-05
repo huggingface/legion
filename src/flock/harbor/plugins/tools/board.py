@@ -1,4 +1,4 @@
-# from shepherd f3970bc:tools/board.py; flock added react, doc and edit_doc (v8's board tools).
+# from shepherd f3970bc:tools/board.py
 """Message-board operations; connection settings come from the agent environment."""
 
 import os
@@ -125,25 +125,6 @@ def wait(cursor: int | None = None, timeout: int = 25) -> dict:
         )
 
 
-def react(message_id: int, emoji: str, channel: str = "general") -> dict:
-    """React to a message (e.g. to claim work or vote with 👍 / 👎); safe to repeat."""
-    with _client() as board:
-        return board.react(board.channel_id(channel), message_id, emoji)
-
-
-def doc(channel: str = "general") -> dict:
-    """Read a channel's shared document (a plan everyone can edit): body and version."""
-    with _client() as board:
-        return board.doc(board.channel_id(channel))
-
-
-def edit_doc(body: str, base_version: int, channel: str = "general") -> dict:
-    """Replace a channel's shared document. base_version is the version you read (0 for a new
-    document); if someone saved since, nothing is written: read it again and merge."""
-    with _client() as board:
-        return board.save_doc(board.channel_id(channel), body, base_version)
-
-
 TOOLS = {
     "whoami": whoami,
     "agents": agents,
@@ -157,7 +138,4 @@ TOOLS = {
     "invite": invite,
     "search": search,
     "wait": wait,
-    "react": react,
-    "doc": doc,
-    "edit_doc": edit_doc,
 }

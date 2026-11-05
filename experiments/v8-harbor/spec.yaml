@@ -38,6 +38,7 @@ resources:
 tools_dir: ../../src/flock/harbor/plugins/tools
 tools:
   - board.*
+  - board_extra.*                             # react, doc, edit_doc: v8's board tools beyond shepherd's
   - world.*
 agents:
   roles:
