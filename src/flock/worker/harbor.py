@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -26,9 +26,12 @@ log = logging.getLogger(__name__)
 
 
 class HarborHost:
-    def __init__(self, root: Path, emit: Callable[[str, dict], None] | None = None) -> None:
+    def __init__(self, root: Path, emit: Callable[[str, dict], None] | None = None,
+                 folders: Callable[[str], Awaitable[Path]] | None = None) -> None:
         self.root = Path(root)  # bundle, sources, resource state and exports
         self.emit = emit  # (agent, {"resource", "kind", "data"}): a resource's event
+        # version -> the run's tools and resources folders unpacked here (ToolsManager.folder)
+        self.folders = folders
         self.resources: Any = None  # flock.harbor Resources, started; None until prepared
         self.bundle: Any = None  # shepherd's ToolBundle; None: the run has no tools
         self.task_path: Path | None = None  # the pinned task, downloaded for every agent here
@@ -51,6 +54,9 @@ class HarborHost:
 
         h = spec.harbor
         config = Spec.model_validate(h.config)
+        if h.folders and self.folders is not None:  # shipped by `flock launch`, not the paths
+            d = await self.folders(h.folders)
+            config.tools_dir, config.resources_dir = d / "tools", d / "resources"
         if config.environment.backend == "hf-sandbox":
             # every sandbox call runs in a thread (asyncio.to_thread); the default pool has
             # about 6 on 2 vCPUs, so N agents' commands would queue behind each other
@@ -58,8 +64,6 @@ class HarborHost:
                 2 * spec.agents_per_worker + 8, thread_name_prefix="harbor"))
         self.root.mkdir(parents=True, exist_ok=True)
         if h.tools_sha256 and self.bundle is None:
-            # shortcut: built from the spec's tools_dir (the controller's tools transport ships
-            # flock's own bundle format); upgrade when HF Jobs workers lack that folder
             bundle = await asyncio.to_thread(build_tool_bundle, config.tools_dir, config.tools,
                                              self.root / "tools.tar.gz")
             if bundle.sha256 != h.tools_sha256:

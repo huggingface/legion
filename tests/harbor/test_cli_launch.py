@@ -1,10 +1,12 @@
 """A Harbor spec through flock's commands: `flock launch` and `flock update` compile it (the
 task pinned once, the tool bundle's sha recorded), a resume keeps the run's pin, and a running
-type's Trial inputs are fixed; a local run drives it end to end (controller, a worker process,
-HarborAdapter, FlockPi) on test_adapter.py's fakes."""
+type's Trial inputs are fixed; a local run drives it end to end (controller, a worker process
+that unpacks the shipped tools and resources folders, HarborAdapter, FlockPi) on
+test_adapter.py's fakes."""
 
 import asyncio
 import json
+import shutil
 import sys
 from io import StringIO
 from pathlib import Path
@@ -19,7 +21,7 @@ from harbor.models.task.id import GitTaskId
 from flock import cli
 from flock.controller import localrun
 from flock.harbor import sources
-from flock.ops import read_spec
+from flock.ops import check_spec, read_spec
 
 from ..conftest import wire
 from .test_worker_host import RESOURCE, TOOL
@@ -80,6 +82,9 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
     h = stored.harbor
     assert h.task["task"]["git_commit_id"] == "a" * 40 and h.team == "Work together."
     assert len(h.tools_sha256) == 64 and h.config["tools_dir"] == str(exp / "tools")
+    # the folders reach workers through the controller, as the swarm's tools version
+    assert store.get_swarm("crew")["spec"].tools_version == h.folders
+    assert store.get_tool_bundle("crew", h.folders) is not None
 
     pins["main"] = "b" * 40  # the branch moved: the run keeps its pin
     r = runner.invoke(cli.app, ["launch", str(exp), "--skip-preflight"])
@@ -100,11 +105,14 @@ def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
     monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("FLUSH_INTERVAL", "0.2")
-    spec = read_spec(str(experiment(tmp_path / "exp") / "spec.yaml"))
+    spec_file = str(experiment(tmp_path / "exp") / "spec.yaml")
+    spec = read_spec(spec_file)
+    folders, _ = check_spec(spec, spec_file)
+    shutil.rmtree(tmp_path / "exp")  # the worker unpacks the shipped folders, not these
     out = StringIO()
     result = asyncio.run(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path / ".flock", until=60, until_idle=True, prompt="go",
-        refresh=0.2, reconcile_interval=0.2, out=out,
+        refresh=0.2, reconcile_interval=0.2, out=out, tools=folders.data,
         worker_command=[sys.executable, str(Path(__file__).with_name("fake_worker.py"))])))
     assert result.reason == "idle" and result.exit_code == 0, out.getvalue()
     assert result.totals["turns_completed"] == 2, out.getvalue()

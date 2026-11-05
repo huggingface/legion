@@ -486,7 +486,8 @@ class Worker:
         self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
                                            type_name=cfg.type, fetch=self._fetch_tools)
         # harness harbor: what its agents' Trials share on this worker (flock.worker.harbor)
-        self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event)
+        self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event,
+                                 folders=self.tools.folder)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
         self.identities = identities or Identities()

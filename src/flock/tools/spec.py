@@ -42,7 +42,18 @@ def check_selection(spec: SwarmSpec, manifest: Manifest | None) -> None:
 def prepare(spec: SwarmSpec, spec_file: str | Path) -> Bundle | None:
     """The bundle to upload for this spec, or None when it uses no tools folder (no type selects
     tools and `tools_dir` is unset: an existing spec next to an unrelated `tools/` is unchanged).
-    Raises ToolsError: a missing folder, a bad module, an unknown tool name."""
+    Raises ToolsError: a missing folder, a bad module, an unknown tool name. A compiled Harbor
+    spec's: its tools and resources folders, packed (flock.harbor.spec.pack_folders)."""
+    harbor = next((ts.harbor for ts in spec.types.values() if ts.harbor is not None), None)
+    if harbor is not None and harbor.folders:
+        from flock.harbor.spec import pack_folders
+
+        c = harbor.config
+        bundle = pack_folders(c["tools_dir"], c["resources_dir"])
+        if bundle.version != harbor.folders:  # packed once for the spec, once for the upload
+            raise ToolsError(f"{c['tools_dir']} or {c['resources_dir']} changed while the spec "
+                             "was read: run it again")
+        return bundle
     selecting = [n for n, ts in spec.types.items() if ts.folder_tools is not None]
     if not selecting and spec.tools_dir is None:
         return None

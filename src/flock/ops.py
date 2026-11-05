@@ -102,16 +102,18 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
     """A Harbor spec as flock runs it, done here on the operator's machine as shepherd's
     launcher does: load it (${VAR} from the environment, then the --env files), pin the task to
     one revision and build the tool bundle, whose sha every worker checks against the bundle it
-    builds from `tools_dir` (workers read `tools_dir` and `resources_dir` at these absolute
-    paths), then compile it (flock.harbor.spec.compile_spec)."""
+    builds, then compile it (flock.harbor.spec.compile_spec). The tools and resources folders
+    go to the workers packed (`pack_folders`, uploaded by `check_spec`'s caller as the swarm's
+    tools version); the compiled spec names that version."""
     import asyncio
     import tempfile
 
     from flock.specrender import read_env_file
+    from flock.tools.loader import ToolsError
 
     try:
         from flock.harbor import sources
-        from flock.harbor.spec import Spec, compile_spec
+        from flock.harbor.spec import Spec, compile_spec, pack_folders
         from flock.harbor.tools.bundle import build_tool_bundle
     except ImportError as e:
         raise SpecError([(f"{path}: a Harbor spec (top-level `task:`) needs flock's harbor "
@@ -130,7 +132,11 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
                 bundle = build_tool_bundle(spec.tools_dir, spec.tools, Path(d) / "tools.tar.gz")
         except Exception as e:  # noqa: BLE001 - the folder's modules are imported to list them
             raise SpecError([f"{path}: tools: {e}"]) from None
-    return compile_spec(spec, task, bundle)
+    try:
+        folders = pack_folders(spec.tools_dir, spec.resources_dir).version
+    except ToolsError as e:  # a symlink, or over the bundle limits
+        raise SpecError([f"{path}: tools_dir, resources_dir: {e}"]) from None
+    return compile_spec(spec, task, bundle, folders)
 
 
 def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:

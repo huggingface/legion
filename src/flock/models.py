@@ -738,6 +738,10 @@ class HarborSpec(BaseModel):
     tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
     tools_sha256: str | None = None
     resources: dict[str, dict[str, Any]] = Field(default_factory=dict)  # resource options
+    # the content hash of the run's tools and resources folders, packed by `flock launch` and
+    # uploaded as the swarm's tools bundle of that version: a worker fetches and unpacks it in
+    # its own run dir (None: config's tools_dir and resources_dir, read where they are)
+    folders: str | None = None
 
 
 class TypeSpec(BaseModel):

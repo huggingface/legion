@@ -133,6 +133,12 @@ class ToolsManager:
         if task is not None:
             await asyncio.shield(task)
 
+    async def folder(self, version: str) -> Path:
+        """Version `version` unpacked on this worker (fetched once): a Harbor run's tools and
+        resources folders (flock.worker.harbor)."""
+        await self._prepare(version)
+        return self.root / version
+
     async def _switch(self) -> None:
         while self.wanted is not None and self.wanted[0] not in (None, self.version):
             version = self.wanted[0]

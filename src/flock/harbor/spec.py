@@ -12,6 +12,8 @@ the run's.
 import json
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -285,10 +287,11 @@ class Spec(Config):
         return spec
 
 
-def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
+def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None) -> SwarmSpec:
     """The SwarmSpec flock runs `spec` as: one type per role, `harness: harbor`, whose `harbor:`
     block holds what a worker needs to start each agent's Trial. `task` is the pinned task
-    (`ResolvedTask.manifest()`); `bundle` the built tool bundle (None: no tools)."""
+    (`ResolvedTask.manifest()`); `bundle` the built tool bundle (None: no tools); `folders` the
+    version of `pack_folders` (None: workers read tools_dir and resources_dir where they are)."""
     team = spec.team_file.read_text(encoding="utf-8") if spec.team_file is not None else ""
     roles, loops = spec.roles(), spec.type_loops()
     label = {name: name if spec.agents.roles else None for name in roles}
@@ -349,6 +352,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
                 "tools": bundle.manifest if bundle is not None else {},
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,
+                "folders": folders,
             },
         }
     return SwarmSpec.model_validate({
@@ -371,6 +375,21 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
         "limits": spec.limits.model_dump(include={"alive", "spawned_total", "budget_usd"}),
         "compute": spec.compute,
     })
+
+
+def pack_folders(tools_dir, resources_dir):
+    """The run's tools and resources folders (`tools/`, `resources/`; a missing one left out)
+    as one flock tools bundle (flock.tools.bundle): `flock launch` uploads it to the controller
+    as the swarm's tools version, and every worker fetches it by that content hash and unpacks
+    it in its own run dir (flock.worker.harbor)."""
+    from flock.tools.bundle import pack
+    from flock.tools.loader import Manifest
+
+    with tempfile.TemporaryDirectory() as d:
+        for name, src in (("tools", Path(tools_dir)), ("resources", Path(resources_dir))):
+            if src.is_dir():  # links followed, as `flock init` copies a folder
+                shutil.copytree(src, Path(d) / name, ignore=shutil.ignore_patterns("__pycache__"))
+        return pack(d, Manifest())  # no flock folder tools: Harbor's bundle carries the tools
 
 
 def resource_secrets(spec: Spec) -> list[str]:
