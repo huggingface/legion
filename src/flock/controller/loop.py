@@ -365,8 +365,8 @@ class LoopEngine:
                 flags["released"] = {"since": entry["since"], "reason": reason, "by": by}
                 self.store.put_control(swarm, "unsynced", {})  # this release's report starts empty
                 self._event(swarm, "released", {"reason": reason, "by": by})
-            elif not new["types"] and not new["agents"]:
-                return h
+            elif not new["types"] and not new["agents"] and not interrupt:
+                return h  # already held; `interrupt` still cuts the turns below
             self.store.put_swarm_flags(swarm, flags)
             self._event(swarm, "paused", {**new, "reason": reason, "by": by, "auto": auto,
                                           "interrupt": interrupt})
