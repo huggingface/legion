@@ -88,6 +88,14 @@ def test_apply_creates_agents_and_launches_workers(store, jobs, settings, clock,
     assert "launch" not in kinds(tick())
 
 
+def test_worker_hf_token_replaces_the_controllers(store, jobs, settings, tick):
+    settings.secret_source.update(HF_TOKEN="controller-hf", FLOCK_WORKER_HF_TOKEN="worker-hf")
+    store.put_swarm(make_spec(researcher={"replicas": 1, "secrets": ["HF_TOKEN"]}), 0)
+    tick()
+    secrets = jobs.launches[0]["secrets"]
+    assert secrets["HF_TOKEN"] == "worker-hf" and "FLOCK_WORKER_HF_TOKEN" not in secrets
+
+
 def test_launch_budget(store, jobs, settings, clock, tick):
     settings.launches_per_window = 2
     store.put_swarm(make_spec(researcher={"replicas": 5, "agents_per_worker": 1}), 0)

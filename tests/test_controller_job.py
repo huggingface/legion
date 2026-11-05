@@ -521,6 +521,8 @@ def test_deploy_job_dry_run_never_prints_secret_values(capsys):
     assert rc == 0 and "network_group: flock" in out
     assert "OPENAI_API_KEY" in out and "ANTHROPIC_API_KEY" in out
     assert not any(v in out for v in env.values())
+    assert jobdeploy.collect_secrets({**env, "FLOCK_WORKER_HF_TOKEN": "w"}, [])[
+        "FLOCK_WORKER_HF_TOKEN"] == "w"
     with pytest.raises(SystemExit, match="FLOCK_TOKEN"):
         jobdeploy.main(["hf://buckets/me/flock/dist/a/f.whl", "--namespace", "me", "--dry-run"],
                        {"HF_TOKEN": "h"})

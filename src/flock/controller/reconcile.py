@@ -769,6 +769,8 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
             log.warning(
                 "secret %s for %s/%s is not set on the controller", name, spec.swarm, type_name
             )
+    if wh := s.secret_source.get("FLOCK_WORKER_HF_TOKEN"):  # not the controller's job-launching token
+        secrets["HF_TOKEN"] = wh
     labels = {**s.job_labels, "swarm": spec.swarm, "type": type_name, "worker": wid}
     p.budget -= 1
     store.record_launch(p.now)

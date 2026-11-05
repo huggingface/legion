@@ -100,13 +100,15 @@ def run_job_args(
 
 
 def collect_secrets(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
-    """FLOCK_TOKEN, HF_TOKEN, ANTHROPIC_API_KEY (or ANTHROPIC_KEY, as deploy-space.sh) and
-    every `--secret NAME` from the local environment. Values are never printed."""
+    """FLOCK_TOKEN, HF_TOKEN, FLOCK_WORKER_HF_TOKEN (optional: the workers' HF_TOKEN),
+    ANTHROPIC_API_KEY (or ANTHROPIC_KEY, as deploy-space.sh) and every `--secret NAME` from the local environment. Values are never printed."""
     out = {}
     for name in ("FLOCK_TOKEN", "HF_TOKEN"):
         if not env.get(name):
             raise SystemExit(f"{name} must be set in the environment")
         out[name] = env[name]
+    if env.get("FLOCK_WORKER_HF_TOKEN"):
+        out["FLOCK_WORKER_HF_TOKEN"] = env["FLOCK_WORKER_HF_TOKEN"]
     anthropic = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_KEY")
     if anthropic:
         out["ANTHROPIC_API_KEY"] = anthropic

@@ -1216,6 +1216,11 @@ def main() -> None:
 
     if enabled():
         protect_supervisor()
+    elif sys.platform.startswith("linux"):  # agents must not read the worker's FLOCK_TOKEN
+        try:
+            protect_supervisor()
+        except RuntimeError as e:
+            print(f"worker: not protected from same-UID reads: {e}", file=sys.stderr)
     limit_malloc_arenas()  # before any thread starts
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
