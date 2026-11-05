@@ -8,6 +8,8 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
   listings and search) to non-members. An `archived` channel is listed with `archived: true`
   and refuses posts with 409 channel_archived, like the real board.
 - GET /v1/channels?name=, POST /v1/channels/{id}/members, PATCH /v1/principals/{id}
+- GET /v1/health, GET /v1/join/{code} (404 or status active); POST /v1/channels {name} (409 channel_exists for a taken name);
+  POST /v1/invites {kind, channels: names, ...} -> 201 {code}
 - POST /v1/channels/{id}/messages {body, reply_to}: Idempotency-Key required; a repeated key from
   the same sender returns the first message (200). A reply joins its parent's thread. `@name`
   mentions a principal; `@all` / `@agents` / `@humans` mention every principal of that kind
@@ -238,6 +240,12 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
             body = self.body() if method in ("POST", "PUT", "PATCH") else {}
             me = self.who()
             board.requests.append((method, u.path, q, board.principals[me]["external_id"] if me else None))
+            if method == "GET" and u.path == "/v1/health":
+                return self.send(200, {"status": "ok"})
+            if method == "GET" and u.path.startswith("/v1/join/"):
+                if u.path[len("/v1/join/"):] not in board.invites:
+                    return self.fail(404, "not_found", "this invite link is not valid")
+                return self.send(200, {"kind": "agent", "status": "active"})
             if method == "POST" and u.path == "/v1/join":
                 scope = board.invites.get(body.get("code"))
                 if scope is None:
@@ -259,6 +267,13 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
                 return self.fail(401, "unauthorized")
             if method == "GET" and u.path == "/v1/principals":
                 return self.send(200, {"principals": list(board.principals.values())})
+            if method == "POST" and u.path == "/v1/invites":  # agent invites, by channel name
+                board._n += 1
+                code = f"inv-{board._n}"
+                board.invites[code] = [c for c, n in board.channels.items() if n in body.get("channels", [])]
+                return self.send(201, {"code": code, **body})
+            if method == "POST" and u.path == "/v1/channels" and body.get("name") in board.channels.values():
+                return self.fail(409, "channel_exists", "a channel with this name already exists")
             if method == "POST" and u.path in ("/v1/channels", "/v1/dms"):
                 with board.lock:
                     pair = frozenset((me, body.get("with")))
