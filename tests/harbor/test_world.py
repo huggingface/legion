@@ -23,6 +23,8 @@ from flock.world import Agent, ToolError, World, tool
 from flock.world.server import create_app
 from flock.world.workspace import apply_patch
 
+from .test_board_hooks import calls_in_flight_are_capped
+
 TOOLS_DIR = Path(flock.harbor.__file__).with_name("plugins") / "tools"
 world_tools = load_module(TOOLS_DIR / "world.py")
 WorldResource = load_module(TOOLS_DIR.parent / "resources" / "world.py").Resource
@@ -182,6 +184,7 @@ async def test_socket_proxy_names_the_agent_and_opens_only_its_routes(
                              secrets=[])
     try:
         await resource.start()
+        await resource.add(["agent-002"])  # placed after start
         path = resource.bind("agent-001")["mounts"][0]["source"]
         spoofed = {"X-Flock-Agent": "agent-002", "X-Flock-Type": "interviewer",
                    "X-World-Token": "guess"}
@@ -202,5 +205,15 @@ async def test_socket_proxy_names_the_agent_and_opens_only_its_routes(
         assert status(b"POST /tools/../hooks HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}") == 403
         too_big = b"POST /tools/submit HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n"
         assert status(too_big) == 413
+
+        other = httpx.HTTPTransport(uds=resource.bind("agent-002")["mounts"][0]["source"])
+        with httpx.Client(base_url="http://world", transport=other) as client:
+            assert client.post("/tools/submit", json={"args": {"path": "main"}}).json()[
+                "result"]["by"] == "agent-002"
+            assert calls_in_flight_are_capped(  # agent-001's calls never hold up agent-002's
+                path, lambda: client.get("/manifest").raise_for_status(),
+                b"GET /manifest HTTP/1.1\r\n\r\n") == 200
+        await resource.remove(["agent-002"])
+        assert "agent-002" not in resource.sockets and "agent-002" not in resource.tokens
     finally:
         await resource.stop()

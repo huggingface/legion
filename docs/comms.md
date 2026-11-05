@@ -174,6 +174,15 @@ An empty text is always refused; an unknown thread id is an error. The agent's p
 post time and its threads are kept in its synced state (`<agent>.state.json`), so `max_posts` and
 `min_post_gap` survive a relaunch. Each refusal is also a `comms_refused {rule, error}` event.
 
+Harness `harbor` (the `resources.board` plug-in, `flock.harbor.plugins.resources.board`): the
+same `rules` are checked by a per-agent proxy on the worker, in front of the agent's board
+socket. There, `threads: per_topic` is not enforced (shepherd's `board.post` names no thread),
+and the counts behind `max_posts`, `min_post_gap` and `max_channels_per_agent` restart when the
+agent moves to another worker. On hf-sandbox (no mounts) there is no proxy and the rules are not
+enforced; each Trial start records a `board.warning` event. Use a dedicated board per run: with
+the same operator token, another run's agents of the same names re-join them, and this run's
+tokens stop working.
+
 ## The poller and wake events
 
 One activity long-poll per worker, never one per agent:

@@ -35,6 +35,7 @@ HEALTH_EVERY_S, HEALTH_MISSES = 5, 12  # a minute of failed health checks fails 
 FORWARD_IN = ("content-type", "accept", "x-request-id", "x-flock-turn")
 FORWARD_OUT = ("content-type", "retry-after")
 UPLOAD_MAX = MAX_BYTES * 4 // 3 + (4 << 20)  # flock.world.server's cap on a tool request body
+CALLS_MAX = 8  # world calls one agent has in flight; more are refused with 429
 
 
 class Options(BaseModel):
@@ -66,9 +67,22 @@ def _proxy(url, client, token, agent):
     prefix = re.escape(base.path.rstrip("/"))
     allowed = {"GET": re.compile(prefix + "/manifest"),
                "POST": re.compile(prefix + r"/tools/[A-Za-z_][A-Za-z0-9_]{0,63}")}
+    slots = threading.BoundedSemaphore(CALLS_MAX)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         timeout = 60  # a client that stops sending or reading
+
+        def handle(self):
+            # A few calls at once per agent, never queued: one agent's calls must not hold the
+            # shared client or the worker's threads that the others need.
+            if not slots.acquire(blocking=False):
+                self.wfile.write(b"HTTP/1.0 429 Too Many Requests\r\nRetry-After: 1\r\n"
+                                 b"Content-Length: 0\r\n\r\n")
+                return
+            try:
+                super().handle()
+            finally:
+                slots.release()
 
         def forward(self):
             # Only an agent's own routes, checked on the URL as sent (dot segments resolved):

@@ -3,16 +3,21 @@
 
 flock's additions (lines marked `flock:`; unused options keep shepherd's behaviour):
 - `add` / `remove`: agents placed after start join under their names; a name the board already
-  has re-joins with a fresh token (its old one stops working).
+  has re-joins with a fresh token (its old one stops working). So shepherd's dedicated-board
+  check cannot run here (another worker's or a re-assigned agent's name is on the board too):
+  give each run its own board, or another run's agents of the same names take over its tokens.
 - `watch(emit)`: one activity poller (the operator's feed of `channels`) turns each new message
   into `emit(agent, kind, data)` for the agents added here: `mention` (named directly), `thread`
   (a reply in a thread the agent posted in) or `channel` (a new topic), the first that applies
-  among the kinds in `wake`.
+  among the kinds in `wake`. The feed leaves out the operator's own posts: a message posted
+  with the operator token (the kickoff, or a person using it) wakes no one.
 - `rules` (flock's comms rules): each agent reaches the board only through its own Unix socket,
-  served by a proxy that checks every post with `check_content` / `check_rate`, opens only the
-  board tools' routes and sends the agent's token, which never enters the container. With
-  `transport: http` (no mounts, e.g. hf-sandbox) there is no proxy: the rules are not enforced,
-  and the resource says so in its metadata and in every agent's binding.
+  served by a proxy that checks every post with `check_content` / `check_rate` and every new
+  channel against `max_channels_per_agent` / `max_channels`, opens only the board tools'
+  routes, refuses an agent's ninth call in flight (429) and sends the agent's token, which never
+  enters the container. `threads: per_topic` is not enforced (shepherd's board.post names no
+  thread). With `transport: http` (no mounts, e.g. hf-sandbox) there is no proxy: the rules are
+  not enforced, and the resource says so in its metadata and in every agent's binding.
 - `kickoff`: posted once to the first channel at start (every worker posts it under one key).
 """
 
@@ -58,6 +63,7 @@ ROUTES = {
 FORWARD_IN = ("content-type", "accept", "idempotency-key")  # never the agent's own auth headers
 FORWARD_OUT = ("content-type", "retry-after", "idempotent-replayed")
 BODY_MAX = 1 << 20
+CALLS_MAX = 8  # board calls one agent has in flight; more are refused with 429
 
 
 class Options(BaseModel):
@@ -264,8 +270,8 @@ class Resource:
         mounts = []
         hosts = [urlsplit(self.url).hostname]
         source = self._proxy(name) if self._ruled() else self.socket_path  # flock: or a proxy
-        if self._ruled():  # flock: the agent's token stays with its proxy
-            env["MSGBOARD_TOKEN"] = "via-proxy"
+        if self._ruled():  # flock: the agent's token and the board's path stay with its proxy
+            env.update(MSGBOARD_URL="http://board", MSGBOARD_TOKEN="via-proxy")
         if source:
             env["MSGBOARD_SOCKET"] = SOCKET
             mounts = [
@@ -458,12 +464,45 @@ class Resource:
         base = httpx.URL(url)
         prefix = re.escape(base.path.rstrip("/"))
         allowed = {method: re.compile(prefix + route) for method, route in ROUTES.items()}
-        # shortcut: posts made and the last one's time live in this proxy, so max_posts and
-        # min_post_gap restart when the agent moves; keep them in its state if runs need that
-        posted, lock = [0, None], threading.Lock()
+        rules = self.options.rules
+        # shortcut: the agent's posts, last post time and channels made live in this proxy, so
+        # max_posts, min_post_gap and max_channels_per_agent restart when the agent moves; keep
+        # them in its state if runs need that
+        made = {"posts": 0, "last_post": None, "channels": 0}
+        lock, slots = threading.Lock(), threading.BoundedSemaphore(CALLS_MAX)
+
+        def check(kind, body, headers):
+            """Raises Refused: the post's rules, or the channel caps (as the comms hub's)."""
+            if kind == "post":
+                sent = json.loads(body or b"{}")
+                # shortcut: shepherd's board.post has no thread argument, so a post without
+                # reply_to starts a topic and `threads: per_topic` never refuses; enforce it
+                # when the board tools can name a thread
+                check_content(rules, sent.get("body"), sent.get("reply_to") or "new")
+                check_rate(rules, made["posts"], made["last_post"], time.time())
+            elif made["channels"] >= rules.max_channels_per_agent:
+                raise Refused("max_channels_per_agent", "you reached your channel creation limit")
+            else:
+                listed = client.get(url + "/v1/channels", headers=headers)
+                listed.raise_for_status()
+                if sum(c.get("kind") != "dm" for c in listed.json()["channels"]) >= rules.max_channels:
+                    raise Refused("max_channels",
+                                  "the channel limit is reached; join an existing channel")
 
         class Handler(http.server.BaseHTTPRequestHandler):
             timeout = 60  # a client that stops sending or reading
+
+            def handle(self):
+                # A few calls at once per agent, never queued: one agent's long-polls must not
+                # hold the shared client or the worker's threads that the others need.
+                if not slots.acquire(blocking=False):
+                    self.wfile.write(b"HTTP/1.0 429 Too Many Requests\r\nRetry-After: 1\r\n"
+                                     b"Content-Length: 0\r\n\r\n")
+                    return
+                try:
+                    super().handle()
+                finally:
+                    slots.release()
 
             def reply(self, status, body, headers=()):
                 self.send_response(status)
@@ -498,29 +537,29 @@ class Resource:
                 body = self.rfile.read(length)
                 headers = {k: v for k, v in self.headers.items() if k.lower() in FORWARD_IN}
                 headers["Authorization"] = f"Bearer {resource.credentials[name]['token']}"
-                post = self.command == "POST" and target.path.endswith("/messages")
-                with lock if post else contextlib.nullcontext():
-                    if post:
-                        try:
-                            sent = json.loads(body or b"{}")
-                            # shepherd's board.post has no thread argument: a post without
-                            # reply_to starts a topic
-                            check_content(resource.options.rules, sent.get("body"),
-                                          sent.get("reply_to") or "new")
-                            check_rate(resource.options.rules, posted[0], posted[1], time.time())
-                        except Refused as exc:
-                            self.refuse(str(exc))
-                            return
-                        except (ValueError, AttributeError):
-                            self.send_error(400)
-                            return
+                kind = None
+                if self.command == "POST":
+                    kind = "post" if target.path.endswith("/messages") else (
+                        "channel" if target.path.endswith("/v1/channels") else None)
+                with lock if kind else contextlib.nullcontext():
                     try:
+                        if kind:
+                            check(kind, body, headers)
                         r = client.request(self.command, target, content=body, headers=headers)
+                    except Refused as exc:
+                        self.refuse(str(exc))
+                        return
+                    except (ValueError, AttributeError, KeyError, TypeError):
+                        self.send_error(400)
+                        return
                     except httpx.HTTPError as exc:
                         self.send_error(502, f"board unreachable ({type(exc).__name__})")
                         return
-                    if post and r.status_code == 201:  # a new message (200: a replayed one)
-                        posted[:] = [posted[0] + 1, time.time()]
+                    if kind and r.status_code == 201:  # made (200: a replayed post)
+                        if kind == "post":
+                            made.update(posts=made["posts"] + 1, last_post=time.time())
+                        else:
+                            made["channels"] += 1
                 self.reply(r.status_code, r.content,
                            [(k, r.headers[k]) for k in FORWARD_OUT if k in r.headers])
 
