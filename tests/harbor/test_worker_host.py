@@ -1,24 +1,31 @@
 """The worker's HarborHost on fakes: 20 agents' Trials share one Resources, one tool bundle and
 one task download, and on hf-sandbox their sandbox commands (threads, as Harbor's hf-sandbox
-environment runs them) overlap instead of queueing on the default pool."""
+environment runs them) overlap instead of queueing on the default pool. Board agents join on
+whichever worker their Trial starts."""
 
 import asyncio
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("harbor")
 
+import flock.harbor
 from flock.harbor import launch, sources
 from flock.harbor.spec import Spec, compile_spec
 from flock.harbor.tools.bundle import build_tool_bundle
 from flock.worker.adapters.harbor import make_adapter
 from flock.worker.harbor import HarborHost
 
+from .. import fake_msgboard
 from .test_adapter import TASK, FakeEnv, Fakes, Trial, read
+
+BOARD = Path(flock.harbor.__file__).with_name("plugins") / "resources" / "board.py"
 
 SPEC = """
 name: host
@@ -188,3 +195,63 @@ async def test_refusals(world, tmp_path, case, error):
         await a.start(a.workdir, None, a.spec)
     assert world.trials == []
     await host.close()
+
+
+async def test_board_agents_join_on_any_worker_spawned_and_reassigned(world, tmp_path, monkeypatch):
+    """Two workers of one type on one external board (fake), a spawned agent, and an agent
+    re-assigned from the first worker to the second: each joins where its Trial starts (a
+    re-join: same identity, a fresh token) and its mentions come from that worker's poller.
+    hf-sandbox has no mounts, so the board's rules are not enforced: each Trial says so."""
+    board, server, url = fake_msgboard.serve()
+    monkeypatch.setenv("MSGBOARD_OPERATOR_TOKEN", board.token_for("operator", "user"))
+    shutil.copy(BOARD, tmp_path / "resources" / "board.py")
+    (tmp_path / "spec.yaml").write_text(SPEC.replace(
+        "{fake: {mount: MOUNT}}", f"{{fake: {{mount: false}}, board: {{url: '{url}', "
+        "channels: [flock-test], rules: {max_len: 2000}}}"))
+    ts = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK, None).types["agent"]
+    events, hosts = [], []
+    for w in ("w1", "w2"):
+        hosts.append(HarborHost(tmp_path / w / "_harbor" / "_worker",
+                                emit=lambda agent, e, w=w: events.append((w, agent, e["kind"]))))
+
+    def adapter(host, name):
+        return make_adapter(host.root.parent.parent / name, name, ts, host=host)
+
+    def token(trial):
+        return trial.config.agent.env["MSGBOARD_TOKEN"]
+
+    def kinds(kind):
+        return sorted((w, agent) for w, agent, k in events if k == kind)
+
+    async def until(check):
+        async with asyncio.timeout(5):
+            while not check():
+                await asyncio.sleep(0.01)
+
+    first, second, spawned, moved = (
+        adapter(hosts[0], "agent-0000"), adapter(hosts[1], "agent-0001"),
+        adapter(hosts[1], "helper-0001"),  # spawned: not in the roster
+        adapter(hosts[1], "agent-0000"))  # `first`, re-assigned to w2
+    try:
+        for a in (first, second, spawned):
+            await a.start(a.workdir, None, a.spec)
+        assert all(token(t) in board.tokens for t in world.trials)
+        assert sorted(board.names()) == ["agent-0000", "agent-0001", "helper-0001", "operator"]
+        await first.close()
+        await moved.start(moved.workdir, None, moved.spec)
+        old, new = token(world.trials[0]), token(world.trials[-1])
+        assert old not in board.tokens and board.tokens[new] == board.principal("agent-0000")["id"]
+        await until(lambda: sum(p == "/v1/activity" and "after" in q
+                                for _, p, q, _ in board.requests) >= 2)  # both pollers wait
+        board.post("carol", 12, "@agent-0000 @helper-0001 review please")
+        await until(lambda: kinds("mention") == [("w2", "agent-0000"), ("w2", "helper-0001")])
+        await asyncio.sleep(0.05)  # and nothing from w1
+        assert kinds("mention") == [("w2", "agent-0000"), ("w2", "helper-0001")]
+        assert kinds("warning") == [("w1", "agent-0000"), ("w2", "agent-0000"),
+                                    ("w2", "agent-0001"), ("w2", "helper-0001")]
+    finally:
+        for a in (second, spawned, moved):
+            await a.close()
+        for host in hosts:
+            await host.close()
+        server.shutdown()

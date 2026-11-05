@@ -156,6 +156,8 @@ class HarborAdapter:
                     self._prompts = asyncio.Queue()
         if run is None or run.done():
             await self._drop_network()
+        if self.resources is not None:  # it leaves this worker (drain, unassign)
+            await self.resources.remove([self.agent])
         return self.result
 
     async def events(self) -> AsyncIterator[AdapterEvent]:
@@ -244,9 +246,14 @@ class HarborAdapter:
             trial_seconds + parse_duration(self.spec.turn_timeout).total_seconds())
         tc.environment.kwargs = dict(config.environment.kwargs)
         if self.resources is not None:
-            self.resources.bind(self.agent, tc)
+            await self.resources.add([self.agent])  # joins here (again: after a move)
+            bound = self.resources.bind(self.agent, tc)
             if tc.environment.mounts and config.environment.backend == "hf-sandbox":
                 raise RuntimeError("hf-sandbox has no mounts: use the resources' http transport")
+            for name, meta in bound.items():  # e.g. board rules not enforced without mounts
+                if meta.get("warning") and getattr(self.host, "emit", None):
+                    self.host.emit(self.agent, {"resource": name, "kind": "warning",
+                                                "data": {"warning": meta["warning"]}})
         await self._drop_network()  # the last Trial's: it has ended
         if config.environment.backend != "hf-sandbox":  # a sandbox is an HF Job: no local network
             # one network per Trial, outside host and VPN routes: docker's default pools run

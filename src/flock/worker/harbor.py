@@ -3,12 +3,18 @@ board's and world's sockets and proxies run on this host, each agent's Trial is 
 shepherd's tool bundle, the task downloaded once, and on hf-sandbox a thread pool sized for
 every sandbox call. Prepared at the worker's first Trial start; a failed attempt is retried by
 the next one. The worker stops the resources when it exits.
+
+Each agent is added to the resources as its Trial starts and removed when it leaves (another
+worker of the type, a spawned agent and a re-assigned one alike), and the resources' events for
+an agent (the board's mentions) go to `emit(agent, event)`, which the worker forwards as the
+agent's `resource` event.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -20,8 +26,9 @@ log = logging.getLogger(__name__)
 
 
 class HarborHost:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, emit: Callable[[str, dict], None] | None = None) -> None:
         self.root = Path(root)  # bundle, sources, resource state and exports
+        self.emit = emit  # (agent, {"resource", "kind", "data"}): a resource's event
         self.resources: Any = None  # flock.harbor Resources, started; None until prepared
         self.bundle: Any = None  # shepherd's ToolBundle; None: the run has no tools
         self.task_path: Path | None = None  # the pinned task, downloaded for every agent here
@@ -65,18 +72,21 @@ class HarborHost:
             self.task_path = await sources.download_task(task, self.root / "sources")
         if self.resources is None:
             key = secret_env().get(config.inference.api_key_env)
-            # shortcut: the type's roster joins at start; spawned agents and a second worker
-            # of the type need the resources' add/remove hooks (next step)
+            # a resource without the add hook gets the type's roster, as shepherd's launcher
+            # gives it; one with it is told each agent placed here (adapters/harbor.py)
             resources = Resources(
                 config.resources_dir, h.resources, run_dir=self.root,
                 agents=[name for name, role in h.roster.items() if role == h.role],
                 secrets=[key] if key else [],
-                required=self.bundle.manifest["requires"] if self.bundle else ())
+                required=self.bundle.manifest["requires"] if self.bundle else (),
+                incremental=True)
             try:
                 await resources.start()
             except BaseException:
                 await resources.finish()
                 raise
+            if self.emit is not None:
+                resources.watch(self.emit)
             for w in resources.watchers:  # a resource that dies is logged; its binds stay
                 w.add_done_callback(lambda t: t.cancelled() or log.error("%s", t.exception()))
             self.resources = resources

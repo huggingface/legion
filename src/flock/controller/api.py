@@ -669,6 +669,8 @@ def create_app(
     (reason "mention") and `comms_thread_reply` (reason "thread") event a worker posts goes to
     the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
     `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
+    A harbor resource's `resource` event {resource, kind, data} goes the same way, as
+    `<resource>.<kind>` (a board mention: `board.mention`).
     `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.
@@ -715,13 +717,17 @@ def create_app(
 
     def comms_event(agent: str, ev: Event) -> None:
         data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
-        reason = COMMS_WAKE_EVENTS[ev.type]
+        source, reason = "comms", COMMS_WAKE_EVENTS.get(ev.type)
+        if ev.type == "resource":  # {resource, kind, data} from a harbor resource's watch
+            source, reason, data = data.get("resource"), data.get("kind"), data.get("data")
+            if not (isinstance(source, str) and isinstance(reason, str) and isinstance(data, dict)):
+                return
         try:  # `loop.notices`: named in the agent's next round prompt
             loops.notice(agent, reason, data)
         except Exception:
             log.exception("comms notice failed for %s", agent)
         try:
-            woke = loops.wake(agent, f"comms.{reason}")
+            woke = loops.wake(agent, f"{source}.{reason}")
             log.debug("comms %s for %s (wake %s): %s", reason, agent, woke, data)
             if on_comms is not None:
                 on_comms(agent, reason, {"agent": agent, **data})
@@ -1588,7 +1594,7 @@ def create_app(
             a = store.get_agent(agent)
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
             for ev in evs:
-                if ev.type in COMMS_WAKE_EVENTS:
+                if ev.type in COMMS_WAKE_EVENTS or ev.type == "resource":
                     comms_event(agent, ev)
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)

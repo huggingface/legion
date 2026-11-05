@@ -486,7 +486,7 @@ class Worker:
         self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
                                            type_name=cfg.type, fetch=self._fetch_tools)
         # harness harbor: what its agents' Trials share on this worker (flock.worker.harbor)
-        self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker")
+        self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
         self.identities = identities or Identities()
@@ -628,6 +628,12 @@ class Worker:
         if self.world.needs_restart() and not self.draining:
             log.warning("world credential changed; draining to be relaunched with the new one")
             self._spawn(self.drain("world credential changed"))
+
+    def _resource_event(self, agent: str, event: dict) -> None:
+        """A harbor resource's event for one of this worker's agents (a board mention): the
+        agent's `resource` event, which the controller turns into `<resource>.<kind>` wakes."""
+        if (rt := self.agents.get(agent)) is not None:
+            rt.emit("resource", event)
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)

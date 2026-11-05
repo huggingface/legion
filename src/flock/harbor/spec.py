@@ -236,6 +236,9 @@ class Spec(Config):
             and not self.resources["board"].get("url")
         ):
             raise ValueError("hf-sandbox has no mounts: set resources.board.url")
+        if backend == "hf-sandbox" and (self.resources.get("board") or {}).get("rules"):
+            # no mounts, no rule proxy: the board runs its rules unenforced and warns
+            self.resources["board"].setdefault("transport", "http")
         budgets = limits.budget_usd is not None or any(
             loop.while_.agent_usd is not None or loop.while_.budget_usd is not None
             for loop in loops

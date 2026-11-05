@@ -104,6 +104,9 @@ def test_v8_shaped_spec_loads(tmp_path):
         "The run is ending.",
     )
     assert loop.on == ["board.mention", "board.thread"]  # comms.* is read as board.*
+    assert "transport" not in spec.resources["board"]
+    ruled = v8_spec(tmp_path, V8.replace("[general]}", "[general], rules: {max_len: 2000}}"))
+    assert ruled.resources["board"]["transport"] == "http"  # no mounts: no rule proxy
     # run.json holds this dump; it validates again as written
     dumped = spec.model_dump(mode="json")
     assert dumped["loop"]["while"]["max_rounds"] == 10000
