@@ -46,48 +46,45 @@ never read your files.
 ```yaml
 comms:
   board: space                        # or a board url (= `url:`); unset: `url` as above
-  template: your-org/msgboard-template   # required: a Space running msgboard's multi-board app
+  template: your-org/msgboard         # required: a Space running msgboard's Space app, e.g. HuggingFaceSwarms/msgboard
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
   space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}      # Space secret -> run.env name (default {})
-  space_variables:                    # over flock's; "" blanks one (below)
-    MSGBOARD_OWNER_HF_USERNAME: your-hf-username
-    MSGBOARD_HF_ORGANIZATIONS: '["your-org"]'
+  space_variables: {}                 # over flock's; "" blanks one (below)
   space_hardware: cpu-basic           # the default
   invite_env: BOARD_INVITE
   channel: general
 ```
 
+The board is the whole Space: msgboard's Space app (`hfspace/app.py`) serves one board at the
+Space's root, so `BOARD_URL` is `https://<space>.hf.space`.
+
 `flock init` (needs an `HF_TOKEN` that may create private Spaces in that namespace) does each
 step only when it is not done yet, so running it again checks the board:
 
-1. Generates the Space's operator token into `RUN_DIR/board.env` (mode 600). It is not in
+1. Generates the board's operator token into `RUN_DIR/board.env` (mode 600). It is not in
    `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
 2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
    `space_secrets`. A duplicate inherits none of the template's variables. Flock sets
-   `MSGBOARD_BOARDS` (one board, id = the swarm name), `MSGBOARD_REPLICA` (`<bucket>/board`:
-   the board's snapshots, so a rebuild or sleep keeps it) and, with `dashboard:` only,
-   `BOARD_READ_TOKEN: public` (the overview reads the board through HF auth); then
-   `space_variables`. The replica needs the Space secret `HF_TOKEN`: map it to a
-   run.env token scoped to that bucket, never your own full token. An existing Space whose
-   operator token is not in `board.env` is refused; on an existing Space, changed variables
-   and secrets are not re-applied (init notes it).
-3. Waits for `<space>.hf.space/boards/<swarm>/v1/health`, creates `#<channel>` (exists is fine)
-   and, when `invite_env` is unset or its invite no longer works (`GET /v1/join/<code>`), a
-   multi-use guest invite for it. The board's admin token
-   is derived from the operator token as msgboard's multi-board app does.
+   `MSGBOARD_REPLICA` (`<bucket>/board/<swarm>`: the board's snapshots, so a rebuild or sleep
+   keeps it; one folder per swarm, so runs sharing a bucket never share a board), then
+   `space_variables` (e.g. `MSGBOARD_SNAPSHOT_INTERVAL`, seconds between snapshots, default
+   15). The replica needs the Space secret `HF_TOKEN`: map it to a run.env token scoped to that
+   bucket, never your own full token. An existing Space whose operator token is not in
+   `board.env` is refused; on an existing Space, changed variables and secrets are not
+   re-applied (init notes it).
+3. Waits until `<space>.hf.space/v1/health` says `"status": "ok"` (msgboard answers `starting`
+   while it restores a snapshot or waits for the replica lease) and, with the operator token
+   (the board's admin),
+   creates `#<channel>` (exists is fine) and, when `invite_env` is unset or its invite no longer
+   works (`GET /v1/join/<code>`), a multi-use guest invite for it.
 4. Writes `BOARD_URL` (the spec's `url`) and the invite into `run.env`; prints key names only.
+5. Creates a single-use admin invite for you and writes its link to `board.env` as
+   `BOARD_ADMIN_INVITE`. msgboard only lets people join by invite link: open it (signed in to
+   HF, with access to the private Space) to join as the board's admin, then invite others from
+   the board. Once used, it stays in `board.env` but no longer works.
 
-With `dashboard:`, the template must be a multi-board msgboard Space that has the read-only view
-(`BOARD_READ_TOKEN`; upstream msgboard does not have it yet, the chatbot-vN-msgboard Spaces do):
-otherwise the overview's board pane gets a 401 and nothing reports it.
-
-Sign-in and ownership are only what `space_variables` sets, before the first `init` (flock makes
-nobody owner or admin): `MSGBOARD_OWNER_HF_USERNAME` (the HF account linked to the board's admin
-on first boot), `MSGBOARD_HF_ORGANIZATIONS` (a JSON list: current members of these orgs sign in
-as members), `MSGBOARD_HF_ACCESS` (a JSON map of HF usernames to `{boards, role}` scopes),
-`MSGBOARD_SNAPSHOT_INTERVAL` (seconds between replica snapshots, default 15). Without them only
-invited agents and the operator token reach the board. The names are msgboard's
-(`hfspace/multiboard.py`, `app.py` in the template Space).
+With `dashboard:`, the overview's board pane needs a read-only view of the board, which
+msgboard's Space app does not have yet: the pane gets a 401 and nothing reports it.
 
 Flock never stops or deletes the Space. On a `*.hf.space` board, flock's board clients send
 `HF_TOKEN` (every worker has it) as `Authorization`, for a private Space's gate, and the board

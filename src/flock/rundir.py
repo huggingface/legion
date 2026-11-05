@@ -5,8 +5,9 @@ run's env file and controller. Nothing here prints; secret values never appear i
     RUN_DIR/experiment/   a copy of the experiment folder (links followed): what is launched
     RUN_DIR/cluster.env   a copy of the cluster profile (--profile): read before run.env
     RUN_DIR/run.env       mode 600: every ${VAR} the spec reads, the secrets it names, per-run tokens
-    RUN_DIR/board.env     mode 600, `comms.board: space` only: BOARD_OPERATOR_TOKEN. Not in
-                          run.env, which every job sources: workers never see it
+    RUN_DIR/board.env     mode 600, `comms.board: space` only: BOARD_OPERATOR_TOKEN (the board's
+                          admin token) and BOARD_ADMIN_INVITE (a single-use admin invite link for
+                          the operator). Not in run.env, which every job sources: workers never see it
     RUN_DIR/logs/, hosts/ the jobs' logs and host files (hosts/controller.host, world.host)
     RUN_DIR/slurm/        `compute: slurm`: a copy of scripts/slurm (the job scripts `flock launch` submits)
 
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hmac
 import json
 import os
 import re
@@ -524,15 +524,6 @@ def board_space(c: CommsSpec, swarm: str) -> str:
     return c.space or f"{c.template.split('/')[0]}/board-{swarm}"
 
 
-def board_token(master: str, slug: str) -> str:
-    """The admin token of board `slug` on a multi-board Space whose MSGBOARD_OPERATOR_TOKEN is
-    `master`: msgboard's hfspace/multiboard.py `board_token`, copied (msgboard is not a dependency)."""
-    key = master.encode()
-    cred = hmac.digest(key, ("id:" + slug).encode(), "sha256")[:8].hex()
-    secret = base64.urlsafe_b64encode(hmac.digest(key, ("secret:" + slug).encode(), "sha256"))
-    return f"fbt_{cred}.{secret.rstrip(b'=').decode()}"
-
-
 def _write_private(path: Path, text: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.fchmod(fd, 0o600)  # O_CREAT's mode only applies to a new file
@@ -552,9 +543,10 @@ def _replace_keys(path: Path, values: Mapping[str, str]) -> None:
 def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
                     rep: InitReport) -> tuple[Check, dict[str, str]]:
     """`comms.board: space`, each step skipped when done: the operator token (board.env), the
-    private Space duplicated from `comms.template` with one board named after the swarm, its
-    health, the channel and a multi-use agent invite. Returns (the check, the run.env values
-    BOARD_URL and `comms.invite_env`)."""
+    private Space duplicated from `comms.template` (msgboard's Space app: one board at the
+    Space's root), its health, the channel, a multi-use agent invite and a single-use admin
+    invite for the operator (board.env). Returns (the check, the run.env values BOARD_URL and
+    `comms.invite_env`)."""
     import httpx
 
     try:  # the comms block and swarm name as the spec reads them; url is what this makes
@@ -572,9 +564,10 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         return Check("board space", False, "needs HF_TOKEN (run.env or `hf auth login`) with write "
                                            "access to the Space's namespace"), {}
     space = board_space(c, swarm)
-    url = f"{space_url(space)}/boards/{swarm}"
+    url = space_url(space)
     bf = run_dir / BOARD_ENV
-    master = (read_env_file(bf) if bf.is_file() else {}).get("BOARD_OPERATOR_TOKEN")
+    board_env = read_env_file(bf) if bf.is_file() else {}
+    master = board_env.get("BOARD_OPERATOR_TOKEN")
     try:
         api = hub_api(hf)
         exists = api.repo_exists(space, repo_type="space")
@@ -585,22 +578,18 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
             # msgboard's token format (auth.new_token): fbt_<16 hex>.<32 bytes, urlsafe b64>
             master = (f"fbt_{secrets.token_hex(8)}."
                       + base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode())
-            _write_private(bf, f"# {BOARD_ENV}: the board Space's operator token (admin on every "
-                               f"board there). Never sourced by a job.\nBOARD_OPERATOR_TOKEN={master}\n")
+            _write_private(bf, f"# {BOARD_ENV}: the board's operator (admin) token. Never sourced "
+                               f"by a job.\nBOARD_OPERATOR_TOKEN={master}\n")
             rep.created.append(f"{BOARD_ENV} BOARD_OPERATOR_TOKEN (generated)")
         if exists:
             rep.notes.append(f"Space {space} exists: changed comms.space_variables or "
                              "space_secrets are not re-applied (edit them in its settings)")
         else:
-            boards = [{"id": swarm, "name": swarm, "storage_id": swarm, "require_existing": False}]
-            # a duplicate inherits none of the template's variables: sign-in and ownership are
-            # only what the spec sets (nobody is made admin by default)
+            # a duplicate inherits none of the template's variables
             variables = {
-                # the overview reads the board through HF auth as the view-only account
-                **({"BOARD_READ_TOKEN": "public"} if data.get("dashboard") else {}),
-                "MSGBOARD_BOARDS": json.dumps(boards),
-                # the board's snapshots: a rebuild or sleep would lose it otherwise
-                **({"MSGBOARD_REPLICA": bucket.rstrip("/") + "/board"} if bucket else {}),
+                # the board's snapshots (a rebuild or sleep would lose it otherwise), one folder
+                # per swarm: the Space app uses the prefix as given, and runs often share a bucket
+                **({"MSGBOARD_REPLICA": f"{bucket.rstrip('/')}/board/{swarm}"} if bucket else {}),
                 **c.space_variables}
             if variables.get("MSGBOARD_REPLICA") and "HF_TOKEN" not in c.space_secrets:
                 return Check("board space", False, "MSGBOARD_REPLICA needs the Space secret HF_TOKEN: "
@@ -619,17 +608,25 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         h = {"Authorization": f"Bearer {hf}"}  # the private Space's gate
         end = time.monotonic() + BOARD_WAIT_S
         while True:
+            # msgboard's Space app answers 200 {"status": "starting", "error": ...} while it
+            # restores or waits for the replica lease (other calls get 503): only "ok" is ready
             try:
-                code: int | str = httpx.get(f"{url}/v1/health", headers=h, timeout=10).status_code
-            except httpx.HTTPError as e:  # building or restarting
-                code = type(e).__name__
-            if code == 200:
-                break
+                r = httpx.get(f"{url}/v1/health", headers=h, timeout=10)
+                body = r.json() if r.status_code == 200 else None
+            except (httpx.HTTPError, ValueError) as e:  # building or restarting; not JSON yet
+                state: int | str = type(e).__name__
+            else:
+                if not isinstance(body, dict):
+                    state = r.status_code
+                elif body.get("status") == "ok":
+                    break
+                else:
+                    state = f"{body.get('status')}" + (f": {body['error']}" if body.get("error") else "")
             if time.monotonic() > end:
-                return Check("board space", False, f"{url}/v1/health -> {code} after "
+                return Check("board space", False, f"{url}/v1/health -> {state} after "
                                                    f"{BOARD_WAIT_S:.0f} s"), {}
             _sleep(10)
-        h["X-Msgboard-Token"] = board_token(master, swarm)
+        h["X-Msgboard-Token"] = master  # the operator token is the board's admin token
         r = httpx.post(f"{url}/v1/channels", json={"name": c.channel}, headers=h, timeout=30)
         if r.status_code not in (200, 201, 409):  # 409 channel_exists
             return Check("board space", False, f"create #{c.channel}: {r.status_code} {r.text[:200]}"), {}
@@ -646,9 +643,18 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
             if r.status_code != 201:
                 return Check("board space", False, f"agent invite: {r.status_code} {r.text[:200]}"), out
             out[c.invite_env] = r.json()["code"]
+        if "BOARD_ADMIN_INVITE" not in board_env:  # people join msgboard by invite link only
+            r = httpx.post(f"{url}/v1/invites", headers=h, timeout=30, json={
+                "kind": "human", "role": "admin", "max_uses": 1, "label": f"flock {swarm} operator"})
+            if r.status_code != 201:
+                return Check("board space", False, f"admin invite: {r.status_code} {r.text[:200]}"), out
+            _write_private(bf, bf.read_text(encoding="utf-8")
+                           + "# a single-use link that makes whoever opens it the board's admin\n"
+                             f"BOARD_ADMIN_INVITE={url}/?invite={r.json()['code']}\n")
+            rep.created.append(f"{BOARD_ENV} BOARD_ADMIN_INVITE (open it to join the board as admin)")
     except Exception as e:  # noqa: BLE001 - any Hub or board error is the check's answer
         return Check("board space", False, f"{space}: {type(e).__name__}: {e}"), {}
-    return Check("board space", True, f"{space}: board {swarm} answers, #{c.channel}, "
+    return Check("board space", True, f"{space}: board answers, #{c.channel}, "
                                       f"{c.invite_env} set"), out
 
 

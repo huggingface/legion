@@ -26,7 +26,8 @@ SPEC = {
 
 
 class FakeApi:
-    """HfApi's Space calls; a duplicated Space derives its board's admin token, as msgboard does."""
+    """HfApi's Space calls; a duplicated Space's operator token is its board's admin token, as in
+    msgboard's Space app."""
 
     def __init__(self, board: Board):
         self.board, self.spaces, self.calls = board, set(), []
@@ -38,15 +39,15 @@ class FakeApi:
         self.calls.append((from_id, to_id, kw))
         self.spaces.add(to_id)
         master = next(s["value"] for s in kw["space_secrets"] if s["key"] == "MSGBOARD_OPERATOR_TOKEN")
-        self.board.tokens[rundir.board_token(master, "demo")] = self.board.principal("operator", "user")["id"]
+        self.board.tokens[master] = self.board.principal("operator", "user")["id"]
 
 
 @pytest.fixture
 def space(monkeypatch):
-    board, srv, url = serve(Board(channels={1: "random"}), prefix="/boards/demo")
+    board, srv, url = serve(Board(channels={1: "random"}))  # one board at the Space's root
     api = FakeApi(board)
     monkeypatch.setattr(rundir, "hub_api", lambda token: api)
-    monkeypatch.setattr(rundir, "space_url", lambda sid: url.removesuffix("/boards/demo"))
+    monkeypatch.setattr(rundir, "space_url", lambda sid: url)
     monkeypatch.setattr(rundir, "check_venv", lambda env: rundir.Check("venv", True))
     yield board, api, url
     srv.shutdown()
@@ -75,16 +76,17 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert kw["private"] and set(secrets) == {"MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"}
     assert secrets["HF_TOKEN"] == "hf_scoped"  # the mapped, bucket-scoped token, not the operator's
     variables = {v["key"]: v["value"] for v in kw["space_variables"]}
-    assert json.loads(variables["MSGBOARD_BOARDS"]) == [
-        {"id": "demo", "name": "demo", "storage_id": "demo", "require_existing": False}]
     assert kw["space_hardware"] == "cpu-basic"
-    # flock's only: none of the template's (no owner, org or admin unless the spec sets them),
-    # no BOARD_READ_TOKEN without a dashboard
-    assert variables == {"MSGBOARD_BOARDS": variables["MSGBOARD_BOARDS"],
-                         "MSGBOARD_REPLICA": "hf://buckets/acme/runs/board"}
+    # flock's only: none of the template's
+    assert variables == {"MSGBOARD_REPLICA": "hf://buckets/acme/runs/board/demo"}
     assert "general" in board.channels.values()
     values = read_env_file(run / "run.env")
     assert values["BOARD_URL"] == url and values["BOARD_INVITE"] in board.invites
+    # a single-use admin invite link for the operator, next to the operator token
+    admin = read_env_file(run / "board.env")["BOARD_ADMIN_INVITE"]
+    assert admin.startswith(url + "/?invite=") and admin.split("=", 1)[1] in board.invites
+    assert admin not in (run / "run.env").read_text()
+    invites = len(board.invites)
     # the operator token: its own file, mode 600, never in run.env (every job sources run.env)
     # nor in the env files commands and local runs read
     op = read_env_file(run / "board.env")["BOARD_OPERATOR_TOKEN"]
@@ -101,6 +103,8 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert any("not re-applied" in n for n in rep.notes)
     assert read_env_file(run / "run.env")["BOARD_INVITE"] == values["BOARD_INVITE"]
     assert list(board.channels.values()).count("general") == 1
+    assert len(board.invites) == invites  # no second admin invite
+    assert read_env_file(run / "board.env")["BOARD_ADMIN_INVITE"] == admin
     # an invite that no longer works (the board lost it, or it was revoked) is replaced
     del board.invites[values["BOARD_INVITE"]]
     rep = rundir.init(run, env=ENV)
@@ -114,13 +118,21 @@ def test_spec_variables_override_without_dropping_the_defaults(tmp_path, space, 
     _, api, _ = space
     monkeypatch.setattr(rundir, "bucket_store", lambda url, token: FakeBucket())
     spec = {**SPEC, "dashboard": DASH, "comms": {**SPEC["comms"], "space_variables": {
-        "MSGBOARD_OWNER_HF_USERNAME": "someone", "MSGBOARD_REPLICA": ""}}}
+        "MSGBOARD_SNAPSHOT_INTERVAL": "30", "MSGBOARD_REPLICA": ""}}}
     rundir.init(tmp_path / "run", _folder(tmp_path, spec), env=ENV)
     variables = {v["key"]: v["value"] for v in api.calls[0][2]["space_variables"]}
-    assert variables == {"BOARD_READ_TOKEN": "public",  # with dashboard: the overview reads it
-                         "MSGBOARD_BOARDS": variables["MSGBOARD_BOARDS"],
-                         "MSGBOARD_OWNER_HF_USERNAME": "someone",  # only because the spec says so
+    assert variables == {"MSGBOARD_SNAPSHOT_INTERVAL": "30",  # only because the spec says so
                          "MSGBOARD_REPLICA": ""}  # blanked: no replica
+
+
+def test_swarms_sharing_a_bucket_get_their_own_replica(tmp_path, space):
+    _, api, _ = space
+    for name in ("demo", "demo-2"):
+        rep = rundir.init(tmp_path / name, _folder(tmp_path / name, {**SPEC, "swarm": name}), env=ENV)
+        assert {c.name: c for c in rep.checks}["board space"].ok
+    replicas = [{v["key"]: v["value"] for v in kw["space_variables"]}["MSGBOARD_REPLICA"]
+                for _, _, kw in api.calls]
+    assert replicas == ["hf://buckets/acme/runs/board/demo", "hf://buckets/acme/runs/board/demo-2"]
 
 
 def test_board_space_needs_a_template(tmp_path, space):
@@ -160,11 +172,44 @@ def test_health_wait_survives_connection_errors(tmp_path, space, monkeypatch):
     assert fails and {c.name: c for c in rep.checks}["board space"].ok
 
 
+def test_health_wait_holds_while_the_board_is_starting(tmp_path, space, monkeypatch):
+    import httpx
+
+    board, _, _ = space
+    real, starting = httpx.get, []
+
+    def slow(url, **kw):  # msgboard's Space app while it restores: 200, but not ready
+        if url.endswith("/v1/health") and len(starting) < 2:
+            starting.append(url)
+            return httpx.Response(200, json={"status": "starting", "error": None})
+        return real(url, **kw)
+
+    monkeypatch.setattr(httpx, "get", slow)
+    monkeypatch.setattr(rundir, "_sleep", lambda s: None)
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
+    assert len(starting) == 2 and {c.name: c for c in rep.checks}["board space"].ok
+    assert "general" in board.channels.values()
+
+
+def test_health_wait_reports_a_board_that_never_starts(tmp_path, space, monkeypatch):
+    import httpx
+
+    board, _, _ = space
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: httpx.Response(
+        200, json={"status": "starting", "error": "ValueError: bad operator token"}))
+    monkeypatch.setattr(rundir, "_sleep", lambda s: None)
+    monkeypatch.setattr(rundir, "BOARD_WAIT_S", 0)
+    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
+    c = {c.name: c for c in rep.checks}["board space"]
+    assert c.ok is False and "starting: ValueError: bad operator token" in c.detail
+    assert "general" not in board.channels.values()  # nothing posted to a board that is not up
+
+
 def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
     from flock.comms.board import _auth
 
     monkeypatch.setenv("HF_TOKEN", "hf_x")
-    space = "https://acme-board-demo.hf.space/boards/demo"
+    space = "https://acme-board-demo.hf.space"
     assert _auth("fbt_b", space) == {"X-Msgboard-Token": "fbt_b", "Authorization": "Bearer hf_x"}
     assert _auth(None, space) == {"Authorization": "Bearer hf_x"}  # join on a private Space
     # elsewhere the HF token is never sent; old public boards still get the Bearer fallback
@@ -189,7 +234,8 @@ def test_board_url_form_and_space_without_init(tmp_path):
         read_spec(str(_folder(tmp_path / "s") / "spec.yaml"))
 
 
-ORG = "https://acme-board-demo.hf.space/boards/demo"
+ORG = "https://acme-board-demo.hf.space"  # a `board: space` board: the Space's root
+SHARED = "https://acme-boards.hf.space/boards/demo"  # a board under a path, given by url
 DASH = {"registry": "hf://buckets/acme/overview", "name": "Demo", "setup": "One line.",
         "viewer": "https://acme-viewer.hf.space"}
 
@@ -225,7 +271,7 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     created = b.files["runs/demo.json"].pop("created_at")
     assert datetime.fromisoformat(created).utcoffset() == timedelta(0)  # UTC ISO 8601
     assert b.files["runs/demo.json"] == {
-        "id": "demo", "name": "Demo", "title": None, "setup": "One line.", "board_id": "demo",
+        "id": "demo", "name": "Demo", "title": None, "setup": "One line.", "board_id": None,
         "board": ORG + "/", "board_public": "https://huggingface.co/spaces/acme/board-demo",
         "viewer": "https://acme-viewer.hf.space",
         "viewer_public": "https://huggingface.co/spaces/acme/viewer",  # from the registry's namespace
@@ -235,11 +281,12 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     assert b.files["runs/demo.json"]["title"] == "T"  # rewritten, first write's time kept
     assert b.files["runs/demo.json"]["created_at"] == "2026-01-01T00:00:00+00:00"
     # a board given by url: its page derived the same way
-    url_board = {"invite_env": "BOARD_INVITE", "channel": "general", "url": ORG}
+    url_board = {"invite_env": "BOARD_INVITE", "channel": "general", "url": SHARED}
     assert rundir.register_dashboard(_spec(comms=url_board), {"HF_TOKEN": "t"}).ok
-    assert b.files["runs/demo.json"]["board_public"] == "https://huggingface.co/spaces/acme/board-demo"
+    assert b.files["runs/demo.json"]["board_public"] == "https://huggingface.co/spaces/acme/boards"
+    assert b.files["runs/demo.json"]["board_id"] == "demo"
     # dashboard.id: a second row next to an existing experiment's (e.g. a resumed copy of it)
-    other = {**url_board, "url": ORG.replace("/boards/demo", "/boards/demo-2")}  # its own board
+    other = {**url_board, "url": SHARED.replace("/boards/demo", "/boards/demo-2")}  # its own board
     c = rundir.register_dashboard(_spec(comms=other, dashboard={**DASH, "id": "demo-2"}), {"HF_TOKEN": "t"})
     assert c.ok, c.detail
     assert b.files["runs/demo-2.json"]["id"] == "demo-2" and b.files["runs/demo.json"]["id"] == "demo"
@@ -260,12 +307,13 @@ def test_dashboard_refuses_rows_the_overview_drops(monkeypatch, over, why):
 def test_dashboard_refuses_a_board_id_another_run_uses(monkeypatch):
     b = FakeBucket(files={"runs/other.json": {"id": "other", "board_id": "demo"}})
     monkeypatch.setattr(rundir, "bucket_store", lambda url, token: b)
-    c = rundir.register_dashboard(_spec(), {"HF_TOKEN": "t"})
+    shared = {"invite_env": "BOARD_INVITE", "channel": "general", "url": SHARED}
+    c = rundir.register_dashboard(_spec(comms=shared), {"HF_TOKEN": "t"})
     assert c.ok is False and "board_id demo is already used" in c.detail and "runs/other.json" in c.detail
     assert "runs/demo.json" not in b.files
     del b.files["runs/other.json"]  # the same run's own row is no conflict
     b.files["runs/demo.json"] = {"id": "demo", "board_id": "demo"}
-    assert rundir.register_dashboard(_spec(), {"HF_TOKEN": "t"}).ok
+    assert rundir.register_dashboard(_spec(comms=shared), {"HF_TOKEN": "t"}).ok
 
 
 def test_dashboard_write_failure_fails_the_check(monkeypatch):
