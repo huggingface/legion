@@ -91,7 +91,9 @@ every turn is admitted under the provider's `max_working` like any other prompt.
   agent. The worker then sends the rendered prompt when the agent is
   idle and again each time a turn ends `completed` (or at `max_turns`), with no controller round trip (no idle gap,
   run 1 lost ~17 % of agent time there). It stops at `max_rounds`, at the `until` deadline, on
-  a `loop_stop` command, or after 3 failed turns in a row (a failed turn is retried after 2 s).
+  a `loop_stop` command, or after 3 failed turns in a row (a failed turn is retried after 2 s;
+  a turn timeout or a model-server failure, `reason: model_transport`, is retried with backoff
+  from 2 s to 120 s and does not count, up to 20 in a row).
   A turn that ends at the type's `max_turns` is not a failed turn, on either side: with
   `tool_choice: required` it is how turns normally end. Each one is a `loop_max_turns` event.
   Each prompt it sends is a `loop_prompt` event, which is how the controller counts rounds. An

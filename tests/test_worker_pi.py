@@ -593,13 +593,29 @@ def test_pi_spreads_agents_over_multiple_endpoints_without_shared_config():
     assert pi_model_config(spec, "agent-0000") == pi_model_config(spec, "agent-0000")
 
 
-def test_pi_transport_error_has_retryable_reason():
+@pytest.mark.parametrize("message, transient", [
+    ("Connection error.", True),  # the OpenAI SDK with nothing listening (pi_rpc_server_down.jsonl)
+    ("fetch failed: connection reset", True),
+    ("connect ECONNREFUSED 10.0.0.5:8000", True),
+    ("connect EHOSTUNREACH 10.0.0.5:8000", True),
+    ("getaddrinfo ENOTFOUND vllm-0", True),
+    ("Network error", True),
+    ("socket hang up", True),
+    ("terminated", True),  # undici: the stream was cut mid-response
+    ("502 Bad Gateway", True),
+    ("503 status code (no body)", True),
+    ("504 Gateway Time-out", True),
+    ("400 Bad Request: invalid tool schema", False),
+    ("401 Incorrect API key provided", False),
+    ("404 The model `m` does not exist", False),
+])
+def test_model_server_failures_are_model_transport(message, transient):
     mapper = PiMapper()
     mapper.on_record({"type": "agent_start"})
     mapper.on_record({"type": "message_end", "message": {"role": "assistant",
-        "stopReason": "error", "errorMessage": "fetch failed: connection reset"}})
+        "stopReason": "error", "errorMessage": message}})
     [ended] = mapper.on_record({"type": "agent_settled"})
-    assert ended.status == "error" and ended.data["reason"] == "model_transport"
+    assert ended.status == "error" and (ended.data.get("reason") == "model_transport") is transient
 
 
 def test_update_spec_carries_new_endpoints_to_the_next_pi_start(tmp_path):

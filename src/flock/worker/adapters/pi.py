@@ -64,7 +64,15 @@ ENV_DENY = ("FLOCK_TOKEN",)
 # Network extras off; the image sets the same values.
 PI_ENV_DEFAULTS = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
 PI_FLAGS = ("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-approve")
-HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b", re.IGNORECASE)
+# A failed turn whose error matches is `reason: model_transport`: loops retry it with backoff
+# instead of counting it (the model server is down, overloaded or unreachable). Anything else,
+# e.g. 400/401/404 or a context-length error, counts toward the loop's three failed turns.
+TRANSIENT = re.compile(
+    r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503|504)\b"  # not "requested 429 tokens"
+    r"|connection.?(?:error|reset|refused|closed|lost)|network.?error|fetch failed|socket"
+    r"|other side closed|terminated|timeout|timed out|abort"
+    r"|econnreset|econnrefused|ehostunreach|enetunreach|enotfound|eai_again|etimedout",
+    re.IGNORECASE)
 RPC_TIMEOUT = 60.0
 # Records PiMapper ignores that carry whole messages: each `message_update` repeats the partial
 # message so far (per token), `tool_execution_update` the output so far, `turn_end` and
@@ -316,11 +324,8 @@ class PiMapper:
                 return [AdapterEvent("turn_ended", status="interrupted", raw=rec)]
             if last.get("stopReason") == "error":
                 message = str(last.get("errorMessage") or "")
-                transient = bool(HTTP_TRANSIENT.search(message)) or any(x in message.lower() for x in (
-                    "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
-                    "connection refused", "socket", "abort"))
                 return [AdapterEvent("turn_ended", status="error", error=message, raw=rec,
-                                     data={"reason": "model_transport"} if transient else {})]
+                                     data={"reason": "model_transport"} if TRANSIENT.search(message) else {})]
             return [AdapterEvent("turn_ended", status="completed", raw=rec)]
         if t == "auto_retry_end" and not rec.get("success", True):
             return [AdapterEvent("error", error=str(rec.get("finalError") or rec.get("error") or

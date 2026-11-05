@@ -4,8 +4,10 @@ turns in a row, rendering of the built-in placeholders and `{last_summary}`."""
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,7 @@ from flock.tools.toolset import Toolset
 from flock.worker import agents as agents_mod
 from flock.worker.adapters.base import AdapterEvent
 from flock.worker.adapters.llm import LLMAdapter
+from flock.worker.adapters.pi import PiMapper
 from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 from flock.worker.loop import render
@@ -334,6 +337,59 @@ async def test_transport_stalls_do_not_exhaust_worker_loop(tmp_path, monkeypatch
     assert len(ad.sent) == 5
     assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds"
     assert rt._loop_errors == 0
+    await rt.stop()
+
+
+def pi_runs(name: str) -> list[list[dict]]:
+    """A recorded Pi RPC session (tests/fixtures/record_pi_rpc.py), cut after each agent_settled."""
+    runs: list[list[dict]] = [[]]
+    for line in (Path(__file__).parent / "fixtures" / name).read_text().splitlines():
+        runs[-1].append(json.loads(line))
+        if runs[-1][-1].get("type") == "agent_settled":
+            runs.append([])
+    return runs[:-1]
+
+
+class PiReplayAdapter(ScriptedAdapter):
+    """Pi replayed through the real PiMapper: prompt n plays recorded run n (the last repeats)."""
+
+    def __init__(self, home, runs: list[list[dict]]):
+        super().__init__(home)
+        self.runs = runs
+
+    async def send(self, text):
+        self.sent.append(text)
+        m = PiMapper()
+        for rec in self.runs[min(len(self.sent), len(self.runs)) - 1]:
+            for ev in m.on_prompt_response(rec) if rec.get("command") == "prompt" else m.on_record(rec):
+                self._q.put(ev)
+
+
+@pytest.mark.parametrize("fixture, runs, stopped, whys", [
+    # the model server went away: each turn is Pi's 4 failed attempts ("Connection error."),
+    # 4 such turns, then it is back
+    ("pi_rpc_server_down.jsonl", [0, 0, 0, 0, 1], "max_rounds",
+     ["start"] + ["retry after model_transport"] * 4 + ["turn_end"]),
+    ("pi_rpc.jsonl", [2], "errors", ["start", "retry after error", "retry after error"]),  # a 400
+], ids=["server_down", "bad_request"])
+async def test_recorded_pi_failures_in_a_worker_loop(tmp_path, monkeypatch, fixture, runs, stopped, whys):
+    """A 234-agent swarm lost its model server for a while: Pi's own retries are one flock turn,
+    counted once, and a connection failure is retried with backoff instead of counting toward
+    the three failed turns; once the server is back the next turn completes and the counters
+    reset. A genuine error (400) still ends the loop after three turns."""
+    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
+    recorded = pi_runs(fixture)
+    ad = PiReplayAdapter(tmp_path / "h", [recorded[i] for i in runs])
+    rt, _ = runtime(tmp_path, idle_grace="5s", adapter=ad)
+    await rt.setup(restore=False)
+    rt.start_loop(start(max_rounds=6))
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    assert custom(rt, "loop_stopped")[0]["reason"] == stopped
+    assert [d["why"] for d in custom(rt, "loop_prompt")] == whys
+    assert rt.state.turns == len(ad.sent) == len(whys)  # one flock turn per prompt
+    if stopped == "max_rounds":
+        assert rt._loop_errors == rt._loop_transient == 0
     await rt.stop()
 
 

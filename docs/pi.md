@@ -172,7 +172,7 @@ agent being synced or restored. Details: `flock.worker.sync`.
 | `message_end` (system, user, assistant, toolResult) | `message`, the Pi message unchanged (already pi v3) |
 | `message_end`, role assistant, non-zero usage | `usage`, model `<provider>/<id>`, per call (`cumulative=False`) |
 | `compaction_end` with `result.usage` | `usage`, per call (from the docs; not observed) |
-| `agent_settled` | `turn_ended` (completed, error or interrupted; error with `reason` after a limit abort) |
+| `agent_settled` | `turn_ended` (completed, error or interrupted; error with `reason` after a limit abort, or `reason: model_transport` when the error is a connection failure or HTTP 429/502/503/504: `TRANSIENT` in `adapters/pi.py`) |
 | `auto_retry_end {success: false}`, `extension_error`, an unsolicited failed `response` | `error` |
 | a `prompt` Pi rejects (e.g. no API key) | `turn_started` + `turn_ended` status `error` |
 | stdout EOF | `exited` |
@@ -197,6 +197,11 @@ reaching the endpoint as `reasoning_effort: high`, the key arriving as `Bearer <
 env reference, AGENTS.md in the system prompt, no `FLOCK_TOKEN` in the tool's environment, tool
 processes gone after `stop()` (graceful and after a hung Pi is killed), `max_turns=1` and
 `max_budget_usd` stopping a tool prompt after one model call (the session stays usable).
+A model server that went away (`tests/fixtures/pi_rpc_server_down.jsonl`, nothing listening on
+the port): Pi's own auto-retry makes 4 attempts 2, 4 and 8 s apart (`auto_retry_start` x3, then
+`auto_retry_end {success: false}`), each failing with `Connection error.`, inside one run with one
+`agent_settled`: one flock turn, `turn_ended` error `reason: model_transport`. With the server
+back the next prompt completes.
 `experiments/resume-gate-pi` passed as a local dry run and in two cpu-basic jobs; it and the
 tests share one fake server, `tests/fake_openai.py` (`common/launch.sh` copies it next to the
 job scripts). Idle VmRSS of one RPC process: 117 MB; startup to the first RPC
@@ -209,7 +214,7 @@ response 0.4 to 3.3 s on a busy shared dev box.
   Claude-measured defaults) is unmeasured.
 - **Compaction**: never triggered (no long session); its usage mapping follows the docs. Pi's
   default `contextWindow` for a custom model was 128000 in `get_state`.
-- `auto_retry_*` events (the fake server's 400 was not retried; a 5xx/429 path was not tried).
+- `auto_retry_*` after a 5xx/429 (the fake server's 400 was not retried; only a closed port was).
 - A `prompt` that lands between `agent_end` and `agent_settled`.
 - A real model or vLLM endpoint; tool-call parsing is the server's job.
 - Pi 1.3.0 (released 2026-10-15) exists and is untested (not upgraded); the version is part of the resume contract, so a
