@@ -91,6 +91,8 @@ It is env, not YAML: no structure, no second spec.
 SLURM_PARTITION=cpu                      # sbatch -p and the specs' ${SLURM_PARTITION:-}; unset: the cluster default
 WORKER_CPUS=4                            # the specs' compute.cpus / compute.mem
 WORKER_MEM=7G
+WORLD_CPUS=8                             # the world job's sbatch -c / --mem: SIZE IT for your world
+WORLD_MEM=15G                            #   (unset: world.sbatch's 2 CPUs, 3800M; see "Sizing the world job")
 SLURM_MAX_MEM_PER_CPU_MB=2000            # the partition's MaxMemPerCPU: more silently raises the CPU count; unset: not checked
 FLOCK_SLURM_MAX_CPUS=32                  # the largest job a node runs (spec max_cpus/max_mem); unset: not checked
 FLOCK_SLURM_MAX_MEM=60G
@@ -109,6 +111,15 @@ job checks `WORKER_MEM / WORKER_CPUS` against `SLURM_MAX_MEM_PER_CPU_MB` and han
 and not group- or world-writable (the jobs refuse it otherwise). The job scripts read the paths, the
 image and the mounts. Without a partition anywhere, sbatch gets no `-p`. `flock init` layers
 `cluster.env`, then `SECRETS_FILE` (owner-only, mode 600 or 400, else a failed check), then `run.env`, as the jobs do, for its board, provider and bucket checks.
+
+### Sizing the world job
+
+`world.sbatch` asks for 2 CPUs and 3800M, enough for a small world only. flock has no
+per-cluster or per-world size in code: set `WORLD_CPUS` and `WORLD_MEM` in the cluster profile
+or `run.env` (`flock launch` passes them as `-c` / `--mem`, and `CTL_CPUS` / `CTL_MEM` the same
+way for the controller job). For scale: a chatbot4 world serving 234 agents needed 8 CPUs and
+15G; at the default, its bundle fetch timed out. `flock init` notes when they are unset and the
+spec has a `world.command`.
 
 ## The launch contract
 

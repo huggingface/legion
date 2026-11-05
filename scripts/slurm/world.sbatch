@@ -3,7 +3,8 @@
 # CPU Slurm job. `flock launch` submits it with the controller when the spec has a world command;
 # `flock stop --release` stops it before it cancels the controller (docs/slurm.md "Deploying").
 # By hand: sbatch -J flock-world-<run> -o <run dir>/logs/%x-%j.out <run dir>/slurm/world.sbatch <run dir>
-# Size: sbatch -c / --mem (`flock launch` passes WORLD_CPUS / WORLD_MEM from run.env).
+# Size: sbatch -c / --mem (`flock launch` passes WORLD_CPUS / WORLD_MEM from cluster.env or run.env).
+# The #SBATCH defaults below fit a small world only: set both for yours (docs/slurm.md "Sizing the world job").
 #
 # - The command runs on this node, as `compute: local` starts it (docs/world.md): {port} is a free
 #   port, {python} the venv's python; FLOCK_WORLD_PORT, FLOCK_WORLD_HOST=0.0.0.0, FLOCK_SWARM and

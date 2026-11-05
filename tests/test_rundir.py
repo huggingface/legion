@@ -365,6 +365,7 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     rep = rundir.init(run, src, profile=prof, env={})
     assert (run / "cluster.env").read_text() == prof.read_text()
     assert any("cluster.env" in c for c in rep.created)
+    assert not any("WORLD_CPUS" in n for n in rep.notes)  # a `url` world: flock does not start it
     assert _by_name(rep)["spec"].detail.startswith("from-profile:")  # the profile fills ${VAR}s
     text = (run / "run.env").read_text()  # its keys say the profile's value, not `default: `
     assert "# compute.partition (cluster.env: cpu-spot)\n#SLURM_PARTITION=\n" in text
@@ -446,6 +447,23 @@ def test_cluster_env_is_0644_whatever_the_umask_and_the_doctor_checks_it_like_th
     monkeypatch.setattr(os, "getuid", lambda: f.stat().st_uid + 1)
     c = rundir.check_cluster_env(f)
     assert c.ok is False and "not you" in c.detail
+
+
+def test_slurm_world_command_without_a_size_gets_a_note(tmp_path, monkeypatch):
+    (tmp_path / "w").mkdir()
+    spec = {**SLURM_SPEC, "world": {**SLURM_SPEC["world"], "command": ["{python}", "w.py"],
+                                    "dir": str(tmp_path / "w")}}
+    src, run = _folder(tmp_path, spec), tmp_path / "r"
+    monkeypatch.setattr(rundir, "check_capacity", lambda spec, env: rundir.Check("slurm capacity", True))
+    prof = tmp_path / "site.env"
+    prof.write_text("WORLD_MEM=15G\n")
+    rep = rundir.init(run, src, profile=prof, env={})
+    assert [n for n in rep.notes if "WORLD_" in n] == [(
+        "WORLD_CPUS unset: the world job gets world.sbatch's default (2 CPUs, 3800M), small for a "
+        'busy world; set them in cluster.env or run.env (docs/slurm.md "Sizing the world job")')]
+    with (run / "run.env").open("a") as f:
+        f.write("WORLD_CPUS=8\n")
+    assert not any("WORLD_" in n for n in rundir.init(run, env={}).notes)
 
 
 def test_slurm_capacity_from_a_fake_sinfo(tmp_path):

@@ -847,6 +847,11 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     if spec.compute.kind == "slurm":  # the job scripts `flock launch` submits; an edited copy is kept
         copy_experiment(SLURM_SCRIPTS, d / "slurm", rep, need=None)
         rep.checks += [check_capacity(spec, secret_env), check_mounts(secret_env)]
+        if spec.world and spec.world.command and (unset := [n for n in ("WORLD_CPUS", "WORLD_MEM")
+                                                            if not values.get(n)]):
+            rep.notes.append(f"{', '.join(unset)} unset: the world job gets world.sbatch's default "
+                             "(2 CPUs, 3800M), small for a busy world; set them in cluster.env or "
+                             f"{RUN_ENV} (docs/slurm.md \"Sizing the world job\")")
         if (d / CLUSTER_ENV).is_file():
             rep.checks.append(check_cluster_env(d / CLUSTER_ENV))
     return rep
