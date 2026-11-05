@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import tarfile
+import tomllib
+import zipfile
+from pathlib import Path
 
 import pytest
 
 from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
-    HARBOR_HF_HUB_VERSION,
     HF_HUB_VERSION,
     PI_VERSION,
     WORKER_COMMAND,
@@ -31,7 +36,7 @@ def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
     script = cmd[2]
     assert f"@earendil-works/pi-coding-agent@{PI_VERSION}" in script
     assert "astral.sh/uv/install.sh" in script
-    assert 'hf buckets cp "$FLOCK_WHEEL_URL"' in script
+    assert 'hf buckets cp "$1" "$2"' in script and 'fetch "$FLOCK_WHEEL_URL"' in script
     assert "download_bucket_files" in script  # Python API fallback
     assert 'uv tool install -q "$WHEEL[worker]"' in script and "pip install" in script
     for env in ("WORK_ROOT=/work/agents", "PI_CODING_AGENT_DIR=/state/pi"):
@@ -62,28 +67,93 @@ def test_bootstrap_installs_pi_only_on_pi_workers(monkeypatch):
     assert args["env"]["FLOCK_HARNESS"] == "pi"
 
 
-@pytest.mark.parametrize("harness, npm, install", [
-    ("pi", True, f"-q /opt/wheels/w.whl[worker] --with huggingface_hub=={HF_HUB_VERSION}"),
-    ("harbor", False,
-     f"-q --python 3.12 /opt/wheels/w.whl[harbor] --with huggingface_hub=={HARBOR_HF_HUB_VERSION}"),
-])
-def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness, npm, install):
-    """The bootstrap script on stubs (uv, hf, npm, curl, mkdir, flock, flock-worker): a harbor
-    worker gets flock[harbor] on a Python Harbor runs on, with the hub version Harbor needs, and
-    no Pi CLI (Pi runs inside each Trial's environment)."""
-    stubs, log = tmp_path / "stubs", tmp_path / "calls.log"
+MSGBOARD = "msgboard-0.1.0-py3-none-any.whl"
+# what git asks a credential helper for a huggingface.co clone
+FILL = ("printf 'protocol=https\\nhost=huggingface.co\\n\\n' | git credential fill 2>/dev/null"
+        " | grep password= >> LOG; exit 0")
+
+
+def fake_wheel(path: Path, requires: tuple[str, ...] = ()) -> Path:
+    """A wheel uv can read: name and version from the file name, metadata only."""
+    name, version = path.name.split("-")[:2]
+    info = f"{name}-{version}.dist-info"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr(f"{info}/METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+                   + "".join(f"Requires-Dist: {r}\n" for r in requires))
+        z.writestr(f"{info}/WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        z.writestr(f"{info}/RECORD", "")
+    return path
+
+
+@pytest.mark.parametrize("harness", ["pi", "harbor"])
+def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness):
+    """The bootstrap script on stubs (uv, hf from a local bucket, npm, curl, mkdir, flock,
+    flock-worker). A harbor worker installs flock[harbor] on Python 3.12 with uv.lock's versions
+    as constraints and msgboard overridden to the wheel shipped next to flock's (never its
+    private git source), gets shepherd's git credential helper for huggingface.co, and no Pi
+    CLI (Pi runs inside each Trial's environment)."""
+    stubs, log, bucket = tmp_path / "stubs", tmp_path / "calls.log", tmp_path / "bucket"
+    wheels = tmp_path / "wheels"  # the script's /opt/wheels
+    (bucket / "ns/sh/dist").mkdir(parents=True)
+    (bucket / "ns/sh/dist/w.whl").write_text("")
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    fake_wheel(deps / MSGBOARD)
+    (deps / "constraints.txt").write_text("harbor==0.25.0 ; python_full_version >= '3.12'\n")
+    with tarfile.open(bucket / "ns/sh/dist/harbor-deps.tar", "w") as tar:
+        tar.add(deps, arcname=".")
     stubs.mkdir()
-    for name in ("uv", "hf", "npm", "curl", "mkdir", "flock", "flock-worker"):
-        (stubs / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n')
+    wheels.mkdir()
+    for name, body in [
+        ("uv", 'for a; do [ "${prev:-}" = --overrides ] && cat "$a" >> LOG; prev=$a; done'),
+        ("hf", f'cp "{bucket}/${{3#hf://buckets/}}" "$4"'),
+        ("flock-worker", FILL),
+        *((name, "") for name in ("npm", "curl", "mkdir", "flock")),
+    ]:
+        (stubs / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n'
+                                  + body.replace("LOG", str(log)) + "\n")
         (stubs / name).chmod(0o755)
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "FLOCK_HARNESS": harness,
-           "FLOCK_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl"}
-    r = subprocess.run(bootstrap_command(), env=env, capture_output=True, text=True, timeout=30,
-                       check=False)
+           "FLOCK_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl", "HF_TOKEN": "hf_test_token"}
+    cmd = bootstrap_command()
+    r = subprocess.run([*cmd[:2], cmd[2].replace("/opt/wheels", str(wheels))], env=env,
+                       capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, r.stderr
     calls = log.read_text().splitlines()
-    assert f"uv tool install {install}" in calls and calls[-1] == "flock-worker "
-    assert any(c.startswith("npm i -g") for c in calls) == npm
+    assert any(c.startswith("npm i -g") for c in calls) == (harness == "pi")
+    if harness == "pi":
+        assert f"uv tool install -q {wheels}/w.whl[worker] --with huggingface_hub=={HF_HUB_VERSION}" in calls
+        assert calls[-1] == "flock-worker "  # no git helper
+        return
+    i = calls.index(f"uv tool install -q --python 3.12 {wheels}/w.whl[harbor] -c "
+                    f"{wheels}/constraints.txt --overrides {wheels}/overrides.txt")
+    assert calls[i + 1] == f"msgboard @ file://{wheels}/{MSGBOARD}"  # the overrides file
+    assert (wheels / "constraints.txt").read_text().startswith("harbor==0.25.0")
+    assert calls[-2:] == ["flock-worker ", "password=hf_test_token"]
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not installed")
+def test_the_override_replaces_msgboards_git_source(tmp_path):
+    """What the harbor bootstrap relies on: uv's --overrides replaces the harbor extra's
+    `msgboard @ git+` requirement (pyproject's, in flock's wheel metadata) with the shipped
+    wheel. Offline and without the override, uv cannot resolve it."""
+    harbor = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())[
+        "project"]["optional-dependencies"]["harbor"]
+    (git,) = [r for r in harbor if r.startswith("msgboard @ git+")]
+    flock = fake_wheel(tmp_path / "flock-0.0.1-py3-none-any.whl", (f'{git} ; extra == "harbor"',))
+    (tmp_path / "req.in").write_text(f"flock[harbor] @ file://{flock}\n")
+    (tmp_path / "overrides.txt").write_text(f"msgboard @ file://{fake_wheel(tmp_path / MSGBOARD)}\n")
+
+    def compile_(*extra):
+        return subprocess.run(["uv", "pip", "compile", "-q", "--offline", "--no-index",
+                               "--no-cache", *extra, str(tmp_path / "req.in")],
+                              capture_output=True, text=True, timeout=60, check=False,
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+
+    r = compile_("--overrides", str(tmp_path / "overrides.txt"))
+    assert r.returncode == 0, r.stderr
+    assert f"msgboard @ file://{tmp_path}/{MSGBOARD}" in r.stdout and "git+" not in r.stdout
+    assert compile_().returncode != 0
 
 
 def test_launch_args_bootstrap_flag_overrides_default_image(monkeypatch):
