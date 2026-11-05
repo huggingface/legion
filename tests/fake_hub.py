@@ -6,7 +6,7 @@
   minus BUCKET (the agents' state stays on this disk), its /work and HOME under `root/<job id>`.
   `hub.jobs[id]` keeps the job spec as huggingface_hub sent it.
 - GET /api/jobs/<ns>/<id>: RUNNING, then COMPLETED (exit 0), ERROR (another exit) or CANCELED.
-- POST /api/jobs/<ns>/<id>/cancel: SIGTERM to the job's processes; CANCELED.
+- POST /api/jobs/<ns>/<id>/cancel: a running job's processes get SIGTERM; CANCELED.
 - GET /api/jobs/<ns>?label=k=v: the jobs with every one of those labels.
 - Anything else: 404.
 """
@@ -59,8 +59,8 @@ class Hub:
                 "owner": {"id": "0", "name": spec["namespace"], "type": "user"}}
 
     def cancel(self, job: str) -> None:
-        self.cancelled.add(job)
-        if self.procs[job].poll() is None:
+        if self.procs[job].poll() is None:  # an ended job keeps its stage
+            self.cancelled.add(job)
             os.killpg(self.procs[job].pid, signal.SIGTERM)
 
 

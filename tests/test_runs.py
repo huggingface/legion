@@ -664,8 +664,11 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
     out = tiny.flock("stop", "tiny", "--release")
     assert "released: every agent synced, compute freed" in out, out
     assert "controller kept: no job of this run serves it" in out
+    # the drained worker's last heartbeat ends its slot at once; the controller's scancel then
+    # finds the job ended, or ends it while the worker exits
+    ours = f"CANCELLED by {os.getuid()}"
     ended = [(slurm.dir / "jobs" / f"{i}.state").read_text().strip() for i in (first, second)]
-    assert ended in (["FAILED", "COMPLETED"], [f"CANCELLED by {os.getuid()}", "COMPLETED"])
+    assert ended[0] in ("FAILED", ours) and ended[1] in ("COMPLETED", ours), ended
     [wk] = json.loads(tiny.flock("status", "tiny", "--json"))["workers"]
     assert (wk["state"], wk["crashes"]) == ("dead", 0), wk
 
@@ -700,6 +703,7 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
 
     out = tiny.flock("stop", "tiny", "--release")
     assert "released: every agent synced, compute freed" in out, out
-    assert hub.info(job)["status"]["stage"] == "COMPLETED"
+    assert hub.info(job)["status"]["stage"] in ("COMPLETED", "CANCELED")  # see test_slurm
     assert [(e["name"], e["data"]["detail"]) for e in tiny.events("tiny", "worker.")] == [
-        ("worker.launched", job), ("worker.released", job), ("worker.ended", "COMPLETED")]
+        ("worker.launched", job), ("worker.released", job),
+        ("worker.ended", "COMPLETED: drained: worker reported it")]

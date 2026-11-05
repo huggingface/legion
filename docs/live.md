@@ -101,10 +101,11 @@ creates or resumes and never changes the spec.
 each agent's final push to the bucket is retried once, and a push that still fails is named in
 the worker's last heartbeat (`sync_failed` on the swarm stream, the worker's `last_error`,
 `status.released.unsynced`; a worker that ends unplanned mid-release, without that heartbeat,
-puts all its agents there). The command waits until no worker runs, then exits 0 when every
-agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, loops, spec and
-history stay on the controller; nothing launches until `flock launch S`, when each agent
-restores from the bucket by name.
+puts all its agents there). That last heartbeat (`drained`) ends the worker's slot at once:
+the controller does not wait for the scheduler to show the job ended. The command waits until
+no worker runs, then exits 0 when every agent synced, or 1 listing the agents that did not.
+Rows, names, spawn trees, loops, spec and history stay on the controller; nothing launches until
+`flock launch S`, when each agent restores from the bucket by name.
 
 A release then ends the run's controller and world jobs (`ops.down`; Slurm:
 [slurm.md](slurm.md#deploying), HF Jobs: [deploy-job.md](deploy-job.md#deploy)), in this order:

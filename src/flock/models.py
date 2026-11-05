@@ -1687,6 +1687,9 @@ class WorkerHeartbeat(BaseModel):
     # the worker's last heartbeat after a preemption notice (SIGUSR1): it synced and exits;
     # the controller relaunches the slot at once, as a planned restart (docs/slurm.md)
     preempted: bool = False
+    # the worker's last heartbeat after a finished drain (`unsynced` names any agent whose final
+    # sync failed): it exits now, and the controller ends the slot without waiting for the job
+    drained: bool = False
     # agents whose turn a preemption or a bounded drain cut; they get the type's
     # resume_prompt after the restore
     interrupted: list[str] = Field(default_factory=list)

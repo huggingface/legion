@@ -203,7 +203,7 @@ def _needs_check(w: Row, now: float, lv: Liveness, local: bool) -> bool:
     A local worker is checked every pass (a process poll): its exit is a crash at once."""
     if w["job_id"] is None:
         return False
-    if local or w.get("preempted"):  # preempted: the worker synced and is exiting, end it now
+    if local or w.get("preempted") or w.get("drained"):  # synced and exiting: end it now
         return True
     seen = last_seen(w)
     if seen is None and now - (w["launched_at"] or now) < INSPECT_GRACE:
@@ -611,6 +611,13 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
         _job_ended(p, spec, w, ts, JobState("ERROR", "preempted: worker reported it",
                                             preempted=True))
         return
+    if w.get("drained") and not p.local:  # a local worker's exit is seen at once anyway
+        # The last heartbeat after a finished drain: synced, exiting 0. End the slot as its job's
+        # COMPLETED would, without waiting up to INSPECT_EVERY for the scheduler to show it; the
+        # cancel only makes sure the job never lingers on (compute freed).
+        p.cancel(w["job_id"], spec.namespace)
+        _job_ended(p, spec, w, ts, JobState("COMPLETED", "drained: worker reported it"))
+        return
     st = p.job_state(w["job_id"], spec.namespace)
     if st is None:
         return
@@ -652,6 +659,7 @@ def _job_ended(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None, st: JobSt
         "last_seen": None,
         "draining": 0,
         "preempted": 0,
+        "drained": 0,
     }
     released = bool(store.swarm_flags(w["swarm"]).get("released"))
     if not planned and released:
@@ -813,6 +821,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         last_inspect=None,
         draining=0,
         preempted=0,
+        drained=0,
         log_path=log_path,
         state=WorkerState.launching.value,
         next_launch_at=None,
@@ -842,6 +851,8 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
     }
     if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
         fields["preempted"] = 1
+    if hb.drained:  # the next reconcile pass ends the slot (a drain's planned end)
+        fields["drained"] = 1
     if hb.unsynced and (hb.draining or hb.preempted):  # a final sync failed: never swallowed
         fields["last_error"] = ("final sync failed: " + ", ".join(sorted(hb.unsynced)))[:500]
         store.put_control(w["swarm"], "unsynced",
