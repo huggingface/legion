@@ -380,8 +380,9 @@ def test_cli_status_json_and_watch(app, store, monkeypatch):
     assert out.exit_code == 0, out.output
     for want in ("gen 1", "no world", "workers (by time to memory limit)", "demo-researcher-w0000",
                  "world tools:", "open_pr", "restores:", "control-plane events", "crash",
-                 "reaches its memory limit in 30 min"):
+                 "reaches its memory limit in 30 min", "nonreclaim MB", "800/1000"):
         assert want in out.output, (want, out.output)
+    assert "900/1000" not in out.output  # memory.current: page cache included
 
 
 def test_watch_shows_world_metrics_and_provider_queues(capsys):

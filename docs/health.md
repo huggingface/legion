@@ -151,8 +151,9 @@ reason (`PENDING (Resources)`, from squeue `%r`) and one row per worker with cra
 `last_error`; the snapshot's world (up/down, Slurm state, `/metrics`: event-loop lag, 429s,
 each pool's oldest queue wait, `lane_<lane>_*` per lane, the comment outbox, any other number
 under `world`), each model server, each ramp (`step k/n, next +m at HH:MMZ`), alerts, agents
-per type and state, workers by time to memory limit, restores, tool rates, stuck agents and
-the last control-plane events.
+per type and state, workers by time to memory limit (on non-reclaimable memory, as the
+worker's relief ladder: `nonreclaim MB`, its slope and ETA; a worker that sends none shows its
+total, marked `total`), restores, tool rates, stuck agents and the last control-plane events.
 
 - `--type T`, `--state S`, `--parent P` list the matching agents (with their server, `DEAD`
   when it is down); `--type` adds the type's per-agent loop rows. `--state idle` means what

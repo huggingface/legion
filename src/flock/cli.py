@@ -316,6 +316,14 @@ def _show_launch(swarm: str, done: dict, strict: bool) -> None:
         _print_status(done["status"])
 
 
+def _mem_mb(m: dict) -> str:
+    """Non-reclaimable / limit MB: what the worker's slope, ETA and relief ladder use, not
+    memory.current (page cache included). A worker that sends none: the total, marked."""
+    nr = m.get("nonreclaim_mb")
+    used = _num(nr) if nr is not None else f"{_num(m.get('current_mb'))} total"
+    return f"{used}/{_num(m.get('limit_mb'))}"
+
+
 def _show_held(r: dict) -> None:
     h = r["held"]
     held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
@@ -591,10 +599,10 @@ def _print_health(h: dict | None, workers: list[dict]) -> None:
                 key=lambda x: (x[1].get("eta_limit_s") is None, x[1].get("eta_limit_s") or 0))
     if ws:
         typer.echo("workers (by time to memory limit):")
-        _table([[wid, f"{_num(wk['mem'].get('current_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
-                 _num(wk.get("slope_mb_h")), _num(wk.get("eta_limit_s"), "{:.0f}s"),
-                 wk.get("relaunches", 0)] for wid, wk in ws[:15]],
-               ["worker", "mem MB", "MB/h", "to limit", "relaunches"])
+        _table([[wid, _mem_mb(wk["mem"]), _num(wk.get("slope_mb_h")),
+                 _num(wk.get("eta_limit_s"), "{:.0f}s"), wk.get("relaunches", 0)]
+                for wid, wk in ws[:15]],
+               ["worker", "nonreclaim MB", "MB/h", "to limit", "relaunches"])
     restores = [(wid, wk["restore"]) for wid, wk in ws if wk.get("restore")]
     if restores:
         typer.echo("restores:")
