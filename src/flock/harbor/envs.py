@@ -7,6 +7,7 @@ import contextvars
 from harbor.environments import hf_sandbox
 from harbor.environments.docker.docker import DockerEnvironment
 from harbor.environments.podman import PodmanEnvironment
+from harbor.utils.env import is_sensitive_env_key
 
 from flock.secrets_file import secret_env
 
@@ -16,10 +17,12 @@ _EXEC_ENV = contextvars.ContextVar("flock_exec_env", default=None)
 class _EnvOffArgv:
     """Harbor's `compose exec -e NAME=value` (the agent's env: the inference key, resource
     tokens) puts the value in an argv every user of the node reads (`ps`). For the agent's env
-    names (`secret_names`, from the adapter) it passes `-e NAME`, and the value goes in the
-    compose process's own environment, which podman and docker read a bare NAME from
-    (podman-compose 1.5: `--env NAME`). Any other name (a task's PATH or STORAGE_DRIVER, which
-    would steer the host's compose there) keeps `-e NAME=value`."""
+    names (`secret_names`, from the adapter) and every sensitive-looking one (Harbor's
+    `is_sensitive_env_key`: the key Harbor's Pi passes as OPENAI_API_KEY, a task's *_TOKEN) it
+    passes `-e NAME`, and the value goes in the compose process's own environment, which podman
+    and docker read a bare NAME from (podman-compose 1.5: `--env NAME`). Any other name (a
+    task's PATH or STORAGE_DRIVER, which would steer the host's compose there) keeps
+    `-e NAME=value`."""
 
     def __init__(self, *args, secret_names=(), **kwargs):
         super().__init__(*args, **kwargs)
@@ -31,7 +34,8 @@ class _EnvOffArgv:
         command, values, i = list(command), {}, 1
         while i + 1 < len(command) and command[i] in ("-w", "-e", "-u"):  # flags, then service
             name, eq, value = command[i + 1].partition("=")
-            if command[i] == "-e" and eq and name in self._secret_names:
+            if command[i] == "-e" and eq and (name in self._secret_names
+                                              or is_sensitive_env_key(name)):
                 values[name], command[i + 1] = value, name
             i += 2
         token = _EXEC_ENV.set(values)  # per task: concurrent execs keep their own

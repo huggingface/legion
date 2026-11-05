@@ -348,6 +348,10 @@ reads `HF_TOKEN` from a 0600 file there. At exit the job's containers are stoppe
 KillWait. With `--cgroup-manager cgroupfs` and no user systemd, conmon and the containers should
 stay in the job's cgroup (Slurm's `Contain` kills them, the memory ladder sees them): unverified
 on compute nodes so far.
+Every user of a node can read a process's command line (`ps`): a Trial's `compose exec` passes
+the agent's env (its inference key, resource tokens) and sensitive-looking names (`*_TOKEN`,
+`*_API_KEY`, `*SECRET*`, `*PASSWORD*`) by name only. A task's `[verifier.env]` value taken from
+a secret must have such a name, or it stays on the command line.
 
 ## Singletons on Spot
 

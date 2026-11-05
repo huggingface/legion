@@ -26,6 +26,7 @@ from flock.harbor.spec import Spec, compile_spec
 from flock.worker.adapters.base import ResumeError
 from flock.worker.adapters.harbor import HarborAdapter, make_adapter
 
+from .test_envs import compose
 from .test_launch import FakeTrial
 
 EXAMPLES = Path(__file__).parent / "examples"
@@ -42,6 +43,7 @@ class Fakes:
 
     def __init__(self):
         self.trials, self.pi, self.root, self.uploads, self.net = [], [], [], [], []
+        self.pi_env = []  # each `pi --print` exec's env
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.fail = None  # pi call number -> "exit" | "provider"
         self.hold = set()  # pi call numbers that wait for release(n) or a kill
@@ -102,6 +104,7 @@ class FakeEnv:
         if " pi --print " not in command:
             return ExecResult(return_code=0)
         f.pi.append(command)
+        f.pi_env.append(env)
         n = len(f.pi)
         if n in f.hold:
             await f.gate(n).wait()
@@ -838,3 +841,21 @@ async def test_preempt_pushes_the_last_turns_unmounted_sessions(fakes, tmp_path)
     await asyncio.wait_for(run, 3)
     (session,) = [k for k in store.files if k.endswith("s.jsonl")]
     assert len(store.files[session].splitlines()) == 2  # the turn after the last SYNC download
+
+
+async def test_a_pi_turn_leaves_no_value_in_an_argv(fakes, monkeypatch, tmp_path):
+    """The env the real FlockPi gives a `pi --print` turn (Harbor's Pi passes the inference key
+    as OPENAI_API_KEY, not under the spec's name) through flock's docker environment with the
+    adapter's secret_names: every name is passed bare, every value through the environment."""
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    await a.send("go")
+    await read(events, "turn_ended")
+    await a.close()
+    (pi_env,) = fakes.pi_env
+    runs, env = compose(monkeypatch, tmp_path, "docker",
+                        fakes.trials[0].config.environment.kwargs["secret_names"])
+    await env.exec("pi --print go", env=pi_env, user="agent")
+    ((argv, compose_env),) = runs
+    assert pi_env and all(compose_env[k] == v for k, v in pi_env.items())
+    assert not [x for x in argv for v in pi_env.values() if v in x], argv
