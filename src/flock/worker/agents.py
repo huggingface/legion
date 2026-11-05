@@ -416,7 +416,7 @@ class AgentRuntime:
     def _write_world_section(self) -> None:
         """The World section (name, version, tools, a "world changed" note) of CLAUDE.md /
         AGENTS.md, rewritten when it changes (docs/world.md)."""
-        if self.world is None or not self.workdir.is_dir():
+        if self.world is None or not self.workdir.is_dir() or not self._own_instructions:
             return
         section = self.world.section(self.name)
         if section != (self._world_section or ""):
@@ -429,7 +429,7 @@ class AgentRuntime:
     def _write_comms_section(self) -> None:
         """The comms section (board identity, rules, protocol files) of CLAUDE.md / AGENTS.md,
         rewritten when it changes; the llm harness reads AGENTS.md into its system message."""
-        if self.comms is None or not self.workdir.is_dir():
+        if self.comms is None or not self.workdir.is_dir() or not self._own_instructions:
             return
         section = self.comms.section(self.name)
         if section != (self._comms_section or ""):
@@ -444,7 +444,8 @@ class AgentRuntime:
     def _write_tools_section(self, tools: Toolset) -> None:
         """The generated Tools section of CLAUDE.md / AGENTS.md (CLI harnesses; llm gets function
         tools instead), rewritten when the toolset changes."""
-        if self.spec.harness.value == "llm" or not self.workdir.is_dir():
+        if (self.spec.harness.value == "llm" or not self.workdir.is_dir()
+                or not self._own_instructions):
             return
         section = instructions_section(tools)
         if section != (self._tools_section or ""):
@@ -455,9 +456,14 @@ class AgentRuntime:
                 self._note(f"your tools changed; re-read the Tools section of {target.name}")
         self._tools_section = section
 
+    @property
+    def _own_instructions(self) -> bool:
+        """CLAUDE.md / AGENTS.md go in the workdir; a harbor Trial gets its own from Harbor."""
+        return self.spec.harness.value != "harbor"
+
     def _write_instructions(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)
-        if self._instructions_written:
+        if self._instructions_written or not self._own_instructions:
             return
         target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
         if self.spec.system_prompt is not None:
@@ -920,13 +926,25 @@ class AgentRuntime:
             finally:
                 self._stop_req = None
         self._defer_buffer("draining")
+        await self._close()
         await self.sync_now("drain")
         return cut
 
     async def unassign(self) -> None:
         self.allow_starts = False
         await self.stop("unassign")
+        await self._close()
         await self.sync_now("unassign")
+
+    async def _close(self) -> None:
+        """End what outlives a burst (harbor: the Trial, whose verifier then runs)."""
+        if (close := getattr(self.adapter, "close", None)) is None:
+            return
+        try:
+            await close()
+        except Exception as e:  # noqa: BLE001 - the sync after it must still run
+            log.warning("%s: close failed: %s", self.name, e)
+            self.emit("error", {"error": f"close failed: {type(e).__name__}: {e}"})
 
     async def sync_now(self, reason: str) -> None:
         """Push the agent to the bucket; every push path (periodic, drain, preempt, unassign)
@@ -968,6 +986,7 @@ class AgentRuntime:
             rev=self.rev,
             start_rev=self.start_rev,
             endpoint=self.endpoint(),
+            trial=status() if (status := getattr(self.adapter, "trial_status", None)) else None,
         )
 
     def endpoint(self) -> str | None:

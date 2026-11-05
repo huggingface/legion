@@ -728,8 +728,8 @@ class HarborSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     task: dict[str, Any]  # ResolvedTask.manifest(): registry commit, dataset, the pinned task
-    # a partial flock.harbor Spec (model, inference, task, environment, limits) for
-    # shepherd's build_trial_config
+    # a partial flock.harbor Spec (model, inference, task, environment, limits, tools_dir,
+    # tools, resources_dir) for shepherd's build_trial_config and the worker's HarborHost
     config: dict[str, Any]
     team: str = ""  # the team_file's text
     role: str | None = None  # the role named in the instructions (None: agents.count)
@@ -1670,6 +1670,7 @@ class AgentHeartbeat(BaseModel):
     rev: str | None = None  # `type_spec_rev` the agent applied at its last turn boundary
     start_rev: str | None = None  # the one its running harness process started with
     endpoint: str | None = None  # `host:port` of the model server it is pinned to (base_urls)
+    trial: dict[str, Any] | None = None  # harness harbor: {id, attempt, alive} of its Trial
 
 
 class WorkerMem(BaseModel):

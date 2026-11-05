@@ -38,12 +38,13 @@ class HarborAdapter:
     harness = "harbor"
 
     def __init__(self, workdir: Path, name: str, spec: TypeSpec, *, resources: Any = None,
-                 bundle: Any = None) -> None:
+                 bundle: Any = None, host: Any = None) -> None:
         self.workdir, self.agent, self.spec = Path(workdir), name, spec
         self.root = self.workdir.parent / "_harbor" / name  # trials/<name>-tN, state/sources
         self.home = self.root / "pi"
         self.resources = resources  # the worker's flock.harbor Resources (bind); None: none
         self.bundle = bundle  # the run's ToolBundle; None: no tools
+        self.host = host  # the worker's HarborHost: resources, bundle, task (flock.worker.harbor)
         self.session_id: str | None = None
         self.attempt = 0  # Trials started for this agent here
         self.trial: Any = None
@@ -63,6 +64,12 @@ class HarborAdapter:
 
     def alive(self) -> bool:
         return self._run is not None and not self._run.done()
+
+    def trial_status(self) -> dict[str, Any] | None:
+        """The heartbeat's `trial`: the agent's latest Trial here, if any."""
+        if self.trial is None:
+            return None
+        return {"id": self.trial.config.trial_name, "attempt": self.attempt, "alive": self.alive()}
 
     # ------------------------------------------------------------------ adapter
     async def start(self, workdir: Path, session_id: str | None, spec: TypeSpec, *,
@@ -162,11 +169,14 @@ class HarborAdapter:
         h = self.spec.harbor
         if h is None:
             raise RuntimeError("harness harbor needs the type's `harbor:` block")
+        if self.host is not None:
+            await self.host.prepare(self.spec)
+            self.resources, self.bundle = self.host.resources, self.host.bundle
         if h.tools.get("tools") and self.bundle is None:
             raise RuntimeError(f"the tool bundle {h.tools_sha256} is not on this worker")
         config = Spec.model_validate(h.config)
         task = ResolvedTask(GitTaskId.model_validate(h.task["task"]), h.task["registry_commit"],
-                            h.task["dataset"])
+                            h.task["dataset"], getattr(self.host, "task_path", None))
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
         tc = launch.build_trial_config(config, task, self.root, self.agent, self._instructions())
@@ -178,6 +188,8 @@ class HarborAdapter:
         tc.environment.kwargs = dict(config.environment.kwargs)
         if self.resources is not None:
             self.resources.bind(self.agent, tc)
+            if tc.environment.mounts and config.environment.backend == "hf-sandbox":
+                raise RuntimeError("hf-sandbox has no mounts: use the resources' http transport")
         self._creating = True
         try:
             trial = await launch.Trial.create(tc)
@@ -238,7 +250,7 @@ def _why(trial: Any, task: asyncio.Task) -> str:
             or (info.exception_message if info is not None else None) or "ended")
 
 
-def make_adapter(workdir: Path, name: str, spec: TypeSpec) -> HarborAdapter:
-    """The worker's factory for harness `harbor` (flock.registry). The worker's Resources and
-    the tool bundle are not wired yet (the next step)."""
-    return HarborAdapter(workdir, name, spec)
+def make_adapter(workdir: Path, name: str, spec: TypeSpec, *, host: Any = None) -> HarborAdapter:
+    """The worker's factory for harness `harbor` (flock.registry); `host` is the worker's
+    HarborHost (its Resources, tool bundle and task download)."""
+    return HarborAdapter(workdir, name, spec, host=host)

@@ -88,6 +88,7 @@ from flock.worker.cgroup import (
 )
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
+from flock.worker.harbor import HarborHost
 from flock.worker.identity import Identities
 from flock.worker.sync import (
     BucketStats,
@@ -430,9 +431,11 @@ MEM_KNOB_ENV = {"rotate": "FLOCK_MEM_ROTATE", "drain": "FLOCK_MEM_DRAIN",
                 "recycle_gap_s": "FLOCK_MEM_RECYCLE_GAP_S"}
 
 
-def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
+def default_adapter_factory(cfg: WorkerConfig, harbor: HarborHost | None = None
+                            ) -> Callable[[str, TypeSpec], HarnessAdapter]:
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
-        return load(HARNESSES[spec.harness].adapter)(cfg.work_root / name, name, spec)
+        kw = {"host": harbor} if spec.harness.value == "harbor" else {}
+        return load(HARNESSES[spec.harness].adapter)(cfg.work_root / name, name, spec, **kw)
 
     return make
 
@@ -481,7 +484,9 @@ class Worker:
         self.client = client
         self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
                                            type_name=cfg.type, fetch=self._fetch_tools)
-        self.adapter_factory = adapter_factory or default_adapter_factory(cfg)
+        # harness harbor: what its agents' Trials share on this worker (flock.worker.harbor)
+        self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker")
+        self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
         self.identities = identities or Identities()
         self.outbox = Outbox()
@@ -1165,6 +1170,7 @@ class Worker:
                 log.warning("preempt: events/heartbeat cut at the budget")
         else:
             await self._final_reports()
+            await self.harbor.close()  # not in a preemption's budget: the job ends anyway
         await self.comms.aclose()
         await self.world.aclose()
         await self.client.aclose()

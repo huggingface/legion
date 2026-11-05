@@ -250,6 +250,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
                  "dataset": None, "selector": "v8", "revision": "main"},
         "environment": {"backend": "hf-sandbox", "kwargs": {"flavor": "cpu-basic"}},
         "limits": {"agent_max_turns": 150, "agent_timeout_seconds": None, "trial_hours": 23},
+        "tools_dir": str(spec.tools_dir), "tools": ["board.*"],
+        "resources_dir": str(spec.resources_dir),
     }
     assert Spec.model_validate(h.config).model == h.config["model"]  # the worker rebuilds it
 

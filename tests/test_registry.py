@@ -14,7 +14,8 @@ from flock.registry import COMPUTE, HARNESSES, load
 @pytest.mark.parametrize("name", HARNESSES)
 def test_harness_entry_is_complete(name):
     h = HARNESSES[name]
-    assert list(inspect.signature(load(h.adapter)).parameters) == ["workdir", "name", "spec"]
+    # harbor's also takes the worker's `host` (flock.worker.harbor)
+    assert list(inspect.signature(load(h.adapter)).parameters)[:3] == ["workdir", "name", "spec"]
     assert h.instructions_file.endswith(".md")
     assert Harness(name) == name
     if h.version:  # Dockerfile.worker is edited by hand

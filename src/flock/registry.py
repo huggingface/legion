@@ -17,6 +17,7 @@ from typing import Any
 @dataclass(frozen=True)
 class HarnessEntry:
     adapter: str  # "module:function"; function(workdir, agent name, TypeSpec) -> HarnessAdapter
+    # (harbor's also takes `host=`, the worker's HarborHost)
     provider_type: str  # the provider `type` a provider-backed model must have
     api: str  # the wire API it speaks to that provider (preflight probes this one)
     instructions_file: str  # the instructions file written into each agent's workdir

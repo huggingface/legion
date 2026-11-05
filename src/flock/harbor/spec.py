@@ -266,7 +266,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
     roles, loops = spec.roles(), spec.type_loops()
     label = {name: name if spec.agents.roles else None for name in roles}
     roster = {agent_name(n, i): label[n] for n, role in roles.items() for i in range(role.count)}
-    config = spec.model_dump(mode="json", include={"inference", "task", "environment"})
+    # the folders: a worker builds the tool bundle and loads the resource modules from them
+    config = spec.model_dump(mode="json", include={
+        "inference", "task", "environment", "tools_dir", "tools", "resources_dir"})
     config["limits"] = spec.limits.model_dump(
         include={"agent_max_turns", "agent_timeout_seconds", "trial_hours"}
     )
