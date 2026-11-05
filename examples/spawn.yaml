@@ -6,16 +6,16 @@ namespace: <you>
 bucket: hf://buckets/<you>/flock/spawn-demo
 types:
   leader:
-    harness: claude
-    model: claude-opus-5-5
+    harness: pi
+    model: anthropic/claude-opus-5-5
     system_prompt_file: prompts/leader.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 1
     workers: {initial: 1, max_extra: 0}
     max_budget_usd: 2.0
   analyst:
-    harness: claude
-    model: claude-haiku-5-5
+    harness: pi
+    model: anthropic/claude-haiku-5-5
     system_prompt_file: prompts/analyst.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 0                    # spawned only
@@ -24,8 +24,8 @@ types:
     max_turns: 20                  # per prompt, the child's own limits
     max_budget_usd: 0.5
   helper:
-    harness: claude
-    model: claude-haiku-5-5
+    harness: pi
+    model: anthropic/claude-haiku-5-5
     system_prompt_file: prompts/analyst.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 0

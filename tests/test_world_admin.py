@@ -263,7 +263,7 @@ async def test_hub_treats_a_parked_503_as_a_world_holdoff(monkeypatch, tmp_path)
 def test_world_admin_token_is_never_the_world_secret():
     def spec(world):
         return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": world,
-                                         "types": {"dev": {"harness": "claude", "model": "m"}}})
+                                         "types": {"dev": {"harness": "pi", "model": "m"}}})
     local = spec({"command": ["python", "w.py"]})
     assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "flock-world-admin:sw")
     assert world_admin_token(local, TOKEN, {}) != derived_token(TOKEN, "sw")  # the world secret
@@ -287,7 +287,7 @@ def _swarm(world_client, store, clock):
                          loop_interval=0, world_transport=_forward(world_client))
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local", "world": {"url": "http://w.invalid", "token_env": "WORLD_SECRET"},
-        "types": {"dev": {"harness": "claude", "model": "m", "replicas": 1}}})
+        "types": {"dev": {"harness": "pi", "model": "m", "replicas": 1}}})
     return app, spec.model_dump(mode="json")
 
 

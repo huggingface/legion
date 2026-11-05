@@ -1,6 +1,6 @@
 # flock
 
-Host coding-harness agent swarms (Claude Code, Codex) on Hugging Face Jobs: keep
+Host coding-harness agent swarms (Pi, Harbor Trials) on Hugging Face Jobs: keep
 them alive, prompt them, watch them. One controller, N worker jobs, up to 200
 agents per worker. Declare a swarm in YAML and the controller keeps it running,
 the way Kubernetes keeps pods running.
@@ -16,10 +16,9 @@ them.
   (background controller, workers as subprocesses, run bundle);
   `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
-  and one or more agent types. Each type sets the harness (`claude`,
-  `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
-  worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`
-  (enforced for every harness: Claude in its SDK, Codex, Pi and `llm` in the worker).
+  and one or more agent types. Each type sets the harness (`pi`, `llm` or `harbor`), model,
+  replicas, system prompt, job flavor, agents per worker, worker lifetime, idle grace,
+  per-prompt `max_turns` and `max_budget_usd` (enforced by the worker).
   `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name
@@ -79,8 +78,6 @@ Supported harnesses:
 
 | `harness` | What runs | Providers | Notes |
 |---|---|---|---|
-| `claude` | Claude Code through the Python Agent SDK | native, `anthropic` | |
-| `codex` | `codex app-server` | native, `openai_compat` (Responses API) | verified locally, not yet in a job |
 | `pi` | `pi --mode rpc` | native, `openai_compat` | [docs/pi.md](docs/pi.md) |
 | `llm` | in-process Chat Completions loop: `bash` plus the type's [tools folder](docs/tools.md) functions | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
 
@@ -162,8 +159,8 @@ namespace: <you>
 bucket: hf://buckets/<you>/flock/demo
 types:
   scribe:
-    harness: claude
-    model: claude-haiku-5-5
+    harness: pi
+    model: anthropic/claude-haiku-5-5   # one of Pi's built-in providers
     system_prompt_file: prompts/scribe.md
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 100
@@ -181,7 +178,7 @@ providers:
 models:
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
-  analyst: {harness: codex, model: qwen-27b, replicas: 50}
+  analyst: {harness: pi, model: qwen-27b, replicas: 50}
 ```
 
 ```sh

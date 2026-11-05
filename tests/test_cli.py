@@ -74,7 +74,7 @@ PROVIDER_SPEC = {
     "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
                            "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
     "models": {"q": {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
-    "types": {"worker": {"harness": "codex", "model": "q", "replicas": 1}},
+    "types": {"worker": {"harness": "pi", "model": "q", "replicas": 1}},
 }
 
 
@@ -130,7 +130,7 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
-    assert r.exit_code == 0 and "ok" in r.output and "responses" in r.output, r.output
+    assert r.exit_code == 0 and "ok" in r.output and "chat_completions" in r.output, r.output
     assert store.get_swarm("op")["spec"].types["worker"].provider_name == "gpu1"
     assert len(seen) == 2  # one probe: a tool call plus a follow-up turn
     r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `flock preflight`
@@ -176,12 +176,12 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
 
 def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     wire(monkeypatch, app)
-    bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "claude", "model": "q"}}}
+    bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "llm", "model": "native"}}}
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(bad))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1
-    assert "types.writer.model: harness 'claude' cannot use provider 'gpu1'" in r.output
+    assert "types.writer.model: harness 'llm' needs a provider-backed model" in r.output
 
 
 def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
@@ -190,20 +190,18 @@ def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
     spec = SwarmSpec.model_validate({
         "swarm": "s", "namespace": "n", "bucket": "b",
         "providers": {"p": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
-                            "self_hosted": True},
-                      "a": {"type": "anthropic", "api_key_env": "A", "self_hosted": True}},
+                            "self_hosted": True}},
         "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
-                   "plain": {"model": "p:m"},
-                   "am": {"model": "a:m", "extra": {"x": 1}}},
-        "types": {"cx": {"harness": "codex", "model": "m"}, "pi": {"harness": "pi", "model": "m"},
-                  "cl": {"harness": "claude", "model": "am"}, "nox": {"harness": "codex", "model": "plain"}}})
+                   "plain": {"model": "p:m"}},
+        "types": {"pi": {"harness": "pi", "model": "m"}, "l": {"harness": "llm", "model": "m"},
+                  "nox": {"harness": "pi", "model": "plain"}}})
     err = "\n".join(ops.extra_warnings(spec))
-    assert all(f"type {t}: `extra`" in err for t in ("cx", "pi", "cl")) and "nox" not in err
+    assert "type pi: `extra`" in err and "type l:" not in err and "nox" not in err
     # the llm harness sends `extra` as body fields: never warned (PR #7 adds the harness)
     assert "llm" not in ops.EXTRA_NOT_SENT
-    monkeypatch.setattr(ops, "EXTRA_NOT_SENT", frozenset({"claude"}))
+    monkeypatch.setattr(ops, "EXTRA_NOT_SENT", frozenset({"llm"}))
     err = "\n".join(ops.extra_warnings(spec))
-    assert "type cl:" in err and "type cx:" not in err
+    assert "type l:" in err and "type pi:" not in err
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
@@ -246,8 +244,7 @@ def test_extra_warnings_flags_pi_env_dropped_by_isolation():
     from flock.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b", "types": {
-        "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}},
-        "b": {"harness": "claude", "model": "m", "env": {"HF_TOKEN": "x"}}}})
+        "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}}}})
     assert ops.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
 
 

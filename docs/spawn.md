@@ -74,9 +74,9 @@ uv run hf buckets delete <you>/flock               # optional: wheels and agent 
 
 ```yaml
 types:
-  leader:  {harness: claude, model: claude-opus-5-5, replicas: 1, workers: {initial: 1, max_extra: 0}}
-  analyst: {harness: codex,  model: gpt-5.5-codex,   replicas: 0, workers: {initial: 1, max_extra: 3}}
-  helper:  {harness: codex,  model: gpt-5.5-codex,   replicas: 0, workers: {initial: 0, max_extra: 2}}
+  leader:  {harness: pi, model: anthropic/claude-opus-5-5,  replicas: 1, workers: {initial: 1, max_extra: 0}}
+  analyst: {harness: pi, model: anthropic/claude-haiku-5-5, replicas: 0, workers: {initial: 1, max_extra: 3}}
+  helper:  {harness: pi, model: anthropic/claude-haiku-5-5, replicas: 0, workers: {initial: 0, max_extra: 2}}
 spawn:                                   # run policy, separate from what a type is
   leader:  {types: {analyst: 3, helper: 2}, depth: 2}   # per-type caps, total 5
   analyst: {types: [helper], max: 3, depth: 1}         # list + one total cap
@@ -241,7 +241,7 @@ The worker image and the bootstrap put the `flock` CLI on PATH (same package). I
 names are always agent names.
 
 **Through the worker.** When the agent's pin file (`FLOCK_TOOLS_PIN`) names the worker's
-gateway (every CLI harness: claude, codex, pi), each call goes there as `controller:request
+gateway (the `pi` harness), each call goes there as `controller:request
 {method, path, params, json}`. The worker accepts only the routes an agent token may use:
 
 | Method | Path |
@@ -306,7 +306,7 @@ keeps them until removed; it does nothing until prompted.
 - Pre-warming is a possible later feature. Today a worker is opened only for agents that
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
-- The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
+- The instructions above are not appended to AGENTS.md automatically; put them in the
   type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock launch` appends to
   a shared prompt.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.

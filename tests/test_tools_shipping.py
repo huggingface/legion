@@ -50,7 +50,7 @@ def folder(root: Path, src: str = ADD_V1, name: str = "tools") -> Path:
 
 
 def raw_spec(tools=None, **extra) -> dict:
-    t = {"harness": "claude", "model": "claude-opus-5-5", "replicas": 1, "agents_per_worker": 2}
+    t = {"harness": "pi", "model": "claude-opus-5-5", "replicas": 1, "agents_per_worker": 2}
     if tools is not None:
         t["tools"] = tools
     return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
@@ -305,7 +305,7 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     await rt.setup(restore=False)
     await rt.prompt("first")
     await until(lambda: rt.state.turns == 1, timeout=5)
-    md = (work / "dev-0000" / "CLAUDE.md").read_text()
+    md = (work / "dev-0000" / "AGENTS.md").read_text()
     assert md.startswith("You are dev.") and SECTION_START in md
     assert "- `add`: Add two integers (v1)." in md
     assert """flock-tool add --json '{"a": 1, "b": 1}'""" in md
@@ -336,7 +336,7 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     await rt.stop()
     await rt.prompt("third")
     await until(lambda: rt.state.turns == 3, timeout=5)
-    md = (work / "dev-0000" / "CLAUDE.md").read_text()
+    md = (work / "dev-0000" / "AGENTS.md").read_text()
     assert md.count(SECTION_START) == 1 and "- `mul`: Multiply two integers." in md
     await rt.stop()
 
@@ -372,7 +372,7 @@ async def test_cli_harness_tools_enabled_then_disabled_in_one_burst(tmp_path):
         p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
         assert p.returncode == 1 and json.loads(p.stdout) == {"error": "unknown tool 'add'; tools: none"}
         assert read_pin(rt.pin_path)[0].version is None
-        assert SECTION_START not in (tmp_path / "agents" / "dev-0000" / "CLAUDE.md").read_text()
+        assert SECTION_START not in (tmp_path / "agents" / "dev-0000" / "AGENTS.md").read_text()
     finally:
         await rt.stop()
 
@@ -398,7 +398,7 @@ async def test_cli_harness_tools_enabled_mid_burst(tmp_path):
         assert len(adapter.starts) == 1
         p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
         assert (p.returncode, p.stdout.strip()) == (0, "5")
-        md = (tmp_path / "agents" / "dev-0000" / "CLAUDE.md").read_text()
+        md = (tmp_path / "agents" / "dev-0000" / "AGENTS.md").read_text()
         assert "- `add`: Add two integers (v1)." in md  # the section follows at the turn boundary
     finally:
         await rt.stop()
@@ -439,49 +439,6 @@ def secrets_seen() -> dict:
         await rt.stop()
 
 
-KEYS_SEEN = ADD_V1 + '''
-
-def keys_seen() -> dict:
-    """Which credential names the tool process can see (names only)."""
-    import os
-    return {k: k in os.environ for k in ("PROVIDER_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-'''
-
-
-@pytest.mark.parametrize("auth, alias", [("x-api-key", "ANTHROPIC_API_KEY"),
-                                         ("bearer", "ANTHROPIC_AUTH_TOKEN")])
-async def test_flock_tool_drops_claude_key_aliases(tmp_path, monkeypatch, auth, alias):
-    """Claude gets a provider-backed key as ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN; neither
-    reaches a tool, nor the source name."""
-    from flock.worker.adapters.claude import claude_env
-
-    f = Fetcher()
-    b = pack(folder(tmp_path / "v1", KEYS_SEEN))
-    f.bundles = {b.version: b.data}
-    m = manager(tmp_path, f)
-    await m.ensure(b.version, "all")
-    tspec = SwarmSpec.model_validate({
-        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
-        "providers": {"fake": {"type": "anthropic", "base_url": "http://127.0.0.1:9",
-                               "api_key_env": "PROVIDER_KEY", "auth": auth, "self_hosted": True}},
-        "types": {"dev": {"harness": "claude", "model": "fake:dummy", "idle_grace": "30s",
-                          "turn_timeout": "2s"}},
-    }).types["dev"]
-    rt, adapter = await _cli_runtime(tmp_path, m, tspec)
-    try:
-        await rt.prompt("first")
-        await until(lambda: rt.state.turns == 1, timeout=5)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-        env = claude_env(tspec, adapter.envs[0])  # what the Claude CLI process gets
-        assert env[alias] == "dummy-key" and PIN_ENV in env
-        p = await run_tool_cli(Path(sys.executable).parent / "flock-tool", ["keys_seen"], env)
-        assert json.loads(p.stdout) == {"PROVIDER_KEY": False, "ANTHROPIC_API_KEY": False,
-                                        "ANTHROPIC_AUTH_TOKEN": False}
-    finally:
-        await rt.stop()
-
-
 def test_credential_names_per_harness():
     from flock.worker.adapters.base import credential_env_names
 
@@ -492,11 +449,9 @@ def test_credential_names_per_harness():
                                 "self_hosted": True}},
             "types": {"a": {"harness": harness, "model": model}}}).types["a"]
 
-    assert credential_env_names(t("claude", "anthropic")) == ["ANTHROPIC_API_KEY",
-                                                              "ANTHROPIC_AUTH_TOKEN", "K"]
-    for h in ("codex", "pi", "llm"):
+    for h in ("pi", "llm"):
         assert credential_env_names(t(h, "openai_compat")) == ["K"]
-    assert credential_env_names(t("claude", "anthropic", "claude-opus-5-5")) == []  # native
+    assert credential_env_names(t("pi", "openai_compat", "native-model")) == []  # native
 
 
 class DelayedStartAdapter(ScriptedAdapter):
@@ -554,7 +509,7 @@ async def test_a_prompt_while_awaiting_turn_started_keeps_the_turns_pin(tmp_path
 
 
 async def test_restored_workdir_keeps_the_tools_section(tmp_path):
-    """A workdir restored with an old CLAUDE.md, a spec system_prompt: the base text is written
+    """A workdir restored with an old AGENTS.md, a spec system_prompt: the base text is written
     first and the generated section is added to it."""
     f = Fetcher()
     b = pack(folder(tmp_path / "v1"))
@@ -565,7 +520,7 @@ async def test_restored_workdir_keeps_the_tools_section(tmp_path):
 
     wd = tmp_path / "agents" / "dev-0000"
     wd.mkdir(parents=True)
-    (wd / "CLAUDE.md").write_text("Old instructions from the bucket.\n")
+    (wd / "AGENTS.md").write_text("Old instructions from the bucket.\n")
     adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
     rt = AgentRuntime("dev-0000", "dev", type_spec(system_prompt="System instructions.",
                                                    idle_grace="30s"),
@@ -575,7 +530,7 @@ async def test_restored_workdir_keeps_the_tools_section(tmp_path):
     try:
         await rt.prompt("first")
         await until(lambda: rt.state.turns == 1, timeout=5)
-        md = (wd / "CLAUDE.md").read_text()
+        md = (wd / "AGENTS.md").read_text()
         assert md.startswith("System instructions.\n\n" + SECTION_START)
         assert "Old instructions" not in md and "- `add`: Add two integers (v1)." in md
     finally:

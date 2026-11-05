@@ -271,7 +271,7 @@ def test_hourly_rollup_lines_written_when_the_hour_closes(store):
         "schema": 1, "run": "run-x", "swarm": "demo", "swarms": ["demo"],
         "started_at": "2026-09-21T14:00:00+00:00", "ended_at": None, "status": "running",
         "states": True, "generation": 1,
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 3}}}
+        "types": {"researcher": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 3}}}
     tok = {"m": {"input": 7, "output": 1}}
     h.on_events(a0, [
         _ev(a0["name"], "turn_started"),

@@ -242,7 +242,7 @@ def test_taskboard_claims_are_exclusive_and_released_when_an_agent_is_done(tmp_p
 def raw(world: dict | None = None, **types) -> dict:
     return {"swarm": "sw", "compute": "local",
             "world": world if world is not None else {"command": "flock world serve tb:TB"},
-            "types": types or {"dev": {"harness": "claude", "model": "m"}}}
+            "types": types or {"dev": {"harness": "pi", "model": "m"}}}
 
 
 def test_world_spec_validates():
@@ -259,27 +259,27 @@ def test_world_spec_validates():
         SwarmSpec.model_validate(jobs)
     jobs["world"] = {"command": ["x"], "url": "http://world.invalid/"}  # one block, both scales
     assert SwarmSpec.model_validate(jobs).world.url == "http://world.invalid"
-    no_world = {**raw(dev={"harness": "claude", "model": "m", "tools": ["world:claim"]})}
+    no_world = {**raw(dev={"harness": "pi", "model": "m", "tools": ["world:claim"]})}
     del no_world["world"]
     with pytest.raises(ValidationError, match="swarm-level `world:` block"):
         SwarmSpec.model_validate(no_world)
     with pytest.raises(ValidationError, match="world: false"):
-        SwarmSpec.model_validate(raw(dev={"harness": "claude", "model": "m", "world": False,
+        SwarmSpec.model_validate(raw(dev={"harness": "pi", "model": "m", "world": False,
                                           "tools": ["world:claim"]}))
     with pytest.raises(ValidationError, match="bad world tool"):
-        SwarmSpec.model_validate(raw(dev={"harness": "claude", "model": "m",
+        SwarmSpec.model_validate(raw(dev={"harness": "pi", "model": "m",
                                           "tools": ["world:no-dash"]}))
 
 
 def test_world_tools_selection():
     w = WorldSpec(url="http://w", manifest=WorldManifest(
         world_api="v1", name="w", version="1", tools=[{"name": "a"}, {"name": "b"}]))
-    ts = TypeSpec(harness="claude", model="m")
+    ts = TypeSpec(harness="pi", model="m")
     assert world_tools(ts, w) == ["a", "b"] and world_tools(ts, None) == []
-    ts = TypeSpec(harness="claude", model="m", tools=["ws_write", "world:b", "comms:post"])
+    ts = TypeSpec(harness="pi", model="m", tools=["ws_write", "world:b", "comms:post"])
     assert world_tools(ts, w) == ["b"] and ts.folder_tools == ["ws_write"]
-    assert TypeSpec(harness="claude", model="m", tools=["world:a"]).folder_tools is None
-    assert world_tools(TypeSpec(harness="claude", model="m", world=False), w) == []
+    assert TypeSpec(harness="pi", model="m", tools=["world:a"]).folder_tools is None
+    assert world_tools(TypeSpec(harness="pi", model="m", world=False), w) == []
 
 
 def test_cli_resolves_world_dir_next_to_the_spec(tmp_path):
@@ -299,7 +299,7 @@ def test_cli_resolves_world_dir_next_to_the_spec(tmp_path):
 
 def world_spec(url: str, token_env: str | None = "WORLD_TOKEN", **types) -> SwarmSpec:
     w = {"url": url, **({"token_env": token_env} if token_env else {})}
-    types = types or {"dev": {"harness": "claude", "model": "m", "replicas": 2,
+    types = types or {"dev": {"harness": "pi", "model": "m", "replicas": 2,
                               "agents_per_worker": 2}}
     return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": w,
                                      "types": types})
@@ -352,7 +352,7 @@ async def test_apply_fetches_the_manifest_and_hands_the_world_to_workers(control
 
 async def test_apply_refuses_a_world_it_cannot_use(controller, taskboard):
     put = controller.state.put
-    sel = {"dev": {"harness": "claude", "model": "m", "tools": ["world:claim_task", "world:fly"]}}
+    sel = {"dev": {"harness": "pi", "model": "m", "tools": ["world:claim_task", "world:fly"]}}
     r = await put(world_spec(taskboard.url, **sel))
     assert r.status_code == 400 and "unknown world tool(s) fly; world taskboard has: list_tasks" \
         in r.json()["detail"]
@@ -365,7 +365,7 @@ async def test_apply_refuses_a_world_it_cannot_use(controller, taskboard):
         dead = f"http://127.0.0.1:{s.getsockname()[1]}"
     r = await put(world_spec(dead))
     assert r.status_code == 400 and "cannot reach" in r.json()["detail"]
-    clash = world_spec(taskboard.url, dev={"harness": "claude", "model": "m"})
+    clash = world_spec(taskboard.url, dev={"harness": "pi", "model": "m"})
     clash.world.manifest = fetch_manifest(taskboard.url, SECRET)
     with pytest.raises(WorldError, match=r"world tool\(s\) list_tasks have the name of a folder"):
         check_tools(clash, lambda t: ["list_tasks"])
@@ -449,7 +449,7 @@ async def test_a_refused_reapply_keeps_the_running_world(store, tmp_path):
                          secret_source={})
     body = {"swarm": "sw", "compute": "local",
             "world": {"dir": str(tmp_path), "command": [sys.executable, "world.py"]},
-            "types": {"dev": {"harness": "claude", "model": "m", "replicas": 0}}}
+            "types": {"dev": {"harness": "pi", "model": "m", "replicas": 0}}}
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
                                      headers={"Authorization": f"Bearer {TOKEN}"}) as c:
@@ -522,7 +522,7 @@ async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path)
         "swarm": "sw", "compute": "local",
         "world": {"dir": str(d), "command": [sys.executable, "-m", "flock.cli", "world", "serve",
                                              "taskboard:TaskBoard"]},
-        "types": {"dev": {"harness": "claude", "model": "m"}}})
+        "types": {"dev": {"harness": "pi", "model": "m"}}})
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://t",
@@ -829,7 +829,7 @@ async def test_runtime_section_hooks_and_the_secret_stays_in_the_worker(tmp_path
         pin = json.loads((tmp_path / "agents" / "_tools_pins" / "dev-0001.json").read_text())
         assert TOKEN_ENV in pin["env_deny"] and pin["toolset"]["gateway"] == comms.address
         assert SECRET not in json.dumps(pin)
-        md = (rt.workdir / "CLAUDE.md").read_text()
+        md = (rt.workdir / "AGENTS.md").read_text()
         assert "## World: rec (version 1.0)" in md and "`echo`, `refuse`, `crash`, `later`" in md
         assert "`flock-tool echo --json" in md and "changed" not in md
         assert rec.hooks_seen[0] == ("agent_start", "dev-0001", {})
@@ -842,12 +842,12 @@ async def test_runtime_section_hooks_and_the_secret_stays_in_the_worker(tmp_path
         await until(lambda: rt.turn_id is None)
         await rt.prompt("second")
         await until(lambda: sum(h[0] == "turn" for h in rec.hooks_seen) == 2)
-        md = (rt.workdir / "CLAUDE.md").read_text()
+        md = (rt.workdir / "AGENTS.md").read_text()
         assert "## World: rec (version 2.0)" in md and "(version 1.0 -> 2.0)" in md
         assert "`refuse`" not in md
         await rt.prompt("third")
         await until(lambda: sum(h[0] == "turn" for h in rec.hooks_seen) == 3)
-        assert "changed" not in (rt.workdir / "CLAUDE.md").read_text()
+        assert "changed" not in (rt.workdir / "AGENTS.md").read_text()
         world.on_done("dev-0001", "unassigned")
         await until(lambda: rec.hooks_seen[-1][0] == "agent_done")
         assert rec.hooks_seen[-1] == ("agent_done", "dev-0001", {"reason": "unassigned"})
@@ -937,7 +937,7 @@ async def test_reapply_to_another_world_never_sends_the_old_secret(store, tmp_pa
         return SwarmSpec.model_validate({
             "swarm": "sw", "compute": "local",
             "world": {"url": f"http://{host}.invalid", "token_env": env},
-            "types": {"dev": {"harness": "claude", "model": "m", "replicas": 1}},
+            "types": {"dev": {"harness": "pi", "model": "m", "replicas": 1}},
         }).model_dump(mode="json")
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",

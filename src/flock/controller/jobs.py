@@ -18,22 +18,18 @@ WORKER_COMMAND = ["flock-worker"]
 # Unset (or FLOCK_WORKER_BOOTSTRAP=1): bootstrap mode, see `bootstrap_command`.
 DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
-# Bootstrap mode: no prebuilt image. A stock Node image installs the pinned harness CLIs, uv and
-# the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
+# Bootstrap mode: no prebuilt image. A stock Node image installs the pinned Pi CLI (pi types), uv
+# and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
 # runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
 # Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
-CLAUDE_CODE_VERSION = HARNESSES["claude"].version
-CODEX_VERSION = HARNESSES["codex"].version
 PI_VERSION = HARNESSES["pi"].version
 HF_HUB_VERSION = "2.2.0"
-CLAUDE_AGENT_SDK_VERSION = "0.2.166"
 
 _BOOTSTRAP = r"""set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
 t0=$(date +%s)
 command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 >/dev/null; }
-npm i -g --silent @anthropic-ai/claude-code@{claude} @openai/codex@{codex} >/dev/null 2>&1
 if [ "${FLOCK_HARNESS:-}" = pi ]; then
   npm i -g --silent @earendil-works/pi-coding-agent@{pi} >/dev/null 2>&1
   export FLOCK_PI_CLI="$(command -v pi)"
@@ -47,18 +43,15 @@ hf buckets cp "$FLOCK_WHEEL_URL" "$WHEEL" >/dev/null 2>&1 || uv run -q --no-proj
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
 ' "$FLOCK_WHEEL_URL" "$WHEEL"
-uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggingface_hub=={hub} \
-  || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" \
-       claude-agent-sdk=={sdk} huggingface_hub=={hub}
+uv tool install -q "$WHEEL[worker]" --with huggingface_hub=={hub} \
+  || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" huggingface_hub=={hub}
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
-export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
+export WORK_ROOT=/work/agents
 export FLOCK_LLM_HOME=/state/llm PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
-export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/claude /state/codex /state/pi /state/llm
-if [ -n "${OPENAI_API_KEY:-}" ]; then printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null; fi
-echo "bootstrap: $(($(date +%s) - t0)) s; claude $(claude --version); codex $(codex --version); $(python3 --version)"
+mkdir -p /work/agents /state/pi /state/llm
+echo "bootstrap: $(($(date +%s) - t0)) s; $(python3 --version)"
 exec flock-worker
 """
 
@@ -71,11 +64,8 @@ def bootstrap_command() -> list[str]:
     """`bash -c <script>` for BOOTSTRAP_IMAGE; the job env must carry FLOCK_WHEEL_URL."""
     script = _BOOTSTRAP
     for key, value in {
-        "claude": CLAUDE_CODE_VERSION,
-        "codex": CODEX_VERSION,
         "pi": PI_VERSION,
         "hub": HF_HUB_VERSION,
-        "sdk": CLAUDE_AGENT_SDK_VERSION,
     }.items():
         script = script.replace("{" + key + "}", shlex.quote(value))
     return ["bash", "-c", script]

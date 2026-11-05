@@ -4,7 +4,7 @@
     workdir.base.tar, workdir.base.json           (only with the type's workdir.base, below)
     meta.json                                     ({files, bytes, ts} of the mirrored workdir when it last changed)
     sessions/<agent>.jsonl, <agent>.state.json    (pi session log + worker state)
-    harness/<path relative to the harness home>   (CLAUDE_CONFIG_DIR, CODEX_HOME or PI_CODING_AGENT_DIR)
+    harness/<path relative to the harness home>   (PI_CODING_AGENT_DIR, FLOCK_LLM_HOME)
 
 The workdir goes through `sync_bucket` (the Python form of `hf buckets sync`, as in the
 resume-gate experiment), upward with delete so the bucket mirrors the workdir. The handful of

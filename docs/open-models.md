@@ -14,13 +14,12 @@ providers:                       # where models are served
   gpu1: {type: openai_compat, base_url: "https://qwen.example.org/v1",  # your vLLM, over HTTPS
          api_key_env: VLLM_API_KEY,
          self_hosted: true, max_working: 256}                 # self-hosted: price defaults to 0
-  anth: {type: anthropic, api_key_env: ANTHROPIC_API_KEY}     # base_url optional, default Anthropic
 models:                          # optional aliases and per-model settings
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
-  worker:  {harness: codex, model: "hf:Qwen/Qwen3.8-27B:deepinfra"}  # provider-prefixed, router provider pinned
-  analyst: {harness: codex, model: qwen-27b}                  # alias into models:
-  writer:  {harness: claude, model: claude-opus-5-5}          # harness-native id, as before
+  worker:  {harness: pi, model: "hf:Qwen/Qwen3.8-27B:deepinfra"}  # provider-prefixed, router provider pinned
+  analyst: {harness: pi, model: qwen-27b}                  # alias into models:
+  writer:  {harness: pi, model: anthropic/claude-opus-5-5} # harness-native id (Pi's own providers)
 ```
 
 `examples/open-models.yaml` is a complete spec. A type's `model` is looked up as an alias first,
@@ -36,15 +35,9 @@ harness on the wrong kind of provider.
 
 | harness | provider `type` | API the server must serve | `base_url` |
 |---|---|---|---|
-| `codex` | `openai_compat` | OpenAI **Responses** (`POST {base_url}/responses`, streamed) | required, ends in `/v1` |
-| `claude` | `anthropic` | Anthropic Messages (`POST {base_url}/v1/messages`) | optional API root, no `/v1` |
 | `pi` | `openai_compat` | OpenAI Chat Completions (Pi's `openai-completions`) | required, ends in `/v1` |
 | `llm` | `openai_compat` (required) | OpenAI **Chat Completions** (`POST {base_url}/chat/completions`, not streamed) | required, ends in `/v1` |
-| claude, codex, pi | none (native id) | the harness's own vendor | - |
-
-Codex 0.162.1 (the pinned version) refuses `wire_api = "chat"`, so a server that only has
-`/v1/chat/completions` will not work with Codex. vLLM serves `/v1/responses`; for the HF router,
-run the preflight to find out for your model.
+| pi | none (native id) | the harness's own vendor | - |
 
 ## Pointing a swarm at vLLM
 
@@ -75,8 +68,7 @@ runs inside the worker job. Options: a public endpoint behind its own key (e.g. 
 the controller); HF Inference Endpoints, which serve an HTTPS URL that takes an HF token as
 `Authorization: Bearer` (`api_key_env: HF_TOKEN`); or the HF Jobs proxy, untested: start the
 GPU job with `--expose 8000` (URL `https://<job id>--8000.hf.jobs`, which checks an HF token),
-serve vLLM without `--api-key`, set `api_key_env: HF_TOKEN`, and use `auth: bearer` on
-`anthropic` providers because Claude Code's default `x-api-key` is not accepted. On 2026-10-16
+serve vLLM without `--api-key` and set `api_key_env: HF_TOKEN`. On 2026-10-16
 `--expose-public 8000` with vLLM's own `--api-key` returned vLLM's 401 for every keyed request
 (the proxy most likely did not pass the key through).
 
@@ -89,12 +81,9 @@ name:
 |---|---|---|
 | controller environment (Space secrets) | you | preflight; sent to jobs |
 | worker job secrets | controller, added automatically for provider-backed types | read by the worker |
-| harness process | worker | Codex: same name (`env_key`); Claude Code: `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` with `auth: bearer` |
+| harness process | worker | the same name |
 
-How the key travels: Codex always sends `Authorization: Bearer <key>`. Claude Code sends
-`x-api-key: <key>` by default; set `auth: bearer` on an `anthropic` provider to send
-`Authorization: Bearer <key>` instead (Claude Code's `ANTHROPIC_AUTH_TOKEN`), for gateways and
-proxies that only accept a bearer token. Preflight sends the key the same way.
+How the key travels: `Authorization: Bearer <key>`. Preflight sends the key the same way.
 
 Controller secrets to set: every `api_key_env` your providers name (e.g. `HF_TOKEN`,
 `VLLM_API_KEY`), plus the `secrets` your types list, plus `FLOCK_TOKEN`.
@@ -106,15 +95,11 @@ worker.
 
 ## Reasoning
 
-| `reasoning` | Codex (`model_reasoning_effort`, sent as Responses `reasoning.effort`) | Claude Code (Agent SDK) |
-|---|---|---|
-| `off` | `none` | `thinking: {type: disabled}` |
-| `low` / `medium` / `high` | same word | `effort: low/medium/high` |
-
-A type's `reasoning` overrides its alias's. Whether a server honours the effort is up to the
+A type's `reasoning` (`off`, `low`, `medium`, `high`) overrides its alias's; Pi gets it as its
+thinking level (docs/pi.md). Whether a server honours the effort is up to the
 server; Qwen3 on vLLM turns thinking off through the chat template, not the effort. `extra`
 (raw request-body fields such as `chat_template_kwargs`) is accepted for swarmlab compatibility
-but Claude Code, Codex and Pi cannot send body fields, so for them it is not used; set such
+but Pi cannot send body fields, so for it it is not used; set such
 defaults on the server (vLLM can set default chat-template arguments at startup). The `llm`
 harness does send `extra`, merged into every request body, and ignores `reasoning`
 (docs/llm-harness.md).
@@ -131,17 +116,15 @@ Cost is only as good as the usage the server reports. A provider-backed turn tha
 zero tokens is flagged: the worker logs a warning (once per agent), the `turn_ended` event carries
 `usage_missing: true`, and `flock status` / the status page count such agents per provider
 (`zero_usage_agents`) with a "cost unknown" warning. The HF router streams zero usage for some
-providers (deepinfra, novita and ovhcloud for Qwen3.8-27B on 2026-10-16), so Codex on the router
+providers (deepinfra, novita and ovhcloud for Qwen3.8-27B on 2026-10-16), so such a model
 shows $0 today.
 
 ## Preflight
 
 `flock update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as the body)
 makes the controller probe each distinct provider-backed model the way a harness starts: two
-turns, streamed on the Responses API for `openai_compat` (shaped like Codex's requests:
-`store: false`, encrypted reasoning, parallel tool calls), non-streamed Chat Completions with
-`extra` for types on the `llm` or `pi` harness (a tool call written as text passes with a warning,
-since that harness accepts it), or the Messages API for `anthropic`.
+non-streamed Chat Completions turns with `extra` (a tool call written as text passes with a
+warning, since the `llm` harness accepts it).
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
 `follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
@@ -193,15 +176,9 @@ escape hatch: report only, no queueing.
 
 ## Not verified yet
 
-- Codex against a real vLLM Responses endpoint. Against the HF router it works with a pinned
-  provider (smoke run 2026-10-16: 10/10 turns with tool calls, cost unknown because usage is zero).
-- Claude Code against vLLM's Anthropic-compatible endpoint. Against a fake server, Claude Code
-  2.1.296 sent every request, background ones included, to the type's model id, so
-  `ANTHROPIC_SMALL_FAST_MODEL` was not needed.
 - Workers reaching a GPU job through the HF Jobs proxy (`--expose` with an HF token).
-- Codex with model ids it has no built-in metadata for (context window, auto-compaction).
-- Cost of Codex on the HF router: the working router providers stream zero usage, so it shows
-  as $0 with the zero-usage warning.
+- Cost on the HF router: the working router providers stream zero usage, so it shows as $0 with
+  the zero-usage warning.
 
 
 Pi also supports `base_urls` for multiple servers of one model. Agents are spread

@@ -50,7 +50,7 @@ def swarm_raw(**comms) -> dict:
     return {"swarm": "sw", "namespace": "ns", "bucket": "hf://buckets/ns/b",
             "comms": {"url": "http://board", "invite_env": INVITE_ENV, "channel": "#flock-test",
                       **comms},
-            "types": {"dev": {"harness": "claude", "model": "m", "comms": True}}}
+            "types": {"dev": {"harness": "pi", "model": "m", "comms": True}}}
 
 
 def custom(rt: AgentRuntime, kind: str) -> list[dict]:
@@ -64,7 +64,7 @@ def posted(board) -> int:
 class Team:
     """N agents of one worker sharing one CommsHub, against the fake board."""
 
-    def __init__(self, tmp_path, board, names, *, harness="claude", protocols=None, env=None,
+    def __init__(self, tmp_path, board, names, *, harness="pi", protocols=None, env=None,
                  **rules):
         self.board = board
         self.agents: dict[str, AgentRuntime] = {}
@@ -124,14 +124,14 @@ def test_comms_block_validates():
     with pytest.raises(ValidationError, match="swarm-level `comms:` block"):
         SwarmSpec.model_validate(raw)
     raw = swarm_raw()
-    raw["types"]["dev"] = {"harness": "claude", "model": "m", "comms": False, "tools": ["comms:post"]}
+    raw["types"]["dev"] = {"harness": "pi", "model": "m", "comms": False, "tools": ["comms:post"]}
     with pytest.raises(ValidationError, match="comms: false"):
         SwarmSpec.model_validate(raw)
 
 
 def test_listed_comms_tools_and_folder_tools():
     raw = swarm_raw(search=None)
-    raw["types"]["dev"] = {"harness": "claude", "model": "m", "tools": ["ws_write", "comms:post"]}
+    raw["types"]["dev"] = {"harness": "pi", "model": "m", "tools": ["ws_write", "comms:post"]}
     s = SwarmSpec.model_validate(raw)
     ts = s.types["dev"]
     assert ts.folder_tools == ["ws_write"] and comms_tools(ts, s.comms) == ["comms:post"]
@@ -211,7 +211,7 @@ async def test_join_at_first_prompt_token_stays_in_worker(tmp_path, board):
         assert pin["toolset"]["gateway"] == t.hub.address and pin["toolset"]["gateway_key"]
         assert env[PIN_ENV].endswith("dev-0000.json")
         # the instructions: comms section with the protocol, and the tools section
-        md = (rt.workdir / "CLAUDE.md").read_text()
+        md = (rt.workdir / "AGENTS.md").read_text()
         assert "You are @dev-0000 on the message board channel #flock-test" in md
         assert "### Protocol: lead-agree\n\nOne leads; others say agree." in md
         assert "`flock-tool post --json" in md
@@ -793,7 +793,7 @@ async def test_legacy_identities_with_a_trailing_slash_url_still_fan_out():
 
     transport = httpx.MockTransport(handler)
     ids = Identities(env={"INV": "inv"}, client=httpx.AsyncClient(transport=transport))
-    legacy = TypeSpec(harness="claude", model="m", msgboard_invite="INV",
+    legacy = TypeSpec(harness="pi", model="m", msgboard_invite="INV",
                       env={"MSGBOARD_URL": "http://board.invalid/"})
     for name in ("dev-0000", "dev-0001"):  # the older msgboard_invite path joins first
         assert (await ids.env_for(name, legacy))["MSGBOARD_URL"] == "http://board.invalid"

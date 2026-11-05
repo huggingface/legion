@@ -23,7 +23,7 @@ SPEC = {
     "bucket": "hf://buckets/ns/sh",
     "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"},
     "types": {"researcher": {
-        "harness": "claude", "model": "claude-opus-5-5", "replicas": 2, "agents_per_worker": 2,
+        "harness": "pi", "model": "claude-opus-5-5", "replicas": 2, "agents_per_worker": 2,
         "secrets": ["ANTHROPIC_API_KEY"], "system_prompt_file": "prompts/system.md",
         "env": {"MSGBOARD_URL": "${BOARD_URL:-https://board.invalid}"}}},
 }

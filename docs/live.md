@@ -224,7 +224,7 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 | change | takes effect |
 |---|---|
 | tools folder (a new content hash) | each agent's next turn. The worker fetches the version within a heartbeat (30 s on jobs, 5 s locally); a turn in flight keeps its version (docs/tools.md) |
-| `system_prompt` / `system_prompt_file` | each agent's next turn boundary. The worker rewrites `CLAUDE.md` / `AGENTS.md` and the `llm` harness rebuilds its system message |
+| `system_prompt` / `system_prompt_file` | each agent's next turn boundary. The worker rewrites `AGENTS.md` and the `llm` harness rebuilds its system message |
 | `loop:` settings and loop prompt files | the next loop tick (docs/loop.md) |
 | `comms.rules`, `comms.protocols` | the next heartbeat; the instructions' board section at the next turn |
 | `comms.kickoff_file` | never: the kickoff is posted once per channel |
@@ -248,8 +248,8 @@ each kind of change:
 <the prompt>
 ```
 
-CLI harnesses (`claude`, `codex`, `pi`) read their instructions file only at start. For them
-the note says which file to re-read (`your instructions in CLAUDE.md changed; re-read them`,
+The `pi` harness reads its instructions file only at start. For it
+the note says which file to re-read (`your instructions in AGENTS.md changed; re-read them`,
 `your tools changed; re-read the Tools section of AGENTS.md`).
 
 A running `pi` agent takes a provider's new endpoint list (`base_urls`), model id or

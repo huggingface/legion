@@ -251,7 +251,7 @@ def test_pi_model_config_from_resolved_model():
     assert c == PiModelConfig(base_url="http://h:8000/v1", api_key_env="VLLM_KEY", model_id="Qwen/Q",
                               provider="gpu", reasoning="high")
     assert c.model_ref == "gpu/Qwen/Q"
-    # pi needs an openai_compat provider, like codex
+    # pi needs an openai_compat provider
     with pytest.raises(ValueError, match="needs a provider of type openai_compat"):
         SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
                                   "providers": {"an": {"type": "anthropic", "api_key_env": "K",

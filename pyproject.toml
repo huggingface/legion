@@ -13,7 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 controller = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "jinja2>=3.1"]
-worker = ["claude-agent-sdk>=0.1"]
+worker = []  # kept: Dockerfile.worker and the job bootstrap install `[worker]`
 # Shepherd's Harbor task path (src/flock/harbor); pins as on shepherd f3970bc. Harbor needs Python 3.12+.
 harbor = [
   "harbor==0.25.0; python_version >= '3.12'",

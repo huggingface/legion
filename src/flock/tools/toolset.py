@@ -182,7 +182,7 @@ SECTION_END = "<!-- /flock:tools -->"
 
 
 def instructions_section(ts: Toolset) -> str:
-    """The generated "Tools" section for CLI harnesses' CLAUDE.md / AGENTS.md ("" without tools)."""
+    """The generated "Tools" section for CLI harnesses' AGENTS.md ("" without tools)."""
     if not ts.tools:
         return ""
     how = ("Call these with the `flock-tool` command from your shell. It prints the result (JSON "

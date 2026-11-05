@@ -211,7 +211,7 @@ async def test_status_page_renders(client, store, clock, tick):
         client,
         make_spec(
             researcher={"replicas": 2},
-            reviewer={"replicas": 1, "harness": "codex", "model": "gpt-5.5-codex"},
+            reviewer={"replicas": 1, "harness": "pi", "model": "gpt-5.5-codex"},
         ),
     )
     tick()

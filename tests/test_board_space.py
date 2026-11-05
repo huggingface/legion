@@ -21,7 +21,7 @@ SPEC = {
     "bucket": "hf://buckets/acme/runs",
     "comms": {"board": "space", "template": "acme/msgboard-template", "invite_env": "BOARD_INVITE",
               "channel": "general", "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
-    "types": {"a": {"harness": "claude", "model": "claude-opus-5-5", "comms": True}},
+    "types": {"a": {"harness": "pi", "model": "claude-opus-5-5", "comms": True}},
 }
 
 

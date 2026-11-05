@@ -1,6 +1,9 @@
 # flock: design
 
 Status: agreed design, 2026-10-14. Author: Carlos Patiño with Claude.
+2026-11-05: the `claude` and `codex` harnesses are removed (Harbor Trials replace them, harness
+`harbor`); what this document says about them is kept as the record of what was measured and
+decided.
 Scope: v1, the first milestone and the contracts later layers depend on.
 
 ## 1. What it is
@@ -325,10 +328,10 @@ models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: claude            # claude | codex | pi | llm
-    model: claude-opus-5-5
+    harness: pi                # pi | llm | harbor
+    model: anthropic/claude-opus-5-5
     image: null                # default worker image; override to add tools/skills
-    system_prompt_file: prompts/researcher.md   # written to the workdir as CLAUDE.md / AGENTS.md
+    system_prompt_file: prompts/researcher.md   # written to the workdir as AGENTS.md
     env: {MSGBOARD_URL: https://lvwerra-msgboard-demo.hf.space}
     secrets: [ANTHROPIC_API_KEY]
     labels: {team: eval}
@@ -351,13 +354,8 @@ types:
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
     tools: [ws_write, run_bot] # functions from the tools folder, or `all` (docs/tools.md)
-  reviewer:
-    harness: codex
-    model: gpt-5.5-codex
-    replicas: 500
-    secrets: [OPENAI_API_KEY]
   analyst:
-    harness: codex
+    harness: pi
     model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B:deepinfra" directly
     reasoning: low             # optional; overrides the alias
     replicas: 200
@@ -392,14 +390,14 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 
 | Field | Meaning |
 |---|---|
-| `providers.<name>.type` | `openai_compat` (Codex: Responses API; Pi and `llm`: Chat Completions) or `anthropic` (Claude Code; Messages API) |
+| `providers.<name>.type` | `openai_compat` (Chat Completions); `anthropic` is still accepted but no harness uses it |
 | `providers.<name>.base_url` | required for `openai_compat` (ends in `/v1`); optional for `anthropic` (API root, default Anthropic) |
 | `providers.<name>.api_key_env` | NAME of the secret holding the key; the value is never in the spec |
 | `providers.<name>.self_hosted` | price defaults to `[0, 0, 0]`; the real cost is the GPU job |
 | `providers.<name>.max_working` | max agents of the swarm on this provider in a turn at once; enforced at prompt admission (`FLOCK_MAX_WORKING_ENFORCE=0`: report only) |
-| `providers.<name>.auth` | `anthropic` only: `x-api-key` (default) or `bearer` (Claude Code's `ANTHROPIC_AUTH_TOKEN`) |
+| `providers.<name>.auth` | `anthropic` only: `x-api-key` (default) or `bearer` |
 | `providers.<name>.pricing` | `{model id or "*": [input, output, cached]}` USD per 1M tokens |
-| `providers.<name>.timeout_s`, `max_retries` | passed to the harness (Codex provider table; Claude `API_TIMEOUT_MS`, `CLAUDE_CODE_MAX_RETRIES`) |
+| `providers.<name>.timeout_s`, `max_retries` | passed to the harness |
 | `models.<alias>.model` | `"<provider>:<model id>"` |
 | `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
 | `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); sent by the `llm` harness only |
@@ -416,8 +414,8 @@ name (`[a-z][a-z0-9_-]*`, e.g. Bedrock's `anthropic.claude-...-v1:0`) is native.
 Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
 type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
 row for the id, or its `"*"` row, unless `self_hosted`; harness against provider type
-(`claude` needs `anthropic`, `codex`, `pi` and `llm` need `openai_compat`; native ids pass,
-except on `llm`, which needs a provider).
+(`pi`, `llm` and `harbor` need `openai_compat`; native ids pass, except on `llm`, which needs
+a provider).
 
 Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
 the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
@@ -425,14 +423,7 @@ spec. Workers get the resolved model inside `AssignCommand.spec`; the controller
 
 Keys: the controller adds each provider-backed type's `api_key_env` to that type's job secrets
 (it must be in the controller's environment, like every secret). The worker reads it from its
-own environment and hands it to the harness: under the same name for Codex (`env_key`), as
-`ANTHROPIC_API_KEY` for Claude Code (plus `ANTHROPIC_BASE_URL` when `base_url` is set).
-
-Harness configuration: Codex gets `-c` overrides on `codex app-server` (the provider table,
-`model_provider`, `model`, `model_reasoning_effort`; `off` is `none`), not a written
-`config.toml`, because `CODEX_HOME` is per worker and synced. Reserved ids (`openai`,
-`ollama`, `lmstudio`) become `flock-<name>`. Claude Code gets the SDK's `effort` for
-low/medium/high and `thinking: disabled` for off.
+own environment and hands it to the harness under the same name.
 
 `max_working`: counted per provider from heartbeats (agents in `working`) and shown in
 `GET /swarms/{swarm}` (`status.providers`), `flock status` and the status page. The controller
@@ -455,10 +446,9 @@ Reachability: a provider is a `base_url` every worker reaches over HTTPS. Worker
 and inference runs elsewhere; flock does not colocate workers with GPU jobs.
 
 Preflight: `POST /swarms/{swarm}/preflight` (body: a spec; none = the applied one) probes each
-distinct provider-backed model from the controller (which holds the keys) with two streamed
-turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
-API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`, non-streamed
-Chat Completions (with `extra`) for types on the `llm` harness. Best-effort: a
+distinct provider-backed model from the controller (which holds the keys) with two
+non-streamed Chat Completions turns (with `extra`): a tool call to a trivial `get_time` tool,
+then the tool result sent back. Best-effort: a
 failed probe refuses `flock launch` (`--skip-preflight` bypasses); a model not probed (key not
 in the controller's environment, or preflight skipped) is reported `unverified` with a warning
 and applied anyway unless `--strict`. Zero streamed usage is a warning.
@@ -467,12 +457,10 @@ and applied anyway unless `--strict`. Zero streamed usage is a warning.
 ### Harness environment
 
 A harness process gets an allowlist of the worker's environment (`PATH`, `HOME`, `USER`,
-`SHELL`, `TERM`, `LANG`, `LC_*`, `XDG_*`, `TZ`, `TMPDIR`, proxy and CA variables, `IS_SANDBOX`,
-its config dir) plus what the worker passes: the type's declared `secrets`, `env`, the msgboard
+`SHELL`, `TERM`, `LANG`, `LC_*`, `XDG_*`, `TZ`, `TMPDIR`, proxy and CA variables, its config
+dir) plus what the worker passes: the type's declared `secrets`, `env`, the msgboard
 identity, and the provider key. `FLOCK_TOKEN`, the incarnation and other job secrets stay in the
-worker (before 2026-10-16 both adapters passed `os.environ` whole). The Claude SDK merges
-`os.environ` itself, so its `cli_path` is a small exec wrapper that drops every name the worker
-did not mean to pass.
+worker (before 2026-10-16 both adapters passed `os.environ` whole).
 
 ### States
 

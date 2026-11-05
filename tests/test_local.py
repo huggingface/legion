@@ -50,7 +50,7 @@ def local_spec(**kw) -> SwarmSpec:
 def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
     spec = make_spec()
     assert spec.compute.kind == "hf-jobs"
-    types = {"a": {"harness": "claude", "model": "m"}}
+    types = {"a": {"harness": "pi", "model": "m"}}
     with pytest.raises(ValueError, match="namespace and bucket required for compute hf-jobs"):
         SwarmSpec.model_validate({"swarm": "s", "types": types})
     with pytest.raises(ValueError, match="bucket required"):
@@ -73,7 +73,7 @@ def test_compute_local_short_and_long_form():
     short = local_spec()
     assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
     long = SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local"},
-                                     "types": {"a": {"harness": "claude", "model": "m"}}})
+                                     "types": {"a": {"harness": "pi", "model": "m"}}})
     assert long.compute.kind == "local"
     again = SwarmSpec.model_validate(short.model_dump(mode="json"))  # stored form round-trips
     assert again.compute.kind == "local"
@@ -429,13 +429,12 @@ def test_local_env_keeps_harness_overrides_and_isolates_pi(tmp_path):
     user_pi = home / ".pi" / "agent"
     user_pi.mkdir(parents=True)
     (user_pi / "models.json").write_text('{"providers": {"mine": {}}}')
-    base = {"HOME": str(home), "FLOCK_CLAUDE_CLI": "/c/claude", "FLOCK_CODEX_CLI": "/c/codex",
-            "FLOCK_PI_CLI": "/c/pi", "FLOCK_URL": "http://mine", "FLOCK_TOKEN": "my-token",
+    base = {"HOME": str(home), "FLOCK_PI_CLI": "/c/pi", "FLOCK_PROMPTS_DIR": "/p", "FLOCK_URL": "http://mine", "FLOCK_TOKEN": "my-token",
             "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
     jobs = LocalJobsClient(root=tmp_path / "run", base_env=base)
     a = jobs.process_env({"WORKER_ID": "s-a-w0000", "TYPE": "a"}, {})
     b = jobs.process_env({"WORKER_ID": "s-b-w0000", "TYPE": "b"}, {})
-    for k in ("FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI"):
+    for k in ("FLOCK_PI_CLI", "FLOCK_PROMPTS_DIR"):
         assert a[k] == base[k]  # documented executable overrides survive
     for k in ("FLOCK_URL", "FLOCK_TOKEN", "FLOCK_AGENT_TOKEN", "FLOCK_CURRENT"):
         assert k not in a  # the caller's connection and auth never reach a worker
@@ -479,7 +478,7 @@ def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
 async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     spec = SwarmSpec.model_validate({
         "swarm": "budget", "compute": "local", "limits": {"budget_usd": 10},
-        "types": {"w": {"harness": "claude", "model": "m", "replicas": 0}}})
+        "types": {"w": {"harness": "pi", "model": "m", "replicas": 0}}})
     out = io.StringIO()
     task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path, until=30, refresh=0.1, grace=0, out=out)))

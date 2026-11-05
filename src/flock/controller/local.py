@@ -40,8 +40,7 @@ LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": f"{LOCAL_HEARTBEAT_INTERVAL.total_se
                       "PYTHONUNBUFFERED": "1"}
 # The caller's own flock connection and auth never leak into a worker (it gets the
 # controller's): FLOCK_* is dropped except these documented harness settings.
-KEEP_FLOCK_ENV = frozenset({"FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI",
-                            "FLOCK_PROMPTS_DIR"})
+KEEP_FLOCK_ENV = frozenset({"FLOCK_PI_CLI", "FLOCK_PROMPTS_DIR"})
 STOP_GRACE = 5.0  # s between SIGTERM and SIGKILL on cancel
 
 
@@ -279,7 +278,7 @@ class LocalJobsClient:
 
     @staticmethod
     def _signal(p: _Proc, sig: signal.Signals) -> None:
-        try:  # the process group: harness children (claude, codex, pi) go with the worker
+        try:  # the process group: harness children (pi, tools) go with the worker
             os.killpg(p.popen.pid, sig)
         except (ProcessLookupError, PermissionError):
             pass

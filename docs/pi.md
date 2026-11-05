@@ -8,7 +8,7 @@ experiments/resume-gate-pi/RESULTS.md); no real model yet (see "Not verified").
 
 ## Running a Pi type
 
-A pi type names its model the way codex does (design.md section 5): a `<provider>:<id>` string
+A pi type names its model as design.md section 5 says: a `<provider>:<id>` string
 or a `models:` alias, resolved at apply; Pi needs an `openai_compat` provider.
 
 ```yaml
@@ -72,7 +72,7 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   again past a limit (an answer that asks for tools, or a `turn_start` for a steered prompt
   after a final answer) it sends `abort`: the tools of that answer do not run (or are killed),
   and the turn ends `error` with `data.reason` `max_turns` or `max_budget_usd` (`subtype`
-  `error_max_turns` / `error_max_budget_usd`, as Claude reports them). A limit reached on a
+  `error_max_turns` / `error_max_budget_usd`). A limit reached on a
   final answer ends the turn normally. A steered prompt that arrives after the last allowed
   answer can have its request already on the wire when the abort lands (one extra call, at
   most). Pinned provider prices: the worker passes `type_price_table(spec)`, so a
@@ -205,8 +205,8 @@ response 0.4 to 3.3 s on a busy shared dev box.
 ## Not verified
 
 - **Workers in an HF Job**: only the resume gate ran (as root, startup 0.4 s, idle VmRSS 107 MB);
-  packing (`agents_per_worker` and `max_working_per_worker` for pi types still use the
-  Claude-measured defaults) is unmeasured.
+  packing (`agents_per_worker` and `max_working_per_worker` for pi types still use defaults
+  measured on Claude Code) is unmeasured.
 - **Compaction**: never triggered (no long session); its usage mapping follows the docs. Pi's
   default `contextWindow` for a custom model was 128000 in `get_state`.
 - `auto_retry_*` events (the fake server's 400 was not retried; a 5xx/429 path was not tried).

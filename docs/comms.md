@@ -27,7 +27,7 @@ types:
     harness: llm
     comms: true                       # all comms tools; or list some in tools:
   scribe:
-    harness: claude
+    harness: pi
     tools: [summarise, comms:read, comms:search]
 ```
 
@@ -148,7 +148,7 @@ The model sees the bare names; the spec writes them `comms:post`, `comms:read`, 
 | `search` | `query`, `thread?`, `from?`, `since?` (`2026-10-21`, `today`, `12h`, `7d`), `limit?` (default 10, max 50) | `{query, results: [{id, thread, author, time, snippet}], dropped?, note?, total?}` |
 
 - `llm`: function tools next to `bash` (and `done`), served in process by the worker.
-- `claude`, `codex`, `pi`: in the generated Tools section of `CLAUDE.md` / `AGENTS.md`, called as
+- `pi`: in the generated Tools section of `AGENTS.md`, called as
   `flock-tool post --json '{"text": "...", "thread": "new"}'`. `flock-tool` reads the agent's pin
   file and sends built-in calls to the worker's local gateway (127.0.0.1, one JSON line each way,
   with the agent's key from its pin), which makes the board call with the agent's token.
@@ -210,7 +210,7 @@ docs/loop.md "Wake queue"). A type without that
 `protocols` are prompt files appended to each comms agent's instructions, after a short section
 that tells the agent its board name, the channel, the tools and the rules in force (and the
 kickoff's id). For `llm` that is the system message; for the CLI harnesses a section of
-`CLAUDE.md` / `AGENTS.md` between `<!-- flock:comms -->` markers. Starters to copy into your
+`AGENTS.md` between `<!-- flock:comms -->` markers. Starters to copy into your
 experiment (they are examples, never loaded from flock's wheel):
 
 | file | what |
@@ -230,7 +230,7 @@ block in its next heartbeat response (every 30 s, ±10 %), the same path as the 
 - `rules` apply from the agent's next tool call (at most one heartbeat after the apply);
 - `protocols` apply from the agent's next turn boundary: the instructions file is rewritten when a
   prompt starts a turn; `llm` rebuilds its system message at that turn's start when it changed; a
-  CLI harness reads its `CLAUDE.md` / `AGENTS.md` at its next start (a new burst);
+  CLI harness reads its `AGENTS.md` at its next start (a new burst);
 - the kickoff is never posted again; changing `url`, `channel` or `invite_env` resolves the new
   channel (and posts the kickoff there once). Each worker then drops its cached identities and
   joins every agent that had joined there again at once, redeeming the current invite, so the

@@ -52,7 +52,6 @@ class AdapterEvent:
 # worker passes explicitly (spec.env, the type's declared secrets, identity, the provider key).
 BASE_ENV = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ", "TMPDIR",
-    "IS_SANDBOX",  # Claude's bypassPermissions as root
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 })
@@ -70,23 +69,13 @@ def minimal_env(
     return env
 
 
-# Where the Claude adapter puts a provider-backed type's key (claude_env): x-api-key / bearer.
-CLAUDE_KEY_ALIASES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-
-
 def credential_env_names(spec: TypeSpec) -> list[str]:
     """Every environment variable through which a harness process holds its provider key: the
-    provider's `api_key_env` plus the names an adapter copies it to (Claude: ANTHROPIC_API_KEY or
-    ANTHROPIC_AUTH_TOKEN; Codex, Pi and llm read `api_key_env` itself). Tool calls
-    (`flock-tool`, docs/tools.md) get none of them. Empty for a harness-native model, whose keys
-    are ordinary declared `secrets`."""
+    provider's `api_key_env` (Pi and llm read it themselves). Tool calls (`flock-tool`,
+    docs/tools.md) get none of them. Empty for a harness-native model, whose keys are ordinary
+    declared `secrets`."""
     r = spec.resolved_model
-    if r is None:
-        return []
-    names = [r.provider.api_key_env]
-    if spec.harness.value == "claude":
-        names += CLAUDE_KEY_ALIASES
-    return sorted(set(names))
+    return [] if r is None else [r.provider.api_key_env]
 
 
 HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b",

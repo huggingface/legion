@@ -5,8 +5,8 @@ namespace: <you>
 bucket: hf://buckets/<you>/flock/first-spawn
 types:
   leader:
-    harness: claude
-    model: claude-haiku-5-5
+    harness: pi
+    model: anthropic/claude-haiku-5-5
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 1
     workers: {initial: 1}
@@ -20,8 +20,8 @@ types:
         flock-agent spawn analyst --key c5 --prompt "Say hello in Spanish. One word."
       Then reply "spawned 5" and stop. Children report back as later prompts; reply "ok".
   analyst:
-    harness: claude
-    model: claude-haiku-5-5
+    harness: pi
+    model: anthropic/claude-haiku-5-5
     secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
     replicas: 0                    # exists only when spawned
     agents_per_worker: 10

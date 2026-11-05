@@ -42,7 +42,7 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
     }
     return SwarmSpec.model_validate({
         "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": block,
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 2,
+        "types": {"researcher": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 2,
                                  "agents_per_worker": 2, "secrets": ["ANTHROPIC_API_KEY"],
                                  "resume_prompt": "Your turn was cut; continue.",
                                  "env": {"MSGBOARD_URL": "https://example.invalid"}}},

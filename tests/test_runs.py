@@ -1,6 +1,6 @@
 """Tiny real runs (tests/tinyrun.py): a `compute: local` swarm through its whole lifecycle, a
 controller that crashes mid-loop and comes back, one run per feature: loops, spawn, the tools
-folder, comms on the fake board (tests/fake_msgboard.py), one turn per harness; and the remote
+folder, comms on the fake board (tests/fake_msgboard.py); and the remote
 backends on fakes: Slurm (tests/fixtures/slurm_stubs) and HF Jobs (tests/fake_hub.py)."""
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from flock.controller.slurm import read_env_file
 from flock.tools.bundle import pack
 
 from . import fake_hub, fake_msgboard
-from .test_worker_adapters import FAKE_APP_SERVER
 
 
 def test_lifecycle(tiny):
@@ -48,6 +47,9 @@ def test_lifecycle(tiny):
     turn = tiny.events("writer-0000", "agent.turn")
     assert [(e["name"], e["data"]["turn_id"]) for e in turn] == [
         ("agent.turn_started", "t-1"), ("agent.turn_ended", "t-1")], turn
+    assert turn[1]["data"]["tokens"]["fake-model"]["output"] > 0, turn
+    started = tiny.events("writer-0000", "agent.session_started")[0]["data"]
+    assert (started["harness"], started["model_id"]) == ("llm", "fake-model"), started
     st = tiny.wait(lambda: (s := json.loads(tiny.flock("status", "tiny", "--json")))
                    ["verdict"]["level"] == "ok" and s)
     t = st["status"]["types"]["writer"]
@@ -534,40 +536,6 @@ def test_comms(tiny, board, tmp_path):
         (1, "start"), (1, "wake: comms.mention")]
     assert [e["data"]["why"] for e in tiny.events("quiet-0000", "loop.prompt")] == ["start"]
     assert [e["data"]["reason"] for e in tiny.events(a, "loop.wake")] == ["comms.mention"]
-
-
-# appended under types.writer
-HARNESSES = """\
-  coder:
-    harness: codex
-    model: fake:fake-model
-    replicas: 1
-    env: {HEARTBEAT_INTERVAL: "0.5"}
-"""
-
-
-def test_one_turn_per_harness(tiny, tmp_path, monkeypatch):
-    """One turn on each harness the tests can run: `llm` on the fake model server, `codex` on
-    the fake app-server of tests/test_worker_adapters.py (FLOCK_CODEX_CLI, which a local
-    worker keeps). `pi` and `claude` need their real CLIs (test_worker_pi runs pi when it is
-    installed)."""
-    codex = tmp_path / "fake-codex"
-    codex.write_text(f"#!{sys.executable}\n{FAKE_APP_SERVER}")
-    codex.chmod(0o755)
-    monkeypatch.setenv("FLOCK_CODEX_CLI", str(codex))
-    tiny.flock("launch", tiny.spec(extra=HARNESSES), "--skip-preflight")
-    for n in ("writer-0000", "coder-0000"):
-        tiny.flock("prompt", n, "bash: echo hi")
-    for n, harness, reply in (("writer-0000", "llm", "done: hi\n[exit code 0]"),
-                              ("coder-0000", "codex", "done")):
-        assert tiny.turns(n, 1)["cost_usd"] > 0
-        evs = tiny.events(n)
-        started = next(e["data"] for e in evs if e["name"] == "agent.session_started")
-        assert (started["harness"], started["model_id"]) == (harness, "fake-model"), started
-        ended = next(e["data"] for e in evs if e["name"] == "agent.turn_ended")
-        assert ended["status"] == "completed" and ended["tokens"]["fake-model"]["output"] > 0
-        said = [e["data"]["message"] for e in evs if e["name"] == "agent.message"]
-        assert said[-1]["role"] == "assistant" and said[-1]["content"][-1]["text"] == reply
 
 
 @pytest.fixture

@@ -18,7 +18,7 @@ LEADER = "leader-0000"
 
 
 def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
-    base = {"harness": "claude", "model": "claude-opus-5-5"}
+    base = {"harness": "pi", "model": "claude-opus-5-5"}
     types = {
         "leader": {"replicas": 1, "workers": {"initial": 1}},
         "analyst": {"replicas": 0, "agents_per_worker": 2, "workers": {"initial": 1, "max_extra": 1}},

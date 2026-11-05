@@ -254,7 +254,7 @@ def agent_status(
         name=a["name"],
         swarm=a["swarm"],
         type=a["type"],
-        harness=ts.harness if ts else Harness.claude,
+        harness=ts.harness if ts else Harness.llm,  # its type left the spec: a placeholder
         model=ts.model if ts else "unknown",
         provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},

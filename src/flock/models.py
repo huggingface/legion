@@ -214,8 +214,8 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only: Codex,
-    # Claude Code and Pi cannot add body fields, so for them it is kept for spec portability.
+    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only: Pi cannot
+    # add body fields, so for it it is kept for spec portability.
     extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
@@ -749,7 +749,7 @@ class TypeSpec(BaseModel):
     model: str
     reasoning: Reasoning | None = None  # overrides the alias's reasoning
     image: str | None = None  # None -> default worker image
-    system_prompt_file: str | None = None  # written into the workdir as CLAUDE.md / AGENTS.md
+    system_prompt_file: str | None = None  # written into the workdir as AGENTS.md
     # The file's contents, inlined by `flock launch` (the controller and workers cannot
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None

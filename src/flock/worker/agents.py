@@ -307,7 +307,7 @@ class AgentRuntime:
 
     def _apply_live(self) -> None:
         """At a turn boundary: take the pending type spec. A changed system prompt
-        rewrites CLAUDE.md / AGENTS.md (the llm harness rebuilds its system message from it at
+        rewrites AGENTS.md (the llm harness rebuilds its system message from it at
         the turn start); an agent that already had a turn gets a one-line note in its next
         prompt for each kind of change."""
         spec, self._next_spec = self._next_spec, None
@@ -427,7 +427,7 @@ class AgentRuntime:
         self._world_section = section
 
     def _write_comms_section(self) -> None:
-        """The comms section (board identity, rules, protocol files) of CLAUDE.md / AGENTS.md,
+        """The comms section (board identity, rules, protocol files) of AGENTS.md,
         rewritten when it changes; the llm harness reads AGENTS.md into its system message."""
         if self.comms is None or not self.workdir.is_dir() or not self._own_instructions:
             return
@@ -442,7 +442,7 @@ class AgentRuntime:
         self._comms_section = section
 
     def _write_tools_section(self, tools: Toolset) -> None:
-        """The generated Tools section of CLAUDE.md / AGENTS.md (CLI harnesses; llm gets function
+        """The generated Tools section of AGENTS.md (CLI harnesses; llm gets function
         tools instead), rewritten when the toolset changes."""
         if (self.spec.harness.value == "llm" or not self.workdir.is_dir()
                 or not self._own_instructions):
@@ -458,7 +458,7 @@ class AgentRuntime:
 
     @property
     def _own_instructions(self) -> bool:
-        """CLAUDE.md / AGENTS.md go in the workdir; a harbor Trial gets its own from Harbor."""
+        """AGENTS.md go in the workdir; a harbor Trial gets its own from Harbor."""
         return self.spec.harness.value != "harbor"
 
     def _write_instructions(self) -> None:

@@ -65,7 +65,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
         spec = SwarmSpec.model_validate({
             "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "world": {"url": TEMPLATE, "token_env": "WORLD_TOKEN"},
-            "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5",
+            "types": {"researcher": {"harness": "pi", "model": "claude-opus-5-5",
                                      "replicas": 1, "world_tools": True}},
         })
         app = create_app(store, TOKEN, clock=clock)

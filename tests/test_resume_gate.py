@@ -79,7 +79,7 @@ def test_removed_key_dropped_typo_refused(monkeypatch, caplog, tmp_path: Path) -
     spec = tmp_path / "spec.yaml"
     loop = {"prompt": "next round", "gone_opt": "5s"}
     data = {"swarm": "h", "compute": {"kind": "local"},
-            "types": {name: {"harness": "claude", "model": "claude-opus-5-5", "loop": loop}}}
+            "types": {name: {"harness": "pi", "model": "claude-opus-5-5", "loop": loop}}}
     spec.write_text(yaml.safe_dump(data))
     read_spec(str(spec))  # a spec file: dropped too
     loop["gone_optt"] = loop.pop("gone_opt")

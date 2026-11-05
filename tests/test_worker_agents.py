@@ -235,7 +235,7 @@ async def test_system_prompt_written(tmp_path):
     await rt.setup(restore=False)
     await rt.prompt("hi")
     await until(lambda: adapter.sent == ["hi"])
-    assert (rt.workdir / "CLAUDE.md").read_text() == "You are a researcher."
+    assert (rt.workdir / "AGENTS.md").read_text() == "You are a researcher."
 
 
 async def test_inline_system_prompt_wins_over_file(tmp_path):
@@ -243,7 +243,7 @@ async def test_inline_system_prompt_wins_over_file(tmp_path):
     await rt.setup(restore=False)
     await rt.prompt("hi")
     await until(lambda: adapter.sent == ["hi"])
-    assert (rt.workdir / "CLAUDE.md").read_text() == "Keep notes.md."
+    assert (rt.workdir / "AGENTS.md").read_text() == "Keep notes.md."
 
 
 async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):

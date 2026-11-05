@@ -44,7 +44,7 @@ def sim_spec(max_working: int, per_worker: int = 25, agents: int = 1000) -> Swar
         for prov, _ in shape.values()
     }
     types = {
-        name: {"harness": "codex", "model": f"{prov}:LFM2.5-2.6B", "replicas": n,
+        name: {"harness": "pi", "model": f"{prov}:LFM2.5-2.6B", "replicas": n,
                "agents_per_worker": per_worker}
         for name, (prov, n) in shape.items()
     }

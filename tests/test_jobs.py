@@ -8,8 +8,6 @@ import pytest
 
 from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
-    CLAUDE_CODE_VERSION,
-    CODEX_VERSION,
     PI_VERSION,
     WORKER_COMMAND,
     HubJobsClient,
@@ -22,23 +20,22 @@ WHEEL = "hf://buckets/ns/sh/dist/abc/flock-0.0.1-py3-none-any.whl"
 
 
 def _spec(**kw) -> TypeSpec:
-    return TypeSpec(harness="claude", model="claude-haiku-5-5", **kw)
+    return TypeSpec(harness="pi", model="claude-haiku-5-5", **kw)
 
 
 def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
     cmd = bootstrap_command()
     assert cmd[:2] == ["bash", "-c"]
     script = cmd[2]
-    assert f"@anthropic-ai/claude-code@{CLAUDE_CODE_VERSION}" in script
-    assert f"@openai/codex@{CODEX_VERSION}" in script
+    assert f"@earendil-works/pi-coding-agent@{PI_VERSION}" in script
     assert "astral.sh/uv/install.sh" in script
     assert 'hf buckets cp "$FLOCK_WHEEL_URL"' in script
     assert "download_bucket_files" in script  # Python API fallback
     assert 'uv tool install -q "$WHEEL[worker]"' in script and "pip install" in script
-    for env in ("IS_SANDBOX=1", "CLAUDE_CONFIG_DIR=/state/claude", "CODEX_HOME=/state/codex"):
+    for env in ("WORK_ROOT=/work/agents", "PI_CODING_AGENT_DIR=/state/pi"):
         assert env in script
     assert script.rstrip().endswith("exec flock-worker")
-    assert "{" + "claude}" not in script and "{" + "hub}" not in script  # all pins filled in
+    assert "{" + "pi}" not in script and "{" + "hub}" not in script  # all pins filled in
     f = tmp_path / "bootstrap.sh"
     f.write_text(script)
     subprocess.run(["bash", "-n", str(f)], check=True)

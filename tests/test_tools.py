@@ -427,7 +427,7 @@ def test_extract_checks_hash_and_members(tmp_path):
 
 
 def spec_with(tmp_path, tools=None, tools_dir=None, **extra) -> tuple[SwarmSpec, Path]:
-    t = {"harness": "claude", "model": "m"}
+    t = {"harness": "pi", "model": "m"}
     if tools is not None:
         t["tools"] = tools
     raw = {"swarm": "s", "namespace": "ns", "bucket": "b", "types": {"dev": t}, **extra}
@@ -460,13 +460,13 @@ def test_prepare_selection_and_defaults(tmp_path):
 
 def test_spec_fields_are_optional_and_checked():
     base = {"swarm": "s", "namespace": "ns", "bucket": "b",
-            "types": {"dev": {"harness": "claude", "model": "m"}}}
+            "types": {"dev": {"harness": "pi", "model": "m"}}}
     s = SwarmSpec.model_validate(base)
     assert s.tools_dir is None and s.tools_version is None and s.types["dev"].tools is None
     with pytest.raises(ValueError, match="tools_version is written by `flock launch`"):
         SwarmSpec.model_validate({**base, "tools_version": "nothex"})
     with pytest.raises(ValueError):
-        SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "claude", "model": "m",
+        SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "pi", "model": "m",
                                                             "tools": "some"}}})
 
 

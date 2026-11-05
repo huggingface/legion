@@ -16,9 +16,9 @@ from flock.models import (
 
 
 def spec(spawn=None, limits=None, types=None) -> SwarmSpec:
-    base = {"harness": "codex", "model": "gpt-5.5-codex"}
+    base = {"harness": "pi", "model": "gpt-5.5-codex"}
     types = types or {
-        "leader": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 1,
+        "leader": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 1,
                    "workers": {"initial": 1, "max_extra": 0}},
         "analyst": {"replicas": 0, "workers": {"initial": 1, "max_extra": 3}},
         "helper": {"replicas": 0, "workers": {"initial": 0, "max_extra": 2}},

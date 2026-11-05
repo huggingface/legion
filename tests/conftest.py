@@ -44,7 +44,7 @@ def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
     full = {}
     for name, overrides in types.items():
         base = {
-            "harness": "claude",
+            "harness": "pi",
             "model": "claude-opus-5-5",
             "secrets": ["ANTHROPIC_API_KEY"],
             "env": {"MSGBOARD_URL": "https://example.invalid"},
