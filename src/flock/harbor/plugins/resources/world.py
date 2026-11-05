@@ -1,10 +1,10 @@
 """A running World API world (docs/world.md), shared by every agent; flock never starts or stops it.
 
 Each agent acts only as itself. `transport: unix` (docker, podman): a per-agent Unix socket,
-served by a launcher-side proxy that adds the agent's token and name, so no world credential
-enters the container. `transport: http` (backends without mounts, e.g. hf-sandbox): WORLD_URL,
-WORLD_AGENT and the agent's own token, which the world accepts only for that agent's tool calls
-(flock.world.protocol.agent_token).
+served by a launcher-side proxy that adds the world secret and the agent's name, so no world
+credential enters the container and any World API v1 world works. `transport: http` (backends
+without mounts, e.g. hf-sandbox): WORLD_URL, WORLD_AGENT and the agent's own token, which a
+flock.world server accepts only for that agent's tool calls (flock.world.protocol.agent_token).
 """
 
 import asyncio
@@ -128,10 +128,10 @@ class Resource:
     def _serve_sockets(self):
         self.socket_directory = tempfile.TemporaryDirectory(prefix="flock-world-")
         self.proxy_client = httpx.Client(timeout=httpx.Timeout(1800, connect=10))
-        for name, token in self.tokens.items():
+        for name in self.tokens:
             path = Path(self.socket_directory.name) / f"{name}.sock"
             server = socketserver.ThreadingUnixStreamServer(
-                str(path), _proxy(self.url, self.proxy_client, token, name)
+                str(path), _proxy(self.url, self.proxy_client, self.secret, name)
             )
             server.daemon_threads = True
             # The containing host directory is private; the socket is mounted alone.
