@@ -12,6 +12,7 @@ from flock.controller.reconcile import (
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
     NUDGE_MAX,
+    STABLE_AFTER,
     agent_state,
     rebuild_from_jobs,
     reconcile,
@@ -251,10 +252,29 @@ def test_planned_ends_right_after_start_back_off(store, jobs, clock, tick):
         assert "launch" in kinds(tick())
     assert waits == [30, 60, 120]  # crash_backoff doubling, without a crash or a crashloop
     assert (w["crashes"], w["consecutive_crashes"]) == (0, 0)
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    assert store.get_worker(W0)["fast_ends"] == 3  # a heartbeat soon after the launch: kept
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)  # a re-apply clears it
+    assert store.get_worker(W0)["fast_ends"] == 0
+    store.update_worker(W0, fast_ends=3)
+    clock.advance(STABLE_AFTER)
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    assert store.get_worker(W0)["fast_ends"] == 0  # a long run, however it ends
     assert store.type_health("demo", "researcher") != "crashlooping"
-    clock.advance(FAST_END)  # a run of normal length resets the count
+    store.update_worker(W0, fast_ends=3)
     heartbeat(store, clock, W0, [("researcher-0000", "idle", None)], draining=True)
     jobs.set_stage(jobs.job_for(W0), "COMPLETED")
+    assert kinds(tick())[:2] == ["planned_restart", "launch"]  # a run of normal length
+    assert store.get_worker(W0)["fast_ends"] == 0
+
+
+def test_a_preemption_right_after_start_relaunches_at_once(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    clock.advance(5)  # well inside FAST_END: preempted by the scheduler, not the worker's doing
+    hb = WorkerHeartbeat(worker=W0, deadline=clock() + timedelta(hours=24), preempted=True,
+                         agents=[AgentHeartbeat(name="researcher-0000", state="idle")])
+    assert record_heartbeat(store, W0, hb, clock())
     assert kinds(tick())[:2] == ["planned_restart", "launch"]
     assert store.get_worker(W0)["fast_ends"] == 0
 

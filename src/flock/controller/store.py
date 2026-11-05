@@ -367,7 +367,8 @@ class Store:
                     [spec.swarm, type_name],
                 )
             # Re-applying the spec clears crashlooping, launch_refused and their streaks.
-            self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
+            self._x("UPDATE workers SET consecutive_crashes = 0, fast_ends = 0 WHERE swarm = ?",
+                    [spec.swarm])
         self._liveness[spec.swarm] = spec.compute.liveness()
         self.listener("reconcile", "")
 
