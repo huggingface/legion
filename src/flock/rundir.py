@@ -238,18 +238,31 @@ def _files(root: Path) -> dict[str, Path]:
             if p.is_file() and "__pycache__" not in p.parts}
 
 
-def outside_links(src: Path) -> list[str]:
-    """Links below `src`'s top level that point outside it: `copy_experiment` copies what they
-    point to (a secret file, say) as a plain file, which `flock launch` may then ship. A top-level
-    link (v8-harbor's `tools`) and links within its own target are not listed."""
+def outside_links(src: Path) -> list[tuple[Path, str]]:
+    """(path in `src`, target) of links below `src`'s top level that point outside it:
+    `copy_experiment` copies what they point to (a secret file, say) as a plain file, which
+    `flock launch` may then ship. A top-level link (v8-harbor's `tools`) and links within its own
+    target are not listed."""
     root, out = src.resolve(), []
     for top in src.iterdir():
         within = (root, top.resolve())
         for d, dirs, files in os.walk(top):  # the top link followed, the ones below it not
             for p in (Path(d) / n for n in dirs + files):
                 if p.is_symlink() and not any(p.resolve().is_relative_to(w) for w in within):
-                    out.append(f"{p.relative_to(src)} -> {os.readlink(p)}")
+                    out.append((p.relative_to(src), os.readlink(p)))
     return sorted(out)
+
+
+def shipped_folders(spec_file: Path) -> list[Path]:
+    """A Harbor spec's (top-level `task:`) tools and resources folders as written, which
+    `flock launch` ships to the workers; [] for any other spec."""
+    try:
+        data = load_spec_yaml(spec_file.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - unreadable or broken: the spec check says so
+        return []
+    if not (isinstance(data, dict) and "task" in data):
+        return []
+    return [Path(str(data.get(f"{k}_dir") or k)) for k in ("tools", "resources")]
 
 
 def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
@@ -271,10 +284,15 @@ def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
         raise ValueError(f"{dst} is missing or empty: pass --from EXPERIMENT_FOLDER")
     if need and not (src / need).is_file():
         raise ValueError(f"{src}: no spec.yaml (an experiment folder holds spec.yaml + prompts/)")
-    if links := outside_links(src):
+    links = outside_links(src)
+    shipped = shipped_folders(src / need) if need else []
+    if refused := [f"{p} -> {t}" for p, t in links if any(p.is_relative_to(f) for f in shipped)]:
+        raise ValueError(f"{src}: links in the tools or resources folder point outside the "
+                         f"experiment, and launch would ship what they point to: "
+                         f"{', '.join(refused)}; copy those files in instead")
+    if links:
         rep.checks.append(Check("links", True, "copied as files from outside the folder (check "
-                                "none is a secret: launch ships tools/ and resources/)", links,
-                                warn=True))
+                                "none is a secret)", [f"{p} -> {t}" for p, t in links], warn=True))
     shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))
     rep.created.append(f"{dst} (copy of {src})")

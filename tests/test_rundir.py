@@ -48,6 +48,17 @@ def _by_name(rep):
     return {c.name: c for c in rep.checks}
 
 
+def test_init_warns_of_links_that_point_outside_the_folder(tmp_path):
+    """Copied as the files they point to (a prompt shared with another experiment, say)."""
+    src = _folder(tmp_path)
+    (tmp_path / "shared.md").write_text("Shared.\n")
+    (src / "prompts" / "shared.md").symlink_to(tmp_path / "shared.md")
+    rep = rundir.init(tmp_path / "run", src, env={})
+    links = _by_name(rep)["links"]
+    assert links.warn and links.lines == [f"prompts/shared.md -> {tmp_path / 'shared.md'}"]
+    assert (tmp_path / "run" / "experiment" / "prompts" / "shared.md").read_text() == "Shared.\n"
+
+
 def test_init_creates_everything_then_changes_nothing(tmp_path):
     src, run = _folder(tmp_path), tmp_path / "runs" / "r1"
     rep = rundir.init(run, src, env={})

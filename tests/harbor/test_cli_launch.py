@@ -123,9 +123,9 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
-    """A linked tools folder ships; a link inside it is refused at launch, and `flock init`,
-    which copies what it points to, warns of it. Init's run.env names the board's default
-    token, known once the spec is compiled."""
+    """A linked tools folder ships; a link inside it is refused at launch and by `flock init`
+    (which would copy what it points to). Init's run.env names the board's default token,
+    known once the spec is compiled."""
     exp = experiment(tmp_path / "exp",
                      resources="{fake: {mount: true}, board: {url: https://board.example}}")
     board = Path(flock.harbor.__file__).with_name("plugins") / "resources" / "board.py"
@@ -137,10 +137,12 @@ def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
     (tmp_path / "shared" / "creds").symlink_to(tmp_path / "token")
     with pytest.raises(SpecError, match="symlinks are not allowed"):
         read_spec(str(exp / "spec.yaml"))
-    rep = rundir.init(tmp_path / "run", exp, env={"PATH": os.environ["PATH"],
-                                                  "HOME": str(tmp_path)})
-    (links,) = [c for c in rep.checks if c.name == "links"]
-    assert links.warn and links.lines == [f"tools/creds -> {tmp_path / 'token'}"]
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+    with pytest.raises(ValueError, match=f"tools/creds -> {tmp_path / 'token'}; copy"):
+        rundir.init(tmp_path / "run", exp, env=env)
+    (tmp_path / "shared" / "creds").unlink()
+    rep = rundir.init(tmp_path / "run", exp, env=env)
+    assert not [c for c in rep.checks if c.name == "links" or c.ok is False], rep.checks
     assert "\n#MSGBOARD_OPERATOR_TOKEN=\n" in (tmp_path / "run" / "run.env").read_text()
 
 
