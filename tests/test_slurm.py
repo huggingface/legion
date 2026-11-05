@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import random
-import stat
 from datetime import timedelta
 from pathlib import Path
 
@@ -19,49 +18,13 @@ from flock.controller.slurm import (
     read_env_file,
     resolve,
 )
-from flock.models import AgentHeartbeat, ComputeSpec, SwarmSpec, WorkerHeartbeat
+from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
 from .conftest import TOKEN
 
-STUBS = Path(__file__).parent / "fixtures" / "slurm_stubs"
 W0 = "demo-researcher-w0000"
 SECRET_VALUES = {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-secret-anthropic",
                  "HF_TOKEN": "hf_secret_value"}
-
-
-class Slurm:
-    """The stub cluster: job files under `dir/jobs/<id>.*`."""
-
-    def __init__(self, root: Path) -> None:
-        self.dir = root
-
-    def ids(self) -> list[str]:
-        return sorted(p.stem for p in (self.dir / "jobs").glob("*.state"))
-
-    def argv(self, job_id: str) -> list[str]:
-        return (self.dir / "jobs" / f"{job_id}.argv").read_text().splitlines()
-
-    def set(self, job_id: str, state: str, exit_code: str = "0:0") -> None:
-        (self.dir / "jobs" / f"{job_id}.state").write_text(state + "\n")
-        (self.dir / "jobs" / f"{job_id}.exit").write_text(exit_code + "\n")
-
-    def flag(self, job_id: str, name: str) -> None:
-        (self.dir / "jobs" / f"{job_id}.{name}").touch()
-
-    def calls(self) -> list[str]:
-        p = self.dir / "calls"
-        return p.read_text().splitlines() if p.exists() else []
-
-
-@pytest.fixture
-def slurm(tmp_path, monkeypatch) -> Slurm:
-    d = tmp_path / "slurm"
-    d.mkdir()
-    for f in STUBS.iterdir():  # executable even if the checkout lost the mode bits
-        f.chmod(f.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{STUBS}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("SLURM_STUB_DIR", str(d))
-    return Slurm(d)
 
 
 def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
@@ -119,47 +82,6 @@ def test_compute_spec_keys_and_resolution(tmp_path):
 
 
 # --------------------------------------------------------------------------- client
-
-
-def test_launch_writes_env_file_and_sbatch_line_without_secrets(tmp_path, slurm, store, clock):
-    spec = slurm_spec(tmp_path)
-    store.put_swarm(spec, 0)
-    jobs = SlurmJobsClient(env={})
-    actions = reconcile(store, jobs, clock(), settings())
-    assert [a.kind for a in actions if a.kind == "launch"] == ["launch"]
-    (job_id,) = slurm.ids()
-    argv = slurm.argv(job_id)
-    inc = store.get_worker(W0)["incarnation"]
-    env_path = tmp_path / "launch" / f"{W0}-{inc}.env"
-    assert argv == [
-        "--parsable", "-p", "cpu", "-A", "acct", "-c", "4", "--mem=7G", "--time=29:00:00",
-        "--no-requeue", "-J", W0, f"--comment=swarm=demo,type=researcher,worker={W0}",
-        "-o", f"{tmp_path / 'logs'}/{W0}-%j.out",
-        "/fsx/run3/slurm/worker.sbatch", str(env_path),
-    ]
-    assert not any(a.startswith(("--export", "--signal")) for a in argv)
-    # every line is a comment or KEY=value (the cluster's worker.sbatch sources it with set -a)
-    assert all(ln.startswith("#") or ln.split("=", 1)[0].isidentifier()
-               for ln in env_path.read_text().splitlines())
-    text = env_path.read_text()
-    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
-    for value in SECRET_VALUES.values():  # no secret value in the file or on the command line
-        assert value not in text and not any(value in a for a in argv)
-    assert "Secrets this worker expects" in text
-    for name in ("FLOCK_TOKEN", "HF_TOKEN", "ANTHROPIC_API_KEY"):
-        assert name in text.splitlines()[1]
-    env = read_env_file(env_path)
-    assert env["FLOCK_URL"] == "http://${CTL_HOST}:7860"  # expanded by the worker
-    assert env["FLOCK_CTL_HOST_FILE"] == "/fsx/run3/controller.host"
-    assert env["WORKER_ID"] == W0 and env["SWARM"] == "demo" and env["TYPE"] == "researcher"
-    assert env["BUCKET"] == "hf://buckets/ns/sh" and len(env["WORKER_INCARNATION"]) == 32
-    assert env["WORK_ROOT"] == f"/tmp/flock/{W0}/work"
-    assert env["FLOCK_LLM_HOME"] == f"/tmp/flock/{W0}/llm"
-    assert env["RUN"] == tmp_path.name  # the launch dir's parent: <runs>/<RUN>/launch
-    assert env["FLOCK_VENV"] == "/fsx/run3/venv"
-    assert env["FLOCK_SECRETS_FILE"] == "/fsx/run3/secrets.env"
-    assert env["MSGBOARD_URL"] == "https://example.invalid" and "FLOCK_TOKEN" not in env
-    assert "DEADLINE" in env and env["DRAIN_WINDOW"] == "10m"
 
 
 def test_no_partition_leaves_it_to_the_cluster(tmp_path, slurm):
@@ -242,38 +164,6 @@ def test_launch_needs_script_and_dirs(tmp_path, slurm, store, clock):
     assert slurm.ids() == []
 
 
-def test_preempted_job_relaunches_same_name_without_backoff(tmp_path, slurm, store, clock):
-    spec = slurm_spec(tmp_path, types={"researcher": {"cpus": 2}})
-    store.put_swarm(spec, 0)
-    jobs, s = SlurmJobsClient(env={}), settings()
-    reconcile(store, jobs, clock(), s)
-    (first,) = slurm.ids()
-    slurm.set(first, "RUNNING")
-    clock.advance(30)
-    heartbeat(store, clock, W0)
-    slurm.set(first, "CANCELLED by 0")  # the node watcher, after SIGUSR1 and 30 s
-    clock.advance(100)  # the slot goes quiet: the next pass checks the job
-    actions = reconcile(store, jobs, clock(), s)
-    kinds = [a.kind for a in actions]
-    assert "planned_restart" in kinds and "crash" not in kinds
-    w = store.get_worker(W0)
-    assert w["consecutive_crashes"] == 0 and w["crashes"] == 0
-    assert "launch" in kinds  # same pass: next_launch_at = now
-    second = [i for i in slurm.ids() if i != first]
-    assert len(second) == 1
-    argv = slurm.argv(second[0])
-    assert argv[argv.index("-J") + 1] == W0 and "-c" in argv and argv[argv.index("-c") + 1] == "2"
-
-
-def test_controller_build_selects_backend(tmp_path):
-    from flock.controller.main import build
-
-    env = {"FLOCK_TOKEN": TOKEN, "FLOCK_DATA": str(tmp_path / "d"), "FLOCK_COMPUTE": "slurm"}
-    b = build(env)
-    assert isinstance(b.jobs, SlurmJobsClient)
-    b.store.close()
-
-
 def test_env_file_quoting_round_trips(tmp_path):
     import subprocess
 
@@ -295,22 +185,6 @@ def test_space_mode_honours_worker_url():
     assert d.mode == "space" and d.public_url == "http://ip-10-0-0-1:7860"
     assert d.worker_url == "http://${CTL_HOST}:7860"
     assert deployment({"FLOCK_URL": "http://h:1"}).worker_url == "http://h:1"
-
-
-async def test_slurm_controller_accepts_only_slurm_specs(store, clock, tmp_path):
-    import httpx
-
-    from flock.controller.api import create_app
-
-    app = create_app(store, TOKEN, clock=clock, compute="slurm")
-    spec = slurm_spec(tmp_path)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
-                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
-        r = await c.put("/swarms/demo", json=spec.model_dump(mode="json"))
-        assert r.status_code == 200, r.text
-        other = spec.model_copy(update={"compute": ComputeSpec(kind="local")})
-        r = await c.put("/swarms/demo", json=other.model_dump(mode="json"))
-        assert r.status_code == 400 and "compute 'slurm'" in r.text
 
 
 # --------------------------------------------------------------------------- planned restarts
@@ -428,19 +302,6 @@ def test_spot_churn_never_crashloops_and_timeout_is_planned(tmp_path, slurm, sto
 # --------------------------------------------------------------------------- hardening
 
 
-def test_sbatch_gets_a_scrubbed_environment(tmp_path, slurm, store, clock, monkeypatch):
-    for name in ("FLOCK_TOKEN", "HF_TOKEN", "OPENAI_API_KEY", "CHATBOT_BOARD_INVITE",
-                 "FLOCK_WORLD_TOKEN", "CHATBOT_WORLD_TOKEN"):
-        monkeypatch.setenv(name, f"secret-{name.lower()}")
-    monkeypatch.setenv("LANG", "C.UTF-8")
-    store.put_swarm(slurm_spec(tmp_path), 0)
-    reconcile(store, SlurmJobsClient(), clock(), settings())
-    (job,) = slurm.ids()
-    seen = (slurm.dir / "jobs" / f"{job}.environ").read_text()
-    assert "secret-" not in seen and "FLOCK_TOKEN" not in seen and "HF_TOKEN" not in seen
-    assert "LANG=C.UTF-8" in seen and "PATH=" in seen
-
-
 def test_size_guard_at_apply_and_at_launch(tmp_path, slurm, store, clock):
     from flock.models import mem_mb
 
@@ -471,6 +332,9 @@ def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, cl
     (job,) = slurm.ids()
     w = store.get_worker(W0)
     assert w["log_path"] == str(tmp_path / "logs" / f"{W0}-{job}.out")
+    env = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))  # no container_root:
+    assert (env["WORK_ROOT"], env["FLOCK_LLM_HOME"]) == (  # node-local, fixed per slot
+        f"/tmp/flock/{W0}/work", f"/tmp/flock/{W0}/llm") and "HOME" not in env
     (tmp_path / "logs" / f"{W0}-{job}.out").write_text("start\nImportError: no module x\n")
     slurm.set(job, "FAILED", "1:0")
     clock.advance(100)

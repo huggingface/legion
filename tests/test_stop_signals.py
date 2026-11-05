@@ -17,7 +17,8 @@ import httpx
 import pytest
 
 from .test_controller_job import FakeBucket, StateSync, _built, _free_port
-from .test_run3_experiment import ROOT, _env
+from .test_local_run_e2e import _env
+from .test_world import TASKBOARD
 
 SEQUENCES = [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"), ("SIGTERM",)]
 
@@ -56,10 +57,10 @@ def test_world_serve_stops_once(tmp_path, signals):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     env = {**_env(tmp_path), "FLOCK_WORLD_TOKEN": "w0rld-t0ken",
-           "CHATBOT_WS": str(tmp_path / "ws")}
-    proc = subprocess.Popen([sys.executable, "-m", "flock.cli", "world", "serve",
-                             "chatbot3:Chatbot3World", "--port", str(port)],
-                            cwd=ROOT / "worlds" / "chatbot3", env=env, text=True,
+           "TASKBOARD_DB": str(tmp_path / "taskboard.db")}
+    proc = subprocess.Popen([sys.executable, "-m", "flock.world", "serve",
+                             "taskboard:TaskBoard", "--port", str(port)],
+                            cwd=TASKBOARD, env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
         deadline = time.monotonic() + 30

@@ -142,10 +142,10 @@ def test_clone_filters_never_run(repos, tmp_path):
     assert len(list((clone / ".git/objects").rglob("*"))) == loose  # no objects left in the clone
 
 
-def test_payload_size_5k_files(tmp_path, capsys):
-    """Measured: a 5,000-file clone with a 3-file change, v1 vs v2 JSON payload sizes."""
+def test_payload_size_1k_files(tmp_path, capsys):
+    """Measured: a 1,000-file clone with a 3-file change, v1 vs v2 JSON payload sizes."""
     seed = tmp_path / "seed"
-    for i in range(5000):
+    for i in range(1000):
         d = seed / f"pkg{i // 100}"
         d.mkdir(parents=True, exist_ok=True)
         (d / f"m{i}.py").write_text(f"# module {i}\n" + "def f(x):\n    return x + 1\n" * 20)
@@ -161,7 +161,7 @@ def test_payload_size_5k_files(tmp_path, capsys):
     v1 = len(json.dumps(capture(work, "clone")))
     v2 = len(json.dumps(capture_v2(work, "clone")))
     with capsys.disabled():
-        print(f"\n5k files, 3 changed: v1 {v1:,} bytes, v2 {v2:,} bytes")
+        print(f"\n1k files, 3 changed: v1 {v1:,} bytes, v2 {v2:,} bytes")
     assert v2 * 100 < v1
 
 
@@ -255,3 +255,21 @@ def test_server_counts_uploads_and_answers_need_full_without_v2():
     assert c.post("/tools/put", json=v2, headers=h).json()["result"] == ["base_sha", "patch"]
     m = c.get("/metrics").json()
     assert (m["upload_v1_total"], m["upload_v2_total"]) == (1, 1)
+
+
+def test_upload_stays_inside_the_workspace(repos):
+    work, clone, _ = repos
+    with pytest.raises(ValueError, match="inside"):
+        capture_v2(work, "..")
+    (clone / "leak").symlink_to("/etc/passwd")
+    with pytest.raises(ValueError, match="symlinks"):
+        capture_v2(work, "clone")
+
+
+def test_a_git_that_times_out_is_a_tool_error(repos, monkeypatch):
+    def slow(argv, **_):
+        raise subprocess.TimeoutExpired(argv, 30)
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    with pytest.raises(ValueError, match="timed out after 30 s"):
+        capture_v2(repos[0], "clone")

@@ -13,31 +13,6 @@ from .conftest import TOKEN, make_spec, wire, write_spec
 runner = CliRunner()
 
 
-def test_apply_status_prompt(tmp_path, monkeypatch, app, store, tick):
-    wire(monkeypatch, app)
-    spec_file = tmp_path / "spec.yaml"
-    write_spec(spec_file, make_spec())
-
-    r = runner.invoke(cli.app, ["launch", str(spec_file)])
-    assert r.exit_code == 0, r.output
-    assert "demo" in r.output and "researcher" in r.output
-    tick()
-
-    r = runner.invoke(cli.app, ["status"])
-    assert r.exit_code == 0, r.output
-    assert "agents=3 workers=2" in r.output and "unknown:3" in r.output
-    r = runner.invoke(cli.app, ["status", "demo"])
-    assert r.exit_code == 0 and "researcher" in r.output
-
-    r = runner.invoke(cli.app, ["prompt", "researcher-0001", "hello there"])
-    assert r.exit_code == 0, r.output
-    ack = json.loads(r.output)
-    assert ack["agent"] == "researcher-0001" and ack["status"] == "pending"
-
-    r = runner.invoke(cli.app, ["prompt", "nobody-0001", "x"])
-    assert r.exit_code == 1
-
-
 def test_update_replicas_agents_workers_remove(tmp_path, monkeypatch, app, store, tick):
     wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"

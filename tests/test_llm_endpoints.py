@@ -55,7 +55,8 @@ def servers(tmp_path):
         log = tmp_path / f"requests-{i}.jsonl"  # a Handler per server: its own request log
         handler = type(f"Handler{i}", (fake_openai.Handler,), {"log_path": str(log)})
         s = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        threading.Thread(target=s.serve_forever, daemon=True).start()
+        threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.05},
+                         daemon=True).start()
         s.log, s.url = log, f"http://127.0.0.1:{s.server_port}/v1"
         srvs.append(s)
     yield srvs

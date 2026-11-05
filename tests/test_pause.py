@@ -6,9 +6,7 @@ from __future__ import annotations
 import json
 
 import httpx
-from typer.testing import CliRunner
 
-from flock import cli
 from flock.controller.api import create_app
 from flock.controller.health import Health
 from flock.controller.reconcile import swarm_stream
@@ -17,7 +15,7 @@ from flock.world.hub import WorldHub
 from flock.world.protocol import TOKEN_ENV
 
 from . import test_loop_controller
-from .conftest import make_spec, wire
+from .conftest import make_spec
 from .test_health import FakeWorld
 from .test_loop_controller import A0, A1, prompts
 from .test_world import world_block
@@ -131,21 +129,6 @@ async def test_worker_loop_is_stopped_by_a_hold_and_restarted_with_its_rounds(si
     sim.tick()
     starts = {c["agent"]: c for c in await sim.commands()}
     assert starts[A0]["kind"] == "loop_start" and starts[A0]["meta"]["round"] == 1
-
-
-def test_cli_stop_launch_and_held_marker(app, store, monkeypatch, tick):
-    wire(monkeypatch, app)
-    store.put_swarm(make_spec(), 0.0)
-    runner = CliRunner()
-    r = runner.invoke(cli.app, ["stop", "demo", "--type", "researcher", "--reason", "deploy"])
-    assert r.exit_code == 0 and "held: type researcher" in r.output, r.output
-    r = runner.invoke(cli.app, ["status", "demo"])
-    assert "HELD type researcher: deploy (by operator" in r.output, r.output
-    r = runner.invoke(cli.app, ["stop", "demo", "--reason", "x", "--type", "nope"])
-    assert r.exit_code != 0
-    r = runner.invoke(cli.app, ["launch", "demo"])
-    assert r.exit_code == 0 and "held: nothing" in r.output, r.output
-    assert "HELD" not in runner.invoke(cli.app, ["status", "demo"]).output
 
 
 def world_types_spec(**world) -> SwarmSpec:

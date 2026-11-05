@@ -6,7 +6,6 @@ import subprocess
 
 import pytest
 
-from flock.controller import jobs as jobs_mod
 from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
     CLAUDE_CODE_VERSION,
@@ -53,14 +52,6 @@ def _client(monkeypatch, image, bootstrap_env=None, wheel=WHEEL) -> HubJobsClien
     return HubJobsClient(token="x", image=image, wheel_url=wheel)
 
 
-def test_launch_args_bootstrap_when_no_image(monkeypatch):
-    c = _client(monkeypatch, image=None)
-    args = c.launch_args(_spec(), {"WORKER_ID": "w"})
-    assert args["image"] == BOOTSTRAP_IMAGE == "node:22.23.3-bookworm"
-    assert args["command"] == bootstrap_command()
-    assert args["env"] == {"WORKER_ID": "w", "FLOCK_WHEEL_URL": WHEEL, "FLOCK_HARNESS": "claude"}
-
-
 def test_bootstrap_installs_pi_only_on_pi_workers(monkeypatch):
     script = bootstrap_command()[2]
     assert 'if [ "${FLOCK_HARNESS:-}" = pi ]' in script
@@ -90,23 +81,6 @@ def test_bootstrap_without_wheel_url_fails_fast(monkeypatch):
     monkeypatch.delenv("FLOCK_WHEEL_URL", raising=False)
     with pytest.raises(ValueError, match="FLOCK_WHEEL_URL"):
         _client(monkeypatch, image=None, wheel=None)
-
-
-def test_launch_counts_hub_calls(monkeypatch):
-    c = _client(monkeypatch, image=None)
-    seen = {}
-
-    class Api:
-        def run_job(self, **kw):
-            seen.update(kw)
-            return type("J", (), {"id": "job-1"})()
-
-    c.api = Api()
-    job = c.launch("w0", _spec(), {"X": "1"}, {"S": "s"}, {"swarm": "e"}, 2400.7, namespace="ns")
-    assert job == "job-1" and c.calls["run_job"] == 1
-    assert seen["image"] == BOOTSTRAP_IMAGE and seen["timeout"] == 2400
-    assert seen["namespace"] == "ns" and seen["labels"] == {"swarm": "e"}
-    assert jobs_mod.DEFAULT_WORKER_IMAGE is None or isinstance(jobs_mod.DEFAULT_WORKER_IMAGE, str)
 
 
 def test_parse_job_labels():

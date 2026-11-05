@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Fake sbatch for tests: records argv, prints a job id, the job starts PENDING.
+# SLURM_STUB_RUN=1: the job runs at once, `SCRIPT ARGS...` in a session of its own (the job's
+# processes) with SLURM_JOB_ID set and its output in the -o file (%j: the job id). It ends
+# COMPLETED (exit 0) or FAILED (any other exit), unless scancel ended it first.
 set -eu
 S="$SLURM_STUB_DIR"
 mkdir -p "$S/jobs"
@@ -7,15 +10,34 @@ n=$(( $(cat "$S/next" 2>/dev/null || echo 1000) + 1 ))
 echo "$n" > "$S/next"
 printf '%s\n' "$@" > "$S/jobs/$n.argv"
 env > "$S/jobs/$n.environ"
-name=""; comment=""
-prev=""
+name=""; comment=""; out=/dev/null
+prev=""; job=()
 for a in "$@"; do
-  case "$prev" in -J) name="$a" ;; esac
-  case "$a" in --comment=*) comment="${a#--comment=}" ;; esac
+  if [ ${#job[@]} -gt 0 ]; then job+=("$a")
+  else
+    case "$prev" in
+      -J) name="$a" ;;
+      -o) out="${a//%j/$n}" ;;
+      -p|-A|-c|--qos|--mem|--time) ;;
+      *) case "$a" in --comment=*) comment="${a#--comment=}" ;; -*) ;; *) job=("$a") ;; esac ;;
+    esac
+  fi
   prev="$a"
 done
 echo "$name" > "$S/jobs/$n.name"
 echo "$comment" > "$S/jobs/$n.comment"
 echo PENDING > "$S/jobs/$n.state"
 echo "0:0" > "$S/jobs/$n.exit"
+if [ -n "${SLURM_STUB_RUN:-}" ] && [ ${#job[@]} -gt 0 ]; then
+  echo RUNNING > "$S/jobs/$n.state"
+  (
+    SLURM_JOB_ID=$n setsid "${job[@]}" > "$out" 2>&1 < /dev/null &
+    echo $! > "$S/jobs/$n.pid"
+    rc=0; wait $! || rc=$?
+    if ! grep -q CANCELLED "$S/jobs/$n.state"; then
+      echo "$rc:0" > "$S/jobs/$n.exit"
+      if [ "$rc" = 0 ]; then echo COMPLETED; else echo FAILED; fi > "$S/jobs/$n.state"
+    fi
+  ) > /dev/null 2>&1 &
+fi
 echo "$n"

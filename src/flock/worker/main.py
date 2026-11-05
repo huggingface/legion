@@ -185,6 +185,7 @@ class WorkerConfig:
             bucket=env.get("BUCKET") or None,
             work_root=Path(env.get("WORK_ROOT", "/work/agents")),
             sync_interval=float(env.get("SYNC_INTERVAL", 180)),
+            flush_interval=float(env.get("FLUSH_INTERVAL", 3.0)),
             heartbeat_interval=float(env.get("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL.total_seconds())),
             drain_window=parse_duration(env.get("DRAIN_WINDOW") or DEFAULT_DRAIN_WINDOW),
             incarnation=env.get("WORKER_INCARNATION") or None,
@@ -518,6 +519,8 @@ class Worker:
         self._terminating = False
         self.preempted = False  # the preemption handler started (no new turns)
         self.preempt_synced = False  # it finished: the heartbeat may say `preempted` now
+        self._drain_done = False  # drain() finished: every agent synced (or named in unsynced)
+        self.drained = False  # the last heartbeat says so (set once nothing else will be sent)
         self._interrupted: set[str] = set()  # agents whose turn a preemption cut
         self._deadline = 0.0  # loop time by which a preempted worker has exited
         self.spec_rev: str | None = None  # the type spec revision we have (docs/live.md)
@@ -765,7 +768,7 @@ class Worker:
     def heartbeat_payload(self) -> WorkerHeartbeat:
         return WorkerHeartbeat(worker=self.cfg.worker_id, deadline=self.cfg.deadline,
                                draining=self.draining, spec_rev=self.spec_rev,
-                               preempted=self.preempt_synced,
+                               preempted=self.preempt_synced, drained=self.drained,
                                interrupted=sorted(self._interrupted),
                                agents=[a.heartbeat() for a in self.agents.values()],
                                mem=self.mem, restore=self.restore_progress(),
@@ -1134,6 +1137,7 @@ class Worker:
                 "drain: %d agents finished in %.1f s, %s; bucket %s", len(self.agents),
                 loop.time() - t0, f"NOT synced: {', '.join(unsynced)}" if unsynced else "all synced",
                 self.sync.stats.since(snap) if self.sync else {})
+        self._drain_done = True
         self._drained.set()
 
     async def abandon(self, why: str) -> None:
@@ -1178,8 +1182,12 @@ class Worker:
             except TimeoutError:
                 log.warning("preempt: events/heartbeat cut at the budget")
         else:
+            # before `drained`: that heartbeat lets the controller cancel the job at once.
+            # Not in a preemption's budget: the job ends anyway
+            await self.harbor.close()
+            # the loops are stopped: the heartbeat after the events flush is the last one
+            self.drained = self._drain_done
             await self._final_reports()
-            await self.harbor.close()  # not in a preemption's budget: the job ends anyway
         await self.comms.aclose()
         await self.world.aclose()
         await self.client.aclose()
