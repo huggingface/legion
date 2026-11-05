@@ -22,7 +22,7 @@ DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 # and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then runs
 # the worker. Versions match Dockerfile.worker, which stays the eventual path. Harbor types get
 # `flock[harbor]` on a uv-managed Python 3.12 instead, with msgboard's wheel and uv.lock's
-# versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh).
+# versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh --harbor).
 # Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
 PI_VERSION = HARNESSES["pi"].version
@@ -51,7 +51,9 @@ fetch "$FLOCK_WHEEL_URL" "$WHEEL"
 if [ "${FLOCK_HARNESS:-}" = harbor ]; then
   # msgboard is private on GitHub (a job cannot clone it): its wheel, and uv.lock's versions for
   # every worker of the run, come next to flock's wheel; Harbor needs Python 3.12+
-  fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar
+  fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar || {
+    echo "bootstrap: no harbor-deps.tar next to the wheel: scripts/publish-wheel.sh --harbor" >&2
+    exit 1; }
   tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
   echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
   uv tool install -q --python 3.12 "$WHEEL[harbor]" -c /opt/wheels/constraints.txt \
