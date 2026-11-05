@@ -926,22 +926,23 @@ class AgentRuntime:
             finally:
                 self._stop_req = None
         self._defer_buffer("draining")
-        await self._close()
+        await self.close()
         await self.sync_now("drain")
         return cut
 
     async def unassign(self) -> None:
         self.allow_starts = False
         await self.stop("unassign")
-        await self._close()
+        await self.close()
         await self.sync_now("unassign")
 
-    async def _close(self) -> None:
-        """End what outlives a burst (harbor: the Trial, whose verifier then runs)."""
+    async def close(self, timeout: float | None = None) -> None:
+        """End what outlives a burst (harbor: the Trial, whose verifier then runs; after
+        `timeout` s it is cancelled and Harbor stops its environment unverified)."""
         if (close := getattr(self.adapter, "close", None)) is None:
             return
         try:
-            await close()
+            await close(timeout=timeout)
         except Exception as e:  # noqa: BLE001 - the sync after it must still run
             log.warning("%s: close failed: %s", self.name, e)
             self.emit("error", {"error": f"close failed: {type(e).__name__}: {e}"})

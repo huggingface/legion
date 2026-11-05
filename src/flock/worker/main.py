@@ -108,6 +108,8 @@ log = logging.getLogger("flock.worker")
 DEFAULT_DRAIN_WINDOW = timedelta(minutes=10)
 PREEMPT_EXIT = 75  # EX_TEMPFAIL: the job ended because its machine was taken away
 DEFAULT_DRAIN_BUDGET = 20.0  # s, FLOCK_DRAIN_BUDGET_S: the whole preemption handler
+# s an exit (terminate, abandon) gives each harbor Trial to verify, then as much to stop it
+EXIT_CLOSE_S = 10.0
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -1031,9 +1033,15 @@ class Worker:
         self._terminating = self.draining = True
         for rt in self.agents.values():
             rt.allow_starts = False
-        await asyncio.gather(*(rt.stop("terminated") for rt in list(self.agents.values())),
-                             return_exceptions=True)
+        await self._stop_all("terminated")
         self._drained.set()
+
+    async def _stop_all(self, reason: str) -> None:
+        """Stop every agent, then end what outlives it (harbor Trials), all in parallel: no
+        container or sandbox outlives this worker."""
+        agents = list(self.agents.values())
+        await asyncio.gather(*(rt.stop(reason) for rt in agents), return_exceptions=True)
+        await asyncio.gather(*(rt.close(EXIT_CLOSE_S) for rt in agents), return_exceptions=True)
 
     async def preempt(self, reason: str) -> None:
         """The machine goes away in seconds (docs/slurm.md): everything below fits in
@@ -1068,6 +1076,8 @@ class Worker:
                 self._interrupted.add(rt.name)
             await rt.stop("preempted")
             await rt.sync_now("preempt")
+            # the Trial must not outlive the machine: half the time left to verify, half to stop
+            await rt.close(max(0.5, (t0 + budget - loop.time()) / 2))
 
         snap = self.sync.stats.snapshot() if self.sync else {}
         try:
@@ -1135,8 +1145,7 @@ class Worker:
         for rt in self.agents.values():
             rt.sync = None
             rt.allow_starts = False
-        await asyncio.gather(*(rt.stop("abandoned") for rt in list(self.agents.values())),
-                             return_exceptions=True)
+        await self._stop_all("abandoned")
         self._drained.set()
 
     async def run(self) -> int:

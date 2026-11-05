@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from flock.models import AssignCommand, PromptCommand
 from flock.worker.adapters.harbor import HarborAdapter
 from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
-from flock.worker.main import default_adapter_factory
+from flock.worker.main import EXIT_CLOSE_S, PREEMPT_EXIT, default_adapter_factory
 
 from .test_worker_main import FakeController, make_worker
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, event_types, spec, until
@@ -21,13 +24,20 @@ HARBOR = {"harness": "harbor", "harbor": {"task": {}, "config": {}},
 class TrialAdapter(ScriptedAdapter):
     harness = "harbor"
 
-    def __init__(self, home, *, fail_close=False, **kw):
+    def __init__(self, home, *, fail_close=False, closing=None, **kw):
         super().__init__(home, **kw)
-        self.fail_close, self.closed = fail_close, 0
+        self.fail_close, self.closed, self.timeouts = fail_close, 0, []
+        self.closing = closing if closing is not None else {"now": 0, "peak": 0}
 
-    async def close(self):
+    async def close(self, timeout=None):
         self.closed += 1
-        self.log.append(("close", None))
+        self.timeouts.append(timeout)
+        self.log.append(("close", self.home.name))
+        c = self.closing
+        c["now"] += 1
+        c["peak"] = max(c["peak"], c["now"])
+        await asyncio.sleep(0.05)
+        c["now"] -= 1
         if self.fail_close:
             raise RuntimeError("verifier crashed")
 
@@ -52,7 +62,7 @@ async def test_drain_closes_the_trial_before_the_final_sync(tmp_path):
     assert rt.heartbeat().trial == {"id": "a-t1", "attempt": 1, "alive": True}
     assert list(rt.workdir.iterdir()) == []  # the Trial has its instructions from Harbor
     await rt.drain()
-    assert [k for k, _ in order[-3:]] == ["stop", "close", "push"] and a.closed == 1
+    assert [k for k, _ in order[-3:]] == ["stop", "close", "push"] and a.timeouts == [None]
     assert rt.heartbeat().trial["alive"] is False
 
 
@@ -87,3 +97,34 @@ async def test_the_worker_closes_its_host_at_exit(tmp_path):
     run = asyncio.create_task(worker.run())
     await worker.drain("test")
     assert await asyncio.wait_for(run, 5) == 0 and closed.is_set()
+
+
+@pytest.mark.parametrize("path", ["terminate", "abandon", "preempt"])
+async def test_every_exit_path_closes_the_trials_in_parallel(tmp_path, path):
+    ctrl, order, adapters, closing = FakeController(), [], {}, {"now": 0, "peak": 0}
+    sync = RecordingSync(MemoryStore(), log=order)
+    names = ["researcher-0001", "researcher-0002"]
+    ctrl.batches = [
+        [AssignCommand(agent=n, type="researcher", spec=spec(**HARBOR), restore=False)
+         for n in names],
+        [PromptCommand(agent=n, prompt_id=f"p-{n}", text="go") for n in names],
+    ]
+    worker, _ = make_worker(tmp_path, ctrl, sync=sync)
+
+    def factory(name, sp):
+        adapters[name] = TrialAdapter(tmp_path / "home" / name, log=order, closing=closing)
+        return adapters[name]
+
+    worker.adapter_factory = factory
+    run = asyncio.create_task(worker.run())
+    await until(lambda: len(adapters) == 2 and all(a.sent for a in adapters.values()))
+    await getattr(worker, path)("test")
+    assert await asyncio.wait_for(run, 5) == (PREEMPT_EXIT if path == "preempt" else 0)
+    assert all(a.closed == 1 for a in adapters.values()) and closing["peak"] == 2
+    timeouts = [t for a in adapters.values() for t in a.timeouts]
+    if path == "preempt":  # within the drain budget, after each agent's last sync
+        assert all(0 < t < worker.cfg.drain_budget for t in timeouts)
+        for n in names:
+            assert order.index(("push", n)) < order.index(("close", n))
+    else:
+        assert timeouts == [EXIT_CLOSE_S] * 2

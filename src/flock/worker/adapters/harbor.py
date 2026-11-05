@@ -24,7 +24,6 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +31,8 @@ from flock.models import TypeSpec, parse_duration
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 
 log = logging.getLogger(__name__)
+
+CANCEL_WAIT = 60.0  # s close() waits for a cancelled Trial's environment to stop (no timeout)
 
 
 class HarborAdapter:
@@ -102,18 +103,25 @@ class HarborAdapter:
             await agent.kill()
         self._exit()
 
-    async def close(self) -> Any:
-        """End the Trial (Harbor runs the verifier); returns its TrialResult, None if none."""
-        if self._starting is not None and not self._starting.done():
-            self._starting.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._starting
-        if self.alive():
+    async def close(self, timeout: float | None = None) -> Any:
+        """End the Trial: FlockPi returns, Harbor runs the verifier and stops the environment;
+        returns its TrialResult (None if none). After `timeout` s, or when this call is
+        cancelled, the Trial is cancelled instead: Harbor stops the environment unverified
+        (waited for up to `timeout` s more; CANCEL_WAIT without one)."""
+        starting = self._starting
+        if starting is not None and not starting.done():
+            starting.cancel()
+            await asyncio.wait({starting})
+        run = self._run
+        if run is not None and not run.done():
             self._closing = True
             self._prompts.put_nowait(None)
             try:
-                await asyncio.shield(self._run)
+                await asyncio.wait({run}, timeout=timeout)
             finally:
+                if not run.done():
+                    run.cancel()
+                    await asyncio.wait({run}, timeout=CANCEL_WAIT if timeout is None else timeout)
                 self._closing = False
                 self._prompts = asyncio.Queue()
         return self.result
