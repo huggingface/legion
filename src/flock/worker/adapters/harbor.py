@@ -225,6 +225,7 @@ class HarborAdapter:
 
         from flock.harbor import launch
         from flock.harbor.agent import Channel
+        from flock.harbor.envs import ENVIRONMENTS
         from flock.harbor.sources import ResolvedTask
         from flock.harbor.spec import Spec
 
@@ -252,8 +253,8 @@ class HarborAdapter:
         tc.agent.override_timeout_sec = (
             trial_seconds + parse_duration(self.spec.turn_timeout).total_seconds())
         tc.environment.kwargs = dict(config.environment.kwargs)
-        if config.environment.backend == "hf-sandbox":  # + kwargs.namespace, secret_env's token
-            tc.environment.import_path = "flock.harbor.envs:HFSandbox"
+        # flock's subclasses: no secret in an argv (docker, podman); hf-sandbox's namespace
+        tc.environment.import_path = ENVIRONMENTS[config.environment.backend]
         if self.resources is not None:
             await self.resources.add([self.agent])  # joins here (again: after a move)
             if self._closes:  # a close during the add removed the agent before it was added

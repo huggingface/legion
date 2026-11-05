@@ -1,11 +1,49 @@
 """flock's Harbor environments, loaded through `EnvironmentConfig.import_path` (the adapter sets
-it for every hf-sandbox Trial)."""
+it for every Trial: `ENVIRONMENTS`)."""
 
 import asyncio
+import contextvars
 
 from harbor.environments import hf_sandbox
+from harbor.environments.docker.docker import DockerEnvironment
+from harbor.environments.podman import PodmanEnvironment
 
 from flock.secrets_file import secret_env
+
+_EXEC_ENV = contextvars.ContextVar("flock_exec_env", default=None)
+
+
+class _EnvOffArgv:
+    """Harbor's `compose exec -e NAME=value` (the agent's env: the inference key, resource
+    tokens) puts the value in an argv every user of the node reads (`ps`). Here it passes
+    `-e NAME`, and the value goes in the compose process's own environment, which podman and
+    docker read a bare NAME from (podman-compose 1.5: `--env NAME`)."""
+
+    async def _run_docker_compose_command(self, command, *args, **kwargs):
+        if command[:1] != ["exec"]:
+            return await super()._run_docker_compose_command(command, *args, **kwargs)
+        command, values, i = list(command), {}, 1
+        while i + 1 < len(command) and command[i] in ("-w", "-e", "-u"):  # flags, then service
+            if command[i] == "-e" and "=" in command[i + 1]:
+                name, _, values[name] = command[i + 1].partition("=")
+                command[i + 1] = name
+            i += 2
+        token = _EXEC_ENV.set(values)  # per task: concurrent execs keep their own
+        try:
+            return await super()._run_docker_compose_command(command, *args, **kwargs)
+        finally:
+            _EXEC_ENV.reset(token)
+
+    def _compose_env_vars(self, *args, **kwargs):
+        return {**super()._compose_env_vars(*args, **kwargs), **(_EXEC_ENV.get() or {})}
+
+
+class Docker(_EnvOffArgv, DockerEnvironment):
+    pass
+
+
+class Podman(_EnvOffArgv, PodmanEnvironment):
+    pass
 
 
 class HFSandbox(hf_sandbox.HFSandboxEnvironment):
@@ -49,3 +87,7 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
                 self.logger.error(f"Failed to kill HF Sandbox during cleanup: {kill_exc}")
             self._sandbox = None
             raise
+
+
+ENVIRONMENTS = {"docker": "flock.harbor.envs:Docker", "podman": "flock.harbor.envs:Podman",
+                "hf-sandbox": "flock.harbor.envs:HFSandbox"}  # backend -> import_path

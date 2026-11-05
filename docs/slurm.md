@@ -340,11 +340,14 @@ XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other pr
 `harness: harbor` workers never run in a container: each agent is a Harbor Trial in rootless
 podman, which cannot run inside Enroot. Their env file carries `FLOCK_HARNESS=harbor` and node
 paths, and `worker.sbatch` runs `flock-worker` here as its child with shepherd's podman setup:
-the job's own podman storage in `/tmp/flock-podman.*` (removed at exit), `podman-compose` from
-the venv (`flock[harbor]`, Python 3.12+), and podman's health checks run by
-`python -m flock.harbor.podman_healthchecks` (compute nodes have no user systemd). Unverified on
-compute nodes so far; the containers may sit outside the job's cgroup, so the worker's memory
-readings (the memory ladder) may not count them.
+the job's own podman storage in `/tmp/flock-podman.*` (left to the job's own `/tmp`, a per-job
+tmpfs on hopper-cpu), `podman-compose` from the venv (`flock[harbor]`, Python 3.12+), podman's
+health checks run by `python -m flock.harbor.podman_healthchecks` (compute nodes have no user
+systemd), and shepherd's git credential helper for huggingface.co (private task repos), which
+reads `HF_TOKEN` from a 0600 file there. At exit the job's containers are stopped, within
+KillWait. With `--cgroup-manager cgroupfs` and no user systemd, conmon and the containers should
+stay in the job's cgroup (Slurm's `Contain` kills them, the memory ladder sees them): unverified
+on compute nodes so far.
 
 ## Singletons on Spot
 

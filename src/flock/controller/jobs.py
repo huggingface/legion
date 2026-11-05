@@ -19,13 +19,14 @@ WORKER_COMMAND = ["flock-worker"]
 DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
 # Bootstrap mode: no prebuilt image. A stock Node image installs the pinned Pi CLI (pi types), uv
-# and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh; harbor types
-# get `flock[harbor]` on a uv-managed Python 3.12, which takes longer), then runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
+# and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then runs
+# the worker. Versions match Dockerfile.worker, which stays the eventual path. Harbor types get
+# `flock[harbor]` on a uv-managed Python 3.12 instead, with msgboard's wheel and uv.lock's
+# versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh).
 # Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
 PI_VERSION = HARNESSES["pi"].version
 HF_HUB_VERSION = "2.2.0"
-HARBOR_HF_HUB_VERSION = "1.33.0"  # uv.lock's with the harbor extra (harbor's litellm needs < 2)
 
 _BOOTSTRAP = r"""set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
@@ -38,14 +39,35 @@ fi
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 uv tool install -q huggingface_hub=={hub} >/dev/null 2>&1
 mkdir -p /opt/wheels
-WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
-hf buckets cp "$FLOCK_WHEEL_URL" "$WHEEL" >/dev/null 2>&1 || uv run -q --no-project \
-  --with huggingface_hub=={hub} python3 -c 'import sys; from huggingface_hub import HfApi
+fetch() {  # fetch hf://buckets/<namespace>/<bucket>/<path> <file>
+  hf buckets cp "$1" "$2" >/dev/null 2>&1 || uv run -q --no-project \
+    --with huggingface_hub=={hub} python3 -c 'import sys; from huggingface_hub import HfApi
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
-' "$FLOCK_WHEEL_URL" "$WHEEL"
-if [ "${FLOCK_HARNESS:-}" = harbor ]; then  # Harbor needs Python 3.12+ and huggingface_hub < 2
-  uv tool install -q --python 3.12 "$WHEEL[harbor]" --with huggingface_hub=={harbor_hub}
+' "$1" "$2"
+}
+WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
+fetch "$FLOCK_WHEEL_URL" "$WHEEL"
+if [ "${FLOCK_HARNESS:-}" = harbor ]; then
+  # msgboard is private on GitHub (a job cannot clone it): its wheel, and uv.lock's versions for
+  # every worker of the run, come next to flock's wheel; Harbor needs Python 3.12+
+  fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar
+  tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
+  echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
+  uv tool install -q --python 3.12 "$WHEEL[harbor]" -c /opt/wheels/constraints.txt \
+    --overrides /opt/wheels/overrides.txt
+  # Harbor downloads tasks with Git. Scope HF_TOKEN authentication to the Hub,
+  # without writing a token or changing the user's Git configuration. (shepherd's launch.slurm)
+  if [[ -n "${HF_TOKEN:-}" ]]; then
+    git_slot=${GIT_CONFIG_COUNT:-0}
+    export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
+    export "GIT_CONFIG_VALUE_${git_slot}="
+    git_slot=$((git_slot + 1))
+    export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
+    export "GIT_CONFIG_VALUE_${git_slot}="'!f() { if [ "$1" = get ]; then printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; fi; }; f'
+    export GIT_CONFIG_COUNT=$((git_slot + 1))
+  fi
+  export GIT_TERMINAL_PROMPT=0
 else
   uv tool install -q "$WHEEL[worker]" --with huggingface_hub=={hub} \
     || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" huggingface_hub=={hub}
@@ -56,7 +78,7 @@ export WORK_ROOT=/work/agents
 export FLOCK_LLM_HOME=/state/llm PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
 export PYTHONUNBUFFERED=1
 mkdir -p /work/agents /state/pi /state/llm
-echo "bootstrap: $(($(date +%s) - t0)) s; $(python3 --version)"
+echo "bootstrap: $(($(date +%s) - t0)) s"  # flock-worker logs the Python it runs on
 exec flock-worker
 """
 
@@ -71,7 +93,6 @@ def bootstrap_command() -> list[str]:
     for key, value in {
         "pi": PI_VERSION,
         "hub": HF_HUB_VERSION,
-        "harbor_hub": HARBOR_HF_HUB_VERSION,
     }.items():
         script = script.replace("{" + key + "}", shlex.quote(value))
     return ["bash", "-c", script]

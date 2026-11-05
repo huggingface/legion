@@ -1251,6 +1251,7 @@ def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     quiet_libraries()
+    log.info("flock-worker on Python %s (%s)", sys.version.split()[0], sys.executable)
     # FLOCK_WORKER_SECRETS_FILE: credentials from a 0600 file, not the exec env (docs/slurm.md)
     if names := load_secrets():
         log.info("secrets: %d read from FLOCK_WORKER_SECRETS_FILE (%s)", len(names),
