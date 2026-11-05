@@ -4,7 +4,9 @@ against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes 
 import asyncio
 import json
 import shlex
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,10 +41,12 @@ class Fakes:
 
     def __init__(self):
         self.trials, self.pi, self.root, self.uploads = [], [], [], []
-        self.probe_ok, self.upload_fails = True, False
+        self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.fail = None  # pi call number -> "exit" | "provider"
         self.hold = set()  # pi call numbers that wait for release(n) or a kill
         self.gates = {}
+        self.mounted = True  # False: /logs/agent lives in the env (hf-sandbox), not on the host
+        self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -69,7 +73,16 @@ class FakeEnv:
             (local / path.name).write_text(path.read_text())
 
     def is_path_mounted(self, environment_path, host_path):
-        return True
+        return self.fakes.mounted
+
+    def _remote(self, path):
+        return self.logs_dir / Path(path).relative_to("/logs/agent")
+
+    async def download_file(self, source, target):
+        shutil.copy2(self._remote(source), target)
+
+    async def download_dir(self, source, target):
+        shutil.copytree(self._remote(source), target, dirs_exist_ok=True)
 
     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
         f = self.fakes
@@ -77,7 +90,9 @@ class FakeEnv:
             return ExecResult(return_code=0 if f.probe_ok else 1)
         if user == "root":
             f.root.append(command)
-        if "pkill" in command:
+        if command.endswith(flock_agent.KILL_PI):
+            if f.kill_fails:
+                return ExecResult(return_code=1)
             self.killed = True
             for gate in f.gates.values():
                 gate.set()
@@ -116,13 +131,25 @@ class Trial(FakeTrial):
 
     def __init__(self, config, fakes):
         super().__init__(config, [])
-        logs_dir = config.trials_dir / config.trial_name / "agent"
+        self.logs_dir = logs_dir = config.trials_dir / config.trial_name / "agent"
         logs_dir.mkdir(parents=True)
         self.agent = AgentFactory.create_agent_from_config(config.agent, logs_dir=logs_dir)
-        self.agent_environment = FakeEnv(logs_dir, fakes)
-        self.verified = False
+        remote = logs_dir if fakes.mounted else logs_dir.parent / "remote"
+        remote.mkdir(exist_ok=True)
+        self.agent_environment = FakeEnv(remote, fakes)
+        self.fakes, self.verified, self.cancelled = fakes, False, False
 
     async def run(self):
+        try:
+            return await self._life()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # Harbor stops the environment, then re-raises
+            self.cancelled = True
+            raise
+
+    async def _life(self):
+        if self.fakes.start_gate:
+            await self.fakes.start_gate.wait()
         for hook in self.hooks.values():
             await hook(None)
         instruction = "TASK\n\n" + self.config.extra_instructions[0]
@@ -131,6 +158,12 @@ class Trial(FakeTrial):
         except Exception as exc:  # noqa: BLE001 - Harbor records any agent failure
             self.result.exception_info = ExceptionInfo.from_exception(exc)
             return self.result
+        finally:
+            if not self.fakes.mounted:  # Harbor downloads /logs/agent after the agent phase
+                remote = self.agent_environment.logs_dir
+                shutil.copytree(remote, self.logs_dir, dirs_exist_ok=True)
+        if self.fakes.verify_gate:
+            await self.fakes.verify_gate.wait()
         self.verified = True
         self.result.verifier_result = VerifierResult(rewards={"reward": 1.0})
         return self.result
@@ -148,6 +181,15 @@ def fakes(monkeypatch):
 
     monkeypatch.setattr(launch.Trial, "create", create)
     return shared
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """FlockPi's monotonic clock, moved by hand; an idle Trial looks at it every 20 ms."""
+    now = [0.0]
+    monkeypatch.setattr(flock_agent, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(flock_agent, "PROBE", 0.02)
+    return now
 
 
 def adapter(tmp_path, **limits) -> HarborAdapter:
@@ -197,7 +239,7 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     assert "You are agent-0000, working on your own isolated copy of this task." in first
     assert "--continue" in second and "TASK" not in second and "Second." in second
     (session,) = a.session_files(sid)
-    assert session == a.home / "sessions" / "s.jsonl"
+    assert session == a.home / "sessions" / "s.jsonl" and a.session_dir == a.root  # purge()
     assert len(session.read_text().splitlines()) == 2
 
 
@@ -240,7 +282,7 @@ async def test_stop_kills_a_turn_in_flight(fakes, tmp_path):
     await a.stop()
     evs = await read(events, "exited")
     assert [(e.kind, e.status) for e in evs] == [("turn_ended", "interrupted"), ("exited", None)]
-    assert any("pkill -f '[p]i --print'" in c for c in fakes.root)
+    assert any(c.endswith(flock_agent.KILL_PI) for c in fakes.root)
     assert a.alive()
     _, events = await start(a)  # same Trial; the queued prompt was dropped
     await a.send("b")
@@ -271,8 +313,7 @@ async def test_resume_errors(fakes, tmp_path):
     fakes.upload_fails = True
     with pytest.raises(ResumeError, match="upload failed"):
         await a.start(a.workdir, "s-1", a.spec)
-    (a.home / "sessions" / "s.jsonl").unlink()
-    sid, _ = await start(a)  # the runtime's fallback: a fresh session
+    sid, _ = await start(a)  # the runtime's fallback: a fresh session, nothing put back
     assert sid not in ("gone", "s-1") and len(fakes.trials) == 2 and a.alive()
 
 
@@ -330,11 +371,12 @@ async def test_three_failed_turns_end_the_trial(fakes, tmp_path):
     assert len(fakes.trials) == 2
 
 
-async def test_trial_hours_roll_over_to_a_new_trial(fakes, tmp_path):
-    a = adapter(tmp_path, trial_hours=1e-9)  # each Trial ends once it is idle
+async def test_trial_hours_roll_over_to_a_new_trial(fakes, tmp_path, clock):
+    a = adapter(tmp_path, trial_hours=1)
     _, events = await start(a)
     for prompt in ("a", "b"):
-        await asyncio.wait_for(asyncio.shield(a._run), 5)  # t1 ends idle, before any prompt
+        clock[0] += 3600  # the Trial's time is up: it ends idle, before any prompt
+        await asyncio.wait_for(asyncio.shield(a._run), 5)
         await a.send(prompt)  # starts the next Trial
         evs = await read(events, "turn_ended")
         assert [e.kind for e in evs] == ["turn_started", "message", "usage", "turn_ended"]
@@ -366,3 +408,160 @@ async def test_the_worker_runtime_drives_one_trial_across_bursts(fakes, tmp_path
     assert len(fakes.trials) == 1 and a.alive() and "--continue" in fakes.pi[1]
     assert rt.state.tokens["huggingface/moonshotai/Kimi-K2.5"].input == 2000
     assert rt.state.last_summary == "reply-2"
+
+
+def lines(a):
+    return len((a.home / "sessions" / "s.jsonl").read_text().splitlines())
+
+
+async def test_unmounted_sessions_reach_home_at_rollover_and_close(fakes, tmp_path, clock):
+    fakes.mounted = False  # hf-sandbox: FlockPi downloads the sessions every SYNC s only
+    a = adapter(tmp_path, trial_hours=1)
+    _, events = await start(a)
+    for prompt in ("a", "b"):
+        await a.send(prompt)
+        await read(events, "turn_ended")
+    assert lines(a) == 1  # the second turn's session is not downloaded yet
+    clock[0] += 3600
+    await asyncio.wait_for(asyncio.shield(a._run), 5)
+    assert lines(a) == 2  # Harbor's download at the end, kept before the next Trial starts
+    for prompt in ("c", "d"):
+        await a.send(prompt)
+        await read(events, "turn_ended")
+    assert lines(a) == 3 and fakes.uploads == [(a.home / "sessions", SESSIONS)]
+    await a.close()
+    assert lines(a) == 4 and len(fakes.trials) == 2  # what BucketSync pushes after a drain
+
+
+async def test_rate_limited_turns_do_not_end_the_trial(fakes, tmp_path):
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    fakes.fail = lambda n: "provider" if n <= 3 else None
+    ended = []
+    for prompt in "abcd":
+        await a.send(prompt)
+        ended.append((await read(events, "turn_ended"))[-1])
+    assert [e.data.get("reason") for e in ended] == ["model_transport"] * 3 + [None]
+    assert ended[-1].status == "completed" and len(fakes.trials) == 1 and a.alive()
+
+
+async def test_a_prompt_sent_while_the_verifier_runs_ends_as_a_failed_turn(fakes, tmp_path):
+    from ..worker_fakes import until
+
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    fakes.fail, fakes.verify_gate = (lambda n: "exit"), asyncio.Event()
+    for prompt in "abc":
+        await a.send(prompt)
+        await read(events, "turn_ended")
+    await until(lambda: a.trial.agent.why is not None)  # FlockPi returned; Harbor verifies
+    await a.send("late")
+    fakes.verify_gate.set()
+    evs = await read(events, "exited")
+    assert [(e.kind, e.status) for e in evs] == [
+        ("turn_started", None), ("turn_ended", "error"), ("error", None), ("exited", None),
+    ]
+    assert "3 failed turns" in evs[1].error and len(fakes.pi) == 3
+
+
+async def test_an_expired_trial_leaves_queued_prompts_to_the_next(fakes, tmp_path, clock):
+    a = adapter(tmp_path, trial_hours=1)
+    _, events = await start(a)
+    fakes.hold = {1}
+    await a.send("first")
+    await read(events, "turn_started")
+    await a.send("queued-during-the-turn")
+    clock[0] += 3600
+    fakes.release(1)
+    evs = await read(events, "turn_ended", 2)
+    assert [e.data for e in evs if e.kind == "turn_started"] == [{"trial": "agent-0000-t2"}]
+    assert "queued-during-the-turn" in fakes.pi[1] and fakes.trials[0].verified
+
+
+async def test_a_failed_continue_restarts_the_session(fakes, tmp_path):
+    a = adapter(tmp_path)
+    (a.home / "sessions").mkdir(parents=True)
+    (a.home / "sessions" / "s.jsonl").write_text('{"call": 0}\n')
+    _, events = await start(a, "s-1")
+    fakes.fail = lambda n: "exit" if n == 1 else None
+    await a.send("go on")
+    evs = await read(events, "exited")
+    assert [e.kind for e in evs] == ["turn_started", "turn_ended", "error", "exited"]
+    assert "resume failed" in evs[2].error
+    with pytest.raises(ResumeError, match="--continue failed"):
+        await a.start(a.workdir, "s-1", a.spec)
+    _, events = await start(a)  # the runtime's session_restarted: fresh, nothing put back
+    await a.send("again")
+    assert (await read(events, "turn_ended"))[-1].status == "completed"
+    assert len(fakes.trials) == 2 and len(fakes.uploads) == 1 and "TASK" in fakes.pi[1]
+
+
+async def test_close_cancels_a_slow_verifier_after_its_timeout(fakes, tmp_path):
+    a = adapter(tmp_path)
+    await start(a)
+    fakes.verify_gate = asyncio.Event()
+    assert await asyncio.wait_for(a.close(timeout=0.1), 5) is None
+    assert not a.alive() and not fakes.trials[0].verified and fakes.trials[0].cancelled
+
+
+async def test_close_while_a_trial_starts_does_not_raise(fakes, tmp_path, monkeypatch):
+    from ..worker_fakes import until
+
+    monkeypatch.setattr(flock_agent, "PROBE", 0.05)
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    fakes.probe_ok = False
+    await read(events, "exited")  # t1 failed its probe
+    fakes.probe_ok, fakes.start_gate = True, asyncio.Event()
+    await a.send("b")  # starts t2, which hangs before FlockPi is ready
+    await until(lambda: len(fakes.trials) == 2)
+    assert await asyncio.wait_for(a.close(), 5) is None
+    assert not a.alive() and fakes.trials[1].cancelled
+
+
+async def test_a_failed_kill_is_reported(fakes, tmp_path, monkeypatch):
+    monkeypatch.setattr(flock_agent, "STOP_GRACE", 0.05)
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    fakes.hold, fakes.kill_fails = {1}, True
+    await a.send("a")
+    await read(events, "turn_started")
+    await a.stop()
+    evs = await read(events, "exited")
+    assert [e.kind for e in evs] == ["error", "exited"] and "kill pi" in evs[0].error
+    assert "pkill" not in flock_agent.KILL_PI
+    fakes.release(1)
+
+
+def test_read_turn_counts_compaction(tmp_path):
+    path = tmp_path / "pi.txt"
+    path.write_text("\n".join(json.dumps(e) for e in [
+        {"type": "message_end",
+         "message": {"role": "assistant", "usage": {"input": 10, "output": 1}}},
+        {"type": "compaction_end", "result": {"usage": {"input": 100, "output": 20}}},
+    ]))
+    messages, usage = flock_agent.read_turn(path)
+    assert len(messages) == 1 and (usage.input, usage.output) == (110, 21)
+
+
+def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path):
+    """KILL_PI on a fake /proc, `kill` stubbed: nothing on this machine is signalled."""
+    import subprocess
+
+    proc = tmp_path / "proc"
+    script = flock_agent.KILL_PI.replace("/proc", str(proc))
+    for pid, argv in [("11", ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
+                      ("12", ["bash", "-c", "set -o pipefail; pi --print 'hi'"]),
+                      ("13", ["sleep", "100"]), ("14", ["bash", "-c", script])]:
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+
+    def run():
+        return subprocess.run(["bash", "-c", f"kill() {{ echo $1; }}; {script}"],
+                              capture_output=True, text=True)
+
+    killed = run()
+    assert killed.returncode == 0 and killed.stdout.split() == ["11", "12"]
+    for pid in ("11", "12"):
+        (proc / pid / "cmdline").unlink()
+    assert run().returncode == 1  # nothing to kill: reported

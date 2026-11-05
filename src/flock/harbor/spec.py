@@ -23,6 +23,7 @@ from flock.models import (
     LoopSpec,
     SpawnRule,
     SwarmSpec,
+    TypeSpec,
     WorkerKnobs,
     agent_name,
     load_spec_yaml,
@@ -55,6 +56,13 @@ def seconds(value):
 
 
 Duration = Annotated[float, BeforeValidator(seconds), Field(gt=0)]
+# [input, output, cached] USD per 1M tokens; Harbor reports no cost for router models.
+Pricing = Annotated[list[Annotated[float, Field(ge=0)]], Field(min_length=3, max_length=3)]
+
+
+def flock_duration(value: float) -> str:
+    """Seconds as flock writes durations: a whole number of a unit."""
+    return f"{value:.0f}s" if value == int(value) else f"{round(value * 1000)}ms"
 
 
 class Ramp(Settings):
@@ -117,6 +125,7 @@ class Role(RoleSettings):
     ramp: Ramp | None = None
     loop: Loop | None = None  # replaces the run's loop for this role
     workers: Workers | None = None  # overrides keys of the run's workers
+    pricing: Pricing | None = None  # its own `model`'s; budgets need it (else the run's)
 
     @model_validator(mode="after")
     def ramp_within_count(self):
@@ -151,10 +160,7 @@ class Spec(Config):
     environment: Environment = Field(default_factory=Environment)
     limits: SpecLimits = Field(default_factory=SpecLimits)
     loop: Loop | None = None
-    # [input, output, cached] USD per 1M tokens; Harbor reports no cost for router models.
-    pricing: (
-        Annotated[list[Annotated[float, Field(ge=0)]], Field(min_length=3, max_length=3)] | None
-    ) = None
+    pricing: Pricing | None = None
     workers: Workers = Field(default_factory=Workers)
     # Where flock's workers run (docs/local.md); a shepherd config runs here, on its engine.
     compute: ComputeSpec = Field(default_factory=lambda: ComputeSpec(kind="local"))
@@ -202,16 +208,28 @@ class Spec(Config):
                 raise ValueError("limits.run_timeout_seconds must be longer than loop.while.until")
             if loop.while_.until is None and "run_timeout_seconds" not in limits.model_fields_set:
                 raise ValueError(
-                    "a loop without while.until needs limits.run_timeout_seconds "
-                    "(the default 900 s would end the run after 15 minutes)"
+                    "a loop without while.until runs for limits.run_timeout_seconds: set it "
+                    "(the default is 900 s, 15 minutes) or while.until"
                 )
+        shared = sum(role.loop is None for role in self.roles().values())
+        if self.loop is not None and self.loop.while_.budget_usd is not None and shared > 1:
+            raise ValueError(
+                f"loop.while.budget_usd would apply to each of the {shared} roles sharing the "
+                "run's loop: set limits.budget_usd for the run, or a budget in each role's loop"
+            )
         reserve = sum(loop.final.reserve_usd for loop in loops if loop.final)
         if limits.budget_usd is not None and reserve > limits.budget_usd:
             raise ValueError(
                 f"loop final.reserve_usd ({reserve:g}) is more than limits.budget_usd"
             )
-        if backend == "hf-sandbox" and limits.trial_hours >= 24:
-            raise ValueError("hf-sandbox caps a sandbox at 24 h: set limits.trial_hours below 24")
+        for name, role in self.roles().items() if backend == "hf-sandbox" else ():
+            turn = ((role.workers and role.workers.turn_timeout) or self.workers.turn_timeout
+                    or TypeSpec.model_fields["turn_timeout"].default)
+            if limits.trial_hours * 3600 + parse_duration(turn).total_seconds() >= 86400:
+                raise ValueError(
+                    f"hf-sandbox caps a sandbox at 24 h: limits.trial_hours plus {name}'s "
+                    f"turn_timeout ({turn}, a Trial's last turn) must stay below it"
+                )
         if (
             backend == "hf-sandbox"
             and "board" in self.resources
@@ -224,6 +242,9 @@ class Spec(Config):
         )
         if budgets and self.pricing is None:
             raise ValueError("budgets need pricing: [input, output, cached] USD per 1M tokens")
+        for name, role in self.roles().items():
+            if budgets and role.model not in (None, self.model) and role.pricing is None:
+                raise ValueError(f"agents.roles.{name} has its own model: budgets need its pricing")
         if self.compute.kind == "hf-jobs" and backend != "hf-sandbox":
             raise ValueError("compute hf-jobs cannot run containers: use backend hf-sandbox")
         if self.compute.kind == "slurm" and backend == "docker":
@@ -279,16 +300,18 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
         packing |= role.workers.model_dump(exclude_none=True) if role.workers else {}
         slots = {k: packing.pop(k) for k in ("initial", "max_extra") if k in packing}
         ramp, loop = role.ramp, loops.get(name)
-        if ramp is not None:  # flock's durations are whole numbers of a unit
-            whole = ramp.every == int(ramp.every)
-            every = f"{ramp.every:.0f}s" if whole else f"{round(ramp.every * 1000)}ms"
+        if loop is not None and loop.while_.until is None:  # the run's timeout ends the loop
+            until = flock_duration(spec.limits.run_timeout_seconds)
+            loop = loop.model_copy(update={"while_": loop.while_.model_copy(
+                update={"until": until})})
         types[name] = {
             **packing,
             "harness": "harbor",
             "model": f"{PROVIDER}:{model}",
             "replicas": 0 if ramp else role.count,  # the ramp raises them
             "replicas_ramp": ramp and {
-                "start": ramp.start, "add": ramp.add, "every": every, "max": role.count,
+                "start": ramp.start, "add": ramp.add, "every": flock_duration(ramp.every),
+                "max": role.count,
             },
             "workers": slots or None,
             "max_turns": spec.limits.agent_max_turns,
@@ -316,7 +339,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
             "api_key_env": spec.inference.api_key_env,
             "max_working": spec.inference.max_working,
             # no pricing: the run's cost shows as 0 (Harbor reports none for router models)
-            "pricing": {"*": spec.pricing or [0.0, 0.0, 0.0]},
+            "pricing": {"*": spec.pricing or [0.0, 0.0, 0.0]} | {
+                role.model: role.pricing for role in roles.values() if role.model and role.pricing
+            },
         }},
         "types": types,
         "dashboard": spec.dashboard,

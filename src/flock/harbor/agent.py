@@ -9,9 +9,10 @@ run(): put back the agent's saved Pi sessions if the channel says so, signal rea
 turn's messages and token usage (from pi.txt) go back as flock events, and the session files
 are copied to the channel's `home`, where flock's BucketSync pushes them. While idle it
 probes the environment every PROBE seconds; a failed probe ends the Trial with an error.
-run() returns when the channel closes, after `trial_seconds`, or after MAX_ERRORS failed
-turns in a row; the Trial then runs its verifier. The worker's loop engine and controller do
-loops, steering, budgets and stops.
+run() returns when the channel closes, after `trial_seconds` (queued prompts wait for the next
+Trial), after MAX_ERRORS failed turns in a row (rate-limited ones do not count), or when the
+first turn on restored sessions fails (`restore_error`); the Trial then runs its verifier. The
+worker's loop engine and controller do loops, steering, budgets and stops.
 """
 
 import asyncio
@@ -38,6 +39,13 @@ PROBE = 60  # seconds between idle probes (`exec true`); also hf-sandbox activit
 MAX_ERRORS = 3  # failed turns in a row before the Trial ends
 SYNC = 600  # seconds between session downloads when /logs/agent is not mounted (hf-sandbox)
 STOP_GRACE = 30  # seconds stop() waits for a killed turn to report
+# Ends `pi` without procps (absent from slim images): its /proc command lines. `[p]` keeps this
+# shell's own command line from matching; it fails when no process matched.
+KILL_PI = (
+    "n=0; for d in /proc/[0-9]*; do "
+    "case \"$(tr '\\0' ' ' 2>/dev/null < $d/cmdline)\" in "
+    "*[p]'i --print'*) kill ${d#/proc/} 2>/dev/null && n=$((n+1));; esac; done; [ $n -gt 0 ]"
+)
 
 
 @dataclass
@@ -67,7 +75,12 @@ def read_turn(path):
             event = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(event, dict) or event.get("type") != "message_end":
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "compaction_end":  # Pi's summary call, as adapters/pi.py counts it
+            usage += pi_tokens((event.get("result") or {}).get("usage"))
+            continue
+        if event.get("type") != "message_end":
             continue
         message = event.get("message")
         if isinstance(message, dict):
@@ -103,16 +116,26 @@ class FlockPi(Pi):
                 raise
         ch.ready.set()
         errors = 0
+        check = ch.restore  # until a turn runs on the restored sessions
         try:
             while errors < MAX_ERRORS:
                 prompt = await self._next_prompt(environment, deadline)
                 if prompt is None:
                     return
                 text = f"{instruction}\n\n{prompt}" if fresh else prompt
-                status, used = await self._turn(text, fresh, environment, totals)
+                ended, used = await self._turn(text, fresh, environment, totals)
+                transient = ended.data.get("reason") == "model_transport"
+                if check and ended.status == "error" and not transient and not used:
+                    ch.restore_error = f"--continue failed: {ended.error}"[:500]
+                    self.why = "resume failed"  # the adapter's next start raises ResumeError
+                    return
+                check = check and ended.status != "completed" and not used
                 # A first turn that failed before using tokens left nothing to --continue.
-                fresh = fresh and status != "completed" and not used
-                errors = errors + 1 if status == "error" else 0
+                fresh = fresh and ended.status != "completed" and not used
+                if ended.status != "error":
+                    errors = 0
+                elif not transient:  # a 429 storm is the loop's to back off, not a failure
+                    errors += 1
             self.why = f"{MAX_ERRORS} failed turns in a row"
         finally:
             # A filled context stops Harbor recounting only the last turn after run().
@@ -125,7 +148,7 @@ class FlockPi(Pi):
         queue = self.channel.prompts
         while True:
             left = deadline - time.monotonic()
-            if left <= 0 and queue.empty():
+            if left <= 0:  # queued prompts go to the next Trial
                 self.why = "trial_hours"
                 return None
             try:
@@ -147,7 +170,7 @@ class FlockPi(Pi):
         return "\n\n".join(texts)
 
     async def _turn(self, text, first, environment, totals):
-        """One `pi` call; reports it and returns (status, used tokens)."""
+        """One `pi` call; reports it and returns (its turn_ended event, used tokens)."""
         ch = self.channel
         self.busy, self._killed = True, False
         self.idle.clear()
@@ -189,9 +212,10 @@ class FlockPi(Pi):
                 data = {"reason": "model_transport"} if transient else {}
             else:
                 status, data = "completed", {}
-            ch.emit(AdapterEvent("turn_ended", status=status, data=data,
-                                 error=error if status == "error" else None))
-            return status, usage != TokenUsage()
+            ended = AdapterEvent("turn_ended", status=status, data=data,
+                                 error=error if status == "error" else None)
+            ch.emit(ended)
+            return ended, usage != TokenUsage()
         finally:
             self.busy = False
             self.idle.set()
@@ -208,9 +232,14 @@ class FlockPi(Pi):
                     (self.environment_logs_dir / self._SESSIONS_DIRECTORY).as_posix(), local
                 )
                 self._synced = time.monotonic()
+        self.keep_sessions()
+
+    def keep_sessions(self):
+        """The host's copy of the session files to the channel's home, where BucketSync pushes
+        them; also when the Trial ended (Harbor then downloaded /logs/agent)."""
         home = self.channel.home / "sessions"
         home.mkdir(parents=True, exist_ok=True)
-        for path in local.glob("*.jsonl"):
+        for path in (self.logs_dir / self._SESSIONS_DIRECTORY).glob("*.jsonl"):
             temporary = home / f".{path.name}.tmp"  # BucketSync never sees half a file
             shutil.copy2(path, temporary)
             os.replace(temporary, home / path.name)
@@ -226,12 +255,13 @@ class FlockPi(Pi):
 
     async def kill(self):
         """End the running `pi`; its turn ends `interrupted`. Unverified in a real container
-        (procps' pkill must be in the image; whether --continue then works is untested)."""
+        (whether --continue works after it is untested). A failed kill is an `error` event."""
         if not self.busy or self._env is None:
             return
         self._killed = True
-        with suppress(Exception):
-            # [p]: the pattern must not match this command's own shell
-            await self.exec_as_root(self._env, "pkill -f '[p]i --print' || true", timeout_sec=30)
+        try:
+            await self.exec_as_root(self._env, KILL_PI, timeout_sec=30)
+        except Exception as exc:  # reported; the turn timeout still applies
+            self.channel.emit(AdapterEvent("error", error=f"kill pi: {safe_error(exc)[:300]}"))
         with suppress(TimeoutError):
             await asyncio.wait_for(self.idle.wait(), STOP_GRACE)

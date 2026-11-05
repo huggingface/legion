@@ -12,10 +12,13 @@ background for as long as the agent lives here:
 - `stop` kills a turn in flight and ends the burst's event stream; the Trial stays up.
 - `close` ends the Trial: FlockPi returns, Harbor runs the verifier and stops the environment.
 A Trial that fails (an idle probe, 3 failed turns in a row, a crash) is reported as `error`
-and `exited`; the next prompt starts a new one.
+and `exited`, after a failed turn for any prompt queued for it; the next prompt starts a new
+one. When its first turn on restored sessions failed, the next `start` of that session raises
+ResumeError (the runtime then starts a fresh session).
 
-The session files live in `home/sessions` (FlockPi copies them there after each turn), where
-BucketSync pushes and restores them. Files in the container do not survive a new Trial.
+The session files live in `home/sessions` (FlockPi copies them there after each turn and the
+adapter again when a Trial ends), where BucketSync pushes and restores them. Files in the
+container do not survive a new Trial.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ class HarborAdapter:
         self.workdir, self.agent, self.spec = Path(workdir), name, spec
         self.root = self.workdir.parent / "_harbor" / name  # trials/<name>-tN, state/sources
         self.home = self.root / "pi"
+        self.session_dir = self.root  # what purge() deletes for an ephemeral agent
         self.resources = resources  # the worker's flock.harbor Resources (bind); None: none
         self.bundle = bundle  # the run's ToolBundle; None: no tools
         self.host = host  # the worker's HarborHost: resources, bundle, task (flock.worker.harbor)
@@ -57,6 +61,7 @@ class HarborAdapter:
         self._queue = EventQueue()  # one stream; each burst reads it up to its `exited`
         self._open = False  # a burst is reading events (an `exited` is owed)
         self._closing = False
+        self._resume_failed: str | None = None  # the last Trial's --continue failed: why
 
     def session_files(self, session_id: str | None) -> list[Path]:
         """Every Pi session file of the agent: one Pi session dir per agent, and `--continue`
@@ -81,10 +86,13 @@ class HarborAdapter:
         files = self.session_files(session_id)
         if session_id and not files:
             raise ResumeError(f"no Pi session files under {self.home / 'sessions'}")
+        if session_id and self._resume_failed:
+            why, self._resume_failed = self._resume_failed, None
+            raise ResumeError(why)
         if self._starting is not None and not self._starting.done():
             await asyncio.shield(self._starting)  # its failure is reported in this burst
         if not self.alive():
-            await self._new_trial(restore=bool(files))
+            await self._new_trial(restore=bool(session_id and files))
         self._open = True
         self.session_id = session_id or self.session_id or str(uuid.uuid4())
         return self.session_id
@@ -140,21 +148,34 @@ class HarborAdapter:
             self._emit(AdapterEvent("exited"))
 
     def _ensure(self) -> None:
-        """A Trial for the queued prompts, unless one is up or starting."""
-        if self.alive() or self._creating or self._closing or self._prompts.empty():
+        """A Trial for the queued prompts, unless one is up or starting (or the session must
+        restart: the runtime's next start gets the ResumeError)."""
+        if (self.alive() or self._creating or self._closing or self._resume_failed
+                or self._prompts.empty()):
             return
         self._creating = True  # until the task has the new Trial's `_run`
         self._starting = asyncio.create_task(self._restart(), name=f"trial-{self.agent}")
 
     async def _restart(self) -> None:
         try:
-            await self._new_trial(restore=bool(self.session_files(None)))
+            await self._new_trial(restore=bool(self.session_id and self.session_files(None)))
         except Exception as e:  # noqa: BLE001 - reported; the next start tries again
             log.warning("%s: new Trial failed: %s", self.agent, e)
-            self._emit(AdapterEvent("error", error=f"new Trial failed: {e}"))
-            self._exit()
+            self._fail(f"new Trial failed: {e}")
         finally:
             self._creating = False
+
+    def _fail(self, error: str) -> None:
+        """A Trial failed or did not start: prompts queued for it end as a failed turn (the
+        runtime's loop sends them again), then `error` and `exited`."""
+        queued = False
+        while not self._prompts.empty():
+            queued = self._prompts.get_nowait() is not None or queued
+        if queued and self._open:
+            self._emit(AdapterEvent("turn_started"))
+            self._emit(AdapterEvent("turn_ended", status="error", error=error))
+        self._emit(AdapterEvent("error", error=error))
+        self._exit()
 
     def _instructions(self) -> str:
         from flock.harbor.instructions import build_agent_instructions
@@ -232,6 +253,11 @@ class HarborAdapter:
         self.result = _result(task)
         if trial is not self.trial or not trial.agent.channel.ready.is_set():
             return  # superseded, or never ready: whoever started it reports that
+        try:  # unmounted (hf-sandbox): Harbor's download at the end beats FlockPi's last one
+            trial.agent.keep_sessions()
+        except OSError as e:
+            log.warning("%s: sessions of Trial %s not kept: %s", self.agent,
+                        trial.config.trial_name, e)
         why = _why(trial, task)
         log.info("%s: Trial %s ended: %s", self.agent, trial.config.trial_name, why)
         if why == "closed" or self._closing:
@@ -239,8 +265,8 @@ class HarborAdapter:
         if why == "trial_hours":
             self._ensure()  # prompts queued as it ended go to the next Trial
             return
-        self._emit(AdapterEvent("error", error=f"Trial {trial.config.trial_name} ended: {why}"))
-        self._exit()
+        self._resume_failed = trial.agent.channel.restore_error
+        self._fail(f"Trial {trial.config.trial_name} ended: {why}")
 
 
 def _result(task: asyncio.Task) -> Any:

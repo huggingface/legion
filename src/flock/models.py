@@ -919,6 +919,10 @@ class TypeSpec(BaseModel):
         if (self.harness.value == "harbor") != (self.harbor is not None):
             raise ValueError("the `harbor:` block goes with harness harbor, which needs it "
                              "(written by the compile step of a flock.harbor spec)")
+        board = [x for x in (self.loop.on if self.loop else []) if x.startswith("board.")]
+        if board and self.harness.value != "harbor":
+            raise ValueError(f"loop.on {', '.join(board)}: board.* wakes come from harness "
+                             "harbor's board resource; use comms.* here")
         return self
 
     @field_validator("workers")

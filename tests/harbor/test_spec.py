@@ -124,11 +124,17 @@ def test_v8_shaped_spec_loads(tmp_path):
         (lambda d: d["environment"].update(backend="slurm"), "backend"),
         # review findings on the spec as first written
         (lambda d: d["limits"].update(budget_usd=10), r"reserve_usd \(20\) is more than"),
-        (lambda d: d["limits"].update(trial_hours=24), "set limits.trial_hours below 24"),
+        (lambda d: d["limits"].update(trial_hours=24), "hf-sandbox caps a sandbox at 24 h"),
+        # 23.6 h plus the default turn_timeout of 30 min is over 24 h
+        (lambda d: d["limits"].update(trial_hours=23.6), r"plus answers's turn_timeout \(30m"),
         (
             lambda d: (d["loop"]["while"].pop("until"), d["limits"].pop("run_timeout_seconds")),
-            "a loop without while.until needs limits.run_timeout_seconds",
+            "a loop without while.until runs for limits.run_timeout_seconds",
         ),
+        (lambda d: d["loop"]["while"].update(budget_usd=50),
+         "would apply to each of the 2 roles sharing the run's loop"),
+        (lambda d: d["agents"]["roles"]["safety"].update(model="huggingface/other/M"),
+         "agents.roles.safety has its own model: budgets need its pricing"),
         (lambda d: d["environment"].update(backend="docker") or d.update(compute="hf-jobs"),
          "compute hf-jobs cannot run containers"),
         (lambda d: d["environment"].update(backend="docker") or d.update(compute="slurm"),
@@ -174,6 +180,7 @@ agents:
       ramp: {start: 1, add: 1, every: 10m}
     safety:
       model: huggingface/other/Model
+      pricing: [1, 2, 0.1]
       workers: {agents_per_worker: 1, max_extra: 2}
       loop: {prompt: 'Safety round {round}.', every: 5m, on: [comms.mention], while: {until: 2h}}
 environment: {backend: hf-sandbox, kwargs: {flavor: cpu-basic}}
@@ -206,7 +213,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert (provider.type, provider.base_url, provider.api_key_env, provider.max_working) == (
         "openai_compat", "https://router.huggingface.co/v1", "HF_TOKEN", 40,
     )
-    assert provider.pricing == {"*": [0.3, 1.2, 0.03]}
+    assert provider.pricing == {"*": [0.3, 1.2, 0.03], "huggingface/other/Model": [1, 2, 0.1]}
     assert swarm.limits.model_dump() == {"alive": 10, "spawned_total": None, "budget_usd": 400}
     assert swarm.spawn["answers"].types == {"safety": 2}
     assert list(swarm.types) == ["answers", "safety"]
@@ -256,6 +263,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert Spec.model_validate(h.config).model == h.config["model"]  # the worker rebuilds it
 
     assert safety.model == "inference:huggingface/other/Model"
+    assert safety.resolved_model.pricing == [1, 2, 0.1]
     assert safety.harbor.config["model"] == "huggingface/other/Model"
     assert (safety.replicas, safety.replicas_ramp, safety.agents_per_worker) == (1, None, 1)
     assert safety.workers.model_dump() == {"initial": None, "max_extra": 2}
@@ -280,6 +288,18 @@ def test_roles_sharing_the_run_loop_split_its_reserve(tmp_path):
     assert reserves == [10, 10]  # flock holds back their sum: the spec's 20
     harbor = swarm.types["answers"].harbor
     assert harbor.tools == {} and harbor.tools_sha256 is None  # no bundle: no tools
+
+
+def test_a_loop_without_until_ends_at_the_run_timeout(tmp_path):
+    data = load_spec_yaml(COMPILE)
+    data["loop"]["while"].pop("until")
+    data["limits"]["run_timeout_seconds"] = 9000.5  # over safety's own 2h
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert swarm.types["answers"].loop.while_.until == "9000500ms"
+    assert swarm.types["safety"].loop.while_.until == "2h"  # its own
 
 
 def test_a_shepherd_config_compiles():
