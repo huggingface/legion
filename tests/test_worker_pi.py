@@ -85,11 +85,11 @@ def test_fixture_maps_to_turns_messages_and_per_call_usage():
     # messages pass through untouched: byte-identical to Pi's message_end payload
     ends = [r["message"] for r in recs if r["type"] == "message_end"]
     assert [e.message for e in evs if e.kind == "message"] == ends
-    # usage: one event per model call that reported tokens, never cumulative
+    # usage: one event per model call that reported tokens
     usage = [e for e in evs if e.kind == "usage"]
     calls = [m for m in ends if m["role"] == "assistant" and m["usage"]["totalTokens"]]
     assert len(usage) == len(calls) == 4
-    assert all(not e.cumulative and not e.baseline and e.model == "fake/fake-model" for e in usage)
+    assert all(e.model == "fake/fake-model" for e in usage)
     assert usage[0].usage == TokenUsage(input=62, output=7, cache_read=40)
     stats = next(r for r in recs if r.get("command") == "get_session_stats")["data"]["tokens"]
     total = sum((e.usage for e in usage), TokenUsage())
@@ -382,7 +382,7 @@ async def test_pi_happy_path(tmp_path, fake_server, monkeypatch):
     msgs = [e.message for e in evs if e.kind == "message"]
     assert [m["role"] for m in msgs if m["role"] != "system"] == ["user", "assistant", "toolResult", "assistant"]
     assert msgs[-1]["content"][0]["text"] == "done: wrote"
-    assert all(e.model == "flock/fake-model" and not e.cumulative for e in evs if e.kind == "usage")
+    assert all(e.model == "flock/fake-model" for e in evs if e.kind == "usage")
     # the tool ran in the workdir with the allow-listed env: key and identity yes, FLOCK_TOKEN no
     env_txt = (wd / "env.txt").read_text()
     assert "FLOCK_TEST_PI_KEY=sk-test-key" in env_txt and "MSGBOARD_TOKEN=mb-1" in env_txt

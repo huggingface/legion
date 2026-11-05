@@ -44,7 +44,6 @@ from flock.worker.adapters.base import (
     HarnessAdapter,
     ResumeError,
     credential_env_names,
-    usage_sub,
 )
 from flock.worker.events import Outbox, SessionLog, utcnow
 from flock.worker.loop import render
@@ -88,8 +87,6 @@ class AgentState(BaseModel):
     turn_seq: int = 0  # last turn number handed out (turn ids are t-<n>)
     turns: int = 0  # turns ended (completed, failed or interrupted)
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # cumulative, by model
-    harness_cum: dict[str, TokenUsage] = Field(default_factory=dict)  # last cumulative snapshot
-    harness_estimate_usd: float | None = None
     loop_round: int = 0  # last loop round sent to this agent (docs/loop.md)
     loop_run: str | None = None  # the loop run (LoopStartCommand.run) loop_round counts in
     last_summary: str | None = None  # what the agent last passed to `done` (else its last reply)
@@ -553,7 +550,6 @@ class AgentRuntime:
                 transcript = next((p for p in self.adapter.session_files(old) if old and old in p.name), None)
                 sid = await self.adapter.start(self.workdir, None, self.spec, env=env)
                 kind, self.resumed = "session_restarted", False
-                self.state.harness_cum = {}
                 readable = self.spec.harness.value != "harbor"  # a Trial sees no worker paths
                 first.append(restart_prompt(old, transcript, self.log.path if readable else None,
                                             str(e)))
@@ -752,14 +748,6 @@ class AgentRuntime:
         model = ev.model or self.spec.model
         usage = ev.usage
         assert usage is not None
-        if ev.cost_usd is not None:
-            self.state.harness_estimate_usd = ev.cost_usd
-        if ev.cumulative:
-            prev = self.state.harness_cum.get(model)
-            self.state.harness_cum[model] = usage
-            if ev.baseline:
-                return
-            usage = usage_sub(usage, prev)
         self.state.tokens[model] = self.state.tokens.get(model, TokenUsage()) + usage
         self._turn_tokens[model] = self._turn_tokens.get(model, TokenUsage()) + usage
 
@@ -989,7 +977,6 @@ class AgentRuntime:
             session_id=self.state.session_id,
             resumed=self.resumed,
             tokens=dict(self.state.tokens),
-            harness_estimate_usd=self.state.harness_estimate_usd,
             turns=self.state.turns,
             last_sync=self.last_sync,
             msgboard_principal=self.identities.principal(self.name) if self.identities else None,

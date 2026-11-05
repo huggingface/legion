@@ -251,7 +251,7 @@ async def test_plain_answer(tmp_path, fake_server, monkeypatch):
     assert evs[-1].status == "completed" and evs[-1].data["num_turns"] == 1
     assert evs[3].message["content"] == [{"type": "text", "text": "echo: hello"}]
     assert evs[3].message["stopReason"] == "stop" and evs[3].message["provider"] == "gpu"
-    assert evs[2].model == "fake-model" and not evs[2].cumulative
+    assert evs[2].model == "fake-model"
     assert evs[2].usage == TokenUsage(input=62, output=7, cache_read=40)  # 102 prompt, 40 cached
     [req] = requests_seen(fake_server)
     assert req["auth"] == "Bearer sk-test"

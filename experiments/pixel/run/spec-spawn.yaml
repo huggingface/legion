@@ -62,8 +62,8 @@ models:
       chat_template_kwargs: {enable_thinking: false}
 types:
   leader:
-    harness: claude
-    model: claude-sonnet-5-5
+    harness: pi
+    model: anthropic/claude-sonnet-5-5   # one of Pi's built-in providers
     system_prompt_file: leader.md
     # BOARD_URL / BOARD_INVITE: the msgboard (one multi-use agent invite scoped to
     # #flock-pixel-test; each leader joins under its flock name). Painters get none of this.
