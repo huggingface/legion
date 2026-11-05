@@ -255,3 +255,21 @@ def test_server_counts_uploads_and_answers_need_full_without_v2():
     assert c.post("/tools/put", json=v2, headers=h).json()["result"] == ["base_sha", "patch"]
     m = c.get("/metrics").json()
     assert (m["upload_v1_total"], m["upload_v2_total"]) == (1, 1)
+
+
+def test_upload_stays_inside_the_workspace(repos):
+    work, clone, _ = repos
+    with pytest.raises(ValueError, match="inside"):
+        capture_v2(work, "..")
+    (clone / "leak").symlink_to("/etc/passwd")
+    with pytest.raises(ValueError, match="symlinks"):
+        capture_v2(work, "clone")
+
+
+def test_a_git_that_times_out_is_a_tool_error(repos, monkeypatch):
+    def slow(argv, **_):
+        raise subprocess.TimeoutExpired(argv, 30)
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    with pytest.raises(ValueError, match="timed out after 30 s"):
+        capture_v2(repos[0], "clone")

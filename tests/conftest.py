@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 import stat
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from flock import ops
 from flock.controller.api import create_app
 from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import Settings, reconcile
@@ -130,6 +132,14 @@ def tiny(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUSH_INTERVAL", "0.2")  # workers send their events within 0.2 s
     monkeypatch.setenv("FAKE_KEY", "fake-key")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    waited = []
+
+    def sleep(_s: float) -> None:  # ops' polls (`stop --release` has no limit): 0.2 s, 60 s at most
+        waited.append(0.2)
+        assert sum(waited) <= 60, "flock waited over 60 s"
+        time.sleep(0.2)
+
+    monkeypatch.setattr(ops, "_sleep", sleep)
     run = TinyRun(tmp_path, f"http://127.0.0.1:{srv.server_port}/v1", monkeypatch)
     yield run
     run.close()

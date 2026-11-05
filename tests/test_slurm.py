@@ -332,6 +332,9 @@ def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, cl
     (job,) = slurm.ids()
     w = store.get_worker(W0)
     assert w["log_path"] == str(tmp_path / "logs" / f"{W0}-{job}.out")
+    env = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))  # no container_root:
+    assert (env["WORK_ROOT"], env["FLOCK_LLM_HOME"]) == (  # node-local, fixed per slot
+        f"/tmp/flock/{W0}/work", f"/tmp/flock/{W0}/llm") and "HOME" not in env
     (tmp_path / "logs" / f"{W0}-{job}.out").write_text("start\nImportError: no module x\n")
     slurm.set(job, "FAILED", "1:0")
     clock.advance(100)

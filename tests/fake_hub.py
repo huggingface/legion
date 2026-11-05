@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import signal
@@ -32,9 +33,10 @@ class Hub:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.procs: dict[str, subprocess.Popen] = {}
         self.cancelled: set[str] = set()
+        self._ids = itertools.count(1)  # one id per job, also from concurrent requests
 
     def run(self, ns: str, spec: dict[str, Any]) -> dict[str, Any]:
-        job = f"job{len(self.jobs) + 1}"
+        job = f"job{next(self._ids)}"
         d = self.root / job
         env = {**{k: os.environ[k] for k in ("PATH", "PYTHONPATH") if k in os.environ},
                **spec.get("environment", {}), **spec.get("secrets", {}),
