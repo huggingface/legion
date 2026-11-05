@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -162,3 +163,99 @@ def test_controller_restart(tiny, tmp_path):
     # stop --delete on a controller: the swarm is removed
     assert json.loads(tiny.flock("stop", "tiny", "--delete", "--yes")) == {
         "swarm": "tiny", "removing": True}
+
+
+
+LOOPS = """\
+    loop:
+      prompt: "bash: echo round {round}"
+      while: {max_rounds: 3}
+      final: {prompt: "final after {round} rounds; last: {last_summary}"}
+  ticker:
+    harness: llm
+    model: fake:fake-model
+    replicas: 1
+    max_turns: 1
+    env: {HEARTBEAT_INTERVAL: "1"}
+    loop:
+      prompt: "bash: echo tick {round}"
+      every: 500ms
+      on: [comms.mention]
+      while: {until: 5s}
+      final: {prompt: "bash: echo bye"}
+limits: {budget_usd: 1000}
+"""
+
+
+def test_loops(tiny, monkeypatch):
+    """Two loops, each with its final round, then idle: `every: turn_end` with `max_rounds`
+    (re-prompted by the worker) and `every: 500ms` with `while.until` (by the controller),
+    whose turns all stop at `max_turns: 1`. Then the run's bundle sums them up."""
+    monkeypatch.setenv("FLOCK_LOOP_INTERVAL", "0.2")
+    out = tiny.flock("launch", tiny.spec(replicas=2, extra=LOOPS), "--skip-preflight")
+    # unquoted `on:` is the key "on" (YAML 1.2), and this type is not on the board
+    assert "loop.on comms.mention: no comms feeder: the type is not on the board" in out, out
+    run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
+
+    def loop(t: str) -> dict:
+        return json.loads(tiny.flock("status", "tiny", "--type", t, "--json"))["loop"]
+
+    w = tiny.wait(lambda: (x := loop("writer"))["state"] == "done" and x)
+    t = tiny.wait(lambda: (x := loop("ticker"))["state"] == "done" and x)
+    time.sleep(1)  # then idle: nothing more is sent
+    assert (w["mode"], w["reason"], w["rounds_total"], w["final_sent"], w["final_done"]) == (
+        "worker", "max_rounds", 6, 2, 2), w
+    for n in ("writer-0000", "writer-0001"):
+        assert tiny.said(n)[-1] == [  # rendered on the worker, {last_summary}: the last reply
+            "bash: echo round 1", "bash: echo round 2", "bash: echo round 3",
+            "final after 3 rounds; last: done: round 3\n[exit code 0]"]
+        evs = tiny.events(n)
+        assert [(e["data"]["kind"], e["data"]["round"], e["data"]["why"]) for e in evs
+                if e["name"] == "loop.prompt"] == [("loop", 1, "start"), ("loop", 2, "turn_end"),
+                                                   ("loop", 3, "turn_end"),
+                                                   ("final", 3, "final: max_rounds")]
+        assert [e["data"] for e in evs if e["name"] == "loop.stopped"] == [
+            {"reason": "max_rounds", "round": 3, "active": True}]
+        seq = [e["name"] for e in evs
+               if e["name"] in ("loop.prompt", "agent.turn_started", "agent.turn_ended")]
+        assert seq == ["loop.prompt", "agent.turn_started", "agent.turn_ended"] * 4  # one each
+
+    # the controller's loop: a round every 500 ms until 5 s after the loop started, then the
+    # final round; a turn stopped at max_turns is no loop error
+    assert (t["mode"], t["reason"], t["final_done"]) == ("controller", "until", 1), t
+    k = t["rounds_total"]
+    assert k >= 2 and tiny.said("ticker-0000")[-1] == [
+        *(f"bash: echo tick {i}" for i in range(1, k + 1)), "bash: echo bye"]
+    assert [e["data"]["why"] for e in tiny.events("ticker-0000", "loop.prompt")] == [
+        "start", *["every 500ms"] * (k - 1), "final: until"]
+
+    swarm = [(e["name"], e["data"]) for e in tiny.events("tiny", "loop.")
+             if e["name"] not in ("loop.tick", "loop.max_turns")]
+    for typ, why, n in (("writer", "max_rounds", 2), ("ticker", "until", 1)):
+        assert [x for x, d in swarm if d["type"] == typ] == [
+            "loop.started", "loop.stopped", *["loop.final_round"] * n, "loop.final_done"], swarm
+        assert next(d for x, d in swarm if x == "loop.stopped" and d["type"] == typ)[
+            "reason"] == why
+
+    # the bundle: events.jsonl merges the swarm stream with the agents' by time, each event
+    # once; run.json sums up each loop and the budget
+    tiny.flock("stop", "tiny", "--delete", "--yes")
+    merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
+    agents = ("writer-0000", "writer-0001", "ticker-0000")
+    per_agent = sum(len((run / "events" / f"{a}.jsonl").read_text().splitlines()) for a in agents)
+    assert len(merged) == len([e for e in merged if e["agent"] == ""]) + per_agent
+    stamps = [datetime.fromisoformat(e["ts"]) for e in merged]
+    assert stamps == sorted(stamps)
+    assert sorted(e["agent"] for e in merged if e["type"] == "final_round") == sorted(agents)
+    assert [(e["agent"], e["data"]["kind"], e["data"]["round"]) for e in merged
+            if e["type"] == "loop_max_turns"] == [
+        *(("ticker-0000", "loop", i) for i in range(1, k + 1)), ("ticker-0000", "final", k)]
+    doc = json.loads((run / "run.json").read_text())
+    assert doc["spec"]["types"]["ticker"]["loop"]["on"] == ["comms.mention"]
+    lp = doc["loops"]["writer"]
+    assert (lp["state"], lp["reason"], lp["rounds_total"], lp["final_sent"], lp["final_done"],
+            lp["wakes_total"]) == ("done", "max_rounds", 6, 2, 2, 0), lp
+    assert (doc["loops"]["ticker"]["state"], doc["loops"]["ticker"]["reason"]) == ("done", "until")
+    assert doc["budget"] == {"budget_usd": 1000.0, "final_reserve_usd": 0.0,
+                             "cost_usd": doc["totals"]["cost_usd"], "stop": None}
+

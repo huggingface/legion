@@ -1,9 +1,10 @@
 """`loop:` end to end in one process: the real controller app, its loop engine ticking,
 FakeJobsClient, a real Worker over ASGI and three `llm` agents against tests/fake_openai.py.
 
-Spec: `every: turn_end` with `while: {max_rounds: 3}`, then `final`. Each agent gets exactly
-3 loop prompts (rendered on the worker), then one final prompt; one turn per prompt (nothing stacked); swarm events in order. Run twice: the worker
-re-prompts (no `max_working`), and the controller re-prompts (`max_working: 3`)."""
+Spec: `every: turn_end` with `while: {max_rounds: 3}`, then `final`, on a provider with
+`max_working: 3`, so the controller re-prompts. Each agent gets exactly 3 loop prompts (rendered
+on the worker), then one final prompt; one turn per prompt (nothing stacked); swarm events in
+order. Without `max_working` the worker re-prompts: tests/test_runs.py::test_loops."""
 
 from __future__ import annotations
 
@@ -32,9 +33,9 @@ KEY_ENV = "FLOCK_TEST_LOOP_KEY"
 AGENTS = [f"painter-000{i}" for i in range(3)]
 
 
-def loop_spec(url: str, capped: bool) -> SwarmSpec:
+def loop_spec(url: str) -> SwarmSpec:
     provider = {"type": "openai_compat", "base_url": url, "api_key_env": KEY_ENV, "self_hosted": True,
-                **({"max_working": 3} if capped else {})}
+                "max_working": 3}
     return SwarmSpec.model_validate({
         "swarm": "e2e", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": {"gpu": provider},
         "types": {"painter": {
@@ -53,8 +54,7 @@ def fake_server(tmp_path):
     srv.shutdown()
 
 
-@pytest.mark.parametrize("capped", [False, True], ids=["worker-side", "controller-side"])
-async def test_loop_end_to_end(tmp_path, fake_server, monkeypatch, capped):
+async def test_loop_end_to_end_on_the_controller(tmp_path, fake_server, monkeypatch):
     monkeypatch.setenv(KEY_ENV, "sk-fake")
     store = Store(tmp_path / "data")
     jobs = FakeJobsClient()
@@ -72,7 +72,7 @@ async def test_loop_end_to_end(tmp_path, fake_server, monkeypatch, capped):
             await asyncio.sleep(0.05)
 
     try:
-        r = await admin.put("/swarms/e2e", json=loop_spec(fake_server.url, capped).model_dump(mode="json"))
+        r = await admin.put("/swarms/e2e", json=loop_spec(fake_server.url).model_dump(mode="json"))
         assert r.status_code == 200, r.text
         reconcile(store, jobs, datetime.now(UTC), settings)
         [launch] = jobs.launches
@@ -102,7 +102,7 @@ async def test_loop_end_to_end(tmp_path, fake_server, monkeypatch, capped):
                 break
             await asyncio.sleep(0.05)
         assert state["state"] == "done", state
-        assert state["mode"] == ("controller" if capped else "worker")
+        assert state["mode"] == "controller"
         assert (state["reason"], state["rounds_min"], state["rounds_max"]) == ("max_rounds", 3, 3)
         assert (state["final_sent"], state["final_done"]) == (3, 3)
         await asyncio.sleep(0.5)  # then idle: nothing more is sent
@@ -132,7 +132,7 @@ async def test_loop_end_to_end(tmp_path, fake_server, monkeypatch, capped):
                          "final_done"]
         assert next(e for e in swarm if e["type"] == "loop_stopped")["data"]["reason"] == "max_rounds"
         ticks = [e["data"] for e in swarm if e["type"] == "loop_tick"]
-        assert sum(len(t["rounds"]) for t in ticks) == (9 if capped else 0)
+        assert sum(len(t["rounds"]) for t in ticks) == 9
     finally:
         for t in tasks:
             t.cancel()

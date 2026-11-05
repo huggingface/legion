@@ -153,33 +153,6 @@ async def test_duration_loop_rounds_then_final(sim):
         i for i, k in enumerate(agent_kinds) if k == "loop_prompt" and i < agent_kinds.index("final_round"))
 
 
-async def test_turn_end_runs_on_the_worker(sim):
-    await sim.apply({"prompt": "go {round}", "while": {"max_rounds": 3}, "final": {"prompt": "fin"}})
-    await sim.heartbeat()
-    sim.tick()
-    cmds = await sim.commands()
-    assert {c["kind"] for c in cmds} == {"loop_start"}
-    start = {c["agent"]: c for c in cmds}
-    assert start[A0]["text"] == "go {round}" and start[A0]["max_rounds"] == 3
-    assert start[A0]["meta"]["round"] == 0 and start[A0]["meta"]["why"] == "turn_end"
-    sim.tick()
-    assert await sim.commands() == []  # the worker owns the cadence now
-    for a in (A0, A1):  # the worker's own re-prompts, reported as events
-        for n in (1, 2, 3):
-            await sim.events(a, ("loop_prompt", {"kind": "loop", "round": n, "why": "turn_end"}),
-                             ("turn_started", {}), ("turn_ended", {"status": "completed"}))
-    sim.tick()
-    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
-    assert st["mode"] == "worker" and st["rounds_total"] == 6 and st["state"] == "running"
-    await sim.events(A0, ("loop_stopped", {"reason": "max_rounds", "round": 3}))
-    sim.tick()
-    assert await sim.commands() == []  # A1's worker loop has not said it stopped
-    await sim.events(A1, ("loop_stopped", {"reason": "max_rounds", "round": 3}))
-    sim.tick()
-    fin = prompts(await sim.commands())
-    assert set(fin) == {A0, A1} and fin[A0]["loop"]["why"] == "final: max_rounds"
-
-
 async def test_worker_loop_is_resent_when_it_stalls(sim):
     await sim.apply({"prompt": "go", "while": {"max_rounds": 9}})
     await sim.heartbeat()

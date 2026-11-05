@@ -69,9 +69,10 @@ class TinyRun:
         return got
 
     def turns(self, name: str, n: int) -> dict:
-        """The agent's status once it has ended `n` turns and is idle again."""
+        """The agent's status once it has ended `n` turns, is idle again and its events show
+        them (events can trail the heartbeat)."""
         return self.wait(lambda: (a := self.agent(name))["turns"] >= n and a["state"] == "idle"
-                         and a)
+                         and len(self.events(name, "agent.turn_ended")) >= n and a)
 
     def events(self, name: str, only: str = "") -> list[dict]:
         """`flock status NAME --events --json`: the normalised events whose name starts with
