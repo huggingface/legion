@@ -347,6 +347,10 @@ class Client:
         return self._call("POST", f"/swarms/{swarm}/loop",
                           json={"type": type, "action": "stop", "final": final})
 
+    def start_loop(self, swarm: str, type: str) -> dict:
+        """Start a type's stopped loop again: a new run, rounds from 0."""
+        return self._call("POST", f"/swarms/{swarm}/loop", json={"type": type, "action": "start"})
+
     def delete(self, swarm: str) -> dict:
         """Drain the swarm and drop it from the controller (the bucket keeps its copies)."""
         return self._call("DELETE", f"/swarms/{swarm}")

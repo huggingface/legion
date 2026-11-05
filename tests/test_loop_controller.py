@@ -289,6 +289,38 @@ async def test_while_until_clock_time_stops_regardless_of_start(sim):
     assert fin[A0]["loop"]["why"] == "final: until"
 
 
+async def test_raising_until_reopens_a_loop_that_ended_on_it(sim):
+    loop = {"prompt": "p", "every": "10s", "while": {"until": "60s"}, "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick(61)
+    fin = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, fin[a])
+    await sim.heartbeat()
+    sim.tick()
+    (lp,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (lp["state"], lp["reason"], lp["rounds_max"]) == ("done", "until", 1)
+    await sim.apply({**loop, "while": {"until": "600s"}})  # flock update with a later until
+    sim.tick()
+    got = prompts(await sim.commands())
+    assert {(p["loop"]["kind"], p["loop"]["round"]) for p in got.values()} == {("loop", 2)}
+    (again,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (again["state"], again["started_at"]) == ("running", lp["started_at"])
+    assert ("loop_started", {"type": "researcher", "mode": "controller", "every": "10s",
+                             "restart": False, "reopened": True}) in sim.swarm_events()
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.clock.advance(540)  # the new deadline: a new final round
+    await sim.heartbeat()
+    sim.tick()
+    assert {p["loop"]["why"] for p in prompts(await sim.commands()).values()} == {"final: until"}
+
+
 async def test_agent_usd_takes_an_agent_out(sim):
     # claude-opus-5-5 output: $20 per 1M tokens, so 25,000 tokens = $0.50
     await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_usd": 0.5}})
@@ -458,8 +490,7 @@ async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     assert "loop researcher: done" in line and "stopped: manual" in line
     sim.tick(10)
     assert await sim.commands() == []  # stopped without a final round
-    body = {"type": "researcher", "action": "start", "final": True}
-    assert "running" in cli._loop_line(Client()._call("POST", "/swarms/demo/loop", json=body))
+    assert "running" in cli._loop_line(Client().start_loop("demo", "researcher"))
     sim.tick()
     got = prompts(await sim.commands())
     assert {p["loop"]["round"] for p in got.values()} == {1}  # a new run of the loop: from round 1

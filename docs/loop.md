@@ -166,7 +166,9 @@ while the final round is in flight ends it (`final_done`, note "final removed fr
 its final prompts not yet fetched by a worker are dropped, and one already fetched is not sent
 again. Any end of a final round (also a stop with `final: false` during it, and the hard budget stop)
 drops its undelivered final prompts.
-A stopped loop stays stopped until the loop is started again (`POST /swarms/{swarm}/loop`; no CLI command). `limits.budget_usd` is live too.
+A stopped loop stays stopped until the loop is started again (`POST /swarms/{swarm}/loop`, `Client.start_loop`; no CLI command),
+with one exception: a loop that ended on `until` runs on when a re-apply moves `until` past now
+(same run: `started_at` and rounds kept, a new final round at the new end; `loop_started` with `reopened`). `limits.budget_usd` is live too.
 
 **Restart.** Loop state is in the controller's SQLite (`loops`, `loop_agents`, `swarm_flags`),
 so a controller restart resumes the loops; only queued wake-ups are lost.

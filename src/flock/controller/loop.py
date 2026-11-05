@@ -730,6 +730,10 @@ class LoopEngine:
         self.store.put_loop(spec.swarm, type_name, L)
         self._event(spec.swarm, "loop_updated", {"type": type_name, "mode": new,
                                                  "every": ts.loop.every, "previous_mode": old})
+        until = ts.loop.while_.until
+        if (L["state"] == "done" and L.get("reason") == "until" and until
+                and now < until_deadline(until, L["started_at"])):
+            self._reopen(spec.swarm, type_name, L, new)
         if L["state"] != "running":
             return
         if old == "worker" and new == "controller":
@@ -751,6 +755,20 @@ class LoopEngine:
                 if st and st["phase"] == "looping" and st["wstarted"]:
                     self._loop_start(spec, type_name, ts, L, a, st, now)
                     self.store.put_loop_agent(a["name"], spec.swarm, type_name, st)
+
+    def _reopen(self, swarm: str, type_name: str, L: dict, mode: str) -> None:
+        """A re-applied `while.until` moved past now: the loop that ended on it runs on, same
+        run (started_at, rounds kept). Its agents loop again and get a new final round; worker
+        loops get `loop_start` (in `_updated`, or from `_run` once their stop is acked)."""
+        L["state"], L["stopped_at"], L["reason"], L["final_at"] = "running", None, None, None
+        self.store.put_loop(swarm, type_name, L)
+        for name, st in self.store.loop_agents(swarm, type_name).items():
+            if st["phase"] == "done" and st["done_reason"] == "deadline":  # the worker-side end
+                st["phase"], st["done_reason"] = "looping", None
+            st["final"], st["final_sent"] = None, None
+            self.store.put_loop_agent(name, swarm, type_name, st)
+        self._event(swarm, "loop_started", {"type": type_name, "mode": mode, "every": L["every"],
+                                            "restart": False, "reopened": True})
 
     def _stop(self, swarm: str, type_name: str, ts: TypeSpec, L: dict, reason: str, *,
               final: bool, now: float) -> None:
