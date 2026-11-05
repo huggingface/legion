@@ -132,8 +132,10 @@ def world(monkeypatch, tmp_path):
     return fakes
 
 
-def agents(tmp_path, *, mount=False, sha=None):
-    (tmp_path / "spec.yaml").write_text(SPEC.replace("MOUNT", str(mount).lower()))
+def agents(tmp_path, *, mount=False, sha=None, resources=None):
+    text = SPEC.replace("MOUNT", str(mount).lower())
+    (tmp_path / "spec.yaml").write_text(
+        text.replace("{fake: {mount: false}}", resources) if resources else text)
     spec = Spec.load(tmp_path / "spec.yaml", env={})
     bundle = build_tool_bundle(spec.tools_dir, spec.tools, tmp_path / "launcher-tools.tar.gz")
     if sha:
@@ -255,3 +257,55 @@ async def test_board_agents_join_on_any_worker_spawned_and_reassigned(world, tmp
         for host in hosts:
             await host.close()
         server.shutdown()
+
+
+GATED = '''
+import asyncio
+
+class Resource:
+    def __init__(self, options, *, state_dir, agents, secrets):
+        self.agents, self.metadata = set(agents), {}
+        self.adding, self.gate = asyncio.Event(), asyncio.Event()
+
+    async def start(self):
+        pass
+
+    async def add(self, names):
+        self.adding.set()
+        await self.gate.wait()
+        self.agents.update(names)
+
+    async def remove(self, names):
+        self.agents.difference_update(names)
+
+    def bind(self, name):
+        return {}
+
+    async def wait(self):
+        await asyncio.Event().wait()
+
+    async def export(self, directory):
+        return {}
+
+    async def stop(self):
+        pass
+'''
+
+
+async def test_a_close_while_the_agent_joins_leaves_it_out(world, tmp_path):
+    """close() lands while the resources add the agent: its remove ran first, so the start
+    removes the agent again and fails, and no Trial is created."""
+    (tmp_path / "resources" / "gated.py").write_text(GATED)
+    host, (a, *_) = agents(tmp_path, resources="{fake: {mount: false}, gated: {}}")
+    starting = asyncio.create_task(a.start(a.workdir, None, a.spec))
+    async with asyncio.timeout(5):
+        while host.resources is None:
+            await asyncio.sleep(0.01)
+        gated = host.resources.providers["gated"]
+        await gated.adding.wait()
+    await a.close(0)
+    gated.gate.set()
+    with pytest.raises(RuntimeError, match="agent closed"):
+        await starting
+    assert gated.agents == set() and world.trials == []
+    await host.close()
