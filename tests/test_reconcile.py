@@ -708,3 +708,16 @@ def test_no_nudge_when_type_has_no_resume_prompt(store, jobs, clock, tick):
     for _ in range(3):
         assert "nudge" not in _stuck_tick(store, clock, tick, 60)
     assert store.prompts_for_worker(W0) == []
+
+
+def test_a_failed_batch_listing_skips_the_pass_without_inspecting(store, jobs, clock, tick, monkeypatch):
+    store.put_swarm(make_spec(researcher={"replicas": 30, "agents_per_worker": 1}), 0)
+    tick()
+
+    def boom(labels, *, namespace):
+        raise RuntimeError("slurmctld busy")
+    monkeypatch.setattr(jobs, "list", boom)
+    clock.advance(70)
+    tick()
+    assert jobs.inspects == 0
+    assert all(w["job_id"] for w in store.list_workers("demo"))  # nothing relaunched

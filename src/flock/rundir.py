@@ -27,6 +27,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from string import Template
 from typing import Any
 
 from flock.models import SwarmSpec, load_spec_yaml, max_workers
@@ -505,10 +506,12 @@ def _bash_values(sf: Path, env: Mapping[str, str]) -> dict[str, str]:
     out = subprocess.run(["bash", "-c", 'set -a; . "$1"; set +a; env -0', "flock-init", str(sf)],
                          capture_output=True, timeout=30, env=dict(env))
     if out.returncode:
-        tail = (out.stderr.decode(errors="replace").strip().splitlines() or [""])[-1]
-        raise RuntimeError(f"{sf}: sourcing it with bash exited {out.returncode}: {tail}".rstrip(": "))
+        # no stderr: bash echoes the offending line, which can be a secret
+        raise RuntimeError(f"{sf}: sourcing it with bash exited {out.returncode}")
     got = dict(kv.split("=", 1) for kv in out.stdout.decode(errors="replace").split("\0") if "=" in kv)
-    return {k: got[k] for k in read_env_file(sf) if k in got}
+    # names read leniently: the jobs source any bash (umask, if blocks), init only needs what is assigned
+    names = re.findall(r"^\s*(?:export\s+)?([A-Za-z_]\w*)=", sf.read_text(errors="replace"), re.M)
+    return {k: got[k] for k in names if k in got}
 
 
 def init(run_dir: str | Path, experiment: str | Path | None = None, *,
@@ -553,7 +556,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     cluster = read_env_file(d / CLUSTER_ENV) if (d / CLUSTER_ENV).is_file() else {}
     jobs_secrets: dict[str, str] = {}  # the profile's SECRETS_FILE, as common.sh's source_env_600
     if sf := cluster.get("SECRETS_FILE") or env.get("SECRETS_FILE"):
-        sf = Path(sf)
+        sf = Path(Template(str(sf)).safe_substitute({**env, **cluster})).expanduser()
         st = sf.stat() if sf.is_file() else None
         if st is None:
             rep.checks.append(Check("secrets file", False, f"{sf}: no such file"))
@@ -562,7 +565,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
                                     f"(chmod 600 '{sf}'); the jobs refuse it"))
         else:
             try:
-                jobs_secrets = _bash_values(sf, env)
+                jobs_secrets = _bash_values(sf, {**env, **cluster})
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
                 rep.checks.append(Check("secrets file", False, str(e) if isinstance(e, RuntimeError)
                                         else f"{sf}: sourcing it with bash failed ({type(e).__name__})"))
