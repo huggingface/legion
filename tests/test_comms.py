@@ -542,6 +542,23 @@ async def test_thread_read_gives_the_newest_messages_and_says_when_truncated(tmp
         await t.close()
 
 
+async def test_gateway_replies_with_an_error_when_a_tool_raises(tmp_path, board):
+    t = Team(tmp_path, board, ["dev-0000"])
+    try:
+        await t.start()
+
+        async def boom(*a):
+            raise RuntimeError("kaput")
+
+        t.hub.call = boom
+        ts, agent, workdir = read_pin(tmp_path / "agents" / "_tools_pins" / "dev-0000.json")
+        r = await ts.call("post", {"text": "x", "thread": "new"}, agent=agent,
+                          workdir=workdir, env={})
+        assert r.error and "RuntimeError: kaput" in r.output
+    finally:
+        await t.close()
+
+
 async def test_concurrent_gateway_startup_opens_one_listener():
     hub = CommsHub(swarm="sw", env={})
     started = []
