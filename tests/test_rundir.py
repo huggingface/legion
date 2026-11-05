@@ -159,6 +159,7 @@ def test_tokens_must_match(tmp_path):
     assert "FLOCK_WORLD_ADMIN_TOKEN" in rundir.check_tokens(url, ok).detail  # unset
     assert rundir.check_tokens(url, {**ok, "FLOCK_WORLD_ADMIN_TOKEN": "adm"}).ok
     assert not rundir.check_tokens(url, {**ok, "FLOCK_WORLD_ADMIN_TOKEN": "w"}).ok
+    assert not rundir.check_tokens(url, {**ok, "FLOCK_WORLD_ADMIN_TOKEN": "a"}).ok  # FLOCK_TOKEN
 
 
 class FakeBucket:

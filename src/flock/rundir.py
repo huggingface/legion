@@ -365,9 +365,10 @@ def check_tokens(data: Any, values: Mapping[str, str]) -> Check:
     if len({values[n] for n in world}) > 1:
         return Check("tokens", False, f"{' and '.join(world)} differ in {RUN_ENV} "
                                       "(the spec's world.token_env must equal FLOCK_WORLD_TOKEN)")
-    if ADMIN_TOKEN_ENV in names and values[ADMIN_TOKEN_ENV] in {values[n] for n in world}:
-        return Check("tokens", False, f"{ADMIN_TOKEN_ENV} equals the world token in {RUN_ENV}: "
-                                      "every worker holds that one")
+    if ADMIN_TOKEN_ENV in names and values[ADMIN_TOKEN_ENV] in {values[n] for n in names
+                                                                if n != ADMIN_TOKEN_ENV}:
+        return Check("tokens", False, f"{ADMIN_TOKEN_ENV} equals another per-run token in "
+                                      f"{RUN_ENV}: every worker holds those")
     return Check("tokens", True, f"{', '.join(names)} set in {RUN_ENV}")
 
 
