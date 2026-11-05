@@ -14,6 +14,7 @@ from flock.models import (
     CommandBatch,
     CommsSpec,
     DrainCommand,
+    Event,
     EventBatch,
     PromptCommand,
     StopCommand,
@@ -63,7 +64,8 @@ class FakeController:
         return httpx.Response(404)
 
 
-def make_worker(tmp_path, ctrl: FakeController, *, deadline_in: float = 3600, sync=None, adapters=None):
+def make_worker(tmp_path, ctrl: FakeController, *, deadline_in: float = 3600, sync=None, adapters=None,
+                handler=None):
     cfg = WorkerConfig(url="http://controller", token="tok", worker_id=WID, swarm="sw", type="researcher",
                        deadline=utcnow() + timedelta(seconds=deadline_in), bucket=None,
                        work_root=tmp_path / "agents", heartbeat_interval=0.1, flush_interval=0.05,
@@ -74,7 +76,7 @@ def make_worker(tmp_path, ctrl: FakeController, *, deadline_in: float = 3600, sy
         adapters[name] = ScriptedAdapter(tmp_path / "home" / name, turn_time=0.2)
         return adapters[name]
 
-    client = ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(ctrl.handler))
+    client = ControllerClient(cfg.url, cfg.token, transport=httpx.MockTransport(handler or ctrl.handler))
     return Worker(cfg, client, adapter_factory=factory, sync=sync), adapters
 
 
@@ -273,6 +275,53 @@ async def test_drain_sequence_at_deadline(tmp_path):
     assert {"researcher-0001", "researcher-0002"} <= set(sync.pushed)  # final sync per agent
     assert ctrl.heartbeats[-1].draining is True
     assert adapters["researcher-0001"].stops == 1
+
+
+async def test_events_in_flight_when_the_worker_drains_arrive_exactly_once(tmp_path):
+    """A drain cancelled the flush loop mid-send, so the batch it had taken was lost (at exit
+    only what was still queued went out). Events carry no id: the send finishes instead."""
+    ctrl = FakeController()
+    in_flight, release = asyncio.Event(), asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events") and not release.is_set():
+            in_flight.set()
+            await release.wait()
+        return ctrl.handler(request)
+
+    def note(n: int) -> Event:
+        return Event(type="note", ts=utcnow(), agent="researcher-0001", data={"n": n})
+
+    worker, _ = make_worker(tmp_path, ctrl, handler=handler)
+    for n in range(3):
+        worker.outbox.add(note(n))
+    run = asyncio.create_task(worker.run())
+    await asyncio.wait_for(in_flight.wait(), 5)  # the flush loop is sending events 0-2
+    worker.outbox.add(note(3))
+    await worker.drain("test")
+    await asyncio.sleep(0.2)  # run() is shutting down while that send is still open
+    release.set()
+    assert await asyncio.wait_for(run, 5) == 0
+    assert [e.data["n"] for e in ctrl.events] == [0, 1, 2, 3]
+
+
+async def test_a_preempted_worker_does_not_wait_past_its_budget_for_a_stuck_send(tmp_path):
+    ctrl = FakeController()
+    in_flight = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            in_flight.set()
+            await asyncio.Event().wait()  # the controller never answers
+        return ctrl.handler(request)
+
+    worker, _ = make_worker(tmp_path, ctrl, handler=handler)
+    worker.cfg.drain_budget = 1.0
+    worker.outbox.add(Event(type="note", ts=utcnow(), agent="researcher-0001"))
+    run = asyncio.create_task(worker.run())
+    await asyncio.wait_for(in_flight.wait(), 5)
+    await worker.preempt("test")
+    assert await asyncio.wait_for(run, 5) == wmain.PREEMPT_EXIT
 
 
 async def test_assign_restore_goes_through_sync(tmp_path):
