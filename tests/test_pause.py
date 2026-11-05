@@ -152,9 +152,15 @@ def test_cli_stop_launch_and_held_marker(app, store, monkeypatch, tick):
     assert "HELD type researcher: deploy (by operator" in r.output, r.output
     r = runner.invoke(cli.app, ["stop", "demo", "--reason", "x", "--type", "nope"])
     assert r.exit_code != 0
+    tick()  # the agents
+    r = runner.invoke(cli.app, ["launch", "demo", "--agent", "researcher-0000"])  # held by its type
+    assert r.exit_code == 0 and "held: type researcher" in r.output, r.output
+    assert "not lifted: researcher-0000 (still held by its type)" in r.output, r.output
     r = runner.invoke(cli.app, ["launch", "demo"])
-    assert r.exit_code == 0 and "held: nothing" in r.output, r.output
+    assert r.exit_code == 0 and "held: nothing" in r.output and "not lifted" not in r.output, r.output
     assert "HELD" not in runner.invoke(cli.app, ["status", "demo"]).output
+    r = runner.invoke(cli.app, ["launch", "demo", "--type", "researcher"])
+    assert "not lifted: researcher (not held)" in r.output, r.output
 
 
 def world_types_spec(**world) -> SwarmSpec:

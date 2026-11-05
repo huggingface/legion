@@ -320,6 +320,8 @@ def _show_held(r: dict) -> None:
     h = r["held"]
     held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
     typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
+    if miss := r.get("not_lifted"):  # a resume's --type/--agent with no hold of their own
+        typer.echo("not lifted: " + ", ".join(f"{n} ({why})" for n, why in miss.items()))
 
 
 @app.command()

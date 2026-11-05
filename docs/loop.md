@@ -206,10 +206,12 @@ Holds are stored in `swarm_flags` (a controller restart keeps them). Events on t
 (only the names a call actually changed). `GET /swarms/{s}` has
 `status.held: {types: {T: {since, reason, by, auto}}, agents: {...}}` (null when nothing is
 held) and `flock status` prints a `HELD` line per held type or agent. An agent held through its
-type is resumed with its type, not with `--agent`.
+type is resumed with its type, not with `--agent`: `flock launch` then prints
+`not lifted: <name> (still held by its type)` (or `(not held)` for a name with no hold).
 
 API: `POST /swarms/{s}/pause {types?, agents?, interrupt?, reason?, by?}` and
-`POST /swarms/{s}/resume {types?, agents?, by?}`; both answer `{swarm, held}` and 404 for an
+`POST /swarms/{s}/resume {types?, agents?, by?}`; both answer `{swarm, held}` (resume also
+`not_lifted: {name: why}` for the named ones it could not lift) and 404 for an
 unknown type or agent. The controller makes holds of its own when the world is down
 (`auto: true`, docs/health.md); an operator hold is never replaced or lifted by those.
 
