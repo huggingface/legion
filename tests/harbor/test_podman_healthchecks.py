@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("harbor")
 
 spec = importlib.util.spec_from_file_location(
-    "podman_healthchecks", Path(__file__).parents[2] / "scripts/podman_healthchecks.py"
+    "podman_healthchecks", Path(__file__).parents[2] / "src/flock/harbor/podman_healthchecks.py"
 )
 healthchecks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(healthchecks)

@@ -16,8 +16,8 @@ The env file name carries the incarnation, so a job that starts late never reads
 of the job that replaced it.
 
 The env file (`KEY=value` lines, mode 600) holds NO secret values: only settings (WORKER_ID,
-WORKER_INCARNATION, SWARM, TYPE, DEADLINE, DRAIN_WINDOW, BUCKET, RUN, WORK_ROOT, the controller
-URL template and host file, the type's env) and a comment that names the secrets the worker
+WORKER_INCARNATION, SWARM, TYPE, FLOCK_HARNESS, DEADLINE, DRAIN_WINDOW, BUCKET, RUN, WORK_ROOT,
+the controller URL template and host file, the type's env) and a comment that names the secrets the worker
 expects from the cluster's secrets file (FLOCK_TOKEN, HF_TOKEN, FLOCK_WORLD_TOKEN, ...). FLOCK_URL is `http://${CTL_HOST}:<port>` when
 `host_file` is set: the worker reads the controller's hostname from that file at start and
 again when the controller stops answering (worker/main.py), so a controller that moves host
@@ -305,6 +305,9 @@ class SlurmJobsClient:
                secrets: dict[str, str], labels: dict[str, str], timeout: float, *,
                namespace: str, compute: ComputeSpec | None = None) -> str:
         cfg = resolve(compute, env.get("TYPE", ""), self.env)
+        env = {**env, "FLOCK_HARNESS": spec.harness.value}  # worker.sbatch: harbor runs podman
+        if spec.harness.value == "harbor":  # podman cannot run in Enroot: node paths, no image
+            cfg |= {"container_root": "", "container_image": ""}
         missing = [k for k in ("worker_script", "log_dir", "launch_dir") if not cfg.get(k)]
         if missing:
             raise SlurmConfigError(f"compute slurm needs {', '.join(missing)} (spec `compute:` keys "

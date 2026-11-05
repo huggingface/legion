@@ -24,6 +24,11 @@
 #   job memory). The paths carry no worker id, so a slot relaunched under a new id restores its
 #   agents to the same absolute paths: a Pi session resumes only from the cwd it was written from.
 #   Without an image flock-worker runs here, in this job's shell (exec), with the env file's paths.
+# - FLOCK_HARNESS=harbor (the env file): each agent is a Harbor Trial in a rootless podman
+#   container, which cannot run inside Enroot, so flock-worker runs here (never in CONTAINER) as
+#   a child of this shell, with shepherd's podman setup (f3970bc launch.slurm): the job's own
+#   podman storage under /tmp, podman's health checks run by flock.harbor.podman_healthchecks,
+#   and at exit the job's containers and storage removed. Unverified on compute nodes.
 # - Spot reclaim (container): the watcher sends SIGUSR1 to this shell, to srun AND to every process
 #   of the step. flock-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
 #   handler (drain + sync) replaces it. The handler below forwards USR1 to the srun step, then
@@ -62,6 +67,20 @@ run_worker() {
     FLOCK_WORKER_SECRETS_FILE_UNLINK=1 "$VENV/bin/flock-worker"
 }
 
+# podman_cleanup (EXIT, harbor): stop the health checks, then remove this job's containers and
+# podman storage (the wrapper's --root: never the user's). Unverified: rootless storage files
+# belong to subordinate ids, hence `podman unshare`.
+podman_cleanup() {
+  local p=$PODMAN_LOCAL/bin/podman  # by path: a plain `podman` here would be the user's storage
+  [ -z "${HEALTH_PID:-}" ] || kill "$HEALTH_PID" 2>/dev/null
+  if [ -x "$p" ]; then
+    timeout 15 "$p" stop --all --time 5 >/dev/null 2>&1
+    timeout 15 "$p" rm --all --force >/dev/null 2>&1
+    timeout 60 "$p" unshare rm -rf "$PODMAN_LOCAL/graphroot" "$PODMAN_LOCAL/runroot" >/dev/null 2>&1
+  fi
+  rm -rf "$PODMAN_LOCAL"
+}
+
 if [ "${1:-}" = --inner ]; then  # in the container (srun below): the batch shell's environment came along
   export HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp
   export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
@@ -95,17 +114,55 @@ require_var FLOCK_URL WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WIN
 case $WORKER_ID in *[!A-Za-z0-9._-]*|"") die "WORKER_ID=$WORKER_ID: unexpected characters";; esac
 export SYNC_INTERVAL=${SYNC_INTERVAL:-180} HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30} LOG_LEVEL=${LOG_LEVEL:-INFO}
 select_worker_image "$TYPE"        # per-type image (common.sh)
-log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM type=$TYPE deadline=$DEADLINE ctl=$CTL_HOST container=${CONTAINER_IMAGE:-<none>}"
-if [ -z "$CONTAINER_IMAGE" ]; then
+PODMAN_LOCAL=
+[ "${FLOCK_HARNESS:-}" != harbor ] || CONTAINER_IMAGE=   # podman cannot run inside Enroot
+log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM type=$TYPE deadline=$DEADLINE ctl=$CTL_HOST container=${CONTAINER_IMAGE:-<none>} harness=${FLOCK_HARNESS:-?}"
+if [ "${FLOCK_HARNESS:-}" = harbor ]; then
+  # ---------------------------------------------------------------- harbor: rootless podman here
+  export PODMAN_COMPOSE_PROVIDER=$VENV/bin/podman-compose
+  [ -x "$PODMAN_COMPOSE_PROVIDER" ] || die "$PODMAN_COMPOSE_PROVIDER is missing: install flock[harbor] in $VENV"
+  PODMAN=$(command -v podman) || die "podman is not on PATH"
+  PODMAN_LOCAL=$(mktemp -d /tmp/flock-podman.XXXXXX) || die "cannot create the podman storage dir"
+  trap podman_cleanup EXIT
+  export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
+  mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
+  # Explicit engine flags work on the cluster's Podman 4.9 and avoid user storage.
+  cat > "$PODMAN_LOCAL/bin/podman" <<EOF
+#!/bin/bash
+exec "$PODMAN" --root "$PODMAN_LOCAL/graphroot" --runroot "$PODMAN_LOCAL/runroot" \
+    --storage-driver overlay --storage-opt overlay.mount_program=/usr/bin/fuse-overlayfs \
+    --cgroup-manager cgroupfs --events-backend file "\$@"
+EOF
+  # Netavark 1.4 tries systemd-run even when no user bus exists. Keep only its
+  # DNS daemon in this Slurm job; delegate every other invocation unchanged.
+  cat > "$PODMAN_LOCAL/bin/systemd-run" <<'EOF'
+#!/bin/bash
+if [[ "${1:-} ${2:-} ${3:-}" == "-q --scope --user" && "${4:-}" == /usr/lib/podman/aardvark-dns ]]; then
+    shift 3
+    exec "$@"
+fi
+exec /usr/bin/systemd-run "$@"
+EOF
+  chmod 700 "$PODMAN_LOCAL/bin/podman" "$PODMAN_LOCAL/bin/systemd-run" || exit 2
+  export PATH="$PODMAN_LOCAL/bin:$PATH"
+  # Prevent inherited remote-engine settings from bypassing this job's storage.
+  unset CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST
+  [ "$(podman info --format '{{.Store.GraphRoot}}')" = "$PODMAN_LOCAL/graphroot" ] \
+    || die "podman does not use this job's storage $PODMAN_LOCAL/graphroot"
+elif [ -z "$CONTAINER_IMAGE" ]; then
   run_worker  # exec: flock-worker is this job's shell from here on (signals reach it directly)
+else
+  # ---------------------------------------------------------------- the container
+  export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent>
+  export FLOCK_LLM_HOME=/work/flock/agents/llm    # llm harness sessions
+  container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for FLOCK_CTL_HOST_FILE
 fi
 
-# ---------------------------------------------------------------- the container
-export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent>
-export FLOCK_LLM_HOME=/work/flock/agents/llm    # llm harness sessions
-container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for FLOCK_CTL_HOST_FILE
-
-SRUN_PID= ; STOPPING=0
+SRUN_PID= ; STOPPING=0   # SRUN_PID: the srun step, or flock-worker itself (harbor)
+# term_worker: srun turns a SIGTERM into a SIGKILL of its task, so a step gets it through slurmd
+term_worker() {
+  if [ -n "$PODMAN_LOCAL" ]; then kill -TERM "$SRUN_PID" 2>/dev/null; else step_signal TERM; fi
+}
 on_usr1() {  # Spot reclaim: the watcher cancels the job 30 s after this signal
   [ "$STOPPING" = usr1 ] && return 0
   STOPPING=usr1
@@ -115,22 +172,33 @@ on_usr1() {  # Spot reclaim: the watcher cancels the job 30 s after this signal
   sleep 3
   if kill -0 "$SRUN_PID" 2>/dev/null; then
     log "flock-worker step still alive 3 s after USR1: SIGTERM"
-    step_signal TERM
+    term_worker
   fi
 }
 on_term() {
   [ "$STOPPING" = 0 ] || return 0
   STOPPING=term
   log "SIGTERM (scancel by the controller, preemption or time limit): forwarding to flock-worker"
-  [ -n "$SRUN_PID" ] && step_signal TERM
+  [ -n "$SRUN_PID" ] && term_worker
 }
 trap on_usr1 USR1
 trap on_term TERM INT
 
 [ "$STOPPING" = 0 ] || { log "signal before flock-worker started: exit"; exit 0; }
 trap '' USR1  # srun starts with USR1 ignored, like every child here
-srun "${CTR_SRUN[@]}" bash "$SLURM_DIR/worker.sbatch" --inner &
-SRUN_PID=$!
+if [ -n "$PODMAN_LOCAL" ]; then
+  run_worker &  # exec in a subshell: SRUN_PID is flock-worker
+  SRUN_PID=$!
+  # shellcheck disable=SC2086  # SECRET_NAMES: one name per word
+  unset $SECRET_NAMES FLOCK_WORLD_ADMIN_TOKEN  # flock-worker has them; the processes below never
+  # shortcut: not restarted if it fails (a `podman ps` error), after which health-gated compose
+  # services stay `starting`; restart it in a loop if that shows up
+  "$VENV/bin/python" -m flock.harbor.podman_healthchecks &
+  HEALTH_PID=$!
+else
+  srun "${CTR_SRUN[@]}" bash "$SLURM_DIR/worker.sbatch" --inner &
+  SRUN_PID=$!
+fi
 trap on_usr1 USR1
 while kill -0 "$SRUN_PID" 2>/dev/null; do
   wait "$SRUN_PID"
