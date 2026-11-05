@@ -45,7 +45,9 @@ def fake_server(tmp_path):
 
 def _env(tmp_path: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("FLOCK_")}
-    return {**env, "FAKE_KEY": "fake-key", "HOME": str(tmp_path / "home")}
+    return {**env, "FAKE_KEY": "fake-key", "HOME": str(tmp_path / "home"),
+            "FLOCK_RECONCILE_INTERVAL": "0.2", "FLOCK_LOCAL_REFRESH": "0.2",
+            "FLOCK_LOOP_INTERVAL": "0.2", "FLUSH_INTERVAL": "0.2"}  # a faster local run
 
 
 def _localrun(*args: str) -> list[str]:
@@ -74,7 +76,7 @@ LOOPER = """\
     tools: [greet]
     loop:
       prompt: "bash: echo round {round}"
-      every: 5s
+      every: 1s
       while: {max_rounds: 2}
       final: {prompt: "bash: echo final"}
 """
@@ -85,7 +87,7 @@ PROMPT = 'script: [["bash", {"command": "echo hi-from-$FLOCK_AGENT"}], ["greet",
 def test_flock_run_until_idle(tmp_path, fake_server):
     """`localrun --prompt ... --until idle`: the tools folder is uploaded as by `flock launch`,
     each of 3 writers runs the prompt in one turn (its own bash, then the folder tool); a
-    looping type (`every: 5s`) is idle between rounds, so the run goes on until its loop is done
+    looping type (`every: 1s`) is idle between rounds, so the run goes on until its loop is done
     (both rounds and the final round), then stops on idle, exits 0 and leaves the bundle
     (run.json, events.jsonl, events/<agent>.jsonl) and the health files."""
     (tmp_path / "tools").mkdir()

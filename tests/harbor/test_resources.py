@@ -190,6 +190,9 @@ async def test_external_health_monitor_detects_board_loss(
     server, board_provider, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
+    sleep = asyncio.sleep
+    # the health check runs every 5 s: every wait here is cut to 0.1 s
+    monkeypatch.setattr(asyncio, "sleep", lambda s, *a, **k: sleep(min(s, 0.1), *a, **k))
     resource = board_provider(
         {"url": server.url, "token_env": "BOARD_ADMIN"},
         state_dir=tmp_path / "external",

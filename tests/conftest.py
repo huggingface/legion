@@ -130,6 +130,9 @@ def tiny(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCK_STATE_URL", "")  # see no_local_checkpoint
     monkeypatch.setenv("FLOCK_HEALTH_INTERVAL", "1")  # a verdict within a second
     monkeypatch.setenv("FLUSH_INTERVAL", "0.2")  # workers send their events within 0.2 s
+    monkeypatch.setenv("FLOCK_RECONCILE_INTERVAL", "0.2")  # the local run's cadence
+    monkeypatch.setenv("FLOCK_LOCAL_REFRESH", "0.2")
+    monkeypatch.setenv("FLOCK_LOOP_INTERVAL", "0.2")
     monkeypatch.setenv("FAKE_KEY", "fake-key")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     waited = []

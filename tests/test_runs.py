@@ -118,8 +118,8 @@ def test_lifecycle(tiny):
 RESTART_LOOP = """\
     loop:
       prompt: "bash: echo round {round}"
-      every: 3s
-      while: {max_rounds: 10}
+      every: 1s
+      while: {max_rounds: 30}
   helper:
     harness: llm
     model: fake:fake-model
@@ -148,7 +148,7 @@ def test_controller_restart(tiny, tmp_path):
     before = {n: tiny.agent(n) for n in (*writers, child)}
     loop = json.loads(tiny.flock("status", "tiny", "--type", "writer", "--json"))["loop"]
     rounds = {n: loop["per_agent"][n]["rounds"] for n in writers}
-    assert loop["state"] == "running" and max(rounds.values()) < 10, loop
+    assert loop["state"] == "running" and max(rounds.values()) < 30, loop
 
     tiny.crash()
     restarted = datetime.now(UTC)
@@ -204,11 +204,10 @@ limits: {budget_usd: 1000}
 """
 
 
-def test_loops(tiny, monkeypatch):
+def test_loops(tiny):
     """Two loops, each with its final round, then idle: `every: turn_end` with `max_rounds`
     (re-prompted by the worker) and `every: 500ms` with `while.until` (by the controller),
     whose turns all stop at `max_turns: 1`. Then the run's bundle sums them up."""
-    monkeypatch.setenv("FLOCK_LOOP_INTERVAL", "0.2")
     out = tiny.flock("launch", tiny.spec(replicas=2, extra=LOOPS), "--skip-preflight")
     # unquoted `on:` is the key "on" (YAML 1.2), and this type is not on the board
     assert "loop.on comms.mention: no comms feeder: the type is not on the board" in out, out

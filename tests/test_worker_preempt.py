@@ -148,17 +148,17 @@ async def test_sigusr1_preempts_within_budget_and_restart_restores(tmp_path):
 
 
 async def test_preempt_is_bounded_by_the_budget(tmp_path):
-    store = SlowStore(delay=3.0)  # a bucket that hangs past the budget and the bound below
+    store = SlowStore(delay=2.5)  # a bucket that hangs past the budget and the bound below
     ctrl = FakeController()
     ctrl.batches = [[AssignCommand(agent=n, type="researcher", spec=spec(idle_grace="10s"),
                                    restore=False) for n in names(3)]]
-    worker, _adapters, _ = make(tmp_path, ctrl, store, budget=1.5)
+    worker, _adapters, _ = make(tmp_path, ctrl, store, budget=0.5)
     run = asyncio.create_task(worker.run())
     await until(lambda: len(worker.agents) == 3, timeout=5)
     t0 = time.monotonic()
     os.kill(os.getpid(), signal.SIGTERM)  # outside compute local, SIGTERM preempts too
     assert await asyncio.wait_for(run, 10) == PREEMPT_EXIT
-    assert time.monotonic() - t0 < 2.5
+    assert time.monotonic() - t0 < 2.0  # the budget, then at least 1 s for the last reports
 
 
 def test_budget_from_env_and_host_file(tmp_path):

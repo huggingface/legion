@@ -114,7 +114,7 @@ class TinyRun:
         url = f"http://127.0.0.1:{port}"  # also what its workers use (not SPACE_HOST)
         env = {**os.environ, "FLOCK_URL": url, "FLOCK_TOKEN": "tiny-token", "FLOCK_COMPUTE":
                compute, "FLOCK_DATA": str(data), "PORT": str(port),
-               "FLOCK_RECONCILE_INTERVAL": "0.5"}
+               "FLOCK_RECONCILE_INTERVAL": "0.2"}
         with (data.parent / "controller.log").open("ab") as log:
             self.procs.append(subprocess.Popen(
                 [sys.executable, "-m", "flock.controller.main"], env=env, stdout=log,

@@ -147,8 +147,9 @@ Different:
    env, as HF Jobs passes job secrets. Workers inherit your environment minus your own flock
    connection settings (`FLOCK_*`, except `FLOCK_PI_CLI` and `FLOCK_PROMPTS_DIR`); the harness still gets only the allow-listed variables plus what the
    worker passes.
-4. **Faster loop.** Reconcile every 1 s (jobs: 5 s) and worker heartbeats every 5 s (jobs: 30 s;
-   a type's `env: {HEARTBEAT_INTERVAL: ...}` overrides it).
+4. **Faster loop.** Reconcile every 1 s (jobs: 5 s; `FLOCK_RECONCILE_INTERVAL` overrides both)
+   and worker heartbeats every 5 s (jobs: 30 s; a type's `env: {HEARTBEAT_INTERVAL: ...}`
+   overrides it). The foreground run checks its stop conditions every 2 s (`FLOCK_LOCAL_REFRESH`).
 5. **The controller runs next to you.** 127.0.0.1 on a free port, a new random token per run, no
    status port, no jobs proxy auth. The controller state syncs to `FLOCK_STATE_URL`, by
    default `<bucket>/controller/<swarm>` when the spec has a bucket and an HF token is found

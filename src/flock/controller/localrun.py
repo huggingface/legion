@@ -74,8 +74,10 @@ class RunOptions:
     preflight: bool = False
     strict: bool = False
     grace: float = 10.0  # s for in-flight turns at stop
-    refresh: float = 2.0  # s between view frames and stop-condition checks
-    reconcile_interval: float = 1.0
+    # s between view frames and stop-condition checks (FLOCK_LOCAL_REFRESH; tests use less)
+    refresh: float = field(default_factory=lambda: float(os.environ.get("FLOCK_LOCAL_REFRESH", "2")))
+    reconcile_interval: float = field(  # FLOCK_RECONCILE_INTERVAL, as for flock-controller
+        default_factory=lambda: float(os.environ.get("FLOCK_RECONCILE_INTERVAL", "1")))
     host: str = "127.0.0.1"
     out: TextIO = field(default_factory=lambda: sys.stdout)
     worker_command: list[str] | None = None  # tests

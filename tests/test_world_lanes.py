@@ -129,7 +129,7 @@ def test_outbox_survives_restart_retries_forever_drops_on_final_and_coalesces(tm
         if not box.depth()[0]:
             break
         time.sleep(0.03)
-        clock.t += 2
+        clock.t += 5
     assert box.depth()[0] == 0
     assert calls[0] == (7, ["a", "b"])  # oldest first, coalesced
     assert calls.count((7, ["a", "b"])) == 7 and (8, ["x"]) in calls
