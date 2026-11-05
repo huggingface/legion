@@ -398,6 +398,14 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     rep = rundir.init(run, env={})
     c = _by_name(rep)["secrets file"]
     assert not c.ok and "exited 3" in c.detail and "tok-secret" not in repr(rep)
+    sec.write_text("set -e\nHF_TOKEN=hf_abc&def\n")  # bash would echo "def: command not found"
+    c = _by_name(rundir.init(run, env={}))["secrets file"]
+    assert not c.ok and "def" not in c.detail.replace(str(sec), "").replace("bash exited", "")
+    sec.write_text("umask 077\nHF_TOKEN=tok-lenient\nexport OTHER=$CLUSTER_VAR\n")  # not NAME=value lines
+    (run / "cluster.env").write_text(prof.read_text() + f"CLUSTER_VAR=cv\nSECRETS_FILE={tmp_path}/${{SECNAME}}\n")
+    rep = rundir.init(run, env={"SECNAME": "secrets.env"})  # path expanded; cluster.env visible to the file
+    assert "secrets file" not in _by_name(rep) and seen[-1]["HF_TOKEN"] == "tok-lenient"
+    assert seen[-1]["OTHER"] == "cv"
     with pytest.raises(ValueError, match="no such file"):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
 
