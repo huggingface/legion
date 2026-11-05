@@ -80,6 +80,11 @@ class TinyRun:
         out = self.flock("status", name, "--events", "--json", "--only", only)
         return [json.loads(x) for x in out.splitlines()]
 
+    def results(self, name: str) -> list[str]:
+        """The text of each tool result in the agent's events, in order."""
+        return [d["message"]["content"][0]["text"] for e in self.events(name, "agent.message")
+                if (d := e["data"])["message"]["role"] == "toolResult"]
+
     def said(self, agent: str) -> list[list[str]]:
         """The user messages of each model request made for `agent` (its system message names
         it), in order."""

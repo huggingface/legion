@@ -259,3 +259,64 @@ def test_loops(tiny, monkeypatch):
     assert doc["budget"] == {"budget_usd": 1000.0, "final_reserve_usd": 0.0,
                              "cost_usd": doc["totals"]["cost_usd"], "stop": None}
 
+
+SPAWNING = """\
+  helper:
+    harness: llm
+    model: fake:fake-model
+    replicas: 0
+    workers: {max_extra: 1}
+    env: {HEARTBEAT_INTERVAL: "1"}
+  scout:
+    harness: llm
+    model: fake:fake-model
+    replicas: 0
+    workers: {max_extra: 1}
+    env: {HEARTBEAT_INTERVAL: "1"}
+spawn:
+  writer: {types: {helper: 1}, depth: 2}
+  helper: {types: [scout], max: 1}
+"""
+BIN = Path(sys.executable).parent  # flock and flock-agent, as an agent's bash finds them
+
+
+def test_spawn(tiny):
+    """writer-0000 spawns a helper with a first prompt (one helper at most); the helper runs it
+    as itself and reports to its parent, then spawns a scout; removing the helper takes the
+    scout with it."""
+    tiny.flock("launch", tiny.spec(extra=SPAWNING), "--skip-preflight")
+    helper, scout = "writer-0000-helper-0001", "writer-0000-helper-0001-scout-0002"
+    tiny.flock("prompt", "writer-0000", f"bash: {BIN}/flock-agent spawn helper --prompt "
+               f"""'bash: {BIN}/flock prompt $FLOCK_PARENT "from $FLOCK_AGENT [$FLOCK_TOKEN]"'""")
+    tiny.turns("writer-0000", 1)
+    assert tiny.turns(helper, 1)["parent"] == "writer-0000"
+    assert tiny.events(helper, "agent.session_started")[0]["data"]["parent"] == "writer-0000"
+    assert tiny.events("writer-0000", "agent.session_started")[0]["data"]["parent"] is None
+    tiny.turns("writer-0000", 2)
+    assert tiny.said("writer-0000")[-1][-1] == f"from {helper} []"  # never the worker's token
+    tiny.flock("prompt", "writer-0000", f"bash: {BIN}/flock-agent spawn helper")
+    tiny.turns("writer-0000", 3)
+    assert tiny.results("writer-0000")[-1].startswith('error 409: {"reason":"max_children"')
+
+    tiny.flock("prompt", helper, f"bash: {BIN}/flock-agent spawn scout --prompt 'bash: echo hi'")
+    tiny.turns(helper, 2)
+    tiny.turns(scout, 1)
+    assert tiny.said(scout)[-1] == ["bash: echo hi"]
+    w, h, s = (tiny.agent(n) for n in ("writer-0000", helper, scout))
+    assert (w["children"], w["depth"], w["parent"]) == ([helper], 2, None), w
+    assert (h["children"], h["depth"], h["parent"]) == ([scout], 1, "writer-0000"), h
+    assert (s["children"], s["depth"], s["parent"]) == ([], 0, helper), s
+
+    tiny.flock("prompt", "writer-0000", f"bash: {BIN}/flock-agent remove {helper}")
+    tiny.turns("writer-0000", 4)
+    assert json.loads(tiny.results("writer-0000")[-1].split("\n")[0]) == {
+        "removed": [scout, helper]}
+    tiny.flock("status", helper, code=1)
+    tiny.flock("status", scout, code=1)
+    assert tiny.agent("writer-0000")["children"] == []
+    assert [e["data"] for e in tiny.events("writer-0000", "agent.child_removed")] == [
+        {"child": helper, "type": "helper", "reason": "removed"}]
+    assert [e["data"] for e in tiny.events(helper, "agent.child_removed")] == [
+        {"child": scout, "type": "scout", "reason": "parent_removed"}]
+    types = json.loads(tiny.flock("status", "tiny", "--json"))["status"]["types"]
+    assert types["helper"]["agents_by_state"] == types["scout"]["agents_by_state"] == {}
