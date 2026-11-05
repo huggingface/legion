@@ -36,8 +36,7 @@ def test_lifecycle(tiny):
     session = a["session_id"]
     assert session and a["resumed"] is False and a["cost_usd"] > 0, a
     assert a["worker"] == "tiny-writer-w0000"
-    evs = tiny.wait(lambda: "agent.turn_ended" in (e := tiny.flock(
-        "status", "writer-0000", "--events")) and e)  # events can trail the heartbeat
+    evs = tiny.flock("status", "writer-0000", "--events")
     for line in ("agent.session_started", "user     bash: echo one", "tool     bash: one",
                  "agent.turn_ended completed fake-model"):
         assert line in evs, evs
@@ -108,7 +107,8 @@ def test_lifecycle(tiny):
     assert doc["totals"]["cost_usd"] == round(a["cost_usd"], 6)
 
 
-LOOP = """\
+# appended under types.writer
+RESTART_LOOP = """\
     loop:
       prompt: "bash: echo round {round}"
       every: 3s
@@ -122,7 +122,8 @@ LOOP = """\
 spawn:
   writer: {types: {helper: 1}, depth: 1}
 """
-SPAWN = f"bash: {Path(sys.executable).parent}/flock-agent spawn helper --prompt 'bash: echo hi'"
+BIN = Path(sys.executable).parent  # flock and flock-agent, as an agent's bash finds them
+SPAWN = f"bash: {BIN}/flock-agent spawn helper --prompt 'bash: echo hi'"
 
 
 def test_controller_restart(tiny, tmp_path):
@@ -131,7 +132,7 @@ def test_controller_restart(tiny, tmp_path):
     round reaches each agent."""
     data = tmp_path / "ctl"
     port = tiny.controller(data)
-    tiny.flock("launch", tiny.spec(replicas=2, extra=LOOP), "--skip-preflight")
+    tiny.flock("launch", tiny.spec(replicas=2, extra=RESTART_LOOP), "--skip-preflight")
     tiny.turns("writer-0000", 1)  # the loop's first round
     tiny.flock("prompt", "writer-0000", SPAWN)
     child = tiny.wait(lambda: tiny.agent("writer-0000")["children"])[0]
@@ -174,6 +175,7 @@ def test_controller_restart(tiny, tmp_path):
 
 
 
+# appended under types.writer
 LOOPS = """\
     loop:
       prompt: "bash: echo round {round}"
@@ -268,6 +270,7 @@ def test_loops(tiny, monkeypatch):
                              "cost_usd": doc["totals"]["cost_usd"], "stop": None}
 
 
+# appended under types.writer
 SPAWNING = """\
   helper:
     harness: llm
@@ -285,7 +288,6 @@ spawn:
   writer: {types: {helper: 1}, depth: 2}
   helper: {types: [scout], max: 1}
 """
-BIN = Path(sys.executable).parent  # flock and flock-agent, as an agent's bash finds them
 
 
 def test_spawn(tiny):
@@ -409,6 +411,7 @@ def test_tools_folder(tiny, tmp_path):
     assert [e["name"] for e in tiny.events("tiny", "worker.")] == ["worker.launched"]  # no restart
 
 
+# appended under types.writer
 COMMS = """\
     comms: true
     loop: {prompt: "bash: echo round {round} {why}", every: 1h, on: [comms.mention],
@@ -528,6 +531,7 @@ def test_comms(tiny, board, tmp_path):
     assert [e["data"]["reason"] for e in tiny.events(a, "loop.wake")] == ["comms.mention"]
 
 
+# appended under types.writer
 HARNESSES = """\
   coder:
     harness: codex

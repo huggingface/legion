@@ -61,12 +61,21 @@ class TinyRun:
         return json.loads(self.flock("status", name))
 
     def wait(self, what, timeout: float = 30.0):
-        """Poll `what()` until it returns something truthy, and return that."""
+        """Poll `what()` until it returns something truthy, and return that. A check that
+        raises (status not there yet) is retried; the last error is re-raised at the timeout."""
         end = time.monotonic() + timeout
-        while not (got := what()):
-            assert time.monotonic() < end, f"not met in {timeout:g} s"
+        while True:
+            try:
+                if got := what():
+                    return got
+                err = None
+            except Exception as e:  # noqa: BLE001 - any failure of the check is retried
+                err = e
+            if time.monotonic() > end:
+                if err:
+                    raise err
+                raise AssertionError(f"not met in {timeout:g} s")
             time.sleep(0.2)
-        return got
 
     def turns(self, name: str, n: int) -> dict:
         """The agent's status once it has ended `n` turns, is idle again and its events show
