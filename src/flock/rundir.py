@@ -123,6 +123,10 @@ def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, 
     named += [(p.get("api_key_env"), f"providers.{n}.api_key_env")
               for n, p in (data.get("providers") or {}).items() if isinstance(p, dict)]
     named.append(((data.get("comms") or {}).get("invite_env"), "comms.invite_env"))
+    # a Harbor spec's (flock.harbor.spec): its inference key and its resources' tokens
+    named.append(((data.get("inference") or {}).get("api_key_env"), "inference.api_key_env"))
+    named += [(o.get("token_env"), f"resources.{n}.token_env")
+              for n, o in (data.get("resources") or {}).items() if isinstance(o, dict)]
     named += [(s, f"types.{n}.secrets") for n, t in (data.get("types") or {}).items()
               if isinstance(t, dict) for s in t.get("secrets") or []]
     cluster = cluster or {}

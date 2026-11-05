@@ -420,6 +420,15 @@ def test_spec_keys_never_show_a_secret_from_cluster_env():
     assert rundir.spec_keys(data)["SLURM_PARTITION"] == ("", "a (default: )")
 
 
+def test_spec_keys_name_a_harbor_specs_inference_and_resource_tokens():
+    data = {"inference": {"api_key_env": "HF_INFERENCE_TOKEN"},
+            "resources": {"world": {"token_env": "CHATBOT_WORLD_TOKEN"}, "board": {}}}
+    assert rundir.spec_keys(data) == {
+        "HF_TOKEN": (None, "secret: bucket sync and the Hub"),
+        "HF_INFERENCE_TOKEN": (None, "secret: inference.api_key_env"),
+        "CHATBOT_WORLD_TOKEN": (None, "secret: resources.world.token_env")}
+
+
 def test_cluster_env_is_0644_whatever_the_umask_and_the_doctor_checks_it_like_the_jobs(
         tmp_path, monkeypatch):
     src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
