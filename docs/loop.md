@@ -104,7 +104,9 @@ every turn is admitted under the provider's `max_working` like any other prompt.
   this matters: a worker-side loop would keep its slot from turn to turn and starve the agents
   queued behind it, while controller-sent rounds queue FIFO with everybody else's. A `turn_end`
   round whose prompt never started a turn (deferred by a draining worker, or lost) is sent again
-  after 30 s.
+  after 30 s. Here too 3 failed turns in a row end an agent's loop; up to 20 timeouts or
+  `model_transport` failures in a row do not count (no extra backoff: the next round goes out
+  as usual).
 
 **Rounds.** A round is one loop prompt to one agent. The counter is per agent; `max_rounds`
 counts loop prompts (not the final prompt, and wake prompts only with

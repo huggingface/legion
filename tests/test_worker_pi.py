@@ -608,6 +608,13 @@ def test_pi_spreads_agents_over_multiple_endpoints_without_shared_config():
     ("400 Bad Request: invalid tool schema", False),
     ("401 Incorrect API key provided", False),
     ("404 The model `m` does not exist", False),
+    ("Error: Unterminated string in JSON at position 12", False),  # \bterminated\b only
+    ("400 Unterminated string in JSON at position 12", False),
+    ("400 tool output: curl: (7) Failed to connect: Connection refused", False),  # quoted agent text
+    ("400 tool output: cannot open socket /run/x.sock", False),
+    ("422 tool output: request timed out", False),
+    ("408 Request Timeout", True),
+    ("429 Too Many Requests", True),
 ])
 def test_model_server_failures_are_model_transport(message, transient):
     mapper = PiMapper()

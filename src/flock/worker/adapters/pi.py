@@ -70,9 +70,11 @@ PI_FLAGS = ("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates
 TRANSIENT = re.compile(
     r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503|504)\b"  # not "requested 429 tokens"
     r"|connection.?(?:error|reset|refused|closed|lost)|network.?error|fetch failed|socket"
-    r"|other side closed|terminated|timeout|timed out|abort"
+    r"|other side closed|\bterminated\b|timeout|timed out|abort"
     r"|econnreset|econnrefused|ehostunreach|enetunreach|enotfound|eai_again|etimedout",
     re.IGNORECASE)
+# A 4xx other than 408/429 is the request's fault, whatever agent text its message quotes.
+CLIENT_ERROR = re.compile(r"\s*4(?!08|29)\d\d\b")
 RPC_TIMEOUT = 60.0
 # Records PiMapper ignores that carry whole messages: each `message_update` repeats the partial
 # message so far (per token), `tool_execution_update` the output so far, `turn_end` and
@@ -324,8 +326,9 @@ class PiMapper:
                 return [AdapterEvent("turn_ended", status="interrupted", raw=rec)]
             if last.get("stopReason") == "error":
                 message = str(last.get("errorMessage") or "")
+                transient = TRANSIENT.search(message) and not CLIENT_ERROR.match(message)
                 return [AdapterEvent("turn_ended", status="error", error=message, raw=rec,
-                                     data={"reason": "model_transport"} if TRANSIENT.search(message) else {})]
+                                     data={"reason": "model_transport"} if transient else {})]
             return [AdapterEvent("turn_ended", status="completed", raw=rec)]
         if t == "auto_retry_end" and not rec.get("success", True):
             return [AdapterEvent("error", error=str(rec.get("finalError") or rec.get("error") or

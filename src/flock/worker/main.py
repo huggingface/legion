@@ -1158,12 +1158,14 @@ class Worker:
                 loop.remove_signal_handler(sig)
             # Never cancel the flush loop mid-send: the batch it took would be lost, and events
             # carry no id, so it cannot be re-sent without counting twice. A preempted worker
-            # waits at most its remaining budget.
-            wait = max(1.0, self._deadline - loop.time()) if self.preempted else None
-            try:
-                await asyncio.wait_for(self._flush_lock.acquire(), wait)
-            except TimeoutError:
-                pass  # out of budget: the send in flight is cut, as before
+            # waits at most its budget less the 2 s kept for the last heartbeat; a batch still
+            # in flight then is lost, never sent twice. A stale worker's batch is dropped anyway.
+            wait = max(0.0, self._deadline - loop.time() - 2) if self.preempted else None
+            if not self.stale:
+                try:
+                    await asyncio.wait_for(self._flush_lock.acquire(), wait)
+                except TimeoutError:
+                    pass  # out of budget: the send in flight is cut, as before
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

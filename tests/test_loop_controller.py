@@ -1021,7 +1021,10 @@ async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
     assert (w["round"], w["why"], w["wake"]) == (2, "wake: comms.mention", True)
 
 
-async def test_transport_stalls_do_not_exhaust_controller_loop(sim):
+async def test_transport_stalls_do_not_exhaust_controller_loop(sim, monkeypatch):
+    """Up to TRANSIENT_LIMIT timeout / model_transport turns in a row are not counted; each
+    further one is, so a model server that stays down still ends the loop."""
+    monkeypatch.setattr("flock.controller.loop.TRANSIENT_LIMIT", 6)
     await sim.apply({"prompt": "p", "every": "5s"})
     await sim.heartbeat()
     sim.tick()
@@ -1033,6 +1036,13 @@ async def test_transport_stalls_do_not_exhaust_controller_loop(sim):
         assert A0 in got
     state = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
     assert (state["phase"], state["errors"]) == ("looping", 0)
+    for i in range(3):
+        await sim.turn(A0, got[A0], status="error", reason="model_transport")
+        sim.tick(5)
+        got = prompts(await sim.commands())
+        assert (A0 in got) == (i < 2)
+    state = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
+    assert (state["phase"], state["done_reason"], state["errors"]) == ("done", "errors", 3)
 
 
 async def test_a_loop_hashed_before_the_field_deletions_resumes_quietly(sim):

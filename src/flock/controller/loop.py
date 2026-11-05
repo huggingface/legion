@@ -65,6 +65,9 @@ WAKE_MAX_DELAY = 10.0  # s, a wake is never held longer than this by a stream of
 STALL_AFTER = 30.0  # s idle in a worker-side loop with nothing in flight: send loop_start again
 ACK_TIMEOUT = 60.0  # s to wait for a worker's loop_stopped before the final prompt goes anyway
 ERROR_LIMIT = 3  # failed loop turns in a row (not max_turns) end an agent's loop (both sides)
+# timeout / model_transport turns in a row that do not count toward ERROR_LIMIT; each further
+# one does, so a dead model server still ends the loop (the worker's LOOP_TRANSIENT_LIMIT)
+TRANSIENT_LIMIT = 20
 RESTOP_EVERY = 30.0  # s, hard budget stop: min gap between repeated stops to one working agent
 LOOP_KINDS = ("loop",)
 NOTICE_KEEP = 100  # pending notices kept per agent (the oldest go first)
@@ -176,7 +179,7 @@ def with_notices(text: str, line: str | None) -> str:
 def _new_agent() -> dict[str, Any]:
     return {"phase": "new", "rounds": 0, "last_sent": None,
             "wstarted": None, "stop_sent": None, "acked": False, "last_activity": None,
-            "turn_done": False, "errors": 0, "done_reason": None,
+            "turn_done": False, "errors": 0, "transient": 0, "done_reason": None,
             "final": None, "final_sent": None,
             "wakes": 0, "wake_last": None, "wake_times": [],  # wake prompts sent (`on:`)
             "inflight": None}  # {kind, round} of a loop prompt the worker took, until its turn starts
@@ -499,9 +502,12 @@ class LoopEngine:
                     if L.get("mode") == "controller" and held:
                         st["turn_done"] = True
                     elif L.get("mode") == "controller":
-                        st["errors"] = (0 if status == "completed" or max_turns else
-                                        st["errors"] if d.get("reason") in ("timeout", "model_transport")
-                                        else st["errors"] + 1)
+                        transient = d.get("reason") in ("timeout", "model_transport")
+                        st["transient"] = st.get("transient", 0) + 1 if transient else 0
+                        if status == "completed" or max_turns:
+                            st["errors"] = 0
+                        elif not transient or st["transient"] > TRANSIENT_LIMIT:
+                            st["errors"] += 1
                         if st["errors"] >= ERROR_LIMIT:
                             stop_reason = "errors"
                         st["turn_done"] = True
