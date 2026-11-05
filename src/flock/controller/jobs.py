@@ -19,12 +19,13 @@ WORKER_COMMAND = ["flock-worker"]
 DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
 # Bootstrap mode: no prebuilt image. A stock Node image installs the pinned Pi CLI (pi types), uv
-# and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
-# runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
+# and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh; harbor types
+# get `flock[harbor]` on a uv-managed Python 3.12, which takes longer), then runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
 # Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
 PI_VERSION = HARNESSES["pi"].version
 HF_HUB_VERSION = "2.2.0"
+HARBOR_HF_HUB_VERSION = "1.33.0"  # uv.lock's with the harbor extra (harbor's litellm needs < 2)
 
 _BOOTSTRAP = r"""set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
@@ -43,8 +44,12 @@ hf buckets cp "$FLOCK_WHEEL_URL" "$WHEEL" >/dev/null 2>&1 || uv run -q --no-proj
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
 ' "$FLOCK_WHEEL_URL" "$WHEEL"
-uv tool install -q "$WHEEL[worker]" --with huggingface_hub=={hub} \
-  || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" huggingface_hub=={hub}
+if [ "${FLOCK_HARNESS:-}" = harbor ]; then  # Harbor needs Python 3.12+ and huggingface_hub < 2
+  uv tool install -q --python 3.12 "$WHEEL[harbor]" --with huggingface_hub=={harbor_hub}
+else
+  uv tool install -q "$WHEEL[worker]" --with huggingface_hub=={hub} \
+    || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" huggingface_hub=={hub}
+fi
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export WORK_ROOT=/work/agents
@@ -66,6 +71,7 @@ def bootstrap_command() -> list[str]:
     for key, value in {
         "pi": PI_VERSION,
         "hub": HF_HUB_VERSION,
+        "harbor_hub": HARBOR_HF_HUB_VERSION,
     }.items():
         script = script.replace("{" + key + "}", shlex.quote(value))
     return ["bash", "-c", script]

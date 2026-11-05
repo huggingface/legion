@@ -8,6 +8,8 @@ import pytest
 
 from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
+    HARBOR_HF_HUB_VERSION,
+    HF_HUB_VERSION,
     PI_VERSION,
     WORKER_COMMAND,
     HubJobsClient,
@@ -58,6 +60,30 @@ def test_bootstrap_installs_pi_only_on_pi_workers(monkeypatch):
     c = _client(monkeypatch, image=None)
     args = c.launch_args(TypeSpec(harness="pi", model="m"), {"WORKER_ID": "w"})
     assert args["env"]["FLOCK_HARNESS"] == "pi"
+
+
+@pytest.mark.parametrize("harness, npm, install", [
+    ("pi", True, f"-q /opt/wheels/w.whl[worker] --with huggingface_hub=={HF_HUB_VERSION}"),
+    ("harbor", False,
+     f"-q --python 3.12 /opt/wheels/w.whl[harbor] --with huggingface_hub=={HARBOR_HF_HUB_VERSION}"),
+])
+def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness, npm, install):
+    """The bootstrap script on stubs (uv, hf, npm, curl, mkdir, flock, flock-worker): a harbor
+    worker gets flock[harbor] on a Python Harbor runs on, with the hub version Harbor needs, and
+    no Pi CLI (Pi runs inside each Trial's environment)."""
+    stubs, log = tmp_path / "stubs", tmp_path / "calls.log"
+    stubs.mkdir()
+    for name in ("uv", "hf", "npm", "curl", "mkdir", "flock", "flock-worker"):
+        (stubs / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n')
+        (stubs / name).chmod(0o755)
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "FLOCK_HARNESS": harness,
+           "FLOCK_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl"}
+    r = subprocess.run(bootstrap_command(), env=env, capture_output=True, text=True, timeout=30,
+                       check=False)
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text().splitlines()
+    assert f"uv tool install {install}" in calls and calls[-1] == "flock-worker "
+    assert any(c.startswith("npm i -g") for c in calls) == npm
 
 
 def test_launch_args_bootstrap_flag_overrides_default_image(monkeypatch):
