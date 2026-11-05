@@ -1,9 +1,10 @@
 """A local run end to end (docs/local.md): the controller on 127.0.0.1, real worker subprocesses
 running the `llm` harness against tests/fake_openai.py. No HF token, bucket or network.
 
-1. `python -m flock.controller.localrun --prompt ... --until idle`: 3 agents each get the
-   prompt, finish a turn, the run stops on its own, exits 0 and leaves the bundle (run.json,
-   events.jsonl, events/<agent>.jsonl).
+1. `python -m flock.controller.localrun --prompt ... --until idle`: the tools folder ships,
+   3 writers each run the prompt in one turn, a looping type finishes its loop, the run stops
+   on its own, exits 0 and leaves the bundle (run.json, events.jsonl, events/<agent>.jsonl).
+2. Ctrl-C (`--grace 0`) while a tool runs: nothing survives the run.
 `flock launch` in the background, through its lifecycle: tests/test_runs.py."""
 
 from __future__ import annotations
@@ -60,41 +61,72 @@ def _bundle_events(run: Path, agent: str) -> list[dict]:
     return [json.loads(x) for x in (run / "events" / f"{agent}.jsonl").read_text().splitlines()]
 
 
-AGENTS = ["writer-0000", "writer-0001", "writer-0002"]
+WRITERS = ["writer-0000", "writer-0001", "writer-0002"]
+LOOPERS = ["looper-0000", "looper-0001"]
+# appended under types: a looping type next to the writers (its agents get --prompt too)
+LOOPER = """\
+    tools: [greet]
+  looper:
+    harness: llm
+    model: fake:fake-model
+    replicas: 2
+    agents_per_worker: 2
+    tools: [greet]
+    loop:
+      prompt: "bash: echo round {round}"
+      every: 5s
+      while: {max_rounds: 2}
+      final: {prompt: "bash: echo final"}
+"""
+# each agent runs its own bash, then the folder tool, in one turn
+PROMPT = 'script: [["bash", {"command": "echo hi-from-$FLOCK_AGENT"}], ["greet", {"name": "flock"}]]'
 
 
-def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
-    (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url))
+def test_flock_run_until_idle(tmp_path, fake_server):
+    """`localrun --prompt ... --until idle`: the tools folder is uploaded as by `flock launch`,
+    each of 3 writers runs the prompt in one turn (its own bash, then the folder tool); a
+    looping type (`every: 5s`) is idle between rounds, so the run goes on until its loop is done
+    (both rounds and the final round), then stops on idle, exits 0 and leaves the bundle
+    (run.json, events.jsonl, events/<agent>.jsonl) and the health files."""
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "greet.py").write_text(GREET)
+    (tmp_path / "spec.yaml").write_text(SPEC.format(url=fake_server.url) + LOOPER)
     t0 = time.monotonic()
-    p = subprocess.run(
-        _localrun("spec.yaml", "--prompt", "bash: echo hi-from-$FLOCK_AGENT", "--until",
-               "idle", "--skip-preflight"),
-        cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=90,
-        check=False)
+    p = subprocess.run(_localrun("spec.yaml", "--prompt", PROMPT, "--until", "idle",
+                                 "--skip-preflight"),
+                       cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True,
+                       timeout=120, check=False)
     took = time.monotonic() - t0
     assert p.returncode == 0, p.stdout + p.stderr
-    assert "stopping (idle)" in p.stdout and "3 agents, 3 turns" in p.stdout, p.stdout
+    assert "stopping (idle)" in p.stdout and "5 agents, " in p.stdout, p.stdout
+    assert "tools: version " in p.stdout and ": greet" in p.stdout, p.stdout
     assert took < 60, took
 
     run = _run_dir(tmp_path)
     doc = json.loads((run / "run.json").read_text())
     assert doc["stop_reason"] == "idle" and doc["compute"] == "local"
-    assert doc["totals"]["agents"] == 3 and doc["totals"]["turns_completed"] == 3
-    assert doc["totals"]["workers"] == 2  # agents_per_worker 2: two worker processes
+    assert doc["totals"]["agents"] == 5 and doc["totals"]["workers"] == 3  # 2 + 1 per 2 agents
     assert doc["totals"]["tokens"]["fake-model"]["input"] > 0
-    assert sorted(a["name"] for a in doc["agents"]) == AGENTS
-    for name in AGENTS:
+    turns = {a["name"]: a["turns_completed"] for a in doc["agents"]}
+    assert sorted(turns) == sorted(WRITERS + LOOPERS)
+    assert [turns[n] for n in WRITERS] == [1, 1, 1], turns  # the prompt, one turn each
+    for name in WRITERS:
         evs = _bundle_events(run, name)
-        kinds = [e["type"] for e in evs]
-        assert "turn_started" in kinds and "turn_ended" in kinds, kinds
-        tool = [e for e in evs if e["type"] == "message"
+        started = [e for e in evs if e["type"] == "turn_started"]
+        assert started and started[0]["data"]["data"].get("tools_version"), started
+        tool = [json.dumps(e) for e in evs if e["type"] == "message"
                 and e["data"]["message"].get("role") == "toolResult"]
-        assert tool and f"hi-from-{name}" in json.dumps(tool[0]), tool  # its own bash ran
+        assert f"hi-from-{name}" in tool[0] and "hello flock via folder tool" in tool[1], tool
+    for name in LOOPERS:  # every round and the final one, whatever the prompt did meanwhile
+        prompts = [(e["data"]["data"]["kind"], e["data"]["data"]["round"])
+                   for e in _bundle_events(run, name) if e["type"] == "loop_prompt"]
+        assert prompts == [("loop", 1), ("loop", 2), ("final", 2)], (name, prompts)
+        assert turns[name] >= 3, turns
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
     merged = [e for e in merged if e["agent"]]  # the swarm stream: control-plane events
-    assert {e["agent"] for e in merged} == set(AGENTS)
-    assert len(merged) == sum(len(_bundle_events(run, a)) for a in AGENTS)
-    for log in (run / "logs").glob("hello-writer-w*.log"):
+    assert {e["agent"] for e in merged} == set(WRITERS + LOOPERS)
+    assert len(merged) == sum(len(_bundle_events(run, a)) for a in WRITERS + LOOPERS)
+    for log in (run / "logs").glob("hello-*-w*.log"):
         assert "drained; exiting" in log.read_text()  # drained, not killed
     assert not (tmp_path / ".flock" / "current").exists()
     assert "Authorization" not in (run / "run.json").read_text()
@@ -103,11 +135,11 @@ def test_flock_run_three_llm_agents_until_idle(tmp_path, fake_server):
     latest = json.loads((ctl / "metrics" / "hello" / "latest.json").read_text())
     assert latest["body"]["types"]["writer"]["by_state"], latest
     assert sum(t["input"] for t in latest["body"]["tokens"]["by_type"].values()) > 0
-    turns: dict[str, int] = {}  # summed: the run may straddle an hour
+    rolled: dict[str, int] = {}  # summed: the run may straddle an hour
     for hour in (ctl / "rollups" / "hello").glob("*.jsonl"):
         for x in map(json.loads, hour.read_text().splitlines()):
-            turns[x["agent"]] = turns.get(x["agent"], 0) + x["turns"]
-    assert turns == dict.fromkeys(AGENTS, 1)
+            rolled[x["agent"]] = rolled.get(x["agent"], 0) + x["turns"]
+    assert rolled == turns
     assert json.loads((ctl / "run.json").read_text())["status"] == "ended"
 
 
@@ -164,66 +196,3 @@ def greet(name: str, ctx: Context) -> str:
     """
     return f"hello {name} via folder tool"
 '''
-
-
-def test_flock_run_ships_the_tools_folder(tmp_path, fake_server):
-    """the local run uploads tools/ like `flock launch` (docs/tools.md): the spec is applied with
-    its tools_version, and an agent's turn calls the folder tool."""
-    (tmp_path / "tools").mkdir()
-    (tmp_path / "tools" / "greet.py").write_text(GREET)
-    spec = SPEC.format(url=fake_server.url).replace("replicas: 3", "replicas: 1")
-    (tmp_path / "spec.yaml").write_text(spec + "    tools: [greet]\n")
-    p = subprocess.run(
-        _localrun("spec.yaml", "--prompt", 'call: greet {"name": "flock"}', "--until",
-               "idle", "--skip-preflight"),
-        cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=90,
-        check=False)
-    assert p.returncode == 0, p.stdout + p.stderr
-    assert "tools: version " in p.stdout and ": greet" in p.stdout, p.stdout
-    evs = _bundle_events(_run_dir(tmp_path), "writer-0000")
-    started = [e for e in evs if e["type"] == "turn_started"]
-    assert started and started[0]["data"]["data"].get("tools_version"), started
-    tool = [e for e in evs if e["type"] == "message"
-            and e["data"]["message"].get("role") == "toolResult"]
-    assert tool and "hello flock via folder tool" in json.dumps(tool[0]), tool
-
-
-LOOP_SPEC = """\
-swarm: looped
-compute: local
-providers:
-  fake: {{type: openai_compat, base_url: "{url}", api_key_env: FAKE_KEY, self_hosted: true}}
-types:
-  writer:
-    harness: llm
-    model: fake:fake-model
-    replicas: 2
-    agents_per_worker: 2
-    loop:
-      prompt: "bash: echo round {{round}}"
-      every: 5s
-      while: {{max_rounds: 2}}
-      final: {{prompt: "bash: echo final"}}
-"""
-LOOP_AGENTS = ["writer-0000", "writer-0001"]
-
-
-def _run_loop_spec(tmp_path: Path, url: str, extra: str = "") -> subprocess.CompletedProcess:
-    (tmp_path / "spec.yaml").write_text(LOOP_SPEC.format(url=url) + extra)
-    return subprocess.run(
-        _localrun("spec.yaml", "--until", "idle", "--skip-preflight"),
-        cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120,
-        check=False)
-
-
-def test_flock_run_until_idle_waits_for_the_loop(tmp_path, fake_server):
-    """`--until idle` with a duration `every`: agents are idle between rounds, but the run goes
-    on until the loop is done (both rounds and the final round), then stops on idle."""
-    p = _run_loop_spec(tmp_path, fake_server.url)
-    assert p.returncode == 0, p.stdout + p.stderr
-    assert "stopping (idle)" in p.stdout and "2 agents, 6 turns" in p.stdout, p.stdout
-    run = _run_dir(tmp_path)
-    for name in LOOP_AGENTS:
-        prompts = [(e["data"]["data"]["kind"], e["data"]["data"]["round"])
-                   for e in _bundle_events(run, name) if e["type"] == "loop_prompt"]
-        assert prompts == [("loop", 1), ("loop", 2), ("final", 2)], (name, prompts)

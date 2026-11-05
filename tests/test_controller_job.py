@@ -437,6 +437,7 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
     import flock.controller.main as main_mod
 
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
+    monkeypatch.setattr(main_mod, "GRACEFUL_SHUTDOWN", 1.0)  # the parked poll still outlasts it
     port = _free_port()
     b = _built(tmp_path, PORT=str(port), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z", FLOCK_STATE_SYNC_INTERVAL="0.1")

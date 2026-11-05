@@ -112,5 +112,6 @@ def serve(root: Path) -> tuple[Hub, ThreadingHTTPServer, str]:
     hub = Hub(root)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler(hub))
     srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05},  # fast shutdown()
+                     daemon=True).start()
     return hub, srv, f"http://127.0.0.1:{srv.server_port}"
