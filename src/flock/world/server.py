@@ -58,6 +58,7 @@ from flock.world.protocol import (
     TOKEN_HEADER,
     TURN_HEADER,
     TYPE_HEADER,
+    agent_token,
 )
 from flock.world.workspace import MAX_BYTES
 
@@ -235,7 +236,8 @@ def _error(code: str, message: str, status: int = 200,
 
 class _Auth:
     """`X-World-Token`: the world secret on every route but `/healthz` (none) and `/admin/*`
-    (the admin secret). An empty world secret: open; an empty admin secret: /admin is 403."""
+    (the admin secret), or on `/manifest` and `/tools/*` the caller's `agent_token` for its
+    `X-Flock-Agent`. An empty world secret: open; an empty admin secret: /admin is 403."""
 
     def __init__(self, app: Any, token: str, admin: str) -> None:
         self.app, self.token, self.admin = app, token, admin
@@ -249,7 +251,11 @@ class _Auth:
                 await _error("forbidden", f"no admin secret: set {ADMIN_TOKEN_ENV} on the world",
                              403)(scope, receive, send)
                 return
-            if need and not hmac.compare_digest(Headers(scope=scope).get(TOKEN_HEADER, ""), need):
+            headers = Headers(scope=scope)
+            got, agent = headers.get(TOKEN_HEADER, ""), headers.get(AGENT_HEADER, "")
+            own = bool(agent) and (path == "/manifest" or path.startswith("/tools/")) \
+                and hmac.compare_digest(got, agent_token(need, agent))
+            if need and not (hmac.compare_digest(got, need) or own):
                 await _error("unauthorized", f"missing or wrong {TOKEN_HEADER}", 401)(
                     scope, receive, send)
                 return

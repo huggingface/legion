@@ -143,7 +143,7 @@ HTTP and JSON. A world is any server that answers these routes:
 
 | header | sent | meaning |
 |---|---|---|
-| `X-World-Token` | every request | the shared secret; answer `401` if it is wrong |
+| `X-World-Token` | every request | the shared secret; answer `401` if it is wrong. `flock.world.server` also takes, on `/manifest` and tool calls, the agent's own token `agent_token(secret, X-Flock-Agent)` (protocol.py), so an agent that holds it acts only as itself |
 | `X-Flock-Agent` | tool calls | the calling agent (`worker-0001`); trust it when the secret matches |
 | `X-Flock-Type`, `X-Flock-Swarm` | tool calls | its type and swarm |
 | `X-Flock-Turn` | tool calls | the agent's turn (`t-3`), when it is in one |
