@@ -576,6 +576,10 @@ class LoopEngine:
                 self._updated(spec, type_name, ts, L, now)
             if L["state"] == "final" and ts.loop.final is None:  # final removed by a re-apply
                 self._finish(spec.swarm, type_name, L, now, "final removed from the spec")
+            until = ts.loop.while_.until
+            if (L["state"] == "done" and L.get("reason") == "until" and phase is None and until
+                    and now < until_deadline(until, L["started_at"])):
+                self._reopen(spec.swarm, type_name, L)  # a re-apply moved `until` past now
             if L["state"] == "running":
                 self._run(spec, type_name, ts, L, now, budget=phase)
             if L["state"] == "final":
@@ -730,10 +734,6 @@ class LoopEngine:
         self.store.put_loop(spec.swarm, type_name, L)
         self._event(spec.swarm, "loop_updated", {"type": type_name, "mode": new,
                                                  "every": ts.loop.every, "previous_mode": old})
-        until = ts.loop.while_.until
-        if (L["state"] == "done" and L.get("reason") == "until" and until
-                and now < until_deadline(until, L["started_at"])):
-            self._reopen(spec.swarm, type_name, L, new)
         if L["state"] != "running":
             return
         if old == "worker" and new == "controller":
@@ -756,10 +756,12 @@ class LoopEngine:
                     self._loop_start(spec, type_name, ts, L, a, st, now)
                     self.store.put_loop_agent(a["name"], spec.swarm, type_name, st)
 
-    def _reopen(self, swarm: str, type_name: str, L: dict, mode: str) -> None:
-        """A re-applied `while.until` moved past now: the loop that ended on it runs on, same
-        run (started_at, rounds kept). Its agents loop again and get a new final round; worker
-        loops get `loop_start` (in `_updated`, or from `_run` once their stop is acked)."""
+    def _reopen(self, swarm: str, type_name: str, L: dict) -> None:
+        """A re-applied `while.until` moved past now (checked every tick, so also after a final
+        round that was running at the re-apply; never under a budget stop): the loop that
+        ended on it runs on, same run (started_at, rounds kept). Its agents loop again and get
+        a new final round; worker loops get `loop_start` from `_run` once idle with their
+        stop acked."""
         L["state"], L["stopped_at"], L["reason"], L["final_at"] = "running", None, None, None
         self.store.put_loop(swarm, type_name, L)
         for name, st in self.store.loop_agents(swarm, type_name).items():
@@ -767,7 +769,7 @@ class LoopEngine:
                 st["phase"], st["done_reason"] = "looping", None
             st["final"], st["final_sent"] = None, None
             self.store.put_loop_agent(name, swarm, type_name, st)
-        self._event(swarm, "loop_started", {"type": type_name, "mode": mode, "every": L["every"],
+        self._event(swarm, "loop_started", {"type": type_name, "mode": L["mode"], "every": L["every"],
                                             "restart": False, "reopened": True})
 
     def _stop(self, swarm: str, type_name: str, ts: TypeSpec, L: dict, reason: str, *,

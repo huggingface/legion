@@ -321,6 +321,85 @@ async def test_raising_until_reopens_a_loop_that_ended_on_it(sim):
     assert {p["loop"]["why"] for p in prompts(await sim.commands()).values()} == {"final: until"}
 
 
+async def test_raising_until_reopens_a_worker_loop_with_one_loop_start_each(sim):
+    from datetime import datetime
+
+    loop = {"prompt": "go", "while": {"until": "60s"}}  # turn_end: the worker re-prompts
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    assert {c["kind"] for c in await sim.commands()} == {"loop_start"}
+    for a in (A0, A1):  # the worker's own re-prompts, reported as events
+        for n in (1, 2):
+            await sim.events(a, ("loop_prompt", {"kind": "loop", "round": n, "why": "turn_end"}),
+                             ("turn_started", {}), ("turn_ended", {"status": "completed"}))
+    sim.clock.advance(61)
+    await sim.heartbeat()
+    sim.tick()
+    assert {(c["kind"], c["reason"]) for c in await sim.commands()} == {("loop_stop", "until")}
+    await sim.events(A0, ("loop_stopped", {"reason": "until", "round": 2}))
+    await sim.events(A1, ("loop_stopped", {"reason": "deadline", "round": 2}))  # its own deadline
+    sim.tick()
+    (lp,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (lp["state"], lp["reason"]) == ("done", "until")
+    await sim.apply({**loop, "while": {"until": "600s"}})
+    sim.tick()
+    sim.tick()
+    starts = await sim.commands()
+    assert sorted((c["kind"], c["agent"]) for c in starts) == [("loop_start", A0), ("loop_start", A1)]
+    want = datetime.fromisoformat(lp["started_at"]) + timedelta(seconds=600)
+    assert {datetime.fromisoformat(c["deadline"]) for c in starts} == {want}
+    assert {c["meta"]["round"] for c in starts} == {2}  # the rounds go on
+
+
+async def test_raising_until_during_the_final_round_reopens_after_it(sim):
+    loop = {"prompt": "p", "every": "10s", "while": {"until": "60s"}, "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick(61)
+    fin = prompts(await sim.commands())
+    await sim.apply({**loop, "while": {"until": "600s"}})  # while the final round runs
+    sim.tick()
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "final"
+    for a in (A0, A1):
+        await sim.turn(a, fin[a])
+    await sim.heartbeat()
+    sim.tick()  # the final round ends: done / until
+    sim.tick()  # ...and the raised until reopens it
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    got = prompts(await sim.commands())
+    assert {(p["loop"]["kind"], p["loop"]["round"]) for p in got.values()} == {("loop", 2)}
+
+
+async def test_raising_until_never_reopens_under_a_budget_stop(sim):
+    loop = {"prompt": "p", "every": "10s", "while": {"until": "60s"},
+            "final": {"prompt": "fin", "reserve_usd": 0.5}}
+    await sim.apply(loop, limits={"budget_usd": 1.0})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick(61)
+    for a, p in prompts(await sim.commands()).items():
+        await sim.turn(a, p)
+    sim.cost.update({A0: 15_000, A1: 15_000})  # $0.60: past budget - reserve
+    await sim.heartbeat()
+    sim.tick()
+    assert sim.store.swarm_flags("demo")["budget_stop"] == "final_reserve"
+    await sim.apply({**loop, "while": {"until": "600s"}}, limits={"budget_usd": 1.0})
+    await sim.heartbeat()
+    sim.tick()
+    sim.tick(10)
+    (lp,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (lp["state"], lp["reason"]) == ("done", "until")
+    assert await sim.commands() == []  # no second final round paid from the reserve
+
+
 async def test_agent_usd_takes_an_agent_out(sim):
     # claude-opus-5-5 output: $20 per 1M tokens, so 25,000 tokens = $0.50
     await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_usd": 0.5}})
