@@ -425,6 +425,34 @@ async def test_a_hand_stop_during_the_final_round_stays_stopped_after_until_was_
     assert await sim.commands() == []  # no round 2
 
 
+async def test_raising_until_does_not_reopen_when_no_agent_can_loop(sim):
+    loop = {"prompt": "p", "every": "10s", "while": {"until": "60s", "max_rounds": 1},
+            "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())  # round 1 of 1, its turns still running at `until`
+    sim.clock.advance(61)
+    await sim.heartbeat(working=(A0, A1))
+    sim.tick()
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    await sim.heartbeat()
+    sim.tick()
+    for a, p in prompts(await sim.commands()).items():
+        assert p["loop"]["why"] == "final: until"
+        await sim.turn(a, p)
+    sim.tick()
+    (lp,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (lp["state"], lp["reason"], lp["final_done"]) == ("done", "until", 2)
+    await sim.apply({**loop, "while": {"until": "600s", "max_rounds": 1}})
+    await sim.heartbeat()
+    sim.tick()
+    sim.tick(10)
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "done"
+    assert await sim.commands() == []  # no second final round
+
+
 async def test_agent_usd_takes_an_agent_out(sim):
     # claude-opus-5-5 output: $20 per 1M tokens, so 25,000 tokens = $0.50
     await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_usd": 0.5}})

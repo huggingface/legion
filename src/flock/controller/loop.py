@@ -582,7 +582,8 @@ class LoopEngine:
                 self._finish(spec.swarm, type_name, L, now, "final removed from the spec")
             until = ts.loop.while_.until
             if (L["state"] == "done" and L.get("reason") == "until" and phase is None and until
-                    and now < until_deadline(until, L["started_at"])):
+                    and now < until_deadline(until, L["started_at"])
+                    and self._can_loop(spec.swarm, type_name, ts.loop)):
                 self._reopen(spec.swarm, type_name, L)  # a re-apply moved `until` past now
             if L["state"] == "running":
                 self._run(spec, type_name, ts, L, now, budget=phase)
@@ -759,6 +760,15 @@ class LoopEngine:
                 if st and st["phase"] == "looping" and st["wstarted"]:
                     self._loop_start(spec, type_name, ts, L, a, st, now)
                     self.store.put_loop_agent(a["name"], spec.swarm, type_name, st)
+
+    def _can_loop(self, swarm: str, type_name: str, lp: LoopSpec) -> bool:
+        """Some agent of the type would loop again after a reopen: not done (a worker loop's own
+        `deadline` end aside) and below `max_rounds`. Otherwise a reopen would only send a
+        second final round."""
+        cap = lp.while_.max_rounds
+        states = self.store.loop_agents(swarm, type_name).values()
+        return not states or any((st["phase"] != "done" or st["done_reason"] == "deadline")
+                                 and (cap is None or st["rounds"] < cap) for st in states)
 
     def _reopen(self, swarm: str, type_name: str, L: dict) -> None:
         """A re-applied `while.until` moved past now (checked every tick, so also after a final
