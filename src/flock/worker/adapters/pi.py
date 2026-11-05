@@ -55,7 +55,9 @@ from flock.worker.adapters.base import (
     EventQueue,
     ResumeError,
     minimal_env,
+    transient_error,
 )
+from flock.worker.adapters.base import pi_tokens as _usage
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +66,6 @@ ENV_DENY = ("FLOCK_TOKEN",)
 # Network extras off; the image sets the same values.
 PI_ENV_DEFAULTS = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
 PI_FLAGS = ("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-approve")
-HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b", re.IGNORECASE)
 RPC_TIMEOUT = 60.0
 # Records PiMapper ignores that carry whole messages: each `message_update` repeats the partial
 # message so far (per token), `tool_execution_update` the output so far, `turn_end` and
@@ -213,13 +214,6 @@ def write_bash_env(path: Path, tool_memory_mb: int | None) -> Path:
     return path
 
 
-def _usage(u: dict[str, Any] | None) -> TokenUsage:
-    u = u or {}
-    return TokenUsage(input=int(u.get("input") or 0), output=int(u.get("output") or 0),
-                      cache_read=int(u.get("cacheRead") or 0), cache_write=int(u.get("cacheWrite") or 0),
-                      reasoning=int(u.get("reasoning") or 0))
-
-
 class PiMapper:
     """Pi RPC records -> AdapterEvents. A flock turn runs from the prompt that started a run
     (or `agent_start`) to `agent_settled`; Pi may run several model calls, retries, compactions
@@ -316,11 +310,9 @@ class PiMapper:
                 return [AdapterEvent("turn_ended", status="interrupted", raw=rec)]
             if last.get("stopReason") == "error":
                 message = str(last.get("errorMessage") or "")
-                transient = bool(HTTP_TRANSIENT.search(message)) or any(x in message.lower() for x in (
-                    "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
-                    "connection refused", "socket", "abort"))
                 return [AdapterEvent("turn_ended", status="error", error=message, raw=rec,
-                                     data={"reason": "model_transport"} if transient else {})]
+                                     data={"reason": "model_transport"} if transient_error(message)
+                                     else {})]
             return [AdapterEvent("turn_ended", status="completed", raw=rec)]
         if t == "auto_retry_end" and not rec.get("success", True):
             return [AdapterEvent("error", error=str(rec.get("finalError") or rec.get("error") or

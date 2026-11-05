@@ -8,6 +8,7 @@ An adapter owns at most one live harness process at a time (one burst). It is re
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,6 +89,19 @@ def credential_env_names(spec: TypeSpec) -> list[str]:
     return sorted(set(names))
 
 
+HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b",
+                            re.IGNORECASE)
+
+
+def transient_error(message: str) -> bool:
+    """A model transport failure (HTTP 429/502/503, a timeout, a dropped connection): a turn
+    that ends on one is `reason: model_transport`, which the worker-side loop retries with
+    backoff instead of counting it as a failed turn."""
+    return bool(HTTP_TRANSIENT.search(message)) or any(x in message.lower() for x in (
+        "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
+        "connection refused", "socket", "abort"))
+
+
 class ResumeError(RuntimeError):
     """The harness could not resume the requested session; start fresh instead."""
 
@@ -146,6 +160,16 @@ def usage_sub(a: TokenUsage, b: TokenUsage | None) -> TokenUsage:
     if b is None:
         return a
     return TokenUsage(**{k: max(0, getattr(a, k) - getattr(b, k)) for k in TokenUsage.model_fields})
+
+
+def pi_tokens(u: dict[str, Any] | None) -> TokenUsage:
+    """A pi `usage` object as TokenUsage (`input` excludes cached tokens; `reasoning` is
+    already inside `output`)."""
+    u = u or {}
+    return TokenUsage(input=int(u.get("input") or 0), output=int(u.get("output") or 0),
+                      cache_read=int(u.get("cacheRead") or 0),
+                      cache_write=int(u.get("cacheWrite") or 0),
+                      reasoning=int(u.get("reasoning") or 0))
 
 
 def pi_usage(u: TokenUsage) -> dict[str, Any]:
