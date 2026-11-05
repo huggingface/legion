@@ -172,7 +172,7 @@ def test_placeholders_take_json_types(value, typed):
 COMPILE = """
 name: v8
 model: huggingface/Qwen/Qwen3.8-27B
-inference: {max_working: 40, reasoning_effort: high}
+inference: {max_working: 40, reasoning_effort: high, api_key_env: HF_INFERENCE_TOKEN}
 task: {repo: https://huggingface.co/datasets/HuggingFaceSwarms/v8-harbor, selector: v8}
 team_file: team.md
 resources: {board: {url: https://board.example, channels: [general]}}
@@ -216,7 +216,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     )
     provider = swarm.providers["inference"]
     assert (provider.type, provider.base_url, provider.api_key_env, provider.max_working) == (
-        "openai_compat", "https://router.huggingface.co/v1", "HF_TOKEN", 40,
+        "openai_compat", "https://router.huggingface.co/v1", "HF_INFERENCE_TOKEN", 40,
     )
     assert provider.pricing == {"*": [0.3, 1.2, 0.03], "huggingface/other/Model": [1, 2, 0.1]}
     assert swarm.limits.model_dump() == {"alive": 10, "spawned_total": None, "budget_usd": 400}
@@ -256,7 +256,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert h.config == {
         "model": "huggingface/Qwen/Qwen3.8-27B",
         "inference": {
-            "base_url": "https://router.huggingface.co/v1", "api_key_env": "HF_TOKEN",
+            "base_url": "https://router.huggingface.co/v1",
+            "api_key_env": "HF_INFERENCE_TOKEN",
             "api_format": "openai_chat_completions", "reasoning_effort": "high",
             "max_working": 40,
         },
@@ -282,6 +283,28 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
 
     assert loop_refusals(swarm) == []
     assert SwarmSpec.model_validate_json(swarm.model_dump_json()) == swarm
+
+
+@pytest.mark.parametrize("edit, error", [
+    (lambda d: d["inference"].pop("api_key_env"), "HF_TOKEN is the workers' Hub token"),
+    (lambda d: d["inference"].pop("api_key_env") or d["environment"].update(backend="podman")
+     or d.update(compute="slurm"), "HF_TOKEN is the workers' Hub token"),
+    (lambda d: d["resources"]["board"].update(token_env="FLOCK_WORLD_ADMIN_TOKEN"),
+     "FLOCK_WORLD_ADMIN_TOKEN is the world's admin secret"),
+])
+def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
+    data = load_spec_yaml(COMPILE)
+    edit(data)
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=error):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    data["environment"].update(backend="docker")  # local docker: the operator's own token
+    data["resources"]["board"].pop("token_env", None)
+    data.pop("compute", None)
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 
 def test_roles_sharing_the_run_loop_split_its_reserve(tmp_path):

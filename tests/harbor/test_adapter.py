@@ -204,7 +204,8 @@ def install(setattr) -> Fakes:
 
 @pytest.fixture
 def fakes(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
+    for name in ("HF_TOKEN", "HF_INFERENCE_TOKEN"):
+        monkeypatch.setenv(name, "test-inference-secret")
     return install(monkeypatch.setattr)
 
 
@@ -220,6 +221,8 @@ def clock(monkeypatch):
 def type_spec(backend="docker", **limits):
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
     spec.environment.backend = backend
+    if backend == "hf-sandbox":  # never the worker's Hub token
+        spec.inference.api_key_env = "HF_INFERENCE_TOKEN"
     for key, value in limits.items():
         setattr(spec.limits, key, value)
     return compile_spec(spec, TASK).types["agent"]

@@ -29,6 +29,7 @@ from flock.models import (
     load_spec_yaml,
     parse_duration,
 )
+from flock.world.protocol import ADMIN_TOKEN_ENV
 
 from .config import (
     AgentSettings,
@@ -298,6 +299,18 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
     config["limits"] = spec.limits.model_dump(
         include={"agent_max_turns", "agent_timeout_seconds", "trial_hours"}
     )
+    # the inference key goes into every agent's container: never the token a remote worker
+    # syncs the bucket and starts sandboxes with
+    remote = spec.environment.backend == "hf-sandbox" or spec.compute.kind in ("slurm", "hf-jobs")
+    if remote and spec.inference.api_key_env == "HF_TOKEN":
+        raise ValueError("inference.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
+                         "sandboxes) and would reach every agent's container: name an "
+                         "inference-only token, e.g. HF_INFERENCE_TOKEN")
+    for name, options in spec.resources.items():
+        if options.get("token_env") == ADMIN_TOKEN_ENV:
+            raise ValueError(f"resources.{name}.token_env: {ADMIN_TOKEN_ENV} is the world's "
+                             "admin secret, never a worker's: name the world's agent secret "
+                             "(its FLOCK_WORLD_TOKEN)")
     # besides the inference key (the provider's): what the workers read on their own host
     secrets = resource_secrets(spec) + (["HF_TOKEN"] if spec.environment.backend == "hf-sandbox"
                                         else [])  # sandboxes start with the worker's HF token

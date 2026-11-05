@@ -19,7 +19,7 @@ harness: pi
 model: huggingface/deepseek-ai/DeepSeek-V4.1-Flash-1017:novita   # v8-harbor's model id
 inference:
   base_url: https://router.huggingface.co/v1
-  api_key_env: HF_TOKEN                       # inference only; never a token that can write CHATBOT_REPO
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN or one that can write CHATBOT_REPO
   api_format: openai_chat_completions
   reasoning_effort: high
 task:
