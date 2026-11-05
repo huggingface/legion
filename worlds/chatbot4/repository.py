@@ -107,7 +107,7 @@ class Repository:
                  *self.negotiation(), remote, *specs, env=env)
 
     def fetch(self):
-        """Fetch main only. The world writes refs/pr/N itself after every push (update_ref), so
+        """Fetch main only. The world writes refs/pr/N itself after every push (update_refs), so
         PR refs never come from the Hub here; a wildcard over refs/pr/* is also refused by the
         Hub's git backend once there are many PRs (hang-up / 'expected acknowledgments').
         A fetch that started after this call is as fresh as this one: waiters behind it return."""
@@ -179,13 +179,17 @@ class Repository:
 
     def refresh(self, max_age):
         """Fetch unless a fetch started within max_age seconds. The world updates its own
-        refs after every push and merge, so this only catches up with outside changes."""
-        if time.monotonic() - self.fetched >= max_age:
-            self.fetch()
+        refs after every push and merge, so this only catches up with outside changes; with
+        max_age > 0 it also returns at once while refs_lock is busy (a fetch is running)
+        instead of queueing another fetch. max_age 0 always gets a main fetched after the call."""
+        if time.monotonic() - self.fetched < max_age or (max_age > 0 and self.refs_lock.locked()):
+            return
+        self.fetch()
 
-    def update_ref(self, ref, sha):
+    def update_refs(self, *refs):
+        """Point each (ref, sha) at its sha in one transaction: one refs_lock wait."""
         with self.refs_lock:
-            self.git("update-ref", ref, sha)
+            self.git("update-ref", "--stdin", data="".join(f"update {ref} {sha}\n" for ref, sha in refs).encode())
 
     def sha(self, ref="main"):
         if ref.startswith("pr:") and ref[3:].isdigit():

@@ -1164,7 +1164,7 @@ def test_a_stale_lease_after_a_restart_adopts_the_hub_head(setup, monkeypatch):
         world.state["prs"][str(pr)].update(base_sha=second["base_sha"], head_sha=second["head_sha"])
         world._dirty("prs", pr)
     world.flush()
-    world.repo.update_ref(f"refs/pr/{pr}", second["head_sha"])
+    world.repo.update_refs((f"refs/pr/{pr}", second["head_sha"]))
     monkeypatch.setattr(world.repo.hub, "merge", real)
     world = Chatbot4World(world.ws, world.repo)
     time.sleep(1.1)  # the next replay gets a new committer date, so a new sha
@@ -1303,6 +1303,53 @@ def test_waiting_fetches_reuse_a_fetch_that_started_after_them(setup, monkeypatc
     assert len(calls) == 2  # the running one, then one for all who waited
     repo.fetch()  # a later call fetches again
     assert len(calls) == 3
+
+
+def test_ttl_refreshes_skip_a_running_fetch_and_a_merge_fetch_waits_for_its_own(setup, monkeypatch):
+    import threading
+
+    world, _clone, remote = setup
+    repo, real, calls = world.repo, world.repo.hub_fetch, []
+    first_in, release = threading.Event(), threading.Event()
+
+    def hub_fetch(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        if len(calls) == 1:
+            first_in.set()
+            assert release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "hub_fetch", hub_fetch)
+    repo.fetched -= 1000  # every TTL is past
+    slow = threading.Thread(target=repo.fetch, name="slow")
+    slow.start()
+    assert first_in.wait(10)
+    _push_to_main(setup, "outside")  # main moves after the running fetch started
+    ttl = [threading.Thread(target=repo.refresh, args=(60,), name=f"ttl{i}") for i in range(5)]
+    for t in ttl:
+        t.start()
+    for t in ttl:
+        t.join(5)
+    assert not any(t.is_alive() for t in ttl)  # they returned while the slow fetch ran
+    merge = threading.Thread(target=repo.refresh, args=(0,), name="merge")
+    merge.start()
+    time.sleep(0.2)
+    release.set()
+    slow.join(10)
+    merge.join(10)
+    assert calls == ["slow", "merge"] and repo.sha() == git(remote, "rev-parse", "main")
+
+
+def test_update_refs_writes_both_refs_at_once(setup):
+    world, clone, _remote = setup
+    _module(clone, "weather", None)
+    rec = submit(world, clone)
+    pr, head = rec["pr"], rec["head_sha"]
+    assert world.repo.sha(f"pr:{pr}") == head
+    assert world.repo.git("rev-parse", f"refs/flock/pr/{pr}/{head}") == head
+    main = world.repo.sha()
+    world.repo.update_refs((f"refs/pr/{pr}", main), (f"refs/flock/pr/{pr}/{main}", main))
+    assert world.repo.sha(f"pr:{pr}") == main == world.repo.git("rev-parse", f"refs/flock/pr/{pr}/{main}")
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):

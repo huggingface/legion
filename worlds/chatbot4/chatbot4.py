@@ -1247,8 +1247,7 @@ class Chatbot4World(World):
                             self.last_create = max(self.last_create, time.monotonic())
                     sha, main = self._land(agent, snapshot, base, title, branch_ref, pr, sha, main,
                                            started, slot)
-            self.repo.update_ref(f"refs/pr/{pr}", sha)
-            self.repo.update_ref(f"refs/flock/pr/{pr}/{sha}", sha)
+            self.repo.update_refs((f"refs/pr/{pr}", sha), (f"refs/flock/pr/{pr}/{sha}", sha))
             return pr, sha, main, old_head
         raise ToolError("main kept moving while opening the PR; open it again", "busy")
 
@@ -1539,8 +1538,7 @@ class Chatbot4World(World):
                         with _timed(steps, "push"):
                             self._lease_push(agent, pr, new, f"refs/pr/{pr}", head, time.monotonic())
                         with _timed(steps, "update_ref"):  # waits for refs_lock
-                            self.repo.update_ref(f"refs/pr/{pr}", new)
-                            self.repo.update_ref(f"refs/flock/pr/{pr}/{new}", new)
+                            self.repo.update_refs((f"refs/pr/{pr}", new), (f"refs/flock/pr/{pr}/{new}", new))
                         with self.lock:  # reviews stay: they match the rebased head by patch-id
                             rec.update(base_sha=main, head_sha=new)
                             self._dirty("prs", pr)
