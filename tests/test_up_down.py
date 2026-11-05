@@ -282,3 +282,22 @@ def test_a_controller_with_no_job_a_local_one_or_one_with_other_swarms_is_kept(a
                                       "compute": "local"})
     store.put_swarm(local, clock().timestamp())  # release frees a local run's workers only
     assert ops.down(api, "loc")["kept"].startswith("a local run keeps its controller")
+
+
+def test_launch_hold_starts_the_jobs_held_and_creates_or_resumes_nothing(slurm_run, monkeypatch, store):
+    r = slurm_run
+    api = Client.for_run(r.run, need_host=False)
+    _start_jobs_on_first_poll(monkeypatch, r.run)
+    ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file, preflight=False)
+    with pytest.raises(SpecError, match="already serves this run"):  # its controller answers
+        ops.launch(api, read_spec(r.spec_file), r.spec_file, hold=True)
+    assert ops.stop(api, "demo", release=True)["down"]["ended"]
+    r.calls.write_text("")
+    api = Client.for_run(r.run, need_host=False)
+    _start_jobs_on_first_poll(monkeypatch, r.run)
+    done = ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file, hold=True)
+    assert [x.split()[2] for x in _log(r.calls)] == ["flock-world-run", "flock-ctl-run"]
+    assert (r.run / "controller.hold").is_file()  # controller.sbatch: FLOCK_HOLD_ON_START=1
+    assert set(done["held"]["held"]["types"]) == set(store.get_swarm("demo")["spec"].types)
+    assert "resumed" not in done and "status" not in done
+    assert store.swarm_flags("demo")["released"]  # still released: `flock launch` lifts it

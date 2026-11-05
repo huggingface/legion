@@ -413,13 +413,14 @@ class Health:
                     f.write(json.dumps({"ts": now, "body": small}, sort_keys=True) + "\n")
 
     def latest(self, swarm: str) -> dict[str, Any] | None:
-        """The newest 30 s sample, else (after a restart) the newest stored slim one."""
+        """The newest 30 s sample, else (after a restart) the newest stored slim one, marked
+        `before_restart`: this controller has not taken one yet."""
         with self._lock:
             mem = self.samples.get(swarm)
             if mem:
                 return mem[-1]
         rows = self.store.health_samples(swarm, "5m", limit=1)
-        return rows[0] if rows else None
+        return {**rows[0], "before_restart": True} if rows else None
 
     def history(self, swarm: str, since: float) -> list[dict[str, Any]]:
         with self._lock:
@@ -499,7 +500,9 @@ class Health:
         types: dict[str, Any] = {}
         baseline = self._since or now
         agents = self.store.list_agents(swarm)
-        states = {a["name"]: agent_state(a, workers.get(a["worker"]), now).value for a in agents}
+        lv = spec.compute.liveness()
+        states = {a["name"]: agent_state(a, workers.get(a["worker"]), now, lv).value
+                  for a in agents}
         pending = self.store.pending_counts(swarm)
         if prev_tick and now > prev_tick:
             self._sample_states(swarm, agents, states, pending, min(now - prev_tick, 2 * SAMPLE_S),

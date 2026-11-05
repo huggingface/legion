@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
 
-from flock.controller.jobs import FakeJobsClient
+from flock import status as fs
+from flock.controller.jobs import FakeJobsClient, JobState
 from flock.controller.reconcile import (
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
@@ -23,6 +24,7 @@ from flock.models import (
     AgentState,
     AssignCommand,
     Command,
+    ComputeSpec,
     DrainCommand,
     UnassignCommand,
     WorkerHeartbeat,
@@ -34,6 +36,7 @@ from .conftest import TOKEN, make_spec
 
 CMD = TypeAdapter(Command)
 W0, W1 = "demo-researcher-w0000", "demo-researcher-w0001"
+LV = ComputeSpec().liveness()  # make_spec's hf-jobs defaults: unknown 90 s, dead 180 s
 
 
 def queued(store: Store, wid: str) -> list:
@@ -119,17 +122,17 @@ def test_heartbeat_updates_states(store, jobs, clock, tick):
     store.put_swarm(make_spec(), 0)
     tick()
     w = store.get_worker(W0)
-    assert worker_state(w, clock().timestamp()) == WorkerState.launching
-    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp()) == "unknown"
+    assert worker_state(w, clock().timestamp(), LV) == WorkerState.launching
+    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp(), LV) == "unknown"
     clock.advance(20)
     heartbeat(
         store, clock, W0, [("researcher-0000", "working", "t-1"), ("researcher-0001", "idle", None)]
     )
     now = clock().timestamp()
     w = store.get_worker(W0)
-    assert worker_state(w, now) == WorkerState.running
-    assert agent_state(store.get_agent("researcher-0000"), w, now) == AgentState.working
-    assert agent_state(store.get_agent("researcher-0001"), w, now) == AgentState.idle
+    assert worker_state(w, now, LV) == WorkerState.running
+    assert agent_state(store.get_agent("researcher-0000"), w, now, LV) == AgentState.working
+    assert agent_state(store.get_agent("researcher-0001"), w, now, LV) == AgentState.idle
     assert store.get_agent("researcher-0000")["turn_id"] == "t-1"
 
 
@@ -140,11 +143,11 @@ def test_unknown_and_dead_by_age(store, jobs, clock, tick):
     a = store.get_agent("researcher-0000")
     t = clock().timestamp()
     w = store.get_worker(W0)
-    assert agent_state(a, w, t + 60) == AgentState.idle
-    assert agent_state(a, w, t + 91) == AgentState.unknown
-    assert worker_state(w, t + 91) == WorkerState.unknown
-    assert agent_state(a, w, t + 181) == AgentState.dead
-    assert worker_state(w, t + 181) == WorkerState.dead
+    assert agent_state(a, w, t + 60, LV) == AgentState.idle
+    assert agent_state(a, w, t + 91, LV) == AgentState.unknown
+    assert worker_state(w, t + 91, LV) == WorkerState.unknown
+    assert agent_state(a, w, t + 181, LV) == AgentState.dead
+    assert worker_state(w, t + 181, LV) == WorkerState.dead
 
 
 def test_unresponsive_worker_is_cancelled_and_relaunched(store, jobs, clock, tick):
@@ -174,7 +177,7 @@ def test_crash_relaunch_restores_and_resumes_interrupted(store, jobs, clock, tic
     assert "crash" in kinds(actions) and "launch" not in kinds(actions)
     w = store.get_worker(W0)
     assert w["crashes"] == 1 and w["consecutive_crashes"] == 1 and w["job_id"] is None
-    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp()) == "dead"
+    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp(), LV) == "dead"
     evs = store.read_events("researcher-0000", 0)
     assert [e["type"] for e in evs] == ["turn_interrupted"] and evs[0]["turn_id"] == "t-9"
     assert store.read_events("researcher-0001", 0) == []
@@ -229,6 +232,19 @@ def test_drained_completed_is_planned_restart(store, jobs, clock, tick):
     jobs.set_stage(jobs.job_for(W0), "COMPLETED")
     actions = tick()  # draining workers are inspected even with a fresh heartbeat
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
+
+
+def test_drained_completed_in_a_released_swarm_ends(store, jobs, clock, tick):
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    store.put_swarm_flags("demo", {"released": {"since": 0, "reason": "", "by": "op"}})
+    assert "release" in kinds(tick())  # the drain
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)], draining=True)
+    jobs.set_stage(jobs.job_for(W0), "COMPLETED")
+    assert kinds(tick()) == ["end"]  # no restart, no launch
+    (ev,) = [e for e in store.read_events("_swarm.demo", 0) if e["type"] == "end"]
+    assert fs.normalise(ev, "demo")["name"] == "worker.ended" and ev["data"]["detail"] == "COMPLETED"
 
 
 def test_completed_without_drain_is_a_crash(store, jobs, clock, tick):
@@ -379,6 +395,21 @@ def test_job_checks_are_bounded(store, jobs, clock, tick):
     clock.advance(16)
     tick()
     assert jobs.inspects == 5 and jobs.lists == 1  # few left: inspect them one by one
+
+
+def test_jobs_missing_from_the_batch_listing_are_inspected(store, jobs, clock, tick, monkeypatch):
+    store.put_swarm(make_spec(researcher={"replicas": 30, "agents_per_worker": 1}), 0)
+    tick()
+    for job_id in list(jobs.states):  # ended long ago: gone from the listing, sacct knows
+        jobs.states[job_id] = JobState("DELETED")
+    monkeypatch.setattr(jobs, "list", lambda labels, *, namespace: [])
+    clock.advance(70)
+    tick()
+    assert jobs.inspects == 30
+    assert all(w["job_id"] is None for w in store.list_workers("demo"))
+    clock.advance(600)  # past the crash backoff
+    tick()
+    assert len(jobs.launches) == 60
 
 
 def test_hub_errors_do_not_break_the_pass(store, jobs, clock, tick, monkeypatch):
@@ -677,3 +708,16 @@ def test_no_nudge_when_type_has_no_resume_prompt(store, jobs, clock, tick):
     for _ in range(3):
         assert "nudge" not in _stuck_tick(store, clock, tick, 60)
     assert store.prompts_for_worker(W0) == []
+
+
+def test_a_failed_batch_listing_skips_the_pass_without_inspecting(store, jobs, clock, tick, monkeypatch):
+    store.put_swarm(make_spec(researcher={"replicas": 30, "agents_per_worker": 1}), 0)
+    tick()
+
+    def boom(labels, *, namespace):
+        raise RuntimeError("slurmctld busy")
+    monkeypatch.setattr(jobs, "list", boom)
+    clock.advance(70)
+    tick()
+    assert jobs.inspects == 0
+    assert all(w["job_id"] for w in store.list_workers("demo"))  # nothing relaunched

@@ -106,7 +106,8 @@ job checks `WORKER_MEM / WORKER_CPUS` against `SLURM_MAX_MEM_PER_CPU_MB` and han
 `flock init` read `FLOCK_SLURM_MAX_CPUS/_MEM` as they are (a size over them is refused).
 `cluster.env` is sourced as shell by jobs that hold secrets: it must be owned by the job's user
 and not group- or world-writable (the jobs refuse it otherwise). The job scripts read the paths, the
-image and the mounts. Without a partition anywhere, sbatch gets no `-p`.
+image and the mounts. Without a partition anywhere, sbatch gets no `-p`. `flock init` layers
+`cluster.env`, then `SECRETS_FILE` (owner-only, mode 600 or 400, else a failed check), then `run.env`, as the jobs do, for its board, provider and bucket checks.
 
 ## The launch contract
 
@@ -192,6 +193,7 @@ compute:
   container_image: null      # FLOCK_SLURM_CONTAINER_IMAGE -> FLOCK_CONTAINER_IMAGE
   max_cpus: null             # FLOCK_SLURM_MAX_CPUS (a profile key)
   max_mem: null              # FLOCK_SLURM_MAX_MEM (a profile key)
+  worker_dead_after: 180s    # no env; also worker_unknown_after, crash_backoff (docs/live.md)
   types:                     # per type: partition, cpus, mem, time, container_root
     interviewer: {cpus: 2, mem: 3800M}
 ```
@@ -275,7 +277,8 @@ crashlooping). The new job registers with a fresh incarnation (the old process g
 exits without syncing), restores every agent from the bucket, and the interrupted agents get
 the type's `resume_prompt`. Without the flag (a hard kill), the unrequested `CANCELLED` (or
 `PREEMPTED`, `NODE_FAIL`, exit 75) gives the same planned restart once the job is checked
-(after 90 s of silence); `TIMEOUT` is planned as before.
+(after `compute.worker_unknown_after` of silence, 90 s by default); `TIMEOUT` is planned as
+before.
 
 The controller and `python -m flock.world serve` treat SIGUSR1 like SIGTERM, once (one final state push
 for the controller).

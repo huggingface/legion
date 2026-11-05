@@ -780,7 +780,7 @@ class Worker:
         if (refresh := getattr(self.client, "refresh_url", None)) is not None:
             refresh()  # a controller move is picked up here even before any call fails
         try:  # retried inside the client for most of an interval: the controller declares a
-            # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
+            # worker dead only after worker_dead_after without any heartbeat, poll or event post
             resp = await self.client.heartbeat(self.heartbeat_payload(),
                                                budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
             if isinstance(resp, dict) and not self.draining:

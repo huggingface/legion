@@ -225,7 +225,8 @@ class LoopEngine:
         self.send = send
         self.clock = clock
         self.capped = capped or (lambda spec, t: False)
-        self.turn_state = turn_state or agent_state
+        self.turn_state = turn_state or (
+            lambda a, w, now: agent_state(a, w, now, store.liveness(a["swarm"])))
         self._lock = threading.RLock()
         # agent -> first, last, why, events: queued wakes not yet sent
         self._wakes: dict[str, tuple[float, float, list[str], int]] = {}

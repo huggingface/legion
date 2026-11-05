@@ -95,14 +95,14 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
 
 
 # `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
-COMMS_WAKES = {"comms.mention": "mention", "comms.thread": "thread"}
+COMMS_WAKES = {f"comms.{k}": k for k in ("mention", "thread", "dm", "channel")}  # = controller.api.COMMS_WAKE_EVENTS values
 
 
 def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
     """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
     kind = COMMS_WAKES.get(src)
     if kind is None:
-        return "no feeder in this version (comms.mention and comms.thread are fed)"
+        return "no feeder in this version (comms.mention, comms.thread, comms.dm and comms.channel are fed)"
     if spec.comms is None or not comms_tools(ts, spec.comms):
         return ("no comms feeder: the type is not on the board (set `comms: true` and the "
                 "swarm-level `comms:` block)")
@@ -210,7 +210,7 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
            source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None,
            preflight: bool | None = None, strict: bool = False,
            checked: tuple[Any, list[str]] | None = None,
-           say: Callable[[str], None] = lambda _: None) -> dict[str, Any]:
+           say: Callable[[str], None] = lambda _: None, hold: bool = False) -> dict[str, Any]:
     """`flock launch` (docs/live.md "Lifecycle") on a spec read with `read_spec`. First, when
     no controller answers (always with `compute: local`): `up` starts the run's controller
     (and world), which restores its checkpoint. Missing on the controller: created; refused
@@ -224,18 +224,37 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
     do failed controller calls. `checked`: `check_spec`'s result when the caller already has
     it. `env_files` also go to `up`; `say` gets its waiting lines. A local run is ended again
     when the launch fails; jobs are not (a refused resume needs the controller for
-    `flock update`)."""
+    `flock update`). `hold` (`flock launch --hold`, Slurm): only start the run's controller
+    and world, the controller restoring every swarm held and released (as `flock stop
+    --release`), so `flock update` can change the spec before any worker starts; nothing is
+    created or resumed. "held" is the swarm's holds, or None when the controller has no such
+    swarm. Refused when a controller already answers."""
     bundle, warnings = checked or check_spec(spec, spec_file)
     done: dict[str, Any] = {"warnings": warnings}
     try:
         try:
+            if hold and spec.compute.kind != "slurm":
+                raise SpecError([("--hold: Slurm runs only (their controller job restores a "
+                                 "checkpoint)")], done)
+            if hold and api.answers():
+                raise SpecError([(f"--hold: a controller already serves this run: `flock stop "
+                                 f"{spec.swarm} --release` first")], done)
             if spec.compute.kind == "local" or not api.answers():
                 try:
-                    started = up(api, spec, spec_file, env_files, say=say)
+                    started = up(api, spec, spec_file, env_files, say=say, hold=hold)
                 except SpecError as e:
                     raise SpecError(e.lines, done) from None
                 if started:
                     done["local" if spec.compute.kind == "local" else "up"] = started
+            if hold:
+                try:
+                    status = api.swarm(spec.swarm)["status"]
+                    done["held"] = {"swarm": spec.swarm, "held": status["held"]}
+                except ClientError as e:
+                    if e.status != 404:
+                        raise
+                    done["held"] = None
+                return done
             return _launch(api, spec, spec_file, bundle, done, source, types, agents,
                            preflight, strict)
         except ClientError as e:
@@ -538,7 +557,7 @@ def _hf_api(env: Mapping[str, str]):  # tests replace it
 
 
 def up(api: Client, spec: SwarmSpec, spec_file: str, env_files=(), *,
-       say: Callable[[str], None] = lambda _: None) -> dict | None:
+       say: Callable[[str], None] = lambda _: None, hold: bool = False) -> dict | None:
     """Start what serves `spec` (`flock launch` when no controller answers). `compute: local`:
     `start_local` (the controller starts the world); its run, or None. `slurm`: sbatch the
     run directory's slurm/world.sbatch (when the spec has a world command) and
@@ -548,16 +567,18 @@ def up(api: Client, spec: SwarmSpec, spec_file: str, env_files=(), *,
     `flock`), unless the group has one. Then wait (UP_WAIT_S; `say` gets a line per check)
     until the controller answers, and the world its /manifest (hosts/world.host), and point
     `api` at the controller. It restores its checkpoint on start. Returns {"jobs": role -> job,
-    "url"}. SpecError when it cannot start them or they do not come up."""
+    "url"}. SpecError when it cannot start them or they do not come up. `hold` (Slurm): the
+    controller job restores every swarm held (<run dir>/controller.hold; refused when that job
+    is already queued: it would start without it)."""
     if spec.compute.kind == "local":
         return start_local(spec, spec_file, env_files, api.env)
     vals = _values(api, env_files)
     if spec.compute.kind == "slurm":
-        return _up_slurm(api, spec, vals, say)
+        return _up_slurm(api, spec, vals, say, hold)
     return _up_hf(api, spec, vals, say)
 
 
-def _up_slurm(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say) -> dict:
+def _up_slurm(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say, hold=False) -> dict:
     from flock.rundir import run_context
 
     d = _run_dir(api)
@@ -566,6 +587,11 @@ def _up_slurm(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say) -> dic
                          "`flock init RUN_DIR --from FOLDER`, then `flock --run RUN_DIR launch ...`"])
     roles = [*(["world"] if spec.world and spec.world.command else []), "controller"]
     jobs = {r: _job_name(r, d) for r in roles}
+    if hold:  # controller.sbatch reads it at start and removes it once held
+        if _state(jobs["controller"]):
+            raise SpecError([(f"--hold: {jobs['controller']} is already queued and would start "
+                              "without the hold: `scancel -n` it first")])
+        (d / "controller.hold").write_text("flock launch --hold\n")
     for role, name in jobs.items():
         if _state(name):
             continue  # still pending or starting: wait for it

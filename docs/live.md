@@ -89,6 +89,7 @@ $ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
 | free the workers, keep everything | `flock stop S --release` |
 | end the loops with their final round | `flock stop S --final [--type T]` |
 | continue after either | `flock launch S` (or `flock launch FOLDER`; `--type`/`--agent` lift one hold) |
+| bring a released Slurm run back held, to change its spec first | `flock launch FOLDER --hold`, `flock update FOLDER`, then `flock launch FOLDER` |
 
 `flock launch FOLDER` creates the swarm when the controller does not have it (with
 `If-None-Match: *`: of two launches racing, one creates and the other gets 412). When it has
@@ -113,6 +114,11 @@ controller the run has no job for, or one serving other swarms that are not rele
 running. `flock launch FOLDER` with no controller answering (`ops.up`) starts them again, waits
 until the controller answers (it restores its checkpoint) and the world serves, then creates or
 resumes.
+`flock launch FOLDER --hold` (Slurm, no controller up) stops there: it writes
+`RUN_DIR/controller.hold`, and the controller job started with it restores every swarm held and
+released, as `flock stop --release` leaves it (`FLOCK_HOLD_ON_START=1`), pushes that checkpoint,
+then removes the file (a later requeue holds nothing). No worker starts, so `flock update` can
+change the spec first (a new provider URL); a plain `flock launch` then resumes.
 
 A controller that restarts restores its swarms from its own checkpoint (`state.db` and
 `events/<swarm>/`, pushed every 60 s to `FLOCK_STATE_URL`; `FLOCK_STATE_RESTORE=0` skips it).
@@ -139,7 +145,7 @@ it.
 Besides `spec_applied`, the swarm stream (`flock status <swarm> --events`, names in docs/health.md "Events") carries what the reconcile
 loop does, as `{target, detail}`: `launch`, `launch_failed`, `launch_refused`, `crash`
 (detail: stage, message, backoff), `crashloop`, `planned_restart` (job timeout, drain,
-preemption), `cancel`, `retire`, `remove_worker`. Per-agent placement
+preemption), `end` (the same in a released swarm: no relaunch), `cancel`, `retire`, `remove_worker`. Per-agent placement
 (`assign`, `unassign`) and conditions repeated every pass (`workers_full`, the launch rate
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).
@@ -195,6 +201,23 @@ A type with it runs its `turn_end` loop on the controller (docs/loop.md).
 
 Local runs: after editing the folder, run `flock update FOLDER`; there is no watch mode in the CLI yet.
 
+## Worker liveness
+
+How long the controller waits on a silent worker, set under `compute:` (durations such as
+`20s`, `2m`); unset keys take the backend's default. A worker is silent when neither a
+heartbeat, a command poll nor an event post arrives from it.
+
+| key | hf-jobs, slurm | local | meaning |
+|---|---|---|---|
+| `worker_unknown_after` | 90s | 15s | silent this long: the worker and its agents are `unknown` |
+| `worker_dead_after` | 180s | 30s | silent this long: `dead`; its job is cancelled and relaunched (a crash). Must be longer than `worker_unknown_after` |
+| `crash_backoff` | 30s | 2s | wait before relaunching a crashed slot, doubling per crash in a row (cap 15 min); also the first wait after a failed launch (cap 5 min) |
+
+The local defaults are 3 and 6 missed heartbeats at the local 5 s interval (the jobs ratio at
+30 s). A local worker is also checked on every reconcile pass, so a worker process that exits
+is a crash at once, without waiting for `worker_dead_after`. Raise the keys with a type's
+`HEARTBEAT_INTERVAL`, or for workers that block for long stretches.
+
 ## What takes effect when
 
 | change | takes effect |
@@ -207,7 +230,8 @@ Local runs: after editing the folder, run `flock update FOLDER`; there is no wat
 | `limits.budget_usd`, `limits.alive`, `spawn:` | at once (the controller) |
 | `replicas` | the next reconcile pass |
 | other type fields (`max_turns`, `max_budget_usd`, `tool_choice`, `turn_timeout`, ...) | the next turn boundary. A CLI harness takes the per-prompt limits, `model`, `env` and `secrets` at its next start, after `idle_grace` |
-| a type's `harness` (with agents), `compute`, `swarm` | refused |
+| `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
+| a type's `harness` (with agents), `compute.kind`, `swarm` | refused |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
 changes nothing until that turn ends. Changed type specs reach the workers in the

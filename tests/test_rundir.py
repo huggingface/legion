@@ -137,12 +137,14 @@ def test_slots_count_ramp_max_and_spawned_children(tmp_path):
     spec = {**SPEC, "types": {
         "lead": {**t, "replicas": 0, "workers": {"initial": 1},
                  "replicas_ramp": {"start": 1, "add": 1, "every": "1m", "max": 3}},
-        "helper": {**t, "replicas": 0, "workers": {"initial": 0, "max_extra": 2}}},
+        "helper": {**t, "replicas": 0, "workers": {"initial": 0, "max_extra": 2}},
+        "free": {**t, "replicas": 0, "replicas_ramp": {"start": 1, "add": 1, "every": "1m", "max": 9}}},
         "spawn": {"lead": {"types": {"helper": 2}}}}
     c = rundir.check_slots(_spec(tmp_path, spec))
     assert c.ok is False and sorted(c.lines) == [
         "OVER: type helper: 6 agents planned, 2 workers x 2 = 4 slots",
-        "OVER: type lead: 3 agents planned, 1 workers x 2 = 2 slots"]
+        "OVER: type lead: 3 agents planned, 1 workers x 2 = 2 slots",
+        "type free: 9 agents planned, workers unset: sized from agents"]
 
 
 def test_tokens_must_match(tmp_path):
@@ -358,6 +360,8 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert (run / "cluster.env").read_text() == prof.read_text()
     assert any("cluster.env" in c for c in rep.created)
     assert _by_name(rep)["spec"].detail.startswith("from-profile:")  # the profile fills ${VAR}s
+    text = (run / "run.env").read_text()  # its keys say the profile's value, not `default: `
+    assert "# compute.partition (cluster.env: cpu-spot)\n#SLURM_PARTITION=\n" in text
     scripts = sorted(p.name for p in rundir.SLURM_SCRIPTS.iterdir())
     assert sorted(p.name for p in (run / "slurm").iterdir()) == scripts  # the job scripts' copy
     (run / "slurm" / "world.sbatch").write_text("# edited\n")
@@ -373,8 +377,69 @@ def test_profile_is_copied_once_and_read_before_run_env(tmp_path, monkeypatch):
     assert files == [str(run / "cluster.env"), str(run / "run.env")]
     spec = read_spec(str(run / "experiment" / "spec.yaml"), files)
     assert spec.compute.partition == "cpu-spot" and spec.compute.cpus == 8
+    sec = tmp_path / "secrets.env"  # the profile's SECRETS_FILE: the checks see it, as the jobs do
+    sec.write_text("OPENAI_API_KEY=sk-hidden\nSWARM=from-secrets\n")
+    sec.chmod(0o600)
+    (run / "cluster.env").write_text(prof.read_text() + f"SECRETS_FILE={sec}\n")
+    seen = []
+    monkeypatch.setattr(rundir, "check_venv", lambda e: seen.append(dict(e)) or rundir.Check("venv", True, ""))
+    rep = rundir.init(run, env={})
+    assert seen[-1]["OPENAI_API_KEY"] == "sk-hidden" and "secrets file" not in _by_name(rep)
+    assert "sk-hidden" not in repr(rep)
+    sec.chmod(0o644)
+    rep = rundir.init(run, env={})
+    c = _by_name(rep)["secrets file"]
+    assert not c.ok and "mode 600" in c.detail and "OPENAI_API_KEY" not in seen[-1]
+    sec.chmod(0o600)  # the jobs source it with bash: a command runs, it is not a literal
+    sec.write_text("HF_TOKEN=$(printf %s tok-from-shell)\n")
+    rundir.init(run, env={})
+    assert seen[-1]["HF_TOKEN"] == "tok-from-shell"
+    sec.write_text("HF_TOKEN=tok-secret\nexit 3\n")
+    rep = rundir.init(run, env={})
+    c = _by_name(rep)["secrets file"]
+    assert not c.ok and "exited 3" in c.detail and "tok-secret" not in repr(rep)
+    sec.write_text("set -e\nHF_TOKEN=hf_abc&def\n")  # bash would echo "def: command not found"
+    c = _by_name(rundir.init(run, env={}))["secrets file"]
+    assert not c.ok and "def" not in c.detail.replace(str(sec), "").replace("bash exited", "")
+    sec.write_text("umask 077\nHF_TOKEN=tok-lenient\nexport OTHER=$CLUSTER_VAR\n")  # not NAME=value lines
+    (run / "cluster.env").write_text(prof.read_text() + f"CLUSTER_VAR=cv\nSECRETS_FILE={tmp_path}/${{SECNAME}}\n")
+    rep = rundir.init(run, env={"SECNAME": "secrets.env"})  # path expanded; cluster.env visible to the file
+    assert "secrets file" not in _by_name(rep) and seen[-1]["HF_TOKEN"] == "tok-lenient"
+    assert seen[-1]["OTHER"] == "cv"
     with pytest.raises(ValueError, match="no such file"):
         rundir.init(run, profile=tmp_path / "missing.env", env={})
+
+
+def test_spec_keys_never_show_a_secret_from_cluster_env():
+    data = {"a": "${SLURM_PARTITION:-}", "b": "${MY_API_KEY}", "c": "${INV:-x}",
+            "comms": {"invite_env": "INV"}}
+    cluster = {"SLURM_PARTITION": "cpu-spot", "MY_API_KEY": "sk-1", "INV": "inv-1"}
+    assert {n: c for n, (_, c) in rundir.spec_keys(data, cluster).items()} == {
+        "SLURM_PARTITION": "a (cluster.env: cpu-spot)", "MY_API_KEY": "b (cluster.env: set, not shown)",
+        "INV": "c (cluster.env: set, not shown)", "HF_TOKEN": "secret: bucket sync and the Hub"}
+    assert rundir.spec_keys(data)["SLURM_PARTITION"] == ("", "a (default: )")
+
+
+def test_cluster_env_is_0644_whatever_the_umask_and_the_doctor_checks_it_like_the_jobs(
+        tmp_path, monkeypatch):
+    src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
+    prof = tmp_path / "site.env"
+    prof.write_text("SLURM_PARTITION=cpu-spot\n")
+    monkeypatch.setattr(rundir, "check_capacity", lambda spec, env: rundir.Check("slurm capacity", True))
+    old = os.umask(0o002)  # a shared login node's
+    try:
+        rep = rundir.init(run, src, profile=prof, env={})
+    finally:
+        os.umask(old)
+    f = run / "cluster.env"
+    assert stat.S_IMODE(f.stat().st_mode) == 0o644 and _by_name(rep)["cluster.env"].ok
+    f.chmod(0o664)
+    c = _by_name(rundir.init(run, env={}))["cluster.env"]
+    assert c.ok is False and f"chmod go-w {f}" in c.detail
+    f.chmod(0o644)
+    monkeypatch.setattr(os, "getuid", lambda: f.stat().st_uid + 1)
+    c = rundir.check_cluster_env(f)
+    assert c.ok is False and "not you" in c.detail
 
 
 def test_slurm_capacity_from_a_fake_sinfo(tmp_path):

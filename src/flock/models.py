@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
@@ -83,8 +83,8 @@ class AgentState(StrEnum):
     working = "working"  # a harness process is running a turn
     idle = "idle"  # no process; idle_since set
     stuck = "stuck"  # a turn exceeded its timeout and was killed; cleared on next turn
-    unknown = "unknown"  # worker heartbeat older than 90 s
-    dead = "dead"  # heartbeat older than 180 s, or job terminal
+    unknown = "unknown"  # heartbeat older than compute.worker_unknown_after (per-backend default)
+    dead = "dead"  # heartbeat older than compute.worker_dead_after, or job terminal
 
 
 class WorkerState(StrEnum):
@@ -362,14 +362,12 @@ class CommsSpec(_Removable):
     # `<template namespace>/board-<swarm>`) and fills BOARD_URL and the invite (docs/comms.md).
     # A url: the same as `url:`. Unset: `url` names an existing board.
     board: str | None = None
-    template: str | None = None  # a multi-board msgboard Space; required with `space`
+    template: str | None = None  # a msgboard Space (one board at its root); required with `space`
     space: str | None = None
     # Space secret -> the run.env (or environment) name holding its value, e.g. {HF_TOKEN:
     # BOARD_BUCKET_TOKEN}: a token scoped to the board's bucket, never the operator's own.
     space_secrets: dict[str, str] = Field(default_factory=dict)
-    # Space variables over flock's (MSGBOARD_BOARDS, MSGBOARD_REPLICA: `<bucket>/board`, and
-    # BOARD_READ_TOKEN: public with `dashboard:`); "" blanks one. Sign-in and ownership
-    # (MSGBOARD_OWNER_HF_USERNAME, MSGBOARD_HF_ORGANIZATIONS, ...) are only what is set here.
+    # Space variables over flock's (MSGBOARD_REPLICA: `<bucket>/board/<swarm>`); "" blanks one.
     space_variables: dict[str, str] = Field(default_factory=dict)
     space_hardware: str = "cpu-basic"  # the Hub requires one to duplicate a Space
     invite_env: str  # secret holding a multi-use agent invite (the code never goes in the spec)
@@ -459,11 +457,12 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
 
 class DashboardSpec(_Removable):
     """Swarm-level `dashboard:` (docs/dashboard.md): `flock init` writes the run's flock-overview
-    row to `<registry>/runs/<swarm>.json`. The other row keys are derived from the spec."""
+    row to `<registry>/runs/<id>.json` (id: default the swarm). The other row keys are derived from the spec."""
 
     model_config = {"extra": "forbid"}
 
     registry: str  # hf://buckets/<ns>/<bucket>, the bucket the overview reads runs/ from
+    id: str | None = None  # the overview row's id (runs/<id>.json); default: the swarm name
     name: str | None = None  # default: the swarm name
     title: str | None = None
     setup: str | None = None  # one line
@@ -955,9 +954,11 @@ class ComputeSpec(_Removable):
     (`flock launch` runs them on this machine). `slurm`: one `sbatch` job per worker (docs/slurm.md).
     The spec also accepts the short form `compute: local`.
 
-    The other keys are for `slurm` and win over the controller's FLOCK_SLURM_* env, which only
-    fills unset keys (then built-in defaults). `types` sets
-    per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less than an agent)."""
+    `worker_unknown_after`, `worker_dead_after` and `crash_backoff` are for every backend
+    (docs/live.md "Worker liveness"). The other keys are for `slurm` and win over the
+    controller's FLOCK_SLURM_* env, which only fills unset keys (then built-in defaults).
+    `types` sets per-type `cpus`/`mem`/`time`/`partition` (an interviewer type needs less
+    than an agent)."""
 
     model_config = {"extra": "forbid"}
 
@@ -992,6 +993,38 @@ class ComputeSpec(_Removable):
     # controller's FLOCK_SLURM_MAX_CPUS/_MEM, from the cluster profile, still apply at launch)
     max_cpus: int | None = Field(default=None, ge=1)
     max_mem: str | None = None
+    # worker liveness (docs/live.md "Worker liveness"); None: the backend's default (`liveness`)
+    worker_unknown_after: str | None = None
+    worker_dead_after: str | None = None
+    crash_backoff: str | None = None
+
+    @field_validator("worker_unknown_after", "worker_dead_after", "crash_backoff")
+    @classmethod
+    def _timing(cls, v: str | None) -> str | None:
+        return None if v is None else _positive_duration(v)
+
+    @model_validator(mode="after")
+    def _check_liveness(self) -> ComputeSpec:
+        lv = self.liveness()
+        hb = (LOCAL_HEARTBEAT_INTERVAL if self.kind == "local"
+              else HEARTBEAT_INTERVAL).total_seconds()
+        if lv.unknown_after < 2 * hb:  # a healthy worker would look silent and be relaunched
+            raise ValueError(f"worker_unknown_after ({lv.unknown_after:g}s) must be at least "
+                             f"{2 * hb:g}s: two heartbeats at the {self.kind} interval ({hb:g}s)")
+        if lv.unknown_after >= lv.dead_after:
+            dflt = lambda v: "" if v else " (default)"
+            raise ValueError(
+                f"worker_unknown_after ({lv.unknown_after:g}s{dflt(self.worker_unknown_after)}) "
+                f"must be shorter than worker_dead_after "
+                f"({lv.dead_after:g}s{dflt(self.worker_dead_after)})")
+        return self
+
+    def liveness(self) -> Liveness:
+        """Worker liveness timings in seconds: the keys set here, else the backend's defaults."""
+        dflt = (LOCAL_LIVENESS if self.kind == "local"
+                else (UNKNOWN_AFTER, DEAD_AFTER, CRASH_BACKOFF))
+        keys = (self.worker_unknown_after, self.worker_dead_after, self.crash_backoff)
+        return Liveness(*(parse_duration(v or d).total_seconds() for v, d in zip(keys, dflt)))
 
 
 class SwarmSpec(BaseModel):
@@ -1131,6 +1164,16 @@ class SwarmSpec(BaseModel):
     @model_validator(mode="after")
     def _job_fields(self) -> SwarmSpec:
         kind = self.compute.kind
+        unknown = self.compute.liveness().unknown_after
+        for name, ts in self.types.items():  # a type's own HEARTBEAT_INTERVAL slows its heartbeats
+            try:
+                hb = float(ts.env["HEARTBEAT_INTERVAL"])
+            except (KeyError, ValueError):
+                continue
+            if 2 * hb > unknown:
+                raise ValueError(f"types.{name}.env.HEARTBEAT_INTERVAL ({hb:g}s): two heartbeats "
+                                 f"({2 * hb:g}s) exceed worker_unknown_after ({unknown:g}s); "
+                                 f"raise worker_unknown_after or lower the interval")
         if kind == "hf-jobs":
             missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
             if missing:
@@ -2009,8 +2052,23 @@ class PreflightReport(BaseModel):
 # --------------------------------------------------------------------------- constants
 
 HEARTBEAT_INTERVAL = timedelta(seconds=30)
+LOCAL_HEARTBEAT_INTERVAL = timedelta(seconds=5)  # compute local: agent states within seconds
+# Worker liveness defaults; a spec's `compute:` overrides them (ComputeSpec.liveness).
 UNKNOWN_AFTER = timedelta(seconds=90)
 DEAD_AFTER = timedelta(seconds=180)
+CRASH_BACKOFF = timedelta(seconds=30)  # first relaunch wait, doubling per crash in a row
+# compute local: 3 and 6 missed local heartbeats, the jobs ratio; an exited worker
+# process is caught on the next reconcile pass anyway, so these only time out a hung one
+LOCAL_LIVENESS = (timedelta(seconds=15), timedelta(seconds=30), timedelta(seconds=2))
+
+
+class Liveness(NamedTuple):
+    """A swarm's worker liveness timings, in seconds (`ComputeSpec.liveness`)."""
+
+    unknown_after: float
+    dead_after: float
+    crash_backoff: float
+
 CRASHLOOP_THRESHOLD = 5
 LAUNCHES_PER_WINDOW = 400  # per 5-minute Hub rate-limit window, PRO assumption
 RATE_WINDOW = timedelta(minutes=5)

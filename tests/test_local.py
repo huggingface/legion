@@ -9,6 +9,7 @@ import io
 import json
 import os
 import random
+import re
 import sys
 import time
 from datetime import UTC, datetime
@@ -27,7 +28,7 @@ from flock.controller.local import LocalJobsClient
 from flock.controller.reconcile import Settings, reconcile
 from flock.controller.store import Store
 from flock.current import clear_current, read_current, write_current
-from flock.models import SwarmSpec
+from flock.models import ComputeSpec, SwarmSpec
 from flock.worker.main import Worker, WorkerConfig
 
 from .conftest import TOKEN, make_spec
@@ -81,6 +82,28 @@ def test_compute_local_short_and_long_form():
     with pytest.raises(ValueError):
         SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local", "x": 1},
                                   "types": {}})
+
+
+def test_liveness_defaults_per_backend_and_overrides():
+    assert make_spec().compute.liveness() == ComputeSpec(kind="slurm").liveness() == (90, 180, 30)
+    assert local_spec().compute.liveness() == (15, 30, 2)
+    assert local_spec().model_dump(mode="json")["compute"] == {"kind": "local"}  # stored as before
+    c = ComputeSpec(kind="local", worker_dead_after="1m", crash_backoff="500ms")
+    assert c.liveness() == (15, 60, 0.5)
+    with pytest.raises(ValueError, match=re.escape("(90s (default)) must be shorter than "
+                                                   "worker_dead_after (60s)")):
+        ComputeSpec(kind="slurm", worker_dead_after="60s")
+    # under two heartbeats (30 s jobs, 5 s local) every healthy worker would look silent
+    with pytest.raises(ValueError, match="at least 60s: two heartbeats at the hf-jobs"):
+        ComputeSpec(worker_unknown_after="10s")
+    with pytest.raises(ValueError, match="at least 10s"):
+        ComputeSpec(kind="local", worker_unknown_after="5s")
+
+
+def test_a_types_heartbeat_interval_is_checked_against_unknown_after():
+    with pytest.raises(ValueError, match=r"types\.w\.env\.HEARTBEAT_INTERVAL \(30s\).*60s.*\(15s\)"):
+        local_spec(env={"HEARTBEAT_INTERVAL": "30"})
+    assert local_spec(env={"HEARTBEAT_INTERVAL": "7"}).types["w"].env["HEARTBEAT_INTERVAL"] == "7"
 
 
 # --------------------------------------------------------------------------- controller check
@@ -206,6 +229,25 @@ def test_reconcile_launches_local_processes_with_the_job_env(tmp_path):
         assert env["WORKER_ID"] == wid and env["SWARM"] == "loc" and env["TYPE"] == "w"
         assert env["FLOCK_URL"] == "http://127.0.0.1:5" and env["FLOCK_TOKEN"] == TOKEN
         assert env["FAKE_KEY"] == "k" and env["BUCKET"] == "" and env["WORKER_INCARNATION"]
+    jobs.kill_all(grace=1)
+    store.close()
+
+
+def test_killed_local_worker_is_relaunched_within_seconds(tmp_path):
+    store = Store(tmp_path / "data")
+    jobs = LocalJobsClient(root=tmp_path / "run", command=_script("import time; time.sleep(60)"),
+                           base_env={"PATH": os.environ["PATH"]})
+    settings = Settings(token=TOKEN, secret_source={})
+    store.put_swarm(local_spec(agents_per_worker=2), time.time())
+    reconcile(store, jobs, datetime.now(UTC), settings)
+    (job,) = jobs.alive()
+    jobs.procs[job].popen.kill()  # never heartbeated: only the process exit tells
+    start, kinds = time.monotonic(), []
+    while "launch" not in kinds:
+        assert time.monotonic() - start < 5, kinds
+        time.sleep(0.2)
+        kinds += [a.kind for a in reconcile(store, jobs, datetime.now(UTC), settings)]
+    assert kinds[0] == "crash" and len(jobs.alive()) == 1 and jobs.alive() != [job]
     jobs.kill_all(grace=1)
     store.close()
 

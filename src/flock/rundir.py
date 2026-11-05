@@ -5,8 +5,9 @@ run's env file and controller. Nothing here prints; secret values never appear i
     RUN_DIR/experiment/   a copy of the experiment folder (links followed): what is launched
     RUN_DIR/cluster.env   a copy of the cluster profile (--profile): read before run.env
     RUN_DIR/run.env       mode 600: every ${VAR} the spec reads, the secrets it names, per-run tokens
-    RUN_DIR/board.env     mode 600, `comms.board: space` only: BOARD_OPERATOR_TOKEN. Not in
-                          run.env, which every job sources: workers never see it
+    RUN_DIR/board.env     mode 600, `comms.board: space` only: BOARD_OPERATOR_TOKEN (the board's
+                          admin token) and BOARD_ADMIN_INVITE (a single-use admin invite link for
+                          the operator). Not in run.env, which every job sources: workers never see it
     RUN_DIR/logs/, hosts/ the jobs' logs and host files (hosts/controller.host, world.host)
     RUN_DIR/slurm/        `compute: slurm`: a copy of scripts/slurm (the job scripts `flock launch` submits)
 
@@ -18,12 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hmac
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from string import Template
 from typing import Any
 
 from flock.models import CommsSpec, SwarmSpec, board_url_default, load_spec_yaml, max_workers
@@ -93,9 +96,10 @@ def run_context(run_dir: str | Path) -> tuple[dict[str, str], list[str]]:
 
 # ---------------------------------------------------------------- what the spec reads
 
-def spec_keys(data: Any) -> dict[str, tuple[str | None, str]]:
+def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, tuple[str | None, str]]:
     """Name -> (default or None, one-line comment) for every ${VAR} in the raw spec's values
-    (comments in the file are not values), then every secret it names, in spec order."""
+    (comments in the file are not values), then every secret it names, in spec order. A key
+    `cluster` (cluster.env) sets is commented with its value there; a secret's is not shown."""
     out: dict[str, tuple[str | None, str]] = {}
     paths: dict[str, list[str]] = {}
 
@@ -115,16 +119,23 @@ def spec_keys(data: Any) -> dict[str, tuple[str | None, str]]:
                 walk(x, path)
 
     walk(data, "")
-    for name, (default, _) in out.items():
-        where = paths[name][0] + (f" (+{len(paths[name]) - 1} more)" if len(paths[name]) > 1 else "")
-        out[name] = (default, f"{where} (default: {default})" if default is not None
-                     else f"{where} (required: no default)")
     named = [("HF_TOKEN", "bucket sync and the Hub")]
     named += [(p.get("api_key_env"), f"providers.{n}.api_key_env")
               for n, p in (data.get("providers") or {}).items() if isinstance(p, dict)]
     named.append(((data.get("comms") or {}).get("invite_env"), "comms.invite_env"))
     named += [(s, f"types.{n}.secrets") for n, t in (data.get("types") or {}).items()
               if isinstance(t, dict) for s in t.get("secrets") or []]
+    cluster = cluster or {}
+    for name, (default, _) in out.items():
+        where = paths[name][0] + (f" (+{len(paths[name]) - 1} more)" if len(paths[name]) > 1 else "")
+        if name in cluster:
+            from flock.controller.localrun import SECRET_NAME
+
+            secret = name in TOKENS or SECRET_NAME.search(name) or name in {n for n, _ in named}
+            note = f"cluster.env: {'set, not shown' if secret else cluster[name]}"
+        else:
+            note = f"default: {default}" if default is not None else "required: no default"
+        out[name] = (default, f"{where} ({note})")
     for name, where in named:
         if isinstance(name, str) and "${" not in name and name not in out and name not in TOKENS:
             out[name] = (None, f"secret: {where}")
@@ -150,12 +161,13 @@ def _quote(v: str) -> str:
 
 
 def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
-                  rep: InitReport, derived: Mapping[str, str] | None = None) -> None:
+                  rep: InitReport, derived: Mapping[str, str] | None = None,
+                  cluster: Mapping[str, str] | None = None) -> None:
     """Create or complete run.env (mode 600): a missing key is appended, commented out when it
-    has no value (the spec's default then applies); `fill` (the --secrets file) sets keys that
-    are missing or commented out. A set key is never changed: a different `fill` value is
-    reported by name only. `derived`: values init works out (an absolute WORLD_DIR), written
-    like `fill`."""
+    has no value (the spec's default, or `cluster`'s value from cluster.env, then applies);
+    `fill` (the --secrets file) sets keys that are missing or commented out. A set key is never
+    changed: a different `fill` value is reported by name only. `derived`: values init works
+    out (an absolute WORLD_DIR), written like `fill`."""
     derived = derived or {}
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     if path.exists() and path.stat().st_mode & 0o077:
@@ -166,7 +178,7 @@ def write_run_env(path: Path, data: Any, folder: str, fill: Mapping[str, str],
         if m := _LINE.match(line):
             (commented if m[1] else set_keys).setdefault(m[2], i)
     current = read_env_file(path) if path.exists() else {}
-    keys = spec_keys(data)
+    keys = spec_keys(data, cluster)
     tokens = token_names(data)
     world_tok = next((current[n] for n in tokens[1:] if current.get(n)), secrets.token_urlsafe(32))
     new: list[str] = []
@@ -255,12 +267,26 @@ def copy_profile(src: Path | None, dst: Path, rep: InitReport) -> None:
         raise ValueError(f"--profile {src}: no such file")
     if not dst.exists():
         shutil.copyfile(src, dst)
+        dst.chmod(0o644)  # whatever the umask: the jobs refuse a group-writable one
         rep.created.append(f"{dst} (copy of {src})")
     elif dst.read_bytes() != src.read_bytes():
         rep.notes.append(f"{dst} differs from {src} (kept)")
 
 
 # ---------------------------------------------------------------- checks
+
+def check_cluster_env(path: Path) -> Check:
+    """cluster.env by the rule the Slurm jobs apply before they source it as shell
+    (scripts/slurm/common.sh): owned by this user, not group/world-writable."""
+    st = path.stat()
+    if st.st_uid != os.getuid():
+        return Check("cluster.env", False, f"{path}: owned by uid {st.st_uid}, not you: the "
+                     "jobs refuse it; remove it and rerun `flock init` with --profile")
+    if st.st_mode & 0o022:
+        return Check("cluster.env", False, f"{path}: mode {st.st_mode & 0o777:o} is group/"
+                     f"world-writable: the jobs refuse it; run: chmod go-w {shlex.quote(str(path))}")
+    return Check("cluster.env", True, f"{path}: yours, mode {st.st_mode & 0o777:o}")
+
 
 def planned_agents(spec: SwarmSpec) -> dict[str, int]:
     """Most agents each type can have: replicas or its ramp's max, plus what its spawners may
@@ -280,6 +306,9 @@ def check_slots(spec: SwarmSpec) -> Check:
     bad, lines = False, []
     for n, want in planned_agents(spec).items():
         ts = spec.types[n]
+        if ts.workers is None:  # the controller does not cap it (reconcile.py)
+            lines.append(f"type {n}: {want} agents planned, workers unset: sized from agents")
+            continue
         room = max_workers(ts) * max(1, ts.agents_per_worker)
         bad |= want > room
         lines.append(f"{'OVER: ' if want > room else ''}type {n}: {want} agents planned, "
@@ -496,15 +525,6 @@ def board_space(c: CommsSpec, swarm: str) -> str:
     return c.space or f"{c.template.split('/')[0]}/board-{swarm}"
 
 
-def board_token(master: str, slug: str) -> str:
-    """The admin token of board `slug` on a multi-board Space whose MSGBOARD_OPERATOR_TOKEN is
-    `master`: msgboard's hfspace/multiboard.py `board_token`, copied (msgboard is not a dependency)."""
-    key = master.encode()
-    cred = hmac.digest(key, ("id:" + slug).encode(), "sha256")[:8].hex()
-    secret = base64.urlsafe_b64encode(hmac.digest(key, ("secret:" + slug).encode(), "sha256"))
-    return f"fbt_{cred}.{secret.rstrip(b'=').decode()}"
-
-
 def _write_private(path: Path, text: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.fchmod(fd, 0o600)  # O_CREAT's mode only applies to a new file
@@ -524,9 +544,10 @@ def _replace_keys(path: Path, values: Mapping[str, str]) -> None:
 def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
                     rep: InitReport) -> tuple[Check, dict[str, str]]:
     """`comms.board: space`, each step skipped when done: the operator token (board.env), the
-    private Space duplicated from `comms.template` with one board named after the swarm, its
-    health, the channel and a multi-use agent invite. Returns (the check, the run.env values
-    BOARD_URL and `comms.invite_env`)."""
+    private Space duplicated from `comms.template` (msgboard's Space app: one board at the
+    Space's root), its health, the channel, a multi-use agent invite and a single-use admin
+    invite for the operator (board.env). Returns (the check, the run.env values BOARD_URL and
+    `comms.invite_env`)."""
     import httpx
 
     try:  # the comms block and swarm name as the spec reads them; url is what this makes
@@ -544,9 +565,10 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         return Check("board space", False, "needs HF_TOKEN (run.env or `hf auth login`) with write "
                                            "access to the Space's namespace"), {}
     space = board_space(c, swarm)
-    url = f"{space_url(space)}/boards/{swarm}"
+    url = space_url(space)
     bf = run_dir / BOARD_ENV
-    master = (read_env_file(bf) if bf.is_file() else {}).get("BOARD_OPERATOR_TOKEN")
+    board_env = read_env_file(bf) if bf.is_file() else {}
+    master = board_env.get("BOARD_OPERATOR_TOKEN")
     try:
         api = hub_api(hf)
         exists = api.repo_exists(space, repo_type="space")
@@ -557,22 +579,18 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
             # msgboard's token format (auth.new_token): fbt_<16 hex>.<32 bytes, urlsafe b64>
             master = (f"fbt_{secrets.token_hex(8)}."
                       + base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode())
-            _write_private(bf, f"# {BOARD_ENV}: the board Space's operator token (admin on every "
-                               f"board there). Never sourced by a job.\nBOARD_OPERATOR_TOKEN={master}\n")
+            _write_private(bf, f"# {BOARD_ENV}: the board's operator (admin) token. Never sourced "
+                               f"by a job.\nBOARD_OPERATOR_TOKEN={master}\n")
             rep.created.append(f"{BOARD_ENV} BOARD_OPERATOR_TOKEN (generated)")
         if exists:
             rep.notes.append(f"Space {space} exists: changed comms.space_variables or "
                              "space_secrets are not re-applied (edit them in its settings)")
         else:
-            boards = [{"id": swarm, "name": swarm, "storage_id": swarm, "require_existing": False}]
-            # a duplicate inherits none of the template's variables: sign-in and ownership are
-            # only what the spec sets (nobody is made admin by default)
+            # a duplicate inherits none of the template's variables
             variables = {
-                # the overview reads the board through HF auth as the view-only account
-                **({"BOARD_READ_TOKEN": "public"} if data.get("dashboard") else {}),
-                "MSGBOARD_BOARDS": json.dumps(boards),
-                # the board's snapshots: a rebuild or sleep would lose it otherwise
-                **({"MSGBOARD_REPLICA": bucket.rstrip("/") + "/board"} if bucket else {}),
+                # the board's snapshots (a rebuild or sleep would lose it otherwise), one folder
+                # per swarm: the Space app uses the prefix as given, and runs often share a bucket
+                **({"MSGBOARD_REPLICA": f"{bucket.rstrip('/')}/board/{swarm}"} if bucket else {}),
                 **c.space_variables}
             if variables.get("MSGBOARD_REPLICA") and "HF_TOKEN" not in c.space_secrets:
                 return Check("board space", False, "MSGBOARD_REPLICA needs the Space secret HF_TOKEN: "
@@ -591,17 +609,25 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
         h = {"Authorization": f"Bearer {hf}"}  # the private Space's gate
         end = time.monotonic() + BOARD_WAIT_S
         while True:
+            # msgboard's Space app answers 200 {"status": "starting", "error": ...} while it
+            # restores or waits for the replica lease (other calls get 503): only "ok" is ready
             try:
-                code: int | str = httpx.get(f"{url}/v1/health", headers=h, timeout=10).status_code
-            except httpx.HTTPError as e:  # building or restarting
-                code = type(e).__name__
-            if code == 200:
-                break
+                r = httpx.get(f"{url}/v1/health", headers=h, timeout=10)
+                body = r.json() if r.status_code == 200 else None
+            except (httpx.HTTPError, ValueError) as e:  # building or restarting; not JSON yet
+                state: int | str = type(e).__name__
+            else:
+                if not isinstance(body, dict):
+                    state = r.status_code
+                elif body.get("status") == "ok":
+                    break
+                else:
+                    state = f"{body.get('status')}" + (f": {body['error']}" if body.get("error") else "")
             if time.monotonic() > end:
-                return Check("board space", False, f"{url}/v1/health -> {code} after "
+                return Check("board space", False, f"{url}/v1/health -> {state} after "
                                                    f"{BOARD_WAIT_S:.0f} s"), {}
             _sleep(10)
-        h["X-Msgboard-Token"] = board_token(master, swarm)
+        h["X-Msgboard-Token"] = master  # the operator token is the board's admin token
         r = httpx.post(f"{url}/v1/channels", json={"name": c.channel}, headers=h, timeout=30)
         if r.status_code not in (200, 201, 409):  # 409 channel_exists
             return Check("board space", False, f"create #{c.channel}: {r.status_code} {r.text[:200]}"), {}
@@ -618,9 +644,18 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
             if r.status_code != 201:
                 return Check("board space", False, f"agent invite: {r.status_code} {r.text[:200]}"), out
             out[c.invite_env] = r.json()["code"]
+        if "BOARD_ADMIN_INVITE" not in board_env:  # people join msgboard by invite link only
+            r = httpx.post(f"{url}/v1/invites", headers=h, timeout=30, json={
+                "kind": "human", "role": "admin", "max_uses": 1, "label": f"flock {swarm} operator"})
+            if r.status_code != 201:
+                return Check("board space", False, f"admin invite: {r.status_code} {r.text[:200]}"), out
+            _write_private(bf, bf.read_text(encoding="utf-8")
+                           + "# a single-use link that makes whoever opens it the board's admin\n"
+                             f"BOARD_ADMIN_INVITE={url}/?invite={r.json()['code']}\n")
+            rep.created.append(f"{BOARD_ENV} BOARD_ADMIN_INVITE (open it to join the board as admin)")
     except Exception as e:  # noqa: BLE001 - any Hub or board error is the check's answer
         return Check("board space", False, f"{space}: {type(e).__name__}: {e}"), {}
-    return Check("board space", True, f"{space}: board {swarm} answers, #{c.channel}, "
+    return Check("board space", True, f"{space}: board answers, #{c.channel}, "
                                       f"{c.invite_env} set"), out
 
 
@@ -642,7 +677,7 @@ def dashboard_row(spec: SwarmSpec) -> dict[str, Any]:
         return f"https://huggingface.co/spaces/{ns}/{m[1]}" if url and (m := spaces.fullmatch(url)) else None
 
     return {
-        "id": spec.swarm, "name": d.name or spec.swarm, "title": d.title, "setup": d.setup,
+        "id": d.id or spec.swarm, "name": d.name or spec.swarm, "title": d.title, "setup": d.setup,
         "board_id": board.split("/boards/")[1].split("/")[0] if board and "/boards/" in board else None,
         "board": board,
         "board_public": f"https://huggingface.co/spaces/{board_space(c, spec.swarm)}"
@@ -654,7 +689,7 @@ def dashboard_row(spec: SwarmSpec) -> dict[str, Any]:
 
 
 def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
-    """Write (or rewrite) `<dashboard.registry>/runs/<swarm>.json`, keeping its `created_at`.
+    """Write (or rewrite) `<dashboard.registry>/runs/<id>.json`, keeping its `created_at`.
     Refused when another run's row has the same `board_id` (the overview routes by it)."""
     d = spec.dashboard
     if d is None:
@@ -666,8 +701,8 @@ def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
         token = get_token()
     if not token:
         return Check("dashboard", False, f"needs HF_TOKEN to write to {d.registry}")
-    rel = f"runs/{spec.swarm}.json"
     row = dashboard_row(spec)
+    rel = f"runs/{row['id']}.json"
     # the overview sends its HF token to `board` and `viewer`: only Spaces of the registry's namespace
     ns, spaces = registry_spaces(d.registry)
     if bad := [k for k in ("board", "viewer") if not spaces.fullmatch(row[k] or "")]:
@@ -698,6 +733,19 @@ def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
 
 
 # ---------------------------------------------------------------- init
+
+def _bash_values(sf: Path, env: Mapping[str, str]) -> dict[str, str]:
+    """The secrets file's assigned names, valued as common.sh's `set -a; . file` leaves them."""
+    out = subprocess.run(["bash", "-c", 'set -a; . "$1"; set +a; env -0', "flock-init", str(sf)],
+                         capture_output=True, timeout=30, env=dict(env), check=False)
+    if out.returncode:
+        # no stderr: bash echoes the offending line, which can be a secret
+        raise RuntimeError(f"{sf}: sourcing it with bash exited {out.returncode}")
+    got = dict(kv.split("=", 1) for kv in out.stdout.decode(errors="replace").split("\0") if "=" in kv)
+    # names read leniently: the jobs source any bash (umask, if blocks), init only needs what is assigned
+    names = re.findall(r"^\s*(?:export\s+)?([A-Za-z_]\w*)=", sf.read_text(errors="replace"), re.MULTILINE)
+    return {k: got[k] for k in names if k in got}
+
 
 def init(run_dir: str | Path, experiment: str | Path | None = None, *,
          secrets_file: str | Path | None = None, profile: str | Path | None = None,
@@ -736,8 +784,25 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     if experiment and m and m[1] and m[2] and not Path(m[2]).is_absolute() \
             and (Path(experiment) / m[2]).is_dir() and not (exp / m[2]).is_dir():
         derived[m[1]] = str((Path(experiment) / m[2]).resolve())  # world.dir, relative to --from
-    write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived)
-    values = {k: v for f in env_files for k, v in read_env_file(f).items()}  # later wins
+    write_run_env(d / RUN_ENV, data, str(experiment or exp), fill, rep, derived,
+                  read_env_file(d / CLUSTER_ENV) if (d / CLUSTER_ENV).is_file() else None)
+    cluster = read_env_file(d / CLUSTER_ENV) if (d / CLUSTER_ENV).is_file() else {}
+    jobs_secrets: dict[str, str] = {}  # the profile's SECRETS_FILE, as common.sh's source_env_600
+    if sf := cluster.get("SECRETS_FILE") or env.get("SECRETS_FILE"):
+        sf = Path(Template(str(sf)).safe_substitute({**env, **cluster})).expanduser()
+        st = sf.stat() if sf.is_file() else None
+        if st is None:
+            rep.checks.append(Check("secrets file", False, f"{sf}: no such file"))
+        elif st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) not in (0o600, 0o400):
+            rep.checks.append(Check("secrets file", False, f"{sf}: must be yours and mode 600 "
+                                    f"(chmod 600 '{sf}'); the jobs refuse it"))
+        else:
+            try:
+                jobs_secrets = _bash_values(sf, {**env, **cluster})
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                rep.checks.append(Check("secrets file", False, str(e) if isinstance(e, RuntimeError)
+                                        else f"{sf}: sourcing it with bash failed ({type(e).__name__})"))
+    values = {**cluster, **jobs_secrets, **read_env_file(d / RUN_ENV)}  # the jobs' order
     space = (data.get("comms") or {}).get("board") == "space"
     if space:  # before the spec loads: it reads BOARD_URL
         board, made = provision_board(data, d, {**env, **values}, rep)
@@ -745,7 +810,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
         if made:
             _replace_keys(d / RUN_ENV, made)
             write_run_env(d / RUN_ENV, data, str(experiment or exp), {}, rep, made)
-            values = {k: v for f in env_files for k, v in read_env_file(f).items()}
+            values = {**cluster, **jobs_secrets, **read_env_file(d / RUN_ENV)}
     rep.checks.append(check_tokens(data, read_env_file(d / RUN_ENV)))
     try:
         spec = read_spec(str(spec_file), env_files)
@@ -771,4 +836,6 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     if spec.compute.kind == "slurm":  # the job scripts `flock launch` submits; an edited copy is kept
         copy_experiment(SLURM_SCRIPTS, d / "slurm", rep, need=None)
         rep.checks += [check_capacity(spec, secret_env), check_mounts(secret_env)]
+        if (d / CLUSTER_ENV).is_file():
+            rep.checks.append(check_cluster_env(d / CLUSTER_ENV))
     return rep

@@ -270,6 +270,12 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
                      compute=compute, health=health, buckets=buckets,
                      checkpoint=None if state is None else lambda: state.push(store, force=True))
+    if env.get("FLOCK_HOLD_ON_START") == "1":  # `flock launch --hold` (docs/live.md "Lifecycle")
+        for sw in store.list_swarms():  # as `flock stop --release`: no worker until `flock launch`
+            app.state.loops.pause(sw["spec"].swarm, reason="launch --hold", by="launch --hold",
+                                  release=True)
+        if state is not None:  # held in the checkpoint before anything else happens
+            state.push(store, force=True)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
     return Built(app, store, dep, jobs, state, settings, halt, timeout, health=health)
 
