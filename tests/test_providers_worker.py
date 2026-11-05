@@ -99,7 +99,7 @@ async def test_zero_usage_turn_is_flagged_and_logged_once(tmp_path, caplog):
 
     def turn(rt, usage):
         rt.on_adapter_event(AdapterEvent("turn_started"))
-        rt.on_adapter_event(AdapterEvent("usage", model="Qwen/Q", usage=usage, cumulative=True))
+        rt.on_adapter_event(AdapterEvent("usage", model="Qwen/Q", usage=usage))
         rt.on_adapter_event(AdapterEvent("turn_ended", status="completed"))
         return [e for e in rt.outbox._q if e.type == "turn_ended"][-1].data["data"]
 

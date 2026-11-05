@@ -25,10 +25,7 @@ class AdapterEvent:
 
     - turn_started: the harness began a turn (data may carry the harness's own turn id).
     - message: `message` is a pi-format AgentMessage (role user/assistant/toolResult).
-    - usage: `usage` tokens for `model`. `cumulative` means a running total for the whole
-      session (the runtime subtracts the previous snapshot); `baseline` means a snapshot that
-      predates this burst and must only reset the reference point, never be counted.
-      `cost_usd` is the harness's own cumulative estimate, if any.
+    - usage: `usage` tokens for `model`, used since the last usage event.
     - turn_ended: `status` is completed | error | interrupted | ...
     - error: `error` text; the process may still be alive.
     - exited: the process is gone; no more events this burst.
@@ -38,9 +35,6 @@ class AdapterEvent:
     message: dict[str, Any] | None = None
     model: str | None = None
     usage: TokenUsage | None = None
-    cumulative: bool = False
-    baseline: bool = False
-    cost_usd: float | None = None
     status: str | None = None
     error: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
@@ -142,13 +136,6 @@ class EventQueue:
             yield ev
             if ev.kind == "exited":
                 return
-
-
-def usage_sub(a: TokenUsage, b: TokenUsage | None) -> TokenUsage:
-    """a - b, clamped at zero per field (cumulative counters never go backwards)."""
-    if b is None:
-        return a
-    return TokenUsage(**{k: max(0, getattr(a, k) - getattr(b, k)) for k in TokenUsage.model_fields})
 
 
 def pi_tokens(u: dict[str, Any] | None) -> TokenUsage:

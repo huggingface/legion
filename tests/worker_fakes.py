@@ -24,7 +24,7 @@ def spec(**kw) -> TypeSpec:
 
 class ScriptedAdapter:
     """Pretends to be a harness: each forwarded prompt outside a turn starts a turn that ends
-    `turn_time` later with one assistant message and cumulative usage; prompts during a turn
+    `turn_time` later with one assistant message and its usage; prompts during a turn
     are folded into it. `hang=True` turns never end. A resume needs `<home>/<sid>.jsonl`."""
 
     harness = "pi"
@@ -42,7 +42,6 @@ class ScriptedAdapter:
         self.log = log if log is not None else []
         self._q = EventQueue()
         self._turn: asyncio.Task | None = None
-        self._cum = TokenUsage()
 
     async def start(self, workdir, session_id, spec, *, env=None):
         self.log.append(("start", session_id))
@@ -74,8 +73,8 @@ class ScriptedAdapter:
         await asyncio.sleep(self.turn_time)
         self._q.put(AdapterEvent("message", message={"role": "assistant", "model": "m-1",
                                                      "content": [{"type": "text", "text": "ok"}]}))
-        self._cum = self._cum + TokenUsage(input=10, output=5, cache_read=100)
-        self._q.put(AdapterEvent("usage", model="m-1", usage=self._cum, cumulative=True, cost_usd=0.01))
+        self._q.put(AdapterEvent("usage", model="m-1",
+                                 usage=TokenUsage(input=10, output=5, cache_read=100)))
         self._q.put(AdapterEvent("turn_ended", status="completed"))
         self._turn = None
 

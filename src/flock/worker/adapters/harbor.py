@@ -66,7 +66,7 @@ class HarborAdapter:
         self._open = False  # a burst is reading events (an `exited` is owed)
         self._closing = False
         self._resume_failed: str | None = None  # the last Trial's --continue failed: why
-        self._closes = 0  # close() calls: a start that saw one begin does not run its Trial
+        self._closes = 0  # close() calls: after one, no Trial starts (the adapter is done)
         self._network: Any = None  # the latest Trial's TrialNetworks (docker, podman)
         self._network_id = uuid.uuid4().hex[:8]  # names and labels this adapter's networks
 
@@ -98,7 +98,13 @@ class HarborAdapter:
                 why, self._resume_failed = self._resume_failed, None
                 raise ResumeError(why)
             if self._starting is not None and not self._starting.done():
-                await asyncio.shield(self._starting)  # its failure is reported in this burst
+                try:
+                    await asyncio.shield(self._starting)  # its failure is reported in this burst
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                    # close() cancelled that start: a failed start, not a cancelled burst
+                    raise RuntimeError("the Trial start was cancelled: the agent closed") from None
             if not self.alive():
                 await self._new_trial(restore=bool(session_id and files))
         except ResumeError:
@@ -131,8 +137,8 @@ class HarborAdapter:
         returns its TrialResult (None if none). After `timeout` s (0: at once; None: no limit),
         or when this call is cancelled, the Trial is cancelled instead: Harbor stops the
         environment unverified, waited for up to CANCEL_WAIT s (a further cancel stops the
-        wait). A Trial still starting is cancelled at once; a start that has not created its
-        Trial yet fails."""
+        wait). A Trial still starting is cancelled at once, and no Trial starts after a close
+        (the worker never reuses a closed adapter)."""
         self._closes += 1
         starting = self._starting
         if starting is not None and not starting.done():
@@ -155,7 +161,7 @@ class HarborAdapter:
                     self._closing = False
                     self._prompts = asyncio.Queue()
         if run is None or run.done():
-            await self._drop_network()
+            await self._drop_network(self._network)
         if self.resources is not None:  # it leaves this worker (drain, unassign)
             await self.resources.remove([self.agent])
         return self.result
@@ -224,7 +230,8 @@ class HarborAdapter:
         h = self.spec.harbor
         if h is None:
             raise RuntimeError("harness harbor needs the type's `harbor:` block")
-        closes = self._closes
+        if self._closes:  # the exit path closed this agent while its burst got here
+            raise RuntimeError("agent closed")
         if self.host is not None:
             await self.host.prepare(self.spec)
             self.resources, self.bundle = self.host.resources, self.host.bundle
@@ -247,6 +254,9 @@ class HarborAdapter:
         tc.environment.kwargs = dict(config.environment.kwargs)
         if self.resources is not None:
             await self.resources.add([self.agent])  # joins here (again: after a move)
+            if self._closes:  # a close during the add removed the agent before it was added
+                await self.resources.remove([self.agent])
+                raise RuntimeError("agent closed")
             bound = self.resources.bind(self.agent, tc)
             if tc.environment.mounts and config.environment.backend == "hf-sandbox":
                 raise RuntimeError("hf-sandbox has no mounts: use the resources' http transport")
@@ -254,7 +264,8 @@ class HarborAdapter:
                 if meta.get("warning") and getattr(self.host, "emit", None):
                     self.host.emit(self.agent, {"resource": name, "kind": "warning",
                                                 "data": {"warning": meta["warning"]}})
-        await self._drop_network()  # the last Trial's: it has ended
+        await self._drop_network(self._network)  # the last Trial's: it has ended
+        networks = None
         if config.environment.backend != "hf-sandbox":  # a sandbox is an HF Job: no local network
             # one network per Trial, outside host and VPN routes: docker's default pools run
             # out after about 30 compose projects on a host
@@ -267,9 +278,9 @@ class HarborAdapter:
         self._creating = True
         try:
             trial = await launch.Trial.create(tc)
-            if self._closes != closes:  # closed while this Trial was being created
-                await self._drop_network()
-                raise RuntimeError(f"Trial {tc.trial_name} not started: the agent was closed")
+            if self._closes:  # closed while this Trial was being created
+                await self._drop_network(networks)  # a close may have taken self._network
+                raise RuntimeError("agent closed")
             launch.attach_pi_setup(trial, config.inference)
             if self.bundle is not None:
                 launch.attach_tool_setup(trial, self.bundle)
@@ -295,11 +306,12 @@ class HarborAdapter:
             raise (ResumeError if channel.restore_error else RuntimeError)(
                 f"Trial {tc.trial_name} did not start: {why}")
 
-    async def _drop_network(self) -> None:
-        """Remove the latest Trial's network once its environment has stopped."""
-        networks, self._network = self._network, None
+    async def _drop_network(self, networks: Any) -> None:
+        """Remove a Trial's network once its environment has stopped."""
         if networks is None:
             return
+        if self._network is networks:
+            self._network = None
         try:
             await networks.stop()
         except Exception as e:  # noqa: BLE001 - a leftover network holds a subnet, not the run

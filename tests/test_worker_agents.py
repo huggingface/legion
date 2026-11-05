@@ -92,9 +92,8 @@ async def test_heartbeat_payload(tmp_path):
     hb = rt.heartbeat()
     assert hb.name == "researcher-0001" and hb.state == "idle" and hb.idle_since is not None
     assert hb.session_id == "s-1" and hb.resumed is False and hb.turns == 2
-    # cumulative usage from the harness is differenced per turn, reported cumulative by model
+    # per-turn usage from the harness, reported cumulative by model
     assert hb.tokens == {"m-1": TokenUsage(input=20, output=10, cache_read=200)}
-    assert hb.harness_estimate_usd == 0.01
     ended = [e for e in rt.outbox._q if e.type == "turn_ended"]
     assert ended[1].data["data"]["tokens"]["m-1"]["input"] == 10
     # size budget: about 100-200 bytes per agent

@@ -48,6 +48,7 @@ class Fakes:
         self.gates = {}
         self.mounted = True  # False: /logs/agent lives in the env (hf-sandbox), not on the host
         self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
+        self.route_gate = None  # set: `ip route` (a Trial network's first command) waits for it
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -186,6 +187,8 @@ def fakes(monkeypatch):
 
     async def command(*args):  # docker or podman, and `ip route`
         shared.net.append(args)
+        if args[0] == "ip" and shared.route_gate:
+            await shared.route_gate.wait()
         if args[0] == "ip":
             return 0, "[]", ""
         if args[2] == "inspect":  # flock-<run id>-<participant>
@@ -532,6 +535,20 @@ async def test_a_model_error_on_the_first_resumed_turn_keeps_the_session(fakes, 
     assert len(fakes.trials) == 1 and "--continue" in fakes.pi[1]
 
 
+async def test_three_failed_turns_on_a_restored_session_start_a_fresh_one(fakes, tmp_path):
+    a = adapter(tmp_path)
+    (a.home / "sessions").mkdir(parents=True)
+    (a.home / "sessions" / "s.jsonl").write_text('{"call": 0}\n')
+    _, events = await start(a, "s-1")
+    fakes.fail = lambda n: "server"  # the model rejects every turn on the restored session
+    for prompt in "abc":
+        await a.send(prompt)
+        await read(events, "turn_ended")
+    assert [e.kind for e in await read(events, "exited")] == ["error", "exited"]
+    with pytest.raises(ResumeError, match="3 failed turns in a row on the restored sessions"):
+        await a.start(a.workdir, "s-1", a.spec)
+
+
 async def test_stop_pulls_unmounted_sessions_for_the_next_push(fakes, tmp_path):
     fakes.mounted = False
     a = adapter(tmp_path)
@@ -615,8 +632,26 @@ async def test_close_while_a_trial_starts_does_not_raise(fakes, tmp_path, monkey
     fakes.probe_ok, fakes.start_gate = True, asyncio.Event()
     await a.send("b")  # starts t2, which hangs before FlockPi is ready
     await until(lambda: len(fakes.trials) == 2)
+    burst = asyncio.create_task(a.start(a.workdir, None, a.spec))  # waits for t2
+    await asyncio.sleep(0)
     assert await asyncio.wait_for(a.close(), 5) is None
     assert not a.alive() and fakes.trials[1].cancelled
+    with pytest.raises(RuntimeError, match="agent closed"):  # a failed start, not a cancel
+        await burst
+
+
+async def test_a_trial_closed_while_created_leaves_no_network(fakes, tmp_path):
+    fakes.route_gate = asyncio.Event()
+    a = adapter(tmp_path)
+    starting = asyncio.create_task(a.start(a.workdir, None, a.spec))
+    await asyncio.sleep(0.01)  # its network is being set up
+    await a.close(0)  # finds no Trial yet
+    fakes.route_gate.set()
+    with pytest.raises(RuntimeError, match="agent closed"):
+        await starting
+    created = [c[-1] for c in fakes.net if c[1:3] == ("network", "create")]
+    removed = [c[-1] for c in fakes.net if c[1:3] == ("network", "rm")]
+    assert created and removed == created and a.trial is None  # created, never run
 
 
 async def test_a_failed_kill_is_reported(fakes, tmp_path, monkeypatch):
@@ -691,6 +726,29 @@ async def test_a_restart_prompt_names_no_worker_path(fakes, tmp_path):
     assert "session_restarted" in event_types(rt) and rt.state.session_id != "gone"
     assert "transcript is not available here" in fakes.pi[0]
     assert str(rt.log.path) not in fakes.pi[0]  # the Trial cannot read the worker's files
+
+
+async def test_no_trial_starts_after_the_exit_path_closed_the_agent(fakes, tmp_path):
+    """stop and close(0) run together on exit: a burst still on its way to adapter.start (here
+    in harness_env) must not start a Trial after close(0) found none."""
+    from ..worker_fakes import event_types, until
+
+    rt, _ = runtime(tmp_path)
+    await rt.setup(restore=False)
+    gate, harness_env = asyncio.Event(), rt.harness_env
+
+    async def parked():
+        await gate.wait()
+        return await harness_env()
+
+    rt.harness_env = parked
+    await rt.prompt("go")
+    await until(lambda: rt._burst is not None)
+    stopping = asyncio.gather(rt.stop("terminated"), rt.close(0))
+    await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.wait_for(stopping, 3)
+    assert fakes.trials == [] and "error" in event_types(rt)
 
 
 async def test_drain_cancels_a_slow_verifier(fakes, tmp_path, monkeypatch):

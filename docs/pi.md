@@ -78,7 +78,7 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   most). Pinned provider prices: the worker passes `type_price_table(spec)`, so a
   provider-backed type is priced at its pinned price.
 - **Environment**: the shared `minimal_env` (`adapters/base.py`: `PATH HOME USER LOGNAME SHELL
-  TERM LANG LANGUAGE TZ TMPDIR IS_SANDBOX LC_* XDG_*`, CA and proxy variables) plus Pi's own
+  TERM LANG LANGUAGE TZ TMPDIR LC_* XDG_*`, CA and proxy variables) plus Pi's own
   variables, then what `AgentRuntime.harness_env` selects for every harness: the names in the
   type's `secrets`, the provider's key variable, the type's `env` and the msgboard identity.
   `PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0` unless set; `PI_CODING_AGENT_DIR`.
@@ -170,7 +170,7 @@ agent being synced or restored. Details: `flock.worker.sync`.
 |---|---|
 | `prompt` response `disposition: started`, or `agent_start`, with no flock turn open | `turn_started` |
 | `message_end` (system, user, assistant, toolResult) | `message`, the Pi message unchanged (already pi v3) |
-| `message_end`, role assistant, non-zero usage | `usage`, model `<provider>/<id>`, per call (`cumulative=False`) |
+| `message_end`, role assistant, non-zero usage | `usage`, model `<provider>/<id>`, per call |
 | `compaction_end` with `result.usage` | `usage`, per call (from the docs; not observed) |
 | `agent_settled` | `turn_ended` (completed, error or interrupted; error with `reason` after a limit abort) |
 | `auto_retry_end {success: false}`, `extension_error`, an unsolicited failed `response` | `error` |
