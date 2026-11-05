@@ -11,9 +11,10 @@ are copied to the channel's `home`, where flock's BucketSync pushes them. While 
 probes the environment every PROBE seconds; a failed probe ends the Trial with an error.
 run() returns when the channel closes, after `trial_seconds` (queued prompts wait for the next
 Trial), after MAX_ERRORS failed turns in a row (rate-limited ones do not count), or when the
-first turn on restored sessions fails without a model error (`restore_error`); the Trial then
-runs its verifier. The worker's loop engine and controller do loops, steering, budgets and
-stops.
+first turn on restored sessions fails without a model error; the Trial then runs its
+verifier. That first failure, or MAX_ERRORS with none working on the restored sessions, sets
+`restore_error`: the next start begins a fresh session. The worker's loop engine and
+controller do loops, steering, budgets and stops.
 """
 
 import asyncio
@@ -145,6 +146,8 @@ class FlockPi(Pi):
                 elif not transient:  # a 429 storm is the loop's to back off, not a failure
                     errors += 1
             self.why = f"{MAX_ERRORS} failed turns in a row"
+            if check:  # none worked on the restored sessions: the next start begins a fresh one
+                ch.restore_error = f"{self.why} on the restored sessions: {ended.error}"[:500]
         finally:
             # A filled context stops Harbor recounting only the last turn after run().
             for name, value in totals.model_dump(exclude_none=True).items():
