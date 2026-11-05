@@ -296,6 +296,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
     config["limits"] = spec.limits.model_dump(
         include={"agent_max_turns", "agent_timeout_seconds", "trial_hours"}
     )
+    # besides the inference key (the provider's): what the workers read on their own host
+    secrets = resource_secrets(spec) + (["HF_TOKEN"] if spec.environment.backend == "hf-sandbox"
+                                        else [])  # sandboxes start with the worker's HF token
     types = {}
     for name, role in roles.items():
         model = role.model or spec.model
@@ -318,6 +321,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
             },
             "workers": slots or None,
             "max_turns": spec.limits.agent_max_turns,
+            "secrets": secrets,
             "loop": loop and loop.model_dump(exclude={"resume_prompt"}),
             "resume_prompt": loop and loop.resume_prompt,
             "harbor": {
@@ -352,6 +356,21 @@ def compile_spec(spec: Spec, task: dict, bundle=None) -> SwarmSpec:
         "limits": spec.limits.model_dump(include={"alive", "spawned_total", "budget_usd"}),
         "compute": spec.compute,
     })
+
+
+def resource_secrets(spec: Spec) -> list[str]:
+    """The env names resources read a token from on the worker: a plugin's `token_env` (its
+    default too) when it connects to a `url`. A missing module is the worker's error."""
+    from .resources import load_module
+
+    names = []
+    for name, options in spec.resources.items():
+        path = spec.resources_dir / f"{name}.py"
+        schema = getattr(load_module(path), "Options", None) if path.is_file() else None
+        settings = schema.model_validate(options) if schema is not None else None
+        if getattr(settings, "url", None) and getattr(settings, "token_env", None):
+            names.append(settings.token_env)
+    return names
 
 
 # From flock's specrender: only UPPERCASE names are variables, so `{spend}` and `${spend}` in

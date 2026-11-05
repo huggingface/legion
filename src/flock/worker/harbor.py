@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from flock.models import TypeSpec
-from flock.secrets_file import secret_env
+from flock.secrets_file import exposed, secret_env
 
 log = logging.getLogger(__name__)
 
@@ -74,12 +74,13 @@ class HarborHost:
             key = secret_env().get(config.inference.api_key_env)
             # a resource without the add hook gets the type's roster, as shepherd's launcher
             # gives it; one with it is told each agent placed here (adapters/harbor.py)
-            resources = Resources(
-                config.resources_dir, h.resources, run_dir=self.root,
-                agents=[name for name, role in h.roster.items() if role == h.role],
-                secrets=[key] if key else [],
-                required=self.bundle.manifest["requires"] if self.bundle else (),
-                incremental=True)
+            with exposed():  # the plugins read their tokens (token_env) from os.environ
+                resources = Resources(
+                    config.resources_dir, h.resources, run_dir=self.root,
+                    agents=[name for name, role in h.roster.items() if role == h.role],
+                    secrets=[key] if key else [],
+                    required=self.bundle.manifest["requires"] if self.bundle else (),
+                    incremental=True)
             try:
                 await resources.start()
             except BaseException:

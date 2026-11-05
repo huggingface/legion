@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from flock.models import TypeSpec, parse_duration
+from flock.secrets_file import exposed
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 
 log = logging.getLogger(__name__)
@@ -242,10 +243,9 @@ class HarborAdapter:
                             h.task["dataset"], getattr(self.host, "task_path", None))
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
-        # shortcut: build_trial_config and the board resource read the inference key and the
-        # board token from os.environ, which a Slurm worker lacks (they are in its secrets file,
-        # secret_env()); read them through secret_env() with the compute commit
-        tc = launch.build_trial_config(config, task, self.root, self.agent, self._instructions())
+        with exposed():  # it reads the inference key from os.environ; a Slurm worker has a file
+            tc = launch.build_trial_config(config, task, self.root, self.agent,
+                                           self._instructions())
         tc.trial_name = f"{self.agent}-t{self.attempt}"
         tc.agent.name, tc.agent.import_path = None, "flock.harbor.agent:FlockPi"
         # FlockPi serves turns for trial_hours; its last turn may take a turn_timeout more

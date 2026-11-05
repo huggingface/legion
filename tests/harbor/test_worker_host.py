@@ -4,6 +4,7 @@ environment runs them) overlap instead of queueing on the default pool. Board ag
 whichever worker their Trial starts."""
 
 import asyncio
+import os
 import shutil
 import threading
 import time
@@ -16,6 +17,7 @@ import pytest
 pytest.importorskip("harbor")
 
 import flock.harbor
+from flock import secrets_file
 from flock.harbor import launch, sources
 from flock.harbor.spec import Spec, compile_spec
 from flock.harbor.tools.bundle import build_tool_bundle
@@ -308,4 +310,49 @@ async def test_a_close_while_the_agent_joins_leaves_it_out(world, tmp_path):
     with pytest.raises(RuntimeError, match="agent closed"):
         await starting
     assert gated.agents == set() and world.trials == []
+    await host.close()
+
+
+TOKENED = '''
+import asyncio, os
+
+class Resource:
+    def __init__(self, options, *, state_dir, agents, secrets):
+        self.token, self.metadata = os.environ.get("FAKE_OPERATOR_TOKEN"), {}
+
+    async def start(self):
+        pass
+
+    def bind(self, name):
+        return {}
+
+    async def wait(self):
+        await asyncio.Event().wait()
+
+    async def export(self, directory):
+        return {}
+
+    async def stop(self):
+        pass
+'''
+
+
+async def test_secrets_from_the_workers_secrets_file_reach_the_trial(world, tmp_path, monkeypatch):
+    """A Slurm worker has its secrets in a file, not os.environ (worker.sbatch): shepherd's
+    build_trial_config and a resource plugin, which read os.environ, still get them, and
+    os.environ is without them again afterwards."""
+    monkeypatch.delenv("HF_TOKEN")
+    monkeypatch.setattr(secrets_file, "_secrets", {})
+    f = tmp_path / "secrets"
+    f.write_text("HF_TOKEN=key-from-file\nFAKE_OPERATOR_TOKEN=op-from-file\n")
+    f.chmod(0o600)
+    assert secrets_file.load({secrets_file.SECRETS_FILE_ENV: str(f)}) == [
+        "FAKE_OPERATOR_TOKEN", "HF_TOKEN"]
+    (tmp_path / "resources" / "tokened.py").write_text(TOKENED)
+    host, (a, *_) = agents(tmp_path, resources="{fake: {mount: false}, tokened: {}}")
+    await a.start(a.workdir, None, a.spec)
+    assert world.trials[0].config.agent.env["HF_TOKEN"] == "key-from-file"
+    assert host.resources.providers["tokened"].token == "op-from-file"
+    assert not {"HF_TOKEN", "FAKE_OPERATOR_TOKEN"} & set(os.environ)
+    await a.close()
     await host.close()

@@ -5,12 +5,14 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+import flock.harbor
 from flock.harbor.config import Config
 from flock.harbor.spec import Spec, compile_spec, substitute
 from flock.models import SwarmSpec, load_spec_yaml, loop_refusals
 
 EXAMPLES = Path(__file__).parent / "examples"
 V8_FIXTURE = Path(__file__).parent / "fixtures" / "v8-harbor-spec.yaml"
+RESOURCES = Path(flock.harbor.__file__).parent / "plugins" / "resources"
 
 
 def within(small, big):
@@ -203,7 +205,7 @@ TASK = {"registry_commit": "d" * 40, "dataset": "v8@1", "task": {"git_url": "x",
 def test_compile_gives_one_harbor_type_per_role(tmp_path):
     for name, text in [("team.md", "Team."), ("answers.md", "Answer."), ("round.md", "R{round}")]:
         (tmp_path / name).write_text(text)
-    (tmp_path / "spec.yaml").write_text(COMPILE)
+    (tmp_path / "spec.yaml").write_text(COMPILE + f"resources_dir: {RESOURCES}\n")
     spec = Spec.load(tmp_path / "spec.yaml", env={})
     bundle = SimpleNamespace(manifest={"tools": {"board.post": {}}, "requires": ["board"]},
                              sha256="f" * 64)
@@ -234,6 +236,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
         10, "20m", 60,
     )
     assert (answers.max_turns, answers.workers, answers.resume_prompt) == (150, None, "Continue.")
+    # the board's token (its plugin's default token_env, as it has a url) and the sandboxes' token
+    assert answers.secrets == safety.secrets == ["MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"]
     assert answers.flavor == "cpu-basic" and answers.idle_grace == "120s"  # main's defaults
     loop = answers.loop
     assert (loop.prompt, loop.every, loop.while_.until, loop.while_.agent_usd) == (
@@ -310,5 +314,6 @@ def test_a_shepherd_config_compiles():
     (name, ts), = swarm.types.items()
     assert (swarm.swarm, name, ts.replicas, ts.loop) == ("pi-hf-team", "agent", 2, None)
     assert ts.harbor.role is None and ts.harbor.roster == {"agent-0000": None, "agent-0001": None}
+    assert ts.secrets == []  # a managed board, docker: the worker reads no token
     assert ts.harbor.team == (EXAMPLES.parent / "prompts" / "team.md").read_text()
     assert swarm.providers["inference"].pricing == {"*": [0.0, 0.0, 0.0]}
