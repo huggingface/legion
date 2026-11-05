@@ -177,9 +177,9 @@ class Trial(FakeTrial):
         return self.result
 
 
-@pytest.fixture
-def fakes(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
+def install(setattr) -> Fakes:
+    """Harbor's Trial.create and the container-network commands faked through `setattr` (the
+    `fakes` fixture; tests/harbor/fake_worker.py in a worker process)."""
     shared = Fakes()
 
     async def create(config):
@@ -197,9 +197,15 @@ def fakes(monkeypatch):
             return 0, json.dumps([{"Labels": {"io.flock.run": args[3].split("-")[1]}}]), ""
         return 0, "", ""
 
-    monkeypatch.setattr(launch.Trial, "create", create)
-    monkeypatch.setattr(networking, "command", command)
+    setattr(launch.Trial, "create", create)
+    setattr(networking, "command", command)
     return shared
+
+
+@pytest.fixture
+def fakes(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
+    return install(monkeypatch.setattr)
 
 
 @pytest.fixture

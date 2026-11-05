@@ -1,7 +1,12 @@
 """A Harbor spec through flock's commands: `flock launch` and `flock update` compile it (the
 task pinned once, the tool bundle's sha recorded), a resume keeps the run's pin, and a running
-type's Trial inputs are fixed."""
+type's Trial inputs are fixed; a local run drives it end to end (controller, a worker process,
+HarborAdapter, FlockPi) on test_adapter.py's fakes."""
 
+import asyncio
+import json
+import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -12,7 +17,9 @@ pytest.importorskip("harbor")
 from harbor.models.task.id import GitTaskId
 
 from flock import cli
+from flock.controller import localrun
 from flock.harbor import sources
+from flock.ops import read_spec
 
 from ..conftest import wire
 from .test_worker_host import RESOURCE, TOOL
@@ -88,3 +95,21 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
     assert r.exit_code == 0 and "types.agent.replicas: 2 -> 3" in r.output, r.output
     assert store.get_swarm("crew")["spec"].types["agent"].harbor.task == h.task
 
+
+def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
+    monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLUSH_INTERVAL", "0.2")
+    spec = read_spec(str(experiment(tmp_path / "exp") / "spec.yaml"))
+    out = StringIO()
+    result = asyncio.run(localrun.run_local(localrun.RunOptions(
+        spec=spec, data_dir=tmp_path / ".flock", until=60, until_idle=True, prompt="go",
+        refresh=0.2, reconcile_interval=0.2, out=out,
+        worker_command=[sys.executable, str(Path(__file__).with_name("fake_worker.py"))])))
+    assert result.reason == "idle" and result.exit_code == 0, out.getvalue()
+    assert result.totals["turns_completed"] == 2, out.getvalue()
+    for agent in ("agent-0000", "agent-0001"):
+        events = [json.loads(x) for x in
+                  (result.run_dir / "events" / f"{agent}.jsonl").read_text().splitlines()]
+        assert "reply-" in json.dumps([e for e in events if e["type"] == "message"])
+        assert not [e for e in events if e["type"] == "error"], events
