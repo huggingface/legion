@@ -121,7 +121,7 @@ def test_flock_run_until_idle(tmp_path, fake_server):
         prompts = [(e["data"]["data"]["kind"], e["data"]["data"]["round"])
                    for e in _bundle_events(run, name) if e["type"] == "loop_prompt"]
         assert prompts == [("loop", 1), ("loop", 2), ("final", 2)], (name, prompts)
-        assert turns[name] >= 3, turns
+        assert turns[name] == 4, turns  # the prompt, 2 rounds, the final round
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
     merged = [e for e in merged if e["agent"]]  # the swarm stream: control-plane events
     assert {e["agent"] for e in merged} == set(WRITERS + LOOPERS)
