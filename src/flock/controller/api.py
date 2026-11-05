@@ -912,6 +912,16 @@ def create_app(
                                          f"cannot change ({old.harness.value} -> "
                                          f"{ts.harness.value}); remove the type first or use a "
                                          "new type name")
+            # a harbor worker prepares the task, tools and resources once and each agent keeps
+            # its Trial inputs: only the roster (agent counts) may change live
+            fixed = old is not None and old.harbor and ts.harbor and [
+                k for k in type(ts.harbor).model_fields if k != "roster"
+                and getattr(old.harbor, k) != getattr(ts.harbor, k)]
+            if fixed and store.list_agents(swarm, type_name):
+                raise HTTPException(400, f"types.{type_name}.harbor ({', '.join(fixed)}): a "
+                                         "running Harbor type's task, tools, resources, settings "
+                                         "and instructions are fixed at launch; revert the "
+                                         "change, or use a new type name")
         try:  # channel name -> id once, kickoff once (docs/comms.md)
             comms_resolve(spec, prev["spec"] if prev else None, secret_source,
                           transport=comms_transport, dry_run=dry_run)

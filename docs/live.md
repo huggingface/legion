@@ -233,6 +233,7 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 | other type fields (`max_turns`, `max_budget_usd`, `tool_choice`, `turn_timeout`, ...) | the next turn boundary. A CLI harness takes the per-prompt limits, `model`, `env` and `secrets` at its next start, after `idle_grace` |
 | `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
 | a type's `harness` (with agents), `compute.kind`, `swarm` | refused |
+| a Harbor spec's `task`, `tools`, `resources`, `environment`, `inference`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
 changes nothing until that turn ends. Changed type specs reach the workers in the

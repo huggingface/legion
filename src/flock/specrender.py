@@ -187,6 +187,14 @@ def at_ref(target: str | Path, ref: str) -> tuple[Path, dict[str, str]]:
         spec = spec / "spec.yaml"
     if not spec.is_file():
         raise ValueError(f"--ref {ref}: {spec.relative_to(tmp)} not found at {sha[:8]}")
+    try:
+        data = load_spec_yaml(spec.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        data = None  # the spec check reports it
+    if isinstance(data, dict) and "task" in data:
+        # the compiled spec names its tools and resources folders: this copy goes at exit
+        raise ValueError(f"--ref {ref}: a Harbor spec's workers read its tools and resources "
+                         "folders at their paths; check the ref out and give its folder")
 
     src = {"git_sha": sha, "ref": ref, "dirty": False, "by": os.environ.get("USER")}
     return spec, {"X-Flock-Source": json.dumps(src)}

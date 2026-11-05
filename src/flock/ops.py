@@ -54,10 +54,14 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
     """Read a spec (${VAR} from --env files and the environment substituted:
     flock.specrender, `sources` filled) and inline each type's
     system_prompt_file (plus system_prompt_append_file) and loop prompt files, and the comms
-    kickoff and protocol files (relative to the spec file). Raises SpecError."""
+    kickoff and protocol files (relative to the spec file). A Harbor spec (shepherd's YAML plus
+    flock's blocks: a top-level `task:`) is compiled instead (`harbor_spec`). Raises SpecError."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(render(path, env_files, sources))
+        data = render(path, env_files, sources)
+        if isinstance(data, dict) and "task" in data:
+            return harbor_spec(path, env_files)
+        spec = SwarmSpec.model_validate(data)
     except ValidationError as e:
         lines = []
         for err in e.errors():
@@ -94,12 +98,59 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
     return spec
 
 
+def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
+    """A Harbor spec as flock runs it, done here on the operator's machine as shepherd's
+    launcher does: load it (${VAR} from the environment, then the --env files), pin the task to
+    one revision and build the tool bundle, whose sha every worker checks against the bundle it
+    builds from `tools_dir` (workers read `tools_dir` and `resources_dir` at these absolute
+    paths), then compile it (flock.harbor.spec.compile_spec)."""
+    import asyncio
+    import tempfile
+
+    from flock.specrender import read_env_file
+
+    try:
+        from flock.harbor import sources
+        from flock.harbor.spec import Spec, compile_spec
+        from flock.harbor.tools.bundle import build_tool_bundle
+    except ImportError as e:
+        raise SpecError([(f"{path}: a Harbor spec (top-level `task:`) needs flock's harbor "
+                          f"extra (pip install 'flock[harbor]'): {e}")]) from None
+    env = {**os.environ, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
+    spec = Spec.load(path, env)
+    try:
+        task = asyncio.run(sources.resolve_task(spec.task)).manifest()
+    except Exception as e:  # noqa: BLE001 - the Hub, git or the selector: the operator's to fix
+        raise SpecError([(f"{path}: task: cannot pin {spec.task.repo} "
+                          f"({spec.task.selector}@{spec.task.revision}): {e}")]) from None
+    bundle = None
+    if spec.tools:
+        try:
+            with tempfile.TemporaryDirectory() as d:  # only its sha and manifest go in the spec
+                bundle = build_tool_bundle(spec.tools_dir, spec.tools, Path(d) / "tools.tar.gz")
+        except Exception as e:  # noqa: BLE001 - the folder's modules are imported to list them
+            raise SpecError([f"{path}: tools: {e}"]) from None
+    return compile_spec(spec, task, bundle)
+
+
+def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
+    """A Harbor type keeps the task revision its run pinned while the spec names the same task
+    (a branch that moved since is not a change). Changes `spec` in place."""
+    for name, ts in spec.types.items():
+        was = old.types.get(name)
+        if ts.harbor and was and was.harbor and was.harbor.config["task"] == ts.harbor.config["task"]:
+            ts.harbor.task = was.harbor.task
+
+
 # `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
 COMMS_WAKES = {f"comms.{k}": k for k in ("mention", "thread", "dm", "channel")}  # = controller.api.COMMS_WAKE_EVENTS values
 
 
 def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
     """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
+    if ts.harbor is not None and src.startswith("board."):  # the board resource's watch
+        # shortcut: not checked against resources.board.wake (the plugin's kinds)
+        return None if "board" in ts.harbor.resources else "no feeder: the run has no board resource"
     kind = COMMS_WAKES.get(src)
     if kind is None:
         return "no feeder in this version (comms.mention, comms.thread, comms.dm and comms.channel are fed)"
@@ -191,10 +242,12 @@ def source_header(spec_file: str | Path | None) -> dict[str, str]:
 def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
     """What `launch` on a stored swarm refuses: the folder's spec against the stored one,
     without the live replicas (the ramp rewrites them) and `world.dir` (absolute: the same
-    folder copied elsewhere). Changes `spec` in place."""
+    folder copied elsewhere) and a Harbor type's task revision (`keep_pins`). Changes `spec` in
+    place."""
     from flock.live import diff_specs, keep_replicas
 
     keep_replicas(old, spec)
+    keep_pins(old, spec)
     if old.world is not None and spec.world is not None:
         spec.world.dir = old.world.dir
     return diff_specs(old, spec)
@@ -361,6 +414,7 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
             before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
             names = (before, up["tools"])
     kept = keep_replicas(old, spec, ramps_only=replicas == "spec")
+    keep_pins(old, spec)
     lines = diff_specs(old, spec, names)
     if check:  # `path: old -> new (spec.yaml:41 | run.env WORKER_MEM | default)`
         lines = [f"{x} ({source_of(sources or {}, x.split(':', 1)[0])})" if ": " in x
