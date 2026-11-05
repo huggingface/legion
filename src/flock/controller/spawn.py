@@ -237,8 +237,7 @@ def _admit(store: Store, spec: SwarmSpec, parent: Row, type_name: str) -> None:
         raise Refused("budget", f"swarm cost reached ${lim.budget_usd:g} (limits.budget_usd)")
     ts = spec.types[type_name]
     room = max_workers(ts) * max(1, ts.agents_per_worker)
-    # no `workers:` block: workers are sized from the agents, as in reconcile
-    if ts.workers is not None and store.count_agents(spec.swarm, type_name) >= room:
+    if store.count_agents(spec.swarm, type_name) >= room:
         raise Refused(
             "workers",
             f"type {type_name!r} is full: {max_workers(ts)} workers x {ts.agents_per_worker}",
