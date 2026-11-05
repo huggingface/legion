@@ -1,4 +1,4 @@
-"""A world end to end under `flock run` (docs/world.md): the real CLI in a subprocess runs
+"""A world end to end under a local run (docs/world.md): the real CLI in a subprocess runs
 examples/world-demo/spec.yaml (pointed at tests/fake_openai.py and a copy of worlds/taskboard):
 the controller starts the world as a child process, two `llm` agents call `claim_task` through
 the worker, one gets the task, the other reads who holds it, and the world stops with the run."""
@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from . import fake_openai
-from .test_local_run_e2e import _bundle_events, _env, _flock, _run_dir
+from .test_local_run_e2e import _bundle_events, _env, _localrun, _run_dir
 from .test_world import ROOT, TASKBOARD
 
 AGENTS = ["worker-0000", "worker-0001"]
@@ -34,7 +34,7 @@ def _tool_results(run, agent: str) -> list[str]:
             if e["type"] == "message" and e["data"]["message"].get("role") == "toolResult"]
 
 
-def test_flock_run_starts_the_world_and_agents_share_its_claims(tmp_path, fake_server):
+def test_local_run_starts_the_world_and_agents_share_its_claims(tmp_path, fake_server):
     board = tmp_path / "taskboard"
     shutil.copytree(TASKBOARD, board, ignore=shutil.ignore_patterns("*.db*", "__pycache__"))
     spec = yaml.safe_load((ROOT / "examples" / "world-demo" / "spec.yaml").read_text())
@@ -42,7 +42,7 @@ def test_flock_run_starts_the_world_and_agents_share_its_claims(tmp_path, fake_s
     spec["world"]["dir"] = str(board)
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(spec))
     p = subprocess.run(
-        _flock("run", "spec.yaml", "--prompt", 'call: claim_task {"name": "greeting"}',
+        _localrun("spec.yaml", "--prompt", 'call: claim_task {"name": "greeting"}',
                "--until", "idle", "--skip-preflight"),
         cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=90,
         check=False)

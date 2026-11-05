@@ -55,7 +55,6 @@ from flock.models import (
     CommsSpec,
     DrainCommand,
     EventBatch,
-    Grant,
     LoopStartCommand,
     LoopStopCommand,
     PromptCommand,
@@ -71,6 +70,7 @@ from flock.models import (
     type_spec_rev,
     world_tools,
 )
+from flock.registry import HARNESSES, load
 from flock.secrets_file import load as load_secrets
 from flock.secrets_file import secret_env
 from flock.tools.runner import Result
@@ -100,6 +100,7 @@ from flock.worker.sync import (
 )
 from flock.worker.tools import ToolsManager, tools_root
 from flock.world.hub import WorldHub
+from flock.world.protocol import fill_host
 
 log = logging.getLogger("flock.worker")
 
@@ -165,10 +166,11 @@ class WorkerConfig:
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
         host_file = env.get("FLOCK_CTL_HOST_FILE") or None
         template = env["FLOCK_URL"] if host_file and "${CTL_HOST}" in env["FLOCK_URL"] else None
+        url = env["FLOCK_URL"]
         if template is not None:
-            env = {**env, "CTL_HOST": env.get("CTL_HOST") or read_host_file(host_file)}
+            url = fill_host(url, "${CTL_HOST}", env.get("CTL_HOST") or read_host_file(host_file))
         return cls(
-            url=expand_env(env["FLOCK_URL"], env).rstrip("/"),
+            url=expand_env(url, env).rstrip("/"),
             url_template=template,
             host_file=host_file,
             drain_budget=float(env.get("FLOCK_DRAIN_BUDGET_S") or DEFAULT_DRAIN_BUDGET),
@@ -195,7 +197,8 @@ class WorkerConfig:
 
 
 def read_host_file(path: str) -> str:
-    """The controller's hostname from its host file (first word; the controller job writes it)."""
+    """The controller's `host` or `host:port` from its host file (first word; the controller
+    job writes it)."""
     try:
         words = Path(path).read_text().split()
     except OSError as e:
@@ -429,30 +432,7 @@ MEM_KNOB_ENV = {"rotate": "FLOCK_MEM_ROTATE", "drain": "FLOCK_MEM_DRAIN",
 
 def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
-        workdir = cfg.work_root / name
-        if spec.harness.value == "claude":
-            from flock.worker.adapters.claude import ClaudeAdapter
-
-            return ClaudeAdapter(workdir)
-        if spec.harness.value == "pi":
-            from flock.controller.prices import type_price_table
-            from flock.isolation import enabled
-            from flock.worker.adapters.pi import PiAdapter, pi_home, pi_model_config
-
-            # Each endpoint needs its own models.json; agents on one worker can
-            # target different servers, so keep their Pi config directories separate.
-            multi = enabled() or (spec.resolved_model and len(spec.resolved_model.provider.endpoints) > 1)
-            home = pi_home() / "agents" / name if multi else None
-            return PiAdapter(workdir, agent=name, home=home, model_config=pi_model_config(spec, name),
-                             prices=type_price_table(spec))
-        if spec.harness.value == "llm":
-            from flock.controller.prices import type_price_table
-            from flock.worker.adapters.llm import LLMAdapter
-
-            return LLMAdapter(workdir, agent=name, prices=type_price_table(spec))
-        from flock.worker.adapters.codex import CodexAdapter
-
-        return CodexAdapter(workdir)
+        return load(HARNESSES[spec.harness].adapter)(cfg.work_root / name, name, spec)
 
     return make
 
@@ -620,13 +600,11 @@ class Worker:
 
     def _toolbox(self, agent: str) -> Callable[[], Toolset]:
         """What a turn of `agent` may call: the folder tools of the current version plus the
-        agent's built-in comms and world tools, with the agent's grant applied (docs/live.md)."""
+        agent's built-in comms and world tools."""
 
         def toolset() -> Toolset:
-            rt = self.agents.get(agent)
-            grant = rt.grant.tools if rt is not None and rt.grant is not None else None
             ts = self.world.toolset_for(
-                agent, self.comms.toolset_for(agent, self.tools.current(grant)), self.comms)
+                agent, self.comms.toolset_for(agent, self.tools.current()), self.comms)
             if ts.gateway is None and self.comms.address is not None:  # `flock` CLI calls
                 ts = dataclasses.replace(ts, gateway=self.comms.address,
                                          gateway_key=self.comms.key(agent))
@@ -737,7 +715,7 @@ class Worker:
     async def _unassign(self, rt: AgentRuntime) -> None:
         try:
             await rt.unassign()
-            if rt.base_spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
+            if rt.spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
                 rt.purge()
         finally:
             self.comms.forget(rt.name)
@@ -785,7 +763,9 @@ class Worker:
                                agents=[a.heartbeat() for a in self.agents.values()],
                                mem=self.mem, restore=self.restore_progress(),
                                tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev,
-                               wants_rotation=self.wants_rotation)
+                               wants_rotation=self.wants_rotation,
+                               unsynced={a.name: a.unsynced for a in self.agents.values()
+                                         if a.unsynced})
 
     def restore_progress(self) -> RestoreProgress | None:
         """Restores in flight, summed over agents (BucketSync.restore_progress)."""
@@ -800,7 +780,7 @@ class Worker:
         if (refresh := getattr(self.client, "refresh_url", None)) is not None:
             refresh()  # a controller move is picked up here even before any call fails
         try:  # retried inside the client for most of an interval: the controller declares a
-            # worker dead only after DEAD_AFTER without any heartbeat, poll or event post
+            # worker dead only after worker_dead_after without any heartbeat, poll or event post
             resp = await self.client.heartbeat(self.heartbeat_payload(),
                                                budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
             if isinstance(resp, dict) and not self.draining:
@@ -834,8 +814,7 @@ class Worker:
         self.comms.configure(spec, tools if isinstance(tools, list) else [])
 
     def _live_from(self, resp: dict) -> None:
-        """A changed type spec and the grants in force (docs/live.md): every agent takes them at
-        its next turn boundary."""
+        """A changed type spec (docs/live.md): every agent takes it at its next turn boundary."""
         raw = resp.get("type_spec")
         if isinstance(raw, dict):
             try:
@@ -846,15 +825,7 @@ class Worker:
                 self.spec_rev = resp.get("spec_rev") or type_spec_rev(spec)
                 self.apply_knobs(spec.worker)
                 for rt in self.agents.values():
-                    rt.set_live(spec=spec)
-        grants = resp.get("grants")
-        if not isinstance(grants, dict):
-            grants = {}
-        for name, rt in self.agents.items():
-            try:
-                rt.set_live(grant=Grant.model_validate(grants[name]) if name in grants else None)
-            except ValueError as e:
-                log.warning("heartbeat: unreadable grant for %s: %s", name, e)
+                    rt.set_live(spec)
 
     async def heartbeat_loop(self) -> None:
         await asyncio.sleep(random.random() * self.cfg.heartbeat_interval)
@@ -991,8 +962,7 @@ class Worker:
         limit = mem.limit_mb if mem is not None and self.cgroup.armed else None
         # the per-agent /proc walk only when something can act on it
         scan = (limit and nonreclaim is not None and nonreclaim / limit >= th.rotate) or (
-            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb) or any(
-            rt.spec.recycle_after and rt.spec.recycle_after.pss_mb for rt in self.agents.values())
+            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb)
         if scan and any(rt.live for rt in self.agents.values()):
             for rt, data in await asyncio.to_thread(self.agent_memory, False):
                 rt.pss_mb = data.get("pi_pss_mb")
@@ -1047,7 +1017,7 @@ class Worker:
         await self.abandon(f"controller process {self.cfg.parent_pid} is gone")
 
     async def terminate(self, reason: str) -> None:
-        """compute local: SIGTERM from `flock run` at stop. Interrupt every turn now (the
+        """compute local: SIGTERM from the local run at stop. Interrupt every turn now (the
         adapters kill their harness and tool processes), then exit through the normal path:
         flush events, last heartbeat. No sync (a local worker has no bucket)."""
         if self._terminating or self.stale:
@@ -1141,8 +1111,14 @@ class Worker:
         agents = list(self.agents.values())
         cut = await asyncio.gather(*(rt.drain(deadline) for rt in agents), return_exceptions=True)
         self._interrupted.update(rt.name for rt, c in zip(agents, cut, strict=True) if c is True)
-        log.info("drain: %d agents finished and synced in %.1f s; bucket %s", len(self.agents),
-                 loop.time() - t0, self.sync.stats.since(snap) if self.sync else {})
+        for rt, c in zip(agents, cut, strict=True):
+            if isinstance(c, BaseException):  # the drain itself failed: its sync is not known
+                rt.unsynced = f"drain failed: {type(c).__name__}: {c}"[:300]
+        unsynced = [rt.name for rt in agents if rt.unsynced]
+        log.log(logging.WARNING if unsynced else logging.INFO,
+                "drain: %d agents finished in %.1f s, %s; bucket %s", len(self.agents),
+                loop.time() - t0, f"NOT synced: {', '.join(unsynced)}" if unsynced else "all synced",
+                self.sync.stats.since(snap) if self.sync else {})
         self._drained.set()
 
     async def abandon(self, why: str) -> None:
@@ -1163,7 +1139,7 @@ class Worker:
                  self.deadline_loop(), self.parent_loop(), self.memory_loop()]
         tasks = [asyncio.create_task(c) for c in loops]
         loop = asyncio.get_running_loop()
-        # compute local: SIGTERM is `flock run` stopping (terminate). Elsewhere SIGTERM and
+        # compute local: SIGTERM is the local run stopping (terminate). Elsewhere SIGTERM and
         # SIGUSR1 mean the machine goes away (a Spot notice, a time limit, a cancel): preempt.
         local = self.cfg.parent_pid is not None
         handlers = {
@@ -1265,7 +1241,7 @@ def main() -> None:
         template, host_file = cfg.url_template, cfg.host_file
 
         def resolve() -> str:
-            return expand_env(template, {"CTL_HOST": read_host_file(host_file)})
+            return fill_host(template, "${CTL_HOST}", read_host_file(host_file))
 
     client = ControllerClient(cfg.url, cfg.token, incarnation=cfg.incarnation,
                               resolve_url=resolve)

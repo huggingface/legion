@@ -1,9 +1,9 @@
-"""`compute: slurm` and `compute: external`: workers as Slurm jobs, or started by someone else.
+"""`compute: slurm`: workers as Slurm jobs.
 
 `SlurmJobsClient` speaks the `JobsClient` protocol (controller/jobs.py), so the reconcile loop,
 placement, heartbeats and events are unchanged. flock only shells out:
 
-    sbatch --parsable -p <partition> [-A <account>] -c <cpus> --mem=<mem> --time=<time>
+    sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<time>
            --no-requeue -J <worker id> --comment=<labels> -o <log_dir>/<worker id>-%j.out
            <worker_script> <launch_dir>/<worker id>-<incarnation>.env
 
@@ -36,10 +36,6 @@ State mapping (squeue first; sacct once the job left squeue):
                                                      `preempted=True` (planned, no backoff)
   FAILED, OUT_OF_MEMORY, BOOT_FAIL, DEADLINE       -> ERROR "<STATE> exit <code>" (a crash)
 
-`ExternalJobsClient` launches nothing: `launch` writes the same env file (when `launch_dir` is
-set), logs what it expects to be started and returns an `external-...` id; `inspect` always
-says SCHEDULING, so the reconcile loop waits for heartbeats and never counts a missing
-external worker as a crash (reconcile.py).
 """
 
 from __future__ import annotations
@@ -56,6 +52,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from flock.controller.jobs import JobListing, JobState
@@ -65,8 +62,9 @@ log = logging.getLogger("flock.slurm")
 
 # The worker's exit code after a preemption drain (worker/main.py): EX_TEMPFAIL.
 PREEMPT_EXIT = 75
-DEFAULTS = {"partition": "hopper-cpu", "cpus": "4", "mem": "7G", "time": "29:00:00",
-            "max_cpus": "28", "max_mem": "54G"}
+# No cluster's values here: partition and node limits come from the spec or the cluster
+# profile (FLOCK_SLURM_*; docs/slurm.md "Cluster profile"). No partition: sbatch's default.
+DEFAULTS = {"cpus": "4", "mem": "7G", "time": "29:00:00"}
 # compute spec key -> controller env override (the first seven are the cluster's contract)
 ENV_KEYS = {
     "partition": "FLOCK_SLURM_PARTITION",
@@ -131,15 +129,16 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess:
 
 def resolve(compute: ComputeSpec | None, type_name: str,
             env: Mapping[str, str] = os.environ) -> dict[str, str]:
-    """Settings for one worker launch: defaults < spec keys < FLOCK_SLURM_* env < the spec's
-    `types.<type>` entry."""
+    """Settings for one worker launch: defaults < FLOCK_SLURM_* env < spec keys < the spec's
+    `types.<type>` entry (the spec wins; the env only fills what it leaves unset)."""
     out: dict[str, str] = dict(DEFAULTS)
     for key, var in ENV_KEYS.items():
-        spec_value = getattr(compute, key, None) if compute is not None else None
-        if spec_value not in (None, ""):
-            out[key] = str(spec_value)
+        set_ = compute is not None and key in compute.model_fields_set  # a default is not set
+        spec_value = getattr(compute, key) if set_ else None
         if env.get(var):
             out[key] = env[var]
+        if spec_value not in (None, ""):
+            out[key] = str(spec_value)
     per_type = compute.types.get(type_name) if compute is not None else None
     if per_type is not None:
         for key, value in per_type.model_dump(exclude_none=True).items():
@@ -280,7 +279,6 @@ class SlurmJobsClient:
     calls: Counter = field(default_factory=Counter)
     # reconcile passes the swarm's `compute` block to launch() (ComputeSpec keys)
     uses_compute_spec: bool = True
-    external: bool = False
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -311,13 +309,13 @@ class SlurmJobsClient:
         if missing:
             raise SlurmConfigError(f"compute slurm needs {', '.join(missing)} (spec `compute:` keys "
                              f"or {', '.join(ENV_KEYS[k] for k in missing)})")
-        if problem := size_problem(cfg["cpus"], cfg["mem"], cfg["max_cpus"], cfg["max_mem"]):
+        if problem := size_problem(cfg["cpus"], cfg["mem"], cfg.get("max_cpus"), cfg.get("max_mem")):
             raise SlurmConfigError(f"{env.get('TYPE', '')}: {problem}")
         settings, names = worker_env(worker_id, env, secrets, cfg)
         env_path = env_file_path(cfg["launch_dir"], worker_id, env)
         write_private(env_path, env_file_text(settings, names))
         Path(cfg["log_dir"]).mkdir(parents=True, exist_ok=True)
-        argv = ["sbatch", "--parsable", "-p", cfg["partition"]]
+        argv = ["sbatch", "--parsable", *(["-p", cfg["partition"]] if cfg.get("partition") else [])]
         if cfg.get("account"):
             argv += ["-A", cfg["account"]]
         argv += [
@@ -338,15 +336,19 @@ class SlurmJobsClient:
             self._launched[job_id] = (worker_id, time.monotonic(), cfg["log_dir"])
             self._dirs[job_id] = cfg["launch_dir"]
         log.info("sbatch %s for %s (%s cpus, %s, %s)", job_id, worker_id, cfg["cpus"],
-                 cfg["mem"], cfg["partition"])
+                 cfg["mem"], cfg.get("partition") or "default partition")
         return job_id
 
-    def _squeue_state(self, job_id: str) -> str | None:
-        r = self._call("squeue", ["squeue", "-h", "-j", job_id, "-o", "%T"])
+    def _squeue_state(self, job_id: str) -> tuple[str, str] | None:
+        """(state, pending reason) from squeue, or None once the job left it."""
+        r = self._call("squeue", ["squeue", "-h", "-j", job_id, "-o", "%T|%r"])
         if r.returncode != 0:
             return None  # "Invalid job id": purged from squeue, ask sacct
-        out = (r.stdout or "").strip().split()
-        return out[0] if out else None
+        out = (r.stdout or "").strip().splitlines()
+        if not out:
+            return None
+        state, _, reason = out[0].partition("|")
+        return state.strip(), reason.strip()
 
     def _sacct_state(self, job_id: str) -> tuple[str, str] | None:
         r = self._call("sacct", ["sacct", "-j", job_id, "-X", "-n", "-P", "-o", "State,ExitCode"])
@@ -368,11 +370,12 @@ class SlurmJobsClient:
         states = (r.stdout or "").split()
         return "RUNNING" if "RUNNING" in states else (states[0] if states else None)
 
-    def map_state(self, job_id: str, state: str, exit_code: str = "") -> JobState:
+    def map_state(self, job_id: str, state: str, exit_code: str = "", reason: str = "") -> JobState:
         word = state.split()[0].rstrip("+") if state else ""
         code = exit_code.split(":")[0] if exit_code else ""
-        if word in SCHEDULING:
-            return JobState("SCHEDULING", word)
+        if word in SCHEDULING:  # with squeue's pending reason, e.g. "PENDING (Resources)"
+            return JobState("SCHEDULING", f"{word} ({reason})" if reason not in ("", "None")
+                            else word)
         if word in RUNNING:
             return JobState("RUNNING")
         if word == "COMPLETED":
@@ -391,14 +394,15 @@ class SlurmJobsClient:
         return JobState("ERROR", f"{word or 'UNKNOWN'} exit {code}".strip())
 
     def inspect(self, job_id: str, *, namespace: str = "") -> JobState:
-        state = self._squeue_state(job_id)
-        if state is not None:
+        found = self._squeue_state(job_id)
+        if found is not None:
+            state, reason = found
             if state in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
                          "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"):
                 acct = self._sacct_state(job_id)  # the exit code lives in sacct
                 if acct is not None:
                     return self.map_state(job_id, *acct)
-            return self.map_state(job_id, state)
+            return self.map_state(job_id, state, reason=reason)
         acct = self._sacct_state(job_id)
         if acct is not None:
             return self.map_state(job_id, *acct)
@@ -423,7 +427,7 @@ class SlurmJobsClient:
             log.warning("scancel %s: %s", job_id, (r.stderr or "").strip()[:200])
 
     def list(self, labels: dict[str, str], *, namespace: str = "") -> list[JobListing]:
-        r = self._call("squeue", ["squeue", "--me", "-h", "-o", "%i|%j|%k|%T"])
+        r = self._call("squeue", ["squeue", "--me", "-h", "-o", "%i|%j|%k|%T|%r"])
         if r.returncode != 0:
             raise RuntimeError(f"squeue exit {r.returncode}: {(r.stderr or '').strip()[:200]}")
         out = []
@@ -432,12 +436,13 @@ class SlurmJobsClient:
             if len(parts) < 4:
                 continue
             job_id, name, comment, state = (p.strip() for p in parts[:4])
+            reason = parts[4].strip() if len(parts) > 4 else ""
             have = _parse_comment(comment)
             if not all(have.get(k) == v for k, v in labels.items()):
                 continue
             launch_dir = self._dirs.get(job_id) or resolve(None, "", self.env).get("launch_dir")
             env = latest_env(launch_dir, name) if launch_dir else {}
-            st = self.map_state(job_id, state)
+            st = self.map_state(job_id, state, reason=reason)
             out.append(JobListing(job_id, have, st.stage, env, st.message))
         return out
 
@@ -466,44 +471,6 @@ class SlurmJobsClient:
         return lines[-n:]
 
 
-@dataclass
-class ExternalJobsClient:
-    """`compute: external`: the controller launches nothing. Each "launch" writes the slot's
-    env file (when a launch dir is configured) and logs what it waits for; the worker started
-    by someone else registers through its heartbeat."""
-
-    env: Mapping[str, str] = field(default_factory=lambda: os.environ)
-    calls: Counter = field(default_factory=Counter)
-    uses_compute_spec: bool = True
-    external: bool = True
-    waiting: dict[str, str] = field(default_factory=dict)  # job id -> worker id
-
-    def launch(self, worker_id: str, spec: TypeSpec, env: dict[str, str],
-               secrets: dict[str, str], labels: dict[str, str], timeout: float, *,
-               namespace: str, compute: ComputeSpec | None = None) -> str:
-        self.calls["launch"] += 1
-        cfg = resolve(compute, env.get("TYPE", ""), self.env)
-        settings, names = worker_env(worker_id, env, secrets, cfg)
-        where = ""
-        if cfg.get("launch_dir"):
-            path = env_file_path(cfg["launch_dir"], worker_id, env)
-            write_private(path, env_file_text(settings, names))
-            where = f"; env file {path}"
-        job_id = f"external-{uuid.uuid4().hex[:8]}"
-        self.waiting[job_id] = worker_id
-        log.info("waiting for an external start of %s (WORKER_ID=%s, FLOCK_URL=%s, secrets %s%s)",
-                 worker_id, worker_id, settings["FLOCK_URL"], " ".join(names), where)
-        return job_id
-
-    def inspect(self, job_id: str, *, namespace: str = "") -> JobState:
-        return JobState("SCHEDULING", "waiting for an external start")
-
-    def cancel(self, job_id: str, *, namespace: str = "") -> None:
-        self.calls["cancel"] += 1
-        self.waiting.pop(job_id, None)
-
-    def list(self, labels: dict[str, str], *, namespace: str = "") -> list[JobListing]:
-        return []
-
-    def logs_tail(self, job_id: str, *, namespace: str = "", n: int = 5) -> list[str]:
-        return []
+def slurm_jobs_client(env: Mapping[str, str], dep: Any, data_dir: str) -> SlurmJobsClient:
+    """The controller's client for compute `slurm` (flock.registry)."""
+    return SlurmJobsClient(env=env)

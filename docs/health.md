@@ -27,8 +27,13 @@ stream is tailed by byte offset.
   `absent` when no such job is queued, `unknown` when squeue is missing, fails or times out),
   so a world waiting for a node is told apart from a crash.
 - **vLLM.** With `providers.<p>.metrics: true`, each base URL's server root `/metrics`
-  (Prometheus text): `waiting` and `running` are summed over servers, `kv` is the highest
-  `gpu_cache_usage_perc` (or `kv_cache_usage_perc`).
+  (Prometheus text): `providers` sums `waiting` and `running` over servers with the highest
+  `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`), as before; `provider_servers` has
+  each server (`host:port`): `up`, its queues, or `up: false`, the `error` and `fails` (failed
+  scrapes in a row; `dead` from 2 on). Each agent's heartbeat names the server it is pinned to
+  (`endpoint`, `pick_endpoint`), so a server counts its `agents`; a dead one lists them
+  (`dead_agents`, first 20) and raises `dead_server` (`provider_down` when every server of the
+  provider is dead). Moving agents off a dead server is manual: drop it from `base_urls` and `flock update`.
 
 ## Snapshot body
 
@@ -37,7 +42,9 @@ stream is tailed by byte offset.
  workers: {wid: {hb, mem, slope_mb_h, eta_limit_s, restore: {..., eta_s}, relaunches}},
  types: {t: {by_state, stuck: [{agent, state, silent_s}], gens: {rev: n}}},
  tools: {name: {rate_per_min, err_pct, refused_pct, max_s}},
- providers: {p: {waiting, running, kv}},
+ providers: {p: {waiting, running, kv, completed}},
+ provider_servers: {p: {"host:port": {up, fails, dead, waiting, running, kv, completed, error, agents, dead_agents}}},
+ ramps: {t: {step, steps, replicas, max, next_add, next_at, holds}},
  tokens: {hour: "YYYY-MM-DDTHH", by_type: {t: {input, output, cache_read, cache_write, reasoning}}},
  alerts: [{kind, msg}]}
 ```
@@ -49,10 +56,13 @@ stream is tailed by byte offset.
 - `stuck`: agents in `stuck`, or in `working` with no event for more than 30 min
   (`FLOCK_STUCK_MIN`). After a controller restart the clock starts at its first sample.
 - `gens`: agents by the type spec revision they run (`rev` in the agent heartbeat).
-- `hb` is the worker's last heartbeat time and `ts` the world probe's time. Policies use them
-  to skip stale samples ([policies.md](policies.md)).
-- Alerts: world down, a worker within 1 h of its memory limit, stuck agents, a tool with
-  20 % or more errors or refusals over the last sample.
+- `hb` is the worker's last heartbeat time and `ts` the world probe's time.
+- `ramps`: per `replicas_ramp` type, its step (`ramp:<type>`), the next step's size and time
+  (epoch s; null while held, released or at the end) and the consecutive capacity holds.
+- Alerts: world down (2 failed probes in a row; `world_pending` instead while its Slurm job is
+  PENDING), a dead model server (`dead_server`, `provider_down`), 3 or more ramp
+  holds in a row (`ramp_held`), a worker within 1 h of its memory limit, stuck agents, a tool
+  with 20 % or more errors or refusals over the last sample.
 
 Retention: the 30 s samples stay in the controller's memory for 6 h (gone after a restart).
 Every 10th one is stored as a 5-min sample for 48 h (table `health_samples`, pruned on
@@ -71,7 +81,7 @@ is not counted. Hours are by the time the controller received the events.
 
 ## Files (mirrored by the state sync)
 
-Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flock run`:
+Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flock launch`:
 `<run dir>/controller/`):
 
 ```
@@ -120,10 +130,77 @@ with a prompt queued).
   controller restart, until the first sample, `body` is the newest stored slim one.
 - `GET /swarms/{s}/health/history?since=<epoch s or ISO>&res=30s|5m`: `[{ts, body}]`; `30s`
   from memory (full bodies), `5m` from the store (slim).
-- `flock status --watch` also shows the world's `/metrics`: event-loop lag, 429s, each pool's
-  oldest queue wait, `lane_<lane>_tripped/paused/effective_slots/in_flight` per lane, the
-  comment outbox depth and age, and any other number under `world`.
-- `GET /swarms/{s}/usage?by=type|hour`: token rows.
-- `flock status [swarm] --watch` (every 10 s), `flock status [swarm] --json`,
-  `flock usage <swarm> [--by type|hour]`.
 - The `/` status page has one health line per swarm: aggregates only, no agent names.
+
+## `flock status`
+
+One operator view per swarm, built by `flock.status.view` (the Python API uses the same
+function) from `GET /swarms/{s}`, the newest snapshot, `GET /workers` and, with a filter, the
+agents. The first line is the verdict (`flock.status.verdict`):
+
+- `FAILING`: the world is down, every server of a provider is down under its agents, or a
+  type's launches are refused. Exit 1.
+- `DEGRADED`: any other alert (a world whose Slurm job is PENDING, stuck agents, a dead
+  server, memory, tool errors, ramp holds),
+  a launch error being retried, agents whose final sync failed, a budget stop, or no snapshot
+  in the last 2 min (the controller's prober is not running).
+- `OK`.
+
+Then: counts per type, holds, loops, providers; workers by state with the scheduler's pending
+reason (`PENDING (Resources)`, from squeue `%r`) and one row per worker with crashes or a
+`last_error`; the snapshot's world (up/down, Slurm state, `/metrics`: event-loop lag, 429s,
+each pool's oldest queue wait, `lane_<lane>_*` per lane, the comment outbox, any other number
+under `world`), each model server, each ramp (`step k/n, next +m at HH:MMZ`), alerts, agents
+per type and state, workers by time to memory limit, restores, tool rates, stuck agents and
+the last control-plane events.
+
+- `--type T`, `--state S`, `--parent P` list the matching agents (with their server, `DEAD`
+  when it is down); `--type` adds the type's per-agent loop rows. `--state idle` means what
+  `flock prompt --state idle` means (the controller's `turn_state`: a prompt just handed out
+  is working, a turn just ended is idle, without waiting for a heartbeat).
+- `--agent A` (or an agent's name as the argument): that agent's status as JSON.
+- `--watch` reprints every 10 s; `--json` prints the whole view (`verdict`, `status`,
+  `health`, every worker row, `agents`, `loop`).
+- A controller that does not answer: `controller unreachable at URL; hosts/controller.host
+  says HOST, written at T` (T is the file's time, i.e. the controller's last start; the host
+  file part needs `--run` or FLOCK_RUN_DIR). Exit 1.
+- Inside an agent: `flock status` is your own status; `flock status [SWARM] --parent P` lists
+  your (or a descendant's) children.
+
+## Events
+
+`flock status SWARM --events` prints the swarm stream, `flock status AGENT --events` (or
+`--agent A --events`) an agent's; `--only PREFIX` keeps the names starting with it (`--only
+agent.`), `--after N` starts after a cursor, `--follow` keeps long-polling, `--wait` returns
+once something new arrived (the next cursor on stderr), `--json` prints JSONL.
+`flock.status.events` yields the same pages (a removed agent's stored events too). Hidden,
+for prompts in resumed runs: `flock events NAME [--after --follow --wait --timeout --pretty]`
+(raw JSONL) and `flock agents SWARM [--type --state --parent]` (the old table). Stored events are never rewritten (resume reads
+them); `flock.status.normalise` maps each to one schema:
+
+`{name, ts, swarm, agent?, type?, worker?, data}`; `data` is the event's payload, with
+`turn_id` when it has one.
+
+| name | stored as | stream | when |
+|---|---|---|---|
+| `agent.message` | `message` | agent | a harness message (user, assistant, tool result) |
+| `agent.turn_started`, `agent.turn_ended`, `agent.turn_interrupted` | same | agent | a turn starts, ends, is cut (`reason: timeout` makes the agent stuck) |
+| `agent.session_started`, `agent.session_resumed`, `agent.session_restarted` | same | agent | the harness session |
+| `agent.sync`, `agent.error`, `agent.prompt_deferred`, `agent.harness_recycled`, ... | same | agent | any other worker event: `agent.<stored type>` |
+| `agent.stuck` | `stuck` | swarm | the controller first sees an agent stuck (its turn timed out) |
+| `agent.nudged` | `nudge` | swarm | a stuck agent got its type's `resume_prompt` |
+| `agent.spawned`, `agent.child_removed` | `spawned`, `child_removed` | parent agent | a child spawned or removed |
+| `worker.launched`, `worker.launch_failed` | `launch`, `launch_failed` | swarm | a worker job submitted or refused |
+| `worker.crashed`, `worker.crashloop`, `worker.restarted` | `crash`, `crashloop`, `planned_restart` | swarm | a worker job ended |
+| `worker.ended` | `end` | swarm | a released swarm's worker job ended as planned: nothing relaunches it |
+| `worker.cancelled`, `worker.retired`, `worker.removed`, `worker.released` | `cancel`, `retire`, `remove_worker`, `release` | swarm | a worker taken down |
+| `worker.rotated`, `worker.sync_failed` | `memory_rotation`, `sync_failed` | swarm | memory rotation; a final sync failed |
+| `type.launch_refused` | `launch_refused` | swarm | a type's launches stop until the next apply |
+| `loop.started`, `loop.updated`, `loop.tick`, `loop.wake`, `loop.stopped`, `loop.max_turns`, `loop.prompt` | `loop_*` | swarm, agent | the loop engine (docs/loop.md) |
+| `loop.final_round`, `loop.final_done` | `final_round`, `final_done` | swarm, agent | the final round |
+| `ramp.step`, `ramp.held` | `ramp_step`, `ramp_held` | swarm | a ramp step, a capacity hold |
+| `world.down`, `world.up`, `world.knob` | `world_down`, `world_up`, `world_knob` | swarm | the world probe; a knob changed |
+| `budget.stop`, `budget.cleared` | `budget_stop`, `budget_cleared` | swarm | `limits.budget_usd` |
+| `comms.dm`, `comms.mention`, `comms.joined`, ... | `comms_*` | agent | the board (docs/comms.md) |
+| `swarm.stopped`, `swarm.resumed`, `swarm.released`, `swarm.unreleased` | `paused`, `resumed`, `released`, `unreleased` | swarm | `flock stop` / `flock launch` |
+| `swarm.spec_applied`, `swarm.removed` | `spec_applied`, `remove_swarm` | swarm | the stored spec; `--delete` done |

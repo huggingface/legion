@@ -30,7 +30,7 @@ SWARM_HEADER = "X-Flock-Swarm"
 TURN_HEADER = "X-Flock-Turn"
 REQUEST_HEADER = "X-Request-Id"
 
-# Environment of a world flock starts (and of `flock world serve`), and of the workers.
+# Environment of a world flock starts (and of `python -m flock.world serve`), and of the workers.
 TOKEN_ENV = "FLOCK_WORLD_TOKEN"
 PORT_ENV = "FLOCK_WORLD_PORT"
 HOST_ENV = "FLOCK_WORLD_HOST"
@@ -159,19 +159,27 @@ def credential_id(token: str, origin: str) -> str:
 
 WORLD_HOST_VAR = "${WORLD_HOST}"  # in world.url: the host is read from FLOCK_WORLD_HOST_FILE
 WORLD_HOST_FILE_ENV = "FLOCK_WORLD_HOST_FILE"
+DEFAULT_PORT = 7860  # what an old host-only host file means (the url's own port)
+
+
+def fill_host(url: str, var: str, host: str) -> str:
+    """`url` with `var` (`${WORLD_HOST}`, `${CTL_HOST}`) replaced by a host file's first word:
+    `host:port` (the jobs bind a free port) also replaces the url's port after `var`; an old
+    host-only file keeps the url's port (DEFAULT_PORT in every spec)."""
+    return re.sub(re.escape(var) + (r"(:\d+)?" if ":" in host else ""), lambda _: host, url)
 
 
 def origin_matches(origin: str, endpoint: str) -> bool:
     """A secret bound to `origin` may go to `endpoint`: the same URL, or, for a world.url with
-    ${WORLD_HOST} (a world whose host moves, docs/slurm.md), that URL with any one host name."""
+    ${WORLD_HOST} (a world whose host moves, docs/slurm.md), what fill_host can make of it (any host, or host:port in place of the url's port)."""
     if origin == endpoint:
         return True
     if WORLD_HOST_VAR not in origin:
         return False
     pre, _, post = origin.partition(WORLD_HOST_VAR)
-    host = endpoint[len(pre):len(endpoint) - len(post)] if endpoint.startswith(pre) and \
-        endpoint.endswith(post) and len(endpoint) > len(pre) + len(post) else ""
-    return bool(re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]+)?", host))
+    host, port = r"[A-Za-z0-9.-]+", r":[0-9]+"
+    rest = re.sub(r"^:\d+", "", post)  # a host:port file replaces this port
+    return bool(re.fullmatch(re.escape(pre) + host + "(?:" + re.escape(post) + "|" + port + re.escape(rest) + ")", endpoint))
 
 
 def manifest_error(exc: Exception) -> str:

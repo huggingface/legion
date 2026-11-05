@@ -8,6 +8,7 @@ from datetime import timedelta
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import Client
 from flock.controller import spawn as spawning
 from flock.models import AgentHeartbeat, PromptCommand, WorkerHeartbeat
 
@@ -43,7 +44,7 @@ async def test_leader_prompts_its_idle_children_once(client, app, store, tick, c
         ack = (await c.post(f"/agents/{LEADER}/children/prompts", json=body)).json()
         assert ack == {"swarm": "demo", "type": "analyst", "parent": LEADER, "matched": 3,
                        "queued": 2, "pending": 0, "skipped_state": 0, "skipped_removing": 0,
-                       "skipped_pending": 1, "skipped_budget": 0, "prompt_id": None}
+                       "skipped_pending": 1}
         again = (await c.post(f"/agents/{LEADER}/children/prompts", json=body)).json()
         assert (again["queued"], again["skipped_pending"]) == (0, 3)  # nothing stacks
         everyone = (await c.post(f"/agents/{LEADER}/children/prompts",
@@ -74,11 +75,11 @@ async def test_children_prompt_refused_for_other_tokens(client, app, store, tick
 def test_cli_prompt_children(monkeypatch, app, store):
     sent = []
 
-    def fake_call(method, path, **kw):
+    def fake_call(self, method, path, **kw):
         sent.append((method, path, kw["json"]))
         return {"matched": 0}
 
-    monkeypatch.setattr(cli, "_call", fake_call)
+    monkeypatch.setattr(Client, "_call", fake_call)
     monkeypatch.setenv("FLOCK_AGENT", LEADER)
     r = runner.invoke(cli.app, ["prompt", "--children", "--type", "analyst", "--state", "idle", "go"])
     assert r.exit_code == 0, r.output

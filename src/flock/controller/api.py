@@ -29,7 +29,6 @@ from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
 from flock.controller.health import Health
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
-from flock.controller.policy import rules_of
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
 from flock.controller.spawn import (
@@ -47,7 +46,6 @@ from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
 from flock.live import diff_specs, keep_replicas
 from flock.models import (
-    COMMS_TOOLS,
     AgentState,
     AgentStatus,
     BulkPromptAck,
@@ -57,8 +55,8 @@ from flock.models import (
     CommandBatch,
     Event,
     EventBatch,
-    Grant,
     Harness,
+    Liveness,
     LoopRequest,
     LoopStatus,
     PreflightReport,
@@ -75,9 +73,6 @@ from flock.models import (
     WorkerStatus,
     comms_tools,
     loop_refusals,
-    merge_grants,
-    parse_duration,
-    policy_refusals,
     type_spec_rev,
     worker_type_spec,
     world_tools,
@@ -251,8 +246,8 @@ def agent_status(
     spec: SwarmSpec | None,
     pending: int,
     now: float,
-    children: list[str] | None = None,
-    grant: Grant | None = None,
+    children: list[str] | None,
+    state: AgentState,
 ):
     ts = spec.types.get(a["type"]) if spec else None
     return AgentStatus(
@@ -263,7 +258,7 @@ def agent_status(
         model=ts.model if ts else "unknown",
         provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},
-        state=agent_state(a, w, now),
+        state=state,
         idle_since=_dt(a["idle_since"]),
         turn_id=a["turn_id"],
         worker=a["worker"],
@@ -281,25 +276,26 @@ def agent_status(
         parent=a["parent"],
         children=children or [],
         depth=agent_depth(spec, a),
-        grants=grant.compact() if grant is not None else None,
         rev=a.get("rev"),
         start_rev=a.get("start_rev"),
+        endpoint=a.get("endpoint"),
     )
 
 
-def worker_status(w: Row, agents: list[str], now: float) -> WorkerStatus:
+def worker_status(w: Row, agents: list[str], now: float, lv: Liveness) -> WorkerStatus:
     return WorkerStatus(
         id=w["id"],
         swarm=w["swarm"],
         type=w["type"],
         job_id=w["job_id"],
-        state=worker_state(w, now),
+        state=worker_state(w, now, lv),
         deadline=_dt(w["deadline"]),
         agents=agents,
         last_heartbeat=_dt(w["last_heartbeat"]),
         launched_at=_dt(w["launched_at"] or w["created_at"]),
         crashes=w["crashes"],
         last_error=w.get("last_error"),
+        pending_reason=w.get("pending_reason"),
         **json.loads(w.get("telemetry") or "{}"),
     )
 
@@ -308,13 +304,14 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
     workers = {w["id"]: w for w in store.list_workers(spec.swarm)}
     agents = store.list_agents(spec.swarm)
     pending = store.pending_counts(spec.swarm)
+    lv = spec.compute.liveness()
     types: dict[str, TypeStatus] = {}
     for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
         ts = spec.types.get(type_name)
         mine = [a for a in agents if a["type"] == type_name]
-        by_state = Counter(agent_state(a, workers.get(a["worker"]), now).value for a in mine)
+        by_state = Counter(agent_state(a, workers.get(a["worker"]), now, lv).value for a in mine)
         w_state = Counter(
-            worker_state(w, now).value for w in workers.values() if w["type"] == type_name
+            worker_state(w, now, lv).value for w in workers.values() if w["type"] == type_name
         )
         types[type_name] = TypeStatus(
             name=type_name,
@@ -352,6 +349,9 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
         cost_usd=round(sum(t.cost_usd for t in types.values()), 6),
         budget_stop=(flags := store.swarm_flags(spec.swarm)).get("budget_stop"),
         held=_held_view(flags.get("holds")),
+        released={**(r := flags["released"]), "since": _dt(r["since"]).isoformat(),
+                  "unsynced": store.get_control(spec.swarm, "unsynced") or {}}
+        if flags.get("released") else None,
         generation=store.generation(spec.swarm),
     )
 
@@ -560,7 +560,7 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
         )
     body = "".join(parts) or (
         '<div class="empty">No swarms yet.<br>Apply one with '
-        "<code>flock apply spec.yaml</code></div>"
+        "<code>flock launch spec.yaml</code></div>"
     )
     stamp = e(_dt(now).strftime("%Y-%m-%d %H:%M:%S UTC"))
     return (
@@ -581,8 +581,8 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
 def add_world_admin_routes(api: APIRouter, store: Store, token: str,
                            secret_source: Mapping[str, str],
                            transport: httpx.BaseTransport | None,
-                           clock: Callable[[], datetime]) -> Callable[..., Any]:
-    """`/swarms/{swarm}/world/...`: the world's admin API (knobs, lane pauses; docs/world.md)
+                           clock: Callable[[], datetime]) -> None:
+    """`/swarms/{swarm}/world/...`: the world's admin API (knobs; docs/world.md)
     through the controller with the world's admin secret (`world_admin_token`). Every change
     is a swarm event."""
 
@@ -634,95 +634,6 @@ def add_world_admin_routes(api: APIRouter, store: Store, token: str,
             audit(swarm, "world_knob", {**c, "by": by(x_flock_source), "reason": reason})
         return out
 
-    @api.post("/swarms/{swarm}/world/{action}")
-    def world_pause(swarm: str, action: Literal["pause", "resume"],
-                    body: Annotated[dict[str, Any], Body()],
-                    x_flock_source: Annotated[str | None, Header()] = None) -> dict:
-        lanes, reason = body.get("lanes"), str(body.get("reason") or "")
-        out = world_admin(swarm, "POST", f"/admin/{action}",
-                          {"lanes": lanes, **({"reason": reason} if action == "pause" else {})})
-        audit(swarm, f"world_{action}", {"lanes": lanes, "by": by(x_flock_source),
-                                         **({"reason": reason} if action == "pause" else {})})
-        return out
-
-    return world_admin  # policies (docs/policies.md) call the world through it too
-
-
-def add_steering_routes(api: APIRouter, store: Store, health: Health,
-                        clock: Callable[[], datetime]) -> None:
-    """Policies (docs/policies.md), loop banners and broadcast counts (docs/live.md)."""
-
-    def spec_of(swarm: str) -> SwarmSpec:
-        row = store.get_swarm(swarm)
-        if row is None:
-            raise HTTPException(404, f"no swarm {swarm!r}")
-        return row["spec"]
-
-    def audit(swarm: str, kind: str, data: dict) -> None:
-        store.append_events(swarm, swarm_stream(swarm), [Event(type=kind, ts=clock(), agent="",
-                                                               data=data)])
-
-    @api.get("/swarms/{swarm}/policies")
-    def policies(swarm: str) -> dict:
-        return health.policies.view(spec_of(swarm), clock().timestamp())
-
-    @api.post("/swarms/{swarm}/policies/{rule}/{action}")
-    def mute(swarm: str, rule: str, action: Literal["mute", "unmute"],
-             body: Annotated[dict[str, Any] | None, Body()] = None) -> dict:
-        spec, now = spec_of(swarm), clock().timestamp()
-        if rule not in {r.name for r in rules_of(spec)[1]}:
-            raise HTTPException(404, f"no policy rule {rule!r} in swarm {swarm!r}")
-        if action == "unmute":
-            health.policies.unmute(swarm, rule)
-            audit(swarm, "policy_unmuted", {"rule": rule})
-        else:
-            dur = (body or {}).get("for")
-            try:
-                until = now + parse_duration(dur).total_seconds() if dur else None
-            except ValueError as e:
-                raise HTTPException(400, str(e)) from None
-            health.policies.mute(swarm, rule, until)
-            audit(swarm, "policy_muted", {"rule": rule, "for": dur})
-        return health.policies.view(spec, now)
-
-    @api.get("/swarms/{swarm}/notices")
-    def notices(swarm: str) -> dict:
-        spec_of(swarm)
-        return {k.removeprefix("notice:"): v for k, v in store.controls(swarm, "notice:").items()}
-
-    @api.put("/swarms/{swarm}/notice")
-    def set_notice(swarm: str, body: Annotated[dict[str, Any], Body()]) -> dict:
-        """The banner line at the top of every loop prompt of `type` (None: every type)."""
-        spec = spec_of(swarm)
-        t, text = body.get("type") or "*", str(body.get("text") or "").strip()
-        if t != "*" and t not in spec.types:
-            raise HTTPException(404, f"no type {t!r} in swarm {swarm!r}")
-        if not text or "\n" in text or len(text) > 500:
-            raise HTTPException(400, "notice text: one line, 1-500 characters")
-        store.put_control(swarm, f"notice:{t}", {"text": text, "since": clock().timestamp()})
-        audit(swarm, "notice_set", {"type": t, "text": text})
-        return notices(swarm)
-
-    @api.delete("/swarms/{swarm}/notice")
-    def clear_notice(swarm: str, type: str | None = None) -> dict:
-        spec_of(swarm)
-        store.delete_control(swarm, f"notice:{type or '*'}")
-        audit(swarm, "notice_cleared", {"type": type or "*"})
-        return notices(swarm)
-
-    @api.get("/swarms/{swarm}/broadcasts")
-    def broadcasts(swarm: str, limit: int = 20) -> list[dict]:
-        """Tracked prompts, newest first: targets, delivered (left the queue), started,
-        finished (`acted`)."""
-        spec_of(swarm)
-        out = []
-        for b in sorted(store.controls(swarm, "broadcast:").values(), key=lambda b: -b["ts"]
-                        )[:max(1, limit)]:
-            n = len(b["agents"])
-            out.append({"id": b["id"], "ts": b["ts"], "type": b["type"], "text": b["text"],
-                        "targets": n, "delivered": n - store.pending_with(b["id"]),
-                        "started": len(b["started"]), "finished": len(b["finished"])})
-        return out
 
 
 def create_app(
@@ -742,13 +653,15 @@ def create_app(
     worlds: WorldHost | None = None,
     world_transport: httpx.BaseTransport | None = None,
     health: Health | None = None,
+    buckets: Callable[[str], Any] | None = None,
+    checkpoint: Callable[[], int] | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
     `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
     `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
     network group spans one namespace, so workers elsewhere could never reach the controller.
-    `compute`, when set ("hf-jobs", "local", "slurm" or "external"), is the only `compute.kind` a spec may ask for:
+    `compute`, when set ("hf-jobs", "local" or "slurm"), is the only `compute.kind` a spec may ask for:
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
     default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`).
@@ -760,7 +673,10 @@ def create_app(
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.
     `health` (docs/health.md) gets every posted event batch; its probe/snapshot loop is run by
-    the caller (main, localrun). Default: one that only counts."""
+    the caller (main, localrun). Default: one that only counts.
+    `buckets(url)` opens a bucket (a `BucketStore`): `flock launch` checks the spec's bucket for
+    agents of an earlier run. None: no bucket access (tests): no fresh-run guard.
+    `checkpoint()` pushes the state to the bucket (POST /checkpoint); None: no state sync."""
     secret_source = os.environ if secret_source is None else secret_source
     worlds = WorldHost() if worlds is None else worlds
     health = Health(store, token=token, secrets=secret_source) if health is None else health
@@ -773,7 +689,6 @@ def create_app(
     # "working" (turn_started seen) or "idle" (turn_ended / turn_interrupted / prompt_deferred
     # seen). A heartbeat that reports the agent replaces it (see `heartbeat_seen`).
     live: dict[str, tuple[str, float]] = {}
-    broadcast_lock = threading.Lock()  # tracked broadcasts: read-modify-write of one row
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
     set_token_key(store, token)
@@ -789,7 +704,6 @@ def create_app(
     loops = LoopEngine(store, send=loop_send, clock=clock,
                        capped=lambda spec, t: bool(caps(spec, t)),
                        turn_state=lambda a, w, now: turn_state(a, w, now))
-    health.policies.loops = loops  # pause_type / resume_type (docs/policies.md)
 
     async def loop_ticker() -> None:
         while True:
@@ -885,6 +799,18 @@ def create_app(
     def index() -> str:
         return _status_page(store, clock().timestamp(), health)
 
+    @api.post("/checkpoint")
+    async def push_checkpoint() -> dict:
+        """Push the controller's state to its bucket now (`flock stop --release`, before it
+        ends the controller): {"files": n}. 409 without state sync, 500 when the push fails."""
+        if checkpoint is None:
+            raise HTTPException(409, "no checkpoint: this controller has no state sync "
+                                     "(FLOCK_STATE_URL)")
+        try:
+            return {"files": await asyncio.to_thread(checkpoint)}
+        except Exception as e:  # noqa: BLE001 - any push failure is the caller's answer
+            raise HTTPException(500, f"checkpoint failed: {type(e).__name__}: {e}") from None
+
     # ------------------------------------------------------------- swarms
 
     @api.get("/swarms")
@@ -892,19 +818,65 @@ def create_app(
         now = clock().timestamp()
         return [swarm_status(store, sw["spec"], now) for sw in store.list_swarms()]
 
+    def reused_bucket(spec: SwarmSpec) -> str | None:
+        """Why a fresh `flock launch` must not create this swarm: its bucket already holds
+        agents of that name (they would be restored silently). None: nothing there."""
+        if buckets is None or spec.compute.kind == "local" or not spec.bucket:
+            return None  # local agents live in the run dir, never in the bucket
+        try:
+            b = buckets(spec.bucket)
+            found = b.first(f"{spec.swarm}/")
+        except Exception as e:  # noqa: BLE001 - cannot tell: refuse, never guess
+            return f"cannot check bucket {spec.bucket} for earlier agents: {type(e).__name__}: {e}"
+        if not found:
+            return None
+        return (f"bucket {spec.bucket} already holds agents of swarm {spec.swarm!r} "
+                f"({found}): a fresh launch would restore them. "
+                "That run's controller restores it on start (FLOCK_STATE_RESTORE); "
+                "else pick a new swarm name or bucket")
+
+    def deletions(prev: SwarmSpec, spec: SwarmSpec) -> list[str]:
+        """`flock update --check`: the agents (and their spawned subtrees) the new spec deletes."""
+        kids = store.children_by_parent(prev.swarm)
+
+        def subtree(n: str) -> list[str]:
+            return [x for k in kids.get(n, []) for x in (k, *subtree(k))]
+
+        out = []
+        for t in prev.types:
+            n = spec.types[t].replicas if t in spec.types else -1
+            gone = sorted(a["name"] for a in store.list_agents(prev.swarm, t)
+                          if n < 0 or (a["parent"] is None and a["slot"] >= n))
+            sub = [x for g in gone for x in subtree(g)]
+            if gone:
+                names = ", ".join(gone[:10]) + (f" (+{len(gone) - 10} more)" if len(gone) > 10 else "")
+                out.append(f"deletes {t}: {len(gone)} agents ({names})"
+                           + (f" and {len(sub)} spawned under them" if sub else ""))
+        return out
+
+    create_lock = threading.Lock()
+
     @api.put("/swarms/{swarm}", response_model=None)
     def apply(swarm: str, spec: SwarmSpec, replicas: Literal["keep", "spec"] = "spec",
               dry_run: bool = False,
-              x_flock_source: Annotated[str | None, Header()] = None) -> SwarmStatus | dict:
+              x_flock_source: Annotated[str | None, Header()] = None,
+              if_none_match: Annotated[str | None, Header()] = None) -> SwarmStatus | dict:
         """Apply `spec` as sent (`replicas=spec`, the default); `replicas=keep` keeps the live
         replica count of types that already exist (`flock update` does that client-side). `dry_run` runs every check and returns the
-        resolved spec without storing anything (`flock update --check`). An apply that changes
-        the spec bumps the swarm's generation and keeps the spec (`flock history`)."""
+        resolved spec without storing anything (`flock update --check`), with the agents it
+        would delete. An apply that changes the spec bumps the swarm's generation and keeps
+        the spec (spec_history). `If-None-Match: *` (`flock launch`): create only, 412 when
+        the swarm exists, 409 when its bucket holds agents of an earlier run."""
         prev = store.get_swarm(swarm)
+        create = if_none_match == "*"
+        if create and prev:
+            raise HTTPException(412, f"swarm {swarm!r} already exists")
         if prev and replicas == "keep":
             keep_replicas(prev["spec"], spec)
         if spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
+        if create and (why := reused_bucket(spec)):
+            raise HTTPException(409, why)
         if namespace and spec.namespace != namespace:
             raise HTTPException(
                 400,
@@ -915,8 +887,8 @@ def create_app(
             raise HTTPException(
                 400,
                 f"this controller launches workers with compute {compute!r}; the spec asks for "
-                f"compute {spec.compute.kind!r} (docs/local.md: `flock run` for local, a "
-                "deployed controller and `flock apply` for hf-jobs)",
+                f"compute {spec.compute.kind!r} (docs/local.md: `flock launch` starts a local "
+                "controller for `compute: local`)",
             )
         for type_name in spec.types:
             owner = store.type_owner(type_name)
@@ -925,7 +897,7 @@ def create_app(
         if conflicts := worker_cap_conflicts(store, spec):
             raise HTTPException(409, "; ".join(conflicts))
         check_tools(swarm, spec)
-        if refused := loop_refusals(spec) + policy_refusals(spec):
+        if refused := loop_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
@@ -948,10 +920,15 @@ def create_app(
             raise HTTPException(400, str(e)) from None
         if dry_run:
             worlds.discard(swarm)  # a candidate world started for the check
-            return {"dry_run": True, "spec": spec.model_dump(mode="json")}
+            return {"dry_run": True, "spec": spec.model_dump(mode="json"),
+                    "deletes": deletions(prev["spec"], spec) if prev else []}
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
-        store.put_swarm(spec, clock().timestamp())
-        if diff:  # an effective apply: a new generation, its spec kept for `flock history`
+        with create_lock:  # two `flock launch` racing: one creates, the other gets 412
+            if create and store.get_swarm(swarm):
+                worlds.discard(swarm)  # the candidate world this losing launch started
+                raise HTTPException(412, f"swarm {swarm!r} already exists")
+            store.put_swarm(spec, clock().timestamp())
+        if diff:  # an effective apply: a new generation, its spec kept in spec_history
             src = spec_source(x_flock_source)
             gen = store.record_spec(spec, clock().timestamp(), src, diff[:50], new=prev is None)
             store.append_events(swarm, swarm_stream(swarm), [Event(
@@ -961,11 +938,6 @@ def create_app(
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
         return swarm_status(store, spec, clock().timestamp())
-
-    @api.get("/swarms/{swarm}/history")
-    def history(swarm: str) -> list[dict]:
-        return [{"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
-                 "diff_summary": r["diff"]} for r in store.spec_history(swarm)]
 
     # ------------------------------------------------------------- health (docs/health.md)
 
@@ -997,30 +969,6 @@ def create_app(
         return health.history(swarm, t)[-limit:] if res == "30s" else store.health_samples(
             swarm, res, t, limit)
 
-    @api.get("/swarms/{swarm}/usage")
-    def usage(swarm: str, by: Literal["type", "hour"] = "type") -> dict:
-        """Tokens by type (all hours summed) or by UTC hour and type."""
-        spec_or_404(swarm)
-        rows = store.usage(swarm)
-        if by == "type":
-            totals: dict[str, dict[str, int]] = {}
-            for r in rows:
-                acc = totals.setdefault(r["type"], {})
-                for k, v in r.items():
-                    if k not in ("hour", "type"):
-                        acc[k] = acc.get(k, 0) + v
-            rows = [{"type": t, **v} for t, v in sorted(totals.items())]
-        return {"swarm": swarm, "by": by, "rows": rows}
-
-    @api.get("/swarms/{swarm}/history/{generation}")
-    def history_spec(swarm: str, generation: int) -> dict:
-        rows = store.spec_history(swarm, generation)
-        if not rows:
-            raise HTTPException(404, f"no generation {generation} of swarm {swarm!r}")
-        r = rows[0]
-        return {"generation": r["generation"], "ts": _dt(r["ts"]), "source": r["source"],
-                "diff_summary": r["diff"], "spec": json.loads(r["spec"])}
-
     def folder_names(swarm: str, spec: SwarmSpec, type_name: str) -> list[str]:
         sel = spec.types[type_name].folder_tools
         if sel != "all":
@@ -1034,7 +982,7 @@ def create_app(
         if spec.tools_version is None:
             if selecting:
                 raise HTTPException(400, f"types {', '.join(selecting)} select tools but the spec "
-                                         "has no tools_version: apply it with `flock apply`, "
+                                         "has no tools_version: apply it with `flock launch`, "
                                          "which uploads the tools folder (docs/tools.md)")
             return
         b = store.get_tool_bundle(swarm, spec.tools_version, body=False)
@@ -1053,7 +1001,7 @@ def create_app(
 
     @api.post("/swarms/{swarm}/tools", status_code=201)
     async def upload_tools(swarm: str, request: Request) -> dict:
-        """Store a tools bundle (the tar.gz `flock apply` packs) under its content hash. The
+        """Store a tools bundle (the tar.gz `flock launch` packs) under its content hash. The
         swarm need not exist yet; the spec then names the version (`tools_version`)."""
         body = await request.body()
         if len(body) > MAX_BUNDLE_BYTES:
@@ -1078,105 +1026,6 @@ def create_app(
         if b is None:
             raise HTTPException(404, f"no tools bundle {version!r} for swarm {swarm!r}")
         return Response(b["body"], media_type="application/gzip")
-
-    # ------------------------------------------------------------- grants (docs/live.md)
-
-    def agent_grant(a: Row) -> Grant | None:
-        """The grant in force for agent row `a`: its type's, then its own on top."""
-        types, agents = store.agent_grants(a["swarm"])
-        return merge_grants(types.get(a["type"]), agents.get(a["name"]))
-
-    def over_budget(a: Row, g: Grant | None) -> bool:
-        return g is not None and g.limits.budget_usd is not None and a["cost"] >= g.limits.budget_usd
-
-    def grant_event(swarm: str, kind: str, target: str, data: dict) -> None:
-        ev = Event(type=kind, ts=clock(), agent="", data={"target": target, **data})
-        store.append_events(swarm, swarm_stream(swarm), [ev])
-        if data.get("kind") == "agent":
-            store.append_events(swarm, target, [ev.model_copy(update={"agent": target})])
-
-    def grant_target(swarm: str, spec: SwarmSpec, target: str) -> tuple[str, str]:
-        """(kind, type name) of a grant target: a type of the swarm, or one of its agents."""
-        if target in spec.types:
-            return "type", target
-        a = store.get_agent(target)
-        if a is None or a["swarm"] != swarm:
-            raise HTTPException(404, f"no type or agent {target!r} in swarm {swarm!r}")
-        if a["type"] not in spec.types:
-            raise HTTPException(409, f"agent {target!r}: its type {a['type']!r} is no longer in "
-                                     "the spec")
-        return "agent", a["type"]
-
-    def check_grant(swarm: str, spec: SwarmSpec, type_name: str, g: Grant) -> Grant:
-        """Refuse what the workers cannot enforce; comms tools come back as `comms:<name>`."""
-        ts = spec.types[type_name]
-        bundle = (store.get_tool_bundle(swarm, spec.tools_version, body=False)
-                  if spec.tools_version else None)
-        folder = bundle["tools"] if bundle else []
-        on_board = comms_tools(ts, spec.comms)
-        refused: list[str] = []
-        tools: dict[str, bool] = {}
-        for name, on in g.tools.items():
-            entry = name if name.startswith("comms:") else f"comms:{name}"
-            if name in folder:
-                tools[name] = on
-            elif entry in COMMS_TOOLS:
-                tools[entry] = on
-                if not on:
-                    continue
-                if spec.comms is None:
-                    refused.append(f"tools: +{name}: the swarm has no comms block")
-                elif not on_board:
-                    refused.append(f"tools: +{name}: type {type_name} has no comms tools, so its "
-                                   "workers hold no board invite; give it `comms: true` or a "
-                                   "comms tool in the spec")
-                elif entry == "comms:search" and not spec.comms.search:
-                    refused.append(f"tools: +{name}: comms.search is off in the spec")
-            else:
-                where = (f"bundle {spec.tools_version} has: {', '.join(folder) or 'none'}"
-                         if bundle else "the swarm has no tools folder")
-                refused.append(f"tools: unknown tool {name!r}; {where}; comms tools: post, read, "
-                               "search")
-        if g.bash is not None and ts.harness != Harness.llm:
-            refused.append(f"bash: only the llm harness has a bash tool to switch (type "
-                           f"{type_name} is {ts.harness.value})")
-        if g.bash is False and ts.tool_choice == "bash":
-            refused.append(f"bash: off contradicts type {type_name}'s tool_choice: bash")
-        if refused:
-            raise HTTPException(400, "; ".join(refused))
-        return g.model_copy(update={"tools": tools})
-
-    @api.get("/swarms/{swarm}/grants")
-    def list_grants(swarm: str) -> dict:
-        spec_or_404(swarm)
-        return {"swarm": swarm, "grants": [
-            {"target": r["target"], "kind": r["kind"], "grant": r["grant"].compact(),
-             "updated_at": _dt(r["updated_at"])} for r in store.list_grants(swarm)]}
-
-    @api.put("/swarms/{swarm}/grants/{target}")
-    def put_grant(swarm: str, target: str, grant: Grant) -> dict:
-        """Set (replace) the grant of a type or an agent; an empty body revokes it. It is an
-        overlay on the spec: `flock update` / `flock apply` keep it. Workers merge it in at
-        each agent's next turn boundary."""
-        spec = spec_or_404(swarm)["spec"]
-        kind, type_name = grant_target(swarm, spec, target)
-        grant = check_grant(swarm, spec, type_name, grant)
-        store.put_grant(swarm, target, kind, grant, clock().timestamp())
-        if grant.empty():
-            grant_event(swarm, "grant_revoked", target, {"kind": kind})
-        else:
-            grant_event(swarm, "grant", target, {"kind": kind, "grant": grant.compact()})
-        return {"swarm": swarm, "target": target, "kind": kind, "grant": grant.compact()}
-
-    @api.delete("/swarms/{swarm}/grants/{target}")
-    def delete_grant(swarm: str, target: str) -> dict:
-        spec_or_404(swarm)
-        row = next((r for r in store.list_grants(swarm) if r["target"] == target), None)
-        if row is None:
-            raise HTTPException(404, f"no grant for {target!r} in swarm {swarm!r}")
-        store.put_grant(swarm, target, row["kind"], Grant(), clock().timestamp())
-        grant_event(swarm, "grant_revoked", target, {"kind": row["kind"]})
-        return {"swarm": swarm, "target": target, "kind": row["kind"], "revoked": True}
 
     @api.post("/swarms/{swarm}/preflight")
     async def preflight(
@@ -1222,15 +1071,14 @@ def create_app(
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         pending = store.pending_counts(swarm)
         kids = store.children_by_parent(swarm)
-        type_grants, agent_grants = store.agent_grants(swarm)
         out: list[AgentStatus] = []
         rows = sorted(store.list_agents(swarm, type, parent=parent), key=lambda a: a["name"])
         for a in rows:
             if cursor is not None and a["name"] <= cursor:
                 continue
-            st = agent_status(a, workers.get(a["worker"]), spec, pending.get(a["name"], 0), now,
-                              kids.get(a["name"]), merge_grants(type_grants.get(a["type"]),
-                                                                agent_grants.get(a["name"])))
+            w = workers.get(a["worker"])  # state: the bulk prompt's (`turn_state`), one `idle`
+            st = agent_status(a, w, spec, pending.get(a["name"], 0), now, kids.get(a["name"]),
+                              turn_state(a, w, now))
             if state is None or st.state == state:
                 out.append(st)
             if len(out) >= max(1, limit):
@@ -1250,8 +1098,9 @@ def create_app(
         w = store.get_worker(a["worker"]) if a["worker"] else None
         pending = store.pending_counts(a["swarm"]).get(name, 0)
         kids = [c["name"] for c in store.list_agents(parent=name)]
-        return agent_status(a, w, row["spec"] if row else None, pending, clock().timestamp(), kids,
-                            agent_grant(a))
+        now = clock().timestamp()
+        return agent_status(a, w, row["spec"] if row else None, pending, now, kids,
+                            turn_state(a, w, now))
 
     @api.post("/agents/{name}/spawn", status_code=201)
     def spawn(name: str, req: SpawnRequest) -> SpawnAck:
@@ -1296,16 +1145,12 @@ def create_app(
     def not_budget_stopped(swarm: str) -> None:
         if loops.hard_stopped(swarm):
             raise HTTPException(409, f"swarm {swarm!r} reached limits.budget_usd: every agent was "
-                                     "stopped; raise the budget (flock apply) to prompt again")
+                                     "stopped; raise the budget (flock update) to prompt again")
 
     @api.post("/agents/{name}/prompt")
     def prompt(name: str, req: PromptRequest) -> PromptAck:
         a = agent_or_404(name)
         not_budget_stopped(a["swarm"])
-        if over_budget(a, g := agent_grant(a)):
-            raise HTTPException(409, f"agent {name!r} reached its granted limits.budget_usd "
-                                     f"(${a['cost']:.4f} of ${g.limits.budget_usd:g}); grant more "
-                                     f"or revoke it (docs/live.md)")
         cmd = PromptCommand(
             agent=name,
             prompt_id=uuid.uuid4().hex,
@@ -1316,7 +1161,8 @@ def create_app(
         now = clock().timestamp()
         store.add_prompt(name, cmd.model_dump_json(), now)
         w = store.get_worker(a["worker"]) if a["worker"] else None
-        live = w is not None and worker_state(w, now) == WorkerState.running
+        lv = store.liveness(a["swarm"])
+        live = w is not None and worker_state(w, now, lv) == WorkerState.running
         return PromptAck(
             prompt_id=cmd.prompt_id, agent=name, status="queued" if live else "pending"
         )
@@ -1356,14 +1202,11 @@ def create_app(
         state=idle) skips agents that already have an undelivered prompt. `build(agent)` makes
         each agent's command (the loop engine's per-agent loop prompts); `sent` collects the
         names that got one."""
-        now = clock().timestamp()
+        now, lv = clock().timestamp(), store.liveness(swarm)
         workers = {w["id"]: w for w in store.list_workers(swarm)}
         skip_pending = req.state == AgentState.idle if req.skip_pending is None else req.skip_pending
         pending = store.pending_counts(swarm) if skip_pending else {}
-        type_grants, agent_grants = store.agent_grants(swarm)
         rows: list[tuple[str, str]] = []
-        # `track` (docs/live.md "Broadcasts"): one prompt id for all, counted as turns report it
-        bid = f"b-{uuid.uuid4().hex[:12]}" if getattr(req, "track", False) else None
         for a in sorted(agents, key=lambda a: a["name"]):
             ack.matched += 1
             w = workers.get(a["worker"])
@@ -1376,44 +1219,18 @@ def create_app(
             if pending.get(a["name"]):
                 ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
                 continue
-            if over_budget(a, merge_grants(type_grants.get(a["type"]), agent_grants.get(a["name"]))):
-                ack.skipped_budget += 1
-                continue
             cmd = build(a) if build else PromptCommand(
-                agent=a["name"], prompt_id=bid or uuid.uuid4().hex, text=req.text,
+                agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
                 timeout=req.timeout, reply_to=req.reply_to)
             rows.append((a["name"], cmd.model_dump_json()))
             if sent is not None:
                 sent.append(a["name"])
-            if w is not None and worker_state(w, now) == WorkerState.running:
+            if w is not None and worker_state(w, now, lv) == WorkerState.running:
                 ack.queued += 1
             else:
                 ack.pending += 1
         store.add_prompts(rows, now)
-        if bid:
-            store.put_control(swarm, f"broadcast:{bid}", {
-                "id": bid, "ts": now, "type": req.type, "text": req.text[:200],
-                "agents": [n for n, _ in rows], "started": [], "finished": []})
-            ack.prompt_id = bid
         return ack
-
-    def track_broadcasts(a: Row, evs: list[Event]) -> None:
-        """Turn events of a tracked prompt (`prompt_id` / `prompt_ids` starting `b-`): the
-        agent counts as started / finished in that broadcast."""
-        for ev in evs:
-            if ev.type not in ("turn_started", "turn_ended"):
-                continue
-            d = ev.data.get("data") if isinstance(ev.data.get("data"), dict) else ev.data
-            for pid in {d.get("prompt_id"), *(d.get("prompt_ids") or [])}:
-                if not (isinstance(pid, str) and pid.startswith("b-")):
-                    continue
-                key = f"broadcast:{pid}"
-                field = "started" if ev.type == "turn_started" else "finished"
-                with broadcast_lock:  # event posts of several workers at once
-                    b = store.get_control(a["swarm"], key)
-                    if b is not None and a["name"] not in b[field]:
-                        b[field].append(a["name"])
-                        store.put_control(a["swarm"], key, b)
 
     # ------------------------------------------------------------- loops (docs/loop.md)
 
@@ -1461,7 +1278,7 @@ def create_app(
             if a["worker"]:
                 by_worker.setdefault(a["worker"], []).append(a["name"])
         return [
-            worker_status(w, by_worker.get(w["id"], []), now)
+            worker_status(w, by_worker.get(w["id"], []), now, store.liveness(w["swarm"]))
             for w in store.list_workers(swarm, type)
         ]
 
@@ -1475,7 +1292,7 @@ def create_app(
     def get_worker(worker_id: str) -> WorkerStatus:
         w = worker_or_404(worker_id)
         names = [a["name"] for a in store.list_agents(worker=worker_id)]
-        return worker_status(w, names, clock().timestamp())
+        return worker_status(w, names, clock().timestamp(), store.liveness(w["swarm"]))
 
     def stale(w: Row, incarnation: str | None) -> bool:
         """The caller is not the slot's current job. Workers that send no incarnation (older
@@ -1497,22 +1314,23 @@ def create_app(
             out.append((frozenset({type_name}), ts.max_working))
         return out
 
-    def busy(a: Row, w: Row | None, now: float) -> bool:
+    def busy(a: Row, w: Row | None, now: float, lv: Liveness) -> bool:
         """In a turn, or handed a prompt to start one, as far as the controller knows."""
-        if w is None or worker_state(w, now) == WorkerState.dead:
+        if w is None or worker_state(w, now, lv) == WorkerState.dead:
             live.pop(a["name"], None)
             return False
         seen = live.get(a["name"])
         if seen is not None:
             return seen[0] != "idle"
-        return agent_state(a, w, now) == AgentState.working
+        return agent_state(a, w, now, lv) == AgentState.working
 
     def turn_state(a: Row, w: Row | None, now: float) -> AgentState:
         """`agent_state`, with working/idle corrected by what the controller learned since the
         heartbeat (`live`): a prompt just handed out makes it working, a turn_ended event idle.
-        Used by the bulk prompt's `state` filter so it neither re-prompts an agent whose turn
-        is starting nor waits a heartbeat for one whose turn just ended."""
-        st = agent_state(a, w, now)
+        The one meaning of an agent's state for the bulk prompt's `state` filter and the
+        agents routes (`flock status --state`, `flock prompt --state`): it neither re-prompts an
+        agent whose turn is starting nor waits a heartbeat for one whose turn just ended."""
+        st = agent_state(a, w, now, store.liveness(a["swarm"]))
         seen = live.get(a["name"])
         if seen is None or st not in (AgentState.idle, AgentState.working):
             return st
@@ -1531,7 +1349,8 @@ def create_app(
                 continue
             if a["worker"] not in workers:
                 workers[a["worker"]] = store.get_worker(a["worker"]) if a["worker"] else None
-            if seen is None and agent_state(a, workers[a["worker"]], now) == AgentState.working:
+            lv = store.liveness(a["swarm"])
+            if seen is None and agent_state(a, workers[a["worker"]], now, lv) == AgentState.working:
                 continue
             live[name] = ("admitted", now)
 
@@ -1541,13 +1360,14 @@ def create_app(
         is the agents that get the pool's free slots: not busy, on a running worker, ordered
         by their oldest pending prompt across all workers (FIFO), at most `cap - busy` long."""
         workers = {x["id"]: x for x in store.list_workers(spec.swarm)}
+        lv = store.liveness(spec.swarm)
         taken: set[str] = set()
         owner: dict[str, str | None] = {}
         types_of: dict[str, str] = {}
         for a in store.agent_states(spec.swarm, users):
             owner[a["name"]] = a["worker"]
             types_of[a["name"]] = a["type"]
-            if busy(a, workers.get(a["worker"]), now):
+            if busy(a, workers.get(a["worker"]), now, lv):
                 taken.add(a["name"])
         free = cap - len(taken)
         window: list[str] = []
@@ -1560,7 +1380,7 @@ def create_app(
                 if name in held:
                     continue  # paused: its prompt waits, and must not hold a slot meanwhile
                 if name in taken or w is None or w["job_id"] is None or w["draining"] \
-                        or w["retire_at"] or worker_state(w, now) != WorkerState.running:
+                        or w["retire_at"] or worker_state(w, now, lv) != WorkerState.running:
                     continue  # a worker that cannot start the turn must not hold a slot
                 window.append(name)
                 if len(window) >= free:
@@ -1745,17 +1565,11 @@ def create_app(
                 out["world"]["down_since"] = _dt(down).isoformat()  # the hub refuses at once
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
-            # docs/live.md: a changed type spec (prompts, limits, ...) and the grants in force
-            # reach the worker here; it applies them at each agent's next turn boundary
+            # docs/live.md: a changed type spec (prompts, limits, ...) reaches the worker here; it applies them at each agent's next turn boundary
             wts = worker_type_spec(ts)  # never `loop.notices` (controller only)
             rev = type_spec_rev(wts)
             if hb.spec_rev != rev:
                 out["type_spec"], out["spec_rev"] = wts.model_dump(mode="json"), rev
-            type_grants, agent_grants = store.agent_grants(w["swarm"])
-            grants = {a.name: g.compact() for a in hb.agents
-                      if (g := merge_grants(type_grants.get(w["type"]), agent_grants.get(a.name)))}
-            if grants:  # absent: no grant in force for any of this worker's agents
-                out["grants"] = grants
         return out
 
     @api.post("/workers/{worker_id}/events")
@@ -1779,7 +1593,6 @@ def create_app(
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
             if a is not None:
-                track_broadcasts(a, evs)
                 loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
                 try:
                     health.on_events(a, evs, now)
@@ -1789,9 +1602,7 @@ def create_app(
             wake_window(w["swarm"], pools)
         return {"ok": True, "accepted": len(batch.events)}
 
-    health.policies.world_admin = add_world_admin_routes(api, store, token, secret_source,
-                                                         world_transport, clock)
-    add_steering_routes(api, store, health, clock)
+    add_world_admin_routes(api, store, token, secret_source, world_transport, clock)
     add_pause_routes(api, loops)
     app.include_router(api)
     return app
@@ -1804,6 +1615,7 @@ class HoldRequest(BaseModel):
     types: list[str] | None = None
     agents: list[str] | None = None
     interrupt: bool = False  # pause: also stop the turns in flight
+    release: bool = False  # pause: also drain and free every worker; resume: relaunch them
     reason: str = ""
     by: str = "operator"
 
@@ -1818,8 +1630,9 @@ def add_pause_routes(api: APIRouter, loops: LoopEngine) -> None:
     @api.post("/swarms/{swarm}/pause")
     def pause(swarm: str, req: HoldRequest) -> dict:
         return call(loops.pause, swarm, types=req.types, agents=req.agents,
-                    interrupt=req.interrupt, reason=req.reason, by=req.by)
+                    interrupt=req.interrupt, reason=req.reason, by=req.by, release=req.release)
 
     @api.post("/swarms/{swarm}/resume")
     def resume(swarm: str, req: HoldRequest) -> dict:
-        return call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by)
+        return call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by,
+                    release=req.release)

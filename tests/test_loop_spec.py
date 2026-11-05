@@ -1,5 +1,5 @@
 """`loop:` in the spec (docs/loop.md): validation, the `while` alias on the wire, prompt files
-inlined by `flock apply`, and world-backed settings accepted by the model but refused at apply."""
+inlined by `flock launch`, and world-backed settings accepted by the model but refused at apply."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from flock import cli
 from flock.models import LoopSpec, SwarmSpec, agent_cap, load_spec_yaml, loop_refusals
 
-from .conftest import TOKEN, make_spec
+from .conftest import TOKEN, make_spec, wire
 
 
 def spec_with(loop: dict, **type_kw) -> SwarmSpec:
@@ -23,11 +23,10 @@ def spec_with(loop: dict, **type_kw) -> SwarmSpec:
 
 
 def test_loop_fields_and_the_while_alias_round_trip():
-    s = spec_with({"prompt": "r{round}", "first": "boot", "every": "120s", "stagger": "4s",
+    s = spec_with({"prompt": "r{round}", "every": "120s",
                    "on": ["comms.mention", "comms.thread"],
-                   "while": {"until": "2h", "max_rounds": 200, "budget_usd": 12, "agent_usd": 3.6,
-                             "idle_rounds": 3},
-                   "final": {"prompt": "fin", "reserve_usd": 0.6, "add_tools": ["submit_final"]}})
+                   "while": {"until": "2h", "max_rounds": 200, "budget_usd": 12, "agent_usd": 3.6},
+                   "final": {"prompt": "fin", "reserve_usd": 0.6}})
     lp = s.types["researcher"].loop
     assert lp.every_s == 120 and lp.while_.max_rounds == 200 and lp.final.reserve_usd == 0.6
     wire = s.model_dump(mode="json")["types"]["researcher"]["loop"]
@@ -53,7 +52,8 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "wake": {"window": "0s"}}, "window must be a duration > 0"),
     ({"prompt": "x", "wake": {"max": -1}}, ">= 0"),
     ({"prompt": "x", "wake": {"gap": "5s"}}, "Extra inputs"),
-    ({"prompt": "x", "stop_when": {"all_done": True}}, "Extra inputs"),
+    ({"prompt": "x", "every": "rounds"}, "bad duration"),
+    ({"prompt": "x", "while": {"score_lt": {"c": 1}}}, "Extra inputs"),
 ])
 def test_bad_loops_are_rejected(loop, msg):
     with pytest.raises(ValidationError, match=msg):
@@ -67,59 +67,53 @@ def test_agent_usd_by_model():
 
 
 def test_world_backed_settings_are_accepted_but_refused():
-    s = spec_with({"prompt": "x", "every": "rounds", "on": ["world.event:claim", "comms.mention"],
-                   "context": ["world.state", "comms.recent:20"],
-                   "while": {"score_lt": {"coverage_pct": 100}}})
-    assert s.types["researcher"].loop.while_.score == {"lt": {"coverage_pct": 100}}
+    s = spec_with({"prompt": "x", "on": ["world.event:claim", "comms.mention"]})
     assert loop_refusals(s) == [
-        "types.researcher.loop.every: rounds needs a world (not in this version)",
-        "types.researcher.loop.while.score_lt needs a world (not in this version)",
-        "types.researcher.loop.on: world.event:claim needs a world (not in this version)",
-        "types.researcher.loop.context: world.state needs a world (not in this version)",
-        "types.researcher.loop.context: comms.recent:20 is not in this version",
-    ]
+        "types.researcher.loop.on: world.event:claim needs a world (not in this version)"]
 
 
 def test_controller_refuses_what_it_cannot_run(app):
     c = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
-    s = spec_with({"prompt": "x", "while": {"score_lt": {"coverage_pct": 100}}})
+    s = spec_with({"prompt": "x", "on": ["world.event:claim"]})
     r = c.put("/swarms/demo", json=s.model_dump(mode="json"))
     assert r.status_code == 400 and "needs a world (not in this version)" in r.text
-    s = spec_with({"prompt_file": "round.md"})  # sent without `flock apply`'s inlining
+    s = spec_with({"prompt_file": "round.md"})  # sent without `flock launch`'s inlining
     r = c.put("/swarms/demo", json=s.model_dump(mode="json"))
     assert r.status_code == 400 and "not inlined" in r.text
 
 
 def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, monkeypatch, app, store):
-    monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    wire(monkeypatch, app)
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "round.md").write_text("Round {round} ({why}).\n")
     (tmp_path / "prompts" / "final.md").write_text("Final: submit.\n")
     raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
     raw["types"]["researcher"]["loop"] = {
-        "prompt_file": "prompts/round.md", "every": "30s", "on": ["comms.mention"],
+        "prompt_file": "prompts/round.md", "every": "30s", "on": ["comms.mention", "comms.channel"],
         "final": {"prompt_file": "prompts/final.md", "reserve_usd": 0.5}}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
     assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
+    assert "loop.on comms.channel: no comms feeder" in r.output  # fed, so only the board is missing
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 
-    raw["types"]["researcher"]["loop"]["while"] = {"score_ge": {"coverage_pct": 100}}
+    raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 1
-    assert "refused: types.researcher.loop.while.score_ge needs a world (not in this version)" in r.output
+    assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
+    raw["types"]["researcher"]["loop"]["on"] = ["comms.mention"]
     raw["types"]["researcher"]["loop"]["prompt_file"] = "prompts/missing.md"
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["apply", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 1 and "missing.md not found" in r.output
 
 
-def test_flock_run_checks_loops_like_apply(tmp_path, monkeypatch):
-    """`flock run` runs the same CLI loop checks as `flock apply` (`_check_loops`): the `on:`
+def test_local_run_checks_loops_like_apply(tmp_path, monkeypatch):
+    """The local run (flock.controller.localrun) runs the same CLI loop checks as `flock launch` (`_check_loops`): the `on:`
     warning, and refusals on the CLI before anything starts."""
     from flock.controller import localrun
 
@@ -138,15 +132,15 @@ def test_flock_run_checks_loops_like_apply(tmp_path, monkeypatch):
                                           "on": ["comms.mention"]}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["run", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
     assert "loop.on comms.mention: no comms feeder" in r.output and len(started) == 1
 
-    raw["types"]["researcher"]["loop"]["while"] = {"score_ge": {"coverage_pct": 100}}
+    raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))
-    r = CliRunner().invoke(cli.app, ["run", str(f), "--skip-preflight"])
+    r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 1 and len(started) == 1  # refused on the CLI: no run started
-    assert "refused: types.researcher.loop.while.score_ge needs a world (not in this version)" in r.output
+    assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
 
 
 DOCS = Path(__file__).parent.parent / "docs" / "loop.md"
@@ -169,7 +163,7 @@ def _doc_example(heading: str) -> str:
 
 @pytest.mark.parametrize("heading", ["## Spec", "### Eliza"])
 def test_documented_examples_load_with_an_unquoted_on_key(heading, tmp_path):
-    """`on:` is a YAML 1.1 boolean: `flock apply` must read it as the key "on" (defect 2)."""
+    """`on:` is a YAML 1.1 boolean: `flock launch` must read it as the key "on" (defect 2)."""
     (tmp_path / "prompts").mkdir()
     for f in ("system.md", "round.md", "final.md"):
         (tmp_path / "prompts" / f).write_text(f)
@@ -186,19 +180,13 @@ def test_spec_yaml_keeps_yes_no_on_off_as_strings():
     assert raw == {"on": ["a"], "off": 1, "yes": "no", "flag": True, "Other": False}
 
 
-def test_wake_and_stop_when_defaults_and_refusal():
+def test_wake_defaults():
     lp = LoopSpec.model_validate({"prompt": "x"})
     assert lp.wake.model_dump() == {"min_gap": "30s", "max": 10, "window": None,
                                     "counts_as_round": False}
-    assert lp.stop_when.all_agents_done is False
     lp = LoopSpec.model_validate({"prompt": "x", "wake": {"min_gap": "0s", "max": None, "window": "10m",
-                                                          "counts_as_round": True},
-                                  "stop_when": {"all_agents_done": True}})
-    assert (lp.wake.max, lp.wake.window, lp.stop_when.all_agents_done) == (None, "10m", True)
-    # `finished` is an argument of the llm harness's `done` tool
-    s = spec_with({"prompt": "x", "stop_when": {"all_agents_done": True}})
-    assert loop_refusals(s) == [
-        "types.researcher.loop.stop_when.all_agents_done needs harness llm with the done tool"]
+                                                          "counts_as_round": True}})
+    assert (lp.wake.max, lp.wake.window) == (None, "10m")
 
 
 def test_until_takes_a_duration_or_a_clock_time():

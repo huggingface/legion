@@ -1,4 +1,4 @@
-"""Tools folder shipping: `flock apply` packs and uploads it, the controller stores and checks it,
+"""Tools folder shipping: `flock launch` packs and uploads it, the controller stores and checks it,
 assigns and heartbeats carry the version, workers fetch and switch versions between turns, CLI
 harnesses get a Tools section and `flock-tool`, and the llm adapter keeps one version per turn."""
 
@@ -24,7 +24,7 @@ from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 from flock.worker.tools import ToolsManager
 
-from .test_cli import _wire
+from .conftest import wire
 from .worker_fakes import ScriptedAdapter, until
 
 runner = CliRunner()
@@ -67,10 +67,10 @@ def write_spec(tmp_path: Path, raw: dict) -> Path:
 
 
 def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec(tools=["add"]))
-    r = runner.invoke(cli.app, ["apply", str(f)])
+    r = runner.invoke(cli.app, ["launch", str(f)])
     assert r.exit_code == 0, r.output
     v1 = pack(tmp_path / "tools").version
     assert f"tools: version {v1}" in r.output and ": add" in r.output
@@ -78,12 +78,14 @@ def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, ap
     assert sw.tools_version == v1 and sw.types["dev"].tools == ["add"]
     assert store.get_tool_bundle("demo", v1)["tools"] == ["add"]
 
-    # same folder: same version; changed folder: a new version on the running swarm
-    assert runner.invoke(cli.app, ["apply", str(f)]).exit_code == 0
+    # same folder: a resume, same version; changed folder: `launch` refuses, `update` ships it
+    assert runner.invoke(cli.app, ["launch", str(f)]).exit_code == 0
     assert store.get_swarm("demo")["spec"].tools_version == v1
     folder(tmp_path, ADD_V2)
     f = write_spec(tmp_path, raw_spec(tools="all"))
-    r = runner.invoke(cli.app, ["apply", str(f)])
+    r = runner.invoke(cli.app, ["launch", str(f)])
+    assert r.exit_code == 1 and "run `flock update` first" in r.output
+    r = runner.invoke(cli.app, ["update", str(f)])
     assert r.exit_code == 0, r.output
     v2 = store.get_swarm("demo")["spec"].tools_version
     assert v2 != v1 and store.get_tool_bundle("demo", v2)["tools"] == ["add", "mul"]
@@ -91,25 +93,25 @@ def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, ap
 
 
 def test_apply_refuses_unknown_tools_and_bad_modules(tmp_path, monkeypatch, app, store):
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec(tools=["add", "mul"]))
-    r = runner.invoke(cli.app, ["apply", str(f)])
+    r = runner.invoke(cli.app, ["launch", str(f)])
     assert r.exit_code == 1
     assert "types.dev.tools: unknown tool(s) mul; the tools folder has: add" in r.output
     assert store.get_swarm("demo") is None  # nothing applied
     (tmp_path / "tools" / "broken.py").write_text("def f(:\n")
     f = write_spec(tmp_path, raw_spec(tools=["add"]))
-    r = runner.invoke(cli.app, ["apply", str(f)])
+    r = runner.invoke(cli.app, ["launch", str(f)])
     assert r.exit_code == 1 and "broken.py: syntax error line 1" in r.output
 
 
 def test_existing_specs_are_unchanged(tmp_path, monkeypatch, app, store):
     """No type selects tools: an unrelated tools/ next to the spec is not shipped."""
-    _wire(monkeypatch, app)
+    wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec())
-    r = runner.invoke(cli.app, ["apply", str(f)])
+    r = runner.invoke(cli.app, ["launch", str(f)])
     assert r.exit_code == 0 and "tools:" not in r.output
     assert store.get_swarm("demo")["spec"].tools_version is None
     assert store.list_tool_bundles("demo") == []

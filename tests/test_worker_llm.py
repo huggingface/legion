@@ -625,7 +625,7 @@ def test_redact():
 
 
 def test_warn_extra_skips_the_llm_harness(capsys):
-    from flock import cli
+    from flock import ops
 
     spec = SwarmSpec.model_validate({
         "swarm": "s", "namespace": "n", "bucket": "b",
@@ -633,8 +633,7 @@ def test_warn_extra_skips_the_llm_harness(capsys):
                             "self_hosted": True}},
         "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
         "types": {"pix": {"harness": "llm", "model": "m"}, "cx": {"harness": "codex", "model": "m"}}})
-    cli._warn_extra(spec)
-    err = capsys.readouterr().err
+    err = "\n".join(ops.extra_warnings(spec))
     assert "type cx: `extra`" in err and "pix" not in err
 
 

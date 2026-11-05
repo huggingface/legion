@@ -2,7 +2,7 @@
 
 What a tool module imports from here: `Context` (the optional run-context argument, never shown
 to the model), `ToolError` (raise it to hand the model a clean error message) and `readonly`
-(a decorator: the tool changes nothing, so loop `idle_rounds` does not count it as activity). The loader,
+(a decorator: the tool changes nothing; informational). The loader,
 schema builder, runner and bundle code live in the submodules; this module stays stdlib-only so
 the per-call subprocess starts fast.
 """
@@ -48,8 +48,8 @@ class ToolError(Exception):
 
 
 def readonly(fn: F) -> F:
-    """Mark a tool as read-only (`readonly: true` in the manifest): it changes no state, so a
-    loop turn whose only calls are read-only tools counts as idle for `while.idle_rounds`."""
+    """Mark a tool as read-only (`readonly: true` in the manifest): it changes no state.
+    Informational: nothing in flock acts on it since loop `while.idle_rounds` was removed."""
     setattr(fn, READONLY_ATTR, True)
     return fn
 

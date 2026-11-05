@@ -47,6 +47,8 @@ def test_no_limit_not_armed_unless_env(tmp_path):
     assert not CgroupMem(tmp_path, env={}).armed
     cg = CgroupMem(tmp_path, env={"FLOCK_MEMORY_LIMIT_MB": "4096"})
     assert cg.armed and cg.limit_mb == 4096
+    both = {"SLURM_MEM_PER_NODE": "7168", "FLOCK_MEMORY_LIMIT_MB": "4096"}
+    assert CgroupMem(tmp_path, env=both).limit_mb == 7168  # Slurm's job limit first
     assert not CgroupMem(tmp_path / "nothing", env={}).armed
 
 

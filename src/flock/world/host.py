@@ -40,6 +40,7 @@ from flock.world.protocol import (
     WORLD_HOST_VAR,
     WorldManifest,
     credential_id,
+    fill_host,
     manifest_error,
 )
 
@@ -91,7 +92,7 @@ def world_endpoint(url: str, env: Mapping[str, str] = os.environ) -> str:
         raise WorldError(f"world host file {path}: {e}") from None
     if not words:
         raise WorldError(f"world host file {path} is empty (is the world job up?)")
-    return url.replace(WORLD_HOST_VAR, words[0])
+    return fill_host(url, WORLD_HOST_VAR, words[0])
 
 
 def follow_world_host(spec: SwarmSpec, controller_token: str, secrets: Mapping[str, str], *,

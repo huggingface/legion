@@ -17,8 +17,7 @@ from flock.world.hub import WorldHub
 from flock.world.protocol import TOKEN_ENV
 
 from . import test_loop_controller
-from .conftest import make_spec
-from .test_cli import _wire
+from .conftest import make_spec, wire
 from .test_health import FakeWorld
 from .test_loop_controller import A0, A1, prompts
 from .test_world import world_block
@@ -39,8 +38,7 @@ async def resume(sim, **body) -> dict:
 
 
 async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
-    await sim.apply({"prompt": "r{round}", "every": "30s", "on": ["comms.mention"],
-                     "while": {"idle_rounds": 2}})
+    await sim.apply({"prompt": "r{round}", "every": "30s", "on": ["comms.mention"]})
     await sim.heartbeat()
     sim.tick()
     r1 = prompts(await sim.commands())
@@ -57,7 +55,7 @@ async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
         sim.tick()
         assert prompts(await sim.commands()) == {}  # no round, no hand prompt, no wake
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
-    assert st["rounds_total"] == 2 and st["per_agent"][A0]["idle_streak"] == 0
+    assert st["rounds_total"] == 2
     status = (await sim.c.get("/swarms/demo")).json()["status"]
     assert status["held"]["types"]["researcher"]["by"] == "operator"
 
@@ -135,17 +133,17 @@ async def test_worker_loop_is_stopped_by_a_hold_and_restarted_with_its_rounds(si
     assert starts[A0]["kind"] == "loop_start" and starts[A0]["meta"]["round"] == 1
 
 
-def test_cli_pause_resume_and_held_marker(app, store, monkeypatch, tick):
-    _wire(monkeypatch, app)
+def test_cli_stop_launch_and_held_marker(app, store, monkeypatch, tick):
+    wire(monkeypatch, app)
     store.put_swarm(make_spec(), 0.0)
     runner = CliRunner()
-    r = runner.invoke(cli.app, ["pause", "demo", "--type", "researcher", "--reason", "deploy"])
+    r = runner.invoke(cli.app, ["stop", "demo", "--type", "researcher", "--reason", "deploy"])
     assert r.exit_code == 0 and "held: type researcher" in r.output, r.output
     r = runner.invoke(cli.app, ["status", "demo"])
     assert "HELD type researcher: deploy (by operator" in r.output, r.output
-    r = runner.invoke(cli.app, ["pause", "demo", "--reason", "x", "--type", "nope"])
+    r = runner.invoke(cli.app, ["stop", "demo", "--reason", "x", "--type", "nope"])
     assert r.exit_code != 0
-    r = runner.invoke(cli.app, ["resume", "demo"])
+    r = runner.invoke(cli.app, ["launch", "demo"])
     assert r.exit_code == 0 and "held: nothing" in r.output, r.output
     assert "HELD" not in runner.invoke(cli.app, ["status", "demo"]).output
 

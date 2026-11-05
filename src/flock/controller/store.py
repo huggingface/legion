@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from flock.models import Event, Grant, SwarmSpec, TokenUsage
+from flock.models import ComputeSpec, Event, Liveness, SwarmSpec, TokenUsage
 
 DB_NAME = "controller.db"
 
@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS agents (
   last_sync REAL,
   msgboard_principal TEXT,
   resume_pending INTEGER NOT NULL DEFAULT 0,
+  stuck_since REAL,
+  nudges INTEGER NOT NULL DEFAULT 0,
+  nudged_at REAL,
   created_at REAL NOT NULL,
   last_heartbeat REAL
 );
@@ -79,6 +82,7 @@ CREATE TABLE IF NOT EXISTS workers (
   state TEXT NOT NULL DEFAULT 'launching',
   deadline REAL,
   launched_at REAL,
+  started_at REAL,
   last_heartbeat REAL,
   last_inspect REAL,
   draining INTEGER NOT NULL DEFAULT 0,
@@ -140,14 +144,6 @@ CREATE INDEX IF NOT EXISTS loop_agents_by_type ON loop_agents (swarm, type);
 CREATE TABLE IF NOT EXISTS swarm_flags (
   swarm TEXT PRIMARY KEY,
   body TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS grants (
-  swarm TEXT NOT NULL,
-  target TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  body TEXT NOT NULL,
-  updated_at REAL NOT NULL,
-  PRIMARY KEY (swarm, target)
 );
 CREATE TABLE IF NOT EXISTS spawn_keys (
   parent TEXT NOT NULL,
@@ -224,6 +220,7 @@ class Store:
         # HMAC key for per-agent tokens (controller/spawn.py), derived from the controller
         # token and never stored: the table holds only hashes.
         self.agent_token_key: bytes | None = None
+        self._liveness: dict[str, Liveness] = {}  # swarm -> its spec's timings (`liveness`)
 
     def _migrate(self) -> None:
         """Additive column changes for databases created by an older version."""
@@ -235,16 +232,20 @@ class Store:
         cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
         if "incarnation" not in cols:
             self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
-        if "last_error" not in cols:  # last launch failure or crash, shown by `flock workers`
+        if "last_error" not in cols:  # last launch failure or crash, shown by `flock status`
             self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
         if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
             self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
+        if "pending_reason" not in cols:  # the scheduler's word while queued, e.g. Slurm's %r
+            self._x("ALTER TABLE workers ADD COLUMN pending_reason TEXT")
         if "log_path" not in cols:  # the current job's log file (compute slurm)
             self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
         if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
             self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
         if "telemetry" not in cols:  # the last heartbeat's mem/restore/tools/knobs_rev (JSON)
             self._x("ALTER TABLE workers ADD COLUMN telemetry TEXT")
+        if "started_at" not in cols:  # launch-timeout clock: last time the job was seen queued
+            self._x("ALTER TABLE workers ADD COLUMN started_at REAL")
         # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
         # of removed agents on swarms.
         cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
@@ -254,9 +255,14 @@ class Store:
         self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
         if "removing" not in cols:  # set while a cascade removal is in flight
             self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
-        for col in ("rev", "start_rev"):  # type spec revs from the last heartbeat
+        for col in ("rev", "start_rev", "endpoint"):  # from the last heartbeat (endpoint: host:port)
             if col not in cols:
                 self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
+        # stuck-agent nudges (reconcile._nudge_stuck); each column on its own guard
+        for col, ddl in (("stuck_since", "REAL"), ("nudges", "INTEGER NOT NULL DEFAULT 0"),
+                         ("nudged_at", "REAL")):
+            if col not in cols:
+                self._x(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
         cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
         if "spawned" not in cols:
             self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
@@ -360,11 +366,13 @@ class Store:
                 )
             # Re-applying the spec clears crashlooping, launch_refused and their streaks.
             self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
+        self._liveness[spec.swarm] = spec.compute.liveness()
         self.listener("reconcile", "")
 
     def update_swarm_spec(self, spec: SwarmSpec) -> None:
         """Replace a stored spec in place (no re-apply side effects): a world that moved."""
         self._x("UPDATE swarms SET spec = ? WHERE name = ?", [spec.model_dump_json(), spec.swarm])
+        self._liveness[spec.swarm] = spec.compute.liveness()
 
     def record_spec(self, spec: SwarmSpec, now: float, source: dict[str, Any],
                     diff: list[str], new: bool) -> int:
@@ -400,6 +408,17 @@ class Store:
             row["spec"] = SwarmSpec.model_validate_json(row["spec"])
         return row
 
+    def liveness(self, swarm: str) -> Liveness:
+        """The swarm's worker liveness timings, kept from its last spec write: every state
+        check reads them, so the spec is not parsed each time. Defaults for an unknown swarm."""
+        lv = self._liveness.get(swarm)
+        if lv is None:
+            row = self.get_swarm(swarm)
+            lv = (row["spec"].compute if row else ComputeSpec()).liveness()
+            if row:
+                self._liveness[swarm] = lv
+        return lv
+
     def list_swarms(self) -> list[Row]:
         rows = self._q("SELECT * FROM swarms ORDER BY name")
         for row in rows:
@@ -413,44 +432,17 @@ class Store:
     def delete_swarm(self, name: str) -> None:
         with self.transaction():
             self._x("DELETE FROM swarms WHERE name = ?", [name])
+            self._liveness.pop(name, None)
             self._x("DELETE FROM types WHERE swarm = ?", [name])
             self._x("DELETE FROM tool_bundles WHERE swarm = ?", [name])
             self._x("DELETE FROM loops WHERE swarm = ?", [name])
             self._x("DELETE FROM loop_agents WHERE swarm = ?", [name])
             self._x("DELETE FROM swarm_flags WHERE swarm = ?", [name])
-            self._x("DELETE FROM grants WHERE swarm = ?", [name])
             self._x("DELETE FROM agent_names WHERE swarm = ?", [name])
             self._x("DELETE FROM spec_history WHERE swarm = ?", [name])
             self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
             self._x("DELETE FROM controls WHERE swarm = ?", [name])
-
-    # ----------------------------------------------------------------- grants (docs/live.md)
-
-    def put_grant(self, swarm: str, target: str, kind: str, grant: Grant, now: float) -> None:
-        """Set (replace) the grant of a type or an agent; an empty grant deletes it."""
-        if grant.empty():
-            self._x("DELETE FROM grants WHERE swarm = ? AND target = ?", [swarm, target])
-            return
-        self._x("INSERT INTO grants (swarm, target, kind, body, updated_at) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(swarm, target) DO UPDATE SET kind = excluded.kind, "
-                "body = excluded.body, updated_at = excluded.updated_at",
-                [swarm, target, kind, grant.model_dump_json(exclude_defaults=True), now])
-
-    def list_grants(self, swarm: str) -> list[Row]:
-        rows = self._q("SELECT target, kind, body, updated_at FROM grants WHERE swarm = ? "
-                       "ORDER BY kind DESC, target", [swarm])
-        for row in rows:
-            row["grant"] = Grant.model_validate_json(row.pop("body"))
-        return rows
-
-    def agent_grants(self, swarm: str) -> tuple[dict[str, Grant], dict[str, Grant]]:
-        """(type grants, agent grants) of a swarm, by target."""
-        types: dict[str, Grant] = {}
-        agents: dict[str, Grant] = {}
-        for row in self.list_grants(swarm):
-            (types if row["kind"] == "type" else agents)[row["target"]] = row["grant"]
-        return types, agents
 
     # ----------------------------------------------------------------- tools bundles (docs/tools.md)
 
@@ -614,7 +606,6 @@ class Store:
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
         self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
-        self._x("DELETE FROM grants WHERE kind = 'agent' AND target = ?", [name])
 
     def mark_removing(self, name: str) -> None:
         """First phase of a cascade removal: refuse new children, revoke the token."""
@@ -933,34 +924,18 @@ class Store:
         h = (self.swarm_flags(a["swarm"]) if flags is None else flags).get("holds") or {}
         return a["type"] in h.get("types", {}) or a["name"] in h.get("agents", {})
 
-    # ------------------------------------------------- steering controls (docs/policies.md)
-    # Operator and controller settings kept across restarts: `notice:<type>` banners,
-    # `broadcast:<id>` prompt tracking, `ramp:<type>` start times, `policy_mutes`.
+    # ----------------------------------------------------------------- controls
+    # Controller settings kept across restarts: `ramp:<type>` start times. Rows of removed
+    # features (`notice:`, `broadcast:`, `policy_mutes`) may linger in old databases; unread.
 
     def get_control(self, swarm: str, key: str) -> Any:
         row = self._one("SELECT body FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
         return json.loads(row["body"]) if row else None
 
     def put_control(self, swarm: str, key: str, body: Any) -> None:
-        if key.startswith("broadcast:") and isinstance(body, dict) and "ts" in body:  # expire after 7 days
-            self._x("DELETE FROM controls WHERE swarm = ? AND key LIKE 'broadcast:%' "
-                    "AND json_extract(body, '$.ts') < ?", [swarm, body["ts"] - 7 * 86400])
         self._x("INSERT INTO controls (swarm, key, body) VALUES (?, ?, ?) "
                 "ON CONFLICT(swarm, key) DO UPDATE SET body = excluded.body",
                 [swarm, key, json.dumps(body, sort_keys=True)])
-
-    def delete_control(self, swarm: str, key: str) -> None:
-        self._x("DELETE FROM controls WHERE swarm = ? AND key = ?", [swarm, key])
-
-    def controls(self, swarm: str, prefix: str) -> dict[str, Any]:
-        rows = self._q("SELECT key, body FROM controls WHERE swarm = ? AND key LIKE ?",
-                       [swarm, prefix + "%"])
-        return {r["key"]: json.loads(r["body"]) for r in rows}
-
-    def pending_with(self, needle: str) -> int:
-        """Undelivered prompts whose command contains `needle` (a broadcast's prompt id)."""
-        return self._one("SELECT COUNT(*) AS n FROM pending_prompts WHERE body LIKE ?",
-                         [f"%{needle}%"])["n"]
 
     # ----------------------------------------------------------------- launch budget
 

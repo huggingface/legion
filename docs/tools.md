@@ -1,9 +1,9 @@
 # Tools folder
 
-An experiment's tools are plain Python functions in a folder next to the spec. `flock apply`
+An experiment's tools are plain Python functions in a folder next to the spec. `flock launch`
 reads the folder, ships it to the workers by content hash, and the agents call the functions as
 tools. Editing a tool never touches flock's code, wheel or image: change the file, run
-`flock apply` again, and running agents use the new version from their next turn.
+`flock update`, and running agents use the new version from their next turn.
 
 ```
 experiment/
@@ -23,7 +23,7 @@ types:
 ```
 
 ```console
-$ flock apply experiment/spec.yaml
+$ flock launch experiment/spec.yaml
 tools: version 3f9c0e2a7b61d4c8 (2817 bytes): ws_write, run_bot
 ```
 
@@ -34,7 +34,7 @@ A runnable version of this example is in [`examples/tools-demo/`](../examples/to
 **Modules.** Every `*.py` file at the top of the folder whose name does not start with `_` is a
 tool module. The folder is first on `sys.path` when a module is imported, so modules can
 import each other and their `_helpers`. A module must not share its name with a standard
-library or installed module (`json.py`, `math.py`): `flock apply` refuses it.
+library or installed module (`json.py`, `math.py`): `flock launch` refuses it.
 
 **Tools.** Every function defined in a tool module (not imported into it) whose name does not
 start with `_` and that has a docstring is a tool. A function without a docstring is a helper.
@@ -46,9 +46,8 @@ start with `_` and that has a docstring is a tool. A function without a docstrin
   descriptions come from a Google-style `Args:` section.
 - readonly: optional, default false. Decorate the function with `@flock.tools.readonly` when the
   tool changes nothing (a status or a listing); the manifest then has `readonly: true` (the key is
-  left out when false, so existing folders keep their version). A loop turn whose calls are all
-  read-only is idle for `while.idle_rounds` (docs/loop.md). The comms `read` and `search`
-  built-ins are read-only too.
+  left out when false, so existing folders keep their version). Informational: nothing in flock
+  acts on it since loop `while.idle_rounds` was removed.
 
 ```python
 from flock.tools import readonly
@@ -152,7 +151,7 @@ What an `llm` agent's model is offered for `run_bot` (next to `bash` and, with `
 
 ## Selection
 
-`types.<type>.tools` lists the tools a type gets, or `all`. It is strict: `flock apply` fails
+`types.<type>.tools` lists the tools a type gets, or `all`. It is strict: `flock launch` fails
 with `types.dev.tools: unknown tool(s) promote_best; the tools folder has: ws_write, run_bot`
 and applies nothing. A type without `tools:` gets no folder tools.
 
@@ -162,7 +161,7 @@ nothing, so existing specs (even next to an unrelated `tools/` directory) are un
 
 ## Versions
 
-1. `flock apply` imports the modules in a fresh `python -I -B` process (side effects and
+1. `flock launch` imports the modules in a fresh `python -I -B` process (side effects and
    crashes stay there), builds the manifest (names, descriptions, schemas), checks the
    selection, and packs the folder as a deterministic tar.gz (`__pycache__`, `*.pyc`, dotfiles,
    `.git`, `.venv` left out; symlinks refused) with the manifest inside. The version is the
@@ -263,7 +262,7 @@ the agent never sees.
 
 ## Follow-ups
 
-- Hot reload: done, `flock run --watch` and `flock update` ([live.md](live.md)); a CLI harness
+- Hot reload: done, `flock update` ([live.md](live.md)); a CLI harness
   gets a "tools changed" note in its next prompt.
 - Per-tool settings (timeout, rate) via a decorator; a long-lived tool host per type for tools
   that want warm state.

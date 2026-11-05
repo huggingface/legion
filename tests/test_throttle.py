@@ -166,7 +166,8 @@ async def test_controller_keeps_a_worker_whose_heartbeats_are_throttled(store, c
         actions = tick()
         assert not [a for a in actions if a.kind in ("cancel", "crash", "launch")], actions
         w = store.get_worker(wid)
-        assert worker_state(w, clock().timestamp()) == WorkerState.running
+        assert worker_state(w, clock().timestamp(), store.liveness(w["swarm"])) \
+            == WorkerState.running
     status = {a["name"]: a for a in (await _agents(edge))}
     assert {s["state"] for s in status.values()} == {AgentState.unknown.value}  # stale, not dead
     assert c.stats["throttled"] >= 12

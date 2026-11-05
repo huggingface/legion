@@ -1,10 +1,9 @@
-"""Live changes end to end in one process (docs/live.md): the real CLI (`flock apply`,
-`flock update`, `flock grant`, `flock revoke`), the real controller app and reconcile pass, two
-real Worker loops (FakeJobsClient, ASGI) running the `llm` harness against
-tests/fake_openai.py. The experiment folder changes while the swarm runs (system prompt, tools
-folder, replicas); a grant takes `add` and `bash` away from one agent. Each change reaches
-the agents at their next turn, with a one-line note in that prompt, without a worker
-restart; grants survive `flock update`."""
+"""Live changes end to end in one process (docs/live.md): the real CLI (`flock launch`,
+`flock update`), the real controller app and reconcile pass, two real Worker loops
+(FakeJobsClient, ASGI) running the `llm` harness against tests/fake_openai.py. The experiment
+folder changes while the swarm runs (system prompt, tools folder, replicas). Each change
+reaches the agents at their next turn, with a one-line note in that prompt, without a worker
+restart."""
 
 from __future__ import annotations
 
@@ -58,14 +57,14 @@ def user_texts(body: dict) -> list[str]:
     return [m["content"] for m in body["messages"] if m["role"] == "user"]
 
 
-async def test_update_and_grants_reach_running_agents(tmp_path, monkeypatch):
+async def test_update_reaches_running_agents(tmp_path, monkeypatch):
     monkeypatch.setenv(KEY_ENV, "sk-e2e")
     log = tmp_path / "requests.jsonl"
     srv = fake_openai.serve(0, str(log))
     url = f"http://127.0.0.1:{srv.server_port}/v1"
     sw = Swarm(tmp_path)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     exp = tmp_path / "experiment"
     (exp / "tools").mkdir(parents=True)
     (exp / "prompts").mkdir()
@@ -82,7 +81,7 @@ async def test_update_and_grants_reach_running_agents(tmp_path, monkeypatch):
         return turn_slices(await turns(admin, agent, n))[-1]
 
     try:
-        await cli_run("apply", str(spec_file), "--skip-preflight")
+        await cli_run("launch", str(spec_file), "--skip-preflight")
         sw.tick()
         await until(lambda: len(sw.workers) == 2
                     and all(w.tools.version == v1 for w in sw.workers.values()), timeout=10)
@@ -114,48 +113,15 @@ async def test_update_and_grants_reach_running_agents(tmp_path, monkeypatch):
                                        'changed.\n\ncall: mul {"a": 6, "b": 7}')
         assert {x["function"]["name"] for x in req["tools"]} == {"bash", "add", "mul"}
 
-        # 2. a grant for one agent: no add, no bash, at most 2 model calls per prompt
-        out = await cli_run("grant", "calc-0001", "tools=-add", "bash=off", "limits.max_turns=2")
-        assert "agent calc-0001: tools -add, bash off, limits.max_turns 2" in out
-        w1 = next(w for w in sw.workers.values() if "calc-0001" in w.agents)
-        await until(lambda: w1.agents["calc-0001"]._next_grant is not None
-                    and w1.agents["calc-0001"]._next_grant.bash is False, timeout=10)
-        t = await prompt("calc-0001", 'call: mul {"a": 2, "b": 3}', 2)
-        res = next(d for k, d in t if k == "message" and d["role"] == "toolResult")
-        assert (res["toolName"], res["content"][0]["text"]) == ("mul", "6")
-        req = requests_of(log, "calc-0001")[-2]
-        assert {x["function"]["name"] for x in req["tools"]} == {"mul"}
-        assert req["messages"][0]["content"].startswith("You are calc-0001")
-        assert "You have no shell." in req["messages"][0]["content"]
-        assert user_texts(req)[-1] == (
-            "[flock] Since your last turn: your system prompt changed; your grants changed: "
-            'tools -add, bash off, limits.max_turns 2.\n\ncall: mul {"a": 2, "b": 3}')
-        t = await prompt("calc-0001", "bash: echo hi", 3)  # bash is gone for this agent
-        res = next(d for k, d in t if k == "message" and d["role"] == "toolResult")
-        assert res["isError"] and "unknown tool 'bash'; the tools are mul" in res["content"][0]["text"]
-        st = (await admin.get("/agents/calc-0001")).json()
-        assert st["grants"] == {"tools": {"add": False}, "limits": {"max_turns": 2}, "bash": False}
-
-        # 3. `flock update` keeps grants: a replica change applies, the grant stays
+        # 2. a replica change applies
         spec_file.write_text(yaml.safe_dump(spec_raw(url, "all", replicas=3)))
         out = await cli_run("update", str(spec_file), "--replicas", "spec")
         assert out.strip() == "types.calc.replicas: 2 -> 3"
-        assert (await admin.get("/agents/calc-0001")).json()["grants"] == st["grants"]
         sw.tick()
         assert (await admin.get("/agents/calc-0002")).status_code == 200
-        # the other agent never saw the grant
         await prompt("calc-0000", "bash: echo still-here", 3)
         req = requests_of(log, "calc-0000")[-1]
         assert {x["function"]["name"] for x in req["tools"]} == {"bash", "add", "mul"}
-
-        # 4. revoke: bash and add are back at the next turn, with a note
-        await cli_run("revoke", "calc-0001")
-        await until(lambda: w1.agents["calc-0001"]._next_grant is None, timeout=10)
-        await prompt("calc-0001", "bash: echo back", 4)
-        req = requests_of(log, "calc-0001")[-2]
-        assert {x["function"]["name"] for x in req["tools"]} == {"bash", "add", "mul"}
-        assert user_texts(req)[-1].startswith("[flock] Since your last turn: your grants "
-                                              "changed: all revoked.")
         assert len(sw.workers) == 3  # the new replica's worker; none of the first two restarted
     finally:
         await admin.aclose()

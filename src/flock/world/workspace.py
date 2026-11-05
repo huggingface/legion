@@ -30,8 +30,12 @@ def git(root: Path, *args: str, data: bytes | None = None, env: dict | None = No
 
 
 def git_bytes(root: Path, *args: str, data: bytes | None = None, env: dict | None = None) -> bytes:
-    p = subprocess.run(["git", *SAFE, "-C", str(root), *args], input=data, capture_output=True,
-                       timeout=30, check=False, env=env)
+    try:
+        p = subprocess.run(["git", *SAFE, "-C", str(root), *args], input=data,
+                           capture_output=True, timeout=30, check=False, env=env)
+    except subprocess.TimeoutExpired:  # a ValueError reaches the agent as a tool error
+        raise ValueError("workspace capture timed out after 30 s: the clone is too large or "
+                         "slow; trim it") from None
     if p.returncode:
         raise ValueError("expected a local git clone with a committed base")
     return p.stdout

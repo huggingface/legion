@@ -40,9 +40,9 @@ def resolve(spec: SwarmSpec, previous: SwarmSpec | None, secrets: Mapping[str, s
     c.channel_id = c.kickoff_id = None
     if c.kickoff_file and c.kickoff is None:
         raise CommsError(f"comms.kickoff_file {c.kickoff_file!r} was not inlined: apply the spec with "
-                         "`flock apply`, which reads it next to the spec")
+                         "`flock launch`, which reads it next to the spec")
     if c.protocols and len(c.protocols_text) != len(c.protocols):
-        raise CommsError("comms.protocols were not inlined: apply the spec with `flock apply`, "
+        raise CommsError("comms.protocols were not inlined: apply the spec with `flock launch`, "
                          "which reads them next to the spec")
     p = previous.comms if previous is not None else None
     if p is not None and p.channel_id is not None and (p.url, p.channel) == (c.url, c.channel):

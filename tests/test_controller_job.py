@@ -16,9 +16,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-import typer
 
-from flock import cli
+from flock.client import ClientError, auth_headers
 from flock.controller import jobdeploy
 from flock.controller import spawn as spawning
 from flock.controller.jobs import HubJobsClient
@@ -167,30 +166,30 @@ async def test_agent_token_in_header_keeps_its_scope(app, store, client, tick):
 
 
 def test_cli_headers_space_mode():
-    h = cli.auth_headers("https://me-flock.hf.space", {"FLOCK_TOKEN": "ft"})
+    h = auth_headers("https://me-flock.hf.space", {"FLOCK_TOKEN": "ft"})
     assert h == {"X-Flock-Token": "ft", "Authorization": "Bearer ft"}
-    h = cli.auth_headers("http://nwa-x-controller:7860", {"FLOCK_TOKEN": "ft",
-                                                          "FLOCK_AGENT_TOKEN": "at"})
+    h = auth_headers("http://nwa-x-controller:7860", {"FLOCK_TOKEN": "ft",
+                                                      "FLOCK_AGENT_TOKEN": "at"})
     assert h == {"X-Flock-Token": "at", "Authorization": "Bearer at"}
 
 
 def test_cli_headers_behind_the_jobs_proxy(monkeypatch):
     url = "https://6ad7aaaa0000000000000001--7860.hf.jobs"
-    h = cli.auth_headers(url, {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x"})
+    h = auth_headers(url, {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x"})
     assert h == {"X-Flock-Token": "ft", "Authorization": "Bearer hf_x"}
-    h = cli.auth_headers("https://proxy.example", {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x",
-                                                   "FLOCK_PROXY_AUTH": "hf"})
+    h = auth_headers("https://proxy.example", {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x",
+                                               "FLOCK_PROXY_AUTH": "hf"})
     assert h["Authorization"] == "Bearer hf_x"
     monkeypatch.setattr("huggingface_hub.get_token", lambda: "hf_saved")
-    assert cli.auth_headers(url, {"FLOCK_TOKEN": "ft"})["Authorization"] == "Bearer hf_saved"
+    assert auth_headers(url, {"FLOCK_TOKEN": "ft"})["Authorization"] == "Bearer hf_saved"
     monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
-    with pytest.raises(typer.Exit):
-        cli.auth_headers(url, {"FLOCK_TOKEN": "ft"})
+    with pytest.raises(ClientError, match="behind the HF Jobs proxy"):
+        auth_headers(url, {"FLOCK_TOKEN": "ft"})
 
 
 async def test_cli_headers_pass_the_api_auth(app):
     """The headers the CLI sends behind the proxy are accepted by the controller."""
-    headers = cli.auth_headers("https://j--7860.hf.jobs", {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf"})
+    headers = auth_headers("https://j--7860.hf.jobs", {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf"})
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as c:
         assert (await c.get("/swarms")).status_code == 200
@@ -339,8 +338,30 @@ def test_build_restores_state_before_opening_the_store(tmp_path, monkeypatch):
     b.store.close()
 
 
+def test_hold_on_start_restores_every_swarm_held_and_released(tmp_path, monkeypatch):
+    """`flock launch --hold`: the restored swarm is held and released, in the checkpoint before
+    the controller serves, and no worker launches until `flock launch` lifts it."""
+    bucket = FakeBucket(tmp_path / "bucket")
+    src = Store(tmp_path / "src")
+    src.put_swarm(make_spec(), 1.0)
+    StateSync(bucket, tmp_path / "src").push(src)
+    src.close()
+    import flock.controller.main as main_mod
+
+    monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
+    bucket.ops.clear()
+    b = _built(tmp_path, FLOCK_STATE_URL="hf://buckets/ns/flock/controller/run", FLOCK_HOLD_ON_START="1")
+    flags = b.store.swarm_flags("demo")
+    assert set(flags["holds"]["types"]) == set(make_spec().types) and flags["released"]["by"] == "launch --hold"
+    assert "upload" in bucket.ops  # pushed at once
+    b.settings.secret_source = {"ANTHROPIC_API_KEY": "sk-test"}
+    reconcile(b.store, b.jobs, datetime(2026, 10, 20, tzinfo=UTC), b.settings)
+    assert b.jobs.launches == []
+    b.store.close()
+
+
 def test_a_snapshot_without_swarms_is_not_restored(tmp_path, caplog):
-    """After `flock remove` of the last swarm, the next push writes an empty snapshot: a new
+    """After `flock stop --delete` of the last swarm, the next push writes an empty snapshot: a new
     controller in the same group must start empty, not resurrect the removed swarm."""
     caplog.set_level(logging.INFO, "flock.state")
     bucket = FakeBucket(tmp_path / "bucket")
@@ -419,6 +440,7 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
     port = _free_port()
     b = _built(tmp_path, PORT=str(port), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z", FLOCK_STATE_SYNC_INTERVAL="0.1")
+    b.store.put_swarm(make_spec(researcher={"replicas": 0}), 1.0)  # an empty one never pushes
     took = await _serve_then_sigterm(b, long_poll=True)
     # the parked 30 s long-poll does not hold the exit past the graceful window
     assert took < main_mod.GRACEFUL_SHUTDOWN + 3
@@ -426,7 +448,7 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
     order = [next(i for i, m in enumerate(lines) if m.startswith(p))
              for p in ("SIGTERM: shutting down", "final push: ok (", "flock controller: exit")]
     assert order == sorted(order)
-    assert "final push: ok (1 files)" in lines  # state.db; no event files yet
+    assert any(m.startswith("final push: ok (") and m != "final push: ok (0 files)" for m in lines)
     pushes = b.state.pushes
     await asyncio.sleep(0.3)  # the periodic sync loop was cancelled: no push after exit
     assert b.state.pushes == pushes and "state.db" in bucket.list("state.db")
@@ -442,6 +464,7 @@ async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_pat
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(broken, d))
     b = _built(tmp_path / "one", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z")
+    b.store.put_swarm(make_spec(), 1.0)
     await _serve_then_sigterm(b)
     assert "final push: failed (RuntimeError: bucket down)" in caplog.text
     b.store.close()
@@ -451,6 +474,7 @@ async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_pat
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(slow, d))
     b = _built(tmp_path / "two", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
                FLOCK_STATE_URL="hf://x/y/z", FLOCK_FINAL_PUSH_TIMEOUT="0.3")
+    b.store.put_swarm(make_spec(), 1.0)
     took = await _serve_then_sigterm(b)
     release.set()
     assert "final push: failed (timeout after 0.3 s)" in caplog.text

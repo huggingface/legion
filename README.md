@@ -12,15 +12,15 @@ them.
 
 ## Features
 
-- **Local mode:** `compute: local` and `flock run spec.yaml` run the same spec on a laptop
-  (controller in-process, workers as subprocesses, terminal view, run bundle);
+- **Local mode:** `compute: local` and `flock launch spec.yaml` run the same spec on a laptop
+  (background controller, workers as subprocesses, run bundle);
   `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
   and one or more agent types. Each type sets the harness (`claude`,
   `codex`, `pi` or `llm`), model, replicas, system prompt, job flavor, agents per worker,
   worker lifetime, idle grace, per-prompt `max_turns` and `max_budget_usd`
   (enforced for every harness: Claude in its SDK, Codex, Pi and `llm` in the worker).
-  `apply`, `scale` and `remove` edit the spec; a reconcile loop makes HF Jobs
+  `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name
   keeps the same harness session and workdir across worker restarts.
@@ -50,18 +50,16 @@ them.
   caps, depth) and swarm `limits:`. Each agent calls the controller with its
   own scoped token. See [docs/spawn.md](docs/spawn.md).
 - **Tools folder:** plain Python functions in `tools/` next to the spec become agent
-  tools (schema from type hints); `flock apply` ships them by content hash and a changed
+  tools (schema from type hints); `flock launch` ships them by content hash and a changed
   folder reaches running agents at their next turn, with no image or wheel rebuild. See
   [docs/tools.md](docs/tools.md).
 - **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
-  turn_end` or a duration, after an optional `first`) while `while:` holds
+  turn_end` or a duration) while `while:` holds
   (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
-  round; `limits.budget_usd` stops the swarm. `flock loop` stops or restarts
-  a loop. See [docs/loop.md](docs/loop.md).
+  round; `limits.budget_usd` stops the swarm. `flock stop --final` stops
+  a loop with its final round. See [docs/loop.md](docs/loop.md).
 - **Live changes:** `flock update <folder>` applies an edited experiment folder (spec,
-  prompts, tools) to the running swarm and prints what changed; `flock run --watch` does it
-  on every save; `flock grant <target> tools=+x bash=off limits.budget_usd=1` changes what a
-  type or one agent may do. Agents take each change at their next turn, with a one-line note.
+  prompts, tools) to the running swarm and prints what changed; run it again after each edit. Agents take each change at their next turn, with a one-line note.
   See [docs/live.md](docs/live.md).
 - **Comms (optional):** a `comms:` block gives the agents one msgboard channel and
   built-in `post` / `read` / `search` tools; each agent joins under its own name at its
@@ -69,8 +67,8 @@ them.
   worker turns @mentions and thread replies into events. See [docs/comms.md](docs/comms.md).
 - **Worlds (optional):** a `world:` block names an HTTP service holding the swarm's shared state
   (World API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); its tools reach the
-  agents like folder tools, each call carrying the agent's name. `flock run` starts a local world
-  as a child process; `flock world serve module:Class` serves a `flock.world.World` subclass;
+  agents like folder tools, each call carrying the agent's name. `flock launch` starts a local world
+  as a child process; `python -m flock.world serve module:Class` serves a `flock.world.World` subclass;
   `worlds/taskboard` is an example. See [docs/world.md](docs/world.md).
 - **msgboard identity (optional):** a type can name an invite; the worker
   redeems it by agent name so an agent keeps its principal across restarts.
@@ -99,14 +97,16 @@ uv sync --all-extras                 # or: pip install -e ".[controller,worker,d
 run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,
 a different program; `uv run` also gives the scripts a Python with `huggingface_hub`.
 
-### On your laptop: `flock run`
+### On your laptop: `flock launch`
 
-The same spec with `compute: local` runs the controller and its workers on your machine, with
-a live view in the terminal and a run bundle at the end; no HF token or bucket needed for a
+The same spec with `compute: local` runs the controller and its workers on your machine, in the background
+with a run bundle at the end (`flock status` to watch); no HF token or bucket needed for a
 local model endpoint. See [docs/local.md](docs/local.md):
 
 ```sh
-uv run flock run examples/local.yaml --prompt "Introduce yourself." --until idle
+uv run flock launch examples/local.yaml
+uv run flock prompt --swarm hello --type writer "Introduce yourself."
+uv run flock stop hello --delete --yes   # ends the run and writes the bundle
 ```
 
 ### Run the controller
@@ -186,17 +186,19 @@ types:
 
 ```sh
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
-uv run flock apply demo.yaml
+uv run flock launch demo.yaml
 uv run flock status demo                 # counts by type and state, cost
 uv run flock prompt scribe-0007 "Summarize your workdir."
-uv run flock events scribe-0007 --follow # JSONL: turn_started, turn_ended, ...
-uv run flock scale demo scribe 200
-uv run flock remove demo
+uv run flock status scribe-0007 --events --follow  # agent.turn_started, agent.turn_ended, ...
+uv run flock stop demo --release      # drain, sync every agent, free the workers
+uv run flock launch demo              # resume
+uv run flock stop demo --delete
 ```
 
-Other commands: `agents <swarm> [--type --state]`, `agent <name>`,
-`workers <swarm>`, `preflight <spec>`. `apply` runs the preflight first when the
-spec has provider-backed models (`--skip-preflight` to bypass).
+Other commands: `status <swarm> [--type --state --parent --agent --events --watch --json]`
+(docs/health.md), `stop <swarm> [--release|--final]`, `update <folder> [--check]`. `launch`
+runs the preflight first when the spec has provider-backed models (`--skip-preflight` to
+bypass); `update --check` runs it alone.
 
 ### HTTP API
 
@@ -214,8 +216,7 @@ spec has provider-backed models (`--skip-preflight` to bypass).
 | `GET /workers`, `GET /workers/{id}` | worker list and detail |
 | `POST /agents/{parent}/spawn`, `DELETE /agents/{name}`, `GET /whoami` | spawn and remove child agents ([docs/spawn.md](docs/spawn.md)); agents call these with their own token |
 | `GET/POST /swarms/{swarm}/loop`, `GET /swarms/{swarm}/events` | loop state per type and agent, `{type, action: start\|stop, final}`, the swarm-level event stream ([docs/loop.md](docs/loop.md)) |
-| `GET /swarms/{swarm}/grants`, `PUT/DELETE /swarms/{swarm}/grants/{target}` | live grants for a type or an agent: tools, `bash`, `limits.max_turns`, `limits.budget_usd` ([docs/live.md](docs/live.md)) |
-| `GET /swarms/{swarm}/health`, `/health/history?since=&res=`, `/usage?by=type\|hour` | health snapshots, token usage ([docs/health.md](docs/health.md)) |
+| `GET /swarms/{swarm}/health`, `/health/history?since=&res=` | health snapshots ([docs/health.md](docs/health.md)) |
 | `GET /`, `GET /healthz` | status page, health and request counters (no auth) |
 
 ## Tests
@@ -246,5 +247,7 @@ No network, no real jobs: the Hub client and the harness processes are faked.
 - Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in
   the controller image. Without the Space's persistent storage a redeploy wipes
   it; replicas come back from the spec, spawned agents do not.
+- The experiments under `experiments/` (except `experiments/v8/`, written for this layout) target the pre-cleanup layout; run them from commit
+  `8949085` (`git checkout 8949085`).
 
 Design, contract and decision log: [docs/design.md](docs/design.md).

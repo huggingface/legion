@@ -24,10 +24,11 @@ from starlette.responses import PlainTextResponse
 
 from flock.controller.api import Notifier, create_app
 from flock.controller.health import SAMPLE_S, Health
-from flock.controller.jobs import FakeJobsClient, HubJobsClient, JobsClient
+from flock.controller.jobs import FakeJobsClient, JobsClient
 from flock.controller.reconcile import Settings, run_reconciler
 from flock.controller.state import DEFAULT_INTERVAL, StateSync, state_sync_from_env
 from flock.controller.store import Store
+from flock.registry import COMPUTE, load
 
 log = logging.getLogger("flock.controller")
 STATS_LOG_INTERVAL = 60.0
@@ -145,7 +146,6 @@ class Built:
 
 
 WORLD_FOLLOW_INTERVAL = 15.0  # s between reads of FLOCK_WORLD_HOST_FILE
-COMPUTE_KINDS = (None, "hf-jobs", "local", "slurm", "external")
 
 
 def build(env: Mapping[str, str] = os.environ) -> Built:
@@ -153,10 +153,10 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
     if not token:
         raise SystemExit("FLOCK_TOKEN must be set")
     kind = env.get("FLOCK_COMPUTE") or None
-    if kind not in COMPUTE_KINDS:
+    if kind is not None and kind not in COMPUTE:
         # never fall back to HF Jobs: a typo on a cluster would launch paid jobs
         raise SystemExit(f"FLOCK_COMPUTE={kind!r} is not one of "
-                         f"{', '.join(k for k in COMPUTE_KINDS if k)} (unset: hf-jobs)")
+                         f"{', '.join(COMPUTE)} (unset: hf-jobs)")
     dep = deployment(env)
     data_dir = env.get("FLOCK_DATA", "./data")
     if env is os.environ:  # a container with no usable HOME: hub caches under the data dir
@@ -175,22 +175,11 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         log.info("state: trimmed %d event streams to the restored index", fixed)
     jobs: JobsClient
     compute: str | None = None  # the spec `compute.kind` this controller accepts
-    if kind == "local":  # docs/local.md: workers as local subprocesses
-        if dep.mode == "job":
-            raise SystemExit("FLOCK_COMPUTE=local cannot run with FLOCK_MODE=job")
-        from flock.controller.local import LocalJobsClient
-
-        jobs, compute = LocalJobsClient(root=data_dir), "local"
-    elif kind in ("slurm", "external"):  # docs/slurm.md
-        from flock.controller.slurm import ExternalJobsClient, SlurmJobsClient
-
-        compute = kind
-        jobs = SlurmJobsClient(env=env) if compute == "slurm" else ExternalJobsClient(env=env)
-    elif env.get("FLOCK_FAKE_JOBS") == "1":
+    if kind in (None, "hf-jobs") and env.get("FLOCK_FAKE_JOBS") == "1":
         jobs = FakeJobsClient(network_group=dep.network_group)
     else:
-        jobs = HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
-        compute = "hf-jobs"
+        compute = kind or "hf-jobs"
+        jobs = load(COMPUTE[compute])(env, dep, data_dir)
     log.info("compute %s: %s", compute or ("fake" if env.get("FLOCK_FAKE_JOBS") == "1"
                                            else "hf-jobs"), type(jobs).__name__)
     settings = Settings(
@@ -273,8 +262,20 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         for t in loops:
             t.cancel()
 
+    def buckets(url: str):
+        from flock.worker.sync import HubBucketStore
+
+        return HubBucketStore(url, token=env.get("HF_TOKEN") or None)
+
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
-                     compute=compute, health=health)
+                     compute=compute, health=health, buckets=buckets,
+                     checkpoint=None if state is None else lambda: state.push(store, force=True))
+    if env.get("FLOCK_HOLD_ON_START") == "1":  # `flock launch --hold` (docs/live.md "Lifecycle")
+        for sw in store.list_swarms():  # as `flock stop --release`: no worker until `flock launch`
+            app.state.loops.pause(sw["spec"].swarm, reason="launch --hold", by="launch --hold",
+                                  release=True)
+        if state is not None:  # held in the checkpoint before anything else happens
+            state.push(store, force=True)
     timeout = float(env.get("FLOCK_FINAL_PUSH_TIMEOUT", FINAL_PUSH_TIMEOUT))
     return Built(app, store, dep, jobs, state, settings, halt, timeout, health=health)
 

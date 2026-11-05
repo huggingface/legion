@@ -11,7 +11,7 @@ from flock.controller.api import create_app
 from flock.models import SwarmSpec, WorkerHeartbeat
 from flock.world.host import WorldError, follow_world_host, world_endpoint
 from flock.world.hub import WorldHub
-from flock.world.protocol import TOKEN_ENV, origin_matches
+from flock.world.protocol import TOKEN_ENV, credential_id, origin_matches
 
 from .conftest import TOKEN
 from .test_world import SECRET, Recorder, Served
@@ -26,6 +26,16 @@ def test_origin_matches():
     assert not origin_matches("http://${WORLD_HOST}:7860", "http://evil.com/x:7860")
     assert not origin_matches("http://${WORLD_HOST}:7860", "https://h:7860")
     assert not origin_matches("http://${WORLD_HOST}:7860", "http://:7860")
+    t = "http://${WORLD_HOST}:7860"  # a host:port file fills in the free port the job bound
+    assert origin_matches(t, "http://ip-10-53-93-119:44951")
+    assert origin_matches(t, "http://ip-10-53-93-119:7860")
+    assert not origin_matches(t, "http://h")  # fill_host keeps :7860 for a host-only file
+    assert not origin_matches(t, "http://evil.com:1/x")
+    assert not origin_matches(t, "http://a@b:1")
+    assert not origin_matches(t, "http://evil/x?:7860")
+    assert not origin_matches(t, "http://h:1:2")
+    assert origin_matches("http://${WORLD_HOST}/p", "http://h:5/p")
+    assert not origin_matches("http://${WORLD_HOST}/p", "http://h:5/q")
 
 
 def test_world_endpoint_needs_the_host_file(tmp_path):
@@ -37,7 +47,11 @@ def test_world_endpoint_needs_the_host_file(tmp_path):
         world_endpoint(TEMPLATE, {"FLOCK_WORLD_HOST_FILE": str(f)})
     f.write_text("node-3\n")
     assert world_endpoint(TEMPLATE + ":7860", {"FLOCK_WORLD_HOST_FILE": str(f)}) == \
-        "http://node-3:7860"
+        "http://node-3:7860"  # an old host-only file: the url's port
+    f.write_text("node-3:41234\n")  # host:port: the job bound a free port
+    assert world_endpoint(TEMPLATE + ":7860/x", {"FLOCK_WORLD_HOST_FILE": str(f)}) == \
+        "http://node-3:41234/x"
+    assert world_endpoint(TEMPLATE, {"FLOCK_WORLD_HOST_FILE": str(f)}) == "http://node-3:41234"
     assert world_endpoint("http://fixed:1", {}) == "http://fixed:1"
 
 
@@ -49,8 +63,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
         monkeypatch.setenv("FLOCK_WORLD_HOST_FILE", str(host_file))
         monkeypatch.setenv("WORLD_TOKEN", SECRET)
         spec = SwarmSpec.model_validate({
-            "swarm": "demo", "bucket": "hf://buckets/ns/sh",
-            "compute": {"kind": "external"},
+            "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "world": {"url": TEMPLATE, "token_env": "WORLD_TOKEN"},
             "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5",
                                      "replicas": 1, "world_tools": True}},
@@ -76,10 +89,10 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
             store.update_swarm_spec(new)
 
             # a worker gets the new endpoint with its next heartbeat
+            from flock.controller.jobs import FakeJobsClient
             from flock.controller.reconcile import reconcile
-            from flock.controller.slurm import ExternalJobsClient
 
-            reconcile(store, ExternalJobsClient(env={}), clock(), _settings())
+            reconcile(store, FakeJobsClient(), clock(), _settings())
             wid = "demo-researcher-w0000"
             hb = WorkerHeartbeat(worker=wid, deadline=clock(), agents=[])
             r = await c.post(f"/workers/{wid}/heartbeat", json=hb.model_dump(mode="json"))
@@ -95,6 +108,10 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
         # a different (unlisted) origin would not be trusted
         hub.configure_raw({**block, "endpoint": "https://elsewhere.example/x"})
         assert hub.needs_restart()
+        t = "http://${WORLD_HOST}:7860"  # the endpoint's port is the one the job bound
+        hub.configure_raw({**block, "credential_origin": t, "credential_id": credential_id(SECRET, t),
+                           "endpoint": "http://ip-10-53-93-119:44951"})
+        assert not hub.needs_restart()
     finally:
         first.close()
         second.close()

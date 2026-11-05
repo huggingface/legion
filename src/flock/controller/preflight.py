@@ -30,6 +30,7 @@ from flock.models import (
     ResolvedModel,
     SwarmSpec,
 )
+from flock.registry import HARNESSES
 
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -321,11 +322,9 @@ async def probe(
     return result
 
 
-def api_for(harness: Harness, r: ResolvedModel) -> str:
+def api_for(harness: Harness) -> str:
     """The wire API a type's harness speaks to its provider (`llm` and Pi: chat completions)."""
-    if harness in (Harness.llm, Harness.pi):
-        return "chat_completions"
-    return "responses" if r.provider.type == "openai_compat" else "messages"
+    return HARNESSES[harness].api
 
 
 def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str, str | None]]:
@@ -337,7 +336,7 @@ def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str
         r = ts.resolved_model
         if r is None:
             continue
-        api = api_for(ts.harness, r)
+        api = api_for(ts.harness)
         extra = json.dumps(r.extra, sort_keys=True) if api == "chat_completions" else None
         choice = ts.tool_choice if api == "chat_completions" else None
         key = (r.provider_name, r.model_id, r.reasoning, api, extra, choice)

@@ -8,6 +8,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Harness versions are part of the contract: resume across workers needs the same CLI.
+# Keep them equal to the `version`s in src/flock/registry.py (this file is edited by hand).
 RUN npm install -g @anthropic-ai/claude-code@2.1.296 @openai/codex@0.162.1 \
     @earendil-works/pi-coding-agent@1.2.0 \
  && npm cache clean --force

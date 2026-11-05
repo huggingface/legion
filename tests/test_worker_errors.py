@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from flock import cli
 
-from .conftest import TOKEN, make_spec
+from .conftest import TOKEN, make_spec, wire
 
 W0 = "demo-researcher-w0000"
 
@@ -28,9 +28,8 @@ def test_crash_records_status_and_log_tail(store, jobs, clock, tick, app, monkey
     assert err == ("ERROR: Job failed with exit code: 1 | bootstrap: installing / "
                    "Error: 401 Unauthorized for hf://buckets/me/flock/dist/x.whl")
 
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
-    r = CliRunner().invoke(cli.app, ["workers", "demo"])
+    wire(monkeypatch, app)
+    r = CliRunner().invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and "401 Unauthorized" in r.output and "last_error" in r.output
     assert json.loads(TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
                       .get(f"/workers/{W0}").text)["last_error"] == err

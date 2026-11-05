@@ -2,9 +2,8 @@
 replicas, `<parent>-<type>-NNNN` for spawned children. `naming: words`: `<prefix><adjective>-
 <noun>` (the type's `name_prefix`, e.g. `iv-`), reserved in the store with the slot or the
 parent, unique on the controller, never reused while the swarm exists, and kept when a replica
-slot is recreated (also across controller restarts: the reservation is in the store). With
-`naming_seed` the words are a function of (seed, swarm, reservation number), so the same spec
-gives the same names; without it they are random."""
+slot is recreated (also across controller restarts: the reservation is in the store). The
+words are random."""
 
 from __future__ import annotations
 
@@ -30,11 +29,8 @@ def reserve_word_name(store, spec: SwarmSpec, type_name: str, slot: int | None,
     """A new words name for this agent, reserved in the store."""
     ts = spec.types.get(type_name)
     prefix = (ts.name_prefix if ts else None) or ""
-    k = store.reserved_names_count(spec.swarm)
     for attempt in range(10_000):
-        rng = (random.Random(f"{spec.naming_seed}:{spec.swarm}:{k}:{attempt}")
-               if spec.naming_seed is not None else _SYSTEM)
-        name = prefix + _words(rng, long=attempt >= 200)  # 3 words once 2 are crowded
+        name = prefix + _words(_SYSTEM, long=attempt >= 200)  # 3 words once 2 are crowded
         if store.reserve_name(name, spec.swarm, type_name, slot, parent, now):
             return name
     raise RuntimeError(f"no free name for {type_name} in swarm {spec.swarm}")

@@ -14,7 +14,7 @@ must see the same state, across workers (claims, a shared board), at 5 agents or
 # spec.yaml
 world:
   dir: ../../worlds/taskboard                       # where `command` runs, relative to the spec
-  command: [flock, world, serve, "taskboard:TaskBoard"]
+  command: ["{python}", -m, flock.world, serve, "taskboard:TaskBoard"]
 types:
   worker:
     harness: llm
@@ -32,7 +32,7 @@ a shared task board in SQLite with `list_tasks`, `add_task`, `claim_task`, `fini
 
 | key | what |
 |---|---|
-| `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). `compute: local` only. |
+| `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). The controller starts it with `compute: local`; with `compute: slurm` the run's world job does (docs/slurm.md "Deploying"), next to `url`. |
 | `world.dir` | Where `command` runs, relative to the spec file. Defaults to the spec's directory. |
 | `world.url` | A world that is already running (a Job, a Space, your laptop). Required with `compute: hf-jobs`. With `compute: local` it is used when there is no `command`. |
 | `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys, and handed to the workers. A started world without it gets a generated secret. |
@@ -48,7 +48,7 @@ carry both, and `compute:` is the only line that changes.
 
 ## What flock does
 
-**At apply** (`flock apply`, `flock run`, any re-apply):
+**At apply** (`flock launch`, any re-apply):
 
 1. With `compute: local` and a `command`, the controller starts the world as a child process. It
    runs in `dir` with these variables set: `FLOCK_WORLD_PORT`, `FLOCK_WORLD_HOST=127.0.0.1`,
@@ -75,11 +75,11 @@ world.command exited with 1 before serving GET /manifest; its log (.flock/<run>/
 types.worker.tools: unknown world tool(s) fly; world taskboard has: list_tasks, add_task, ...
 ```
 
-A started world stops when its swarm is removed (`flock remove`), when its block is removed, and
-at the end of `flock run`, after the workers. Stopping sends SIGTERM to the world's whole process
+A started world stops when its swarm is removed (`flock stop --delete`), when its block is removed, and
+when the local controller ends (`flock stop --release`), after the workers. Stopping sends SIGTERM to the world's whole process
 group (it runs in its own session). After 5 s, SIGKILL goes to whatever is left in the group,
 including helpers that outlived the main process. Its output goes to
-`<run>/logs/world-<swarm>.log` under `flock run`; a standalone local controller lets it inherit
+`<run>/logs/world-<swarm>.log` under a `flock launch` run; a standalone local controller lets it inherit
 its own output.
 
 **In the workers.** The world block, with its manifest, comes with every assign and heartbeat
@@ -170,7 +170,7 @@ The manifest:
 - A tool's error is a `200` with `ok: false`; the agent reads `message`. An optional
   `error.retry_after_s` says the call cannot succeed for that many seconds (a budget, a busy
   backend). Use `4xx` and `5xx` for protocol failures: `401` for the secret, `404` for an
-  unknown tool, `429` or `503` with `Retry-After` when overloaded (`flock world serve` answers
+  unknown tool, `429` or `503` with `Retry-After` when overloaded (`python -m flock.world serve` answers
   `{"ok": false, "error": {"code": "overloaded", "message", "retry_after_s"}}`).
 - `result` goes to the model as is if it is a string, otherwise as JSON. If `result` is absent,
   a `text` string is used instead.
@@ -217,13 +217,13 @@ class Counter(World):
 ```
 
 ```sh
-cd worlds/counter && FLOCK_WORLD_TOKEN=dev flock world serve counter:Counter   # :8765
+cd worlds/counter && FLOCK_WORLD_TOKEN=dev python -m flock.world serve counter:Counter   # :8765
 curl -s -H 'X-World-Token: dev' localhost:8765/manifest
 curl -s -H 'X-World-Token: dev' -H 'X-Flock-Agent: me' -d '{"args": {"by": 2}}' \
   localhost:8765/tools/bump        # {"ok":true,"result":{"n":2,"last":"me"}}
 ```
 
-`flock world serve module:Class` imports the module from the current directory. It serves on
+`python -m flock.world serve module:Class` imports the module from the current directory. It serves on
 `$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default `127.0.0.1:8765`, or `--host` / `--port`) and
 requires `$FLOCK_WORLD_TOKEN` (`--token-env NAME` for another variable; `--insecure` for none).
 Synchronous tools and hooks run one at a time, so the world needs no locks of its own
@@ -238,7 +238,7 @@ returns `{"code": "internal"}` with the exception text. Overriding `manifest()` 
 args, agent)` serves tools that are not methods. The server checks each call against
 `manifest()` as served at that moment, so what `GET /manifest` advertises is exactly what
 `POST /tools/<name>` accepts, also after the manifest changes. It needs the `controller` extra (FastAPI, uvicorn),
-which `flock run` needs too.
+which `flock launch` needs too.
 
 `raise ToolError(message, code, retry_after_s=N)` adds `retry_after_s` to the error, for a
 refusal that will not change for a while (chatbot4 sends it with its new-PR budget,
@@ -355,7 +355,7 @@ as final, and so does a single comment the Hub refuses with a 4xx other than 429
 `hub_comments_rejected_total`); joined comments it refuses are split. The pause file pauses
 `push` and `merge` (closes still go through).
 
-**Parked mode.** `flock world serve` binds its port first and builds the world in a background
+**Parked mode.** `python -m flock.world serve` binds its port first and builds the world in a background
 thread. While that raises (a failed restore, the Hub unreachable, a bad config), it is
 *parked*: it logs the error and builds again after 30 s, doubling up to 10 min, forever.
 `GET /manifest`, tool calls and hooks then answer `503` with `Retry-After` and
@@ -386,7 +386,7 @@ class Shop(World):
 
     @tool
     def push(self) -> str:
-        if self.paused("push"):  # an operator ran `flock world pause <swarm> push`
+        if self.paused("push"):  # paused through POST /admin/pause
             raise ToolError("pushes are paused; keep working locally", "paused")
         return f"pushing with {self.knobs['hub.push.slots']} slots"
 ```
@@ -410,8 +410,8 @@ The manifest lists the knob names under `knobs` and adds the capability `admin-v
 `$FLOCK_WORLD_ADMIN_TOKEN` in the world's environment; unset, `/admin` answers `403`. It is
 never derived from the world secret, which every worker holds. Bodies are capped at 64 KB, and
 admission control never applies to `/admin`. Operators go through the controller, which sends
-the same secret and records each change as a swarm event (`world_knob {name, old, new, by,
-reason}`, `world_pause {lanes, reason, by}`, `world_resume {lanes, by}`):
+the same secret and records each knob change as a swarm event (`world_knob {name, old, new,
+by, reason}`):
 
 - a world flock starts (`command`, `compute: local`): the controller derives the secret from
   its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
@@ -420,10 +420,8 @@ reason}`, `world_pause {lanes, reason, by}`, `world_resume {lanes, by}`):
   `experiments/run4/slurm/secrets.env.example`), and keep it from the workers.
 
 ```bash
-flock world knobs <swarm>                                   # values, defaults, ranges, paused lanes
-flock world set <swarm> pr.open_floor=10 --reason "hub 429s"
-flock world pause <swarm> open push --reason "hub outage"
-flock world resume <swarm> open push
+python -m flock.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
+python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 ```
 
 chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`
@@ -442,11 +440,11 @@ pausing `comment` holds the review comment outbox.
 4. Bound results: byte caps, pagination, narrowing hints.
 5. Stable error codes plus `retry_after_s`; make writes idempotent on `X-Request-Id` where the backend allows.
 6. Inject the backend, and test with a fake.
-7. Pass `flock world doctor <url> [--token T] [--calls N]`. It warns about reads without the hint, writes with no read on the same noun and read tools with no limit/page argument, lists the capabilities, checks `/healthz` and `/metrics`, and with `--calls N` runs N concurrent calls of each read-only tool with empty args (p50/p95, error codes, `/manifest` latency meanwhile). It exits 1 when the manifest is unreachable or a read-only tool errors; warnings exit 0. Tools with required arguments are not called.
+7. Pass `python -m flock.world doctor <url> [--token T] [--calls N]`. It warns about reads without the hint, writes with no read on the same noun and read tools with no limit/page argument, lists the capabilities, checks `/healthz` and `/metrics`, and with `--calls N` runs N concurrent calls of each read-only tool with empty args (p50/p95, error codes, `/manifest` latency meanwhile). It exits 1 when the manifest is unreachable or a read-only tool errors; warnings exit 0. Tools with required arguments are not called.
 
 ## Local and HF Jobs
 
-| | `compute: local` (`flock run`) | `compute: hf-jobs` |
+| | `compute: local` (`flock launch`) | `compute: hf-jobs` |
 |---|---|---|
 | who runs the world | the controller, from `command` in `dir` | you: a Job, a Space or any host the workers can reach; give `url` |
 | port | chosen by flock (`{port}`, `$FLOCK_WORLD_PORT`), on 127.0.0.1 | yours |

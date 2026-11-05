@@ -33,13 +33,13 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
-from flock.controller.policy import Policies, digest, send
-from flock.controller.reconcile import agent_state, swarm_stream
+from flock.controller.reconcile import HOLD_WARN_AFTER, agent_state, swarm_stream
 from flock.controller.store import Row, Store
-from flock.models import Event, SwarmSpec, hit_max_turns, parse_duration, world_tools
+from flock.models import Event, SwarmSpec, hit_max_turns, world_tools
 from flock.world.host import world_token
 from flock.world.protocol import TOKEN_HEADER
 
@@ -61,22 +61,25 @@ TOKEN_FIELDS = (("input", "input"), ("output", "output"), ("cache_read", "cacheR
 DOWN_AFTER = 2  # consecutive failed manifest probes before `world_down`
 DOWN_PAUSE_S = 1800.0  # world down this long: pause the types that use it (FLOCK_WORLD_DOWN_PAUSE_S)
 VLLM_METRICS = {"num_requests_waiting": "waiting", "num_requests_running": "running",
-                "gpu_cache_usage_perc": "kv", "kv_cache_usage_perc": "kv"}  # vLLM v0 / v1 names
+                "gpu_cache_usage_perc": "kv", "kv_cache_usage_perc": "kv",
+                "request_success_total": "completed"}  # vLLM v0 / v1 names
+VLLM_KEEP_S = 120.0  # per-server samples kept for the ramp's hold_if (reconcile.vllm_busy)
 
 
-_PROM = re.compile(r"^([A-Za-z_:][\w:]*)(?:\{[^}]*\})?\s+(\S+)")
+_PROM = re.compile(r"^([A-Za-z_:][\w:]*)(\{[^}]*\})?\s+(\S+)")
 
 
 def parse_vllm(text: str) -> dict[str, float]:
-    """`waiting`, `running` (summed over label sets) and `kv` (max) from vLLM's /metrics."""
+    """`waiting`, `running`, `completed` (summed over label sets; aborted requests are not
+    completed) and `kv` (max) from vLLM's /metrics."""
     out: dict[str, float] = {}
     for line in text.splitlines():
         m = _PROM.match(line)
         key = VLLM_METRICS.get(m.group(1).rsplit(":", 1)[-1]) if m else None
-        if key is None:
+        if key is None or (key == "completed" and 'finished_reason="abort"' in (m.group(2) or "")):
             continue
         try:
-            v = float(m.group(2))
+            v = float(m.group(3))
         except ValueError:
             continue
         out[key] = max(out.get(key, 0.0), v) if key == "kv" else out.get(key, 0.0) + v
@@ -132,7 +135,9 @@ class Health:
         self.run_name = run or store.data_dir.resolve().name
         self.transport = transport
         self.world: dict[str, dict[str, Any]] = {}  # swarm -> {up, manifest_ms, slurm_state, metrics}
-        self.providers: dict[str, dict[str, dict[str, float]]] = {}  # swarm -> provider -> queue
+        self.providers: dict[str, dict[str, dict[str, float]]] = {}  # swarm -> provider -> summed queue
+        self.servers: dict[str, dict[str, dict[str, dict]]] = {}  # swarm -> provider -> server -> probe
+        self._server_fails: dict[str, int] = {}  # server root -> consecutive failed scrapes
         self._fails: dict[str, int] = {}  # swarm -> consecutive failed manifest probes
         self._first_fail: dict[str, float] = {}
         self.down_since: dict[str, float] = {}  # swarm -> first failed probe of the outage
@@ -156,9 +161,6 @@ class Health:
         self._closed: list[dict[str, dict[str, Any]]] = []  # closed hours not yet written
         self._rollups_at = 0.0  # when the open hour's files were last written
         self._run_gens: dict[str, int] | None = None  # generations run.json was written for
-        self.interval = SAMPLE_S  # set by `run`; policies count `for:` in samples of it
-        self.policies = Policies(store, secrets=secrets)  # docs/policies.md
-        self._digest_at: dict[str, float] = {}  # swarm -> last digest (or first tick)
         self._buckets: dict[str, dict[tuple[str, str, str], dict]] = {}  # hour -> (swarm, b, agent) -> line
 
     # ------------------------------------------------------------------ counters (post_events)
@@ -409,34 +411,16 @@ class Health:
                 path = self.store.data_dir / "metrics" / spec.swarm / name
                 with path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts": now, "body": small}, sort_keys=True) + "\n")
-            try:
-                self.policies.evaluate(spec, body, now, self.interval)
-            except Exception:  # a policy never stops the snapshots
-                log.exception("policies of %s failed", spec.swarm)
-            self._report(spec, body, now)
-
-    def _report(self, spec: SwarmSpec, body: dict[str, Any], now: float) -> None:
-        """`report: {every, sinks}`: the digest to each sink and as a `digest` event."""
-        if spec.report is None:
-            return
-        every = parse_duration(spec.report.every).total_seconds()
-        last = self._digest_at.setdefault(spec.swarm, now)  # the first one after `every`
-        if now - last < every:
-            return
-        self._digest_at[spec.swarm] = now
-        text = digest(spec.swarm, body, list(self.policies.recent.get(spec.swarm, ())), now, every)
-        self._event(spec.swarm, now, "digest", {"text": text})
-        send(self.store, spec.report.sinks, {"swarm": spec.swarm, "ts": now, "text": text},
-             text, self.policies.transport)
 
     def latest(self, swarm: str) -> dict[str, Any] | None:
-        """The newest 30 s sample, else (after a restart) the newest stored slim one."""
+        """The newest 30 s sample, else (after a restart) the newest stored slim one, marked
+        `before_restart`: this controller has not taken one yet."""
         with self._lock:
             mem = self.samples.get(swarm)
             if mem:
                 return mem[-1]
         rows = self.store.health_samples(swarm, "5m", limit=1)
-        return rows[0] if rows else None
+        return {**rows[0], "before_restart": True} if rows else None
 
     def history(self, swarm: str, since: float) -> list[dict[str, Any]]:
         with self._lock:
@@ -516,14 +500,19 @@ class Health:
         types: dict[str, Any] = {}
         baseline = self._since or now
         agents = self.store.list_agents(swarm)
-        states = {a["name"]: agent_state(a, workers.get(a["worker"]), now).value for a in agents}
+        lv = spec.compute.liveness()
+        states = {a["name"]: agent_state(a, workers.get(a["worker"]), now, lv).value
+                  for a in agents}
         pending = self.store.pending_counts(swarm)
         if prev_tick and now > prev_tick:
             self._sample_states(swarm, agents, states, pending, min(now - prev_tick, 2 * SAMPLE_S),
                                 now)
         _write_json(self.store.data_dir / "states" / swarm / "latest.json", {"ts": now, "states": {
             n: "pending" if st == "idle" and pending.get(n) else st for n, st in states.items()}})
+        pinned: dict[str, list[str]] = {}  # server host:port -> agents pinned to it
         for a in agents:
+            if a.get("endpoint"):
+                pinned.setdefault(a["endpoint"], []).append(a["name"])
             t = types.setdefault(a["type"], {"by_state": Counter(), "stuck": [], "gens": Counter()})
             state = states[a["name"]]
             t["by_state"][state] += 1
@@ -538,15 +527,37 @@ class Health:
         hour = hour_of(now)
         by_type = {r["type"]: {k: r.get(k, 0) for k, _ in TOKEN_FIELDS}
                    for r in self.store.usage(swarm, hour)}
+        servers = {p: {host: {**sv, "agents": len(pinned.get(host, ())),
+                              **({"dead_agents": sorted(pinned.get(host, ()))[:STUCK_KEPT]}
+                                 if sv["dead"] else {})}
+                       for host, sv in hosts.items()}
+                   for p, hosts in self.servers.get(swarm, {}).items()}
         body = {"world": self.world.get(swarm), "workers": out_workers, "types": types,
                 "tools": out_tools, "providers": self.providers.get(swarm, {}),
+                "provider_servers": servers, "ramps": self._ramps(spec),
                 "tokens": {"hour": hour, "by_type": by_type}}
         body["alerts"] = alerts(body)
         return body
 
+    def _ramps(self, spec: SwarmSpec) -> dict[str, dict[str, Any]]:
+        """Per ramp type (`ramp:<type>`, reconcile._ramp): step k of n, the next step's size and
+        time (epoch s; None while held, released or at the end) and the consecutive holds."""
+        out = {}
+        for name, ts in spec.types.items():
+            r = ts.replicas_ramp
+            st = self.store.get_control(spec.swarm, f"ramp:{name}") if r else None
+            if st is None:
+                continue
+            steps, k = r.schedule(), st["step"]
+            nxt = steps[k + 1] if k + 1 < len(steps) else None
+            out[name] = {"step": k, "steps": len(steps) - 1, "replicas": ts.replicas, "max": r.max,
+                         "next_add": nxt[1] - steps[k][1] if nxt and k >= 0 else None,
+                         "next_at": st["t0"] + nxt[0] if nxt and "paused_at" not in st else None,
+                         "holds": st.get("holds", 0)}
+        return out
+
     async def run(self, interval: float = SAMPLE_S) -> None:
         """Probe, then snapshot, every `interval` s, until cancelled."""
-        self.interval = interval
         while True:
             now = time.time()
             try:
@@ -603,6 +614,7 @@ class Health:
         self.world[spec.swarm] = state
         fails = 0 if state["up"] else self._fails.get(spec.swarm, 0) + 1
         prev, self._fails[spec.swarm] = self._fails.get(spec.swarm, 0), fails
+        state["fails"] = fails  # alerts: down only after DOWN_AFTER in a row
         if fails == 1:
             self._first_fail[spec.swarm] = now
         if fails == DOWN_AFTER:
@@ -625,7 +637,7 @@ class Health:
         held = (self.store.swarm_flags(spec.swarm).get("holds") or {}).get("types", {})
         if since is None:
             if up and any(h.get("auto") and h.get("reason") == "world_down"
-                          for h in held.values()):  # a policy's holds are its own to lift
+                          for h in held.values()):
                 self.loops.resume(spec.swarm, by="controller", auto_only=True,
                                   reason="world_down")
             return
@@ -638,23 +650,43 @@ class Health:
                                  auto=True)
 
     async def _probe_providers(self, http: httpx.AsyncClient, spec: SwarmSpec) -> None:
+        """Summed queues per provider (`providers`, the run viewer reads it) and per server
+        (`provider_servers`, `host:port`): up, or down with the error and the consecutive
+        failed scrapes (`dead` from DOWN_AFTER on), and its queues; and per server the last 2
+        minutes of `[ts, waiting, running, completed]` in the store (`vllm`) for the ramp's
+        hold_if; a failed or incomplete scrape empties that server's samples (the ramp then
+        holds)."""
         out: dict[str, dict[str, float]] = {}
+        per: dict[str, dict[str, dict[str, Any]]] = {}
+        old = self.store.get_control(spec.swarm, "vllm") or {}
+        servers: dict[str, list[list[float]]] = {}
+        now = time.time()
         for name, p in spec.providers.items():
             if not p.metrics:
                 continue
-            q: dict[str, float] = {}
-            for base in p.base_urls or ([p.base_url] if p.base_url else []):
+            q, hosts = out.setdefault(name, {}), per.setdefault(name, {})
+            for base in p.endpoints:
                 root = base.rstrip("/").removesuffix("/v1")
+                servers[root] = []
                 try:
                     r = await http.get(f"{root}/metrics")
                     r.raise_for_status()
                 except httpx.HTTPError as e:
-                    log.debug("provider %s metrics at %s: %s", name, root, e)
+                    n = self._server_fails[root] = self._server_fails.get(root, 0) + 1
+                    hosts[urlsplit(root).netloc] = {"up": False, "fails": n, "dead": n >= DOWN_AFTER,
+                                                    "error": f"{type(e).__name__}: {e}"[:200]}
                     continue
-                for k, v in parse_vllm(r.text).items():
+                self._server_fails[root] = 0
+                m = parse_vllm(r.text)
+                hosts[urlsplit(root).netloc] = {"up": True, "fails": 0, "dead": False, **m}
+                for k, v in m.items():
                     q[k] = max(q.get(k, 0.0), v) if k == "kv" else q.get(k, 0.0) + v
-            out[name] = q
-        self.providers[spec.swarm] = out
+                if "waiting" in m and "running" in m:
+                    servers[root] = [x for x in old.get(root, []) if now - x[0] <= VLLM_KEEP_S] + [
+                        [now, m["waiting"], m["running"], m.get("completed", 0.0)]]
+        self.providers[spec.swarm], self.servers[spec.swarm] = out, per
+        if servers or old:
+            self.store.put_control(spec.swarm, "vllm", servers)
 
     def _event(self, swarm: str, now: float, kind: str, data: dict[str, Any]) -> None:
         log.warning("%s: %s %s", swarm, kind, data)
@@ -675,16 +707,32 @@ def alerts(body: dict[str, Any]) -> list[dict[str, str]]:
     """What needs a look, from one snapshot body."""
     out = []
     w = body.get("world")
-    if w and not w["up"]:
+    if w and not w["up"] and w.get("fails", DOWN_AFTER) >= DOWN_AFTER:  # one miss is no outage
         slurm = w.get("slurm_state")
-        why = (f" (Slurm job {slurm}: waiting for a node, not a crash)" if slurm == "PENDING"
-               else f" (Slurm job {slurm})" if slurm else "")
-        out.append({"kind": "world_down", "msg": f"world does not answer{why}"})
+        if slurm == "PENDING":  # queued for a node, e.g. at launch: not failing
+            out.append({"kind": "world_pending", "msg": "world does not answer (Slurm job "
+                        "PENDING: waiting for a node, not a crash)"})
+        else:
+            why = f" (Slurm job {slurm})" if slurm else ""
+            out.append({"kind": "world_down", "msg": f"world does not answer{why}"})
     for wid, wk in body["workers"].items():
         eta = wk.get("eta_limit_s")
         if eta is not None and eta < NEAR_LIMIT_S:
             out.append({"kind": "memory", "msg": f"{wid} reaches its memory limit in "
                         f"{eta / 60:.0f} min"})
+    for p, servers in (body.get("provider_servers") or {}).items():
+        dead = {h: sv for h, sv in servers.items() if sv["dead"] and sv.get("agents")}
+        if dead and all(sv["dead"] for sv in servers.values()):
+            out.append({"kind": "provider_down", "msg": f"provider {p}: every server down "
+                        f"({sum(sv['agents'] for sv in dead.values())} agents pinned)"})
+        else:
+            out += [{"kind": "dead_server", "msg": f"provider {p}: server {h} down, {sv['agents']} "
+                     f"agents pinned to it ({', '.join(sv['dead_agents'][:5])}"
+                     f"{', ...' if sv['agents'] > 5 else ''})"} for h, sv in dead.items()]
+    for t, r in (body.get("ramps") or {}).items():
+        if r["holds"] >= HOLD_WARN_AFTER:
+            out.append({"kind": "ramp_held", "msg": f"ramp {t}: {r['holds']} consecutive capacity "
+                        f"holds, replicas remain {r['replicas']}"})
     stuck = sum(len(t["stuck"]) for t in body["types"].values())
     if stuck:
         out.append({"kind": "stuck", "msg": f"{stuck} agents stuck or silent"})

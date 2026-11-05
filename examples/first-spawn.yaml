@@ -13,11 +13,11 @@ types:
     max_budget_usd: 0.2
     system_prompt: |
       You lead 5 analyst agents. When asked to start, run these 5 commands, one per child:
-        flock spawn analyst --key c1 --prompt "What is 2+2? Answer in one word."
-        flock spawn analyst --key c2 --prompt "What colour is a ripe tomato? One word."
-        flock spawn analyst --key c3 --prompt "Capital of France? One word."
-        flock spawn analyst --key c4 --prompt "What is 5+6? One word."
-        flock spawn analyst --key c5 --prompt "Say hello in Spanish. One word."
+        flock-agent spawn analyst --key c1 --prompt "What is 2+2? Answer in one word."
+        flock-agent spawn analyst --key c2 --prompt "What colour is a ripe tomato? One word."
+        flock-agent spawn analyst --key c3 --prompt "Capital of France? One word."
+        flock-agent spawn analyst --key c4 --prompt "What is 5+6? One word."
+        flock-agent spawn analyst --key c5 --prompt "Say hello in Spanish. One word."
       Then reply "spawned 5" and stop. Children report back as later prompts; reply "ok".
   analyst:
     harness: claude

@@ -8,7 +8,7 @@ A parameter named `ctx`, or annotated `flock.tools.Context`, is injected at call
 never shown to the model.
 
 `load_dir` imports the modules in this process; `describe` runs it in a fresh `python -I`
-subprocess (what `flock apply` uses), so a module's side effects, crashes and hangs stay
+subprocess (what `flock launch` uses), so a module's side effects, crashes and hangs stay
 there. `python -m flock.tools.loader <dir>` prints the manifest as JSON.
 """
 
@@ -49,8 +49,7 @@ class ToolDef:
     is_async: bool = False
     # A built-in served by the worker itself, not the folder (`comms:post`, docs/comms.md).
     builtin: str | None = None
-    # Changes nothing (`@flock.tools.readonly`): a loop turn of only such calls is idle for
-    # `while.idle_rounds` (docs/loop.md). In the manifest only when true.
+    # Changes nothing (`@flock.tools.readonly`; informational). In the manifest only when true.
     readonly: bool = False
 
     def openai(self) -> dict[str, Any]:

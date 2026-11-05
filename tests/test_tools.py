@@ -463,7 +463,7 @@ def test_spec_fields_are_optional_and_checked():
             "types": {"dev": {"harness": "claude", "model": "m"}}}
     s = SwarmSpec.model_validate(base)
     assert s.tools_dir is None and s.tools_version is None and s.types["dev"].tools is None
-    with pytest.raises(ValueError, match="tools_version is written by `flock apply`"):
+    with pytest.raises(ValueError, match="tools_version is written by `flock launch`"):
         SwarmSpec.model_validate({**base, "tools_version": "nothex"})
     with pytest.raises(ValueError):
         SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "claude", "model": "m",

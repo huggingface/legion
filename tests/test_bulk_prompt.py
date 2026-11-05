@@ -6,13 +6,13 @@ from __future__ import annotations
 import json
 
 import yaml
-from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import Client
 from flock.models import AgentHeartbeat
 
-from .conftest import TOKEN, make_spec
+from .conftest import make_spec, wire
 from .test_api import W0, apply, hb_body
 from .test_providers_controller import CAP_PROVIDERS, _cap_client, _delivered, hb, pspec, put
 
@@ -35,7 +35,7 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
     assert r.status_code == 200, r.text
     assert r.json() == {"swarm": "demo", "type": "researcher", "parent": None, "matched": 3, "queued": 1, "pending": 0,
                         "skipped_state": 2, "skipped_removing": 0,
-                        "skipped_pending": 0, "skipped_budget": 0, "prompt_id": None}
+                        "skipped_pending": 0}
     [p] = await _prompts(client, W0)
     assert p["agent"] == "researcher-0000" and p["text"] == "go" and p["reply_to"] == "pixel"
 
@@ -86,10 +86,10 @@ runner = CliRunner()
 
 
 def test_cli_prompt_by_type(tmp_path, monkeypatch, app, store, tick):
-    monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(make_spec().model_dump(mode="json")))
-    assert runner.invoke(cli.app, ["apply", str(spec_file)]).exit_code == 0
+    assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     tick()
     r = runner.invoke(cli.app, ["prompt", "--swarm", "demo", "--type", "researcher", "hello all"])
     assert r.exit_code == 0, r.output
@@ -140,11 +140,11 @@ async def test_repeated_idle_bulk_calls_do_not_stack_prompts(store, clock, tick)
 def test_cli_skip_pending_flag(monkeypatch, app, store, tick, tmp_path):
     sent = []
 
-    def fake_call(method, path, **kw):
+    def fake_call(self, method, path, **kw):
         sent.append(kw["json"])
         return {}
 
-    monkeypatch.setattr(cli, "_call", fake_call)
+    monkeypatch.setattr(Client, "_call", fake_call)
     for flags in ([], ["--stack"], ["--skip-pending"]):
         r = runner.invoke(cli.app, ["prompt", "--swarm", "s", "--type", "t", "--state", "idle", *flags, "x"])
         assert r.exit_code == 0, r.output

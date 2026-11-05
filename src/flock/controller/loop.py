@@ -16,7 +16,7 @@ Who sends the loop prompt (`mode`):
   would keep its slot from turn to turn and starve the agents queued behind it). The controller
   prompts on `turn_ended` events or when `every` has passed since the agent's last loop prompt.
 
-`first` goes alone, and the loop prompt only after the turn that followed it ended. Wake-ups
+Wake-ups
 (`wake(agent, reason)`, fed by the workers' comms events for `on: comms.*`) queue the loop
 prompt after a 2 s debounce, at most one per `wake.min_gap` per agent and `wake.max` per run
 (or `wake.window`); by default a wake prompt is not a round (`wake.counts_as_round`). Each one
@@ -66,7 +66,7 @@ STALL_AFTER = 30.0  # s idle in a worker-side loop with nothing in flight: send 
 ACK_TIMEOUT = 60.0  # s to wait for a worker's loop_stopped before the final prompt goes anyway
 ERROR_LIMIT = 3  # failed loop turns in a row (not max_turns) end an agent's loop (both sides)
 RESTOP_EVERY = 30.0  # s, hard budget stop: min gap between repeated stops to one working agent
-LOOP_KINDS = ("first", "loop")
+LOOP_KINDS = ("loop",)
 NOTICE_KEEP = 100  # pending notices kept per agent (the oldest go first)
 NOTICE_GROUPS = 5  # (kind, thread) groups named in the notice line; the rest are counted
 NOTICE_NAMES = 3  # names shown per group
@@ -82,7 +82,8 @@ def _ts(t: float) -> datetime:
 
 
 def _spec_hash(lp: LoopSpec) -> str:
-    return hashlib.sha256(lp.model_dump_json().encode()).hexdigest()[:12]
+    """Defaults left out: deleting a field (or adding one with a default) keeps the hash."""
+    return hashlib.sha256(lp.model_dump_json(exclude_defaults=True).encode()).hexdigest()[:12]
 
 
 def _custom(ev: Event) -> dict[str, Any]:
@@ -172,14 +173,10 @@ def with_notices(text: str, line: str | None) -> str:
     return f"{text.rstrip()}\n\n{line}" if line else text
 
 
-def with_banner(text: str, banner: str | None) -> str:
-    return f"{banner}\n\n{text}" if banner else text
-
-
 def _new_agent() -> dict[str, Any]:
-    return {"phase": "new", "rounds": 0, "last_sent": None, "first_delivered": False,
+    return {"phase": "new", "rounds": 0, "last_sent": None,
             "wstarted": None, "stop_sent": None, "acked": False, "last_activity": None,
-            "turn_done": False, "idle_streak": 0, "errors": 0, "done_reason": None,
+            "turn_done": False, "errors": 0, "done_reason": None,
             "final": None, "final_sent": None,
             "wakes": 0, "wake_last": None, "wake_times": [],  # wake prompts sent (`on:`)
             "inflight": None}  # {kind, round} of a loop prompt the worker took, until its turn starts
@@ -228,7 +225,8 @@ class LoopEngine:
         self.send = send
         self.clock = clock
         self.capped = capped or (lambda spec, t: False)
-        self.turn_state = turn_state or agent_state
+        self.turn_state = turn_state or (
+            lambda a, w, now: agent_state(a, w, now, store.liveness(a["swarm"])))
         self._lock = threading.RLock()
         # agent -> first, last, why, events: queued wakes not yet sent
         self._wakes: dict[str, tuple[float, float, list[str], int]] = {}
@@ -304,8 +302,8 @@ class LoopEngine:
             return True
 
     def control(self, swarm: str, type_name: str, action: str, final: bool = True) -> LoopStatus:
-        """`flock loop --start|--stop`: stop (optionally without the final round) or start
-        the loop again from round 0 (agents that had `first` do not get it again)."""
+        """POST /swarms/{swarm}/loop start|stop: stop (optionally without the final round) or start
+        the loop again from round 0."""
         with self._lock:
             sw = self.store.get_swarm(swarm)
             ts = sw["spec"].types.get(type_name) if sw else None
@@ -323,24 +321,26 @@ class LoopEngine:
             else:
                 if self.store.swarm_flags(swarm).get("budget_stop"):
                     raise ValueError(f"swarm {swarm!r} is stopped by limits.budget_usd; raise it "
-                                     "(flock apply) before starting a loop again")
+                                     "(flock update) before starting a loop again")
                 if L is None or L["state"] in ("final", "done"):
                     self._start(sw["spec"], type_name, ts, now, restart=L is not None)
             return self.status(swarm, type_name, detail=False)
 
     def _put_budget(self, swarm: str, body: dict[str, Any]) -> None:
         """Write the budget-stop flags, keeping the swarm's pause holds."""
-        holds = self.store.swarm_flags(swarm).get("holds")
-        self.store.put_swarm_flags(swarm, {**body, **({"holds": holds} if holds else {})})
+        flags = self.store.swarm_flags(swarm)
+        self.store.put_swarm_flags(swarm, {**body, **{k: flags[k] for k in ("holds", "released")
+                                                      if flags.get(k)}})
 
     # ------------------------------------------------------------------ pause / resume
     def pause(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
               *, interrupt: bool = False, reason: str = "", by: str = "operator",
-              auto: bool = False) -> dict[str, Any]:
+              auto: bool = False, release: bool = False) -> dict[str, Any]:
         """Hold types and/or agents (both None: every type): no new prompt reaches them and
         their loops skip them without counting rounds, until `resume`. `interrupt` also stops
         the turns in flight (`stop`). An automatic hold never replaces an operator's one.
-        Returns the swarm's holds."""
+        `release` (`flock stop --release`) also marks the swarm released: reconcile drains
+        every worker and launches none until `resume(release=True)`. Returns the swarm's holds."""
         with self._lock:
             sw = self.store.get_swarm(swarm)
             if sw is None:
@@ -361,7 +361,11 @@ class LoopEngine:
                     if n not in h[key] or (not auto and h[key][n].get("auto")):
                         h[key][n] = entry
                         new[key].append(n)
-            if not new["types"] and not new["agents"]:
+            if release and not flags.get("released"):
+                flags["released"] = {"since": entry["since"], "reason": reason, "by": by}
+                self.store.put_control(swarm, "unsynced", {})  # this release's report starts empty
+                self._event(swarm, "released", {"reason": reason, "by": by})
+            elif not new["types"] and not new["agents"]:
                 return h
             self.store.put_swarm_flags(swarm, flags)
             self._event(swarm, "paused", {**new, "reason": reason, "by": by, "auto": auto,
@@ -388,13 +392,17 @@ class LoopEngine:
 
     def resume(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
                *, by: str = "operator", auto_only: bool = False,
-               reason: str | None = None) -> dict[str, Any]:
+               reason: str | None = None, release: bool = False) -> dict[str, Any]:
         """Lift holds: the named ones, or all (both None). `auto_only`: only the holds the
-        controller made itself (world down, policies), never an operator's. `reason`: only
+        controller made itself (world down), never an operator's. `reason`: only
         holds with that reason (each automatic source lifts its own). Queued prompts and wakes
-        go out on the next poll / tick. Returns the swarm's holds."""
+        go out on the next poll / tick. `release` also clears `released` (`flock launch`):
+        the workers relaunch. Returns the swarm's holds."""
         with self._lock:
             flags = self.store.swarm_flags(swarm)
+            if release and flags.pop("released", None) is not None:
+                self.store.put_swarm_flags(swarm, flags)
+                self._event(swarm, "unreleased", {"by": by})
             h = flags.get("holds")
             if not h:
                 return {"types": {}, "agents": {}}
@@ -455,9 +463,7 @@ class LoopEngine:
                         arm["used"] = True  # this round carried the line: plain again next tick
                     st["inflight"] = {"kind": d.get("kind"), "round": d.get("round"),
                                       "counted": d.get("counted", True), "wake": d.get("wake", False)}
-                    if d.get("kind") == "first":
-                        st["first_delivered"] = True
-                    elif d.get("kind") == "final":
+                    if d.get("kind") == "final":
                         st["final"] = "delivered"
                     elif isinstance(d.get("round"), int):
                         st["rounds"] = max(st["rounds"], d["round"])
@@ -468,42 +474,24 @@ class LoopEngine:
                 elif ev.type == "loop_stopped":
                     st["acked"] = True
                     st["wstarted"] = None
-                    if (d.get("reason") in ("max_rounds", "errors", "deadline", "done")
+                    if (d.get("reason") in ("max_rounds", "errors", "deadline")
                             and st["phase"] == "looping"):
                         st["phase"], st["done_reason"] = "done", d["reason"]
                 elif ev.type in ("turn_ended", "turn_interrupted"):
                     st["last_activity"] = now
                     max_turns = ev.type == "turn_ended" and hit_max_turns(d)
                     if max_turns:  # not an error (below), but the operator sees each one
-                        kind = ("final" if st["final"] == "delivered"
-                                else "first" if st["phase"] == "first" else "loop")
+                        kind = "final" if st["final"] == "delivered" else "loop"
                         self._event(a["swarm"], "loop_max_turns",
                                     {"type": a["type"], "kind": kind, "round": st["rounds"],
                                      "calls": d.get("num_turns")}, agent=a["name"])
                     if st["final"] == "delivered":
                         st["final"] = "done"
                         continue
-                    # `done(finished: true)` under `stop_when.all_agents_done`: out of the loop
-                    finished = (ts.loop.stop_when.all_agents_done and ev.type == "turn_ended"
-                                and d.get("finished") is True)
-                    if st["phase"] == "first" and st["first_delivered"]:
-                        st["phase"] = "looping"
-                        stop_reason = "done" if finished else stop_reason
-                        continue
                     if st["phase"] != "looping":
                         continue
                     held = self.store.held(a)  # a turn cut or ended under a pause hold: not counted
                     status = d.get("status") if ev.type == "turn_ended" else "interrupted"
-                    w = ts.loop.while_
-                    if w.idle_rounds is not None and ev.type == "turn_ended" and not held:
-                        # read-only calls (`done`, comms read/search, `readonly` folder tools)
-                        # are not activity; a worker older than `state_calls` sends tool_calls
-                        busy = d.get("state_calls", d.get("tool_calls", 1))
-                        st["idle_streak"] = 0 if busy else st["idle_streak"] + 1
-                        if st["idle_streak"] >= w.idle_rounds:
-                            stop_reason = "idle_rounds"
-                    if finished:
-                        stop_reason = "done"
                     if L.get("mode") == "controller" and held:
                         st["turn_done"] = True
                     elif L.get("mode") == "controller":
@@ -541,10 +529,7 @@ class LoopEngine:
         kind = took.get("kind")
         if kind == "loop" and _is_wake(took):
             _unwake(st)
-        if kind == "first" and st["phase"] == "first":
-            st["first_delivered"] = False
-            st["last_activity"] = None  # due again at once
-        elif kind == "final":
+        if kind == "final":
             if st["final"] in ("sent", "delivered"):
                 st["final"], st["final_sent"] = None, None
         elif kind == "loop" and took.get("counted") is False:
@@ -583,8 +568,11 @@ class LoopEngine:
                 continue
             if L is None:
                 L = self._start(spec, type_name, ts, now)
-            elif (L.get("hash") != _spec_hash(ts.loop)
-                  or L.get("mode") != self._mode(spec, type_name, ts.loop)):
+            elif not L.get("hv"):  # stored under the old full-dump hash: re-hash, not a change
+                L["hash"], L["hv"] = _spec_hash(ts.loop), 1
+                self.store.put_loop(spec.swarm, type_name, L)
+            if (L.get("hash") != _spec_hash(ts.loop)
+                    or L.get("mode") != self._mode(spec, type_name, ts.loop)):
                 self._updated(spec, type_name, ts, L, now)
             if L["state"] == "final" and ts.loop.final is None:  # final removed by a re-apply
                 self._finish(spec.swarm, type_name, L, now, "final removed from the spec")
@@ -678,8 +666,6 @@ class LoopEngine:
                 st["last_sent"], st["turn_done"] = None, True
                 if st["phase"] == "done" and st["done_reason"] == "max_rounds":
                     st["phase"], st["done_reason"] = "looping", None
-            elif kind == "first" and st["phase"] == "first":
-                st["phase"], st["first_delivered"], st["last_activity"] = "new", False, None
             elif kind == "final" and st["final"] == "sent":
                 st["final"], st["final_sent"] = None, None
             else:
@@ -714,18 +700,18 @@ class LoopEngine:
         lp = ts.loop
         assert lp is not None
         return {"state": "running", "mode": self._mode(spec, type_name, lp), "every": lp.every,
-                "started_at": now, "stopped_at": None, "reason": None, "hash": _spec_hash(lp),
+                "started_at": now, "stopped_at": None, "reason": None, "hash": _spec_hash(lp), "hv": 1,
                 "final_at": None, "run": uuid.uuid4().hex[:12]}
 
     def _start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, now: float,
                restart: bool = False) -> dict:
         L = self._new_loop(spec, type_name, ts, now)
         self.store.put_loop(spec.swarm, type_name, L)
-        if restart:  # a new run of the loop: rounds from 0, `first` only for those never sent
+        if restart:  # a new run of the loop: rounds from 0
             for name, st in self.store.loop_agents(spec.swarm, type_name).items():
                 fresh = _new_agent()
                 if st["phase"] != "new":
-                    fresh["phase"], fresh["first_delivered"] = "looping", True
+                    fresh["phase"] = "looping"
                 self.store.put_loop_agent(name, spec.swarm, type_name, fresh)
                 self._wakes.pop(name, None)
         self._event(spec.swarm, "loop_started", {"type": type_name, "mode": L["mode"],
@@ -740,7 +726,7 @@ class LoopEngine:
         workers take over. Worker loops that stay worker loops get a fresh `loop_start`."""
         assert ts.loop is not None
         old, new = L.get("mode"), self._mode(spec, type_name, ts.loop)
-        L["hash"], L["mode"], L["every"] = _spec_hash(ts.loop), new, ts.loop.every
+        L["hash"], L["hv"], L["mode"], L["every"] = _spec_hash(ts.loop), 1, new, ts.loop.every
         self.store.put_loop(spec.swarm, type_name, L)
         self._event(spec.swarm, "loop_updated", {"type": type_name, "mode": new,
                                                  "every": ts.loop.every, "previous_mode": old})
@@ -817,8 +803,7 @@ class LoopEngine:
         until = ts.loop.while_.until
         return LoopMeta(kind=kind, type=type_name, round=round, started_at=_ts(L["started_at"]),
                         wall_s=max(0.0, until_deadline(until, L["started_at"]) - L["started_at"]) if until else None,
-                        cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake,
-                        add_tools=list(ts.loop.final.add_tools) if kind == "final" and ts.loop.final else [])
+                        cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake)
 
     def _loop_start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, a: Row,
                     st: dict, now: float) -> None:
@@ -829,9 +814,8 @@ class LoopEngine:
         line = arm["line"] if arm and not arm.get("used") and lp.notices else None
         if line:
             arm["fetched"] = None  # a new command to wait for
-        st["banner"] = self.banner(spec.swarm, type_name)
         cmd = LoopStartCommand(
-            agent=a["name"], text=with_banner(with_notices(lp.prompt, line), st["banner"]),
+            agent=a["name"], text=with_notices(lp.prompt, line),
             meta=self._meta(ts, type_name, L, "loop", round=st["rounds"], why="turn_end"),
             max_rounds=lp.while_.max_rounds, run=L.get("run"),
             deadline=_ts(until_deadline(until, L["started_at"])) if until else None)
@@ -867,7 +851,6 @@ class LoopEngine:
             self.store.delete_loop_agent(name)
             self._wakes.pop(name, None)
         workers = {w["id"]: w for w in self.store.list_workers(spec.swarm, type_name)}
-        stagger = parse_duration(lp.stagger).total_seconds() if lp.stagger else 0.0
         cap = agent_cap(ts)
         max_rounds = lp.while_.max_rounds
         every = lp.every_s
@@ -875,8 +858,7 @@ class LoopEngine:
         due: dict[str, PromptCommand] = {}
         wakes: dict[str, int] = {}  # agent -> wake events folded into its due prompt
         changed: set[str] = set()
-        banner = self.banner(spec.swarm, type_name)
-        for i, a in enumerate(sorted(agents, key=lambda r: r["name"])):
+        for a in sorted(agents, key=lambda r: r["name"]):
             name = a["name"]
             st = states.get(name)
             if st is None:
@@ -897,19 +879,8 @@ class LoopEngine:
                 changed.add(name)
                 continue
             if st["phase"] == "new":
-                if now < L["started_at"] + i * stagger:
-                    continue
-                if lp.first is not None:
-                    due[name] = self._prompt(a, lp.first, self._meta(ts, type_name, L, "first",
-                                                                     round=0, why="first"))
-                    continue
-                st["phase"], st["first_delivered"] = "looping", True
+                st["phase"] = "looping"
                 changed.add(name)
-            if st["phase"] == "first":
-                if not st["first_delivered"] and now - (st["last_activity"] or 0.0) >= STALL_AFTER:
-                    due[name] = self._prompt(a, lp.first or "", self._meta(  # never taken: again
-                        ts, type_name, L, "first", round=0, why="first"))
-                continue
             if st["phase"] != "looping":
                 continue
             woken = self._woken(name, st, lp, now)
@@ -931,10 +902,6 @@ class LoopEngine:
                         ts, type_name, L, "loop", round=None, why=woken[0],
                         counted=lp.wake.counts_as_round, wake=True))
                     wakes[name] = woken[1]
-                elif (st.get("banner") != banner and not st["acked"]
-                      and not (st["stop_sent"] and not st["acked"])):
-                    self._loop_start(spec, type_name, ts, L, a, st, now)  # the banner changed
-                    changed.add(name)
                 else:
                     arm = st.get("notice_armed")
                     if (arm and not arm.get("used") and arm.get("fetched") is None
@@ -984,11 +951,8 @@ class LoopEngine:
             assert meta is not None
             if name in noticed:  # named once; what came in meanwhile waits for the next round
                 st["notices"] = st["notices"][noticed[name]:]
-            if meta.kind == "first":
-                st["phase"], st["first_delivered"] = "first", False
-            else:
-                st["rounds"] = meta.round if meta.round is not None else st["rounds"]
-                st["last_sent"], st["turn_done"] = now, False
+            st["rounds"] = meta.round if meta.round is not None else st["rounds"]
+            st["last_sent"], st["turn_done"] = now, False
             st["last_activity"] = now
             self._wakes.pop(name, None)
             changed.add(name)
@@ -1005,7 +969,6 @@ class LoopEngine:
         if sent:
             self._event(spec.swarm, "loop_tick", {
                 "type": type_name, "prompted": len(sent),
-                "first": sum(1 for n in sent if due[n].loop.kind == "first"),
                 "rounds": {n: due[n].loop.round for n in sorted(sent) if due[n].loop.kind == "loop"}})
         live = [states[a["name"]] for a in agents]
         if live and all(st["phase"] == "done" for st in live):
@@ -1061,14 +1024,7 @@ class LoopEngine:
         return "wake: " + ", ".join(dict.fromkeys(why)), n
 
     def _prompt(self, a: Row, text: str, meta: LoopMeta) -> PromptCommand:
-        return PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, loop=meta,
-                             text=with_banner(text, self.banner(a["swarm"], a["type"])))
-
-    def banner(self, swarm: str, type_name: str) -> str | None:
-        """`flock notice set` (docs/loop.md "Banner"): the type's line, else the swarm's."""
-        n = (self.store.get_control(swarm, f"notice:{type_name}")
-             or self.store.get_control(swarm, "notice:*"))
-        return n["text"] if n else None
+        return PromptCommand(agent=a["name"], prompt_id=uuid.uuid4().hex, loop=meta, text=text)
 
     # ------------------------------------------------------------------ final round
     def _final(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, now: float) -> None:
@@ -1108,8 +1064,7 @@ class LoopEngine:
             changed.add(name)
             if again:
                 continue
-            self._event(spec.swarm, "final_round", {"type": type_name, "agent": name,
-                                                    "add_tools": lp.final.add_tools}, agent=name)
+            self._event(spec.swarm, "final_round", {"type": type_name, "agent": name}, agent=name)
         for name in changed:
             self.store.put_loop_agent(name, spec.swarm, type_name, states[name])
         live = [states[a["name"]] for a in agents]
@@ -1125,8 +1080,8 @@ def loop_status(store: Store, swarm: str, type_name: str, *, detail: bool = Fals
     rounds = [st["rounds"] for st in agents.values()]
     per = None
     if detail:
-        per = {name: {**{k: st[k] for k in ("phase", "rounds", "done_reason", "final", "errors",
-                                            "idle_streak")}, "wakes": st.get("wakes", 0)}
+        per = {name: {**{k: st[k] for k in ("phase", "rounds", "done_reason", "final", "errors")},
+                      "wakes": st.get("wakes", 0)}
                for name, st in sorted(agents.items())}
     return LoopStatus(
         type=type_name, state=L["state"], mode=L["mode"], every=L["every"],

@@ -1,12 +1,10 @@
-# Live changes: `flock update`, `flock run --watch`, `flock grant`
+# Live changes: `flock update`
 
 Everything an experiment customises lives in its folder, next to the spec: `spec.yaml`, the
 prompt files it names, `tools/`, the comms protocol files. flock reads them at runtime, and
-they can change while the swarm runs. Three commands do this:
+they can change while the swarm runs. `flock update` does this:
 
 - `flock update` applies an edited folder to the running swarm.
-- `flock run --watch` does the same on every save, locally.
-- `flock grant` changes what one agent or one type may do, without editing the spec.
 
 ## `flock update`
 
@@ -17,7 +15,7 @@ prompts changed: calc (system_prompt); comms (protocols_text)
 types.calc.replicas: 2 -> 3
 ```
 
-It reads the folder exactly as `flock apply` does: the spec, `system_prompt_file`, the loop
+It reads the folder exactly as `flock launch` does: the spec, `system_prompt_file`, the loop
 prompt files, the comms kickoff and protocols, and the tools folder. It checks the folder,
 compares it with the spec the controller is running and applies it. The output is one line per
 change: the tools version (old -> new, with the tools added and removed), the prompts changed
@@ -28,8 +26,10 @@ Replicas: `flock update` keeps the running replica count of every type that alre
 (a type with `replicas: 20` in the file and 300 running stays at 300) and prints
 `agent: replicas kept (spec 20, live 300)`. `--replicas spec` applies the file's counts
 instead. `flock update` does this client-side; `PUT /swarms/{swarm}` applies the replicas it
-is sent unless the request asks `?replicas=keep` (`flock apply`, `flock scale` and `flock run`
-send the spec as is).
+is sent unless the request asks `?replicas=keep` (`flock launch` sends the spec
+as is). `--replicas spec` never lowers a type with `replicas_ramp` (the ramp raised it): lower
+`replicas_ramp.max` to stop it growing. `--check` also probes every provider-backed model and
+lists the agents (and their spawned children) a lowered count or a removed type would delete.
 
 Lists print element by element (`types.agent.tools: +world:get_pr -world:foo`); only long
 scalar strings are shortened. `world.endpoint`, `manifest` and the credential fields are
@@ -39,11 +39,13 @@ as `world tools: +a -b`.
 `flock update --check` runs every check the controller runs on an apply (tools against the
 bundle and the live world manifest, world, comms channel, harness changes) and prints the
 diff, storing and posting nothing (`PUT /swarms/{swarm}?dry_run=1` returns the resolved
-spec). It exits 1 with the reason when the update would be refused. A world started for the
+spec). Each changed value names where it came from: `(spec.yaml:41)`, `(run.env WORKER_MEM)`,
+`(env WORKER_MEM)`, `(spec.yaml:12 default of WORKER_MEM)` or `(default)`. It exits 1 with
+the reason when the update would be refused. A world started for the
 check is stopped again.
 
 A refused update exits 1, prints the reason and applies nothing. The reasons are the ones
-`flock apply` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
+`flock launch` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
 from the controller. On a running swarm the controller also refuses to change the harness of a
 type that has agents. Use a new type name for that, or remove the type first.
 
@@ -51,24 +53,21 @@ Preflight runs only when the update adds a provider-backed model the running spe
 have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
 through `.flock/current`, like the other commands do.
 
-## Env files, overlays and `--ref`
+## Env files and `--ref`
 
-`flock apply`, `flock update` and `flock run` render the spec as they read it, so one folder
-serves several clusters without a generated copy:
+`flock launch` and `flock update` render the spec as they read it, so one folder
+(one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock apply experiments/run4/spec.yaml --env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml
-$ flock update experiments/run4 --env runs/run4/run.env --overlay experiments/run4/spec.slurm.yaml --ref origin/run5
+$ flock launch my-experiment/spec.yaml --env runs/run4/run.env
+$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/run4/run.env
+$ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
 ```
 
-- `--overlay FILE` (repeatable, in order) is deep-merged over the spec: mappings merge key by
-  key, lists replace, `null` deletes a key (`world: {dir: null, command: null, url: ...}`
-  turns a local world into a remote one). Relative paths in it (prompts, `world.dir`) stay
-  relative to the spec file.
-- Then every string value, inline prompts and commands included, may use `${VAR}` and
+- Every string value, inline prompts and commands included, may use `${VAR}` and
   `${VAR:-default}` with an UPPERCASE name (as in `sh`, an empty value takes the default);
-  lowercase placeholders such as the loop's `${spend}` are left alone. Sources, later winning: each `--env FILE` in order (`NAME=value` lines,
-  `export ` and `#` comments allowed, no shell expansion), then the process environment. A
+  lowercase placeholders such as the loop's `${spend}` are left alone. Sources, later winning: the process environment, then each `--env FILE`
+  in order (`NAME=value` lines, `export ` and `#` comments allowed, no shell expansion). A
   value that is one placeholder takes its YAML type (`replicas: "${REPLICAS:-20}"` is the
   integer 20); otherwise it is plain text. Keys and prompt files are not substituted. An unset
   variable without a default refuses the spec, naming every such variable. `$${` is a literal
@@ -77,14 +76,59 @@ $ flock update experiments/run4 --env runs/run4/run.env --overlay experiments/ru
   comma-separated string, so `base_urls: ${OPENAI_BASE_URLS:-}` works (empty: none).
 - `--ref GIT_REF[:PATH]` (apply and update) exports the repo holding the given folder at
   `GIT_REF` (`git archive`) into a temp dir and reads the spec from there: the folder's own
-  path in the repo, or `PATH` (repo-relative, a folder or a spec file). Overlays inside the repo
-  are read at the ref too; `--env` files are read where they are. The source sent is
+  path in the repo, or `PATH` (repo-relative, a folder or a spec file). `--env` files are read
+  where they are. The source sent is
   `{git_sha, ref, dirty: false, by}`. `--check` works with it.
 
-## Generations and `flock history`
+## Lifecycle: `flock launch` and `flock stop`
 
-Every apply that changes the spec (`flock apply`, `flock update`, `flock scale`, the first
-apply of `flock run`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
+| Want | Command |
+|---|---|
+| start a new run | `flock launch FOLDER` (refused when the bucket already holds agents of that swarm name) |
+| hold turns, keep compute | `flock stop S` (running turns finish; `--interrupt` cuts them; `--type`/`--agent` narrow it) |
+| free the workers, keep everything | `flock stop S --release` |
+| end the loops with their final round | `flock stop S --final [--type T]` |
+| continue after either | `flock launch S` (or `flock launch FOLDER`; `--type`/`--agent` lift one hold) |
+| bring a released Slurm run back held, to change its spec first | `flock launch FOLDER --hold`, `flock update FOLDER`, then `flock launch FOLDER` |
+
+`flock launch FOLDER` creates the swarm when the controller does not have it (with
+`If-None-Match: *`: of two launches racing, one creates and the other gets 412). When it has
+it, `launch` resumes it, and refuses if the folder's spec differs from the stored one
+(`replicas` aside, which the ramp rewrites): run `flock update` first. So one call either
+creates or resumes and never changes the spec.
+
+`flock stop S --release` holds every type, then drains every worker: running turns finish,
+each agent's final push to the bucket is retried once, and a push that still fails is named in
+the worker's last heartbeat (`sync_failed` on the swarm stream, the worker's `last_error`,
+`status.released.unsynced`; a worker that ends unplanned mid-release, without that heartbeat,
+puts all its agents there). The command waits until no worker runs, then exits 0 when every
+agent synced, or 1 listing the agents that did not. Rows, names, spawn trees, loops, spec and
+history stay on the controller; nothing launches until `flock launch S`, when each agent
+restores from the bucket by name.
+
+A release then ends the run's controller and world jobs (`ops.down`; Slurm:
+[slurm.md](slurm.md#deploying), HF Jobs: [deploy-job.md](deploy-job.md#deploy)), in this order:
+a final controller checkpoint (`POST /checkpoint`; when it fails it is reported and nothing is
+ended), the world's clean stop (SIGTERM: it saves and exits), then the jobs. A local run, a
+controller the run has no job for, or one serving other swarms that are not released keeps
+running. `flock launch FOLDER` with no controller answering (`ops.up`) starts them again, waits
+until the controller answers (it restores its checkpoint) and the world serves, then creates or
+resumes.
+`flock launch FOLDER --hold` (Slurm, no controller up) stops there: it writes
+`RUN_DIR/controller.hold`, and the controller job started with it restores every swarm held and
+released, as `flock stop --release` leaves it (`FLOCK_HOLD_ON_START=1`), pushes that checkpoint,
+then removes the file (a later requeue holds nothing). No worker starts, so `flock update` can
+change the spec first (a new provider URL); a plain `flock launch` then resumes.
+
+A controller that restarts restores its swarms from its own checkpoint (`state.db` and
+`events/<swarm>/`, pushed every 60 s to `FLOCK_STATE_URL`; `FLOCK_STATE_RESTORE=0` skips it).
+There is no takeover by another controller: a fresh launch whose bucket already holds the
+swarm's agents is refused; restart that run's controller, or pick a new swarm name or bucket.
+
+## Generations
+
+Every apply that changes the spec (`flock launch`, `flock update`, the first
+apply of `flock launch`) gives the swarm a new **generation**: 1 for a new swarm, then +1. An
 apply that changes nothing keeps it. `flock status` shows it as `gen N` on the swarm line.
 
 The controller keeps each generation's applied spec with its UTC time, the diff lines (as
@@ -93,39 +137,24 @@ header: `by` from `$USER` and, when the spec's folder is in a git repo, `git_sha
 branch) and `dirty` (the folder has uncommitted changes). Each generation is also a
 `spec_applied {generation, source, diff_summary}` event on the swarm stream.
 
-```console
-$ flock history calc
-gen  applied (UTC)        by      git                     changes
-1    2026-10-28 09:12:03  carlos  3f9c0e2a main           created
-2    2026-10-28 10:40:51  carlos  9a1b2c3d+dirty main     types.calc.replicas: 2 -> 3
-$ flock history calc --diff 1 2
-types.calc.replicas: 2 -> 3
-```
-
-| Method | Path | |
-|---|---|---|
-| GET | `/swarms/{swarm}/history` | `[{generation, ts, source, diff_summary}]`, oldest first |
-| GET | `/swarms/{swarm}/history/{generation}` | the same fields plus `spec`, the stored spec |
-
-Removing the swarm drops its history.
+The history is kept in the controller's store (no route reads it). Removing the swarm drops
+it.
 
 ## Control-plane events
 
-Besides `spec_applied`, the swarm stream (`flock events <swarm>`) carries what the reconcile
+Besides `spec_applied`, the swarm stream (`flock status <swarm> --events`, names in docs/health.md "Events") carries what the reconcile
 loop does, as `{target, detail}`: `launch`, `launch_failed`, `launch_refused`, `crash`
 (detail: stage, message, backoff), `crashloop`, `planned_restart` (job timeout, drain,
-preemption), `cancel`, `retire`, `remove_worker`, `external_wait`. Per-agent placement
+preemption), `end` (the same in a released swarm: no relaunch), `cancel`, `retire`, `remove_worker`. Per-agent placement
 (`assign`, `unassign`) and conditions repeated every pass (`workers_full`, the launch rate
 budget) are not written. The health sampler adds `world_down` and `world_up`; `flock status
 --watch` shows the last ten of these events ([health.md](health.md)).
 
-World admin changes made through the controller (`flock world set`, `flock world pause`,
-`flock world resume`; docs/world.md, "Admin API") are recorded as `world_knob {name, old,
-new, by, reason}`, `world_pause {lanes, reason, by}` and `world_resume {lanes, by}`. They
-take effect in the world at once and survive its restarts; they are not part of the spec.
+World knob changes made through the controller (`python -m flock.world set`; docs/world.md, "Admin
+API") are recorded as `world_knob {name, old, new, by, reason}`. They take effect in the
+world at once and survive its restarts; they are not part of the spec.
 
-Policies ([policies.md](policies.md)) add `alert`, `alert_cleared`, `policy_action`,
-`policy_budget_exhausted` and `digest`; the ramp adds `ramp_step`.
+The ramp adds `ramp_step`.
 
 ## Ramp (`replicas_ramp`)
 
@@ -133,16 +162,34 @@ Policies ([policies.md](policies.md)) add `alert`, `alert_cleared`, `policy_acti
 types:
   agent:
     replicas: 0
-    replicas_ramp: {start: 20, add: 20, every: 10m, max: 300}
+    replicas_ramp:
+      start: 20                       # step 0, on the first pass that sees the ramp
+      phases:                         # or one phase as `add: 20, every: 10m`
+        - {every: 5m, add: 20, until: 100}
+        - {every: 10m, add: 20}       # until: max
+      max: 300
+      stagger: 10s                    # the start raise adds one agent every 10 s (default)
+      hold_if: {waiting: 1, request_s: 15, above: 100}
 ```
 
-The reconciler raises the type's replicas to `start` on the first pass that sees the ramp.
-It then adds `add` every `every`, up to `max`. Replicas change only when a new step is due,
-and never go down. An operator's `flock scale` between steps, up or down, stays until the
-next step asks for more. Each raise rewrites the stored spec and writes `ramp_step {type,
-from, replicas, step, max}`. The start time and the last step are stored, so a controller
-restart keeps the schedule. `flock update` keeps the live replicas by default. This replaces
-`experiments/run4/waves.py run` (fixed schedule only; there is no load guard).
+The reconciler raises the type's replicas along the schedule: `start`, then each phase adds
+`add` every `every` until its `until`; the next phase starts where it stopped. Replicas change
+only when a new step is due, and never go down. An operator's `flock update --replicas spec` between steps (up only on a
+ramp type), stays until the next step asks for more. A lowered `max` caps later raises; it never
+deletes agents. `stagger` spaces the agents of the `start` raise (a phase's own `stagger`,
+default 0, those of its steps). Each step writes `ramp_step {type, from, replicas, step, max}`.
+The start time, the last step and a staggered raise in progress are stored (`ramp:<type>`), so
+a controller restart keeps the schedule. While the type is held (`flock stop`) or the swarm
+released (`flock stop --release`), the clock stops: a resume does not jump the missed steps.
+
+`hold_if` is the load guard: a step that takes the swarm's replicas above `above` waits while
+any vLLM server of a provider with `metrics: true` had `waiting` or more requests queued in
+every health sample of the last 2 minutes, or needs more than `request_s` seconds per request
+(running requests / completions per second), or its metrics are missing or reset. It asks
+again every 2 minutes and writes `ramp_held {type, want, holds, reason}`; from the third hold
+in a row the event carries a `warning`. `flock update` keeps the live replicas by default.
+It needs 3 health samples in the last 150 s, so keep `FLOCK_HEALTH_INTERVAL` under 50 s (the
+default 30 s is fine); slower sampling holds every step ("metrics unavailable").
 
 ## Per-type concurrency (`max_working`)
 
@@ -152,23 +199,24 @@ same admission as a provider's `max_working`: prompts wait in the controller, an
 go to the oldest pending prompt first. When both caps are set, a prompt needs a slot in both.
 A type with it runs its `turn_end` loop on the controller (docs/loop.md).
 
-## Broadcasts (`flock prompt --track`)
+Local runs: after editing the folder, run `flock update FOLDER`; there is no watch mode in the CLI yet.
 
-`flock prompt --swarm S --type T --track "text"` sends every matching agent the same prompt
-with one id (`b-...`, returned as `prompt_id` in the counts). Workers put `prompt_id` on
-`turn_started` and `turn_ended`, the id of the turn's last prompt. When a turn took several
-prompts, the events also carry `prompt_ids` with all of them. The controller counts the
-agents that started and finished a turn with it. `flock broadcasts <swarm>`
-(`GET /swarms/{s}/broadcasts`) shows `312/359 acted`: finished out of targeted, plus how many
-were delivered (left the queue) and started. Agents do nothing extra.
+## Worker liveness
 
-## `flock run --watch`
+How long the controller waits on a silent worker, set under `compute:` (durations such as
+`20s`, `2m`); unset keys take the backend's default. A worker is silent when neither a
+heartbeat, a command poll nor an event post arrives from it.
 
-`flock run spec.yaml --watch` polls the files the spec references and the tools folder every
-second. Once a change has been quiet for a second, it runs `flock update`. The terminal view
-gets a `live updates` pane with the update's lines. A broken save (half-written YAML, a
-syntax error in a tool) shows the refusal and `not applied: the swarm keeps running as it
-was`. The next good save applies. Watching is off by default.
+| key | hf-jobs, slurm | local | meaning |
+|---|---|---|---|
+| `worker_unknown_after` | 90s | 15s | silent this long: the worker and its agents are `unknown` |
+| `worker_dead_after` | 180s | 30s | silent this long: `dead`; its job is cancelled and relaunched (a crash). Must be longer than `worker_unknown_after` |
+| `crash_backoff` | 30s | 2s | wait before relaunching a crashed slot, doubling per crash in a row (cap 15 min); also the first wait after a failed launch (cap 5 min) |
+
+The local defaults are 3 and 6 missed heartbeats at the local 5 s interval (the jobs ratio at
+30 s). A local worker is also checked on every reconcile pass, so a worker process that exits
+is a crash at once, without waiting for `worker_dead_after`. Raise the keys with a type's
+`HEARTBEAT_INTERVAL`, or for workers that block for long stretches.
 
 ## What takes effect when
 
@@ -182,10 +230,11 @@ was`. The next good save applies. Watching is off by default.
 | `limits.budget_usd`, `limits.alive`, `spawn:` | at once (the controller) |
 | `replicas` | the next reconcile pass |
 | other type fields (`max_turns`, `max_budget_usd`, `tool_choice`, `turn_timeout`, ...) | the next turn boundary. A CLI harness takes the per-prompt limits, `model`, `env` and `secrets` at its next start, after `idle_grace` |
-| a type's `harness` (with agents), `compute`, `swarm` | refused |
+| `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
+| a type's `harness` (with agents), `compute.kind`, `swarm` | refused |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
-changes nothing until that turn ends. Changed type specs and grants reach the workers in the
+changes nothing until that turn ends. Changed type specs reach the workers in the
 heartbeat response. The worker sends its `spec_rev`, and the controller answers with the new
 `type_spec` only when they differ.
 
@@ -193,7 +242,7 @@ heartbeat response. The worker sends its `spec_rev`, and the controller answers 
 each kind of change:
 
 ```
-[flock] Since your last turn: your system prompt changed; your grants changed: tools -add, bash off.
+[flock] Since your last turn: your system prompt changed.
 
 <the prompt>
 ```
@@ -205,64 +254,3 @@ the note says which file to re-read (`your instructions in CLAUDE.md changed; re
 A running `pi` agent takes a provider's new endpoint list (`base_urls`), model id or
 reasoning level at its next Pi start: models.json is rewritten then, and a transport error
 or turn timeout restarts Pi. A change of the provider's `api_key_env` needs a worker restart.
-
-## `flock grant`, `flock revoke`, `flock grants`
-
-```sh
-flock grant calc tools=-add bash=off              # every calc agent, from its next turn
-flock grant calc-0001 +mul limits.max_turns=5     # one agent; `+name` is short for tools=+name
-flock grant writer comms.post=off
-flock grant calc-0002 limits.budget_usd=0.50
-flock grants                                      # what is in force
-flock revoke calc-0001 limits                     # some capabilities, or all of them:
-flock revoke calc
-```
-
-| capability | effect |
-|---|---|
-| `tools=+name,-name` | adds or takes away tools that already exist: folder tools in the current bundle, and the comms tools `post`, `read`, `search` |
-| `comms.post=on\|off` (also `comms.read`, `comms.search`) | the same as `tools=+post` / `tools=-post` |
-| `bash=on\|off` | `llm` harness only: the `bash` tool. With bash off, the agent keeps its other tools |
-| `limits.max_turns=N` | model calls per prompt, as `types.<t>.max_turns` |
-| `limits.budget_usd=X` | the agent's total cost cap. At or above it: a prompt gets 409, a bulk prompt or loop prompt skips the agent (`skipped_budget`), and the worker defers one already queued (`prompt_deferred`, reason `budget`). Below it, each turn is capped at what is left (`max_budget_usd`) |
-
-**Targets.** A target is a type (every agent of it, including later ones) or one agent. The
-command finds the swarm from the target; pass `--swarm` when the name is ambiguous. An agent's
-grant wins over its type's grant, key by key.
-
-**Storage.** Grants are an overlay that the controller stores, not part of the spec. This
-means `flock update` and `flock apply` keep them. Removing an agent drops its grant, and
-removing the swarm drops all of them.
-
-**Refusals.** A grant that the workers cannot enforce is refused (400):
-
-- an unknown tool;
-- a comms tool for a type that has no comms tools (its workers hold no board invite);
-- `comms.search` while `comms.search` is off;
-- `bash` on a type whose harness is not `llm`.
-
-**Where grants show.** In `flock agent <name>` (`grants`, the merged grant in force), in
-`flock grants`, on the swarm event stream (`grant`, `grant_revoked`; also on the agent's
-stream for agent targets), and in the `flock run` header (`N grants`).
-
-### API
-
-| Method | Path | |
-|---|---|---|
-| GET | `/swarms/{swarm}/grants` | `{swarm, grants: [{target, kind: type\|agent, grant, updated_at}]}` |
-| PUT | `/swarms/{swarm}/grants/{target}` | replaces the target's grant; an empty body revokes it |
-| DELETE | `/swarms/{swarm}/grants/{target}` | revokes it (404 when there is none) |
-
-```json
-{"tools": {"mul": true, "comms:post": false}, "bash": false,
- "limits": {"max_turns": 5, "budget_usd": 2.0}}
-```
-
-These routes need the controller token; an agent's own token cannot grant.
-
-**Not in this version.** These are still open:
-
-- a `--note` that goes to the agent with a grant;
-- grants issued by a world (`grantable:`);
-- tools that are not already in the bundle (code arrives through `flock update`, access
-  through `flock grant`).

@@ -568,6 +568,7 @@ class BucketStore(Protocol):
 
     def upload(self, files: list[tuple[Path, str]]) -> None: ...
     def list(self, prefix: str) -> list[str]: ...
+    def first(self, prefix: str) -> str | None: ...  # one file under prefix (the launch guard)
     # optional: `list_info(prefix) -> list[tuple[str, float | None]]`, paths with their mtime
     # (POSIX seconds) when the store keeps one; restore uses it to set local mtimes
     def download(self, files: list[tuple[str, Path]]) -> None: ...
@@ -612,6 +613,17 @@ class HubBucketStore:
 
     def list(self, prefix: str) -> list[str]:
         return [r for r, _ in self.list_info(prefix)]
+
+    def first(self, prefix: str) -> str | None:
+        """One file under `prefix` (None: empty), without listing the rest."""
+        from huggingface_hub import BucketFile
+
+        self.stats.add("ops", "list_bucket_tree")
+        full = self.base + prefix
+        for f in self.api.list_bucket_tree(self.bucket_id, prefix=full, recursive=True):
+            if isinstance(f, BucketFile) and f.path.startswith(full):
+                return f.path[len(self.base):]
+        return None
 
     def list_info(self, prefix: str) -> list[tuple[str, float | None]]:
         from huggingface_hub import BucketFile

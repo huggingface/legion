@@ -1,5 +1,5 @@
 # Tools folder demo (docs/tools.md): two `llm` agents with function tools from ./tools.
-# `flock apply examples/tools-demo/spec.yaml` packs ./tools, uploads it, and the agents get
+# `flock launch examples/tools-demo/spec.yaml` packs ./tools, uploads it, and the agents get
 # ws_write and run_bot next to bash. Edit tools/workspace.py and apply again: running agents use
 # the new version from their next turn.
 swarm: tools-demo
@@ -17,7 +17,7 @@ types:
     harness: llm
     model: "hf:deepseek-ai/DeepSeek-V3.2"
     replicas: 2
-    tools: [ws_write, run_bot]      # or `all`; an unknown name fails `flock apply`
+    tools: [ws_write, run_bot]      # or `all`; an unknown name fails `flock launch`
     tool_choice: required           # every model call is a tool call; `done` ends the turn
     max_turns: 14
     max_budget_usd: 0.5

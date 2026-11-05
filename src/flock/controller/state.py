@@ -104,6 +104,7 @@ class StateSync:
         self._uploaded: dict[str, tuple[int, int, str]] | None = None
         self._remote_tails: dict[str, list[str]] = {}  # tail parts in the bucket, per file
         self._mirrored: dict[str, tuple[int, int]] = {}  # health file -> (bytes, mtime_ns) sent
+        self._restored = False
 
     def restore(self) -> bool:
         """Before the Store opens: replace the local DB (and event files) with the bucket's copy.
@@ -138,6 +139,7 @@ class StateSync:
             else:
                 self.bucket.sync_down(name, self.data_dir / name)
         self._mirrored = dict(self._scan_mirrored())
+        self._restored = True
         log.info("state: restored %d swarms (%s), %d agents, %d workers from the bucket",
                  len(summary["swarms"]), ", ".join(summary["swarms"]), summary["agents"],
                  summary["workers"])
@@ -176,6 +178,8 @@ class StateSync:
         the number of files pushed (the DB plus the event files), 0 when nothing changed.
         `final` (the shutdown push): upload only the bytes appended to each event file."""
         with self._lock:
+            if self.pushes == 0 and not self._restored and not store.list_swarms():
+                return 0  # a fresh, empty controller never overwrites a checkpoint it did not restore
             changes = store.changes()
             files = 0
             # health files change without the DB (in-memory samples): sent on their own

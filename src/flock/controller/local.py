@@ -23,19 +23,21 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from flock.controller.jobs import JobListing, JobState
-from flock.models import TypeSpec
+from flock.models import LOCAL_HEARTBEAT_INTERVAL, TypeSpec
 
 log = logging.getLogger("flock.local")
 
 WORKER_COMMAND = [sys.executable, "-m", "flock.worker.main"]
 # Defaults a local worker gets unless the type's env sets them: a laptop run wants agent states
 # within seconds, not the 30 s job heartbeat.
-LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": "5", "PYTHONUNBUFFERED": "1"}
+LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": f"{LOCAL_HEARTBEAT_INTERVAL.total_seconds():g}",
+                      "PYTHONUNBUFFERED": "1"}
 # The caller's own flock connection and auth never leak into a worker (it gets the
 # controller's): FLOCK_* is dropped except these documented harness settings.
 KEEP_FLOCK_ENV = frozenset({"FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI",
@@ -173,7 +175,7 @@ class LocalJobsClient:
             popen = subprocess.Popen(
                 self.command, env=self.process_env(env, secrets), stdin=subprocess.DEVNULL,
                 stdout=handle, stderr=subprocess.STDOUT, cwd=str(self.root),
-                start_new_session=True,  # Ctrl-C in the terminal reaches `flock run`, not workers
+                start_new_session=True,  # Ctrl-C in the terminal reaches the local run, not workers
             )
         except Exception:
             handle.close()
@@ -286,3 +288,10 @@ class LocalJobsClient:
     def _closed(p: _Proc) -> None:
         if not p.log_handle.closed:
             p.log_handle.close()
+
+
+def local_jobs_client(env: Mapping[str, str], dep: Any, data_dir: str) -> LocalJobsClient:
+    """The controller's client for compute `local` (flock.registry)."""
+    if dep.mode == "job":
+        raise SystemExit("FLOCK_COMPUTE=local cannot run with FLOCK_MODE=job")
+    return LocalJobsClient(root=data_dir)

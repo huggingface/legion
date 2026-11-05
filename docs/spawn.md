@@ -27,13 +27,13 @@ uv run scripts/deploy-space.sh "$W" <you>/flock                     # returns wh
 export FLOCK_URL=https://<you>-flock.hf.space
 # 1. wait for the Space to build (a minute or two)
 until curl -fsS "$FLOCK_URL/healthz" >/dev/null; do sleep 10; done
-uv run flock apply examples/first-spawn.yaml
+uv run flock launch examples/first-spawn.yaml
 # 2. apply returns before reconcile creates the leader: wait for its row (a few seconds)
-until uv run flock agents first-spawn | grep -q '^leader-0000 '; do sleep 5; done
+until uv run flock status leader-0000 >/dev/null 2>&1; do sleep 5; done
 uv run flock prompt leader-0000 "Start: spawn the 5 analyst children now."
 # 3. follow the leader (its worker boots first, ~40 s): spawned x5, then "spawned 5"; Ctrl-C
-uv run flock events leader-0000 --follow --pretty
-uv run flock agents first-spawn             # repeat until the children are idle
+uv run flock status leader-0000 --events --follow
+uv run flock status first-spawn --parent leader-0000   # repeat until the children are idle
 ```
 
 The children show `unknown` with `pending 1` for about 50 s: the first spawn of a type with no
@@ -41,30 +41,30 @@ agents boots its worker (a job launch). That is normal. Then each child answers,
 leader (the reports arrive as the leader's turns t-2, t-3, ...), and idles:
 
 ```text
-$ uv run flock agents first-spawn   # about 1 min after the prompt; last_heartbeat cut
+$ uv run flock status first-spawn --parent leader-0000   # about 1 min after the prompt; columns cut
 name                      state  worker                     turns  pending  cost
 leader-0000               idle   first-spawn-leader-w0000   1      0        $0.0030
 leader-0000-analyst-0001  idle   first-spawn-analyst-w0000  1      0        $0.0021
 ...
 leader-0000-analyst-0005  idle   first-spawn-analyst-w0000  1      0        $0.0019
-$ uv run flock events leader-0000-analyst-0003 --pretty
-08:55:31     - session_started session_id=… resumed=False parent=leader-0000
+$ uv run flock status leader-0000-analyst-0003 --events
+08:55:31     - agent.session_started session_id=… resumed=False parent=leader-0000
 08:55:31   t-1 user     Capital of France? One word.
 08:55:34   t-1 assistant Paris
 08:55:35   t-1 assistant [Bash {"command": "flock prompt \"$FLOCK_PARENT\" \"leader-0000-analyst-0003: Paris\"…]
-08:55:36   t-1 turn_ended completed claude-haiku-5-5 in=… out=…
+08:55:36   t-1 agent.turn_ended completed claude-haiku-5-5 in=… out=…
 ```
 
 `turns` and `state` come from worker heartbeats (every 30 s), so they lag the event stream. An
-agent's answer is the text of its `assistant` messages; `turn_ended` only says the turn is over.
-If a worker never gets past `launching`/`dead`, `uv run flock workers first-spawn` shows its
+agent's answer is the text of its `assistant` messages; `agent.turn_ended` only says the turn is over.
+If a worker never gets past `launching`/`dead`, `uv run flock status first-spawn` shows its
 `last_error` (status and log tail); `hf jobs logs <job>` has the rest. A 401 there usually means
 `HF_TOKEN` is missing from the type's `secrets`.
 
 ## Teardown
 
 ```sh
-uv run flock remove first-spawn                    # drains and cancels its workers (about 20 s)
+uv run flock stop first-spawn --delete                    # drains and cancels its workers (about 20 s)
 uv run hf jobs ps --label swarm=first-spawn        # empty once they are gone
 uv run hf spaces pause <you>/flock                 # the Space is public and holds your secrets
 uv run hf buckets delete <you>/flock               # optional: wheels and agent state
@@ -98,7 +98,7 @@ limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
 Caps count a parent's existing children, so removing a child frees its place. A child's own
 per-prompt `max_turns` and `max_budget_usd` come from its type, as for replicas.
 
-`flock apply` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
+`flock launch` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
 reach itself, including spawning its own type), a spawnable type without `workers`, the list form
 without `max`, an unknown key under `spawn.<type>`, and negative `depth`, caps, `workers` or
 limits. The controller also refuses (409) a re-apply that lowers a type's `initial + max_extra`
@@ -154,7 +154,7 @@ spawn:
   freed, since caps count live children. The worker then deletes the agent's workdir, session
   log, state, tools pin and the harness's own session dir (`AgentRuntime.purge`).
 - **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
-  session. A run bundle (`flock run`) keeps removed agents' events (`events/<name>.jsonl`) and
+  session. A run bundle (`flock launch`) keeps removed agents' events (`events/<name>.jsonl`) and
   lists them in `run.json` under `removed_agents`, each with its type, tokens and `cost_usd`
   (priced from its turns' tokens, as the swarm's total counts it).
 - **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
@@ -173,7 +173,6 @@ children alike.
 
 ```yaml
 naming: words
-naming_seed: 3          # optional: the same spec gives the same names; unset: random
 types:
   interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
 ```
@@ -189,7 +188,7 @@ types:
 - **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
   counts it); with `words` it no longer appears in the name.
 - **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
-  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock remove <name>`. A words
+  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock-agent remove <name>`. A words
   name says nothing about the parent: a world that needs the parent uses `X-Flock-Type` and
   its own records (worlds/chatbot3 binds an interview booking to the first interviewer that
   uses it).
@@ -257,28 +256,27 @@ connection error, and retries there. So a controller that moved host is reached 
 address; `FLOCK_URL` in the harness environment, fixed when the harness started, is not used.
 The controller still checks the token's scope (below). A call that still fails after the
 retries (unreachable, or 5xx) is an error for the CLI and a `controller_call_failed {path,
-error}` event on the agent's stream (`flock events <agent>`).
+error}` event on the agent's stream (`flock status <agent> --events`).
 
 **Directly.** Without a gateway (the `llm` harness, or no pin file) the CLI reads `FLOCK_URL`
 and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in the harness
 environment for that fallback; with the gateway they are not needed and can be dropped.
 
 ```sh
-flock whoami                               # name, parent, depth, children
-flock spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
+flock-agent spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
 flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
 flock prompt --children --state idle "text"   # all your idle children, one request
 flock status [<agent>]                     # JSON; yourself by default
-flock events <agent> --after N --wait      # blocks until something new (or --timeout, 600 s)
-flock remove <agent>                       # a descendant and its subtree
+flock status <agent> --events --after N --wait   # blocks until something new (600 s at most)
+flock-agent remove <agent>                    # a descendant and its subtree
 ```
 
 The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up to
 5 attempts with exponential backoff and jitter, never sooner than `Retry-After`, so a thousand
 agents calling it through a Space edge do not fail on throttling.
 
-For the operator (controller token), `flock spawn <type> --parent <agent>` spawns on an agent's
-behalf, `flock agents <swarm> --parent <agent>` lists children, and `status` / `remove` take an
+For the operator (controller token), `flock-agent spawn <type> --parent <agent>` spawns on an agent's
+behalf, `flock status <swarm> --parent <agent>` lists children, and `status` / `remove` take an
 agent name when the name is not a swarm.
 
 ## Snippet for a leader's system prompt
@@ -289,12 +287,12 @@ agent name when the name is not a swarm.
 You can create agents to work in parallel. Each child has its own workdir and session and
 keeps them until removed; it does nothing until prompted.
 
-- `flock spawn <type> --prompt "<task>" --key <short-unique-key>` creates a child and prints
+- `flock-agent spawn <type> --prompt "<task>" --key <short-unique-key>` creates a child and prints
   its name. Reusing a key returns the same child, so retrying is safe.
-- `flock events <child> --after <N> --wait` blocks until the child does something; the cursor for
-  the next call is printed on stderr. A `turn_ended` event means it finished a turn.
+- `flock status <child> --events --after <N> --wait` blocks until the child does something; the
+  cursor for the next call is printed on stderr. An `agent.turn_ended` event means it finished a turn.
 - `flock prompt <child> "<text>"` sends a follow-up; `flock status <child>` shows its state.
-- `flock remove <child>` removes it and everything it spawned. Remove children you no longer
+- `flock-agent remove <child>` removes it and everything it spawned. Remove children you no longer
   need: you have a fixed number of places.
 - Children report back with `flock prompt $FLOCK_PARENT "<result>"`; those reports arrive as
   your next prompts.
@@ -309,7 +307,7 @@ keeps them until removed; it does nothing until prompted.
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
 - The instructions above are not appended to CLAUDE.md / AGENTS.md automatically; put them in the
-  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock apply` appends to
+  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock launch` appends to
   a shared prompt.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
 - Spawned rows are not mirrored to the bucket. If the controller loses its SQLite (no persistent

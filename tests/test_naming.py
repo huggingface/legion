@@ -1,6 +1,6 @@
 """`naming: words` (docs/spawn.md "Names"): readable `<adjective>-<noun>` agent names, reserved
 in the store, unique on the controller, never reused, kept for a recreated replica slot and
-across a controller restart, deterministic with `naming_seed`, a type's `name_prefix`, valid
+across a controller restart, a type's `name_prefix`, valid
 board handles; numeric naming unchanged."""
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ from flock.words import ADJECTIVES, NOUNS
 from .test_spawn_api import apply, spawn, spawn_spec
 
 
-def words_spec(seed: int | None = 7, swarm: str = "demo", **kw) -> SwarmSpec:
+def words_spec(swarm: str = "demo", **kw) -> SwarmSpec:
     d = spawn_spec(**kw).model_dump(mode="json")
-    d.update(swarm=swarm, naming="words", naming_seed=seed)
+    d.update(swarm=swarm, naming="words")
     d["types"]["helper"]["name_prefix"] = "iv-"
     return SwarmSpec.model_validate(d)
 
@@ -30,7 +30,7 @@ def test_word_lists():
 
 
 def test_two_thousand_unique_handles_with_prefix(tmp_path):
-    store, spec = Store(tmp_path / "s"), words_spec(seed=None)
+    store, spec = Store(tmp_path / "s"), words_spec()
     reps = naming.replica_names(store, spec, "analyst", 1500, 0.0)
     kids = [naming.new_child_name(store, spec, "leader-x", "helper", n, 0.0) for n in range(500)]
     names = reps + kids
@@ -40,14 +40,14 @@ def test_two_thousand_unique_handles_with_prefix(tmp_path):
     assert store.reserved_names_count("demo") == 2000
     assert all(not store.reserve_name(n, "demo", "x", None, None, 0.0) for n in names[:50])
     # another swarm on the same controller never gets one of them either
-    other = words_spec(seed=None, swarm="other")
+    other = words_spec(swarm="other")
     assert not set(naming.replica_names(store, other, "analyst", 300, 0.0)) & set(names)
     store.close()
 
 
-def test_seeded_names_persist_and_slots_keep_theirs(tmp_path):
+def test_names_persist_and_slots_keep_theirs(tmp_path):
     a = Store(tmp_path / "a")
-    spec = words_spec(seed=42)
+    spec = words_spec()
     first = naming.replica_names(a, spec, "analyst", 5, 0.0)
     for slot, name in enumerate(first):
         a.insert_agent(name, spec.swarm, "analyst", slot, 0.0)
@@ -58,12 +58,6 @@ def test_seeded_names_persist_and_slots_keep_theirs(tmp_path):
     a = Store(tmp_path / "a")  # a controller restart: the reservations are in the store
     assert naming.replica_names(a, spec, "analyst", 6, 3.0)[:5] == first
     a.close()
-    b = Store(tmp_path / "b")  # the same seed and swarm: the same names
-    assert naming.replica_names(b, spec, "analyst", 5, 0.0) == first
-    b.close()
-    c = Store(tmp_path / "c")
-    assert naming.replica_names(c, words_spec(seed=43), "analyst", 5, 0.0) != first
-    c.close()
 
 
 def test_numeric_naming_unchanged(tmp_path):
@@ -88,7 +82,7 @@ def test_name_prefix_validation():
 async def test_words_through_the_controller(client, store, tick):
     """Replicas and spawned children get words names through the API; the spawn counter still
     counts (spawned_total); removal does not free a name."""
-    await apply(client, words_spec(seed=1))
+    await apply(client, words_spec())
     tick()
     (leader,) = [a["name"] for a in store.list_agents("demo", "leader")]
     assert naming.HANDLE_RE.match(leader) and not leader.startswith("leader")

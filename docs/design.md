@@ -195,8 +195,27 @@ is never "in" a process; the process is a view of files on disk.
 ### CLI and library
 
 One Python package, three entry points: `flock` (CLI/library),
-`flock-controller`, `flock-worker`. Commands: `apply`,
-`prompt`, `status`, `events`, `scale`, `remove`, `logs`.
+`flock-controller`, `flock-worker`. Commands: `launch`,
+`init`, `stop`, `update`, `prompt`, `status` (also the event stream, `--events`).
+
+### Adding a harness or a compute backend
+
+Both are one module plus one entry in `src/flock/registry.py`; the spec loader, controller,
+worker and CLI read nothing else, and `tests/test_registry.py` checks every entry.
+
+- **Harness**: write `src/flock/worker/adapters/<name>.py` with a class implementing
+  `HarnessAdapter` (`adapters/base.py`) and a `make_adapter(workdir, name, spec)` function.
+  Add a `HARNESSES` entry: that function's import path, the provider `type` it needs, the
+  wire API preflight probes, the instructions file name, the pinned CLI version and whether it
+  sends a model's `extra`. A harness CLI also needs its install line in `Dockerfile.worker` and in
+  the bootstrap script (`controller/jobs.py`); those stay by hand. A harness that keeps state
+  in a home directory (like `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) also needs that variable set in
+  `controller/local.py`, `controller/slurm.py` and the bootstrap script.
+- **Compute backend**: write `src/flock/controller/<name>.py` with a `JobsClient`
+  (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function that builds it
+  from the controller's environment (and rejects a setup it cannot run in). Add a `COMPUTE`
+  entry: `compute.kind` / `FLOCK_COMPUTE` name -> that function's import path. Every kind but
+  `local` needs `bucket` and `world.url` in the spec.
 
 ## 4. Agent lifecycle
 
@@ -293,7 +312,7 @@ the type defines `resume_prompt`, sends it. No default.
 
 ```yaml
 swarm: paper-review
-compute: hf-jobs               # default; `local`: workers as subprocesses, `flock run` (docs/local.md)
+compute: hf-jobs               # default; `local`: workers as subprocesses, `flock launch` (docs/local.md)
 namespace: cmpatino            # HF namespace for jobs (required for hf-jobs, ignored locally)
 bucket: hf://buckets/cmpatino/flock
 providers:                     # optional: where open models are served (see "Providers")
@@ -345,7 +364,7 @@ types:
 ```
 
 `scale` and `remove` edit the spec and re-apply. The system prompt is a file
-in the workdir, not a flag, so it survives resume. `flock apply` reads
+in the workdir, not a flag, so it survives resume. `flock launch` reads
 `system_prompt_file` (relative to the spec file) and sends its text as
 `system_prompt`, since neither the controller nor the workers can read the
 caller's files (added in the e2e run). `system_prompt_append_file` (optional) is appended
@@ -353,7 +372,7 @@ after a blank line, so several types can share one prompt plus a section of thei
 (experiments/run4's spawner and child types).
 
 Tools folder (docs/tools.md): `tools_dir` (top level, default `tools/` next to the spec file)
-holds Python functions; `types.<t>.tools` selects them. `flock apply` packs the folder,
+holds Python functions; `types.<t>.tools` selects them. `flock launch` packs the folder,
 uploads it and writes its content hash into the spec as `tools_version`; assigns
 (`AssignCommand.tools_version`) and heartbeat responses (`{"tools": {"version", "select"}}`)
 carry it to the workers, which switch at the next turn.
@@ -440,10 +459,10 @@ distinct provider-backed model from the controller (which holds the keys) with t
 turns: a tool call to a trivial `get_time` tool, then the tool result sent back. The Responses
 API for `openai_compat` (what Codex speaks), the Messages API for `anthropic`, non-streamed
 Chat Completions (with `extra`) for types on the `llm` harness. Best-effort: a
-failed probe refuses `flock apply` (`--skip-preflight` bypasses); a model not probed (key not
+failed probe refuses `flock launch` (`--skip-preflight` bypasses); a model not probed (key not
 in the controller's environment, or preflight skipped) is reported `unverified` with a warning
 and applied anyway unless `--strict`. Zero streamed usage is a warning.
-`flock preflight spec.yaml` runs it alone.
+`flock update --check` runs it alone on a running swarm.
 
 ### Harness environment
 
@@ -496,10 +515,8 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | GET | `/swarms/{swarm}/agents?type=&state=&cursor=` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
 | POST | `/agents/{name}/prompt` | body: text, optional `timeout`, opaque `reply_to`; acks with `turn_id` if a turn started |
-| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`, `skipped_budget` (a granted `limits.budget_usd` reached, docs/live.md). Controller token only |
+| POST | `/swarms/{swarm}/prompts` | body: `type`, optional `state`, text, `timeout`, `reply_to`; one pending prompt per matching agent (agents being removed skipped), admitted as single prompts are (`max_working`); `skip_pending` (default on with `state: idle`) skips agents that already have an undelivered prompt, so repeated calls never stack; `state` reads idle/working corrected by turn events and handed-out prompts since the last heartbeat; acks counts `matched`, `queued`, `pending`, `skipped_state`, `skipped_removing`, `skipped_pending`. Controller token only |
 | GET | `/agents/{name}/events?after=&wait=` | the agent's pi-format event stream, long-poll |
-| GET | `/swarms/{swarm}/grants` | live grants in force (docs/live.md) |
-| PUT, DELETE | `/swarms/{swarm}/grants/{target}` | set (replace) or revoke a type's or an agent's grant: `tools` on/off, `bash`, `limits.max_turns`, `limits.budget_usd`; an overlay kept across re-applies. Controller token only |
 | GET | `/workers`, `/workers/{id}` | worker list and detail; job id, deadline, agents |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |
 | POST | `/workers/{id}/heartbeat` | batched heartbeat (worker token) |
@@ -548,8 +565,8 @@ at the controller.
 
 The worker also sends `spec_rev`, a hash of the type spec it has. The response carries
 `tools` and `comms` (docs/tools.md, docs/comms.md), `type_spec` and `spec_rev` when the type
-spec changed, and `grants` (per agent of that worker, when any is in force). The worker applies
-a new type spec and grants at each agent's next turn boundary (docs/live.md).
+spec changed. The worker applies a new type spec at each agent's next turn boundary
+(docs/live.md).
 
 Telemetry, all optional (older workers send none; the controller stores the last values and
 `GET /workers`, `GET /agents/{name}` return them):
@@ -763,7 +780,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 30 | Spawn: children are agent rows with a parent, placed on their type's workers; `spawn:` policy apart from types; cascade removal; per-agent scoped tokens (§13) |
 | 31 | `llm` as a fourth harness (2026-10-19): an in-process Chat Completions loop for small open models (one `bash` tool, JSONL session, compaction past `context_tokens` projected from the server's prompt_tokens (2026-10-20, run 3: chars/4 undercounted JSON 2x; context-length 400 compacts and retries once, else reason `context_overflow`), tool calls written as text accepted; `tool_choice` forcing with a `done` tool for multi-step turns (one action per prompt without it), after the LFM2.5 probe: constrained output 20/20 valid in ~2.5 s vs free-form 7/20 in ~25 s; one system message, first); `openai_compat` provider required; `extra` sent, `reasoning` ignored; limits checked before each call; preflight probes Chat Completions for `llm` types (Carlos) |
 | 32 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
-| 33 | Tools folder (2026-10-21, thread 3063: tools live outside flock, are read at runtime and change while the swarm runs): public documented functions in `tools/*.py` are tools (schema from type hints, injected `Context`); `flock apply` ships the folder as a tar.gz named by its content hash; workers fetch it at assign and from heartbeat responses and switch at the next turn; one `python -I` subprocess per call (60 s, 1 MB); `llm` offers them as function tools, CLI harnesses through `flock-tool` and a generated Tools section |
+| 33 | Tools folder (2026-10-21, thread 3063: tools live outside flock, are read at runtime and change while the swarm runs): public documented functions in `tools/*.py` are tools (schema from type hints, injected `Context`); `flock launch` ships the folder as a tar.gz named by its content hash; workers fetch it at assign and from heartbeat responses and switch at the next turn; one `python -I` subprocess per call (60 s, 1 MB); `llm` offers them as function tools, CLI harnesses through `flock-tool` and a generated Tools section |
 | 34 | Comms in the spec (2026-10-21, design note §10, threads 3063 and 3144): agents join the board under their flock name at their first prompt; the token stays in the worker (never in the agent env, workdir or pin); one activity long-poll per worker fans messages out as `comms_mention` / `comms_thread_reply` events; built-in `post` / `read` / `search` tools with rules enforced before the board call; search cut 1 is the board's own FTS5 search with query relaxation, no msgboard change; the kickoff is posted by `<swarm>-host`, never an agent (Carlos) |
 
 ## 12. Road to 10k
@@ -845,8 +862,8 @@ no agents pays the worker's boot time; pre-warming is a possible later feature.
 
 Added 2026-10-21 (worlds design note §9 and §13). User guide: [loop.md](loop.md).
 
-A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: `first`
-alone, then the loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
+A type's `loop:` (`TypeSpec.loop`, `LoopSpec` in models.py) keeps its agents prompted: the
+loop prompt on `every` (`turn_end` or a duration) while `while` holds, then one
 `final` prompt per live agent. The controller's loop engine (`controller/loop.py`) ticks once a
 second and sends every prompt through the bulk-prompt path with `state: idle, skip_pending:
 true`, so loops never stack prompts and stay under `max_working` admission. `every: turn_end` on
@@ -855,8 +872,8 @@ re-prompts when a turn completes), under `max_working` on the controller. Prompt
 the worker renders (`PromptCommand.loop`, `{round}`, `{spend}`, `{last_summary}`, ...).
 `limits.budget_usd` becomes a stop, not only a spawn check: at `budget_usd` minus the final
 reserves loops stop, pending prompts are dropped and final rounds run; at `budget_usd` every
-agent is stopped and prompts are refused. World-backed settings (`every: rounds`, `score_*`,
-`on: world.*`, `context:`) are in the model and refused at apply until a world exists.
+agent is stopped and prompts are refused. World-backed wakes (`on: world.*`) are in the
+model and refused at apply until a world exists.
 
 ### Run-4 additive contracts (2026-10-26)
 

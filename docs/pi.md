@@ -90,7 +90,7 @@ prompt when the key variable is unset, so for a keyless endpoint set it to any v
   once per agent per spec revision as an `env_dropped {names}` event, and `flock update` warns
   `types.<T>.env.<KEY>: dropped by pi isolation` for the type's `env` keys that would be dropped
   (by the same function; names only the worker's `FLOCK_HARNESS_ENV_DROP` lists are not previewed).
-- **Controller calls**: Pi's `flock` CLI (`flock spawn`, `flock prompt`, ...) goes through the
+- **Controller calls**: Pi's `flock` CLI (`flock-agent spawn`, `flock prompt`, ...) goes through the
   worker gateway named in the pin file (`FLOCK_TOOLS_PIN`), not to `FLOCK_URL`: the worker
   sends it with the agent's token to wherever the controller is now, so a controller move no
   longer breaks a Pi that started before it (docs/spawn.md, "CLI inside an agent").
@@ -104,9 +104,7 @@ arrives before `idle_grace`), so its heap, session and sandbox root grow for the
 
 - **Recycle**: the runtime restarts Pi at a turn boundary, resuming the same session
   (`--session-id`): the next prompt goes to a fresh process, the event is
-  `harness_recycled {reason, pss_mb}`, and no turn is interrupted. Reasons: `turns`, `hours`,
-  `pss_mb` from the type's `recycle_after: {turns, hours, pss_mb}` (counted from the process
-  start, checked at each turn end; Pi's PSS is sampled every 15 s), `memory` from the worker's
+  `harness_recycled {reason, pss_mb}`, and no turn is interrupted. Reasons: `memory` from the worker's
   relief ladder (docs/slurm.md "Memory"), and `endpoint`: a live change of the model endpoint,
   model id or reasoning level (`PiAdapter.update_spec`) applies within one turn.
 - **OOM**: a Pi SIGKILLed mid-turn (exit -9/137: the OOM killer) ends the turn

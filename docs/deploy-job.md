@@ -72,8 +72,14 @@ scripts/deploy-job.sh "$W" --group flock-run3 [--flavor cpu-upgrade] [--timeout 
     [--secret OPENAI_API_KEY ...] [--dry-run]
 # controller job: 6ad7...   API: https://6ad7...--7860.hf.jobs   status: https://6ad7...--7861.hf.jobs
 export FLOCK_URL=https://6ad7...--7860.hf.jobs
-uv run flock apply spec.yaml          # spec.namespace must be the job's namespace
+uv run flock launch spec.yaml          # spec.namespace must be the job's namespace
 ```
+
+`flock launch` does this itself when no controller answers and `FLOCK_WHEEL_URL` is set: the
+controller job of group `FLOCK_NETWORK_GROUP` (default `flock`; `cpu-upgrade`, 48 h, the spec's
+secrets that are set), then `export FLOCK_URL=...` (`--run RUN_DIR` records it in
+`hosts/controller.host`); `flock stop --release` cancels it after a checkpoint (docs/live.md
+"Lifecycle").
 
 The script (`python -m flock.controller.jobdeploy`) launches `python:3.12-slim`. That
 image installs `huggingface_hub`, downloads the wheel from the bucket, installs
@@ -123,7 +129,7 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
     final push never overlap.
 - **restores on start** (`FLOCK_STATE_RESTORE=1`, the default), before the store opens.
   - It downloads `state.db` and checks it. **A snapshot with no swarms is not restored**:
-    after `flock remove` of the last swarm, the next push writes an empty snapshot, so a later
+    after `flock stop --delete` of the last swarm, the next push writes an empty snapshot, so a later
     controller in the same group starts empty.
   - It drops any local WAL, then pulls `events/`.
   - It logs what it restored: `state: restored N swarms (names), A agents, W workers`.

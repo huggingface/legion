@@ -275,7 +275,7 @@ async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
 
 
 async def test_turn_events_carry_prompt_ids(tmp_path):
-    """Tracked broadcasts (docs/live.md): the turn a prompt started or joined names it."""
+    """Prompt ids on turn events: the turn a prompt started or joined names it."""
     adapter = ScriptedAdapter(tmp_path / "home", start_delay=0.05, turn_time=0.3)
     rt, _ = runtime(tmp_path, adapter=adapter)
     await rt.setup(restore=False)

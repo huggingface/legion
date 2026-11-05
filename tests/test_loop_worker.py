@@ -172,16 +172,14 @@ async def test_controller_loop_prompts_render_with_summary_and_spend(tmp_path):
     assert rt.state.last_summary == "did " + ad.sent[1] and rt.state.loop_round == 2
     # a final prompt ends a worker-side loop first
     rt.loop = start()
-    await rt.prompt("final: {last_summary}", loop=meta(kind="final", round=2, why="final: until",
-                                                       add_tools=["submit_final"]))
+    await rt.prompt("final: {last_summary}", loop=meta(kind="final", round=2, why="final: until"))
     assert rt.loop is None and custom(rt, "loop_stopped")[-1]["reason"] == "final"
-    assert custom(rt, "loop_prompt")[-1] == {"kind": "final", "round": 2, "why": "final: until",
-                                             "add_tools": ["submit_final"]}
+    assert custom(rt, "loop_prompt")[-1] == {"kind": "final", "round": 2, "why": "final: until"}
     await rt.stop()
 
 
 async def test_a_new_run_restarts_from_round_one_a_repeat_does_not(tmp_path):
-    """Finding 4: `flock loop --start` after an exhausted loop (new run id) starts at round
+    """Finding 4: a loop `start` after an exhausted loop (new run id) starts at round
     1; the same run sent again (a lost command, a live update) keeps its count."""
     rt, ad = runtime(tmp_path, idle_grace="5s")
     await rt.setup(restore=False)
@@ -227,53 +225,21 @@ async def test_a_wake_outside_the_round_count_keeps_the_round(tmp_path):
     await rt.stop()
 
 
-async def test_state_calls_and_finished(tmp_path):
-    """`turn_ended.state_calls` leaves out `done` and calls the adapter marked `readonly`;
-    `done(finished: true)` under `stop_when.all_agents_done` ends the worker-side loop."""
-    rt, _ = runtime(tmp_path, idle_grace="5s",
-                    loop={"prompt": "p", "stop_when": {"all_agents_done": True}})
-    await rt.setup(restore=False)
-    ro = {"read", "task_board"}
-
-    def turn(*names: str, finished: bool = False) -> None:
-        rt.on_adapter_event(AdapterEvent("turn_started"))
-        rt.on_adapter_event(AdapterEvent("message", message={"role": "assistant", "content": [
-            {"type": "toolCall", "id": str(i), "name": n, "arguments": {},
-             **({"readonly": True} if n in ro else {})} for i, n in enumerate(names)]}))
-        rt.on_adapter_event(AdapterEvent("message", message={
-            "role": "assistant", "fromDoneTool": True, "content": [{"type": "text", "text": "ok"}],
-            **({"finished": True} if finished else {})}))
-        rt.on_adapter_event(AdapterEvent("turn_ended", status="completed"))
-
-    turn("read", "task_board", "done")
-    turn("read", "bash")
-    turn("claim")
-    rt.loop = start()
-    turn("read", "done", finished=True)
-    ended = custom(rt, "turn_ended")
-    assert [(d["tool_calls"], d["state_calls"], d.get("finished")) for d in ended] == [
-        (2, 0, None), (2, 1, None), (1, 1, None), (1, 0, True)]
-    assert rt.loop is None and custom(rt, "loop_stopped")[-1]["reason"] == "done"
-    await rt.stop()
-
-
-@pytest.mark.parametrize("v1_readonly, v2_readonly, state_calls", [(False, True, 1), (True, False, 0)])
-async def test_readonly_follows_the_turns_pinned_tools(tmp_path, v1_readonly, v2_readonly, state_calls):
+async def test_a_call_runs_with_the_turns_pinned_tools(tmp_path):
     """Review of #19: a tools re-apply lands after the `llm` adapter pinned v1 for a turn but
-    before the worker consumed its `turn_started`. The call runs with v1, so it is classified
-    with v1's `readonly`, not v2's."""
+    before the worker consumed its `turn_started`. The call runs with v1."""
     called: list[str] = []
 
-    def tools(version: str, readonly: bool) -> Toolset:
+    def tools(version: str) -> Toolset:
         async def call(entry, args):
             called.append(version)
             return Result("ok", False)
 
         return Toolset(version, tmp_path, "s", "a", tmp_path / "data", tools=(
             ToolDef("action", "Dummy action", {"type": "object", "properties": {}}, "dummy",
-                    "action", builtin="dummy:action", readonly=readonly),), builtin_call=call)
+                    "action", builtin="dummy:action"),), builtin_call=call)
 
-    current = [tools("v1", v1_readonly)]
+    current = [tools("v1")]
     toolbox = lambda: current[0]
     adapter = LLMAdapter(tmp_path / "agent", agent="a-0001", home=tmp_path / "home", toolbox=toolbox)
     outbox = Outbox()
@@ -302,7 +268,7 @@ async def test_readonly_follows_the_turns_pinned_tools(tmp_path, v1_readonly, v2
     try:
         await adapter.send("Take one action.")
         await asyncio.wait_for(entered.wait(), 3)
-        current[0] = tools("v2", v2_readonly)  # a heartbeat installs v2 mid-turn
+        current[0] = tools("v2")  # a heartbeat installs v2 mid-turn
         pump = asyncio.create_task(rt._pump())
         await until(lambda: rt.turn_id is not None)
         release.set()
@@ -310,7 +276,7 @@ async def test_readonly_follows_the_turns_pinned_tools(tmp_path, v1_readonly, v2
         evs = outbox.take()
         ended = next(e.data["data"] for e in evs if e.type == "turn_ended")
         assert called == ["v1"] and ended["tools_version"] == "v1"
-        assert (ended["tool_calls"], ended["state_calls"]) == (1, state_calls)
+        assert ended["tool_calls"] == 1
     finally:
         await adapter.stop()
         if pump is not None:

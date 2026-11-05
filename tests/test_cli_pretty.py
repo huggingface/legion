@@ -1,4 +1,4 @@
-"""`flock events --pretty`: one readable line per event; raw JSONL stays the default."""
+"""`flock status --events`: one readable line per normalised event; `--json` for JSONL."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import Client
 from flock.models import Event
+from flock.status import normalise
 from flock.worker.events import SessionLog
 
 TS = datetime(2026, 10, 19, 8, 54, 50, tzinfo=UTC)
@@ -41,22 +43,31 @@ def stream(tmp_path) -> list[dict]:
     return [json.loads(e.model_dump_json()) for e in evs]
 
 
+AGENT = {"name": "leader-0000", "swarm": "s", "type": "leader"}
+
+
 def test_pretty_lines(tmp_path):
-    lines = [cli.pretty_event(e) for e in stream(tmp_path)]
+    lines = [cli.pretty_event(normalise(e, "s", AGENT)) for e in stream(tmp_path)]
     assert lines == [
-        "08:54:50     - session_started session_id=abc resumed=False",
+        "08:54:50     - agent.session_started session_id=abc resumed=False",
         "08:54:50   t-1 user     Go: spawn the 5 analyst children now.",
         '08:54:50   t-1 assistant Spawning now. [Bash {"command": "flock spawn analyst --key c1"}]',
         "08:54:50   t-1 tool     Bash: leader-0000-analyst-0001",
-        "08:54:50   t-1 turn_ended completed claude-haiku-5-5 in=120 out=30",
-        "08:54:50     - spawned  child=leader-0000-analyst-0001 type=analyst depth=0 key=c1",
+        "08:54:50   t-1 agent.turn_ended completed claude-haiku-5-5 in=120 out=30",
+        "08:54:50     - agent.spawned child=leader-0000-analyst-0001 type=analyst depth=0 key=c1",
     ]
 
 
 def test_events_flag(tmp_path, monkeypatch):
     evs = stream(tmp_path)
-    monkeypatch.setattr(cli, "_call", lambda *a, **k: {"events": evs, "next": len(evs)})
-    r = CliRunner().invoke(cli.app, ["events", "leader-0000", "--pretty"])
+    pages = {"/agents/leader-0000": AGENT, "/agents/leader-0000/events": {"events": evs,
+                                                                         "next": len(evs)}}
+    monkeypatch.setattr(Client, "_call", lambda _, m, path, **k: pages[path])
+    r = CliRunner().invoke(cli.app, ["status", "leader-0000", "--events"])
     assert r.exit_code == 0 and r.output.splitlines()[1].endswith("analyst children now.")
-    r = CliRunner().invoke(cli.app, ["events", "leader-0000"])
-    assert [json.loads(x) for x in r.output.splitlines()] == evs  # JSONL stays the default
+    r = CliRunner().invoke(cli.app, ["status", "leader-0000", "--events", "--json",
+                                     "--only", "agent.turn"])
+    (ended,) = [json.loads(x) for x in r.output.splitlines()]
+    assert ended == {"name": "agent.turn_ended", "ts": evs[4]["ts"], "swarm": "s",
+                     "agent": "leader-0000", "type": "leader",
+                     "data": {**evs[4]["data"]["data"], "turn_id": "t-1"}}

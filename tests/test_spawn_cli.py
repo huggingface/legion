@@ -1,5 +1,5 @@
 """The flock CLI as an agent runs it: FLOCK_AGENT_TOKEN, FLOCK_AGENT, spawn/status/events/
-prompt/remove/whoami."""
+prompt/remove."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from flock import cli
+from flock.client import connect
 from flock.controller import spawn as spawning
 
 from .conftest import TOKEN
@@ -38,7 +39,7 @@ def agent_cli(monkeypatch, app, store, tick):
             monkeypatch.setenv("FLOCK_AGENT_TOKEN", spawning.agent_token(store, name, "demo", 0))
             monkeypatch.setenv("FLOCK_AGENT", name)
             monkeypatch.setenv("FLOCK_TOKEN", "")  # what the worker leaves in the harness env
-        monkeypatch.setattr(cli, "client", lambda: TestClient(app, headers=_auth()))
+        monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers=_auth()))
 
     def _auth() -> dict:
         tok = os.environ.get("FLOCK_AGENT_TOKEN") or os.environ.get("FLOCK_TOKEN", "")
@@ -48,23 +49,19 @@ def agent_cli(monkeypatch, app, store, tick):
 
 
 def run(*args: str):
-    return runner.invoke(cli.app, list(args))
+    return runner.invoke(cli.agent_app if args[0] in ("spawn", "remove") else cli.app, list(args))
 
 
 def test_client_prefers_the_agent_token(monkeypatch):
     monkeypatch.setenv("FLOCK_TOKEN", "swarm")
     monkeypatch.setenv("FLOCK_AGENT_TOKEN", "agent")
-    assert cli.client().headers["authorization"] == "Bearer agent"
+    assert connect().headers["authorization"] == "Bearer agent"
     monkeypatch.setenv("FLOCK_AGENT_TOKEN", "")
-    assert cli.client().headers["authorization"] == "Bearer swarm"
+    assert connect().headers["authorization"] == "Bearer swarm"
 
 
 def test_agent_spawns_prompts_and_removes(agent_cli):
     agent_cli(LEADER)
-    r = run("whoami")
-    assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["name"] == LEADER
-
     r = run("spawn", "analyst", "--prompt", "count the files", "--key", "a1")
     assert r.exit_code == 0, r.output
     child = r.output.strip()
@@ -79,9 +76,11 @@ def test_agent_spawns_prompts_and_removes(agent_cli):
     st = json.loads(r.output)
     assert st["parent"] == LEADER and st["pending"] == 1
 
-    r = run("events", LEADER, "--wait", "--timeout", "0")
+    r = run("status", LEADER, "--events", "--wait", "--json")
     assert r.exit_code == 0, r.output
-    assert json.loads(r.stdout.splitlines()[-1])["type"] == "spawned"
+    assert json.loads(r.stdout.splitlines()[-1])["name"] == "agent.spawned"
+    r = run("status", "--parent", LEADER)  # in-agent: your children (swarm from yourself)
+    assert r.exit_code == 0 and child in r.output, r.output
 
     r = run("spawn", "leader")
     assert r.exit_code == 1 and "type_not_allowed" in r.output
@@ -99,6 +98,18 @@ def test_agent_spawns_prompts_and_removes(agent_cli):
     assert r.exit_code == 0 and json.loads(r.output) == {"removed": [child]}
 
 
+def test_old_flock_spawn_and_remove_still_work_inside_an_agent(agent_cli):
+    """Agents of runs started before flock-agent call `flock spawn|remove` (hidden aliases)."""
+    agent_cli(LEADER)
+    r = runner.invoke(cli.app, ["spawn", "analyst", "--key", "old"])
+    assert r.exit_code == 0, r.output
+    child = r.output.strip()
+    assert child.startswith("leader-0000-analyst-")
+    r = runner.invoke(cli.app, ["remove", child])
+    assert json.loads(r.output) == {"removed": [child]}
+    assert "spawn" not in runner.invoke(cli.app, ["--help"]).output
+
+
 def test_operator_names_swarms_or_agents(agent_cli):
     agent_cli(None)
     r = run("spawn", "analyst", "--parent", LEADER)
@@ -106,8 +117,9 @@ def test_operator_names_swarms_or_agents(agent_cli):
     assert r.exit_code == 0 and child.startswith("leader-0000-analyst-")
     assert "leader" in run("status", "demo").output  # a swarm: the table
     assert json.loads(run("status", child).output)["parent"] == LEADER  # not a swarm: an agent
-    r = run("agents", "demo", "--parent", LEADER)
+    r = run("status", "demo", "--parent", LEADER)
     assert child in r.output and "leader-0000 " not in r.output
     assert run("spawn", "analyst").exit_code == 1  # no FLOCK_AGENT, no --parent
     assert json.loads(run("remove", child).output) == {"removed": [child]}
-    assert json.loads(run("remove", "demo").output) == {"swarm": "demo", "removing": True}
+    r = runner.invoke(cli.app, ["stop", "demo", "--delete", "--yes"])
+    assert json.loads(r.output) == {"swarm": "demo", "removing": True}

@@ -1,4 +1,4 @@
-"""`compute: slurm` and `compute: external` (controller/slurm.py), against shell stubs of
+"""`compute: slurm` (controller/slurm.py), against shell stubs of
 sbatch/squeue/sacct/scancel (tests/fixtures/slurm_stubs) that keep job states in a temp dir."""
 
 from __future__ import annotations
@@ -10,13 +10,10 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from flock import cli
 from flock.controller.reconcile import Settings, reconcile, record_heartbeat
 from flock.controller.slurm import (
     PREEMPT_EXIT,
-    ExternalJobsClient,
     SlurmJobsClient,
     env_file_text,
     read_env_file,
@@ -106,19 +103,19 @@ def heartbeat(store, clock, wid, preempted=False):
 def test_compute_spec_keys_and_resolution(tmp_path):
     spec = slurm_spec(tmp_path, types={"researcher": {"cpus": 2, "mem": "3500M"}})
     assert spec.compute.kind == "slurm" and spec.namespace == ""
-    cfg = resolve(spec.compute, "researcher", {"FLOCK_SLURM_PARTITION": "other",
-                                               "FLOCK_SLURM_CPUS": "8"})
-    # defaults < spec < FLOCK_SLURM_* env < per-type entry
-    assert cfg["partition"] == "other" and cfg["cpus"] == "2" and cfg["mem"] == "3500M"
-    assert cfg["time"] == "29:00:00" and cfg["account"] == "acct"
-    assert resolve(None, "x", {})["partition"] == "hopper-cpu"
+    env = {"FLOCK_SLURM_PARTITION": "other", "FLOCK_SLURM_CPUS": "8", "FLOCK_SLURM_TIME": "1:00:00",
+           "FLOCK_SLURM_MAX_CPUS": "64"}
+    cfg = resolve(spec.compute, "researcher", env)
+    # defaults < FLOCK_SLURM_* env < spec < per-type entry: the spec wins
+    assert cfg["partition"] == "cpu" and cfg["cpus"] == "2" and cfg["mem"] == "3500M"
+    assert cfg["time"] == "1:00:00" and cfg["account"] == "acct"  # unset in the spec: env
+    assert cfg["max_cpus"] == "64"  # the spec's default is not a value it sets
+    assert resolve(spec.compute, "other", env)["cpus"] == "8"
+    assert "partition" not in resolve(None, "x", {})  # no built-in cluster: sbatch's default
     with pytest.raises(ValueError, match="bucket is required"):
         SwarmSpec.model_validate({"swarm": "d", "compute": "slurm", "types": {}})
     with pytest.raises(ValueError, match="unknown types"):
         slurm_spec(tmp_path, types={"nope": {"cpus": 1}})
-    ext = SwarmSpec.model_validate({"swarm": "d", "bucket": "hf://buckets/n/b",
-                                    "compute": "external", "types": {}})
-    assert ext.compute == ComputeSpec(kind="external")
 
 
 # --------------------------------------------------------------------------- client
@@ -163,6 +160,15 @@ def test_launch_writes_env_file_and_sbatch_line_without_secrets(tmp_path, slurm,
     assert env["FLOCK_SECRETS_FILE"] == "/fsx/run3/secrets.env"
     assert env["MSGBOARD_URL"] == "https://example.invalid" and "FLOCK_TOKEN" not in env
     assert "DEADLINE" in env and env["DRAIN_WINDOW"] == "10m"
+
+
+def test_no_partition_leaves_it_to_the_cluster(tmp_path, slurm):
+    # `partition: ${SLURM_PARTITION:-}` with no profile renders "": no -p, sbatch's default
+    spec = slurm_spec(tmp_path, partition="")
+    job = SlurmJobsClient(env={}).launch(W0, spec.types["researcher"], {"TYPE": "researcher"},
+                                         {}, {"worker": W0}, 3600, namespace="",
+                                         compute=spec.compute)
+    assert slurm.argv(job)[:3] == ["--parsable", "-A", "acct"]
 
 
 def test_state_mapping_lifecycle(tmp_path, slurm):
@@ -259,72 +265,12 @@ def test_preempted_job_relaunches_same_name_without_backoff(tmp_path, slurm, sto
     assert argv[argv.index("-J") + 1] == W0 and "-c" in argv and argv[argv.index("-c") + 1] == "2"
 
 
-# --------------------------------------------------------------------------- external
-
-
-def test_external_waits_without_backoff(tmp_path, store, clock, caplog):
-    spec = SwarmSpec.model_validate({
-        "swarm": "demo", "bucket": "hf://buckets/ns/sh",
-        "compute": {"kind": "external", "launch_dir": str(tmp_path / "launch"),
-                    "host_file": "/fsx/ctl.host"},
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5",
-                                 "replicas": 2, "agents_per_worker": 2}},
-    })
-    store.put_swarm(spec, 0)
-    jobs, s = ExternalJobsClient(env={}), settings()
-    caplog.set_level("INFO", logger="flock.slurm")
-    reconcile(store, jobs, clock(), s)
-    w = store.get_worker(W0)
-    assert w["job_id"].startswith("external-")
-    assert "waiting for an external start of " + W0 in caplog.text
-    (path,) = (tmp_path / "launch").glob(f"{W0}-*.env")
-    env = read_env_file(path)
-    assert env["WORKER_ID"] == W0 and env["FLOCK_URL"] == "http://${CTL_HOST}:7860"
-    assert path.name == f"{W0}-{env['WORKER_INCARNATION']}.env"
-    assert TOKEN not in path.read_text()
-    # hours without a worker: still waiting, never a crash
-    for _ in range(5):
-        clock.advance(3600)
-        kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
-        assert "crash" not in kinds and "cancel" not in kinds
-    assert store.get_worker(W0)["job_id"] == w["job_id"]
-    # a worker shows up, then goes away: the slot waits again, no backoff or crash count
-    heartbeat(store, clock, W0)
-    clock.advance(200)
-    kinds = [a.kind for a in reconcile(store, jobs, clock(), s)]
-    assert "external_wait" in kinds and "planned_restart" in kinds and "crash" not in kinds
-    w2 = store.get_worker(W0)
-    assert w2["consecutive_crashes"] == 0 and w2["job_id"] != w["job_id"]  # new env file
-
-
-def test_flock_workers_shows_external(monkeypatch, store, clock, tmp_path):
-    from fastapi.testclient import TestClient
-
-    from flock.controller.api import create_app
-
-    spec = SwarmSpec.model_validate({
-        "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": "external",
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 1}},
-    })
-    store.put_swarm(spec, 0)
-    reconcile(store, ExternalJobsClient(env={}), clock(), settings())
-    app = create_app(store, TOKEN, clock=clock)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}))
-    r = CliRunner().invoke(cli.app, ["workers", "demo"])
-    assert r.exit_code == 0, r.output
-    assert "external" in r.output.split(W0)[1].splitlines()[0]
-
-
 def test_controller_build_selects_backend(tmp_path):
     from flock.controller.main import build
 
     env = {"FLOCK_TOKEN": TOKEN, "FLOCK_DATA": str(tmp_path / "d"), "FLOCK_COMPUTE": "slurm"}
     b = build(env)
     assert isinstance(b.jobs, SlurmJobsClient)
-    b.store.close()
-    b = build({**env, "FLOCK_COMPUTE": "external", "FLOCK_DATA": str(tmp_path / "e")})
-    assert isinstance(b.jobs, ExternalJobsClient)
     b.store.close()
 
 
@@ -500,16 +446,19 @@ def test_size_guard_at_apply_and_at_launch(tmp_path, slurm, store, clock):
 
     assert mem_mb("54G") == 54 * 1024 and mem_mb("3500M") == 3500 and mem_mb("1T") == 1024**2
     assert mem_mb("512") == 512 and mem_mb("2048K") == 2
+    node = {"max_cpus": 28, "max_mem": "54G"}
     with pytest.raises(ValueError, match="cpus 32 is over max_cpus 28"):
-        slurm_spec(tmp_path, cpus=32)
+        slurm_spec(tmp_path, cpus=32, **node)
     with pytest.raises(ValueError, match="mem 60G is over max_mem 54G"):
-        slurm_spec(tmp_path, types={"researcher": {"mem": "60G"}})
+        slurm_spec(tmp_path, types={"researcher": {"mem": "60G"}}, **node)
     with pytest.raises(ValueError, match="expected a number"):
         slurm_spec(tmp_path, mem="lots")
     assert slurm_spec(tmp_path, cpus=32, max_cpus=64).compute.cpus == 32
-    # an env override that does not fit: refused at launch, nothing submitted
+    assert slurm_spec(tmp_path, cpus=99).compute.cpus == 99  # no node limits: nothing checked
+    # an env override that does not fit the profile's node limits: refused at launch
     store.put_swarm(slurm_spec(tmp_path), 0)
-    actions = reconcile(store, SlurmJobsClient(env={"FLOCK_SLURM_MEM": "100G"}), clock(),
+    actions = reconcile(store, SlurmJobsClient(env={"FLOCK_SLURM_MEM": "100G",
+                                                    "FLOCK_SLURM_MAX_MEM": "54G"}), clock(),
                         settings())
     refused = [a for a in actions if a.kind == "launch_refused"]
     assert refused and "max_mem" in refused[0].detail and slurm.ids() == []

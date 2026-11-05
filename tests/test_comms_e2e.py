@@ -1,9 +1,9 @@
-"""Comms end to end in one process: `flock apply` (the real CLI) with a `comms:` block, the real
+"""Comms end to end in one process: `flock launch` (the real CLI) with a `comms:` block, the real
 controller (ASGI) resolves the channel and posts the kickoff as `<swarm>-host` on the fake
 msgboard, the reconcile pass places a 2-agent `llm` swarm on one real Worker, and the real
 LLMAdapter talks to tests/fake_openai.py, whose model posts, is refused for a fast second post,
 reads, gets mentioned (a controller comms event), and searches. Then the protocols and rules
-change, `flock apply` runs again, and the running agents get both without a restart."""
+change, `flock update` runs, and the running agents get both without a restart."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import json
 import yaml
 from fastapi.testclient import TestClient
 
-from flock import cli
 from flock.controller.api import create_app
 
 from . import fake_msgboard, fake_openai
@@ -61,8 +60,8 @@ async def test_comms_end_to_end(tmp_path, monkeypatch):
                         on_comms=lambda agent, reason, data: wakes.append((agent, reason, data)))
     import httpx
     sw.transport = httpx.ASGITransport(app=sw.app)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     exp = tmp_path / "experiment"
     (exp / "prompts").mkdir(parents=True)
     (exp / "protocols").mkdir()
@@ -132,7 +131,7 @@ async def test_comms_end_to_end(tmp_path, monkeypatch):
         # live settings: new protocol text and no gap; re-apply while the agents run
         (exp / "protocols" / "lead-agree.md").write_text("PROTO-V2: the lead posts a plan first.")
         spec_file.write_text(yaml.safe_dump(spec_raw(llm_url, board_url, "0s")))
-        await apply(spec_file)
+        await apply(spec_file, "update")
         await until(lambda: w.comms.spec.rules.min_post_gap == "0s", timeout=10)
         t = await prompt(A, f'call: post {{"text": "plan: probes first", "thread": {root}}}', 4)
         out, err = tool_result(t)
@@ -179,8 +178,8 @@ async def test_mention_on_the_board_wakes_the_mentioned_agent_once(tmp_path, mon
     sw.app = create_app(sw.store, TOKEN, secret_source={INVITE_ENV: board.invite}, loop_interval=0)
     import httpx
     sw.transport = httpx.ASGITransport(app=sw.app)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
+    monkeypatch.setattr("flock.client.connect",
+                        lambda *_: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(wake_spec(llm_url, board_url)))
     MW, NW = "mw-0000", "nw-0000"
@@ -215,58 +214,6 @@ async def test_mention_on_the_board_wakes_the_mentioned_agent_once(tmp_path, mon
         assert evs(NW, "loop_wake") == []
         assert users(NW) == ["bash: echo round 1 start"]
         assert len(evs(MW, "comms_mention")) == 1 and len(evs(NW, "comms_mention")) == 1
-    finally:
-        await sw.close()
-        srv.shutdown()
-        bsrv.shutdown()
-        await asyncio.sleep(0)
-
-
-async def test_board_reads_are_idle_rounds(tmp_path, monkeypatch):
-    """`idle_rounds` counts state-changing calls only: an agent whose every round is a board
-    `read` (read-only) leaves the loop after `idle_rounds: 2`; one that runs `bash` each round
-    goes on to `max_rounds`."""
-    monkeypatch.setenv(KEY_ENV, "sk-e2e")
-    board, bsrv, board_url = fake_msgboard.serve()
-    monkeypatch.setenv(INVITE_ENV, board.invite)
-    srv = fake_openai.serve(0, str(tmp_path / "requests.jsonl"))
-    llm_url = f"http://127.0.0.1:{srv.server_port}/v1"
-    sw = Swarm(tmp_path)
-    sw.settings.secret_source = {INVITE_ENV: board.invite}
-    sw.app = create_app(sw.store, TOKEN, secret_source={INVITE_ENV: board.invite}, loop_interval=0)
-    import httpx
-    sw.transport = httpx.ASGITransport(app=sw.app)
-    monkeypatch.setattr(cli, "client",
-                        lambda: TestClient(sw.app, headers={"Authorization": f"Bearer {TOKEN}"}))
-    raw = wake_spec(llm_url, board_url)
-    # `turn_end` under `max_working`: the controller counts a round's turn before it sends the
-    # next (`every: 1s` could send round 3 before a slow round 2 was counted idle)
-    raw["providers"]["gpu"]["max_working"] = 2
-    loop = {"every": "turn_end", "while": {"max_rounds": 3, "idle_rounds": 2}}
-    raw["types"]["mw"]["loop"] = {**loop, "prompt": "call: read {}"}
-    raw["types"]["nw"]["loop"] = {**loop, "prompt": "bash: echo round {round}"}
-    spec_file = tmp_path / "spec.yaml"
-    spec_file.write_text(yaml.safe_dump(raw))
-
-    async def ticker():
-        while True:
-            sw.app.state.loops.tick()
-            await asyncio.sleep(0.1)
-
-    def loop(t: str) -> dict:
-        st = sw.app.state.loops.status("wk", t)
-        return st.model_dump() if st else {"state": None}
-
-    try:
-        await apply(spec_file)
-        sw.tick()
-        sw.tasks.append(asyncio.create_task(ticker()))
-        await until(lambda: all(loop(t)["state"] == "done" for t in ("mw", "nw")), timeout=20)
-        mw, nw = loop("mw"), loop("nw")
-        assert (mw["reason"], mw["rounds_max"]) == ("idle_rounds", 2)
-        assert (nw["reason"], nw["rounds_max"]) == ("max_rounds", 3)
-        ended = [e["data"]["data"] for e in sw.store.read_events("mw-0000", 0) if e["type"] == "turn_ended"]
-        assert [(d["tool_calls"], d["state_calls"]) for d in ended] == [(1, 0), (1, 0)]
     finally:
         await sw.close()
         srv.shutdown()
