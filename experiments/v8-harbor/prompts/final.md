@@ -1,0 +1,1 @@
+The run is ending. Save your notes and finish or update your current PR if useful. Leave a short handoff in its board thread with the PR number, test results and what remains. Do not start new work. End with a short plain-text reply.
