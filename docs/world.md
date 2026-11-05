@@ -264,9 +264,9 @@ cover the last `window_s` (300 s):
                        "latency_p95_s": 31.0, "latency_max_s": 48.2, "bytes_in": 120000000,
                        "bytes_out": 52000, "calls_total": 310, "errors_total": 44}},
  "pools": {"fast": {"in_flight": 2, "queued": 0, "limit": 40, "queue_wait_oldest_s": 0.0,
-                    "queue_wait_p95_s": 0.0, "queue_wait_max_s": 0.01},
+                    "queue_wait_p95_s": 0.0, "queue_wait_max_s": 0.01, "overloaded_429_total": 0},
            "slow": {"in_flight": 70, "queued": 6, "limit": 64, "queue_wait_oldest_s": 4.2,
-                    "queue_wait_p95_s": 3.0, "queue_wait_max_s": 9.5}},
+                    "queue_wait_p95_s": 3.0, "queue_wait_max_s": 9.5, "overloaded_429_total": 3}},
  "world": {"open_prs": 57}}
 ```
 
@@ -274,7 +274,8 @@ cover the last `window_s` (300 s):
 `overloaded`), latencies (admitted calls only, queue wait included) and bytes are over the
 window; `calls_total` and `errors_total` since start, as are `upload_v1_total` and `upload_v2_total`
 (workspace uploads by format). `pools.*.in_flight` counts running and
-queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
+queued calls; `pools.*.overloaded_429_total` the refusals since start, by pool (each pool also
+logs one WARNING at most every 10 s with the reason, the tool and how many it refused since). `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
 concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
 `merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,

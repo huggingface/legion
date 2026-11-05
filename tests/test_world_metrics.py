@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import ClassVar
 
@@ -64,7 +65,8 @@ def test_metrics_json_and_prometheus_text():
     assert later["errors_by_code"] == {"open_budget": 1} and later["errors_total"] == 1
     assert set(m["pools"]) == {"fast", "slow"} and m["pools"]["fast"]["limit"] == 40
     assert set(m["pools"]["slow"]) == {"in_flight", "queued", "limit", "queue_wait_oldest_s",
-                                       "queue_wait_max_s", "queue_wait_p95_s"}
+                                       "queue_wait_max_s", "queue_wait_p95_s",
+                                       "overloaded_429_total"}
     text = c.get("/metrics", headers={**H, "Accept": "text/plain"})
     assert text.headers["content-type"].startswith("text/plain")
     lines = text.text.splitlines()
@@ -173,6 +175,23 @@ async def test_admission_refuses_a_full_pool_with_retry_after(monkeypatch):
     finally:
         served.world.release.set()
         served.close()
+
+
+def test_refusals_log_their_pool_and_reason_at_most_every_10_s(monkeypatch, caplog):
+    monkeypatch.setattr(server, "SLOW_THREADS", 2)
+    monkeypatch.setenv("FLOCK_WORLD_SLOW_QUEUE", "-2")  # the slow pool is always full
+    c = TestClient(create_app(Crowded(), SECRET))
+    with caplog.at_level(logging.WARNING, logger="flock.world"):
+        for _ in range(3):
+            assert c.post("/tools/slow", json={"args": {}}, headers=H).status_code == 429
+        monkeypatch.setattr(server, "REFUSAL_LOG_EVERY_S", 0)  # as if 10 s went by
+        assert c.post("/tools/push", json={"args": {"path": "x"}}, headers=H).status_code == 429
+    why = "slow pool overloaded (0 slow calls running or queued)"
+    assert [r.getMessage() for r in caplog.records] == [
+        f"{why}: refused slow; 0 more since the last line",
+        f"{why}: refused push; 2 more since the last line"]
+    pools = c.get("/metrics", headers=H).json()["pools"]
+    assert (pools["slow"]["overloaded_429_total"], pools["fast"]["overloaded_429_total"]) == (4, 0)
 
 
 def test_prometheus_groups_metrics_and_escapes_labels():
