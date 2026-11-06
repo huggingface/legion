@@ -9,6 +9,7 @@ so `after=` cursors are line offsets.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from flock.models import ComputeSpec, Event, Liveness, SwarmSpec, TokenUsage
+
+log = logging.getLogger(__name__)
 
 DB_NAME = "controller.db"
 
@@ -206,6 +209,7 @@ class Store:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._unloadable: set[str] = set()  # swarms list_swarms skips (logged once)
         self._db = sqlite3.connect(
             self.data_dir / DB_NAME, check_same_thread=False, isolation_level=None
         )
@@ -422,10 +426,20 @@ class Store:
         return lv
 
     def list_swarms(self) -> list[Row]:
-        rows = self._q("SELECT * FROM swarms ORDER BY name")
-        for row in rows:
-            row["spec"] = SwarmSpec.model_validate_json(row["spec"])
-        return rows
+        """Every stored swarm whose spec still loads. One that does not (a harness removed from
+        flock, say) is skipped with a logged error, so the others keep running; `get_swarm`
+        still raises for it."""
+        out = []
+        for row in self._q("SELECT * FROM swarms ORDER BY name"):
+            try:
+                row["spec"] = SwarmSpec.model_validate_json(row["spec"])
+            except ValueError as e:
+                if row["name"] not in self._unloadable:
+                    self._unloadable.add(row["name"])
+                    log.error("swarm %s: stored spec no longer loads, skipped: %s", row["name"], e)
+                continue
+            out.append(row)
+        return out
 
     def set_removing(self, name: str) -> None:
         self._x("UPDATE swarms SET removing = 1 WHERE name = ?", [name])

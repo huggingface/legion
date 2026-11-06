@@ -287,6 +287,7 @@ REMOVED: dict[str, set[str]] = {
     "TypeSpec": {"tool_memory_mb", "node_heap_mb"},  # the removed pi harness's memory limits
 }
 _warned: set[tuple[str, str]] = set()
+REMOVED_HARNESSES = frozenset({"pi", "claude", "codex"})  # a stored spec gets a clear refusal
 
 
 def _is_set(v: Any) -> bool:
@@ -899,6 +900,14 @@ class TypeSpec(_Removable):
     def _toc(cls, v: int | None) -> int | None:
         if v is not None and v < 200:
             raise ValueError("tool_output_chars must be >= 200")
+        return v
+
+    @field_validator("harness", mode="before")
+    @classmethod
+    def _removed_harness(cls, v: Any) -> Any:
+        if v in REMOVED_HARNESSES:
+            raise ValueError(f"harness {v!r} was removed from flock; relaunch the type as harbor, "
+                             "or remove the swarm with flock <= cf322fc")
         return v
 
     @field_validator("context_tokens")
