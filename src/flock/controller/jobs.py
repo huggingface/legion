@@ -18,10 +18,11 @@ WORKER_COMMAND = ["flock-worker"]
 DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
 # Bootstrap mode: no prebuilt image. A stock image installs uv and the flock wheel at job start
-# (about 10 s, experiments/common/job_bootstrap.sh), then runs the worker. Versions match
-# Dockerfile.worker, which stays the eventual path. Harbor types get `flock[harbor]` on a
-# uv-managed Python 3.12 instead, with msgboard's wheel and uv.lock's versions from
-# harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh --harbor).
+# (about 10 s; was hf://buckets/cmpatino/legacy-swarmchat-experiments/common/job_bootstrap.sh),
+# then runs the worker. Versions match Dockerfile.worker, which stays the eventual path. Harbor
+# types get `flock[harbor]` on a uv-managed Python 3.12 instead, with msgboard's wheel and
+# uv.lock's versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh
+# --harbor).
 # shortcut: a Node image (it was for the Pi CLI); any image with curl works, switch when retested
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
 HF_HUB_VERSION = "2.2.0"

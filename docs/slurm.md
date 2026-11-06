@@ -334,7 +334,7 @@ job's memory, so nothing goes there: with `container_root: /work` the env file s
 its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HOME,
 XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
 `FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
-`experiments/run3/slurm/Containerfile` builds the image.
+`hf://buckets/cmpatino/legacy-swarmchat-experiments/run3/slurm/Containerfile` builds the image.
 
 `harness: harbor` workers never run in a container: each agent is a Harbor Trial in rootless
 podman, which cannot run inside Enroot. Their env file carries `FLOCK_HARNESS=harbor` and node

@@ -1,4 +1,0 @@
-# Overlay for the 30-min smoke (RUN3_VARIANT=smoke): every looping type's loop ends after 30 min.
-types:
-  coordinator: {loop: {while: {until: 30m, max_rounds: 100}}}
-  worker: {loop: {while: {until: 30m, max_rounds: 100}}}

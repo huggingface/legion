@@ -2,7 +2,7 @@
 
 A type's `loop:` keeps its agents prompted on a cadence until a condition fails, then runs one
 final round and leaves them idle. `limits.budget_usd` is a hard stop for the whole swarm. This
-replaces the drivers that lived outside flock: pixel's `experiments/pixel/run/driver.py`
+replaces the drivers that lived outside flock: pixel's `hf://buckets/cmpatino/legacy-swarmchat-experiments/pixel/run/driver.py`
 (re-prompt idle painters) and the Eliza harness's `swarm.py::main_loop` (rounds with a 2 s
 debounce or a 120 s wake, per-agent caps, a final round). Design: `worlds-design.md` §9 (loop
 and rounds), §4.4 (live settings), §4.7 (the Eliza yardstick), §13 (budget stop).

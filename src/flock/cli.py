@@ -752,12 +752,14 @@ app.command("spawn", hidden=True)(spawn)
 app.command("remove", hidden=True)(remove)
 
 
-# Hidden: run5-era Slurm world jobs (experiments/run4/slurm/world-inner.sh) call `flock world serve`.
+# Hidden: run5-era Slurm world jobs call `flock world serve`
+# (hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/slurm/world-inner.sh).
 app.add_typer(world_app, name="world", hidden=True)
 
 
 # Hidden, old output: prompts in resumed runs' sessions call `flock events <child> --wait`
-# (examples/prompts) and parse `flock agents SWARM --parent` (experiments/pixel/run/leader.md).
+# (examples/prompts) and parse `flock agents SWARM --parent`
+# (hf://buckets/cmpatino/legacy-swarmchat-experiments/pixel/run/leader.md).
 @app.command("events", hidden=True)
 def old_events(name: str, after: int = typer.Option(0, "--after"),
                follow: bool = typer.Option(False, "--follow", "-f"),

@@ -235,7 +235,8 @@ No network, no real jobs: the Hub client and the harness processes are faked.
   resume, planned drain, scale down, remove). A 10,000-agent run on 50 workers
   reached all agents and delivered every prompt, then the HF Spaces edge in
   front of the controller throttled the workers' heartbeats; the controller
-  took them for dead and relaunched them. Reports in `experiments/*/RESULTS.md`.
+  took them for dead and relaunched them. Reports in
+  `hf://buckets/cmpatino/legacy-swarmchat-experiments/*/RESULTS.md`.
 - Packing: one `cpu-upgrade` worker holds 200 resident agents and about 120
   concurrent turns; `cpu-basic` 50 and 20. Cold turns are CPU-bound at about
   1.5 CPU-seconds each.
@@ -247,7 +248,7 @@ No network, no real jobs: the Hub client and the harness processes are faked.
 - Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in
   the controller image. Without the Space's persistent storage a redeploy wipes
   it; replicas come back from the spec, spawned agents do not.
-- The experiments under `experiments/` (except `experiments/v8/`, written for this layout) target the pre-cleanup layout; run them from commit
-  `8949085` (`git checkout 8949085`).
+- Earlier experiments are archived in `hf://buckets/cmpatino/legacy-swarmchat-experiments` (README inside); most target the
+  pre-cleanup layout, so run them from commit `8949085` (`git checkout 8949085`).
 
 Design, contract and decision log: [docs/design.md](docs/design.md).

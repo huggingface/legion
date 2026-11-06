@@ -134,7 +134,7 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 ### Ephemeral types
 
 `ephemeral: true` on a type makes each spawned agent of it live for one session: a judge, an
-interviewer, a one-shot helper. Added 2026-10-22 for experiments/chatbot-v1's interviewers.
+interviewer, a one-shot helper. Added 2026-10-22 for hf://buckets/cmpatino/legacy-swarmchat-experiments/chatbot-v1's interviewers.
 
 ```yaml
 types:

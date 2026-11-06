@@ -661,8 +661,8 @@ class RampPhase(_Removable):
 
 
 class RampHold(_Removable):
-    """`replicas_ramp.hold_if` (was experiments/run4/load_guard.py): a step that takes the
-    swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
+    """`replicas_ramp.hold_if` (was hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/load_guard.py):
+    a step that takes the swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
     had `waiting` or more requests queued in every sample of the last 2 minutes, or takes
     more than `request_s` per request (running / completions per second), or its metrics
     are missing, short or reset."""
@@ -765,8 +765,9 @@ class TypeSpec(_Removable):
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)
     replicas: int = 0
-    agents_per_worker: int = 50  # measured default, experiments/packing
-    max_working_per_worker: int = 20  # measured default, experiments/packing
+    # measured defaults (hf://buckets/cmpatino/legacy-swarmchat-experiments/packing)
+    agents_per_worker: int = 50
+    max_working_per_worker: int = 20
     # Agents of this type in a turn at once, swarm-wide, admitted like a provider's
     # `max_working` (both apply). Controller only.
     max_working: int | None = Field(default=None, ge=1)

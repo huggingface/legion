@@ -1,4 +1,4 @@
-"""The chatbot world (experiments/chatbot-v1): the Eliza world (worlds/eliza) with two teams and a
+"""The chatbot world (hf://buckets/cmpatino/legacy-swarmchat-experiments/chatbot-v1): the Eliza world (worlds/eliza) with two teams and a
 phase. Workspace `$CHATBOT_WS` (default ws/ here): teams/<team>/agents/<agent>/ (the team is the
 letter in the agent's type: ds-a-0001 is team a), best/, probes/ (seeded from probes/ here),
 log.jsonl, phase.json.

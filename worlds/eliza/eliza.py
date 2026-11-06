@@ -1,4 +1,4 @@
-"""The Eliza world (experiments/eliza): agents write ELIZA-style bots in a shared workspace
+"""The Eliza world (hf://buckets/cmpatino/legacy-swarmchat-experiments/eliza): agents write ELIZA-style bots in a shared workspace
 `$ELIZA_WS` (default ws/ here): agents/<agent>/ (writable only by that agent, by X-Flock-Agent),
 best/ (bot.py, v<n>.py, history.jsonl), probes/ (seeded from probes/ here), log.jsonl. Writes and
 edits are atomic, and a .py change that does not compile is refused. Bots run as

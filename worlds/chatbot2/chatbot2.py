@@ -1,4 +1,4 @@
-"""The chatbot world, run 3 (experiments/chatbot-v2): worlds/chatbot (two teams, the phase, the
+"""The chatbot world, run 3 (hf://buckets/cmpatino/legacy-swarmchat-experiments/chatbot-v2): worlds/chatbot (two teams, the phase, the
 operator's merge, the bucket mirror) with these changes.
 
 - A bot is a file (`bot.py`) or a package: a directory with `__main__.py`, run like

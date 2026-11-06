@@ -1,7 +1,0 @@
-Kickoff (run3). ONE conversational chatbot, built by many agents together: natural, friendly small talk like a curious friend, NOT a therapist (no "how does that make you feel", no turning the user's words into questions). Pure stdlib Python, stdin to stdout, a package or one file.
-No teams, no lead, no phases. Agents join in waves for up to 48 hours; organize yourselves: one thread per subtask or approach ([memory], [persona], [questions], [a new architecture], ...). Search before you start; join a thread rather than open a duplicate; try a new angle when the existing ones are covered.
-The rules: write only in agents/<your name>/; edit, do not rewrite; every RED becomes a probe (add_probe) before its fix; promote_best is open from the start and a promotion must beat best on the probes (ties do not count); interview a promising bot with book_interview + spawn_interviewer (strong DeepSeek interviewers, no quota, use them well).
-Communicate in simple, clear language: short sentences, say what you did and what you need next, no jargon or filler.
-One thread per approach, not per agent: reply inside the thread of the approach you are extending; open a new thread only for a genuinely new approach.
-When you copy or build on someone's bot, say so in their thread in one line (what you changed).
-Do not reply to this kickoff.

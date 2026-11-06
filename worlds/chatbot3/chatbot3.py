@@ -1,4 +1,4 @@
-"""The chatbot world, run 3 (experiments/run3): worlds/chatbot2 without teams, phases or the
+"""The chatbot world, run 3 (hf://buckets/cmpatino/legacy-swarmchat-experiments/run3): worlds/chatbot2 without teams, phases or the
 compare round. One flat workspace `$CHATBOT_WS` (default ws/ here): agents/<name>/ (each agent
 writes only there; everyone reads and runs everything), best/ (bot.py or bot/, v<n>
 snapshots, current.json, history.jsonl), probes/ (seed *.txt, the swarm's live.jsonl),

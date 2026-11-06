@@ -236,7 +236,7 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 3. When the harness has been idle for `idle_grace` (default 120 s) the worker
    closes it. State is on disk.
 
-Measured on cpu-basic (experiments/packing/RESULTS.md, 2026-10-14): a cold Claude
+Measured on cpu-basic (hf://buckets/cmpatino/legacy-swarmchat-experiments/packing/RESULTS.md, 2026-10-14): a cold Claude
 turn costs about 1.5 CPU-seconds, mostly CLI startup, and 85 to 110 MB of real
 container memory (RSS double-counts shared pages); an idle resident session
 costs about 116 MB and no CPU. The two cores saturate at 5 concurrent cold
@@ -362,8 +362,8 @@ types:
     secrets: [HF_TOKEN]
     labels: {team: eval}
     replicas: 3000
-    agents_per_worker: 50      # measured default, experiments/packing
-    max_working_per_worker: 20 # measured default, experiments/packing
+    agents_per_worker: 50      # measured default, hf://buckets/cmpatino/legacy-swarmchat-experiments/packing
+    max_working_per_worker: 20 # measured default, hf://buckets/cmpatino/legacy-swarmchat-experiments/packing
     flavor: cpu-basic
     worker_lifetime: 24h
     lifetime_jitter: 4h
@@ -393,7 +393,7 @@ in the workdir, not a flag, so it survives resume. `flock launch` reads
 `system_prompt`, since neither the controller nor the workers can read the
 caller's files (added in the e2e run). `system_prompt_append_file` (optional) is appended
 after a blank line, so several types can share one prompt plus a section of their own
-(experiments/run4's spawner and child types).
+(hf://buckets/cmpatino/legacy-swarmchat-experiments/run4's spawner and child types).
 
 Tools folder (docs/tools.md): `tools_dir` (top level, default `tools/` next to the spec file)
 holds Python functions; `types.<t>.tools` selects them. `flock launch` packs the folder,
@@ -557,7 +557,7 @@ it as `?incarnation=` on command polls, heartbeats and event posts (events from 
 job are still stored but do not count as seen), and the controller answers 409
 when it is not the slot's current job, including to a poll that was parked when the
 slot was relaunched. A heartbeat that omits agents placed on that worker re-queues
-their assign. Both came from the e2e run (experiments/e2e/RESULTS.md, check 6).
+their assign. Both came from the e2e run (hf://buckets/cmpatino/legacy-swarmchat-experiments/e2e/RESULTS.md, check 6).
 
 ### Heartbeat
 
@@ -606,7 +606,7 @@ an `agent_memory` event (`pi_pss_mb`, `tools_pss_mb`, `tools_by_comm`, `tmpfs_ro
 `tokens` are cumulative per agent across workers (the worker restores them from the bucket
 state). An empty map means "not known yet", for an agent still restoring on a relaunched
 worker, and leaves the controller's totals alone. Folding there double-counted cost in the 1k
-run (experiments/load-1k/RESULTS.md, bug 2).
+run (hf://buckets/cmpatino/legacy-swarmchat-experiments/load-1k/RESULTS.md, bug 2).
 
 ### Events and sessions
 
@@ -656,8 +656,8 @@ becomes one request with one admin secret; the swap is one function.
 
 ## 7. Scale budget
 
-Measured on cpu-basic (100 agents, experiments/e2e) and cpu-upgrade (1,000 agents,
-experiments/load-1k), both 2026-10-14.
+Measured on cpu-basic (100 agents, hf://buckets/cmpatino/legacy-swarmchat-experiments/e2e) and cpu-upgrade (1,000 agents,
+hf://buckets/cmpatino/legacy-swarmchat-experiments/load-1k), both 2026-10-14.
 
 | | cpu-basic worker ($0.01/h) | cpu-upgrade worker ($0.03/h) | 10k agents on cpu-upgrade |
 |---|---|---|---|
@@ -676,7 +676,7 @@ experiments/load-1k), both 2026-10-14.
 Inference is the bill. Hosting is noise. The 1k run spent about $2.26 on haiku and about
 $0.15 on jobs; the 10k run about $11.3 and $0.53.
 
-The 10k run (experiments/load-10k/RESULTS.md, 2026-10-14) reached 10,000 idle agents 58 s
+The 10k run (hf://buckets/cmpatino/legacy-swarmchat-experiments/load-10k/RESULTS.md, 2026-10-14) reached 10,000 idle agents 58 s
 after apply, delivered 10,000/10,000 prompts and ran at least 9,958 turns, then stopped early:
 the Spaces edge throttled the workers' own heartbeats and polls at an aggregate of about 90 to
 120 req/s, the controller took the silent workers for dead and crash-relaunched all 50. The
@@ -712,15 +712,15 @@ the limit.
 
 1k and 10k are load tests afterwards, not features.
 
-Results: all three passed on 2026-10-14 (experiments/resume-gate, experiments/packing,
-experiments/e2e). The 1k load test passed the same day after two fixes
-(experiments/load-1k/RESULTS.md): a drained worker did not always exit, and cost was
+Results: all three passed on 2026-10-14 (hf://buckets/cmpatino/legacy-swarmchat-experiments/resume-gate, hf://buckets/cmpatino/legacy-swarmchat-experiments/packing,
+hf://buckets/cmpatino/legacy-swarmchat-experiments/e2e). The 1k load test passed the same day after two fixes
+(hf://buckets/cmpatino/legacy-swarmchat-experiments/load-1k/RESULTS.md): a drained worker did not always exit, and cost was
 double-counted after a relaunch.
 
 ## 10. Unverified assumptions and risks
 
 - Cross-machine session resume: PASSED 2026-10-14 for both harnesses
-  (experiments/resume-gate/RESULTS.md). Claude needs only
+  (hf://buckets/cmpatino/legacy-swarmchat-experiments/resume-gate/RESULTS.md). Claude needs only
   `projects/<enc-cwd>/<id>.jsonl` (plus `<id>/` if present); Codex needs only the
   rollout file at its dated relative path and rebuilds its SQLite index. Codex was
   verified locally with two fresh homes, not in a job (no API key here).

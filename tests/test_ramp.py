@@ -1,5 +1,5 @@
 """`types.T.replicas_ramp` on the controller: phases, stagger, the paused clock, a lowered max
-and the vLLM load guard (`hold_if`, was experiments/run4/load_guard.py)."""
+and the vLLM load guard (`hold_if`, was hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/load_guard.py)."""
 from __future__ import annotations
 
 import pytest
