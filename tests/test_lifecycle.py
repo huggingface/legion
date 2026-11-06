@@ -226,6 +226,34 @@ def test_resume_diff_ignores_where_the_folder_is():
     assert ops.resume_diff(at("/y"), at("/x", "w2"))
 
 
+def test_resume_keeps_a_harbor_runs_roster_with_its_live_replicas():
+    """The roster lists every type's agents from the file's counts: a resume (live replicas
+    kept) keeps the running roster; an update keeps a kept type's agents and takes a new or
+    changed type's from the file."""
+    from flock import live
+    from flock.models import SwarmSpec
+
+    def harbor(**counts):
+        roster = {f"{t}-{i:04d}": t for t, n in counts.items() for i in range(n)}
+        return SwarmSpec.model_validate({**make_spec().model_dump(mode="json"), "types": {
+            t: {"harness": "harbor", "model": "fake:m", "replicas": n, "harbor": {
+                "task": {}, "config": {"task": {}}, "role": t, "roster": roster}}
+            for t, n in counts.items()}})
+
+    old = harbor(writer=2, critic=1)
+    assert ops.resume_diff(old, harbor(writer=1, critic=3)) == []
+    new = harbor(writer=1, critic=3, scout=1)  # `flock update`: the live counts kept
+    live.keep_replicas(old, new)
+    ops.keep_pins(old, new)
+    assert new.types["scout"].harbor.roster == {
+        "writer-0000": "writer", "writer-0001": "writer", "critic-0000": "critic",
+        "scout-0000": "scout"}
+    new = harbor(writer=2, critic=3)  # `--replicas spec`: the file's count
+    ops.keep_pins(old, new)
+    assert list(new.types["writer"].harbor.roster) == [
+        "writer-0000", "writer-0001", "critic-0000", "critic-0001", "critic-0002"]
+
+
 def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, clock):
     import flock.controller.api as api_mod
     from flock.world.host import WorldHost

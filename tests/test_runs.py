@@ -32,7 +32,7 @@ def test_lifecycle(tiny):
 
     # a turn: its Trial's Pi answered (tests/harbor/test_adapter.py), the events say so, the
     # cost is priced
-    ack = json.loads(tiny.flock("prompt", "writer-0000", "bash: echo one"))
+    ack = json.loads(tiny.flock("prompt", "writer-0000", "one"))
     assert ack["agent"] == "writer-0000" and ack["prompt_id"], ack
     tiny.flock("prompt", "nobody-0001", "x", code=1)
     a = tiny.turns("writer-0000", 1)
@@ -49,7 +49,7 @@ def test_lifecycle(tiny):
     assert turn[1]["data"]["tokens"]["fake-model"]["output"] > 0, turn
     started = tiny.events("writer-0000", "agent.session_started")[0]["data"]
     assert (started["harness"], started["model_id"]) == ("harbor", "fake-model"), started
-    assert tiny.said("writer-0000")[0].endswith("\n\nbash: echo one")  # after the task's
+    assert tiny.said("writer-0000")[0].endswith("\n\none")  # after the task's
     st = tiny.wait(lambda: (s := json.loads(tiny.flock("status", "tiny", "--json")))
                    ["verdict"]["level"] == "ok" and s)
     t = st["status"]["types"]["writer"]
@@ -70,7 +70,7 @@ def test_lifecycle(tiny):
     tiny.flock("stop", "tiny", "--type", "nope", code=1)
     out = tiny.flock("stop", "tiny", "--type", "writer", "--reason", "lunch")
     assert out.strip() == "tiny: held: type writer", out
-    tiny.flock("prompt", "writer-0000", "bash: echo two")
+    tiny.flock("prompt", "writer-0000", "two")
     out = tiny.flock("status", "tiny")
     assert "HELD type writer: lunch (by operator" in out and "pending=1" in out, out
     assert tiny.agent("writer-0000")["turns"] == 1
@@ -79,22 +79,21 @@ def test_lifecycle(tiny):
     assert "HELD" not in tiny.flock("status", "tiny")
 
     # stop --release frees the workers and keeps everything; launch FOLDER resumes the
-    # sessions, refused while the folder differs from the running spec (its replicas too: they
-    # change the harbor block's roster)
+    # sessions, refused while the folder differs from the running spec (replicas aside)
     out = tiny.flock("stop", "tiny", "--release", "--reason", "night")
     assert "releasing: 1 workers still running" in out, out  # it waited for the worker
     assert "released: every agent synced, compute freed; `flock launch tiny` resumes" in out
     assert "controller kept: a local run keeps its controller" in out
     out = tiny.flock("status", "tiny")
     assert "RELEASED since" in out and "workers: dead:1" in out, out
-    tiny.spec(replicas=2, extra="limits: {agent_max_turns: 5}\n")
+    tiny.spec(replicas=1, extra="limits: {agent_max_turns: 5}\n")
     assert "run `flock update` first" in tiny.flock("launch", spec, "--skip-preflight", code=1)
-    tiny.spec(replicas=2)
+    tiny.spec(replicas=1)
     assert "tiny: held: nothing" in tiny.flock("launch", spec, "--skip-preflight")
-    tiny.flock("prompt", "writer-0000", "bash: echo three")
+    tiny.flock("prompt", "writer-0000", "three")
     a = tiny.turns("writer-0000", 3)
     assert (a["session_id"], a["resumed"]) == (session, True), a
-    assert tiny.said("writer-0000")[1:] == ["bash: echo two", "bash: echo three"]  # the same
+    assert tiny.said("writer-0000")[1:] == ["two", "three"]  # the same
     assert [e["name"] for e in tiny.events("tiny")] == [
         "swarm.spec_applied", "worker.launched", "swarm.spec_applied",  # launch, update
         "swarm.stopped", "swarm.resumed",  # stop, launch
@@ -381,7 +380,7 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
                                    extra="namespace: ns\nbucket: hf://buckets/ns/tiny\n"),
                "--skip-preflight")
     assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
-    tiny.flock("prompt", "writer-0000", "bash: echo one")
+    tiny.flock("prompt", "writer-0000", "one")
     assert tiny.turns("writer-0000", 1)["cost_usd"] > 0
 
     w = "tiny-writer-w0000"
