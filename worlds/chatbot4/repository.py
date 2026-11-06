@@ -79,14 +79,14 @@ class Repository:
             self.attributes.write_text("".join(f"{p} merge=union\n" for p in union))
         self.fetch()
 
-    def git(self, *args, at=None, data=None, env=None):
-        return self.git_bytes(*args, at=at, data=data, env=env).decode().strip()
+    def git(self, *args, at=None, data=None, env=None, timeout=120):
+        return self.git_bytes(*args, at=at, data=data, env=env, timeout=timeout).decode().strip()
 
-    def git_bytes(self, *args, at=None, data=None, env=None):
+    def git_bytes(self, *args, at=None, data=None, env=None, timeout=120):
         """Run git and return its raw stdout (for diffs and file contents, which need not be
         UTF-8). Failures raise like git()."""
         p = subprocess.run(["git", "-C", str(at or self.root), *args], input=data,
-                           capture_output=True, env=env or self.env, timeout=120, check=False)
+                           capture_output=True, env=env or self.env, timeout=timeout, check=False)
         if p.returncode:
             # Git's stderr can contain remote data or credentials: never expose it to agents;
             # the world's log gets it redacted.
@@ -197,6 +197,43 @@ class Repository:
         """Point each (ref, sha) at its sha in one transaction: one refs_lock wait."""
         with self.refs_lock:
             self.git("update-ref", "--stdin", data="".join(f"update {ref} {sha}\n" for ref, sha in refs).encode())
+
+    def prune_pr_refs(self, ended):
+        """Delete refs/flock/pr/<n>/<sha> (every head PR n ever had) for each n in ended (merged
+        or closed PRs). refs/pr/<n> keeps the final head, which is all get_pr and run_bot read
+        of an ended PR; reviews keep their patch-ids and reconcile reads open PRs only.
+        Returns how many refs went."""
+        refs = [ref for ref in self.git("for-each-ref", "--format=%(refname)",
+                                        "refs/flock/pr/").splitlines()
+                if (n := ref.split("/")[3]).isdigit() and int(n) in ended]
+        if refs:
+            with self.refs_lock:
+                self.git("update-ref", "--stdin", data="".join(f"delete {ref}\n" for ref in refs).encode())
+        return len(refs)
+
+    def maintain(self):
+        """Keep the bare repository fast: pack every ref, drop a gc.log older than an hour (while
+        it exists, git skips the auto-gc that fetches start, for a day), then gc --auto in the
+        foreground. gc --auto never packs unreachable loose objects (rebased and refused
+        commits), so past gc.auto of them a full gc --cruft packs them (what fixed the live v8
+        world: 120k loose objects, merges at 3/h)."""
+        with self.refs_lock:
+            self.git("pack-refs", "--all")
+        gc_log = self.root / "gc.log"
+        try:
+            if time.time() - gc_log.stat().st_mtime > 3600:
+                log.warning("git: removing a stale gc.log that blocked auto-gc: %s",
+                            _safe_text(gc_log.read_text(errors="replace").strip(), 500))
+                gc_log.unlink()
+        except FileNotFoundError:
+            pass
+        # gc.packRefs off: refs were packed above under refs_lock, never while the world writes one
+        gc = ("-c", "gc.autoDetach=false", "-c", "gc.cruftPacks=true", "-c", "gc.packRefs=false",
+              "gc", "--quiet")
+        self.git(*gc, "--auto", timeout=1800)
+        loose = int(re.search(r"^count: (\d+)", self.git("count-objects", "-v"), re.MULTILINE)[1])
+        if loose > int(self.git("config", "--get", "--default", "6700", "gc.auto")):
+            self.git(*gc, timeout=1800)
 
     def sha(self, ref="main"):
         if ref.startswith("pr:") and ref[3:].isdigit():
