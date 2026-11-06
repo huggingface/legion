@@ -1,43 +1,49 @@
-# v8 (experiments/v8 on v8-port: six lanes, prompts) in shepherd's config shape: it loads with
-# flock.harbor.config as copied from shepherd f3970bc. Each agent runs the Harbor task
-# chatbot4-v8-agent in its own container; the shared chatbot4 world and the board are resources,
-# reached through the world.* and board.* tools. Differences from v8: prompts/system.md names
-# $CHATBOT_REPO and shepherd's tool calls, and arrives in the first prompt (not as a system
-# prompt); no board rules, notifications or ramps; one agent per lane.
-#
-# NOT YET (marked, so they are not lost):
-# - hf-sandbox: shepherd's loader takes only environment.backend docker|podman. For hf-sandbox,
-#   set the backend there and resources.world.transport: http (no mounts). http needs a world
-#   image rebuilt from this branch (re-vendor flock.world): older worlds refuse agent tokens.
-# - The flock loop is not read by flock.harbor.config (another workstream designs how flock drives
-#   Trials). v8's: prompts/round.md each turn end, while 3 h / agent_usd 15, final
-#   prompts/final.md, resume_prompt 'Your previous turn was interrupted. Read your notes, check
-#   your clone and PRs, and continue.'
-# - Placeholders (CHANGE-ME): the published task repo and commit, the board and the world URLs.
-name: v8-harbor
+# v8 (experiments/v8 on v8-port: six lanes, its prompts) on flock's Harbor path, on HF Jobs: one
+# agent per lane, each a dedicated hf-sandbox Trial of the task chatbot4-v8-agent, started by its
+# own worker job. The shared chatbot4 world and a dedicated board are resources, reached over
+# HTTP through the world.* and board.* tools. `flock init` writes every ${VAR} below into run.env.
+# Differences from v8: prompts/system.md names $CHATBOT_REPO and shepherd's tool calls, and
+# arrives in the first prompt (not as a system prompt); one agent per lane, no ramps; the board's
+# rules are not enforced on hf-sandbox (no mounts, no rule proxy: run.json warns).
+name: ${RUN_NAME:-v8h-1}
+namespace: HuggingFaceSwarms                   # bills the workers and the sandboxes (kwargs)
+bucket: hf://buckets/HuggingFaceSwarms/v8h-test
+compute: hf-jobs
 harness: pi
-model: huggingface/deepseek-ai/DeepSeek-V4.1-Flash-1017:novita   # v8-harbor's model id
+model: huggingface/deepseek-ai/DeepSeek-V4.1-Flash-1017:novita   # v8's model
+# [input, output, cached] USD per 1M tokens (router novita, input/output as on 2026-11-06):
+# re-read the router's /v1/models before a run, Harbor reports no cost for router models
+pricing: [0.30, 1.20, 0.30]
 inference:
   base_url: https://router.huggingface.co/v1
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN or one that can write CHATBOT_REPO
   api_format: openai_chat_completions
   reasoning_effort: high
 task:
-  repo: https://huggingface.co/datasets/HuggingFaceSwarms/CHANGE-ME-tasks   # tasks/chatbot4-v8-agent
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/swarmchat-harbor   # tasks/chatbot4-v8-agent
   selector: chatbot4-v8-agent
-  revision: main                              # CHANGE-ME: the published commit SHA
+  revision: '${TASK_REV}'                     # the published commit SHA
 team_file: prompts/system.md
 resources_dir: resources                       # links to flock's plugins; `flock init` copies them
 resources:
   board:
-    url: https://CHANGE-ME-board.hf.space     # a dedicated board
+    url: '${BOARD_URL}'                       # a dedicated, public board Space (sandboxes hold no HF token)
     token_env: MSGBOARD_OPERATOR_TOKEN        # its operator token (the worker's, never an agent's)
-    channels: [general]
+    # listed so the poller watches them: a mention in a channel not listed wakes no one
+    channels: [general, understanding, answers, conversation, routing, quality, safety]
+    wake: [mention, thread, channel]          # v8's: no DMs
+    rules:                                    # v8's comms rules; not enforced on hf-sandbox
+      min_post_gap: 10s
+      max_len: 1200
+      threads: per_topic
+      no_group_mentions: true
+      max_channels_per_agent: 3
+      max_channels: 40
   world:
-    url: https://CHANGE-ME-world.hf.space     # a running chatbot4 world (v8-harbor environment/)
+    url: '${WORLD_URL}'                       # the world job's --expose-public URL
     token_env: CHATBOT_WORLD_TOKEN            # = the world's FLOCK_WORLD_TOKEN; one world per run,
                                               # a new secret each run (same secret + name = same agent)
-    # transport: http                         # hf-sandbox; the default unix suits docker/podman
+    transport: http                           # no mounts on hf-sandbox: each agent's own token
 tools_dir: tools                               # links to flock's plugins, as resources
 tools:
   - board.*
@@ -52,9 +58,27 @@ agents:
     quality: {role_file: prompts/lanes/quality.md}
     safety: {role_file: prompts/lanes/safety.md}
 environment:
-  backend: docker
+  backend: hf-sandbox
+  # job_timeout is the sandbox's idle timeout: longer than turn_timeout
+  kwargs: {flavor: cpu-basic, namespace: HuggingFaceSwarms, job_timeout: 3h}
+workers:
+  agents_per_worker: 1
+  flavor: cpu-basic
+  turn_timeout: 2h                            # v8's
+  worker_lifetime: 8h
+  env: {CHATBOT_REPO: '${CHATBOT_REPO}'}      # the task's [environment.env] reads it from the worker
+loop:                                         # v8's, for 3 h
+  prompt_file: prompts/round.md
+  every: turn_end
+  notices: true
+  on: [board.mention, board.thread, board.channel]
+  while: {until: 3h, max_rounds: 10000}
+  final: {prompt_file: prompts/final.md, reserve_usd: 3}
+  resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
 limits:
-  run_timeout_seconds: 11400                  # v8-harbor's RUN_FOR 3 h, plus 10 min
-  agent_timeout_seconds: 10800
+  run_timeout_seconds: 11400                  # 3 h plus 10 min
+  agent_timeout_seconds: 11400
   agent_max_turns: 150                        # v8's max_turns (per round there)
+  budget_usd: 60
+  trial_hours: 20                             # plus turn_timeout must stay under hf-sandbox's 24 h
 output_dir: out

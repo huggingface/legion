@@ -149,6 +149,21 @@ def test_the_smoke_spec_compiles(monkeypatch, pins):
     assert h.config["limits"]["trial_hours"] == 0.15
 
 
+def test_the_v8_harbor_spec_compiles(monkeypatch, pins):
+    env = {"TASK_REV": "c" * 40, "BOARD_URL": "https://board.example",
+           "WORLD_URL": "https://world.example", "CHATBOT_REPO": "ns/chat"}
+    swarm = experiment_spec(monkeypatch, pins, "v8-harbor", "c" * 40, env)
+    assert (swarm.swarm, swarm.compute.kind, len(swarm.types)) == ("v8h-1", "hf-jobs", 6)
+    h = swarm.types["answers"].harbor
+    assert h.config["environment"]["kwargs"]["namespace"] == "HuggingFaceSwarms"
+    assert h.resources["board"]["transport"] == h.resources["world"]["transport"] == "http"
+    assert len(h.resources["board"]["channels"]) == 7  # the poller watches only these
+    for ts in swarm.types.values():
+        assert ts.env == {"CHATBOT_REPO": "ns/chat"} and ts.agents_per_worker == 1
+        assert ts.secrets == ["MSGBOARD_OPERATOR_TOKEN", "CHATBOT_WORLD_TOKEN", "HF_TOKEN"]
+        assert ts.loop.final.reserve_usd == 0.5 and ts.harbor.config["limits"]["trial_hours"] == 20
+
+
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
     """A linked tools folder ships; a link inside it is refused at launch and by `flock init`
     (which would copy what it points to). Init's run.env names the board's default token,
