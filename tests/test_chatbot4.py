@@ -1313,14 +1313,14 @@ def test_a_transient_merge_failure_keeps_the_pr_queued_while_the_next_goes_ahead
     monkeypatch.setattr(world.repo.hub, "merge", flaky)
     world.merge_pr(Agent("oak"), a["pr"])
     world.merge_pr(Agent("oak"), b["pr"])
+    queue = world.state["merge_queue"]
+    queue[0]["tries"] = 1024  # a long outage: the backoff stays capped (no float overflow)
     with pytest.raises(ToolError, match="Hub request failed"):
         world._merge_next()
-    queue = world.state["merge_queue"]
-    assert [(e["pr"], e["tries"]) for e in queue] == [(a["pr"], 1), (b["pr"], 0)]
-    assert queue[0]["next_at"] > time.time()  # A keeps its place and waits for its backoff
-    assert world._merge_next()["pr"] == b["pr"]  # B goes ahead meanwhile
-    assert world._merge_next() is None  # nothing due
-    queue[0]["next_at"] = 0.0  # A's retry is due: it lands on B's main
+    assert [(e["pr"], e["tries"]) for e in queue] == [(a["pr"], 1025), (b["pr"], 0)]
+    assert 590 < queue[0]["next_at"] - time.time() <= 600  # A keeps its place and waits
+    assert world._merge_next()["pr"] == b["pr"]  # B goes ahead meanwhile; the Hub merges again,
+    assert queue[0]["next_at"] == 0.0  # so A's retry is due at once: it lands on B's main
     assert world._merge_next()["rebased_from"] == a["base_sha"] and not queue
     assert not any(e["kind"] == "merge" for box in world.state["inbox"].values() for e in box)
 

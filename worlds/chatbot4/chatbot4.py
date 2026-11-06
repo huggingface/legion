@@ -1605,6 +1605,8 @@ class Chatbot4World(World):
             outcome = "already_merged" if result.get("already_merged") else "merged"
             with self.lock:
                 self.state["merge_queue"].remove(entry)
+                for other in self.state["merge_queue"]:  # the Hub merges again: no one waits out a backoff
+                    other["next_at"] = 0.0
                 self._dirty("_", "merge_queue")
                 if result.get("already_merged"):  # e.g. landed on the Hub though the call failed
                     for name in {agent.name, result["author"]}:
@@ -1617,7 +1619,7 @@ class Chatbot4World(World):
                 if not isinstance(exc, ToolError) or exc.code in MERGE_RETRY_CODES:
                     entry["tries"] += 1
                     entry["next_at"] = time.time() + min(
-                        MERGE_BACKOFF[1], MERGE_BACKOFF[0] * 2 ** (entry["tries"] - 1))
+                        MERGE_BACKOFF[1], MERGE_BACKOFF[0] * 2 ** min(entry["tries"] - 1, 10))
                 else:
                     self.state["merge_queue"].remove(entry)
                     if checked := getattr(exc, "checked", None):  # the head and main the checks saw
