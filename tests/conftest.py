@@ -121,8 +121,10 @@ def slurm(tmp_path, monkeypatch) -> Slurm:
 
 @pytest.fixture(autouse=True)
 def no_local_checkpoint(monkeypatch):
-    """A local run checkpoints to <bucket>/controller/<swarm> by default: never from tests."""
+    """A local run checkpoints to <bucket>/controller/<swarm> by default: never from tests. Nor
+    does any test (or process it starts) get the machine's Hub token."""
     monkeypatch.setenv("FLOCK_STATE_URL", "")
+    monkeypatch.setenv("HF_TOKEN", "fake-hub-token")
 
 
 @pytest.fixture
@@ -149,7 +151,6 @@ def tiny(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCK_LOCAL_REFRESH", "0.2")
     monkeypatch.setenv("FLOCK_LOOP_INTERVAL", "0.2")
     monkeypatch.setenv("FAKE_KEY", "fake-key")
-    monkeypatch.setenv("HF_TOKEN", "fake-hub-token")  # never the machine's: hf-sandbox ships it
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     waited = []
 
