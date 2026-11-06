@@ -85,10 +85,6 @@ if [ "${1:-}" = --inner ]; then  # in the container (srun below): the batch shel
   export HOME=/work/home HF_HOME=/work/hf TMPDIR=/work/tmp
   export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
   mkdir -p "$HOME" "$HF_HOME" "$TMPDIR" && cd /work || exit 2
-  if [ -x /usr/local/bin/pi ]; then  # an image with the Pi CLI: its agent dir on /work, no worker id
-    export FLOCK_PI_CLI=/usr/local/bin/pi PI_CODING_AGENT_DIR=/work/pi/agents
-    mkdir -p "$PI_CODING_AGENT_DIR" || exit 2
-  fi
   run_worker
 fi
 

@@ -27,7 +27,7 @@ types:
     harness: llm
     comms: true                       # all comms tools; or list some in tools:
   scribe:
-    harness: pi
+    harness: llm
     tools: [summarise, comms:read, comms:search]
 ```
 
@@ -148,10 +148,6 @@ The model sees the bare names; the spec writes them `comms:post`, `comms:read`, 
 | `search` | `query`, `thread?`, `from?`, `since?` (`2026-10-21`, `today`, `12h`, `7d`), `limit?` (default 10, max 50) | `{query, results: [{id, thread, author, time, snippet}], dropped?, note?, total?}` |
 
 - `llm`: function tools next to `bash` (and `done`), served in process by the worker.
-- `pi`: in the generated Tools section of `AGENTS.md`, called as
-  `flock-tool post --json '{"text": "...", "thread": "new"}'`. `flock-tool` reads the agent's pin
-  file and sends built-in calls to the worker's local gateway (127.0.0.1, one JSON line each way,
-  with the agent's key from its pin), which makes the board call with the agent's token.
 - Errors and refusals are tool results (`{"error": "..."}`, `isError` in the event stream); the
   turn goes on.
 

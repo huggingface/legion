@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from flock import cli
 from flock.models import AssignCommand, SwarmSpec, type_spec_rev
 from flock.tools.bundle import pack
-from flock.tools.toolset import PIN_ENV, SECTION_START, Toolset, read_pin
+from flock.tools.toolset import PIN_ENV, Toolset, read_pin
 from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 from flock.worker.tools import ToolsManager
@@ -288,7 +288,7 @@ async def run_tool_cli(tool: Path, args: list[str], env: dict) -> subprocess.Com
                                    text=True, env=env, timeout=30, check=False)
 
 
-async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
+async def test_harbor_gets_a_pin_and_flock_tool(tmp_path):
     f = Fetcher()
     b1 = pack(folder(tmp_path / "v1"))
     b2 = pack(folder(tmp_path / "v2", ADD_V2))
@@ -300,15 +300,11 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     work = tmp_path / "agents"
     adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.05)
     outbox = Outbox()
-    rt = AgentRuntime("dev-0000", "dev", type_spec(harness="pi", system_prompt="You are dev."), swarm="demo",
+    rt = AgentRuntime("dev-0000", "dev", type_spec(harness="harbor", harbor={"task": {}, "config": {}}), swarm="demo",
                       work_root=work, adapter=adapter, outbox=outbox, toolbox=m.current)
     await rt.setup(restore=False)
     await rt.prompt("first")
     await until(lambda: rt.state.turns == 1, timeout=5)
-    md = (work / "dev-0000" / "AGENTS.md").read_text()
-    assert md.startswith("You are dev.") and SECTION_START in md
-    assert "- `add`: Add two integers (v1)." in md
-    assert """flock-tool add --json '{"a": 1, "b": 1}'""" in md
     env = adapter.envs[0]
     assert env[PIN_ENV] == str(rt.pin_path)
     ts, agent, wd = read_pin(rt.pin_path)
@@ -326,7 +322,7 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     p = await run_tool_cli(tool, ["--list"], run_env)
     assert [t["name"] for t in json.loads(p.stdout)["tools"]] == ["add"]
 
-    # a new version: the next turn pins it, and the next burst rewrites the section
+    # a new version: the next turn pins it
     await m.ensure(b2.version, "all")
     await rt.prompt("second")
     await until(lambda: rt.state.turns == 2, timeout=5)
@@ -334,25 +330,21 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     p = await run_tool_cli(tool, ["mul", "--json", '{"a": 2, "b": 3}'], run_env)
     assert (p.returncode, p.stdout.strip()) == (0, "6")
     await rt.stop()
-    await rt.prompt("third")
-    await until(lambda: rt.state.turns == 3, timeout=5)
-    md = (work / "dev-0000" / "AGENTS.md").read_text()
-    assert md.count(SECTION_START) == 1 and "- `mul`: Multiply two integers." in md
-    await rt.stop()
 
 
 async def _cli_runtime(tmp_path: Path, m: ToolsManager, tspec=None) -> tuple[AgentRuntime, ScriptedAdapter]:
     from .worker_fakes import spec as type_spec
 
     adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
-    rt = AgentRuntime("dev-0000", "dev", tspec or type_spec(harness="pi", idle_grace="30s"), swarm="demo",
+    rt = AgentRuntime("dev-0000", "dev", tspec or type_spec(harness="harbor", harbor={"task": {}, "config": {}}, idle_grace="30s"),
+                      swarm="demo",
                       work_root=tmp_path / "agents", adapter=adapter, outbox=Outbox(),
                       toolbox=m.current, secret_source={"PROVIDER_KEY": "dummy-key"})
     await rt.setup(restore=False)
     return rt, adapter
 
 
-async def test_cli_harness_tools_enabled_then_disabled_in_one_burst(tmp_path):
+async def test_flock_tool_enabled_then_disabled_in_one_burst(tmp_path):
     f = Fetcher()
     b = pack(folder(tmp_path / "v1"))
     f.bundles = {b.version: b.data}
@@ -372,12 +364,11 @@ async def test_cli_harness_tools_enabled_then_disabled_in_one_burst(tmp_path):
         p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
         assert p.returncode == 1 and json.loads(p.stdout) == {"error": "unknown tool 'add'; tools: none"}
         assert read_pin(rt.pin_path)[0].version is None
-        assert SECTION_START not in (tmp_path / "agents" / "dev-0000" / "AGENTS.md").read_text()
     finally:
         await rt.stop()
 
 
-async def test_cli_harness_tools_enabled_mid_burst(tmp_path):
+async def test_flock_tool_enabled_mid_burst(tmp_path):
     f = Fetcher()
     b = pack(folder(tmp_path / "v1"))
     f.bundles = {b.version: b.data}
@@ -398,8 +389,6 @@ async def test_cli_harness_tools_enabled_mid_burst(tmp_path):
         assert len(adapter.starts) == 1
         p = await run_tool_cli(tool, ["add", "--json", '{"a": 2, "b": 3}'], env)
         assert (p.returncode, p.stdout.strip()) == (0, "5")
-        md = (tmp_path / "agents" / "dev-0000" / "AGENTS.md").read_text()
-        assert "- `add`: Add two integers (v1)." in md  # the section follows at the turn boundary
     finally:
         await rt.stop()
 
@@ -449,9 +438,7 @@ def test_credential_names_per_harness():
                                 "self_hosted": True}},
             "types": {"a": {"harness": harness, "model": model}}}).types["a"]
 
-    for h in ("pi", "llm"):
-        assert credential_env_names(t(h, "openai_compat")) == ["K"]
-    assert credential_env_names(t("pi", "openai_compat", "native-model")) == []  # native
+    assert credential_env_names(t("llm", "openai_compat")) == ["K"]
 
 
 class DelayedStartAdapter(ScriptedAdapter):
@@ -506,35 +493,6 @@ async def test_a_prompt_while_awaiting_turn_started_keeps_the_turns_pin(tmp_path
     await until(lambda: read_pin(rt.pin_path)[0].version == b2.version, timeout=5)
     adapter.release.set()
     await rt.stop()
-
-
-async def test_restored_workdir_keeps_the_tools_section(tmp_path):
-    """A workdir restored with an old AGENTS.md, a spec system_prompt: the base text is written
-    first and the generated section is added to it."""
-    f = Fetcher()
-    b = pack(folder(tmp_path / "v1"))
-    f.bundles = {b.version: b.data}
-    m = manager(tmp_path, f)
-    await m.ensure(b.version, "all")
-    from .worker_fakes import spec as type_spec
-
-    wd = tmp_path / "agents" / "dev-0000"
-    wd.mkdir(parents=True)
-    (wd / "AGENTS.md").write_text("Old instructions from the bucket.\n")
-    adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
-    rt = AgentRuntime("dev-0000", "dev", type_spec(harness="pi", system_prompt="System instructions.",
-                                                   idle_grace="30s"),
-                      swarm="demo", work_root=tmp_path / "agents", adapter=adapter,
-                      outbox=Outbox(), toolbox=m.current)
-    await rt.setup(restore=False)
-    try:
-        await rt.prompt("first")
-        await until(lambda: rt.state.turns == 1, timeout=5)
-        md = (wd / "AGENTS.md").read_text()
-        assert md.startswith("System instructions.\n\n" + SECTION_START)
-        assert "Old instructions" not in md and "- `add`: Add two integers (v1)." in md
-    finally:
-        await rt.stop()
 
 
 def test_flock_tool_without_a_pin(tmp_path):

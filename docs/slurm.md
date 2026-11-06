@@ -295,12 +295,12 @@ env variable, then the default):
 
 | Nonreclaimable / limit | Worker |
 |---|---|
-| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it); recycles the agent with the largest Pi PSS at its next turn boundary (docs/pi.md "Memory"), at most one per `FLOCK_MEM_RECYCLE_GAP_S` (600) |
+| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it); recycles the agent with the largest harness PSS at its next turn boundary, at most one per `FLOCK_MEM_RECYCLE_GAP_S` (600) |
 | ≥ `FLOCK_MEM_DRAIN` (0.85) | drain: turns still running after `FLOCK_MEM_DRAIN_DEADLINE_S` (300) are interrupted (`drain_deadline`, resumed with `resume_prompt` after the restart), sync, exit 0: a planned restart |
 | ≥ `FLOCK_MEM_PREEMPT` (0.93), or a new `oom_kill` in `memory.events` | `preempt("memory")`, as on SIGUSR1: exit 75, relaunched at once |
 
 Spike guard: one agent's tool processes above `FLOCK_MEM_SPIKE_MB` (3072; 0 turns it off) are
-SIGKILLed, not Pi and not the other agents (`tool_tree_killed {agent, mb}`); no drain.
+SIGKILLed, not the harness and not the other agents (`tool_tree_killed {agent, mb}`); no drain.
 `worker_lifetime` stays the backstop.
 
 The controller rotates workers that ask for it: each pass, among workers whose heartbeat says
@@ -310,8 +310,7 @@ restoring or draining, and writes `memory_rotation {worker, nonreclaim_mb, eta_l
 the swarm stream. A worker's own drain or preemption at 85% / 93% does not wait for this budget.
 
 `memory.oom.group` (logged at start): when it is 1 on the job's cgroup, one OOM kill ends every
-process in it, so `oom_score_adj` does not help; only this ladder and the
-tool limits (`tool_memory_mb`) do.
+process in it, so `oom_score_adj` does not help; only this ladder does.
 
 ## The world on a moving host
 
@@ -331,7 +330,7 @@ the world stay on the host. In the container `/tmp` is a RAM tmpfs counted again
 job's memory, so nothing goes there: with `container_root: /work` the env file sets
 `WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`.
 `worker.sbatch` overrides `WORK_ROOT FLOCK_LLM_HOME` in the container with worker-id-free paths
-(`/work/flock/agents/{work,llm}`): a Pi session resumes only from the cwd it was written from, so an agent's workdir must not change when the controller relaunches
+(`/work/flock/agents/{work,llm}`): an agent's workdir must not change when the controller relaunches
 its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HOME,
 XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
 `FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.

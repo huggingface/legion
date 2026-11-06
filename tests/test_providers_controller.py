@@ -29,7 +29,6 @@ def pspec(providers=None, **types) -> SwarmSpec:
         "worker": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B", "replicas": 2,
                    "agents_per_worker": 2, "secrets": ["HF_TOKEN"]},
         "local": {"harness": "llm", "model": "gpu1:Qwen/Small", "replicas": 1},
-        "native": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 1},
     }
     return SwarmSpec.model_validate({"swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b",
                                      "providers": providers or PROVIDERS, "types": types})
@@ -51,7 +50,6 @@ async def test_provider_key_is_added_to_job_secrets(client, jobs, settings, tick
     by_type = {x["labels"]["type"]: x for x in jobs.launches}
     assert by_type["worker"]["secrets"] == {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf-x"}  # deduped
     assert by_type["local"]["secrets"] == {"FLOCK_TOKEN": TOKEN, "VLLM_API_KEY": "v-x"}
-    assert by_type["native"]["secrets"] == {"FLOCK_TOKEN": TOKEN}
     assert by_type["worker"]["spec"].resolved_model.provider.api_key_env == "HF_TOKEN"
 
 
@@ -91,7 +89,6 @@ async def test_self_hosted_is_free_and_status_shows_providers(client, clock, tic
     await client.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, agents))
     a = (await client.get("/agents/local-0000")).json()
     assert a["cost_usd"] == 0.0 and a["provider"] == "gpu1"
-    assert (await client.get("/agents/native-0000")).json()["provider"] is None
     st = (await client.get("/swarms/p")).json()
     assert st["spec"]["providers"]["gpu1"]["pricing"] == {"Qwen/Small": [0.0, 0.0, 0.0]}  # pinned
     gpu1 = st["status"]["providers"]["gpu1"]
@@ -150,7 +147,6 @@ def preflight_spec(**extra_types) -> SwarmSpec:
         "worker": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
         "worker2": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
         "local": {"harness": "llm", "model": "gpu1:Qwen/Small", "reasoning": "off"},
-        "native": {"harness": "pi", "model": "claude-opus-5-5"},
         **extra_types,
     })
 
@@ -176,7 +172,7 @@ async def test_preflight_tool_call_seen(preflight_client):
     rep = r.json()
     assert rep["ok"] is True
     by_model = {x["model"]: x for x in rep["results"]}
-    assert set(by_model) == {"hf:Qwen/Qwen3.8-27B", "gpu1:Qwen/Small"}  # native skipped
+    assert set(by_model) == {"hf:Qwen/Qwen3.8-27B", "gpu1:Qwen/Small"}
     assert by_model["hf:Qwen/Qwen3.8-27B"]["types"] == ["worker", "worker2"]  # one request, two types
     assert all(x["tool_call_seen"] and x["follow_up_ok"] and x["usage_reported"]
                and x["latency_ms"] is not None and x["warning"] is None for x in rep["results"])
@@ -274,14 +270,10 @@ async def test_preflight_probes_chat_completions_for_llm_types(preflight_client)
     assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
 
 
-def test_api_for_pi_speaks_chat_completions_on_openai_compat():
-    from flock.controller.preflight import api_for, models_to_probe
+def test_api_for_every_harness_is_chat_completions():
+    from flock.controller.preflight import api_for
     from flock.models import Harness
-    spec = pspec(preflight_providers(), **{h: {"harness": h, "model": "gpu1:Qwen/Small"}
-                                           for h in ("llm", "pi")})
-    assert [api_for(Harness(h)) for h in ("llm", "pi")] == ["chat_completions"] * 2
-    probes = {tuple(types): (api, choice) for _, types, api, choice in models_to_probe(spec)}
-    assert probes == {("llm", "pi"): ("chat_completions", None)}
+    assert [api_for(h) for h in Harness] == ["chat_completions"] * len(Harness)
 
 
 async def test_preflight_sends_harbor_models_as_harbors_pi_does(preflight_client):

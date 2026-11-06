@@ -357,7 +357,7 @@ async def gateway(hub, agent, tool, **args):
 async def test_board_news_rides_on_the_next_successful_flock_tool_call(tmp_path, board):
     from flock.tools.runner import Result
 
-    team = Team(tmp_path, board, ["cedar", "birch"], harness="pi")
+    team = Team(tmp_path, board, ["cedar", "birch"], harness="harbor")
     team.hub.poll_min_interval = 0.01
     team.hub.poll_cycle_s = 0.03
     team.spec.extended = True

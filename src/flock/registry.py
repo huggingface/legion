@@ -26,9 +26,6 @@ class HarnessEntry:
 
 
 HARNESSES: dict[str, HarnessEntry] = {
-    # @earendil-works/pi-coding-agent; installed only on pi workers (~20 s)
-    "pi": HarnessEntry("flock.worker.adapters.pi:make_adapter", "openai_compat", "chat_completions",
-                       "AGENTS.md", version="1.2.0"),
     # in-process chat-completions loop (docs/llm-harness.md)
     "llm": HarnessEntry("flock.worker.adapters.llm:make_adapter", "openai_compat",
                         "chat_completions", "AGENTS.md", sends_extra=True),

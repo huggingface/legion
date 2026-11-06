@@ -146,7 +146,7 @@ Different:
 3. **Secrets come from your shell.** The names a spec lists (`secrets:`, `api_key_env`,
    `msgboard_invite`) are read from the environment of `flock launch` and passed to the workers as
    env, as HF Jobs passes job secrets. Workers inherit your environment minus your own flock
-   connection settings (`FLOCK_*`, except `FLOCK_PI_CLI` and `FLOCK_PROMPTS_DIR`); the harness still gets only the allow-listed variables plus what the
+   connection settings (`FLOCK_*`, except `FLOCK_PROMPTS_DIR`); the harness still gets only the allow-listed variables plus what the
    worker passes.
 4. **Faster loop.** Reconcile every 1 s (jobs: 5 s; `FLOCK_RECONCILE_INTERVAL` overrides both)
    and worker heartbeats every 5 s (jobs: 30 s; a type's `env: {HEARTBEAT_INTERVAL: ...}`
@@ -164,10 +164,6 @@ Different:
    says so.
 8. **No sandbox.** Agents' `bash` runs as you, on your machine, starting in the agent's workdir
    but not confined to it. Use a container or a throwaway user for untrusted tasks.
-9. **The `pi` harness.** It uses the `pi` CLI on your `PATH` (or `FLOCK_PI_CLI`) and gets one
-   config dir per worker, `<run>/state/pi/<worker>` (`PI_CODING_AGENT_DIR`), because it writes
-   `models.json` for its type there; your `~/.pi/agent` is never touched, and its login is not
-   used. It is wired the same way as `llm` but not yet tested locally.
 
 A worker process that exits is noticed on the next reconcile pass and relaunched after
 `compute.crash_backoff` (2 s locally; docs/live.md "Worker liveness").

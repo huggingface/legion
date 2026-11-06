@@ -248,11 +248,3 @@ each kind of change:
 
 <the prompt>
 ```
-
-The `pi` harness reads its instructions file only at start. For it
-the note says which file to re-read (`your instructions in AGENTS.md changed; re-read them`,
-`your tools changed; re-read the Tools section of AGENTS.md`).
-
-A running `pi` agent takes a provider's new endpoint list (`base_urls`), model id or
-reasoning level at its next Pi start: models.json is rewritten then, and a transport error
-or turn timeout restarts Pi. A change of the provider's `api_key_env` needs a worker restart.

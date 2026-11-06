@@ -13,7 +13,6 @@ import yaml
 from typer.testing import CliRunner
 
 from flock import cli
-from flock.comms.tools import tool_def
 from flock.live import (
     diff_specs,
     keep_replicas,
@@ -260,28 +259,6 @@ async def test_a_new_system_prompt_applies_at_the_next_turn_with_a_note(tmp_path
     await rt.prompt("four")
     await until(lambda: adapter.sent[-1].endswith("four"))
     assert adapter.sent[-1] == "four"  # once
-    await rt.stop()
-
-
-async def test_cli_harness_gets_a_tools_note_when_its_tools_change(tmp_path):
-    tools = [tool_def("comms:read")]
-
-    def box() -> Toolset:
-        return Toolset(version=None, dir=None, swarm="sw", type="researcher",
-                       data_dir=tmp_path / "data", tools=tuple(tools))
-
-    rt, adapter = runtime(tmp_path, harness="pi")
-    rt.toolbox = box
-    await rt.setup(restore=False)
-    await rt.prompt("one")
-    await until(lambda: rt.state.turns == 1)
-    assert "`read`" in (rt.workdir / "AGENTS.md").read_text() and adapter.sent == ["one"]
-    tools.append(tool_def("comms:post"))
-    await rt.prompt("two")
-    await until(lambda: adapter.sent[-1].endswith("two"))
-    assert "`post`" in (rt.workdir / "AGENTS.md").read_text()
-    assert adapter.sent[-1] == ("[flock] Since your last turn: your tools changed; re-read the "
-                                "Tools section of AGENTS.md.\n\ntwo")
     await rt.stop()
 
 

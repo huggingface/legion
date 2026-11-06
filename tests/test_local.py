@@ -422,29 +422,14 @@ def test_run_local_refuses_a_jobs_spec(tmp_path):
 # --------------------------------------------------------------------------- review of #13
 
 
-def test_local_env_keeps_harness_overrides_and_isolates_pi(tmp_path):
-    from flock.worker.adapters.pi import PiModelConfig, write_models_json
-
-    home = tmp_path / "home"
-    user_pi = home / ".pi" / "agent"
-    user_pi.mkdir(parents=True)
-    (user_pi / "models.json").write_text('{"providers": {"mine": {}}}')
-    base = {"HOME": str(home), "FLOCK_PI_CLI": "/c/pi", "FLOCK_PROMPTS_DIR": "/p", "FLOCK_URL": "http://mine", "FLOCK_TOKEN": "my-token",
-            "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
+def test_local_env_keeps_harness_overrides_and_drops_the_callers_flock_env(tmp_path):
+    base = {"HOME": str(tmp_path), "FLOCK_PROMPTS_DIR": "/p", "FLOCK_URL": "http://mine",
+            "FLOCK_TOKEN": "my-token", "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
     jobs = LocalJobsClient(root=tmp_path / "run", base_env=base)
     a = jobs.process_env({"WORKER_ID": "s-a-w0000", "TYPE": "a"}, {})
-    b = jobs.process_env({"WORKER_ID": "s-b-w0000", "TYPE": "b"}, {})
-    for k in ("FLOCK_PI_CLI", "FLOCK_PROMPTS_DIR"):
-        assert a[k] == base[k]  # documented executable overrides survive
+    assert a["FLOCK_PROMPTS_DIR"] == base["FLOCK_PROMPTS_DIR"]  # documented override survives
     for k in ("FLOCK_URL", "FLOCK_TOKEN", "FLOCK_AGENT_TOKEN", "FLOCK_CURRENT"):
         assert k not in a  # the caller's connection and auth never reach a worker
-    pa, pb = Path(a["PI_CODING_AGENT_DIR"]), Path(b["PI_CODING_AGENT_DIR"])
-    assert pa != pb and tmp_path / "run" in pa.parents and tmp_path / "run" in pb.parents
-    write_models_json(pa, PiModelConfig("http://a/v1", "KA", "model-a", "a"))
-    write_models_json(pb, PiModelConfig("http://b/v1", "KB", "model-b", "b"))
-    assert list(json.loads((pa / "models.json").read_text())["providers"]) == ["a"]
-    assert list(json.loads((pb / "models.json").read_text())["providers"]) == ["b"]
-    assert json.loads((user_pi / "models.json").read_text()) == {"providers": {"mine": {}}}
 
 
 def _pid_dead(pid: int) -> bool:

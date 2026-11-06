@@ -5,7 +5,7 @@ by the names in `api_key_env`). Each probe is two streamed turns, the way a harn
 one asks the model to call a trivial tool; turn two sends the model's output back with the tool's
 result and must complete. A server that accepts turn one but fails the follow-up (the HF router's
 auto provider choice did, 2026-10-16) fails preflight. Zero reported usage is a warning. Every
-harness speaks Chat Completions (`llm`, `pi`, `harbor`), so models are probed there, non-streamed
+harness speaks Chat Completions (`llm`, `harbor`), so models are probed there, non-streamed
 with the alias's `extra`, as the llm harness sends them; a tool call the model writes as text
 (which the llm harness accepts) passes with a warning.
 """
@@ -177,7 +177,7 @@ async def probe(
 
 
 def api_for(harness: Harness) -> str:
-    """The wire API a type's harness speaks to its provider (`llm` and Pi: chat completions)."""
+    """The wire API a type's harness speaks to its provider (both: chat completions)."""
     return HARNESSES[harness].api
 
 

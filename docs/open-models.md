@@ -17,27 +17,24 @@ providers:                       # where models are served
 models:                          # optional aliases and per-model settings
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
-  worker:  {harness: pi, model: "hf:Qwen/Qwen3.8-27B:deepinfra"}  # provider-prefixed, router provider pinned
-  analyst: {harness: pi, model: qwen-27b}                  # alias into models:
-  writer:  {harness: pi, model: anthropic/claude-opus-5-5} # harness-native id (Pi's own providers)
+  worker:  {harness: llm, model: "hf:Qwen/Qwen3.8-27B:deepinfra"}  # provider-prefixed, router provider pinned
+  analyst: {harness: llm, model: qwen-27b}                  # alias into models:
 ```
 
 `examples/open-models.yaml` is a complete spec. A type's `model` is looked up as an alias first,
 then as `<provider>:<model id>` (split on the first colon, so `hf:Qwen/Qwen3.8-27B:ovhcloud`
-sends `Qwen/Qwen3.8-27B:ovhcloud` to the router), then taken as a harness-native id. Field names
+sends `Qwen/Qwen3.8-27B:ovhcloud` to the router); every type needs a provider. Field names
 match swarmlab's providers, so a `providers:` block can be copied between the two.
 
 `flock launch` rejects, naming the type and field: an unknown provider prefix, a `models:` entry
-whose prefix is unknown, a provider-backed model without a price (unless `self_hosted`), and a
+whose prefix is unknown, a model with no provider, a provider-backed model without a price (unless `self_hosted`), and a
 harness on the wrong kind of provider.
 
 ## Which harness on which provider
 
 | harness | provider `type` | API the server must serve | `base_url` |
 |---|---|---|---|
-| `pi` | `openai_compat` | OpenAI Chat Completions (Pi's `openai-completions`) | required, ends in `/v1` |
 | `llm` | `openai_compat` (required) | OpenAI **Chat Completions** (`POST {base_url}/chat/completions`, not streamed) | required, ends in `/v1` |
-| pi | none (native id) | the harness's own vendor | - |
 
 ## Pointing a swarm at vLLM
 
@@ -95,13 +92,12 @@ worker.
 
 ## Reasoning
 
-A type's `reasoning` (`off`, `low`, `medium`, `high`) overrides its alias's; Pi gets it as its
-thinking level (docs/pi.md). Whether a server honours the effort is up to the
-server; Qwen3 on vLLM turns thinking off through the chat template, not the effort. `extra`
-(raw request-body fields such as `chat_template_kwargs`) is accepted for swarmlab compatibility
-but Pi cannot send body fields, so for it it is not used; set such
-defaults on the server (vLLM can set default chat-template arguments at startup). The `llm`
-harness does send `extra`, merged into every request body, and ignores `reasoning`
+A type's `reasoning` (`off`, `low`, `medium`, `high`) overrides its alias's. Whether a server
+honours the effort is up to the server; Qwen3 on vLLM turns thinking off through the chat
+template, not the effort. `extra` (raw request-body fields such as `chat_template_kwargs`) is
+accepted for swarmlab compatibility; a harness that cannot send body fields (`harbor`) does not
+use it, so set such defaults on the server (vLLM can set default chat-template arguments at
+startup). The `llm` harness does send `extra`, merged into every request body, and ignores `reasoning`
 (docs/llm-harness.md).
 
 ## Cost
@@ -180,7 +176,3 @@ escape hatch: report only, no queueing.
 - Cost on the HF router: the working router providers stream zero usage, so it shows as $0 with
   the zero-usage warning.
 
-
-Pi also supports `base_urls` for multiple servers of one model. Agents are spread
-by a stable name hash, and their model config directories are separate when more
-than one endpoint is configured. See [pi.md](pi.md).

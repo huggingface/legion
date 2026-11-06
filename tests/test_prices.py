@@ -72,17 +72,11 @@ def test_haiku_5_5_matches_claude_code_estimate():
 
 
 def test_provider_qualified_ids():
-    """Pi reports `provider/model` (review 2026-10-16 finding 3, pi_price_repro.py: 1M input
-    tokens of anthropic/claude-haiku-5-5 were billed $15 at the default row instead of $0.10)."""
-    from flock.worker.adapters.pi import PiMapper
-
-    mapper = PiMapper("anthropic/claude-haiku-5-5")
-    [_, usage] = mapper.on_record({"type": "message_end", "message": {
-        "role": "assistant", "provider": "anthropic", "model": "claude-haiku-5-5",
-        "usage": {"input": 1_000_000}}})
-    assert usage.model == "anthropic/claude-haiku-5-5"  # the event keeps the qualified id
-    assert prices.cost_usd({usage.model: usage.usage}) == prices.cost_usd(
-        {"claude-haiku-5-5": usage.usage}) == pytest.approx(0.10)
+    """A harness may report `provider/model` (review 2026-10-16 finding 3: 1M input tokens of
+    anthropic/claude-haiku-5-5 were billed $15 at the default row instead of $0.10)."""
+    u = TokenUsage(input=1_000_000)
+    assert prices.cost_usd({"anthropic/claude-haiku-5-5": u}) == prices.cost_usd(
+        {"claude-haiku-5-5": u}) == pytest.approx(0.10)
     # prefix rows apply after the provider too; the full id is tried first
     assert prices.price_for("anthropic/claude-sonnet-5-5-20261001") == prices.PRICES["claude-sonnet-5-5"]
     assert prices.price_for("x/mystery") == prices.PRICES["default"]

@@ -210,11 +210,7 @@ EXTRA_NOT_SENT = frozenset(name for name, h in HARNESSES.items() if not h.sends_
 
 
 def extra_warnings(spec: SwarmSpec) -> list[str]:
-    from flock.worker.adapters.pi import env_dropped
-
-    return [f"warning: types.{name}.env.{k}: dropped by pi isolation (use `secrets`)"
-            for name, ts in spec.types.items() if ts.harness.value == "pi"
-            for k in env_dropped(ts.env, ts.resolved_model and ts.resolved_model.provider.api_key_env)] + [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
+    return [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
             f"{ts.harness.value} harness (docs/open-models.md)"
             for name, ts in spec.types.items()
             if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None

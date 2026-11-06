@@ -105,9 +105,8 @@ class TypeHealth(StrEnum):
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*-\d{4,}$")
 TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-# Provider names prefix model strings ("hf:Qwen/...") and become Codex `model_providers.<name>`
-# keys, so no dots and no colons. A model string whose prefix does not look like this
-# (e.g. Bedrock's "anthropic.claude-...-v1:0") is a harness-native id, not a provider reference.
+# Provider names prefix model strings ("hf:Qwen/..."), so no dots and no colons. A model string
+# whose prefix does not look like this names no provider.
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOOLS_VERSION_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -137,7 +136,7 @@ class ProviderSpec(BaseModel):
     # Several servers of one model (openai_compat, the `llm` harness): each agent is pinned to one
     # by a stable hash of its name (rendezvous hashing) and keeps it while it stays listed, so
     # its prefix cache stays warm. `base_url` is the one-element form; with `base_urls` it
-    # defaults to the first. Pi also hashes by agent; other harnesses use `base_url`.
+    # defaults to the first; other harnesses use `base_url`.
     base_urls: list[str] | None = None
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
@@ -214,8 +213,8 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only: Pi cannot
-    # add body fields, so for it it is kept for spec portability.
+    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only; kept for
+    # spec portability elsewhere.
     extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
@@ -285,6 +284,7 @@ REMOVED: dict[str, set[str]] = {
     "LoopSpec": {"first", "context", "stagger", "stop_when"},
     "LoopWhile": {"idle_rounds", "score"},
     "LoopFinal": {"add_tools"},
+    "TypeSpec": {"tool_memory_mb", "node_heap_mb"},  # the removed pi harness's memory limits
 }
 _warned: set[tuple[str, str]] = set()
 
@@ -570,7 +570,7 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
 
 
 class WorkdirSpec(_Removable):
-    """Workdir size feedback and throwaway dirs (docs/pi.md "Workdir"). Sizes count what the
+    """Workdir size feedback and throwaway dirs (docs/design.md "Workdir"). Sizes count what the
     bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
     a note naming its largest dirs (at most hourly); above `max_*` (default 5x soft) a
     `workdir_over_quota` event too. Nothing is ever refused: the workdir still syncs."""
@@ -744,12 +744,12 @@ class HarborSpec(BaseModel):
     folders: str | None = None
 
 
-class TypeSpec(BaseModel):
+class TypeSpec(_Removable):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
     harness: Harness
     # Resolution order (design.md section 5): an alias under `models:`, else "<provider>:<id>"
-    # with the prefix under `providers:`, else a harness-native id (v1 behaviour).
+    # with the prefix under `providers:`; SwarmSpec refuses a model that names no provider.
     model: str
     reasoning: Reasoning | None = None  # overrides the alias's reasoning
     image: str | None = None  # None -> default worker image
@@ -808,10 +808,6 @@ class TypeSpec(BaseModel):
     workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
     worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
-    # Memory (docs/pi.md "Memory"): RLIMIT_DATA (MB) on every tool command of a Pi agent
-    # (through BASH_ENV); Pi's V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
-    tool_memory_mb: int | None = None
-    node_heap_mb: int | None = None
     msgboard_invite: str | None = None  # name of the secret holding the invite code
     # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
     # `flock launch` refuses a name the folder does not define. None: no folder tools.
@@ -827,7 +823,7 @@ class TypeSpec(BaseModel):
     # harness harbor only (and required there): written by the compile step
     harbor: HarborSpec | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
-    # replaced. None means a harness-native model.
+    # replaced. None until the type is validated inside a SwarmSpec.
     resolved_model: ResolvedModel | None = None
 
     @property
@@ -1125,11 +1121,9 @@ class SwarmSpec(BaseModel):
             if ts.harness != Harness.llm and any(getattr(ts, f) is not None for f in llm_only):
                 raise ValueError(f"types.{type_name}: {', '.join(llm_only)} are for harness llm only")
             if r is None:
-                if ts.harness == Harness.llm:
-                    raise ValueError(
-                        f"types.{type_name}.model: harness 'llm' needs a provider-backed model "
-                        f"('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
-                continue
+                raise ValueError(
+                    f"types.{type_name}.model: harness {ts.harness.value!r} needs a provider-backed "
+                    f"model ('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
             want = HARNESSES[ts.harness].provider_type
             if r.provider.type != want:
                 raise ValueError(
@@ -1251,14 +1245,14 @@ class SwarmSpec(BaseModel):
 
 def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?") -> ResolvedModel | None:
     """Resolve a type's `model`: alias under `models:` -> "<provider>:<id>" with the prefix
-    under `providers:` -> harness-native id (returns None). Raises ValueError naming the type
+    under `providers:`; None when it names no provider. Raises ValueError naming the type
     and field for an unknown provider prefix or a provider-backed model with no price."""
     where = f"types.{type_name}.model"
     alias = spec.models.get(type_spec.model)
     target = alias.model if alias else type_spec.model
     prefix, sep, model_id = target.partition(":")
     if not sep or not PROVIDER_NAME_RE.match(prefix):
-        return None  # harness-native id
+        return None  # names no provider
     if prefix not in spec.providers:
         raise ValueError(f"{where}: unknown provider {prefix!r} in {target!r}; declare it under "
                          f"providers: (known: {sorted(spec.providers)}) or use a model alias")

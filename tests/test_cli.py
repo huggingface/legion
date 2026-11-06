@@ -237,14 +237,6 @@ def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     assert store.spec_history("demo")[1]["source"]["by"] == "carlos"
 
 
-def test_extra_warnings_flags_pi_env_dropped_by_isolation():
-    from flock.models import SwarmSpec
-
-    spec = SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b", "types": {
-        "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}}}})
-    assert ops.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
-
-
 def test_hidden_world_app_and_plain_help():
     """run5-era Slurm world jobs call `flock world serve`; help is not re-wrapped by rich."""
     r = runner.invoke(cli.app, ["world", "serve", "--help"])

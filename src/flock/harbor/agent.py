@@ -86,7 +86,7 @@ def read_turn(path):
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") == "compaction_end":  # Pi's summary call, as adapters/pi.py counts it
+        if event.get("type") == "compaction_end":  # Pi's summary call counts too
             usage += pi_tokens((event.get("result") or {}).get("usage"))
             continue
         if event.get("type") != "message_end":

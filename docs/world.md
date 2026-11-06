@@ -87,9 +87,6 @@ response.
 
 - **The model sees** the world's tools exactly like folder tools:
   - the `llm` harness offers them as function tools next to `bash` (and `done`);
-  - the `pi` harness lists them in the generated Tools section of `AGENTS.md`, and
-    the agent calls them with `flock-tool <name> --json '<args>'` through the worker's local
-    gateway.
 - **The World section.** A `## World: <name> (version X)` section in the instructions names the
   world and its tools, with the manifest's `description`.
 - **Calls.** The arguments are checked against the tool's schema before the world is called. A

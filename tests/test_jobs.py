@@ -15,7 +15,6 @@ import pytest
 from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
     HF_HUB_VERSION,
-    PI_VERSION,
     WORKER_COMMAND,
     HubJobsClient,
     bootstrap_command,
@@ -34,15 +33,13 @@ def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
     cmd = bootstrap_command()
     assert cmd[:2] == ["bash", "-c"]
     script = cmd[2]
-    assert f"@earendil-works/pi-coding-agent@{PI_VERSION}" in script
     assert "astral.sh/uv/install.sh" in script
     assert 'hf buckets cp "$1" "$2"' in script and 'fetch "$FLOCK_WHEEL_URL"' in script
     assert "download_bucket_files" in script  # Python API fallback
     assert 'uv tool install -q "$WHEEL[worker]"' in script and "pip install" in script
-    for env in ("WORK_ROOT=/work/agents", "PI_CODING_AGENT_DIR=/state/pi"):
-        assert env in script
+    assert "WORK_ROOT=/work/agents" in script and "pi" not in script.split()
     assert script.rstrip().endswith("exec flock-worker")
-    assert "{" + "pi}" not in script and "{" + "hub}" not in script  # all pins filled in
+    assert "{" + "hub}" not in script  # the pin is filled in
     f = tmp_path / "bootstrap.sh"
     f.write_text(script)
     subprocess.run(["bash", "-n", str(f)], check=True)
@@ -54,17 +51,6 @@ def _client(monkeypatch, image, bootstrap_env=None, wheel=WHEEL) -> HubJobsClien
     else:
         monkeypatch.setenv("FLOCK_WORKER_BOOTSTRAP", bootstrap_env)
     return HubJobsClient(token="x", image=image, wheel_url=wheel)
-
-
-def test_bootstrap_installs_pi_only_on_pi_workers(monkeypatch):
-    script = bootstrap_command()[2]
-    assert 'if [ "${FLOCK_HARNESS:-}" = pi ]' in script
-    assert f"@earendil-works/pi-coding-agent@{PI_VERSION}" in script
-    for env in ("PI_CODING_AGENT_DIR=/state/pi", "PI_OFFLINE=1", "PI_TELEMETRY=0", "FLOCK_PI_CLI="):
-        assert env in script
-    c = _client(monkeypatch, image=None)
-    args = c.launch_args(TypeSpec(harness="pi", model="m"), {"WORKER_ID": "w"})
-    assert args["env"]["FLOCK_HARNESS"] == "pi"
 
 
 MSGBOARD = "msgboard-0.1.0-py3-none-any.whl"
@@ -85,13 +71,12 @@ def fake_wheel(path: Path, requires: tuple[str, ...] = ()) -> Path:
     return path
 
 
-@pytest.mark.parametrize("harness", ["pi", "harbor"])
+@pytest.mark.parametrize("harness", ["llm", "harbor"])
 def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness):
-    """The bootstrap script on stubs (uv, hf from a local bucket, npm, curl, mkdir, flock,
+    """The bootstrap script on stubs (uv, hf from a local bucket, curl, mkdir, flock,
     flock-worker). A harbor worker installs flock[harbor] on Python 3.12 with uv.lock's versions
     as constraints and msgboard overridden to the wheel shipped next to flock's (never its
-    private git source), gets shepherd's git credential helper for huggingface.co, and no Pi
-    CLI (Pi runs inside each Trial's environment)."""
+    private git source) and gets shepherd's git credential helper for huggingface.co."""
     stubs, log, bucket = tmp_path / "stubs", tmp_path / "calls.log", tmp_path / "bucket"
     wheels = tmp_path / "wheels"  # the script's /opt/wheels
     (bucket / "ns/sh/dist").mkdir(parents=True)
@@ -108,7 +93,7 @@ def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness):
         ("uv", 'for a; do [ "${prev:-}" = --overrides ] && cat "$a" >> LOG; prev=$a; done'),
         ("hf", f'cp "{bucket}/${{3#hf://buckets/}}" "$4"'),
         ("flock-worker", FILL),
-        *((name, "") for name in ("npm", "curl", "mkdir", "flock")),
+        *((name, "") for name in ("curl", "mkdir", "flock")),
     ]:
         (stubs / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n'
                                   + body.replace("LOG", str(log)) + "\n")
@@ -120,8 +105,7 @@ def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness):
                        capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, r.stderr
     calls = log.read_text().splitlines()
-    assert any(c.startswith("npm i -g") for c in calls) == (harness == "pi")
-    if harness == "pi":
+    if harness == "llm":
         assert f"uv tool install -q {wheels}/w.whl[worker] --with huggingface_hub=={HF_HUB_VERSION}" in calls
         assert calls[-1] == "flock-worker "  # no git helper
         return

@@ -40,7 +40,7 @@ LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": f"{LOCAL_HEARTBEAT_INTERVAL.total_se
                       "PYTHONUNBUFFERED": "1"}
 # The caller's own flock connection and auth never leak into a worker (it gets the
 # controller's): FLOCK_* is dropped except these documented harness settings.
-KEEP_FLOCK_ENV = frozenset({"FLOCK_PI_CLI", "FLOCK_PROMPTS_DIR"})
+KEEP_FLOCK_ENV = frozenset({"FLOCK_PROMPTS_DIR"})
 STOP_GRACE = 5.0  # s between SIGTERM and SIGKILL on cancel
 # s a harbor worker gets instead, also at its job timeout: on SIGTERM it cancels its Trials and
 # waits up to 60 s (adapters/harbor.py CANCEL_WAIT) for their environments to stop; a SIGKILL
@@ -147,13 +147,9 @@ class LocalJobsClient:
         base = dict(os.environ if self.base_env is None else self.base_env)
         base = {k: v for k, v in base.items()
                 if not k.startswith("FLOCK_") or k in KEEP_FLOCK_ENV}
-        slot = env.get("WORKER_ID") or env.get("TYPE") or "worker"
         local = {
             "WORK_ROOT": str(self.work_root),
             "FLOCK_LLM_HOME": str(self.root / "state" / "llm"),
-            # Pi writes models.json for its worker's type into this dir: one per worker slot
-            # (a slot hosts one type), never the operator's ~/.pi/agent.
-            "PI_CODING_AGENT_DIR": str(self.root / "state" / "pi" / slot),
             # The worker exits when the controller process is gone (no orphans after a kill -9).
             "FLOCK_LOCAL_PARENT_PID": str(os.getpid()),
         }

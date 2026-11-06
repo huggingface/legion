@@ -7,7 +7,7 @@ casually: controller, worker and CLI all import it.
 ## Layout
 - `src/flock/models.py` — shared pydantic contracts (spec, heartbeat, commands, API shapes).
 - `src/flock/controller/` — FastAPI app, SQLite store, reconcile loop, HF Jobs client, status page.
-- `src/flock/worker/` — worker loop, harness adapters (`pi`, `llm`, `harbor`; see docs/pi.md, docs/llm-harness.md), bucket sync, msgboard identity, comms hub (docs/comms.md).
+- `src/flock/worker/` — worker loop, harness adapters (`llm`, `harbor`; see docs/llm-harness.md), bucket sync, msgboard identity, comms hub (docs/comms.md).
 - `src/flock/comms/` — msgboard client, the built-in comms tools and their rules (docs/comms.md).
 - `src/flock/cli.py` — `flock` CLI (typer) over the controller API.
 - `experiments/` — milestone-1 experiments (resume gate, packing measurement) with their results as markdown.

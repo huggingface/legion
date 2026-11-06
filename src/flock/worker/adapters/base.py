@@ -65,7 +65,7 @@ def minimal_env(
 
 def credential_env_names(spec: TypeSpec) -> list[str]:
     """Every environment variable through which a harness process holds its provider key: the
-    provider's `api_key_env` (Pi and llm read it themselves). Tool calls (`flock-tool`,
+    provider's `api_key_env` (the harness reads it itself). Tool calls (`flock-tool`,
     docs/tools.md) get none of them. Empty for a harness-native model, whose keys are ordinary
     declared `secrets`."""
     r = spec.resolved_model

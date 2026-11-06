@@ -1,6 +1,6 @@
 # flock
 
-Host coding-harness agent swarms (Pi, Harbor Trials) on Hugging Face Jobs: keep
+Host coding-harness agent swarms (Harbor Trials, an in-process `llm` loop) on Hugging Face Jobs: keep
 them alive, prompt them, watch them. One controller, N worker jobs, up to 200
 agents per worker. Declare a swarm in YAML and the controller keeps it running,
 the way Kubernetes keeps pods running.
@@ -16,7 +16,7 @@ them.
   (background controller, workers as subprocesses, run bundle);
   `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
 - **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
-  and one or more agent types. Each type sets the harness (`pi`, `llm` or `harbor`), model,
+  and one or more agent types. Each type sets the harness (`llm` or `harbor`), model,
   replicas, system prompt, job flavor, agents per worker, worker lifetime, idle grace,
   per-prompt `max_turns` and `max_budget_usd` (enforced by the worker).
   `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
@@ -78,7 +78,6 @@ Supported harnesses:
 
 | `harness` | What runs | Providers | Notes |
 |---|---|---|---|
-| `pi` | `pi --mode rpc` | native, `openai_compat` | [docs/pi.md](docs/pi.md) |
 | `llm` | in-process Chat Completions loop: `bash` plus the type's [tools folder](docs/tools.md) functions | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
 
 ## Usage
@@ -138,7 +137,7 @@ uv run flock-controller          # http://127.0.0.1:7860
 ```
 
 Workers bootstrap from a stock `node:22-bookworm` image: they install the
-pinned harness CLI and the wheel from the bucket. Every secret a spec names
+wheel from the bucket. Every secret a spec names
 must be in the controller's environment.
 
 One key, three places. The names differ only for the Anthropic key:
@@ -158,12 +157,15 @@ Running the controller locally, export the middle column (`ANTHROPIC_API_KEY`).
 swarm: demo
 namespace: <you>
 bucket: hf://buckets/<you>/flock/demo
+providers:
+  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+       pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}
 types:
   scribe:
-    harness: pi
-    model: anthropic/claude-haiku-5-5   # one of Pi's built-in providers
+    harness: llm
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
     system_prompt_file: prompts/scribe.md
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    secrets: [HF_TOKEN]
     replicas: 100
     agents_per_worker: 50
     max_budget_usd: 0.05
@@ -179,7 +181,7 @@ providers:
 models:
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
-  analyst: {harness: pi, model: qwen-27b, replicas: 50}
+  analyst: {harness: llm, model: qwen-27b, replicas: 50}
 ```
 
 ```sh

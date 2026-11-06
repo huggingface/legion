@@ -241,7 +241,7 @@ The worker image and the bootstrap put the `flock` CLI on PATH (same package). I
 names are always agent names.
 
 **Through the worker.** When the agent's pin file (`FLOCK_TOOLS_PIN`) names the worker's
-gateway (the `pi` harness), each call goes there as `controller:request
+gateway, each call goes there as `controller:request
 {method, path, params, json}`. The worker accepts only the routes an agent token may use:
 
 | Method | Path |

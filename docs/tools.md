@@ -206,31 +206,6 @@ call written as text (`{"name": "run_bot", "arguments": {...}}`, or `[run_bot(pa
 accepted for folder tools as for `bash`. Output is trimmed to `tool_output_chars` like bash
 output.
 
-**`pi`.** The worker appends a generated section to the agent's
-`AGENTS.md` (between `<!-- flock:tools -->` markers, rewritten when the version
-changes, at the next harness start) listing each tool with its description and one example:
-
-```
-- `run_bot`: Run a bot script on a conversation and return its replies.
-  Example: `flock-tool run_bot --json '{"path": "...", "messages": ["..."]}'`
-```
-
-The agent calls them from its shell with `flock-tool NAME --json '<args>'` (`--json -` reads
-stdin; `flock-tool --list` prints the schemas). It prints the result and exits 0, or prints
-`{"error": ...}` and exits 1. `flock-tool` is installed with flock (on `PATH` in the worker image)
-and finds the agent's tools through `FLOCK_TOOLS_PIN`, which the worker sets in every harness
-env from the process's start. The worker rewrites that pin file at each turn boundary (when a
-prompt starts a turn): a new version, tools enabled mid-burst and tools disabled (an empty
-toolset: calls fail with `unknown tool`) all reach a running harness at its next turn, without
-a restart. A prompt that arrives before the harness has reported the turn it already started
-joins that turn and keeps its pin. The call's environment is the harness env minus the
-provider key (`api_key_env`; the pin lists it) and `FLOCK_TOKEN`, the same
-rule as for `llm` tools. A harness-native model's key (e.g. `secrets: [ANTHROPIC_API_KEY]`
-with no provider) is an ordinary declared secret and is not filtered. The generated section
-is added after the spec's system prompt, also in a workdir restored with an older file.
-Not yet: MCP for the CLI harnesses (the model sees the tools through the instructions file, not
-as native tools).
-
 ## Limits
 
 | What | Limit |

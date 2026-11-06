@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from flock.models import TypeSpec
-from flock.registry import HARNESSES
 
 TERMINAL_STAGES = frozenset({"COMPLETED", "CANCELED", "ERROR", "DELETED"})
 WORKER_COMMAND = ["flock-worker"]
@@ -18,24 +17,19 @@ WORKER_COMMAND = ["flock-worker"]
 # Unset (or FLOCK_WORKER_BOOTSTRAP=1): bootstrap mode, see `bootstrap_command`.
 DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
-# Bootstrap mode: no prebuilt image. A stock Node image installs the pinned Pi CLI (pi types), uv
-# and the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then runs
-# the worker. Versions match Dockerfile.worker, which stays the eventual path. Harbor types get
-# `flock[harbor]` on a uv-managed Python 3.12 instead, with msgboard's wheel and uv.lock's
-# versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh --harbor).
-# Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
+# Bootstrap mode: no prebuilt image. A stock image installs uv and the flock wheel at job start
+# (about 10 s, experiments/common/job_bootstrap.sh), then runs the worker. Versions match
+# Dockerfile.worker, which stays the eventual path. Harbor types get `flock[harbor]` on a
+# uv-managed Python 3.12 instead, with msgboard's wheel and uv.lock's versions from
+# harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh --harbor).
+# shortcut: a Node image (it was for the Pi CLI); any image with curl works, switch when retested
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
-PI_VERSION = HARNESSES["pi"].version
 HF_HUB_VERSION = "2.2.0"
 
 _BOOTSTRAP = r"""set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
 t0=$(date +%s)
 command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 >/dev/null; }
-if [ "${FLOCK_HARNESS:-}" = pi ]; then
-  npm i -g --silent @earendil-works/pi-coding-agent@{pi} >/dev/null 2>&1
-  export FLOCK_PI_CLI="$(command -v pi)"
-fi
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 uv tool install -q huggingface_hub=={hub} >/dev/null 2>&1
 mkdir -p /opt/wheels
@@ -77,9 +71,9 @@ fi
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export WORK_ROOT=/work/agents
-export FLOCK_LLM_HOME=/state/llm PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
+export FLOCK_LLM_HOME=/state/llm
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/pi /state/llm
+mkdir -p /work/agents /state/llm
 echo "bootstrap: $(($(date +%s) - t0)) s"  # flock-worker logs the Python it runs on
 exec flock-worker
 """
@@ -91,13 +85,7 @@ def bootstrap_mode(image: str | None = DEFAULT_WORKER_IMAGE) -> bool:
 
 def bootstrap_command() -> list[str]:
     """`bash -c <script>` for BOOTSTRAP_IMAGE; the job env must carry FLOCK_WHEEL_URL."""
-    script = _BOOTSTRAP
-    for key, value in {
-        "pi": PI_VERSION,
-        "hub": HF_HUB_VERSION,
-    }.items():
-        script = script.replace("{" + key + "}", shlex.quote(value))
-    return ["bash", "-c", script]
+    return ["bash", "-c", _BOOTSTRAP.replace("{hub}", shlex.quote(HF_HUB_VERSION))]
 
 
 @dataclass

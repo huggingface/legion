@@ -41,34 +41,27 @@ def err(types: dict, **kw) -> str:
 
 def test_example_spec_resolves():
     s = SwarmSpec.model_validate(yaml.safe_load(EXAMPLE.read_text()))
-    w, a, wr = s.types["worker"], s.types["analyst"], s.types["writer"]
+    w, a = s.types["worker"], s.types["analyst"]
     assert (w.provider_name, w.harness_model, w.resolved_model.pricing) == (
         "hf", "Qwen/Qwen3.8-27B:deepinfra", [0.2, 2.5, 0.2])  # router provider pinned
     assert (a.provider_name, a.harness_model, a.effective_reasoning) == (
         "gpu1", "Qwen/Qwen3.8-27B-FP8", "medium")
     assert a.resolved_model.extra == {"chat_template_kwargs": {"enable_thinking": False}}
-    assert wr.resolved_model is None and wr.harness_model == "anthropic/claude-opus-5-5"
 
 
-def test_resolution_order_alias_then_prefix_then_native():
+def test_resolution_order_alias_then_prefix():
     s = spec({
         "a": {"harness": "llm", "model": "qwen-27b"},
         "b": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
-        "c": {"harness": "pi", "model": "gpt-5.5-codex"},
-        "e": {"harness": "pi", "model": "anthropic.claude-opus-v1:0"},  # Bedrock-style id
     })
     assert s.types["a"].resolved_model.qualified == "gpu1:Qwen/Qwen3.8-27B-FP8"
     assert s.types["b"].resolved_model.qualified == "hf:Qwen/Qwen3.8-27B"
-    assert s.types["c"].resolved_model is None
-    assert s.types["e"].resolved_model is None
     assert resolve_model(s, s.types["b"]).provider.base_url == "https://router.huggingface.co/v1"
 
 
 def test_type_reasoning_overrides_alias():
-    s = spec({"a": {"harness": "llm", "model": "qwen-27b", "reasoning": "off"},
-              "n": {"harness": "pi", "model": "gpt-5.5-codex", "reasoning": "high"}})
+    s = spec({"a": {"harness": "llm", "model": "qwen-27b", "reasoning": "off"}})
     assert s.types["a"].effective_reasoning == "off"
-    assert s.types["n"].effective_reasoning == "high"
 
 
 def test_router_suffix_stays_in_model_id():
@@ -126,7 +119,6 @@ def test_hand_written_resolved_model_is_replaced():
 
 
 @pytest.mark.parametrize(("harness", "model", "needs"), [
-    ("pi", "anth:claude-opus-5-5", "openai_compat"),
     ("llm", "anth:claude-opus-5-5", "openai_compat"),
 ])
 def test_harness_provider_compatibility(harness, model, needs):
@@ -134,10 +126,14 @@ def test_harness_provider_compatibility(harness, model, needs):
     assert "types.t1.model" in msg and f"needs a provider of type {needs}" in msg
 
 
-def test_native_models_are_always_fine():
-    s = spec({"c": {"harness": "pi", "model": "claude-opus-5-5"},
-              "x": {"harness": "pi", "model": "gpt-5.5-codex"}}, providers={}, models={})
-    assert all(t.resolved_model is None for t in s.types.values())
+@pytest.mark.parametrize("harness", ["llm", "harbor"])
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "anthropic.claude-opus-v1:0"])  # Bedrock-style
+def test_a_model_without_a_provider_is_refused(harness, model):
+    t = {"harness": harness, "model": model}
+    if harness == "harbor":
+        t["harbor"] = {"task": {}, "config": {}}
+    msg = err({"c": t}, providers={}, models={})
+    assert "types.c.model" in msg and "names no provider" in msg
 
 
 @pytest.mark.parametrize(("provider", "needle"), [
@@ -162,9 +158,21 @@ def test_provider_and_alias_names():
     assert "models.a:b" in msg
 
 
-def test_standalone_typespec_is_native():
-    ts = TypeSpec(harness="pi", model="hf:Qwen/Qwen3.8-27B")
+def test_standalone_typespec_is_unresolved():
+    ts = TypeSpec(harness="llm", model="hf:Qwen/Qwen3.8-27B")
     assert ts.resolved_model is None and ts.harness_model == "hf:Qwen/Qwen3.8-27B"
+
+
+def test_removed_typespec_keys_are_dropped_with_a_warning(monkeypatch, caplog):
+    from flock import models
+
+    monkeypatch.setattr(models, "_warned", set())
+    with caplog.at_level("WARNING", logger="flock.models"):
+        s = spec({"w": {"harness": "llm", "model": "qwen-27b", "tool_memory_mb": 512,
+                        "node_heap_mb": None}})
+    assert "tool_memory_mb" not in s.model_dump_json()
+    assert [r.getMessage() for r in caplog.records] == [
+        "spec: TypeSpec.tool_memory_mb was removed from flock; ignoring it"]
 
 
 def test_auth_option():

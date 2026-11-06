@@ -62,6 +62,9 @@ def posted(board) -> int:
     return sum(1 for m, p, _, _ in board.requests if m == "POST" and p.endswith("/messages"))
 
 
+HB = {"harbor": {"harbor": {"task": {}, "config": {}}}}
+
+
 class Team:
     """N agents of one worker sharing one CommsHub, against the fake board."""
 
@@ -79,7 +82,7 @@ class Team:
         base = Toolset(version=None, dir=None, swarm="sw", type="dev", data_dir=tmp_path / "data")
         for n in names:
             self.agents[n] = AgentRuntime(
-                n, "dev", spec(harness=harness), swarm="sw", work_root=tmp_path / "agents",
+                n, "dev", spec(harness=harness, **HB.get(harness, {})), swarm="sw", work_root=tmp_path / "agents",
                 adapter=ScriptedAdapter(tmp_path / "home" / n), outbox=Outbox(),
                 toolbox=lambda n=n: self.hub.toolset_for(n, base), comms=self.hub)
 
@@ -193,7 +196,8 @@ async def test_search_relaxation_drops_trailing_words():
 
 
 async def test_join_at_first_prompt_token_stays_in_worker(tmp_path, board):
-    t = Team(tmp_path, board, ["dev-0000"], harness="pi", protocols={"protocols/lead-agree.md": "One leads; others say agree."})
+    t = Team(tmp_path, board, ["dev-0000"], harness="harbor",
+             protocols={"protocols/lead-agree.md": "One leads; others say agree."})
     rt = t.agents["dev-0000"]
     try:
         await rt.setup(restore=False)
@@ -211,11 +215,10 @@ async def test_join_at_first_prompt_token_stays_in_worker(tmp_path, board):
         pin = json.loads((tmp_path / "agents" / "_tools_pins" / "dev-0000.json").read_text())
         assert pin["toolset"]["gateway"] == t.hub.address and pin["toolset"]["gateway_key"]
         assert env[PIN_ENV].endswith("dev-0000.json")
-        # the instructions: comms section with the protocol, and the tools section
-        md = (rt.workdir / "AGENTS.md").read_text()
+        # the instructions' comms section, with the protocol
+        md = t.hub.section("dev-0000")
         assert "You are @dev-0000 on the message board channel #flock-test" in md
         assert "### Protocol: lead-agree\n\nOne leads; others say agree." in md
-        assert "`flock-tool post --json" in md
     finally:
         await t.close()
 
@@ -358,7 +361,7 @@ async def test_read_defaults_to_the_run_since_the_kickoff(tmp_path, board):
 
 
 async def test_flock_tool_reaches_comms_through_the_gateway(tmp_path, board):
-    t = Team(tmp_path, board, ["dev-0000"], harness="pi")
+    t = Team(tmp_path, board, ["dev-0000"], harness="harbor")
     try:
         await t.start()
         ts, agent, workdir = read_pin(tmp_path / "agents" / "_tools_pins" / "dev-0000.json")
@@ -528,7 +531,7 @@ async def test_thread_read_gives_the_newest_messages_and_says_when_truncated(tmp
 
 
 async def test_gateway_replies_with_an_error_when_a_tool_raises(tmp_path, board):
-    t = Team(tmp_path, board, ["dev-0000"], harness="pi")
+    t = Team(tmp_path, board, ["dev-0000"], harness="harbor")
     try:
         await t.start()
 

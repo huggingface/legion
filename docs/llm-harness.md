@@ -8,13 +8,13 @@ swarmlab dependency. Example: `examples/llm-small-model.yaml` (LiquidAI/LFM2.5-2
 
 ## When to use it
 
-- Small models (2-10B) that Pi drowns in long system prompts and many tools.
+- Small models (2-10B) that a coding CLI drowns in long system prompts and many tools.
   The `llm` system prompt is a short preamble plus your `AGENTS.md`; there is one tool.
 - High call volume (e.g. a pixel swarm doing about 1M short calls): no process start per burst
   (an idle agent costs a JSONL file; a working one an asyncio task), so a worker holds many more
   agents than with a CLI harness.
 
-Use Pi when the agent must edit code well: they have file-edit tools,
+Use `harbor` (Harbor's Pi in a task container) when the agent must edit code well: it has file-edit tools,
 model-written compaction, parallel tool calls, prompt caching strategies and years of prompt
 tuning that this loop does not.
 
@@ -35,7 +35,7 @@ types:
 - A provider is required (`openai_compat` only; `anthropic` or a native model id is rejected at
   apply). The key stays in the provider's `api_key_env` secret, never in the spec.
 - `max_turns`: model calls per flock prompt. `max_budget_usd`: per prompt, priced with the
-  type's flock price table (the pinned provider price), as for Pi.
+  type's flock price table (the pinned provider price).
 - `context_tokens` (new, `llm` only, default 32000, minimum 256): the prompt size (tokens) the
   harness keeps each request under, by compacting before the call (see "Context bounding").
   Set it well below the server's `--max-model-len` minus `max_tokens`.

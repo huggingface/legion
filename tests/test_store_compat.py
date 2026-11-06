@@ -8,7 +8,8 @@ import json
 import sqlite3
 
 from flock.controller.store import DB_NAME, Store
-from tests.test_resume_gate import stored_spec
+
+from .conftest import make_spec
 
 # main @ 8949085: the grants table, dropped from the schema since
 GRANTS = """CREATE TABLE IF NOT EXISTS grants (
@@ -17,7 +18,7 @@ GRANTS = """CREATE TABLE IF NOT EXISTS grants (
 
 
 def test_old_db_with_removed_feature_rows_opens(tmp_path):
-    raw = json.loads(stored_spec("hierarchy").read_text())
+    raw = make_spec().model_dump(mode="json")
     raw.update(policies={"mode": "enforce", "rules": [], "sinks": ["file:alerts.log"]},
                report={"every": "1h", "sinks": []})
     name = raw["swarm"]

@@ -246,20 +246,6 @@ live process costs about 0.1 CPU-s against about 1 CPU-s cold. The prompt
 cache is server-side with a 1 h TTL either way. Hence the 120 s idle grace and
 the measured defaults of 50 agents and 20 concurrent turns per worker.
 
-Pi (`@earendil-works/pi-coding-agent` 1.2.0, `harness: pi`, docs/pi.md) follows the same
-model: one `pi --mode rpc` process per burst, cwd = the workdir, JSONL commands on stdin and
-events on stdout. Every agent on a worker shares `PI_CODING_AGENT_DIR=/state/pi` (same type,
-same `models.json`, which the worker writes with the API key as an env-var reference) and has
-its own `--session-dir /state/pi/sessions/<agent>`; the worker passes a session id it
-generates. Prompts go out as `prompt` with `streamingBehavior: "steer"`, which starts a run
-when Pi is idle and queues into the running one when busy; a flock turn runs from the start
-of a Pi run to `agent_settled`. Usage is per model call, not cumulative. The system prompt is
-the workdir's `AGENTS.md`. Pi's harness environment is an allow-list (no `FLOCK_TOKEN`).
-Pi has no turn or budget options, so the worker enforces `max_turns` and `max_budget_usd`: it
-counts model calls and prices each one with the flock price table, and sends Pi `abort` before
-a call past either limit (turn ends `error`, `reason` max_turns|max_budget_usd).
-Packing numbers for Pi are not measured yet; idle VmRSS of one RPC process was 117 MB locally.
-
 The `llm` harness (`harness: llm`, docs/llm-harness.md) has no process: a "burst" is an asyncio
 task in the worker that runs a Chat Completions loop with one `bash` tool against an
 `openai_compat` provider (required). The session is a JSONL file of chat messages under
@@ -293,6 +279,46 @@ If the harness refuses to resume (typically after a version bump), the worker
 starts a fresh session with the same name, sends a first prompt stating where
 the previous transcript is, writes a `session_restarted` event, and status
 shows `resumed: false`.
+
+### Workdir
+
+The workdir is mirrored to the bucket and restored whenever the agent moves to another worker,
+so its size is restore time. Regenerable trees are never synced (`node_modules/`, `.venv/`,
+`venv/`, `.cache/`, `.tox/`, `.nox/`, `.gradle/`, `.next/`, `.ipynb_checkpoints/`,
+`__pycache__/`, `*.pyc`, `*.o`, ...; `.git/` and worktrees are). The type's `workdir:` block
+gives the agent feedback instead of refusing anything:
+
+```yaml
+types:
+  coder:
+    workdir:
+      soft_files: 50000   # default; above it (or soft_mb) the agent's next prompt starts with
+      soft_mb: 2048       # "your workspace has 182k files, 3100 MB; largest: snaps/ 140k, ...
+                          # (soft limit 50k files, 2048 MB); delete clones you no longer need",
+                          # at most hourly
+      max_files: null     # default 5 x soft: above it (or max_mb) a `workdir_over_quota
+      max_mb: null        # {files, bytes, top_dirs}` event too, same hourly limit
+      ephemeral: [scratch/]
+      base: false             # true: restore from a tar plus per-file deltas (below)
+      base_interval_s: 3600   # a new base at most this old ...
+      base_delta_files: 5000  # ... or when this many files changed or were deleted since
+```
+
+The workdir still syncs above every limit. `ephemeral` lists directories relative to the
+workdir that are never synced nor restored, and are emptied (or created) at every agent setup,
+so a move or a worker restart starts them empty. Tell the agents in their system prompt, e.g.
+"clone repositories you only need for this session into `scratch/`; it is not saved when you
+move". A loop prompt can show the current size with `{workspace}` (docs/loop.md).
+
+A restore downloads every mirrored file, about 85 files/s per agent in run 4, so a 100k-file
+workdir took around 20 minutes. With `base: true` the worker keeps a tar of the workdir
+(`workdir.base.tar`, with modes, symlinks and mtimes) plus only the files changed since it, and a
+restore downloads the tar, then those files. Periodic syncs refresh the tar hourly or after 5000
+changed files; drain and preempt syncs only send the changes, as before. Agents whose bucket has
+no tar yet restore file by file and get one at their first periodic sync; turning `base` off
+again goes back to the plain mirror at the next sync. The tar is written to local disk before
+upload and downloaded before extraction, so a worker needs free disk for one workdir's size per
+agent being synced or restored. Details: `flock.worker.sync`.
 
 ### Worker lifetime and the herd
 
@@ -328,12 +354,12 @@ models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: pi                # pi | llm | harbor
-    model: anthropic/claude-opus-5-5
+    harness: llm               # llm | harbor
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
     image: null                # default worker image; override to add tools/skills
     system_prompt_file: prompts/researcher.md   # written to the workdir as AGENTS.md
     env: {MSGBOARD_URL: https://lvwerra-msgboard-demo.hf.space}
-    secrets: [ANTHROPIC_API_KEY]
+    secrets: [HF_TOKEN]
     labels: {team: eval}
     replicas: 3000
     agents_per_worker: 50      # measured default, experiments/packing
@@ -349,13 +375,13 @@ types:
     tool_choice: null          # llm harness only: auto | required | none | bash
     done_tool: null            # llm harness only: offer `done` (default: on for tool_choice required)
     persist_workdir: true
-    workdir: {soft_files: 50000, soft_mb: 2048, ephemeral: [scratch/]}  # docs/pi.md "Workdir"
+    workdir: {soft_files: 50000, soft_mb: 2048, ephemeral: [scratch/]}  # "Workdir" above
     worker: {sync_interval_s: 180, restore_threads: 4}   # live worker knobs, docs/slurm.md
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
     msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
     tools: [ws_write, run_bot] # functions from the tools folder, or `all` (docs/tools.md)
   analyst:
-    harness: pi
+    harness: llm
     model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B:deepinfra" directly
     reasoning: low             # optional; overrides the alias
     replicas: 200
@@ -402,20 +428,19 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 | `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
 | `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); sent by the `llm` harness only |
 | `models.<alias>.pricing` | `[input, output, cached]`, overrides the provider's |
-| `types.<t>.model` | an alias, else `"<provider>:<model id>"`, else a harness-native id (v1) |
+| `types.<t>.model` | an alias, else `"<provider>:<model id>"` |
 | `types.<t>.reasoning` | overrides the alias's |
 
 Resolution of `types.<t>.model`: an alias under `models:`; else `<prefix>:<id>` with the prefix
 under `providers:` (split on the first colon, so `hf:Qwen/Qwen3.8-27B:ovhcloud` keeps the router
-suffix); else a harness-native id with no provider. A prefix that does not look like a provider
-name (`[a-z][a-z0-9_-]*`, e.g. Bedrock's `anthropic.claude-...-v1:0`) is native.
-`models.resolve_model(spec, type_spec)` returns the `ResolvedModel` or None.
+suffix). Anything else names no provider and is refused at apply.
+`models.resolve_model(spec, type_spec)` returns the `ResolvedModel`, or None for a model that
+names no provider.
 
 Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
 type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
-row for the id, or its `"*"` row, unless `self_hosted`; harness against provider type
-(`pi`, `llm` and `harbor` need `openai_compat`; native ids pass, except on `llm`, which needs
-a provider).
+row for the id, or its `"*"` row, unless `self_hosted`; a model that names no provider;
+harness against provider type (`llm` and `harbor` need `openai_compat`).
 
 Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
 the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
@@ -699,9 +724,6 @@ double-counted after a relaunch.
   `projects/<enc-cwd>/<id>.jsonl` (plus `<id>/` if present); Codex needs only the
   rollout file at its dated relative path and rebuilds its SQLite index. Codex was
   verified locally with two fresh homes, not in a job (no API key here).
-- Pi cross-machine resume: PASSED 2026-10-16 in two cpu-basic jobs, as root
-  (experiments/resume-gate-pi/RESULTS.md). Packing on cpu-basic and compaction on long
-  sessions are unmeasured (docs/pi.md).
 - Multi-day job timeouts honoured in practice (24 h is within reports; longer
   is not needed).
 - 1,000 concurrent HF Jobs under one PRO user (credits and spend limit are the
@@ -874,9 +896,7 @@ the total can exceed `max_channels` by at most W-1). In extended mode a group me
 
 Worlds advertising `workspace-upload-v1` receive worker-captured clone snapshots
 outside the model's arguments. Other World API v1 worlds keep their dispatch and
-timeouts. See [world.md](world.md). Pi selects an endpoint per agent by the same
-stable hash used by the llm harness; multi-endpoint Pi workers use separate agent
-config directories so models.json cannot race between different endpoints.
+timeouts. See [world.md](world.md).
 
 Transport failures (`model_transport`) and turn timeouts retry without incrementing
 the loop's consecutive error count, after 2 s doubling to 120 s with jitter; after 20 in a

@@ -30,7 +30,7 @@ def test_compute_entry_is_complete(kind):
 
 def test_unknown_names_keep_their_errors():
     with pytest.raises(ValidationError,
-                       match="Input should be 'pi', 'llm' or 'harbor'"):
+                       match="Input should be 'llm' or 'harbor'"):
         TypeSpec.model_validate({"harness": "nope"})
     with pytest.raises(ValidationError, match="Input should be 'hf-jobs', 'local' or 'slurm'"):
         ComputeSpec(kind="nope")
