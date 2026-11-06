@@ -83,7 +83,7 @@ from flock.world.host import resolve as world_resolve
 from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER
 
 log = logging.getLogger(__name__)
-# Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
+# Comms wake events by reason (fed by the removed worker comms hub; board wakes are `resource`).
 COMMS_WAKE_EVENTS = {"comms_mention": "mention", "comms_thread_reply": "thread",
                     "comms_dm": "dm", "comms_channel_message": "channel"}
 
@@ -992,7 +992,7 @@ def create_app(
             if selecting:
                 raise HTTPException(400, f"types {', '.join(selecting)} select tools but the spec "
                                          "has no tools_version: apply it with `flock launch`, "
-                                         "which uploads the tools folder (docs/tools.md)")
+                                         "which uploads the tools folder")
             return
         b = store.get_tool_bundle(swarm, spec.tools_version, body=False)
         if b is None:

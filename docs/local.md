@@ -14,47 +14,47 @@ No HF token, bucket or network is needed when the model endpoint is local.
 
 ## Quickstart
 
-Install (Python 3.11+):
+Install (Python 3.12+; Harbor comes with flock):
 
 ```sh
 git clone https://github.com/huggingface/flock && cd flock
-uv sync --all-extras          # or: pip install -e ".[controller]"
+uv sync
 ```
 
-Write a spec. This one points 5 `llm` agents at any OpenAI-compatible server on your machine
-(Ollama, llama.cpp, vLLM, LM Studio); it is `examples/local.yaml`:
+Write a Harbor spec (`compute: local` is the default). This one runs 2 agents on one
+terminal-bench task in docker, with the HF router as the model server (tests/harbor/examples/
+has more; experiments/harbor-smoke/spec.yaml adds a board and a loop):
 
 ```yaml
-swarm: hello
-compute: local
-namespace: your-hf-name                  # used by hf-jobs only
-bucket: hf://buckets/your-hf-name/flock  # used by hf-jobs only
-providers:
-  local: {type: openai_compat, base_url: "http://localhost:11434/v1", api_key_env: LOCAL_KEY, self_hosted: true}
-types:
-  writer:
-    harness: llm
-    model: "local:qwen3:4b"
-    replicas: 5
+name: hello
+model: huggingface/moonshotai/Kimi-K2.5
+inference: {base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+            api_format: openai_chat_completions}
+task:
+  repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
+  dataset: terminal-bench-2.1@2.1.0
+  selector: regex-log
+  revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
+agents: {count: 2}
+environment: {backend: docker}
+limits: {run_timeout_seconds: 900, agent_max_turns: 30}
 ```
 
-`namespace` and `bucket` can be left out locally; keeping them means the switch to jobs is one
-line. To use the HF router instead, set `base_url: https://router.huggingface.co/v1`,
-`api_key_env: HF_TOKEN`, drop `self_hosted` and add `pricing: {"*": [in, out, cached]}` (USD per
-1M tokens, [docs/open-models.md](open-models.md)).
+`pricing: [in, out, cached]` (USD per 1M tokens) gives the run a cost; Harbor reports none for
+router models ([docs/open-models.md](open-models.md)).
 
 Run it:
 
 ```sh
-export LOCAL_KEY=unused                      # the key variable must exist; any value for a server without auth
-uv run flock launch examples/local.yaml
-uv run flock prompt --swarm hello --type writer "Introduce yourself in one sentence."
+export HF_TOKEN=...
+uv run flock launch spec.yaml
+uv run flock prompt --swarm hello --type agent "Start on the task."
 uv run flock status hello
 uv run flock stop hello --release      # drain the workers; `flock launch hello` resumes
 uv run flock stop hello --delete --yes # end the controller, write the bundle
 ```
 
-For tests and dry runs, `python -m flock.controller.localrun examples/local.yaml --prompt "..." --until idle`
+For tests and dry runs, `python -m flock.controller.localrun spec.yaml --prompt "..." --until idle`
 runs the same thing in the foreground and exits when done.
 
 - `flock prompt --swarm <swarm> --type <type> "text"` sends a prompt to every agent of a type
@@ -63,8 +63,8 @@ runs the same thing in the foreground and exits when done.
   the controller (`flock launch <swarm>` resumes); `flock stop <swarm> --delete` ends the
   controller and writes the bundle. A run also ends at the spec's `limits.budget_usd`. The test harness (`python -m flock.controller.localrun`) additionally has
   `--until idle|10m` and `--grace S`.
-- A `tools/` folder next to the spec ([tools.md](tools.md)) is checked, uploaded and named in
-  the spec by its hash before the run starts, as `flock launch` does.
+- The spec's `tools_dir` and `resources_dir` are packed, uploaded and named in the spec by
+  their hash before the run starts, as `flock launch` does.
 - After editing the experiment folder (spec, prompt files, tools), run `flock update <folder>` to
   apply the change to the running swarm; a broken save is shown and not applied
   ([live.md](live.md)).
@@ -77,10 +77,10 @@ same directory:
 
 ```sh
 uv run flock status
-uv run flock status hello --type writer
-uv run flock prompt writer-0001 "Now write a haiku."
-uv run flock prompt --swarm hello --type writer --state idle "Next round."
-uv run flock status writer-0001 --events --follow
+uv run flock status hello --type agent
+uv run flock prompt agent-0001 "Report your progress."
+uv run flock prompt --swarm hello --type agent --state idle "Next round."
+uv run flock status agent-0001 --events --follow
 ```
 
 From elsewhere: `FLOCK_CURRENT=/path/to/.flock/current flock status`, or set `FLOCK_URL` and
@@ -104,7 +104,7 @@ budget check, the view and the bundle use the spec as currently applied, so a
   events.jsonl         every agent's events and the swarm-level ones (loop_*, final_done,
                        budget_stop; agent ""), merged by time (pi session format v3)
   events/<agent>.jsonl one file per agent
-  agents/<agent>/      agent workdirs        state/llm/   llm harness sessions
+  agents/<agent>/      agent workdirs
   logs/                controller.log, <worker>.log      controller/  the controller's SQLite state
 ```
 
@@ -141,10 +141,8 @@ Different:
    killed and reported as `Job timeout` (a planned restart, as on HF Jobs).
 2. **Ignored:** `image`, `flavor`, the network group, the wheel and bootstrap, `namespace` and
    `bucket`. There is no bucket sync: agent workdirs live in `<run>/agents/` (shared by the
-   run's workers, so a restarted worker slot finds them on disk) and `llm` sessions in
-   `<run>/state/llm`.
-3. **Secrets come from your shell.** The names a spec lists (`secrets:`, `api_key_env`,
-   `msgboard_invite`) are read from the environment of `flock launch` and passed to the workers as
+   run's workers, so a restarted worker slot finds them on disk).
+3. **Secrets come from your shell.** The names a spec lists (`secrets:`, `api_key_env`) are read from the environment of `flock launch` and passed to the workers as
    env, as HF Jobs passes job secrets. Workers inherit your environment minus your own flock
    connection settings (`FLOCK_*`, except `FLOCK_PROMPTS_DIR`); the harness still gets only the allow-listed variables plus what the
    worker passes.

@@ -460,7 +460,7 @@ class Store:
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
             self._x("DELETE FROM controls WHERE swarm = ?", [name])
 
-    # ----------------------------------------------------------------- tools bundles (docs/tools.md)
+    # ----------------------------------------------------------------- tools bundles
 
     TOOL_BUNDLES_KEPT = 10  # per swarm, newest first, plus the one the spec names
 

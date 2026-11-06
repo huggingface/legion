@@ -37,7 +37,7 @@ written by the controller and never listed; after the update the world's tool ch
 as `world tools: +a -b`.
 
 `flock update --check` runs every check the controller runs on an apply (tools against the
-bundle and the live world manifest, world, comms channel, harness changes) and prints the
+bundle and the live world manifest, world, comms channel, fixed Harbor settings) and prints the
 diff, storing and posting nothing (`PUT /swarms/{swarm}?dry_run=1` returns the resolved
 spec). Each changed value names where it came from: `(spec.yaml:41)`, `(run.env WORKER_MEM)`,
 `(env WORKER_MEM)`, `(spec.yaml:12 default of WORKER_MEM)` or `(default)`. It exits 1 with
@@ -46,8 +46,7 @@ check is stopped again.
 
 A refused update exits 1, prints the reason and applies nothing. The reasons are the ones
 `flock launch` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
-from the controller. On a running swarm the controller also refuses to change the harness of a
-type that has agents. Use a new type name for that, or remove the type first.
+from the controller.
 
 Preflight runs only when the update adds a provider-backed model the running spec does not
 have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
@@ -223,16 +222,13 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 
 | change | takes effect |
 |---|---|
-| tools folder (a new content hash) | each agent's next turn. The worker fetches the version within a heartbeat (30 s on jobs, 5 s locally); a turn in flight keeps its version (docs/tools.md) |
-| `system_prompt` / `system_prompt_file` | each agent's next turn boundary. The worker rewrites `AGENTS.md` and the `llm` harness rebuilds its system message |
 | `loop:` settings and loop prompt files | the next loop tick (docs/loop.md) |
-| `comms.rules`, `comms.protocols` | the next heartbeat; the instructions' board section at the next turn |
 | `comms.kickoff_file` | never: the kickoff is posted once per channel |
 | `limits.budget_usd`, `limits.alive`, `spawn:` | at once (the controller) |
 | `replicas` | the next reconcile pass |
-| other type fields (`max_turns`, `max_budget_usd`, `tool_choice`, `turn_timeout`, ...) | the next turn boundary. A CLI harness takes the per-prompt limits, `model`, `env` and `secrets` at its next start, after `idle_grace` |
+| other type fields (`max_turns`, `max_budget_usd`, `turn_timeout`, ...) | the next turn boundary |
 | `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
-| a type's `harness` (with agents), `compute.kind`, `swarm` | refused |
+| `compute.kind`, `swarm` | refused |
 | a Harbor spec's `task`, `tools`, `resources`, `environment`, `inference`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight

@@ -1,6 +1,6 @@
 # flock
 
-Host coding-harness agent swarms (Harbor Trials, an in-process `llm` loop) on Hugging Face Jobs: keep
+Host agent swarms (each agent a Harbor Trial) on Hugging Face Jobs, Slurm or a laptop: keep
 them alive, prompt them, watch them. One controller, N worker jobs, up to 200
 agents per worker. Declare a swarm in YAML and the controller keeps it running,
 the way Kubernetes keeps pods running.
@@ -15,10 +15,9 @@ them.
 - **Local mode:** `compute: local` and `flock launch spec.yaml` run the same spec on a laptop
   (background controller, workers as subprocesses, run bundle);
   `compute: hf-jobs` is the line that moves it to HF Jobs ([docs/local.md](docs/local.md)).
-- **Declarative swarms:** a YAML spec names a swarm, an HF namespace, a bucket
-  and one or more agent types. Each type sets the harness (`llm` or `harbor`), model,
-  replicas, system prompt, job flavor, agents per worker, worker lifetime, idle grace,
-  per-prompt `max_turns` and `max_budget_usd` (enforced by the worker).
+- **Declarative swarms:** a Harbor spec (YAML) names the run, its task, model server,
+  agents and roles, resources and tools; `flock launch` compiles it into a swarm spec with
+  one type per role (`harness: harbor`: each agent is a Harbor Trial running Pi).
   `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents are named `<type>-NNNN`. The same name
@@ -26,9 +25,8 @@ them.
 - **Durable sessions:** workers sync each agent's session and workdir to a
   bucket and restore them on relaunch, so an agent resumes with its context
   on another worker. A failed resume is a visible fresh start.
-- **Process per burst:** an agent's harness process starts on its first prompt,
-  takes later prompts mid-turn, and exits after an idle grace. Idle agents
-  cost only disk.
+- **Long-lived Trials:** an agent's Trial starts on its first prompt and stays up; each
+  prompt is one Pi turn in it.
 - **Health states:** agents are `working`, `idle`, `stuck`, `unknown` or
   `dead`; workers are `launching`, `running`, `draining`, `unknown` or `dead`.
   A type that crashes five times in a row is marked `crashlooping`.
@@ -37,21 +35,16 @@ them.
   prompt to an agent whose worker is down is held and delivered after relaunch.
 - **Usage and cost:** tokens per model per turn, cost from a price table, per
   agent and per swarm.
-- **Open models:** a `providers:` block points a type at vLLM in a GPU job, the
-  HF router or any OpenAI- or Anthropic-compatible server (`model:
-  "gpu1:Qwen/Qwen3.8-27B-FP8"`), with prices pinned at apply and a preflight
-  that checks each model can call tools. See [docs/open-models.md](docs/open-models.md).
+- **Open models:** `inference:` points the run at vLLM in a GPU job, the HF router or any
+  OpenAI-compatible server, with prices pinned at apply and a preflight that checks each
+  model can call tools. See [docs/open-models.md](docs/open-models.md).
 - **Planned restarts:** workers live 24 h plus jitter by default, drain before
   their deadline, and the controller relaunches them with their agents
   restored. The herd never restarts all at once.
 - **Spawning:** a leader agent creates, prompts and removes child agents of
-  other types with the `flock` CLI, under a `spawn:` policy (allowed types,
+  other roles with the `spawn.*` tools, under a `spawn:` policy (allowed types,
   caps, depth) and swarm `limits:`. Each agent calls the controller with its
-  own scoped token. See [docs/spawn.md](docs/spawn.md).
-- **Tools folder:** plain Python functions in `tools/` next to the spec become agent
-  tools (schema from type hints); `flock launch` ships them by content hash and a changed
-  folder reaches running agents at their next turn, with no image or wheel rebuild. See
-  [docs/tools.md](docs/tools.md).
+  own scoped token, held by its worker. See [docs/spawn.md](docs/spawn.md).
 - **Loops and budget stop:** a type's `loop:` re-prompts its agents (`every:
   turn_end` or a duration) while `while:` holds
   (`until`, `max_rounds`, `budget_usd`, `agent_usd`), then runs one `final:`
@@ -60,33 +53,24 @@ them.
 - **Live changes:** `flock update <folder>` applies an edited experiment folder (spec,
   prompts, tools) to the running swarm and prints what changed; run it again after each edit. Agents take each change at their next turn, with a one-line note.
   See [docs/live.md](docs/live.md).
-- **Comms (optional):** a `comms:` block gives the agents one msgboard channel and
-  built-in `post` / `read` / `search` tools; each agent joins under its own name at its
-  first prompt, posting rules are enforced before the board is called, one poller per
-  worker turns @mentions and thread replies into events. See [docs/comms.md](docs/comms.md).
-- **Worlds (optional):** a `world:` block names an HTTP service holding the swarm's shared state
-  (World API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); its tools reach the
-  agents like folder tools, each call carrying the agent's name. `flock launch` starts a local world
-  as a child process; `python -m flock.world serve module:Class` serves a `flock.world.World` subclass;
+- **Board (optional):** the `board` resource gives the agents a msgboard board through
+  `board.*` tools, with posting rules enforced before the board is called; its @mentions
+  wake loops (`loop.on: [board.mention]`). See [docs/comms.md](docs/comms.md).
+- **Worlds (optional):** a world is an HTTP service holding the swarm's shared state (World
+  API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); the `world` resource and
+  its `world.*` tools reach it, each call carrying the agent's name.
+  `python -m flock.world serve module:Class` serves a `flock.world.World` subclass;
   `worlds/taskboard` is an example. See [docs/world.md](docs/world.md).
-- **msgboard identity (optional):** a type can name an invite; the worker
-  redeems it by agent name so an agent keeps its principal across restarts.
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
   `flock` wraps the HTTP API.
 
-Supported harnesses:
-
-| `harness` | What runs | Providers | Notes |
-|---|---|---|---|
-| `llm` | in-process Chat Completions loop: `bash` plus the type's [tools folder](docs/tools.md) functions | `openai_compat` only | for small open models and high call volume; [docs/llm-harness.md](docs/llm-harness.md) |
-
 ## Usage
 
-Needs Python 3.11+, an HF token with Jobs access, and the harness API key.
+Needs Python 3.12+ (Harbor's), an HF token with Jobs access, and the model server's key.
 
 ```sh
 git clone https://github.com/huggingface/flock && cd flock
-uv sync --all-extras                 # or: pip install -e ".[controller,worker,dev]"
+uv sync                              # Harbor comes with flock
 ```
 
 `uv sync` does not activate the environment, so the commands below go through `uv run` (or
@@ -100,8 +84,8 @@ with a run bundle at the end (`flock status` to watch); no HF token or bucket ne
 local model endpoint. See [docs/local.md](docs/local.md):
 
 ```sh
-uv run flock launch examples/local.yaml
-uv run flock prompt --swarm hello --type writer "Introduce yourself."
+uv run flock launch spec.yaml
+uv run flock prompt --swarm hello --type agent "Start on the task."
 uv run flock stop hello --delete --yes   # ends the run and writes the bundle
 ```
 
@@ -148,43 +132,33 @@ must be in the controller's environment.
 ### Declare and drive a swarm
 
 ```yaml
-# demo.yaml
-swarm: demo
+# demo.yaml: a Harbor spec; experiments/harbor-smoke/spec.yaml is a complete one
+name: demo
 namespace: <you>
 bucket: hf://buckets/<you>/flock/demo
-providers:
-  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-       pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}
-types:
-  scribe:
-    harness: llm
-    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
-    system_prompt_file: prompts/scribe.md
-    secrets: [HF_TOKEN]
-    replicas: 100
-    agents_per_worker: 50
-    max_budget_usd: 0.05
+compute: hf-jobs
+model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+pricing: [0.2, 2.5, 0.2]
+inference: {base_url: https://router.huggingface.co/v1, api_key_env: HF_INFERENCE_TOKEN,
+            api_format: openai_chat_completions}
+task:
+  repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
+  dataset: terminal-bench-2.1@2.1.0
+  selector: regex-log
+  revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
+agents: {count: 100}
+environment: {backend: hf-sandbox}       # hf-jobs workers run each Trial in an HF sandbox
+workers: {agents_per_worker: 50}
 ```
 
-Open models go through `providers:` (keys by secret name only; [docs/open-models.md](docs/open-models.md)):
-
-```yaml
-providers:
-  gpu1: {type: openai_compat, base_url: "https://qwen.example.org/v1",  # your vLLM, over HTTPS
-         api_key_env: VLLM_API_KEY,
-         self_hosted: true, max_working: 256}
-models:
-  qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
-types:
-  analyst: {harness: llm, model: qwen-27b, replicas: 50}
-```
+Model servers: [docs/open-models.md](docs/open-models.md).
 
 ```sh
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
 uv run flock launch demo.yaml
 uv run flock status demo                 # counts by type and state, cost
-uv run flock prompt scribe-0007 "Summarize your workdir."
-uv run flock status scribe-0007 --events --follow  # agent.turn_started, agent.turn_ended, ...
+uv run flock prompt agent-0007 "Report your progress."
+uv run flock status agent-0007 --events --follow  # agent.turn_started, agent.turn_ended, ...
 uv run flock stop demo --release      # drain, sync every agent, free the workers
 uv run flock launch demo              # resume
 uv run flock stop demo --delete
@@ -221,7 +195,7 @@ uv run pytest -q
 uv run ruff check src tests experiments
 ```
 
-No network, no real jobs: the Hub client and the harness processes are faked.
+No network, no real jobs: the Hub client and Harbor are faked (tiny real runs: tests/tinyrun.py).
 
 ## Limits and status
 

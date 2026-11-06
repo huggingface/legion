@@ -81,7 +81,7 @@ class RunOptions:
     host: str = "127.0.0.1"
     out: TextIO = field(default_factory=lambda: sys.stdout)
     worker_command: list[str] | None = None  # tests
-    tools: bytes | None = None  # the packed tools folder (docs/tools.md), uploaded before the PUT
+    tools: bytes | None = None  # the packed tools folder, uploaded before the PUT
     apply: bool = True  # False (`flock launch`): only serve; the CLI creates the swarm
 
 

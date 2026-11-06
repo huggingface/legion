@@ -1,83 +1,21 @@
 # Spawning agents
 
-A running agent (a "leader") can create child agents of other types, prompt them, read their
-event streams and remove them. Children are ordinary agents: they have a harness session, a
-workdir, a worker, a state and a cost like any replica, and they idle and resume the same way.
-What is new is a `parent`, a `depth`, and a token that lets the agent call the controller as
-itself.
-
-Example specs: [`examples/first-spawn.yaml`](../examples/first-spawn.yaml) (the walkthrough
-below) and [`examples/spawn.yaml`](../examples/spawn.yaml). Design notes and decisions:
+A running agent (a "leader") can create child agents of other roles, prompt them, read their
+status and remove them. Children are ordinary agents: they have a Trial, a session, a worker, a
+state and a cost like any replica, and they idle and resume the same way. What is new is a
+`parent`, a `depth`, and a token that lets the agent call the controller as itself. Agents do
+it with the `spawn.*` tools ("Harbor agents" below). Design notes and decisions:
 [design.md §13](design.md#13-spawn).
-
-## First spawn: a leader spawns 5 children
-
-From a clone of this repo, with `uv sync --all-extras` done. Replace `<you>` everywhere,
-including in `examples/first-spawn.yaml`. Cost: a few cents of router inference and under $0.01 of jobs.
-
-`uv sync` does not activate the environment, so every command goes through `uv run`, which
-also gives the scripts a Python with `huggingface_hub`. A bare `flock` may be util-linux's
-file-locking tool (`/usr/bin/flock`), a different program.
-
-```sh
-export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
-uv run hf buckets create <you>/flock --private                      # once
-W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)  # wheel the workers install
-uv run scripts/deploy-space.sh "$W" <you>/flock                     # returns while it builds
-export FLOCK_URL=https://<you>-flock.hf.space
-# 1. wait for the Space to build (a minute or two)
-until curl -fsS "$FLOCK_URL/healthz" >/dev/null; do sleep 10; done
-uv run flock launch examples/first-spawn.yaml
-# 2. apply returns before reconcile creates the leader: wait for its row (a few seconds)
-until uv run flock status leader-0000 >/dev/null 2>&1; do sleep 5; done
-uv run flock prompt leader-0000 "Start: spawn the 5 analyst children now."
-# 3. follow the leader (its worker boots first, ~40 s): spawned x5, then "spawned 5"; Ctrl-C
-uv run flock status leader-0000 --events --follow
-uv run flock status first-spawn --parent leader-0000   # repeat until the children are idle
-```
-
-The children show `unknown` with `pending 1` for about 50 s: the first spawn of a type with no
-agents boots its worker (a job launch). That is normal. Then each child answers, reports to the
-leader (the reports arrive as the leader's turns t-2, t-3, ...), and idles:
-
-```text
-$ uv run flock status first-spawn --parent leader-0000   # about 1 min after the prompt; columns cut
-name                      state  worker                     turns  pending  cost
-leader-0000               idle   first-spawn-leader-w0000   1      0        $0.0030
-leader-0000-analyst-0001  idle   first-spawn-analyst-w0000  1      0        $0.0021
-...
-leader-0000-analyst-0005  idle   first-spawn-analyst-w0000  1      0        $0.0019
-$ uv run flock status leader-0000-analyst-0003 --events
-08:55:31     - agent.session_started session_id=… resumed=False parent=leader-0000
-08:55:31   t-1 user     Capital of France? One word.
-08:55:34   t-1 assistant Paris
-08:55:35   t-1 assistant [Bash {"command": "flock prompt \"$FLOCK_PARENT\" \"leader-0000-analyst-0003: Paris\"…]
-08:55:36   t-1 agent.turn_ended completed Qwen/Qwen3.8-27B:deepinfra in=… out=…
-```
-
-`turns` and `state` come from worker heartbeats (every 30 s), so they lag the event stream. An
-agent's answer is the text of its `assistant` messages; `agent.turn_ended` only says the turn is over.
-If a worker never gets past `launching`/`dead`, `uv run flock status first-spawn` shows its
-`last_error` (status and log tail); `hf jobs logs <job>` has the rest. A 401 there usually means
-`HF_TOKEN` is missing from the type's `secrets`.
-
-## Teardown
-
-```sh
-uv run flock stop first-spawn --delete                    # drains and cancels its workers (about 20 s)
-uv run hf jobs ps --label swarm=first-spawn        # empty once they are gone
-uv run hf spaces pause <you>/flock                 # the Space is public and holds your secrets
-uv run hf buckets delete <you>/flock               # optional: wheels and agent state
-```
 
 ## Spec
 
 ```yaml
-types:                                   # qwen: an alias under `models:` (open-models.md)
-  leader:  {harness: llm, model: qwen, replicas: 1, workers: {initial: 1, max_extra: 0}}
-  analyst: {harness: llm, model: qwen, replicas: 0, workers: {initial: 1, max_extra: 3}}
-  helper:  {harness: llm, model: qwen, replicas: 0, workers: {initial: 0, max_extra: 2}}
-spawn:                                   # run policy, separate from what a type is
+agents:
+  roles:                                 # a Harbor spec's roles become flock types
+    leader:  {count: 1, workers: {initial: 1, max_extra: 0}}
+    analyst: {count: 0, workers: {initial: 1, max_extra: 3}}
+    helper:  {count: 0, workers: {initial: 0, max_extra: 2}}
+spawn:                                   # run policy, separate from what a role is
   leader:  {types: {analyst: 3, helper: 2}, depth: 2}   # per-type caps, total 5
   analyst: {types: [helper], max: 3, depth: 1}         # list + one total cap
 limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
@@ -138,11 +76,13 @@ interviewer, a one-shot helper. Added 2026-10-22 for hf://buckets/cmpatino/legac
 
 ```yaml
 types:
-  interviewer: {harness: llm, model: glm, replicas: 0, ephemeral: true,
-                workers: {initial: 0, max_extra: 2}, max_turns: 26, max_budget_usd: 0.15}
+  interviewer: {replicas: 0, ephemeral: true, workers: {initial: 0, max_extra: 2}, ...}
 spawn:
   dev: {types: [interviewer], max: 2}
 ```
+
+A Harbor spec (flock.harbor.spec) does not expose `ephemeral` yet: it is a key of the compiled
+type.
 
 - **When.** The controller removes the agent when a worker heartbeat reports it idle (or
   stuck) after at least one turn, with no prompt pending or just handed out. How the turn
@@ -152,7 +92,7 @@ spawn:
   the parent's stream, an unassign to its worker (final sync), its token revoked, its cost
   kept in the swarm's total (`removed_cost`), and its place under the parent's `spawn.max`
   freed, since caps count live children. The worker then deletes the agent's workdir, session
-  log, state, tools pin and the harness's own session dir (`AgentRuntime.purge`).
+  log, state and the harness's own session dir (`AgentRuntime.purge`).
 - **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
   session. A run bundle (`flock launch`) keeps removed agents' events (`events/<name>.jsonl`) and
   lists them in `run.json` under `removed_agents`, each with its type, tokens and `cost_usd`
@@ -163,7 +103,7 @@ spawn:
 
 ## Names
 
-`naming:` (swarm-level) picks how agents are named; it applies to replicas and spawned
+`naming:` (swarm-level; a Harbor spec does not expose it yet) picks how agents are named; it applies to replicas and spawned
 children alike.
 
 | `naming` | replicas | spawned children |
@@ -188,10 +128,9 @@ types:
 - **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
   counts it); with `words` it no longer appears in the name.
 - **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
-  `X-Flock-Agent` for worlds, endpoint pinning (`base_urls`), `flock-agent remove <name>`. A words
-  name says nothing about the parent: a world that needs the parent uses `X-Flock-Type` and
-  its own records (worlds/chatbot3 binds an interview booking to the first interviewer that
-  uses it).
+  `X-Flock-Agent` for worlds, `flock-agent remove <name>`. A words name says nothing about the
+  parent: a world that needs it keeps its own records (worlds/chatbot3 binds an interview
+  booking to the first interviewer that uses it).
 - The CLI tells an agent from a swarm by looking the name up (a swarm wins a tie).
 
 ## API
@@ -213,16 +152,8 @@ the controller. The worker's `session_started` / `session_resumed` / `session_re
 
 ## Agent tokens
 
-Every agent gets its own token. The worker puts it into the harness environment with the
-agent's identity:
-
-| Variable | Value |
-|---|---|
-| `FLOCK_AGENT` | the agent's own name |
-| `FLOCK_PARENT` | its parent's name, or empty |
-| `FLOCK_URL` | the controller URL at harness start (direct calls only, see "CLI inside an agent") |
-| `FLOCK_AGENT_TOKEN` | the agent's scoped token (direct calls only; the gateway uses the worker's copy) |
-| `FLOCK_TOKEN` | empty: the worker's own token never reaches an agent |
+Every agent gets its own token. The worker keeps it (with `FLOCK_AGENT`, `FLOCK_PARENT`) and
+sends the agent's controller calls with it; it never enters a Trial's container.
 
 An agent token may: read its own status and events and call `whoami`; spawn under itself and
 bulk-prompt its own children; read, prompt, spawn under, bulk-prompt the children of and remove
@@ -235,14 +166,8 @@ agent's name and nonce under a key derived from `FLOCK_TOKEN`, so every assign o
 relaunched worker) carries the same value. Removing the agent revokes it. Rotating `FLOCK_TOKEN`
 invalidates every agent token; agents get the new one with their next assign.
 
-## CLI inside an agent
-
-The worker image and the bootstrap put the `flock` CLI on PATH (same package). Inside an agent,
-names are always agent names.
-
-**Through the worker.** When the agent's pin file (`FLOCK_TOOLS_PIN`) names the worker's
-gateway, each call goes there as `controller:request
-{method, path, params, json}`. The worker accepts only the routes an agent token may use:
+The worker accepts only the routes an agent token may use (`controller_call` in
+flock.worker.main):
 
 | Method | Path |
 |---|---|
@@ -250,61 +175,24 @@ gateway, each call goes there as `controller:request
 | POST | `/agents/{name}/spawn`, `/agents/{name}/prompt`, `/agents/{name}/children/prompts` |
 | DELETE | `/agents/{name}` |
 
-It sends the call with the agent's own token through its own controller client, which re-reads
-the controller's address (`FLOCK_CTL_HOST_FILE` on Slurm) before every heartbeat and after any
-connection error, and retries there. So a controller that moved host is reached at its new
-address; `FLOCK_URL` in the harness environment, fixed when the harness started, is not used.
-The controller still checks the token's scope (below). A call that still fails after the
-retries (unreachable, or 5xx) is an error for the CLI and a `controller_call_failed {path,
+It sends the call through its own controller client, which re-reads the controller's address
+(`FLOCK_CTL_HOST_FILE` on Slurm) before every heartbeat and after any connection error, and
+retries there; a POST that may have reached the controller is not sent again. A call that still
+fails (unreachable, or 5xx) is an error for the tool and a `controller_call_failed {path,
 error}` event on the agent's stream (`flock status <agent> --events`).
 
-**Directly.** Without a gateway (the `llm` harness, or no pin file) the CLI reads `FLOCK_URL`
-and `FLOCK_AGENT_TOKEN` (falling back to `FLOCK_TOKEN`), as before. Both stay in the harness
-environment for that fallback; with the gateway they are not needed and can be dropped.
+## Operator CLI
 
-```sh
-flock-agent spawn analyst --prompt "..." --key a1   # prints the child's name; same key, same child
-flock prompt <agent> "text"                # a child, a grandchild, or $FLOCK_PARENT
-flock prompt --children --state idle "text"   # all your idle children, one request
-flock status [<agent>]                     # JSON; yourself by default
-flock status <agent> --events --after N --wait   # blocks until something new (600 s at most)
-flock-agent remove <agent>                    # a descendant and its subtree
-```
-
-The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up to
-5 attempts with exponential backoff and jitter, never sooner than `Retry-After`, so a thousand
-agents calling it through a Space edge do not fail on throttling.
-
-For the operator (controller token), `flock-agent spawn <type> --parent <agent>` spawns on an agent's
-behalf, `flock status <swarm> --parent <agent>` lists children, and `status` / `remove` take an
-agent name when the name is not a swarm.
-
-## Snippet for a leader's system prompt
-
-```markdown
-## Child agents
-
-You can create agents to work in parallel. Each child has its own workdir and session and
-keeps them until removed; it does nothing until prompted.
-
-- `flock-agent spawn <type> --prompt "<task>" --key <short-unique-key>` creates a child and prints
-  its name. Reusing a key returns the same child, so retrying is safe.
-- `flock status <child> --events --after <N> --wait` blocks until the child does something; the
-  cursor for the next call is printed on stderr. An `agent.turn_ended` event means it finished a turn.
-- `flock prompt <child> "<text>"` sends a follow-up; `flock status <child>` shows its state.
-- `flock-agent remove <child>` removes it and everything it spawned. Remove children you no longer
-  need: you have a fixed number of places.
-- Children report back with `flock prompt $FLOCK_PARENT "<result>"`; those reports arrive as
-  your next prompts.
-- A refusal prints a reason: `max_children` (remove a finished child first), `depth`,
-  `type_not_allowed`, `alive`, `budget`, `workers` or `spawned_total` (swarm limits: stop
-  spawning).
-```
+With the controller token, `flock-agent spawn <type> --parent <agent>` spawns on an agent's
+behalf, `flock-agent remove <agent>` removes a descendant and its subtree, `flock status <swarm>
+--parent <agent>` lists children, and `status` takes an agent name when the name is not a
+swarm. The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up
+to 5 attempts with exponential backoff and jitter, never sooner than `Retry-After`.
 
 ## Harbor agents
 
-A `harness: harbor` agent runs in a Trial (the task's container) without the worker's gateway,
-so it calls the controller through the `spawn` resource and the `spawn.*` tools
+An agent runs in a Trial (the task's container), so it calls the controller through the `spawn`
+resource and the `spawn.*` tools
 (`flock.harbor.plugins`, copied into the run's `resources/` and `tools/` like `board`):
 
 ```yaml
@@ -326,8 +214,8 @@ limits: {spawned_total: 50}
 | `spawn.remove {agent}` | `DELETE /agents/<agent>`: a descendant and its subtree |
 
 - **Auth.** Each agent's Trial mounts its own Unix socket (`/run/flock-spawn.sock`), served on
-  the worker. The worker sends each call with that agent's own token (the gateway's route
-  allow-list above): the socket, never the request, decides whose token is used, and the controller
+  the worker. The worker sends each call with that agent's own token (the route allow-list
+  above): the socket, never the request, decides whose token is used, and the controller
   checks the token's scope and the caps (`spawn:`, `workers`, `limits`) exactly as for any
   other agent. No token enters the container.
 - **Tools per role.** A role without a `spawn:` rule is not shown `spawn.spawn` and
@@ -342,9 +230,6 @@ limits: {spawned_total: 50}
 - Pre-warming is a possible later feature. Today a worker is opened only for agents that
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
-- The instructions above are not appended to AGENTS.md automatically; put them in the
-  type's `system_prompt_file`, or in a `system_prompt_append_file` that `flock launch` appends to
-  a shared prompt.
 - `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
 - Spawned rows are not mirrored to the bucket. If the controller loses its SQLite (no persistent
   storage), workers report agents the controller does not know and the controller unassigns them.

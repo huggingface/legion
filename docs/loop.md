@@ -14,30 +14,25 @@ worker side and rendering), `cli.py` (`flock stop --final`, `flock status`).
 ## Spec
 
 ```yaml
-types:
-  painter:
-    harness: llm
-    model: lfm
-    replicas: 1000
-    loop:
-      prompt: "Round {round}: claim and paint. Repeat until the result says you are done, then call done."
-      # or prompt_file: prompts/round.md (read by `flock launch`, relative to the spec)
-      every: turn_end            # turn_end (default) | a duration: 30s, 2m
-      on: [comms.mention]        # wake-ups from the board (see "Wake queue")
-      wake:                      # how wake-ups spend rounds (all optional; these are the defaults)
-        min_gap: 30s             # per agent, between two wake prompts; wakes in between coalesce
-        max: 10                  # wake prompts per agent per run of the loop (null: no cap)
-        # window: 10m            # set: `max` per this window instead of per run
-        counts_as_round: false   # true: a wake prompt is a round and counts toward max_rounds
-      while:                     # all set conditions must hold
-        until: 2h                # wall time since the loop started (type-wide); or a clock time: 2026-10-28T20:00Z
-        max_rounds: 400          # loop prompts per agent
-        budget_usd: 12           # the type's total cost (type-wide)
-        agent_usd: 0.05          # per agent; or a map by model alias / id: {deepseek: 3.60, glm: 2.10}
-      final:                     # optional: one last prompt per live agent once the loop stops
-        prompt: "Final round: submit your best result with submit_final, then call done."
-        # or prompt_file: prompts/final.md
-        reserve_usd: 0.60        # held back from limits.budget_usd for this round
+loop:                          # a Harbor spec's run loop; a role's own `agents.roles.<r>.loop` replaces it
+  prompt: "Round {round}: claim and paint. Repeat until the result says you are done."
+  # or prompt_file: prompts/round.md (read by `flock launch`, relative to the spec)
+  every: turn_end            # turn_end (default) | a duration: 30s, 2m
+  on: [board.mention]        # wake-ups from the board resource (see "Wake queue")
+  wake:                      # how wake-ups spend rounds (all optional; these are the defaults)
+    min_gap: 30s             # per agent, between two wake prompts; wakes in between coalesce
+    max: 10                  # wake prompts per agent per run of the loop (null: no cap)
+    # window: 10m            # set: `max` per this window instead of per run
+    counts_as_round: false   # true: a wake prompt is a round and counts toward max_rounds
+  while:                     # all set conditions must hold
+    until: 2h                # wall time since the loop started (type-wide); or a clock time: 2026-10-28T20:00Z
+    max_rounds: 400          # loop prompts per agent
+    budget_usd: 12           # the type's total cost (type-wide)
+    agent_usd: 0.05          # per agent; or a map by model alias / id: {deepseek: 3.60, glm: 2.10}
+  final:                     # optional: one last prompt per live agent once the loop stops
+    prompt: "Final round: submit your best result with submit_final."
+    # or prompt_file: prompts/final.md
+    reserve_usd: 0.60        # held back from limits.budget_usd for this round
 limits:
   budget_usd: 15                 # hard stop for the swarm (below)
 ```
@@ -46,7 +41,7 @@ limits:
 |---|---|
 | `prompt` / `prompt_file` | the loop prompt, a template rendered on the worker (placeholders below); one is required |
 | `every` | `turn_end`: the next loop prompt as soon as the agent's turn completes. A duration: an idle agent gets the next one that long after its previous loop prompt was sent |
-| `on` | wake sources (`comms.mention`, `comms.thread`, ...): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `flock launch` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key and `"on":` quoting is no longer needed |
+| `on` | wake sources (`board.mention`, ...: the board resource's events): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `flock launch` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key and `"on":` quoting is no longer needed |
 | `wake.min_gap` | per agent: at least this long between two wake prompts (default `30s`; `0s` turns it off). Wakes that arrive in the gap are coalesced into one prompt when it ends |
 | `wake.max`, `wake.window` | per agent: at most `max` wake prompts (default 10) per run of the loop, or per `window` when set; `null` for no cap. Past it, wakes are ignored (`wake()` returns false) |
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round, as before this setting |
@@ -69,8 +64,8 @@ The worker fills these in `prompt` and `final.prompt`, at send time:
 | `{wall}` | `while.until` in minutes, or `none` |
 | `{spend}` | the agent's cost so far in USD, 3 decimals (worker-side, same price table as the controller) |
 | `{cap}` | the agent's `while.agent_usd`, 2 decimals, or `none` |
-| `{why}` | what sent it: `start`, `turn_end`, `every 120s`, `wake: comms.mention`, `retry after error`, `final: max_rounds` |
-| `{last_summary}` | the text the agent last passed to `done` (`llm` harness), else its last reply; `(none yet)` before any. A turn that stopped without `done` (`max_turns`, `max_budget_usd`, an error) sets it to `previous turn ended (<reason>) after N tool call(s) without finishing (last calls: a, b, c)` instead, so the next prompt never repeats an older turn's summary |
+| `{why}` | what sent it: `start`, `turn_end`, `every 120s`, `wake: board.mention`, `retry after error`, `final: max_rounds` |
+| `{last_summary}` | the agent's last reply; `(none yet)` before any. A turn that stopped early (`max_turns`, `max_budget_usd`, an error) sets it to `previous turn ended (<reason>) after N tool call(s) without finishing (last calls: a, b, c)` instead, so the next prompt never repeats an older turn's summary |
 | `{workspace}` | the agent's workdir at its last push: `12k files, 340 MB; largest: snaps/ 9k, src/ 2k` (sync excludes and `workdir.ephemeral` left out), or `not measured yet` |
 
 Anything else in braces, and format specs such as `{cap:.2f}`, is left exactly as written, so
@@ -92,8 +87,8 @@ every turn is admitted under the provider's `max_working` like any other prompt.
   idle and again each time a turn ends `completed` (or at `max_turns`), with no controller round trip (no idle gap,
   run 1 lost ~17 % of agent time there). It stops at `max_rounds`, at the `until` deadline, on
   a `loop_stop` command, or after 3 failed turns in a row (a failed turn is retried after 2 s).
-  A turn that ends at the type's `max_turns` is not a failed turn, on either side: with
-  `tool_choice: required` it is how turns normally end. Each one is a `loop_max_turns` event.
+  A turn that ends at the type's `max_turns` is not a failed turn, on either side. Each one is
+  a `loop_max_turns` event.
   Each prompt it sends is a `loop_prompt` event, which is how the controller counts rounds. An
   agent idle for 30 s with no loop activity (a lost command, a relaunched worker) gets its
   `loop_start` again; the command is idempotent.
@@ -213,16 +208,16 @@ unknown type or agent. The controller makes holds of its own when the world is d
 
 ### Wake queue (`on:`)
 
-`LoopEngine.wake(agent, reason)` is fed by the board (docs/comms.md): every `comms_mention` and
-`comms_thread_reply` event a worker posts becomes `wake(agent, "comms.mention")` or
-`wake(agent, "comms.thread")`. A wake queues the agent's loop prompt (`why: wake: <reasons>`)
+`LoopEngine.wake(agent, reason)` is fed by the board resource (docs/comms.md): every `resource`
+event a worker posts for it (`{resource: board, kind: mention, ...}`) becomes
+`wake(agent, "board.mention")`. A wake queues the agent's loop prompt (`why: wake: <reasons>`)
 once 2 s have passed without a new wake for that agent, or at most 10 s after the first, and
 not before `wake.min_gap` has passed since the agent's previous wake prompt, through the same
 `state: idle, skip_pending: true` path. Everything queued until then (a thread's worth of
 replies) becomes that one prompt. By default the prompt is not a round (`wake.counts_as_round`):
 `max_rounds` stays a budget for the cadence, and `wake.max` (per run, or per `wake.window`)
 caps the wakes. A wake is accepted only for an agent in a running loop whose `on:` lists the
-reason (or its prefix before `:`, so `comms.mention:42` matches `comms.mention`), under
+reason (or its prefix before `:`, so `board.mention:42` matches `board.mention`), under
 `wake.max`, and never in a swarm stopped by the hard budget stop; wakes for an agent that is
 working wait until it is idle and then give one prompt. A cadence prompt that goes out first
 takes the queued wakes with it. A wake prompt a worker defers, or one dropped while still
@@ -232,14 +227,13 @@ queued, is taken back from the wake count, and from the round count when it coun
 Why: in a thread of five agents each reply woke the four others, and each wake was a full round,
 so `max_rounds` went on board chatter in minutes. With the defaults one agent gets at most one
 wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock launch` warns when an `on:` source can never
-fire: a `comms.*` source on a type that is not on the board (no `comms: true` or no swarm
-`comms:` block), a kind the swarm's `comms.wake` leaves out, or a source with no feeder.
+fire: a `board.*` source in a run without a board resource, or any other source (only
+`board.*` is fed).
 
 ### Notices (`notices: true`)
 
 Wakes say only why a prompt went out; in a `turn_end` loop they mostly fold into the next round.
-With `notices: true` the controller keeps each agent's `comms_mention` and `comms_thread_reply`
-events (msg id, thread, sender) with its loop state in the store (a controller restart keeps
+With `notices: true` the controller keeps each agent's board events (msg id, thread, sender) with its loop state in the store (a controller restart keeps
 them) and appends one line to its next loop prompt, whatever sent it (turn end, `every`, wake):
 
     New for you since your last round: @cmpatino mentioned you in thread 19820; 2 replies in your thread 19455 (tan-jackal, ochre-spoon). Read them if useful.
@@ -268,7 +262,7 @@ sent: `reason` the wake sources, `events` the wakes folded into it, `coalesced =
 
 Agent stream (from the worker): `loop_prompt {kind: loop|final, round, why}`
 right before the turn it starts, `loop_stopped {reason, round, active}` when a worker-side loop
-ends, and `turn_ended` now carries `tool_calls` (tool calls in the turn, `done` excluded). A wake
+ends, and `turn_ended` now carries `tool_calls` (tool calls in the turn). A wake
 prompt outside the round count has `counted: false` in its `loop_prompt`. The controller also writes `final_round` into the agent's stream.
 
 ### Commands and API
@@ -305,7 +299,7 @@ budget stop is in effect.
 ```yaml
 loop:
   every: turn_end
-  prompt: "Claim and paint. Repeat until the result says you are done, then call done."
+  prompt: "Claim and paint. Repeat until the result says you are done."
   while: {until: 2h, max_rounds: 400, budget_usd: 12}
 ```
 
@@ -317,22 +311,17 @@ idle gap between a painter's turns. Until the world PR, coverage is the painters
 ### Eliza (worlds-design §4.7)
 
 ```yaml
-types:
-  ds: &dev
-    harness: llm
-    model: deepseek
-    replicas: 3
-    system_prompt_file: prompts/system.md
-    tool_choice: required
-    max_turns: 14                           # Eliza's tool calls per round
-    loop:
-      prompt_file: prompts/round.md         # {round} {elapsed} {wall} {spend} {cap} {why} {last_summary} {workspace}
-      every: 120s                           # idle_wake_s
-      on: [comms.mention, comms.thread]     # "new board message", debounced 2 s
-      while: {until: 2h, max_rounds: 200, agent_usd: {deepseek: 3.60, glm: 2.10}}
-      final: {prompt_file: prompts/final.md, reserve_usd: 0.60}
-  glm: {<<: *dev, model: glm, replicas: 2}
-limits: {budget_usd: 15}
+agents:
+  roles:                                    # a Harbor spec; models are the run's model ids
+    ds: {count: 3, model: deepseek}
+    glm: {count: 2, model: glm}
+loop:
+  prompt_file: prompts/round.md             # {round} {elapsed} {wall} {spend} {cap} {why} {last_summary} {workspace}
+  every: 120s                               # idle_wake_s
+  on: [board.mention]                       # "new board message", debounced 2 s
+  while: {until: 2h, max_rounds: 200, agent_usd: {deepseek: 3.60, glm: 2.10}}
+  final: {prompt_file: prompts/final.md, reserve_usd: 0.60}
+limits: {agent_max_turns: 14, budget_usd: 15}   # Eliza's tool calls per round
 ```
 
 How `config.yaml` and `swarm.py::main_loop` map:
@@ -341,7 +330,7 @@ How `config.yaml` and `swarm.py::main_loop` map:
 |---|---|
 | `loop.debounce_s: 2` | the wake queue's 2 s debounce (fixed) |
 | `loop.idle_wake_s: 120` | `every: 120s` |
-| `loop.max_steps_per_round: 14` | the type's `max_turns: 14` (model calls per prompt) |
+| `loop.max_steps_per_round: 14` | `limits.agent_max_turns: 14` (model calls per prompt) |
 | `loop.max_rounds_per_agent: 200` | `while.max_rounds: 200` |
 | `caps.agent_usd_by_model` | `while.agent_usd: {deepseek: 3.60, glm: 2.10}` |
 | `caps.global_usd: 15` | `limits.budget_usd: 15` |
@@ -351,7 +340,7 @@ How `config.yaml` and `swarm.py::main_loop` map:
 | `final_round: off` / `manual` | no `final:` / stop with `final: false` (`POST /swarms/{swarm}/loop`), then a manual prompt |
 | `ctx.halt(...)` when `global_spend >= soft_cap` | `budget_stop {phase: final_reserve}` |
 | `ROUND` template `{rnd} {el} {wall} {spent} {cap} {why} {summary}` | `{round} {elapsed} {wall} {spend} {cap} {why} {last_summary}` |
-| `done_for_now(summary)` | the `done` tool; its summary is `{last_summary}` |
+| `done_for_now(summary)` | not modelled: `{last_summary}` is the agent's last reply |
 | `caps.final_round_agent_usd: 0.10` | not modelled: final-round spend is exempt from `agent_usd` (as in Eliza) and bounded only by the reserve and the hard stop |
 
 What still stays outside flock for Eliza: the board kickoff and final-round announcement (comms

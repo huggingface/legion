@@ -1,4 +1,4 @@
-"""Tools folder -> tool definitions (docs/tools.md, "Contract").
+"""Tools folder -> tool definitions.
 
 Every `*.py` file at the top of the folder whose name does not start with `_` is a tool module.
 Every function defined in it (not imported) whose name does not start with `_` and that has a

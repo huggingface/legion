@@ -123,11 +123,11 @@ sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<
 ```
 
 The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET RUN
-FLOCK_URL WORK_ROOT FLOCK_LLM_HOME PYTHONUNBUFFERED`, the type's `env`, and when configured
+FLOCK_URL WORK_ROOT PYTHONUNBUFFERED`, the type's `env`, and when configured
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
 `container_root`, `HOME HF_HOME TMPDIR`). A comment names the secrets the worker
 expects from the cluster's secrets file: `FLOCK_TOKEN HF_TOKEN` plus the launch's (provider
-key, board invite, `FLOCK_WORLD_TOKEN`). The worker script (the run's `slurm/worker.sbatch`;
+key, the type's `secrets`). The worker script (the run's `slurm/worker.sbatch`;
 the controller job sets `FLOCK_SLURM_WORKER_SCRIPT` to it) sources the secrets file, run.env and
 the env file and runs `flock-worker`, handing it those secrets in a private file (below).
 
@@ -324,23 +324,15 @@ name, optional port) receives it.
 
 ## Containers (Enroot/Pyxis)
 
-Workers may run in a container (`srun --container-image`, when the profile or run.env names an
-image: `CONTAINER_IMAGE`, or `CONTAINER_IMAGE_<type>`); the controller (it needs `sbatch`) and
-the world stay on the host. In the container `/tmp` is a RAM tmpfs counted against the
-job's memory, so nothing goes there: with `container_root: /work` the env file sets
-`WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`.
-`worker.sbatch` overrides `WORK_ROOT FLOCK_LLM_HOME` in the container with worker-id-free paths
-(`/work/flock/agents/{work,llm}`): an agent's workdir must not change when the controller relaunches
-its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HOME,
-XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
-`FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
-`hf://buckets/cmpatino/legacy-swarmchat-experiments/run3/slurm/Containerfile` builds the image.
+`harness: harbor` is the only harness, so `container_root` and `container_image` (and
+`CONTAINER_IMAGE`) are ignored for workers (below). A worker with no usable HOME derives HOME, HF_HOME, XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the
+parent of `WORK_ROOT`; other processes use `FLOCK_HOMELESS_ROOT`.
 
 `harness: harbor` workers never run in a container: each agent is a Harbor Trial in rootless
 podman, which cannot run inside Enroot. Their env file carries `FLOCK_HARNESS=harbor` and node
 paths, and `worker.sbatch` runs `flock-worker` here as its child with shepherd's podman setup:
 the job's own podman storage in `/tmp/flock-podman.*` (left to the job's own `/tmp`, a per-job
-tmpfs on hopper-cpu), `podman-compose` from the venv (`flock[harbor]`, Python 3.12+), podman's
+tmpfs on hopper-cpu), `podman-compose` from the venv (a flock dependency, Python 3.12+), podman's
 health checks run by `python -m flock.harbor.podman_healthchecks` (compute nodes have no user
 systemd), and shepherd's git credential helper for huggingface.co (private task repos), which
 reads `HF_TOKEN` from a 0600 file there. At exit the job's containers are stopped, within

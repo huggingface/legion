@@ -1,4 +1,4 @@
-"""Apply-time glue between a swarm spec and its tools folder (docs/tools.md, "Selection")."""
+"""Apply-time glue between a swarm spec and its tools folder."""
 
 from __future__ import annotations
 

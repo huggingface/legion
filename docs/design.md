@@ -243,19 +243,9 @@ live process costs about 0.1 CPU-s against about 1 CPU-s cold. The prompt
 cache is server-side with a 1 h TTL either way. Hence the 120 s idle grace and
 the measured defaults of 50 agents and 20 concurrent turns per worker.
 
-The `llm` harness (`harness: llm`, docs/llm-harness.md) has no process: a "burst" is an asyncio
-task in the worker that runs a Chat Completions loop with one `bash` tool against an
-`openai_compat` provider (required). The session is a JSONL file of chat messages under
-`$FLOCK_LLM_HOME/sessions/<agent>/` (`/state/llm`), appended per step, reloaded on resume and
-compacted (system + a note + the newest messages and steps) when the prompt projected from the server's last `prompt_tokens` passes the type's `context_tokens`. A flock
-turn ends on a reply without tool calls; prompts sent mid-turn become the next user message;
-`max_turns` / `max_budget_usd` are checked before each model call, as for Pi and Codex. Usage
-is per call. `extra` is sent as body fields; `reasoning` is ignored. Tool calls written as
-text (`{"tool": "bash", ...}` or `[bash(command=...)]`) are accepted for small models. A type's
-`tool_choice` (`required` or `bash`) forces a call on every request; with the `done` tool
-(`done_tool`, default on for `required`) a turn runs until `done` or `max_turns` (50 if unset),
-without it each prompt is one action. Thinking (`reasoning_content` or inline `<think>`) is shown, never resent; the
-transcript keeps exactly one system message, first (LFM2's template requires it).
+`harness: harbor` is the only harness now: each agent is one long-lived Harbor Trial on
+shepherd's task path (flock.worker.adapters.harbor), in which Harbor's Pi runs one turn per
+prompt; the Trial outlives the bursts and its Pi sessions are synced like a harness's files.
 
 ### Resume across workers
 
@@ -351,7 +341,7 @@ models:                        # optional aliases
   qwen-27b: {model: "gpu1:Qwen/Qwen3.8-27B-FP8", reasoning: medium}
 types:
   researcher:
-    harness: llm               # llm | harbor
+    harness: harbor            # the only one; written by the compile step of a Harbor spec
     model: "hf:Qwen/Qwen3.8-27B:deepinfra"
     image: null                # default worker image; override to add tools/skills
     system_prompt_file: prompts/researcher.md   # written to the workdir as AGENTS.md
@@ -368,17 +358,12 @@ types:
     idle_grace: 120s
     max_turns: 50              # model calls per prompt; enforced for every harness
     max_budget_usd: 2.0        # spend per prompt (flock price table); enforced likewise
-    context_tokens: null       # llm harness only: compaction threshold, default 32000
-    tool_choice: null          # llm harness only: auto | required | none | bash
-    done_tool: null            # llm harness only: offer `done` (default: on for tool_choice required)
     persist_workdir: true
     workdir: {soft_files: 50000, soft_mb: 2048, ephemeral: [scratch/]}  # "Workdir" above
     worker: {sync_interval_s: 180, restore_threads: 4}   # live worker knobs, docs/slurm.md
     resume_prompt: "Your previous turn was interrupted. Check the workdir and continue."
-    msgboard_invite: MSGBOARD_INVITE_RESEARCHER   # name of a secret holding the invite code
-    tools: [ws_write, run_bot] # functions from the tools folder, or `all` (docs/tools.md)
   analyst:
-    harness: llm
+    harness: harbor
     model: qwen-27b            # alias; or "hf:Qwen/Qwen3.8-27B:deepinfra" directly
     reasoning: low             # optional; overrides the alias
     replicas: 200
@@ -392,17 +377,14 @@ caller's files (added in the e2e run). `system_prompt_append_file` (optional) is
 after a blank line, so several types can share one prompt plus a section of their own
 (hf://buckets/cmpatino/legacy-swarmchat-experiments/run4's spawner and child types).
 
-Tools folder (docs/tools.md): `tools_dir` (top level, default `tools/` next to the spec file)
-holds Python functions; `types.<t>.tools` selects them. `flock launch` packs the folder,
-uploads it and writes its content hash into the spec as `tools_version`; assigns
-(`AssignCommand.tools_version`) and heartbeat responses (`{"tools": {"version", "select"}}`)
-carry it to the workers, which switch at the next turn.
+A Harbor run's tools and resources folders: `flock launch` packs them, uploads them and writes
+their content hash into the spec (`tools_version`, and `harbor.folders` per type); each worker
+fetches that version once and unpacks it (flock.worker.tools).
 
 Comms (docs/comms.md): a swarm-level `comms:` block (`kind: msgboard`, `url`, `invite_env`,
-`channel`, `kickoff_file`, `rules`, `protocols`, `wake`, `search`) and per-type `comms: true` or
-`comms:*` entries in `tools`. The controller resolves the channel id and posts the kickoff once
-at apply (`comms.channel_id`, `comms.kickoff_id`); assigns (`AssignCommand.comms`) and heartbeat
-responses (`{"comms": {...block, "tools"}}`) carry the block, so rules and protocols are live.
+`channel`, `kickoff_file`). The controller resolves the channel id and posts the kickoff once at
+apply (`comms.channel_id`, `comms.kickoff_id`). Agents use the board through the Harbor board
+resource.
 
 ### Providers
 
@@ -423,7 +405,7 @@ server) are reached through a `providers:` block. Field names are swarmlab's
 | `providers.<name>.timeout_s`, `max_retries` | passed to the harness |
 | `models.<alias>.model` | `"<provider>:<model id>"` |
 | `models.<alias>.reasoning` | `off`, `low`, `medium`, `high` |
-| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); sent by the `llm` harness only |
+| `models.<alias>.extra` | raw request-body fields (swarmlab's `extra`); kept, not sent (Harbor's Pi cannot); a warning at launch |
 | `models.<alias>.pricing` | `[input, output, cached]`, overrides the provider's |
 | `types.<t>.model` | an alias, else `"<provider>:<model id>"` |
 | `types.<t>.reasoning` | overrides the alias's |
@@ -437,7 +419,7 @@ names no provider.
 Checked at apply (HTTP 422 / CLI error naming the type and field): an unknown prefix in a
 type or a `models:` entry; a provider-backed model with no price in the alias, the provider's
 row for the id, or its `"*"` row, unless `self_hosted`; a model that names no provider;
-harness against provider type (`llm` and `harbor` need `openai_compat`).
+harness against provider type (`harbor` needs `openai_compat`).
 
 Pinning: validation writes `types.<t>.resolved_model` (provider, model id, reasoning, extra and
 the `[input, output, cached]` price) and the self-hosted `[0, 0, 0]` default into the stored
@@ -517,7 +499,7 @@ launch errors back off 30 s doubling to 5 min, last error in `launch_error`.
 | Method | Path | Purpose |
 |---|---|---|
 | PUT | `/swarms/{swarm}` | apply a spec |
-| POST | `/swarms/{swarm}/tools` | upload a tools bundle (tar.gz, docs/tools.md); stored under its content hash |
+| POST | `/swarms/{swarm}/tools` | upload a tools bundle (tar.gz: a Harbor run's packed folders); stored under its content hash |
 | GET | `/swarms/{swarm}/tools`, `/swarms/{swarm}/tools/{version}` | stored versions and the current one; one bundle (workers fetch it) |
 | POST | `/swarms/{swarm}/preflight` | probe each provider-backed model with one tool-calling request; body: a spec (none: the applied one) |
 | GET | `/swarms/{swarm}` | spec and aggregates: counts by type and state |
@@ -539,12 +521,11 @@ steered prompt into the current one, and the stream shows which happened.
 Prompts for an agent whose worker is down are held in SQLite and delivered on
 the replacement worker's first command poll (at-least-once).
 
-Per-prompt limits: Claude, Codex, Pi and `llm` all enforce `max_turns` (model calls) and
+Per-prompt limits (history: the removed Claude, Codex and Pi harnesses) enforced `max_turns` (model calls) and
 `max_budget_usd` (spend, priced from the flock table). Claude gets both as SDK options.
 Codex and Pi have no such option, so the worker adapter counts model calls (Codex: one
 `thread/tokenUsage/updated` per call) and prices each call; before the call that would
-pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`, `llm` simply does not
-call) and the turn ends
+pass a limit it stops the harness (Codex `turn/interrupt`, Pi `abort`) and the turn ends
 `error` with `reason` max_turns|max_budget_usd, `subtype` error_max_turns|error_max_budget_usd
 and `num_turns`. The session stays usable. A Codex steer into a turn that has used its
 allowance is held and sent as the next turn once that turn ends.
@@ -574,8 +555,7 @@ About 100 bytes per agent. 10k agents on 1,000 workers is about 33 requests/s
 at the controller.
 
 The worker also sends `spec_rev`, a hash of the type spec it has. The response carries
-`tools` and `comms` (docs/tools.md, docs/comms.md), `type_spec` and `spec_rev` when the type
-spec changed. The worker applies a new type spec at each agent's next turn boundary
+`type_spec` and `spec_rev` when the type spec changed. The worker applies a new type spec at each agent's next turn boundary
 (docs/live.md).
 
 Telemetry, all optional (older workers send none; the controller stores the last values and
@@ -789,6 +769,7 @@ Condensed from the grilling session, 2026-10-13/14.
 | 32 | Controller as an HF Job (job mode, 2026-10-20; supersedes 9 for large swarms, Space mode kept): the controller runs in a network group under the alias `controller`. Workers join the group and use `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` directly, off the Spaces edge (429s at ~44 workers, pixel runs 1k and 2). Humans and the CLI go through the jobs proxy: the API on 7860 needs an HF token, with the flock token in `X-Flock-Token`; a read-only status page is public on 7861. SQLite and event files are synced to a bucket every 60 s and on SIGTERM, then restored at start. One namespace per controller; model jobs stay outside the group (Carlos) |
 | 33 | Tools folder (2026-10-21, thread 3063: tools live outside flock, are read at runtime and change while the swarm runs): public documented functions in `tools/*.py` are tools (schema from type hints, injected `Context`); `flock launch` ships the folder as a tar.gz named by its content hash; workers fetch it at assign and from heartbeat responses and switch at the next turn; one `python -I` subprocess per call (60 s, 1 MB); `llm` offers them as function tools, CLI harnesses through `flock-tool` and a generated Tools section |
 | 34 | Comms in the spec (2026-10-21, design note §10, threads 3063 and 3144): agents join the board under their flock name at their first prompt; the token stays in the worker (never in the agent env, workdir or pin); one activity long-poll per worker fans messages out as `comms_mention` / `comms_thread_reply` events; built-in `post` / `read` / `search` tools with rules enforced before the board call; search cut 1 is the board's own FTS5 search with query relaxation, no msgboard change; the kickoff is posted by `<swarm>-host`, never an agent (Carlos) |
+| 35 | Harbor only (2026-11-06): the `llm` harness and what only it used are removed: the worker comms and world hubs, worker-side folder tools (pins, `flock-tool`, the gateway), the per-agent memory guard and the llm example specs. Agents reach the board, worlds and the controller through Harbor resources (`board`, `world`, `spawn`); supersedes 31, 33 and 34's worker side |
 
 ## 12. Road to 10k
 

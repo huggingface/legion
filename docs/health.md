@@ -10,11 +10,7 @@ stream is tailed by byte offset.
   manifest lists the `metrics-v1` capability, `GET /metrics` is stored as-is under
   `world.metrics`. Two failed probes in a row write `world_down` to the swarm stream; the next
   success writes `world_up`.
-- **World down: refuse, then pause.** From `world_down` on, every heartbeat response carries
-  `world.down_since` (the first failed probe) and the workers' world hub refuses world calls at
-  once, read-only ones too, without uploading anything: `world <name> down since HH:MM UTC;
-  do local work or end your turn` (`code: world_down`, `local: true`). When the
-  world has been down for `world.down_pause_s` seconds (default `FLOCK_WORLD_DOWN_PAUSE_S`,
+- **World down: pause.** When the world has been down for `world.down_pause_s` seconds (default `FLOCK_WORLD_DOWN_PAUSE_S`,
   1800; `0` turns it off) the controller holds every type that has world tools (docs/loop.md
   "Pause and resume"): `paused {reason: world_down, by: controller, auto: true}`. The first
   successful probe lifts those automatic holds (`resumed {auto: true}`), also ones left by a
@@ -201,6 +197,5 @@ them); `flock.status.normalise` maps each to one schema:
 | `ramp.step`, `ramp.held` | `ramp_step`, `ramp_held` | swarm | a ramp step, a capacity hold |
 | `world.down`, `world.up`, `world.knob` | `world_down`, `world_up`, `world_knob` | swarm | the world probe; a knob changed |
 | `budget.stop`, `budget.cleared` | `budget_stop`, `budget_cleared` | swarm | `limits.budget_usd` |
-| `comms.dm`, `comms.mention`, `comms.joined`, ... | `comms_*` | agent | the board (docs/comms.md) |
 | `swarm.stopped`, `swarm.resumed`, `swarm.released`, `swarm.unreleased` | `paused`, `resumed`, `released`, `unreleased` | swarm | `flock stop` / `flock launch` |
 | `swarm.spec_applied`, `swarm.removed` | `spec_applied`, `remove_swarm` | swarm | the stored spec; `--delete` done |

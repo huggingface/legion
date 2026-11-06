@@ -793,7 +793,7 @@ class TypeSpec(_Removable):
     workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
     worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
-    # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
+    # Tools from the swarm's tools folder: a list of function names, or "all".
     # `flock launch` refuses a name the folder does not define. None: no folder tools.
     tools: list[str] | Literal["all"] | None = None
     # Re-prompt this type's agents on a cadence, then a final round (docs/loop.md). None: off.
@@ -1028,7 +1028,7 @@ class SwarmSpec(BaseModel):
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
-    # The tools folder (docs/tools.md), relative to the spec file; None: `tools/` next to it.
+    # The tools folder, relative to the spec file; None: `tools/` next to it.
     # Read by `flock launch` only.
     tools_dir: str | None = None
     # Content hash of the tools bundle, written by `flock launch` after uploading the folder
@@ -1799,7 +1799,7 @@ class AssignCommand(BaseModel):
     parent: str | None = None  # the spawning agent, None for a replica
     # The agent's scoped controller token, injected into its harness env as FLOCK_AGENT_TOKEN.
     agent_token: str | None = None
-    tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
+    tools_version: str | None = None  # the swarm's tools bundle; None: no tools
     comms: CommsSpec | None = None  # the swarm's comms block (docs/comms.md), channel resolved
     world: WorldSpec | None = None  # the swarm's world (docs/world.md), manifest fetched
 

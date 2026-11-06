@@ -284,8 +284,7 @@ class ControllerClient:
         return CommandBatch.model_validate(r.json() if r.content else {"commands": []})
 
     async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> dict:
-        """The controller's answer: {"ok": true} plus, for a swarm with a tools folder,
-        {"tools": {"version", "select"}} (docs/tools.md)."""
+        """The controller's answer: {"ok": true}, and a changed type spec (docs/live.md)."""
         r = await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
                              content=hb.model_dump_json(), params=self.params,
                              headers={"content-type": "application/json"})

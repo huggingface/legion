@@ -7,15 +7,16 @@ casually: controller, worker and CLI all import it.
 ## Layout
 - `src/flock/models.py` — shared pydantic contracts (spec, heartbeat, commands, API shapes).
 - `src/flock/controller/` — FastAPI app, SQLite store, reconcile loop, HF Jobs client, status page.
-- `src/flock/worker/` — worker loop, harness adapters (`llm`, `harbor`; see docs/llm-harness.md), bucket sync, msgboard identity, comms hub (docs/comms.md).
-- `src/flock/comms/` — msgboard client, the built-in comms tools and their rules (docs/comms.md).
+- `src/flock/worker/` — worker loop, the `harbor` harness adapter (one Harbor Trial per agent), bucket sync.
+- `src/flock/harbor/` — the Harbor task path: spec compile, Trials, Pi, and the `board`, `world`, `spawn` resources and tools (plugins/).
+- `src/flock/comms/` — the controller's msgboard client and the board rules the board resource applies (docs/comms.md).
 - `src/flock/cli.py` — `flock` CLI (typer) over the controller API.
 - `experiments/` — Harbor experiments (`harbor-smoke`, `swarmchat-harbor`). Earlier experiments and their results are archived in `hf://buckets/cmpatino/legacy-swarmchat-experiments` (README inside).
-- `tests/` — pytest; no network, no real jobs. Fake the Hub client and the harness processes.
+- `tests/` — pytest; no network, no real jobs. Fake the Hub client and Harbor; tiny real runs use tests/tinyrun.py.
 
 ## Conventions
-- Python 3.11+, pydantic v2, httpx, typer, FastAPI. Keep it small; no new frameworks.
-- Install with `uv sync --all-extras`.
+- Python 3.12+, pydantic v2, httpx, typer, FastAPI. Keep it small; no new frameworks.
+- Install with `uv sync --all-extras` (Harbor is a main dependency; the extras add the controller's and the tests').
 - `ruff check` and `pytest` must pass before pushing.
 - Always pass `namespace=` to every `huggingface_hub` jobs call (saves a `whoami` per call).
 - Never launch an HF Job from tests. Experiments launch jobs only on `cpu-basic` unless the operator approved otherwise.
@@ -36,7 +37,7 @@ Be conservative about adding tests.
   private methods: a test that calls a private method usually has to build the object around it by hand and
   breaks on any refactor. Call a private function directly only when its behaviour cannot be reached
   deterministically otherwise, such as a pure helper.
-- **No `slow` tests.** Keep runs tiny. Tests that need an optional dependency or tool (a harness CLI, an SDK,
+- **No `slow` tests.** Keep runs tiny. Tests that need an optional dependency or tool (an SDK,
   Linux-only features) are gated with `pytest.importorskip` or `pytest.mark.skipif`, so they skip where they
   cannot run.
 - **Scratch tests are fine while developing:** keep them in `scratch/` or `tmp/` and do not commit them.
