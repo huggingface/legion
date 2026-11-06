@@ -109,6 +109,9 @@ class Workers(Settings):
     idle_grace: str | None = None
     turn_timeout: str | None = None
     worker: WorkerKnobs | None = None
+    # the workers' own env (no secrets: it is in the spec): what a task's `[environment.env]`
+    # `${VAR}` reads, as Harbor fills it from the worker's environment
+    env: dict[str, str] | None = None
     initial: int | None = Field(default=None, ge=0, strict=True)
     max_extra: int | None = Field(default=None, ge=0, strict=True)
 

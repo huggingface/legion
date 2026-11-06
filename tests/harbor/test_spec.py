@@ -6,6 +6,8 @@ import yaml
 from pydantic import ValidationError
 
 import flock.harbor
+from flock.controller.jobs import HubJobsClient
+from flock.controller.reconcile import reconcile
 from flock.harbor.config import Config
 from flock.harbor.spec import Spec, compile_spec, substitute
 from flock.models import SwarmSpec, load_spec_yaml, loop_refusals
@@ -331,6 +333,36 @@ def test_a_loop_without_until_ends_at_the_run_timeout(tmp_path):
     swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
     assert swarm.types["answers"].loop.while_.until == "9000500ms"
     assert swarm.types["safety"].loop.while_.until == "2h"  # its own
+
+
+def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, settings, clock):
+    """A task's `[environment.env]` `${VAR}` is filled from the worker's own env (Harbor's
+    resolve_env_vars): `workers.env` puts it there, in every type and every launched job."""
+    data = load_spec_yaml(COMPILE)
+    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
+    data["workers"]["env"] = {"CHATBOT_REPO": "${CHATBOT_REPO}"}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    spec = Spec.load(tmp_path / "spec.yaml", env={"CHATBOT_REPO": "ns/chat"})
+    swarm = compile_spec(spec, TASK)
+    assert {name: ts.env for name, ts in swarm.types.items()} == {
+        "answers": {"CHATBOT_REPO": "ns/chat"}, "safety": {"CHATBOT_REPO": "ns/chat"},
+    }
+    monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/flock/dist/x.whl")
+    runs = []
+
+    class Api:  # HfApi's run_job, recorded
+        def run_job(self, **kw):
+            runs.append(kw)
+            return SimpleNamespace(id=f"job-{len(runs)}")
+
+    jobs = HubJobsClient(token="t", image=None)
+    jobs.api = Api()
+    store.put_swarm(swarm, 0)
+    reconcile(store, jobs, clock(), settings)
+    assert {kw["labels"]["type"] for kw in runs} == {"answers", "safety"}
+    assert all(kw["env"]["CHATBOT_REPO"] == "ns/chat" for kw in runs)
 
 
 def test_a_shepherd_config_compiles():
