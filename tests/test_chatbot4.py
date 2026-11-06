@@ -1352,6 +1352,70 @@ def test_update_refs_writes_both_refs_at_once(setup):
     assert world.repo.sha(f"pr:{pr}") == main == world.repo.git("rev-parse", f"refs/flock/pr/{pr}/{main}")
 
 
+def _deck_line(clone, deck_id, *turns):
+    with open(clone / "deck/multi.jsonl", "a") as out:
+        out.write(json.dumps({"id": deck_id, "area": "test", "turns": list(turns)}) + "\n")
+
+
+@pytest.fixture
+def setup_v8_union(tmp_path, monkeypatch):
+    """The v8 world with CHATBOT_UNION_PATHS=deck/*.jsonl: deck replays keep both sides' lines."""
+    monkeypatch.setenv("CHATBOT_SEED_DIR", "seed-v8")
+    monkeypatch.setenv("CHATBOT_UNION_PATHS", "deck/*.jsonl")
+    return _setup(tmp_path, monkeypatch, "seed-v8")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
+def test_union_paths_let_two_deck_appends_merge_one_after_the_other(setup_v8_union):
+    world, _clone, second = _two_prs(setup_v8_union, lambda c: _deck_line(c, "multi-new-1", "hi", "one"),
+                                     lambda c: _deck_line(c, "multi-new-2", "hi", "two"))
+    result = world.merge_pr(Agent("oak"), second["pr"])
+    assert result["rebased_from"] == second["base_sha"] and result["reviewers"] == ["birch"]
+    deck = git(setup_v8_union[2], "show", "main:deck/multi.jsonl").splitlines()
+    assert [json.loads(line)["id"] for line in deck[-2:]] == ["multi-new-1", "multi-new-2"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
+def test_union_paths_still_refuse_the_same_deck_id_twice(setup_v8_union):
+    world, _clone, second = _two_prs(setup_v8_union, lambda c: _deck_line(c, "multi-dup", "hi", "one"),
+                                     lambda c: _deck_line(c, "multi-dup", "hi", "two"))
+    remote, main = setup_v8_union[2], world.repo.sha()
+    with pytest.raises(ToolError, match="'multi-dup'") as err:
+        world.merge_pr(Agent("oak"), second["pr"])
+    assert err.value.code == "shared_tests" and git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", f"refs/pr/{second['pr']}") == second["head_sha"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
+def test_union_paths_leave_code_conflicts_refused(setup_v8_union):
+    world, _clone, second = _two_prs(setup_v8_union, lambda c: _module(c, "greeting", "Hey!"),
+                                     lambda c: _module(c, "greeting", "Hi!"))
+    with pytest.raises(ToolError, match="in bot/modules/greeting.py") as err:
+        world.merge_pr(Agent("oak"), second["pr"])
+    assert err.value.code == "conflict"
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
+def test_union_paths_apply_to_an_update_from_an_older_main(setup_v8_union):
+    world, clone, second = _two_prs(setup_v8_union, lambda c: _deck_line(c, "multi-new-1", "hi", "one"),
+                                    lambda c: _deck_line(c, "multi-new-2", "hi", "two"))
+    _deck_line(clone, "multi-new-3", "hi", "three")  # the author's update, still on the old main
+    updated = submit(world, clone, branch="two", pr=second["pr"])
+    assert updated["rebased_from"] == second["base_sha"] and updated["base_sha"] == world.repo.sha()
+    deck = world.repo.git("show", f"{updated['head_sha']}:deck/multi.jsonl").splitlines()
+    assert [json.loads(line)["id"] for line in deck[-3:]] == ["multi-new-1", "multi-new-2", "multi-new-3"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
+def test_without_union_paths_deck_appends_still_conflict(setup_v8):
+    world, _clone, second = _two_prs(setup_v8, lambda c: _deck_line(c, "multi-new-1", "hi", "one"),
+                                     lambda c: _deck_line(c, "multi-new-2", "hi", "two"))
+    assert world.repo.attributes is None
+    with pytest.raises(ToolError, match="in deck/multi.jsonl") as err:
+        world.merge_pr(Agent("oak"), second["pr"])
+    assert err.value.code == "conflict"
+
+
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
     world, clone, _ = setup
     main = world.repo.sha()

@@ -70,6 +70,13 @@ class Repository:
             if bundle.exists():
                 self.git("fetch", str(bundle), "+refs/*:refs/*")
                 bundle.unlink()
+        # CHATBOT_UNION_PATHS: gitattributes patterns (e.g. deck/*.jsonl) whose replays onto main
+        # keep both sides' lines (merge=union) instead of conflicting. The attributes file is the
+        # world's own, next to its repository; the dataset is unchanged.
+        union = [p for p in re.split(r"[\s,]+", os.environ.get("CHATBOT_UNION_PATHS", "")) if p]
+        self.attributes = root.parent / "union.gitattributes" if union else None
+        if self.attributes:
+            self.attributes.write_text("".join(f"{p} merge=union\n" for p in union))
         self.fetch()
 
     def git(self, *args, at=None, data=None, env=None):
@@ -265,8 +272,10 @@ class Repository:
         sha = self.git("rev-parse", "HEAD", at=tree)
         if onto and onto != parent:
             self.git("checkout", "-q", "--detach", onto, at=tree)
+            union = ("-c", f"core.attributesFile={self.attributes}") if self.attributes else ()
             try:
-                self.git(*who, "cherry-pick", "--allow-empty", "--keep-redundant-commits", sha, at=tree)
+                self.git(*who, *union, "cherry-pick", "--allow-empty", "--keep-redundant-commits", sha,
+                         at=tree)
             except ToolError:
                 unmerged = subprocess.run(["git", "-C", str(tree), "diff", "--name-only", "-z",
                                            "--diff-filter=U"], env=self.env, capture_output=True,
