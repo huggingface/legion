@@ -27,6 +27,8 @@ from flock.controller import localrun
 from flock.harbor import sources
 from flock.ops import SpecError, check_spec, read_spec
 
+EXPERIMENTS = Path(__file__).parents[2] / "experiments"
+
 from ..conftest import wire
 from .test_worker_host import RESOURCE, TOOL
 
@@ -120,6 +122,31 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
     r = runner.invoke(cli.app, ["update", str(exp), "--replicas", "spec"])
     assert r.exit_code == 0 and "types.agent.replicas: 2 -> 3" in r.output, r.output
     assert store.get_swarm("crew")["spec"].types["agent"].harbor.task == h.task
+
+
+def experiment_spec(monkeypatch, pins, name, rev, env=None):
+    """One of the first runs' specs as `flock launch` reads it, the task pin faked."""
+    pins[rev] = "a" * 40
+    for key in ("RUN_NAME", "BUCKET", "SLURM_PARTITION"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    path = EXPERIMENTS / name / "spec.yaml"
+    swarm = read_spec(str(path))
+    assert check_spec(swarm, str(path))[1] == []  # no refusals, no warnings
+    assert all(ts.harbor.task["task"]["git_commit_id"] == "a" * 40 for ts in swarm.types.values())
+    return swarm
+
+
+def test_the_smoke_spec_compiles(monkeypatch, pins):
+    swarm = experiment_spec(monkeypatch, pins, "harbor-smoke",
+                            "3e235dff6880252a587fa479c09bcb1e16edf2eb")
+    assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("hsmoke-1", "slurm", ["agent"])
+    h = swarm.types["agent"].harbor
+    assert h.config["environment"]["backend"] == "podman"
+    assert h.resources["board"]["rules"]["max_len"] == 1200
+    assert "transport" not in h.resources["board"]  # managed: the rule proxy's socket
+    assert h.config["limits"]["trial_hours"] == 0.15
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
