@@ -50,6 +50,14 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py312"
 
+# shipped into task containers (the tool bundle, flock.harbor.tools.bundle): Python 3.10 there
+[tool.ruff.per-file-target-version]
+"src/flock/harbor/plugins/tools/*.py" = "py310"
+"src/flock/harbor/__init__.py" = "py310"
+"src/flock/harbor/results.py" = "py310"
+"src/flock/harbor/tools/__init__.py" = "py310"
+"src/flock/harbor/tools/runner.py" = "py310"
+
 [tool.ruff.lint.per-file-ignores]
 # ruff >= 0.17 enables PYI041 by default; models.py is the shared contract, left as written.
 "src/flock/models.py" = ["PYI041"]

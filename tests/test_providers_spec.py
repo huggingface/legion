@@ -157,7 +157,7 @@ def test_removed_typespec_keys_are_dropped_with_a_warning(monkeypatch, caplog):
         "spec: TypeSpec.tool_memory_mb was removed from flock; ignoring it"]
 
 
-@pytest.mark.parametrize("harness", ["pi", "claude", "codex"])
+@pytest.mark.parametrize("harness", ["pi", "claude", "codex", "llm"])
 def test_a_removed_harness_gets_a_clear_refusal(harness):
     msg = err({"w": {"harness": harness, "model": "qwen-27b"}})
     assert f"harness '{harness}' was removed from flock; relaunch the type as harbor" in msg

@@ -18,6 +18,9 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
 WORKDIR /opt/flock
 COPY pyproject.toml uv.lock ./
 COPY src ./src
+# shortcut: `uv sync` clones msgboard, a private GitHub repo: the build needs GitHub access to it
+# (or install from harbor-deps.tar, as the job bootstrap does: controller/jobs.py). Workers run
+# in bootstrap mode, so this image is not built today.
 RUN uv python install 3.12 \
  && uv sync --frozen --no-dev --extra worker --python 3.12 \
  && rm -rf /root/.cache/uv

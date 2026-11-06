@@ -875,7 +875,8 @@ class TypeSpec(_Removable):
     def _removed_harness(cls, v: Any) -> Any:
         if v in REMOVED_HARNESSES:
             raise ValueError(f"harness {v!r} was removed from flock; relaunch the type as harbor, "
-                             "or remove the swarm with flock <= cf322fc")
+                             "or remove the swarm with flock <= 3ce0843 (llm), <= cf322fc "
+                             "(pi, claude, codex)")
         return v
 
     @model_validator(mode="after")
