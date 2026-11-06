@@ -284,6 +284,20 @@ def test_api_for_pi_speaks_chat_completions_on_openai_compat():
     assert probes == {("llm", "pi"): ("chat_completions", None)}
 
 
+async def test_preflight_sends_harbor_models_as_harbors_pi_does(preflight_client):
+    pytest.importorskip("harbor")
+    fake, seen = fake_provider()
+    m = "gpu1:huggingface/deepseek-ai/V4-Flash:novita"
+    spec = pspec(preflight_providers(), h={"harness": "harbor", "model": m,
+                                           "harbor": {"task": {}, "config": {}}},
+                 l={"harness": "llm", "model": m})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    assert len(rep["results"]) == 2  # unchanged id for llm, prefix dropped for harbor
+    assert {x["model"] for x in seen} == {"huggingface/deepseek-ai/V4-Flash:novita",
+                                          "deepseek-ai/V4-Flash:novita"}
+
+
 async def test_preflight_llm_accepts_a_tool_call_written_as_text(preflight_client):
     spec = pspec(preflight_providers(), pixel={"harness": "llm", "model": "gpu1:Qwen/Small"})
     fake, seen = fake_provider(text_call=True)

@@ -191,6 +191,10 @@ def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str
         if r is None:
             continue
         api = api_for(ts.harness)
+        if ts.harness == "harbor":  # Harbor's Pi sends the id without the provider prefix
+            from harbor.agents.agent_auth_resolution import parse_model_name
+
+            r = r.model_copy(update={"model_id": parse_model_name(r.model_id)[1]})
         extra = json.dumps(r.extra, sort_keys=True) if api == "chat_completions" else None
         choice = ts.tool_choice if api == "chat_completions" else None
         key = (r.provider_name, r.model_id, r.reasoning, api, extra, choice)
