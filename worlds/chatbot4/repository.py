@@ -77,6 +77,8 @@ class Repository:
         self.attributes = root.parent / "union.gitattributes" if union else None
         if self.attributes:
             self.attributes.write_text("".join(f"{p} merge=union\n" for p in union))
+        # Fetches start no background gc: it packed refs outside refs_lock. maintain() runs gc.
+        self.git("config", "maintenance.auto", "false")
         self.fetch()
 
     def git(self, *args, at=None, data=None, env=None, timeout=120):
@@ -198,35 +200,13 @@ class Repository:
         with self.refs_lock:
             self.git("update-ref", "--stdin", data="".join(f"update {ref} {sha}\n" for ref, sha in refs).encode())
 
-    def prune_pr_refs(self, ended):
-        """Delete refs/flock/pr/<n>/<sha> (every head PR n ever had) for each n in ended (merged
-        or closed PRs). refs/pr/<n> keeps the final head, which is all get_pr and run_bot read
-        of an ended PR; reviews keep their patch-ids and reconcile reads open PRs only.
-        Returns how many refs went."""
-        refs = [ref for ref in self.git("for-each-ref", "--format=%(refname)",
-                                        "refs/flock/pr/").splitlines()
-                if (n := ref.split("/")[3]).isdigit() and int(n) in ended]
-        if refs:
-            with self.refs_lock:
-                self.git("update-ref", "--stdin", data="".join(f"delete {ref}\n" for ref in refs).encode())
-        return len(refs)
-
     def maintain(self):
-        """Keep the bare repository fast: pack every ref, drop a gc.log older than an hour (while
-        it exists, git skips the auto-gc that fetches start, for a day), then gc --auto in the
-        foreground. gc --auto never packs unreachable loose objects (rebased and refused
-        commits), so past gc.auto of them a full gc --cruft packs them (what fixed the live v8
-        world: 120k loose objects, merges at 3/h)."""
+        """Keep the bare repository fast: pack every ref, then gc --auto in the foreground (it
+        ignores and removes a gc.log). gc --auto never packs unreachable loose objects (rebased
+        and refused commits), so past gc.auto of them a full gc --cruft packs them (what fixed
+        the live v8 world: 120k loose objects, merges at 3/h)."""
         with self.refs_lock:
             self.git("pack-refs", "--all")
-        gc_log = self.root / "gc.log"
-        try:
-            if time.time() - gc_log.stat().st_mtime > 3600:
-                log.warning("git: removing a stale gc.log that blocked auto-gc: %s",
-                            _safe_text(gc_log.read_text(errors="replace").strip(), 500))
-                gc_log.unlink()
-        except FileNotFoundError:
-            pass
         # gc.packRefs off: refs were packed above under refs_lock, never while the world writes one
         gc = ("-c", "gc.autoDetach=false", "-c", "gc.cruftPacks=true", "-c", "gc.packRefs=false",
               "gc", "--quiet")

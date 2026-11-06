@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -1447,45 +1446,23 @@ def test_without_union_paths_deck_appends_still_conflict(setup_v8):
     with pytest.raises(ToolError, match="in deck/multi.jsonl") as err:
         world.merge_pr(Agent("oak"), second["pr"])
     assert err.value.code == "conflict"
-def test_git_maintenance_prunes_ended_prs_head_refs_packs_refs_and_gcs(setup):
+
+
+def test_git_maintenance_packs_refs_and_cruft_packs_unreachable_loose_objects(setup):
     world, clone, _remote = setup
-    repo, prs = world.repo, {}
-    for name, author in (("merged", "cedar"), ("closed", "birch"), ("cold", "elm"), ("open", "oak")):
-        git(clone, "checkout", "-q", "-B", name, "origin/main")
-        _module(clone, name, name)
-        rec = submit(world, clone, author=author, branch=name)
-        _module(clone, name, f"{name} again")
-        prs[name] = submit(world, clone, author=author, branch=name, pr=rec["pr"])  # two head refs
-    approve(world, prs["merged"])
-    world.merge_pr(Agent("cedar"), prs["merged"]["pr"])
-    world.close_pr(Agent("birch"), prs["closed"]["pr"], "superseded")
-    world.close_pr(Agent("elm"), prs["cold"]["pr"], "abandoned")
-    world.legacy_json = False
-    with world.lock:
-        world.ended[str(prs["cold"]["pr"])] = 0.0  # ended long ago: moves to the cold table
-        assert world._move_cold(time.time()) and str(prs["cold"]["pr"]) not in world.state["prs"]
-
-    def heads(pr):
-        return repo.git("for-each-ref", "--format=%(refname)", f"refs/flock/pr/{pr}/").split()
-
-    assert all(len(heads(rec["pr"])) == 2 for rec in prs.values())
-    stale = repo.root / "gc.log"
-    stale.write_text("warning: There are too many unreachable loose objects")
-    os.utime(stale, (time.time() - 7200, time.time() - 7200))
+    repo = world.repo
+    rec = submit(world, clone)
+    _module(clone, "weather", "sunny")
+    rec = submit(world, clone, pr=rec["pr"])  # a superseded head keeps its refs/flock/pr ref
+    assert repo.git("config", "maintenance.auto") == "false"  # fetches start no background gc
     repo.git("config", "gc.auto", "20")
-    for i in range(30):  # unreachable loose objects, as refused rebases leave behind
-        repo.git("hash-object", "-w", "--stdin", data=f"orphan {i}".encode())
+    orphans = [repo.git("hash-object", "-w", "--stdin", data=f"orphan {i}".encode())
+               for i in range(30)]  # unreachable loose objects, as refused rebases leave behind
     world._maintain_repo()
-    assert [heads(prs[n]["pr"]) for n in ("merged", "closed", "cold")] == [[], [], []]
-    assert len(heads(prs["open"]["pr"])) == 2
-    for rec in prs.values():  # refs/pr/N keeps each final head
-        assert repo.sha(f"pr:{rec['pr']}") == world.get_pr(rec["pr"])["head_sha"]
-    assert not stale.exists()
     assert not [f for f in (repo.root / "refs").rglob("*") if f.is_file()]  # all in packed-refs
+    assert len(repo.git("for-each-ref", "--format=%(refname)", f"refs/flock/pr/{rec['pr']}/").split()) == 2
     assert re.search(r"^count: 0$", repo.git("count-objects", "-v"), re.MULTILINE)
-    stale.write_text("a recent warning")
-    world._maintain_repo()
-    assert stale.exists()  # less than an hour old: kept
+    repo.git("cat-file", "-e", orphans[0])  # packed into the cruft pack, not pruned
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
