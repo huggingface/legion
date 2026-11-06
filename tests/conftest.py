@@ -38,20 +38,26 @@ class Clock:
         return self.t
 
 
+# A provider-backed placeholder model for specs whose harness never runs (`fake:m`).
+FAKE_PROVIDERS = {"fake": {"type": "openai_compat", "base_url": "http://fake.invalid/v1",
+                           "api_key_env": "FAKE_KEY", "self_hosted": True}}
+
+
 def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
     if not types:
         types = {"researcher": {"replicas": 3, "agents_per_worker": 2}}
     full = {}
     for name, overrides in types.items():
         base = {
-            "harness": "pi",
-            "model": "claude-opus-5-5",
+            "harness": "llm",
+            "model": "fake:m",
             "secrets": ["ANTHROPIC_API_KEY"],
             "env": {"MSGBOARD_URL": "https://example.invalid"},
         }
         full[name] = {**base, **overrides}
     return SwarmSpec.model_validate(
-        {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh", "types": full}
+        {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+         "providers": FAKE_PROVIDERS, "types": full}
     )
 
 

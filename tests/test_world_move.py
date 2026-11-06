@@ -13,7 +13,7 @@ from flock.world.host import WorldError, follow_world_host, world_endpoint
 from flock.world.hub import WorldHub
 from flock.world.protocol import TOKEN_ENV, credential_id, origin_matches
 
-from .conftest import TOKEN
+from .conftest import FAKE_PROVIDERS, TOKEN
 from .test_world import SECRET, Recorder, Served
 
 TEMPLATE = "http://${WORLD_HOST}"
@@ -65,7 +65,8 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
         spec = SwarmSpec.model_validate({
             "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "world": {"url": TEMPLATE, "token_env": "WORLD_TOKEN"},
-            "types": {"researcher": {"harness": "pi", "model": "claude-opus-5-5",
+            "providers": FAKE_PROVIDERS,
+            "types": {"researcher": {"harness": "llm", "model": "fake:m",
                                      "replicas": 1, "world_tools": True}},
         })
         app = create_app(store, TOKEN, clock=clock)

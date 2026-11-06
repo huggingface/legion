@@ -21,6 +21,7 @@ from flock.live import (
 )
 from flock.models import (
     AgentHeartbeat,
+    HarborSpec,
     Harness,
     SwarmSpec,
     type_spec_rev,
@@ -49,7 +50,7 @@ PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://gpu.invalid/v1
 
 
 def raw(**types) -> dict:
-    base = {"researcher": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 2,
+    base = {"researcher": {"harness": "llm", "model": "gpu:m", "replicas": 2,
                            "agents_per_worker": 2},
             "calc": {"harness": "llm", "model": "gpu:m", "replicas": 2, "agents_per_worker": 2,
                      "tools": ["add"]}}
@@ -80,7 +81,7 @@ def test_diff_lists_tools_prompts_and_keys():
         ("prompts changed: calc (system_prompt); "
          "comms (kickoff (posted once per channel: not posted again))"),
         "types.calc.replicas: 2 -> 3",
-        "+ type r (pi, replicas 1)",
+        "+ type r (llm, replicas 1)",
         "- type x (its agents are removed)",
         "limits.budget_usd: 10.0 -> 15.0",
     ]
@@ -187,13 +188,15 @@ async def test_an_update_changes_the_worker_liveness_timings(client, store, tick
 
 async def test_apply_refuses_a_harness_change_for_a_running_type(client, store, tick, tmp_path):
     spec = await applied(client, tmp_path, tick)
-    spec.types["calc"].harness = Harness.pi
+    harbor = {"harness": Harness.harbor, "harbor": HarborSpec(task={}, config={})}
+    calc = spec.types["calc"]
+    spec.types["calc"] = calc.model_copy(update=harbor)
     r = await client.put("/swarms/demo", json=spec.model_dump(mode="json"))
     assert r.status_code == 400 and "types.calc.harness: a running type's harness" in r.text
-    spec.types["fresh"] = spec.types["calc"].model_copy(update={"replicas": 0})
-    spec.types["calc"].harness = Harness.llm
+    spec.types["fresh"] = calc.model_copy(update={"replicas": 0})
+    spec.types["calc"] = calc
     assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
-    spec.types["fresh"].harness = Harness.pi  # a type without agents may still change
+    spec.types["fresh"] = spec.types["fresh"].model_copy(update=harbor)  # no agents: may change
     assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
 
 
@@ -225,7 +228,7 @@ async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client
 
 def test_bash_switch_is_llm_only_in_the_spec():
     with pytest.raises(ValueError, match="only the llm harness"):
-        spec(bash=False)
+        spec(bash=False, harness="harbor", harbor={"task": {}, "config": {}})
     with pytest.raises(ValueError, match="contradicts tool_choice"):
         SwarmSpec.model_validate(raw(calc={"harness": "llm", "model": "gpu:m", "bash": False,
                                            "tool_choice": "bash"}))
@@ -252,8 +255,7 @@ async def test_a_new_system_prompt_applies_at_the_next_turn_with_a_note(tmp_path
     await rt.prompt("three")
     await until(lambda: adapter.sent[-1].endswith("three"))
     assert (rt.workdir / "AGENTS.md").read_text() == "v2"
-    assert adapter.sent[-1] == ("[flock] Since your last turn: your instructions in AGENTS.md "
-                                "changed; re-read them.\n\nthree")
+    assert adapter.sent[-1] == "[flock] Since your last turn: your system prompt changed.\n\nthree"
     await until(lambda: rt.state.turns == 3)
     await rt.prompt("four")
     await until(lambda: adapter.sent[-1].endswith("four"))
@@ -268,7 +270,7 @@ async def test_cli_harness_gets_a_tools_note_when_its_tools_change(tmp_path):
         return Toolset(version=None, dir=None, swarm="sw", type="researcher",
                        data_dir=tmp_path / "data", tools=tuple(tools))
 
-    rt, adapter = runtime(tmp_path)
+    rt, adapter = runtime(tmp_path, harness="pi")
     rt.toolbox = box
     await rt.setup(restore=False)
     await rt.prompt("one")
@@ -320,7 +322,7 @@ def _experiment(root: Path, *, replicas: int = 2, prompt: str = "You are a resea
     (root / "prompts").mkdir(parents=True, exist_ok=True)
     (root / "prompts" / "system.md").write_text(prompt)
     _tools(root, tools)
-    t = {"harness": "pi", "model": "p:m", "replicas": replicas,
+    t = {"harness": "llm", "model": "p:m", "replicas": replicas,
          "agents_per_worker": 2, "system_prompt_file": "prompts/system.md", "tools": ["add"],
          **type_extra}
     f = root / "spec.yaml"
@@ -355,7 +357,7 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
     assert applied.types["researcher"].system_prompt == "You are a careful researcher."
 
     _experiment(exp, replicas=3, prompt="You are a careful researcher.", tools=TOOLS_V2,
-                harness="llm")
+                harness="harbor", harbor={"task": {}, "config": {}})
     r = runner.invoke(cli.app, ["update", str(exp)])
     assert r.exit_code == 1 and "refused: types.researcher.harness" in r.output, r.output
     (exp / "spec.yaml").write_text("types: [unclosed\n")

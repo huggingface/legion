@@ -26,9 +26,9 @@ PROVIDERS = {
 
 def pspec(providers=None, **types) -> SwarmSpec:
     types = types or {
-        "worker": {"harness": "pi", "model": "hf:Qwen/Qwen3.8-27B", "replicas": 2,
+        "worker": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B", "replicas": 2,
                    "agents_per_worker": 2, "secrets": ["HF_TOKEN"]},
-        "local": {"harness": "pi", "model": "gpu1:Qwen/Small", "replicas": 1},
+        "local": {"harness": "llm", "model": "gpu1:Qwen/Small", "replicas": 1},
         "native": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 1},
     }
     return SwarmSpec.model_validate({"swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b",
@@ -147,9 +147,9 @@ def preflight_providers():
 
 def preflight_spec(**extra_types) -> SwarmSpec:
     return pspec(preflight_providers(), **{
-        "worker": {"harness": "pi", "model": "hf:Qwen/Qwen3.8-27B"},
-        "worker2": {"harness": "pi", "model": "hf:Qwen/Qwen3.8-27B"},
-        "local": {"harness": "pi", "model": "gpu1:Qwen/Small", "reasoning": "off"},
+        "worker": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
+        "worker2": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
+        "local": {"harness": "llm", "model": "gpu1:Qwen/Small", "reasoning": "off"},
         "native": {"harness": "pi", "model": "claude-opus-5-5"},
         **extra_types,
     })
@@ -357,7 +357,7 @@ async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, mon
         monkeypatch.delenv("FLOCK_MAX_WORKING_ENFORCE", raising=False)
     else:
         monkeypatch.setenv("FLOCK_MAX_WORKING_ENFORCE", env)
-    spec = pspec(CAP_PROVIDERS, worker={"harness": "pi", "model": "p:test", "replicas": 2})
+    spec = pspec(CAP_PROVIDERS, worker={"harness": "llm", "model": "p:test", "replicas": 2})
     wid = "p-worker-w0000"
     async with await _cap_client(store, clock, None) as c:
         assert (await put(c, spec)).status_code == 200
@@ -385,7 +385,7 @@ async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, mon
 
 
 async def test_max_working_counts_admissions_between_heartbeats(store, clock, tick):
-    spec = pspec(CAP_PROVIDERS, worker={"harness": "pi", "model": "p:test", "replicas": 2,
+    spec = pspec(CAP_PROVIDERS, worker={"harness": "llm", "model": "p:test", "replicas": 2,
                                         "agents_per_worker": 1})
     async with await _cap_client(store, clock, True) as c:
         assert (await put(c, spec)).status_code == 200

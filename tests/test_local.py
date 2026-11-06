@@ -50,11 +50,11 @@ def local_spec(**kw) -> SwarmSpec:
 def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
     spec = make_spec()
     assert spec.compute.kind == "hf-jobs"
-    types = {"a": {"harness": "pi", "model": "m"}}
+    types = {"a": LLM_TYPE}
     with pytest.raises(ValueError, match="namespace and bucket required for compute hf-jobs"):
-        SwarmSpec.model_validate({"swarm": "s", "types": types})
+        SwarmSpec.model_validate({"swarm": "s", "providers": FAKE, "types": types})
     with pytest.raises(ValueError, match="bucket required"):
-        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "types": types})
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "providers": FAKE, "types": types})
 
 
 def test_example_switches_compute_with_one_line():
@@ -73,7 +73,7 @@ def test_compute_local_short_and_long_form():
     short = local_spec()
     assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
     long = SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local"},
-                                     "types": {"a": {"harness": "pi", "model": "m"}}})
+                                     "providers": FAKE, "types": {"a": LLM_TYPE}})
     assert long.compute.kind == "local"
     again = SwarmSpec.model_validate(short.model_dump(mode="json"))  # stored form round-trips
     assert again.compute.kind == "local"
@@ -478,7 +478,7 @@ def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
 async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     spec = SwarmSpec.model_validate({
         "swarm": "budget", "compute": "local", "limits": {"budget_usd": 10},
-        "types": {"w": {"harness": "pi", "model": "m", "replicas": 0}}})
+        "providers": FAKE, "types": {"w": {**LLM_TYPE, "replicas": 0}}})
     out = io.StringIO()
     task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path, until=30, refresh=0.1, grace=0, out=out)))

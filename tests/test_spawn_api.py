@@ -11,14 +11,14 @@ from flock.controller import spawn as spawning
 from flock.controller.store import Store
 from flock.models import AssignCommand, Command, SwarmSpec, TypeHealth
 
-from .conftest import TOKEN
+from .conftest import FAKE_PROVIDERS, TOKEN
 
 CMD = TypeAdapter(Command)
 LEADER = "leader-0000"
 
 
 def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
-    base = {"harness": "pi", "model": "claude-opus-5-5"}
+    base = {"harness": "llm", "model": "fake:m"}
     types = {
         "leader": {"replicas": 1, "workers": {"initial": 1}},
         "analyst": {"replicas": 0, "agents_per_worker": 2, "workers": {"initial": 1, "max_extra": 1}},
@@ -27,7 +27,7 @@ def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
     for name, o in overrides.items():
         types[name] = {**types.get(name, {}), **o}
     body = {
-        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": FAKE_PROVIDERS,
         "types": {k: {**base, **v} for k, v in types.items()},
         "spawn": spawn if spawn is not None else {
             "leader": {"types": {"analyst": 3, "helper": 2}, "depth": 2},

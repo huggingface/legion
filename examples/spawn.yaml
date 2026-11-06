@@ -1,33 +1,37 @@
 # A leader that splits work across child agents (docs/spawn.md). Only the leader exists at
 # apply time; analysts and helpers exist once the leader spawns them, on their own workers.
-# Every type lists HF_TOKEN: workers need it to fetch the flock wheel and sync to the bucket.
+# Every type lists HF_TOKEN: workers need it for the model, to fetch the flock wheel and to
+# sync to the bucket.
 swarm: spawn-demo
 namespace: <you>
 bucket: hf://buckets/<you>/flock/spawn-demo
+providers:                       # the HF router; its key is HF_TOKEN (docs/open-models.md)
+  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+       pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}
 types:
   leader:
-    harness: pi
-    model: anthropic/claude-opus-5-5
+    harness: llm
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
     system_prompt_file: prompts/leader.md
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    secrets: [HF_TOKEN]
     replicas: 1
     workers: {initial: 1, max_extra: 0}
     max_budget_usd: 2.0
   analyst:
-    harness: pi
-    model: anthropic/claude-haiku-5-5
+    harness: llm
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
     system_prompt_file: prompts/analyst.md
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    secrets: [HF_TOKEN]
     replicas: 0                    # spawned only
     agents_per_worker: 10
     workers: {initial: 1, max_extra: 1}
     max_turns: 20                  # per prompt, the child's own limits
     max_budget_usd: 0.5
   helper:
-    harness: pi
-    model: anthropic/claude-haiku-5-5
+    harness: llm
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
     system_prompt_file: prompts/analyst.md
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    secrets: [HF_TOKEN]
     replicas: 0
     agents_per_worker: 10
     workers: {initial: 0, max_extra: 1}

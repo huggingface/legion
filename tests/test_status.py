@@ -52,8 +52,8 @@ def test_verdict_levels():
 
 def _vllm_spec() -> SwarmSpec:
     data = make_spec(researcher={"replicas": 2}).model_dump(mode="json")
-    data["providers"] = {"v": {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
-                               "api_key_env": "K", "self_hosted": True, "metrics": True}}
+    data["providers"]["v"] = {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
+                              "api_key_env": "K", "self_hosted": True, "metrics": True}
     return SwarmSpec.model_validate(data)
 
 

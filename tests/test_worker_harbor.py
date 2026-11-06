@@ -88,7 +88,7 @@ def test_the_worker_host_reaches_harbor_adapters_only(tmp_path):
     a = make("researcher-0001", spec(**HARBOR))
     assert isinstance(a, HarborAdapter) and a.host is worker.harbor
     assert worker.harbor.root == tmp_path / "agents" / "_harbor" / "_worker"
-    assert not hasattr(make("researcher-0002", spec(harness="pi")), "host")
+    assert not hasattr(make("researcher-0002", spec(harness="llm")), "host")
 
 
 async def test_the_worker_closes_its_host_at_exit(tmp_path):
@@ -139,11 +139,11 @@ def test_a_local_harbor_worker_gets_time_to_stop_its_trials(tmp_path, monkeypatc
     script = "trap 'sleep 0.3; exit 3' TERM; echo up; sleep 30 & wait"
     jobs = local.LocalJobsClient(root=tmp_path, command=["sh", "-c", script])
     codes = {}
-    for harness in (Harness.pi, Harness.harbor):
+    for harness in (Harness.llm, Harness.harbor):
         ts = spec().model_copy(update={"harness": harness})
         job = jobs.launch(harness.value, ts, {"WORKER_ID": harness.value}, {}, {}, 60, namespace="")
         while "up" not in "".join(jobs.logs_tail(job, namespace="")):
             time.sleep(0.01)
         jobs.kill_all(grace=0.1)
         codes[harness.value] = jobs.procs[job].popen.returncode
-    assert codes == {"pi": -9, "harbor": 3}
+    assert codes == {"llm": -9, "harbor": 3}

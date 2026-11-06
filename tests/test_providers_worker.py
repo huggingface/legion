@@ -63,7 +63,7 @@ def test_minimal_env_is_an_allowlist():
 
 
 async def test_runtime_hands_over_declared_secrets_and_provider_key(tmp_path):
-    ts = typespec(w={"harness": "pi", "model": "hf:Qwen/Q", "secrets": ["GITHUB_TOKEN"],
+    ts = typespec(w={"harness": "llm", "model": "hf:Qwen/Q", "secrets": ["GITHUB_TOKEN"],
                      "env": {"A": "1"}})["w"]
     adapter = ScriptedAdapter(tmp_path / "home")
     rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents", adapter=adapter,
@@ -79,7 +79,7 @@ async def test_runtime_hands_over_declared_secrets_and_provider_key(tmp_path):
 
 
 async def test_runtime_reports_a_missing_provider_key(tmp_path):
-    ts = typespec(w={"harness": "pi", "model": "hf:Qwen/Q"})["w"]
+    ts = typespec(w={"harness": "llm", "model": "hf:Qwen/Q"})["w"]
     rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents",
                       adapter=ScriptedAdapter(tmp_path / "home"), outbox=Outbox(), secret_source={})
     assert await rt.harness_env() == {}
@@ -92,7 +92,7 @@ async def test_zero_usage_turn_is_flagged_and_logged_once(tmp_path, caplog):
     from flock.worker.adapters.base import AdapterEvent
 
     def rt_for(model):
-        ts = typespec(w={"harness": "pi", "model": model})["w"]
+        ts = typespec(w={"harness": "llm", "model": model})["w"]
         return AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents",
                             adapter=ScriptedAdapter(tmp_path / "home"), outbox=Outbox(),
                             secret_source=WORKER_ENV)
@@ -109,14 +109,14 @@ async def test_zero_usage_turn_is_flagged_and_logged_once(tmp_path, caplog):
         assert turn(rt, TokenUsage())["usage_missing"] is True
     assert sum("zero reported token usage" in r.message for r in caplog.records) == 1  # once
     assert "usage_missing" not in turn(rt_for("hf:Qwen/Q"), TokenUsage(input=10, output=2))
-    native = AgentRuntime("w-0002", "w", TypeSpec(harness="pi", model="gpt-5.5-codex"), swarm="s",
+    native = AgentRuntime("w-0002", "w", TypeSpec(harness="llm", model="gpt-5.5-codex"), swarm="s",
                           work_root=tmp_path / "agents2", adapter=ScriptedAdapter(tmp_path / "h2"),
                           outbox=Outbox(), secret_source={})
     assert "usage_missing" not in turn(native, TokenUsage())  # only provider-backed types
 
 
 async def test_env_dropped_event_once_per_spec_rev(tmp_path):
-    ts = typespec(w={"harness": "pi", "model": "hf:Qwen/Q"})["w"]
+    ts = typespec(w={"harness": "llm", "model": "hf:Qwen/Q"})["w"]
     adapter = ScriptedAdapter(tmp_path / "home")
     adapter.env_dropped_names = ["JUNK", "MY_TOKEN"]
     rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents", adapter=adapter,
@@ -134,7 +134,7 @@ def test_heartbeat_carries_the_pinned_server(tmp_path):
         "swarm": "s", "namespace": "n", "bucket": "b", "providers": {"v": {
             "type": "openai_compat", "base_urls": ["http://g1:8000/v1", "http://g2:8000/v1"],
             "api_key_env": "K", "self_hosted": True}},
-        "types": {"w": {"harness": "pi", "model": "v:Qwen/Q"}}}).types["w"]
+        "types": {"w": {"harness": "llm", "model": "v:Qwen/Q"}}}).types["w"]
     adapter = ScriptedAdapter(tmp_path / "home")
     rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents",
                       adapter=adapter, outbox=Outbox(), secret_source={})
@@ -142,7 +142,7 @@ def test_heartbeat_carries_the_pinned_server(tmp_path):
     assert rt.heartbeat().endpoint == want.split("/")[2]  # before any turn: where it will go
     adapter._endpoint = "http://g1:8000/v1"  # the llm adapter: where its last turn went
     assert rt.heartbeat().endpoint == "g1:8000"
-    native = AgentRuntime("w-0002", "w", TypeSpec(harness="pi", model="gpt-5.5-codex"),
+    native = AgentRuntime("w-0002", "w", TypeSpec(harness="llm", model="gpt-5.5-codex"),
                           swarm="s", work_root=tmp_path / "a2", adapter=ScriptedAdapter(tmp_path / "h2"),
                           outbox=Outbox(), secret_source={})
     assert native.heartbeat().endpoint is None

@@ -14,16 +14,18 @@ from flock.models import (
     root_depth,
 )
 
+from .conftest import FAKE_PROVIDERS
+
 
 def spec(spawn=None, limits=None, types=None) -> SwarmSpec:
-    base = {"harness": "pi", "model": "gpt-5.5-codex"}
+    base = {"harness": "llm", "model": "fake:m"}
     types = types or {
-        "leader": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 1,
+        "leader": {"harness": "llm", "model": "fake:lead", "replicas": 1,
                    "workers": {"initial": 1, "max_extra": 0}},
         "analyst": {"replicas": 0, "workers": {"initial": 1, "max_extra": 3}},
         "helper": {"replicas": 0, "workers": {"initial": 0, "max_extra": 2}},
     }
-    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": FAKE_PROVIDERS,
             "types": {k: {**base, **v} for k, v in types.items()}}
     if spawn is not None:
         body["spawn"] = spawn

@@ -32,6 +32,7 @@ from flock.worker.events import Outbox
 from flock.worker.identity import Identities, MsgboardIdentity
 
 from . import fake_msgboard
+from .conftest import FAKE_PROVIDERS
 from .worker_fakes import ScriptedAdapter, spec, until
 
 INVITE_ENV = "T_INVITE"
@@ -50,7 +51,7 @@ def swarm_raw(**comms) -> dict:
     return {"swarm": "sw", "namespace": "ns", "bucket": "hf://buckets/ns/b",
             "comms": {"url": "http://board", "invite_env": INVITE_ENV, "channel": "#flock-test",
                       **comms},
-            "types": {"dev": {"harness": "pi", "model": "m", "comms": True}}}
+            "providers": FAKE_PROVIDERS, "types": {"dev": {"harness": "llm", "model": "fake:m", "comms": True}}}
 
 
 def custom(rt: AgentRuntime, kind: str) -> list[dict]:
@@ -64,7 +65,7 @@ def posted(board) -> int:
 class Team:
     """N agents of one worker sharing one CommsHub, against the fake board."""
 
-    def __init__(self, tmp_path, board, names, *, harness="pi", protocols=None, env=None,
+    def __init__(self, tmp_path, board, names, *, harness="llm", protocols=None, env=None,
                  **rules):
         self.board = board
         self.agents: dict[str, AgentRuntime] = {}
@@ -124,14 +125,14 @@ def test_comms_block_validates():
     with pytest.raises(ValidationError, match="swarm-level `comms:` block"):
         SwarmSpec.model_validate(raw)
     raw = swarm_raw()
-    raw["types"]["dev"] = {"harness": "pi", "model": "m", "comms": False, "tools": ["comms:post"]}
+    raw["types"]["dev"] = {"harness": "llm", "model": "fake:m", "comms": False, "tools": ["comms:post"]}
     with pytest.raises(ValidationError, match="comms: false"):
         SwarmSpec.model_validate(raw)
 
 
 def test_listed_comms_tools_and_folder_tools():
     raw = swarm_raw(search=None)
-    raw["types"]["dev"] = {"harness": "pi", "model": "m", "tools": ["ws_write", "comms:post"]}
+    raw["types"]["dev"] = {"harness": "llm", "model": "fake:m", "tools": ["ws_write", "comms:post"]}
     s = SwarmSpec.model_validate(raw)
     ts = s.types["dev"]
     assert ts.folder_tools == ["ws_write"] and comms_tools(ts, s.comms) == ["comms:post"]
@@ -192,7 +193,7 @@ async def test_search_relaxation_drops_trailing_words():
 
 
 async def test_join_at_first_prompt_token_stays_in_worker(tmp_path, board):
-    t = Team(tmp_path, board, ["dev-0000"], protocols={"protocols/lead-agree.md": "One leads; others say agree."})
+    t = Team(tmp_path, board, ["dev-0000"], harness="pi", protocols={"protocols/lead-agree.md": "One leads; others say agree."})
     rt = t.agents["dev-0000"]
     try:
         await rt.setup(restore=False)
@@ -357,7 +358,7 @@ async def test_read_defaults_to_the_run_since_the_kickoff(tmp_path, board):
 
 
 async def test_flock_tool_reaches_comms_through_the_gateway(tmp_path, board):
-    t = Team(tmp_path, board, ["dev-0000"])
+    t = Team(tmp_path, board, ["dev-0000"], harness="pi")
     try:
         await t.start()
         ts, agent, workdir = read_pin(tmp_path / "agents" / "_tools_pins" / "dev-0000.json")
@@ -527,7 +528,7 @@ async def test_thread_read_gives_the_newest_messages_and_says_when_truncated(tmp
 
 
 async def test_gateway_replies_with_an_error_when_a_tool_raises(tmp_path, board):
-    t = Team(tmp_path, board, ["dev-0000"])
+    t = Team(tmp_path, board, ["dev-0000"], harness="pi")
     try:
         await t.start()
 
@@ -793,7 +794,7 @@ async def test_legacy_identities_with_a_trailing_slash_url_still_fan_out():
 
     transport = httpx.MockTransport(handler)
     ids = Identities(env={"INV": "inv"}, client=httpx.AsyncClient(transport=transport))
-    legacy = TypeSpec(harness="pi", model="m", msgboard_invite="INV",
+    legacy = TypeSpec(harness="llm", model="m", msgboard_invite="INV",
                       env={"MSGBOARD_URL": "http://board.invalid/"})
     for name in ("dev-0000", "dev-0001"):  # the older msgboard_invite path joins first
         assert (await ids.env_for(name, legacy))["MSGBOARD_URL"] == "http://board.invalid"

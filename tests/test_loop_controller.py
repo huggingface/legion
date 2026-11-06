@@ -175,7 +175,7 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
         spec = SwarmSpec.model_validate({
             "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "providers": CAP_PROVIDERS, "types": {"researcher": {
-                "replicas": 2, "agents_per_worker": 2, "harness": "pi", "model": "p:test",
+                "replicas": 2, "agents_per_worker": 2, "harness": "llm", "model": "p:test",
                 "loop": {"prompt": "go", "while": {"max_rounds": 2}}}}})
         assert (await c.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
         sim.reconcile()
@@ -483,7 +483,7 @@ def provider_spec(loop: dict, max_working: int | None = None) -> dict:
     prov = {"type": "openai_compat", "base_url": "http://unused/v1", "api_key_env": "K",
             "self_hosted": True, **({"max_working": max_working} if max_working else {})}
     return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": {"p": prov},
-            "types": {"researcher": {"harness": "pi", "model": "p:m", "replicas": 2,
+            "types": {"researcher": {"harness": "llm", "model": "p:m", "replicas": 2,
                                      "agents_per_worker": 2, "loop": loop}}}
 
 

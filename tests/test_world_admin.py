@@ -17,7 +17,7 @@ from flock.world.__main__ import world_app
 from flock.world.host import derived_token, world_admin_token
 from flock.world.server import create_app
 
-from .conftest import TOKEN, wire
+from .conftest import FAKE_PROVIDERS, TOKEN, wire
 
 SECRET = "world-secret"
 ADMIN_SECRET = "admin-secret-value"
@@ -263,7 +263,7 @@ async def test_hub_treats_a_parked_503_as_a_world_holdoff(monkeypatch, tmp_path)
 def test_world_admin_token_is_never_the_world_secret():
     def spec(world):
         return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": world,
-                                         "types": {"dev": {"harness": "pi", "model": "m"}}})
+                                         "providers": FAKE_PROVIDERS, "types": {"dev": {"harness": "llm", "model": "fake:m"}}})
     local = spec({"command": ["python", "w.py"]})
     assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "flock-world-admin:sw")
     assert world_admin_token(local, TOKEN, {}) != derived_token(TOKEN, "sw")  # the world secret
@@ -287,7 +287,7 @@ def _swarm(world_client, store, clock):
                          loop_interval=0, world_transport=_forward(world_client))
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local", "world": {"url": "http://w.invalid", "token_env": "WORLD_SECRET"},
-        "types": {"dev": {"harness": "pi", "model": "m", "replicas": 1}}})
+        "providers": FAKE_PROVIDERS, "types": {"dev": {"harness": "llm", "model": "fake:m", "replicas": 1}}})
     return app, spec.model_dump(mode="json")
 
 

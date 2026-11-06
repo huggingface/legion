@@ -16,14 +16,17 @@ from flock.models import PreflightReport, PreflightResult
 from flock.ops import read_spec
 from flock.specrender import read_env_file
 
+from .conftest import FAKE_PROVIDERS
+
 runner = CliRunner()
 SPEC = {
     "swarm": "${SWARM:-demo}",
     "namespace": "ns",
     "bucket": "hf://buckets/ns/sh",
     "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"},
+    "providers": FAKE_PROVIDERS,
     "types": {"researcher": {
-        "harness": "pi", "model": "claude-opus-5-5", "replicas": 2, "agents_per_worker": 2,
+        "harness": "llm", "model": "fake:m", "replicas": 2, "agents_per_worker": 2,
         "secrets": ["ANTHROPIC_API_KEY"], "system_prompt_file": "prompts/system.md",
         "env": {"MSGBOARD_URL": "${BOARD_URL:-https://board.invalid}"}}},
 }
@@ -76,7 +79,7 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     checks = _by_name(rep)
     assert checks["tokens"].ok and checks["spec"].ok and checks["worker slots"].ok
     assert checks["bucket"].ok is None and "no HF token" in checks["bucket"].detail
-    assert checks["providers"].ok is None and checks["board"].ok is None
+    assert checks["providers"].ok and checks["board"].ok is None
     assert checks["world"].ok is None and checks["venv"].ok and not rep.failed
 
     before = env_file.read_text()

@@ -15,7 +15,7 @@ models:                          # optional aliases and per-model settings
 types:
   # The router provider is pinned (":deepinfra"): its automatic choice failed every turn after a
   # tool call on 2026-10-16. gpu1 is a vLLM server the workers reach over HTTPS.
-  worker:  {harness: pi, model: "hf:Qwen/Qwen3.8-27B:deepinfra", replicas: 2}  # provider-prefixed
-  analyst: {harness: pi, model: qwen-27b, replicas: 2}                # alias into models:
+  worker:  {harness: llm, model: "hf:Qwen/Qwen3.8-27B:deepinfra", replicas: 2}  # provider-prefixed
+  analyst: {harness: llm, model: qwen-27b, replicas: 2}                # alias into models:
   writer:  {harness: pi, model: anthropic/claude-opus-5-5, replicas: 1,  # harness-native id
             secrets: [ANTHROPIC_API_KEY]}

@@ -20,7 +20,7 @@ from flock.controller.slurm import (
 )
 from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
-from .conftest import TOKEN
+from .conftest import FAKE_PROVIDERS, TOKEN
 
 W0 = "demo-researcher-w0000"
 SECRET_VALUES = {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-secret-anthropic",
@@ -42,7 +42,8 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
     }
     return SwarmSpec.model_validate({
         "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": block,
-        "types": {"researcher": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 2,
+        "providers": FAKE_PROVIDERS,
+        "types": {"researcher": {"harness": "llm", "model": "fake:m", "replicas": 2,
                                  "agents_per_worker": 2, "secrets": ["ANTHROPIC_API_KEY"],
                                  "resume_prompt": "Your turn was cut; continue.",
                                  "env": {"MSGBOARD_URL": "https://example.invalid"}}},
@@ -384,15 +385,15 @@ def test_harbor_workers_run_on_the_node_and_say_so(tmp_path, slurm, store, clock
     the harness for worker.sbatch and keeps the node's paths, even with a container configured."""
     spec = slurm_spec(tmp_path, container_root="/work", container_image="/fsx/img.sqsh")
     data = spec.model_dump(mode="json", exclude_none=True)
-    data["providers"] = {"inference": {"type": "openai_compat", "base_url": "https://x.invalid/v1",
-                                       "api_key_env": "HF_TOKEN", "pricing": {"*": [0, 0, 0]}}}
+    data["providers"]["inference"] = {"type": "openai_compat", "base_url": "https://x.invalid/v1",
+                                      "api_key_env": "HF_TOKEN", "pricing": {"*": [0, 0, 0]}}
     data["types"]["harbor"] = {"harness": "harbor", "model": "inference:m", "replicas": 1,
                                "harbor": {"task": {}, "config": {}}}
     store.put_swarm(SwarmSpec.model_validate(data), 0)
     reconcile(store, SlurmJobsClient(env={}), clock(), settings())
-    pi = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))
+    llm = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))
     harbor = read_env_file(next((tmp_path / "launch").glob("demo-harbor-w0000-*.env")))
-    assert (pi["FLOCK_HARNESS"], pi["FLOCK_CONTAINER_IMAGE"]) == ("pi", "/fsx/img.sqsh")
-    assert pi["WORK_ROOT"].startswith("/work/")
+    assert (llm["FLOCK_HARNESS"], llm["FLOCK_CONTAINER_IMAGE"]) == ("llm", "/fsx/img.sqsh")
+    assert llm["WORK_ROOT"].startswith("/work/")
     assert harbor["FLOCK_HARNESS"] == "harbor" and "FLOCK_CONTAINER_IMAGE" not in harbor
     assert harbor["WORK_ROOT"] == "/tmp/flock/demo-harbor-w0000/work" and "HOME" not in harbor

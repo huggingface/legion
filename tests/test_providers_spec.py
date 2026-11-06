@@ -52,8 +52,8 @@ def test_example_spec_resolves():
 
 def test_resolution_order_alias_then_prefix_then_native():
     s = spec({
-        "a": {"harness": "pi", "model": "qwen-27b"},
-        "b": {"harness": "pi", "model": "hf:Qwen/Qwen3.8-27B"},
+        "a": {"harness": "llm", "model": "qwen-27b"},
+        "b": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
         "c": {"harness": "pi", "model": "gpt-5.5-codex"},
         "e": {"harness": "pi", "model": "anthropic.claude-opus-v1:0"},  # Bedrock-style id
     })
@@ -65,49 +65,49 @@ def test_resolution_order_alias_then_prefix_then_native():
 
 
 def test_type_reasoning_overrides_alias():
-    s = spec({"a": {"harness": "pi", "model": "qwen-27b", "reasoning": "off"},
+    s = spec({"a": {"harness": "llm", "model": "qwen-27b", "reasoning": "off"},
               "n": {"harness": "pi", "model": "gpt-5.5-codex", "reasoning": "high"}})
     assert s.types["a"].effective_reasoning == "off"
     assert s.types["n"].effective_reasoning == "high"
 
 
 def test_router_suffix_stays_in_model_id():
-    s = spec({"a": {"harness": "pi", "model": "hf:Qwen/Qwen3.8-27B:ovhcloud"}},
+    s = spec({"a": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B:ovhcloud"}},
              providers={**PROVIDERS, "hf": {**PROVIDERS["hf"], "pricing": {"*": [1, 2, 0.5]}}})
     r = s.types["a"].resolved_model
     assert r.model_id == "Qwen/Qwen3.8-27B:ovhcloud" and r.pricing == [1, 2, 0.5]
 
 
 def test_unknown_prefix_names_type_and_field():
-    msg = err({"worker": {"harness": "pi", "model": "gpu9:Qwen/X"}})
+    msg = err({"worker": {"harness": "llm", "model": "gpu9:Qwen/X"}})
     assert "types.worker.model" in msg and "unknown provider 'gpu9'" in msg
 
 
 def test_models_entry_with_unknown_prefix():
-    msg = err({"a": {"harness": "pi", "model": "gpt-5.5-codex"}},
+    msg = err({"a": {"harness": "llm", "model": "gpt-5.5-codex"}},
               models={"q": {"model": "gpu9:Qwen/X"}})
     assert "models.q.model" in msg and "unknown provider 'gpu9'" in msg
 
 
 def test_models_entry_must_be_prefixed():
-    msg = err({"a": {"harness": "pi", "model": "q"}}, models={"q": {"model": "Qwen/X"}})
+    msg = err({"a": {"harness": "llm", "model": "q"}}, models={"q": {"model": "Qwen/X"}})
     assert "models.q.model" in msg and "<provider>:<model id>" in msg
 
 
 def test_missing_pricing_is_an_error_unless_self_hosted():
-    msg = err({"worker": {"harness": "pi", "model": "hf:Qwen/Other"}})
+    msg = err({"worker": {"harness": "llm", "model": "hf:Qwen/Other"}})
     assert "types.worker.model" in msg and "no pricing" in msg and "providers.hf.pricing" in msg
-    msg = err({"worker": {"harness": "pi", "model": "q"}},
+    msg = err({"worker": {"harness": "llm", "model": "q"}},
               models={"q": {"model": "hf:Qwen/Other"}})
     assert "models.q.pricing" in msg
     # alias pricing satisfies it and overrides the provider's
-    s = spec({"w": {"harness": "pi", "model": "q"}},
+    s = spec({"w": {"harness": "llm", "model": "q"}},
              models={"q": {"model": "hf:Qwen/Qwen3.8-27B", "pricing": [9, 9, 9]}})
     assert s.types["w"].resolved_model.pricing == [9, 9, 9]
 
 
 def test_self_hosted_default_price_is_pinned_into_the_spec():
-    s = spec({"w": {"harness": "pi", "model": "gpu1:Qwen/Small"}})
+    s = spec({"w": {"harness": "llm", "model": "gpu1:Qwen/Small"}})
     assert s.types["w"].resolved_model.pricing == [0, 0, 0]
     assert s.providers["gpu1"].pricing["Qwen/Small"] == [0, 0, 0]
     # the stored (dumped) spec round-trips with the pins, and re-validation is stable
@@ -117,7 +117,7 @@ def test_self_hosted_default_price_is_pinned_into_the_spec():
 
 
 def test_hand_written_resolved_model_is_replaced():
-    raw = {"harness": "pi", "model": "hf:Qwen/Qwen3.8-27B",
+    raw = {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B",
            "resolved_model": {"provider_name": "x", "provider": PROVIDERS["gpu1"],
                               "model_id": "evil", "pricing": [0, 0, 0]}}
     s = spec({"w": raw})
@@ -148,16 +148,16 @@ def test_native_models_are_always_fine():
     ({"type": "vertex", "api_key_env": "K"}, "openai_compat"),
 ])
 def test_provider_field_validation(provider, needle):
-    msg = err({"c": {"harness": "pi", "model": "claude-opus-5-5"}},
+    msg = err({"c": {"harness": "llm", "model": "claude-opus-5-5"}},
               providers={"p": provider}, models={})
     assert needle in msg
 
 
 def test_provider_and_alias_names():
-    msg = err({"c": {"harness": "pi", "model": "claude-opus-5-5"}},
+    msg = err({"c": {"harness": "llm", "model": "claude-opus-5-5"}},
               providers={"my.vllm": PROVIDERS["gpu1"]}, models={})
     assert "providers.my.vllm" in msg
-    msg = err({"c": {"harness": "pi", "model": "gpt-5.5-codex"}},
+    msg = err({"c": {"harness": "llm", "model": "gpt-5.5-codex"}},
               models={"a:b": {"model": "gpu1:x"}})
     assert "models.a:b" in msg
 

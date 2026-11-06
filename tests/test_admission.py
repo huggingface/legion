@@ -20,7 +20,7 @@ W0, W1 = "p-worker-w0000", "p-worker-w0001"
 
 
 def _spec():
-    return pspec(CAP_PROVIDERS, worker={"harness": "pi", "model": "p:test", "replicas": 2,
+    return pspec(CAP_PROVIDERS, worker={"harness": "llm", "model": "p:test", "replicas": 2,
                                         "agents_per_worker": 1})
 
 

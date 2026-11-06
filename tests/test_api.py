@@ -141,7 +141,7 @@ async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick):
     a = (await client.get("/agents/researcher-0000")).json()
     assert a["state"] == "working" and a["turn_id"] == "t-1" and a["worker"] == W0
     # opus 5.5: 1M input at $4 + 0.1M output at $20
-    assert a["cost_usd"] == 6.0 and a["turns"] == 3 and a["model"] == "claude-opus-5-5"
+    assert a["cost_usd"] == 6.0 and a["turns"] == 3 and a["model"] == "fake:m"
     page = (await client.get("/swarms/demo/agents", params={"state": "idle"})).json()
     assert [x["name"] for x in page["agents"]] == ["researcher-0001"]
     st = (await client.get("/swarms/demo")).json()["status"]
@@ -211,7 +211,7 @@ async def test_status_page_renders(client, store, clock, tick):
         client,
         make_spec(
             researcher={"replicas": 2},
-            reviewer={"replicas": 1, "harness": "pi", "model": "gpt-5.5-codex"},
+            reviewer={"replicas": 1, "model": "fake:codex"},
         ),
     )
     tick()

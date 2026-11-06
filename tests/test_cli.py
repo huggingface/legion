@@ -74,7 +74,7 @@ PROVIDER_SPEC = {
     "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
                            "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
     "models": {"q": {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
-    "types": {"worker": {"harness": "pi", "model": "q", "replicas": 1}},
+    "types": {"worker": {"harness": "llm", "model": "q", "replicas": 1}},
 }
 
 
@@ -85,7 +85,6 @@ def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, stor
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1 and "preflight failed" in r.output and "FAIL" in r.output
-    assert "`extra` is kept in the spec but not sent" in r.output
     assert store.get_swarm("op") is None and len(seen) == 1
     r = runner.invoke(cli.app, ["launch", "--skip-preflight", str(spec_file)])
     assert r.exit_code == 0, r.output
@@ -135,14 +134,11 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     assert len(seen) == 2  # one probe: a tool call plus a follow-up turn
     r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `flock preflight`
     assert r.exit_code == 0 and "preflight gpu1:Qwen/Q: ok" in r.output and len(seen) == 4
-    # native-only specs skip preflight unless asked
-    native = tmp_path / "native.yaml"
-    write_spec(native, make_spec())
-    r = runner.invoke(cli.app, ["launch", str(native)])
-    assert r.exit_code == 0 and len(seen) == 4
-    write_spec(native, make_spec("demo2", other={}))
-    r = runner.invoke(cli.app, ["launch", "--preflight", str(native)])
-    assert r.exit_code == 0 and "no provider-backed models" in r.output, r.output
+    # a spec with no types has no model to probe
+    empty = tmp_path / "empty.yaml"
+    write_spec(empty, make_spec("demo2").model_copy(update={"types": {}}))
+    r = runner.invoke(cli.app, ["launch", "--preflight", str(empty)])
+    assert r.exit_code == 0 and "no provider-backed models" in r.output and len(seen) == 4, r.output
 
 
 def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, store, clock):
@@ -193,15 +189,16 @@ def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
                             "self_hosted": True}},
         "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
                    "plain": {"model": "p:m"}},
-        "types": {"pi": {"harness": "pi", "model": "m"}, "l": {"harness": "llm", "model": "m"},
-                  "nox": {"harness": "pi", "model": "plain"}}})
+        "types": {"hb": {"harness": "harbor", "model": "m", "harbor": {"task": {}, "config": {}}},
+                  "l": {"harness": "llm", "model": "m"},
+                  "nox": {"harness": "harbor", "model": "plain", "harbor": {"task": {}, "config": {}}}}})
     err = "\n".join(ops.extra_warnings(spec))
-    assert "type pi: `extra`" in err and "type l:" not in err and "nox" not in err
+    assert "type hb: `extra`" in err and "type l:" not in err and "nox" not in err
     # the llm harness sends `extra` as body fields: never warned (PR #7 adds the harness)
     assert "llm" not in ops.EXTRA_NOT_SENT
     monkeypatch.setattr(ops, "EXTRA_NOT_SENT", frozenset({"llm"}))
     err = "\n".join(ops.extra_warnings(spec))
-    assert "type l:" in err and "type pi:" not in err
+    assert "type l:" in err and "type hb:" not in err
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):

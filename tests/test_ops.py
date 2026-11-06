@@ -36,7 +36,7 @@ def test_a_failed_call_after_the_preflight_keeps_what_was_done(api, tmp_path, mo
         launch(api, read_spec(f), f, preflight=True)
     assert e.value.lines == ["error 409: exists"] and e.value.done["preflight"]["ok"]
     r = CliRunner().invoke(cli.app, ["launch", f, "--preflight"])  # the CLI still shows it
-    assert r.exit_code == 1 and "preflight: no provider-backed models" in r.output
+    assert r.exit_code == 1 and "1 model(s) unverified" in r.output
     assert r.output.rstrip().endswith("error 409: exists")
 
 

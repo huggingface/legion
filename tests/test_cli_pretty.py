@@ -14,7 +14,7 @@ TS = datetime(2026, 10, 19, 8, 54, 50, tzinfo=UTC)
 
 
 def stream(tmp_path) -> list[dict]:
-    log = SessionLog(tmp_path / "a.jsonl", swarm="s", agent="leader-0000", harness="pi",
+    log = SessionLog(tmp_path / "a.jsonl", swarm="s", agent="leader-0000", harness="llm",
                      cwd="/w")
     evs = [
         log.custom("session_started", {"session_id": "abc", "resumed": False, "parent": None},

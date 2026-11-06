@@ -13,14 +13,14 @@ below) and [`examples/spawn.yaml`](../examples/spawn.yaml). Design notes and dec
 ## First spawn: a leader spawns 5 children
 
 From a clone of this repo, with `uv sync --all-extras` done. Replace `<you>` everywhere,
-including in `examples/first-spawn.yaml`. Cost: a few cents of Haiku and under $0.01 of jobs.
+including in `examples/first-spawn.yaml`. Cost: a few cents of router inference and under $0.01 of jobs.
 
 `uv sync` does not activate the environment, so every command goes through `uv run`, which
 also gives the scripts a Python with `huggingface_hub`. A bare `flock` may be util-linux's
 file-locking tool (`/usr/bin/flock`), a different program.
 
 ```sh
-export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
+export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
 uv run hf buckets create <you>/flock --private                      # once
 W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)  # wheel the workers install
 uv run scripts/deploy-space.sh "$W" <you>/flock                     # returns while it builds
@@ -52,7 +52,7 @@ $ uv run flock status leader-0000-analyst-0003 --events
 08:55:31   t-1 user     Capital of France? One word.
 08:55:34   t-1 assistant Paris
 08:55:35   t-1 assistant [Bash {"command": "flock prompt \"$FLOCK_PARENT\" \"leader-0000-analyst-0003: Paris\"…]
-08:55:36   t-1 agent.turn_ended completed claude-haiku-5-5 in=… out=…
+08:55:36   t-1 agent.turn_ended completed Qwen/Qwen3.8-27B:deepinfra in=… out=…
 ```
 
 `turns` and `state` come from worker heartbeats (every 30 s), so they lag the event stream. An
@@ -73,10 +73,10 @@ uv run hf buckets delete <you>/flock               # optional: wheels and agent 
 ## Spec
 
 ```yaml
-types:
-  leader:  {harness: pi, model: anthropic/claude-opus-5-5,  replicas: 1, workers: {initial: 1, max_extra: 0}}
-  analyst: {harness: pi, model: anthropic/claude-haiku-5-5, replicas: 0, workers: {initial: 1, max_extra: 3}}
-  helper:  {harness: pi, model: anthropic/claude-haiku-5-5, replicas: 0, workers: {initial: 0, max_extra: 2}}
+types:                                   # qwen: an alias under `models:` (open-models.md)
+  leader:  {harness: llm, model: qwen, replicas: 1, workers: {initial: 1, max_extra: 0}}
+  analyst: {harness: llm, model: qwen, replicas: 0, workers: {initial: 1, max_extra: 3}}
+  helper:  {harness: llm, model: qwen, replicas: 0, workers: {initial: 0, max_extra: 2}}
 spawn:                                   # run policy, separate from what a type is
   leader:  {types: {analyst: 3, helper: 2}, depth: 2}   # per-type caps, total 5
   analyst: {types: [helper], max: 3, depth: 1}         # list + one total cap

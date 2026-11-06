@@ -27,7 +27,7 @@ WHEEL = "hf://buckets/ns/sh/dist/abc/flock-0.0.1-py3-none-any.whl"
 
 
 def _spec(**kw) -> TypeSpec:
-    return TypeSpec(harness="pi", model="claude-haiku-5-5", **kw)
+    return TypeSpec(harness="llm", model="claude-haiku-5-5", **kw)
 
 
 def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):

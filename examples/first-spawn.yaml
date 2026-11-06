@@ -1,13 +1,17 @@
 # docs/spawn.md "First spawn": one leader spawns 5 children, each answers one question.
-# Every type lists HF_TOKEN: workers need it to fetch the flock wheel and sync to the bucket.
+# Every type lists HF_TOKEN: workers need it for the model, to fetch the flock wheel and to
+# sync to the bucket.
 swarm: first-spawn
 namespace: <you>
 bucket: hf://buckets/<you>/flock/first-spawn
+providers:                       # the HF router; its key is HF_TOKEN (docs/open-models.md)
+  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
+       pricing: {"Qwen/Qwen3.8-27B:deepinfra": [0.2, 2.5, 0.2]}}
 types:
   leader:
-    harness: pi
-    model: anthropic/claude-haiku-5-5
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    harness: llm
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
+    secrets: [HF_TOKEN]
     replicas: 1
     workers: {initial: 1}
     max_budget_usd: 0.2
@@ -20,9 +24,9 @@ types:
         flock-agent spawn analyst --key c5 --prompt "Say hello in Spanish. One word."
       Then reply "spawned 5" and stop. Children report back as later prompts; reply "ok".
   analyst:
-    harness: pi
-    model: anthropic/claude-haiku-5-5
-    secrets: [ANTHROPIC_API_KEY, HF_TOKEN]
+    harness: llm
+    model: "hf:Qwen/Qwen3.8-27B:deepinfra"
+    secrets: [HF_TOKEN]
     replicas: 0                    # exists only when spawned
     agents_per_worker: 10
     workers: {initial: 1}

@@ -48,7 +48,7 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),
-    ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'claude-opus-5-5'"),
+    ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'fake:m'"),
     ({"prompt": "x", "wake": {"min_gap": "soon"}}, "bad duration"),
     ({"prompt": "x", "wake": {"window": "0s"}}, "window must be a duration > 0"),
     ({"prompt": "x", "wake": {"max": -1}}, ">= 0"),
@@ -62,7 +62,7 @@ def test_bad_loops_are_rejected(loop, msg):
 
 
 def test_agent_usd_by_model():
-    s = spec_with({"prompt": "x", "while": {"agent_usd": {"claude-opus-5-5": 3.6, "glm": 2.1}}})
+    s = spec_with({"prompt": "x", "while": {"agent_usd": {"m": 3.6, "glm": 2.1}}})
     assert agent_cap(s.types["researcher"]) == 3.6
     assert agent_cap(spec_with({"prompt": "x"}).types["researcher"]) is None
 

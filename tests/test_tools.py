@@ -24,6 +24,8 @@ from flock.tools.loader import ToolsError, describe, load_dir, select
 from flock.tools.runner import check_args, context_dict, run_tool
 from flock.tools.spec import prepare
 
+from .conftest import FAKE_PROVIDERS
+
 
 def write(folder: Path, name: str, src: str) -> Path:
     p = folder / name
@@ -427,10 +429,11 @@ def test_extract_checks_hash_and_members(tmp_path):
 
 
 def spec_with(tmp_path, tools=None, tools_dir=None, **extra) -> tuple[SwarmSpec, Path]:
-    t = {"harness": "pi", "model": "m"}
+    t = {"harness": "llm", "model": "fake:m"}
     if tools is not None:
         t["tools"] = tools
-    raw = {"swarm": "s", "namespace": "ns", "bucket": "b", "types": {"dev": t}, **extra}
+    raw = {"swarm": "s", "namespace": "ns", "bucket": "b", "providers": FAKE_PROVIDERS,
+           "types": {"dev": t}, **extra}
     if tools_dir is not None:
         raw["tools_dir"] = tools_dir
     spec_file = tmp_path / "spec.yaml"
@@ -459,14 +462,14 @@ def test_prepare_selection_and_defaults(tmp_path):
 
 
 def test_spec_fields_are_optional_and_checked():
-    base = {"swarm": "s", "namespace": "ns", "bucket": "b",
-            "types": {"dev": {"harness": "pi", "model": "m"}}}
+    base = {"swarm": "s", "namespace": "ns", "bucket": "b", "providers": FAKE_PROVIDERS,
+            "types": {"dev": {"harness": "llm", "model": "fake:m"}}}
     s = SwarmSpec.model_validate(base)
     assert s.tools_dir is None and s.tools_version is None and s.types["dev"].tools is None
     with pytest.raises(ValueError, match="tools_version is written by `flock launch`"):
         SwarmSpec.model_validate({**base, "tools_version": "nothex"})
     with pytest.raises(ValueError):
-        SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "pi", "model": "m",
+        SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "llm", "model": "fake:m",
                                                             "tools": "some"}}})
 
 

@@ -29,8 +29,8 @@ def world_spec(**world) -> SwarmSpec:
     data = spec.model_dump(mode="json")
     data["world"] = {"url": "http://world", "endpoint": "http://world", "token_env": "WT",
                      **world}
-    data["providers"] = {"v": {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
-                               "api_key_env": "K", "self_hosted": True, "metrics": True}}
+    data["providers"]["v"] = {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
+                              "api_key_env": "K", "self_hosted": True, "metrics": True}
     return SwarmSpec.model_validate(data)
 
 
@@ -271,7 +271,7 @@ def test_hourly_rollup_lines_written_when_the_hour_closes(store):
         "schema": 1, "run": "run-x", "swarm": "demo", "swarms": ["demo"],
         "started_at": "2026-09-21T14:00:00+00:00", "ended_at": None, "status": "running",
         "states": True, "generation": 1,
-        "types": {"researcher": {"harness": "pi", "model": "claude-opus-5-5", "replicas": 3}}}
+        "types": {"researcher": {"harness": "llm", "model": "fake:m", "replicas": 3}}}
     tok = {"m": {"input": 7, "output": 1}}
     h.on_events(a0, [
         _ev(a0["name"], "turn_started"),

@@ -24,7 +24,7 @@ from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 from flock.worker.tools import ToolsManager
 
-from .conftest import wire
+from .conftest import FAKE_PROVIDERS, wire
 from .worker_fakes import ScriptedAdapter, until
 
 runner = CliRunner()
@@ -50,10 +50,10 @@ def folder(root: Path, src: str = ADD_V1, name: str = "tools") -> Path:
 
 
 def raw_spec(tools=None, **extra) -> dict:
-    t = {"harness": "pi", "model": "claude-opus-5-5", "replicas": 1, "agents_per_worker": 2}
+    t = {"harness": "llm", "model": "fake:m", "replicas": 1, "agents_per_worker": 2}
     if tools is not None:
         t["tools"] = tools
-    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": FAKE_PROVIDERS,
             "types": {"dev": t}, **extra}
 
 
@@ -300,7 +300,7 @@ async def test_cli_harness_gets_a_tools_section_a_pin_and_flock_tool(tmp_path):
     work = tmp_path / "agents"
     adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.05)
     outbox = Outbox()
-    rt = AgentRuntime("dev-0000", "dev", type_spec(system_prompt="You are dev."), swarm="demo",
+    rt = AgentRuntime("dev-0000", "dev", type_spec(harness="pi", system_prompt="You are dev."), swarm="demo",
                       work_root=work, adapter=adapter, outbox=outbox, toolbox=m.current)
     await rt.setup(restore=False)
     await rt.prompt("first")
@@ -345,7 +345,7 @@ async def _cli_runtime(tmp_path: Path, m: ToolsManager, tspec=None) -> tuple[Age
     from .worker_fakes import spec as type_spec
 
     adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
-    rt = AgentRuntime("dev-0000", "dev", tspec or type_spec(idle_grace="30s"), swarm="demo",
+    rt = AgentRuntime("dev-0000", "dev", tspec or type_spec(harness="pi", idle_grace="30s"), swarm="demo",
                       work_root=tmp_path / "agents", adapter=adapter, outbox=Outbox(),
                       toolbox=m.current, secret_source={"PROVIDER_KEY": "dummy-key"})
     await rt.setup(restore=False)
@@ -423,7 +423,7 @@ def secrets_seen() -> dict:
         "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
         "providers": {"fake": {"type": "openai_compat", "base_url": "http://127.0.0.1:9/v1",
                                "api_key_env": "PROVIDER_KEY", "self_hosted": True}},
-        "types": {"dev": {"harness": "pi", "model": "fake:dummy", "idle_grace": "30s",
+        "types": {"dev": {"harness": "llm", "model": "fake:dummy", "idle_grace": "30s",
                           "turn_timeout": "2s", "env": {"KEEP_ME": "1"}}},
     }).types["dev"]
     rt, adapter = await _cli_runtime(tmp_path, m, tspec)
@@ -522,7 +522,7 @@ async def test_restored_workdir_keeps_the_tools_section(tmp_path):
     wd.mkdir(parents=True)
     (wd / "AGENTS.md").write_text("Old instructions from the bucket.\n")
     adapter = ScriptedAdapter(tmp_path / "home", turn_time=0.03)
-    rt = AgentRuntime("dev-0000", "dev", type_spec(system_prompt="System instructions.",
+    rt = AgentRuntime("dev-0000", "dev", type_spec(harness="pi", system_prompt="System instructions.",
                                                    idle_grace="30s"),
                       swarm="demo", work_root=tmp_path / "agents", adapter=adapter,
                       outbox=Outbox(), toolbox=m.current)

@@ -172,7 +172,8 @@ def test_spec_llm_needs_an_openai_compat_provider():
         llm_spec(tool_choice="paint")
     with pytest.raises(ValueError, match="for harness llm only"):
         SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
-                                  "types": {"a": {"harness": "pi", "model": "m", "tool_choice": "required"}}})
+                                  "types": {"a": {"harness": "harbor", "model": "m", "tool_choice": "required",
+                                                        "harbor": {"task": {}, "config": {}}}}})
 
 
 def test_example_spec_validates():
@@ -579,7 +580,8 @@ async def test_done_tool_defaults_and_text_form(tmp_path, fake_server, monkeypat
         {"name": "done", "arguments": {"summary": "ok"}}]
     with pytest.raises(ValueError, match="for harness llm only"):
         SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
-                                  "types": {"a": {"harness": "pi", "model": "m", "done_tool": True}}})
+                                  "types": {"a": {"harness": "harbor", "model": "m", "done_tool": True,
+                                                        "harbor": {"task": {}, "config": {}}}}})
 
 
 async def test_forced_with_done_has_a_default_call_cap(tmp_path, fake_server, monkeypatch):
@@ -632,7 +634,7 @@ def test_warn_extra_skips_the_llm_harness(capsys):
         "providers": {"p": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
                             "self_hosted": True}},
         "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
-        "types": {"pix": {"harness": "llm", "model": "m"}, "cx": {"harness": "pi", "model": "m"}}})
+        "types": {"pix": {"harness": "llm", "model": "m"}, "cx": {"harness": "harbor", "model": "m", "harbor": {"task": {}, "config": {}}}}})
     err = "\n".join(ops.extra_warnings(spec))
     assert "type cx: `extra`" in err and "pix" not in err
 
@@ -732,7 +734,8 @@ async def test_calibration_and_settings(tmp_path, fake_server, monkeypatch):
     await a.stop()
     with pytest.raises(ValueError, match="for harness llm only"):
         SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
-                                  "types": {"a": {"harness": "pi", "model": "m", "chars_per_token": 2}}})
+                                  "types": {"a": {"harness": "harbor", "model": "m", "chars_per_token": 2,
+                                                        "harbor": {"task": {}, "config": {}}}}})
     with pytest.raises(ValueError, match="tool_output_chars must be >= 200"):
         llm_spec(tool_output_chars=10)
 
