@@ -110,8 +110,9 @@ class Workers(Settings):
     idle_grace: str | None = None
     turn_timeout: str | None = None
     worker: WorkerKnobs | None = None
-    # the workers' own env (no secret-looking names, checked by compile_spec: it is in the spec): what a task's `[environment.env]`
-    # `${VAR}` reads, as Harbor fills it from the worker's environment
+    # the workers' own env: what a task's `[environment.env]` `${VAR}` reads, as Harbor fills
+    # it from the worker's environment. Stored in the spec, so compile_spec refuses
+    # secret-looking names (a task secret goes in the worker host's env, e.g. Slurm's run.env)
     env: dict[str, str] | None = None
     initial: int | None = Field(default=None, ge=0, strict=True)
     max_extra: int | None = Field(default=None, ge=0, strict=True)
@@ -322,10 +323,12 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             # Harbor's check is a loose substring match: KEY, TOKEN, SECRET, PASSWORD,
             # CREDENTIAL, AUTH anywhere in a name refuse it, harmless or not
             raise ValueError(f"{where}.env: {', '.join(bad)} cannot be set here: the block is "
-                             "stored in the spec and lands in the worker job's plain env, and "
+                             "stored in the spec and lands in the worker job's plain env, so "
                              "names containing KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/AUTH are "
-                             "refused even if harmless. The spec has no way to pass a task "
-                             "secret: only the inference key and resource tokens are passed "
+                             "refused (even if harmless). Put a task secret in the worker host's "
+                             "environment instead: on Slurm add NAME=value to run.env, which "
+                             "every worker job sources, and the task's ${NAME} reads it there. "
+                             "On hf-jobs only the inference key and resource tokens are passed "
                              "as secrets")
     for name, options in spec.resources.items():
         if options.get("token_env") == ADMIN_TOKEN_ENV:
