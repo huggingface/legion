@@ -520,3 +520,18 @@ def test_container_mounts_follow_every_symlink_hop(tmp_path):
     assert rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(uv.parent)}).ok
 
 
+
+
+def test_check_task_wants_commits(tmp_path):
+    from types import SimpleNamespace as NS
+
+    def spec(reg, task):
+        t = {"registry_commit": reg, "task": {"git_commit_id": task}}
+        return NS(types={"a": NS(harbor=NS(task=t))})
+
+    sha = "a" * 40
+    assert rundir.check_task(_spec(tmp_path)).ok is None  # not a Harbor spec
+    ok = rundir.check_task(spec(sha, sha))
+    assert ok.ok is True and "pinned" in ok.detail
+    bad = rundir.check_task(spec(sha, "main"))
+    assert bad.ok is False and "task.git_commit_id" in bad.detail

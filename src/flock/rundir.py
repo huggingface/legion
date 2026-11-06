@@ -525,6 +525,25 @@ def check_mounts(env: Mapping[str, str]) -> Check:
     return Check("container mounts", True, " -> ".join(hops) + ": every hop is mounted")
 
 
+def check_task(spec: SwarmSpec) -> Check:
+    """A Harbor spec's task is pinned: loading the spec resolved the registry and the task's repo
+    to commits (flock.harbor.sources), so a branch or tag cannot move under a running swarm."""
+    tasks = {json.dumps(ts.harbor.task, sort_keys=True): ts.harbor.task
+             for ts in spec.types.values() if ts.harbor}
+    if not tasks:
+        return Check("harbor task", None, "not a Harbor spec")
+    sha = re.compile(r"[0-9a-f]{40}")
+    for t in tasks.values():
+        for what, value in (("registry_commit", t.get("registry_commit")),
+                            ("task.git_commit_id", (t.get("task") or {}).get("git_commit_id"))):
+            if not sha.fullmatch(str(value or "")):
+                return Check("harbor task", False, f"{what} is {value!r}, not a commit: the "
+                             "task is not pinned (set task.revision to a commit)")
+    t = next(iter(tasks.values()))
+    return Check("harbor task", True, f"pinned: registry {t['registry_commit'][:12]}, "
+                 f"task {t['task']['git_commit_id'][:12]}")
+
+
 def check_world(spec: SwarmSpec, env: Mapping[str, str], run_dir: Path) -> Check:
     import httpx
 
@@ -876,7 +895,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
                             f"{RUN_ENV}" if not unset else f"empty, no default: {', '.join(unset)}",
                             warnings))
     secret_env = {**env, **values}
-    rep.checks += [check_slots(spec), check_bucket(spec, secret_env, rep),
+    rep.checks += [check_slots(spec), check_task(spec), check_bucket(spec, secret_env, rep),
                    check_providers(spec, secret_env), check_board(spec, secret_env),
                    check_venv(secret_env), check_world(spec, secret_env, d),
                    register_dashboard(spec, secret_env)]
