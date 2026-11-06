@@ -278,7 +278,7 @@ queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is t
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
 concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
 `merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
-`stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s` (the last `state.db`
+`merge_queue` (PRs waiting in the merge queue), `stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s` (the last `state.db`
 flush), `save_age_s`, `state_bytes` (`state.db` plus its WAL), `dirty_rows` (changed rows not yet
 saved), and its lanes' numbers as `lane_<lane>_<key>` (below).
 
@@ -302,7 +302,7 @@ rows dirty for the next one. `close()` checkpoints the WAL into the database fil
 path)` (module function) copies a database another process is writing, for archive scripts.
 
 chatbot4 keeps its dicts in memory and saves through `state.db` (rows: one per PR, cached
-`open_pr` result, parked draft and inbox, plus `pr_opens` and `pr_merges`), at most every
+`open_pr` result, parked draft and inbox, plus `pr_opens`, `pr_merges` and `merge_queue`), at most every
 `save.interval_s`. On a first start without `state.db` it imports `prs.json`. With `save.legacy_json` off,
 merged and closed PRs leave memory an hour after they ended (`ended_at`), for the cold table; `get_pr` and `list_prs` with
 `state` merged, closed or all still return them. While the knob `save.legacy_json` is on
@@ -350,7 +350,7 @@ lanes.outbox("comment", drain=post).put(key=pr, payload=text)   # post(key, payl
   `outbox_oldest_age_s`.
 
 chatbot4 uses `push` (create, push, ready and close PRs; `CHATBOT_HUB_WRITE_SLOTS`), `merge`
-(`CHATBOT_MERGE_HUB_SLOTS`) and `comment` (review comments through the outbox,
+(`CHATBOT_MERGE_HUB_SLOTS`; only the merge queue's thread holds it) and `comment` (review comments through the outbox,
 `CHATBOT_HUB_OUTBOX_GAP_S`); `push` and `merge` share one breaker. `git_error`/`hub_error`
 (where "vote failed: transaction was aborted" lands) count as transient, `pr_closed`/`pr_merged`
 as final, and so does a single comment the Hub refuses with a 4xx other than 429 (counted in
@@ -429,7 +429,8 @@ python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`
 (`CHATBOT_PR_OPEN_FLOOR`), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
 `hub.comment.gap_s` (its Hub write lanes, below). `open_pr` honours the `open` lane (new PRs)
-and `push`, `merge_pr` the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file;
+and `push`, `merge_pr` and the merge queue the `merge` lane (paused: `merge_pr` refuses and the
+queue waits), besides `CHATBOT_PRS_PAUSED` and its flag file;
 pausing `comment` holds the review comment outbox.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
@@ -514,13 +515,27 @@ sets 330 seconds on every tool so a 300-second conversation can finish.
 
 The chatbot4 world preserves the seed input/output and module loader, runs the
 bot under stdlib/import and side-effect restrictions with resource limits, and
-requires a different agent's review of the exact PR head. `merge_pr` replays a PR on an
+requires a different agent's review of the exact PR head.
+
+`merge_pr` only queues: it checks that the PR is open and approved on its current head (a
+merged PR answers with its merge), appends it to the merge queue (`merge_queue` in the state, so
+a restart keeps it; a PR already queued keeps its place) and answers at once with `{"queued":
+true, "position": N}`. One background thread merges the queue first to last, each PR as the
+agent that queued it, re-checking the PR as it is at its turn (an update after queueing needs
+approvals on the new head). It replays a PR on an
 older base onto main itself (as the PR's author) and force-pushes `refs/pr/N`; it refuses a
-conflict (naming the files; the author's inbox gets it once per main), or a replay whose diff
+conflict (naming the files), or a replay whose diff
 changed so the approvals no longer match. Before merging it
 runs the bot contract and the repository's `tests/` files matching `CHATBOT_MERGE_TESTS`
 (default `test_deck.py`; empty disables) on the tree it would make main, isolated and bounded
-at 60 s, and refuses when they fail there but pass on main. `CHATBOT_UNION_PATHS` (gitattributes
+at 60 s, and refuses when they fail there but pass on main. A merge tells the author, the
+approvers and the agent that queued it through their inbox; a refusal drops the PR from the
+queue and tells the author and that agent why (and `merge_pr` answers a re-queue of the same
+head on the same main with that refusal at once). Hub and git failures, a lane refusal or an
+update in progress keep the PR first, retried after 5, 10, 20 and 40 s; after five in a row it
+goes last. Each queue run logs one `merge_pr pr=N outcome=... total=...` timing line. The
+inbox is the only path for this news: it rides on the agent's next successful world tool
+result. `CHATBOT_UNION_PATHS` (gitattributes
 patterns, e.g. `deck/*.jsonl`; empty by default) makes `merge_pr`'s replay onto main merge
 those paths with `merge=union` (both sides' lines kept) from a world-side attributes file; the
 approval check refuses a replay whose diff changed (e.g. a deleted line kept) and the shared
