@@ -285,6 +285,8 @@ REMOVED: dict[str, set[str]] = {
     # the removed pi harness's memory limits, the removed llm harness's settings
     "TypeSpec": {"tool_memory_mb", "node_heap_mb", "context_tokens", "tool_choice", "done_tool",
                  "bash", "chars_per_token", "tool_output_chars", "msgboard_invite"},
+    # the per-agent memory guard (spike kill, recycle): removed, no harness had the process it read
+    "MemoryKnobs": {"spike_mb", "recycle_gap_s"},
     # the removed worker comms hub's budgets
     "WorkerKnobs": {"comms_rate", "comms_burst", "comms_agent_rate", "comms_agent_burst",
                     "comms_poll_cycle_s"},
@@ -613,8 +615,6 @@ class MemoryKnobs(_Removable):
     rotate: float | None = None
     drain: float | None = None
     preempt: float | None = None
-    spike_mb: float | None = Field(default=None, gt=0)
-    recycle_gap_s: float | None = Field(default=None, ge=0)
 
 
 class WorkerKnobs(_Removable):

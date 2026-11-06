@@ -1,6 +1,4 @@
-"""Single-agent recycle (docs/slurm.md "Memory"): a fresh harness process on the same session at
-a turn boundary, from the memory watchdog; and a harness SIGKILLed mid-turn (the OOM killer) as
-a transient failure."""
+"""A harness SIGKILLed mid-turn (the OOM killer) is a transient failure."""
 
 from __future__ import annotations
 
@@ -10,21 +8,6 @@ from flock.worker.adapters.base import AdapterEvent
 
 from .test_loop_worker import custom, start
 from .worker_fakes import ScriptedAdapter, runtime, until
-
-
-async def test_recycle_now_ends_an_idle_process(tmp_path):
-    rt, ad = runtime(tmp_path, idle_grace="5s")
-    await rt.setup(restore=False)
-    assert not rt.recycle("memory")  # no process yet
-    await rt.prompt("hi")
-    await until(lambda: rt.state.turns == 1)
-    rt.pss_mb = 900.0
-    assert rt.recycle("memory")
-    await until(lambda: rt.phase == "none")
-    assert custom(rt, "harness_recycled") == [{"reason": "memory", "pss_mb": 900.0}]
-    await rt.prompt("again")
-    await until(lambda: rt.state.turns == 2)
-    assert ad.starts == [None, "s-1"]
 
 
 class OomOnce(ScriptedAdapter):

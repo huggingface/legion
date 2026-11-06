@@ -218,19 +218,14 @@ types:
     worker:
       drain_budget_s: 20        # FLOCK_DRAIN_BUDGET_S: the whole preemption handler
       sync_interval_s: 180      # SYNC_INTERVAL: periodic bucket push
-      comms_rate: 0.5           # FLOCK_COMMS_RATE: board requests/s per worker (0: off)
-      comms_burst: 5            # FLOCK_COMMS_BURST
-      comms_agent_rate: 0.1     # FLOCK_COMMS_AGENT_RATE: one agent's comms calls/s (0: off)
-      comms_agent_burst: 10     # FLOCK_COMMS_AGENT_BURST
-      comms_poll_cycle_s: null  # FLOCK_COMMS_POLL_CYCLE_S (see below)
       sync_exclude: [data/raw/] # FLOCK_SYNC_EXCLUDE: added to the default excludes
       restore_batch: 1000       # FLOCK_RESTORE_BATCH: files per download batch
       restore_threads: 4        # FLOCK_RESTORE_THREADS: one agent's batches in parallel
-      memory: {rotate: null, drain: null, preempt: null, spike_mb: null, recycle_gap_s: null}
-                                # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT, _SPIKE_MB, _RECYCLE_GAP_S
+      memory: {rotate: null, drain: null, preempt: null}
+                                # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT
 ```
 
-Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` when set, else `FLOCK_COMMS_POLL_CYCLE_S`, else 300. Each heartbeat carries `knobs_rev`,
+Each heartbeat carries `knobs_rev`,
 a hash of the settings in force, and `flock status --json` shows it (`knobs_rev` per worker), so workers running
 an older configuration stand out.
 
@@ -289,19 +284,24 @@ for the controller).
 15 s it reads its cgroup (the smallest `memory.max` up the tree; when none, Slurm's in-job
 `SLURM_MEM_PER_NODE`, then `FLOCK_MEMORY_LIMIT_MB`, both MB) and compares nonreclaimable memory (anon + shmem + slab_unreclaimable + kernel_stack +
 pagetables, not page cache) with the limit. Without a limit nothing below is armed. Each rung
-is logged once until memory falls below the first one again. `rotate`, `drain`, `preempt`,
-`spike_mb` and `recycle_gap_s` can also be set per type under `worker.memory` (spec, then the
-env variable, then the default):
+is logged once until memory falls below the first one again. `rotate`, `drain` and `preempt`
+can also be set per type under `worker.memory` (spec, then the env variable, then the default):
 
 | Nonreclaimable / limit | Worker |
 |---|---|
-| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it), for the controller's rotation (below). The per-agent recycle needs a harness process PSS, which neither `llm` nor `harbor` reports yet |
+| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it), for the controller's rotation (below) |
 | ≥ `FLOCK_MEM_DRAIN` (0.85) | drain: turns still running after `FLOCK_MEM_DRAIN_DEADLINE_S` (300) are interrupted (`drain_deadline`, resumed with `resume_prompt` after the restart), sync, exit 0: a planned restart |
 | ≥ `FLOCK_MEM_PREEMPT` (0.93), or a new `oom_kill` in `memory.events` | `preempt("memory")`, as on SIGUSR1: exit 75, relaunched at once |
 
-Spike guard: one agent's tool processes above `FLOCK_MEM_SPIKE_MB` (3072; 0 turns it off) are
-SIGKILLed, not the harness and not the other agents (`tool_tree_killed {agent, mb}`); no drain.
-`worker_lifetime` stays the backstop.
+The ladder acts on the whole worker. For Harbor agents that means: no single Trial is picked
+and restarted for memory (the worker cannot tell which one grows: a Trial's agent runs in its
+own container, so its memory is not in the worker's process tree). Relief is a drain or a
+preemption of the whole worker; every agent's Trial stops, its Pi sessions go to the bucket and
+the agents resume on the relaunched worker. On docker and podman a Trial's container memory
+counts against the worker's job only when the engine puts its containers inside the job's
+cgroup; on hf-sandbox it does not count at all. `worker_lifetime` stays the
+backstop. (`worker.memory.spike_mb` and `recycle_gap_s`, the removed per-agent guard, are
+dropped from stored specs with a warning.)
 
 The controller rotates workers that ask for it: each pass, among workers whose heartbeat says
 `wants_rotation`, it sends a drain to the one with the smallest `eta_limit_s` while fewer than

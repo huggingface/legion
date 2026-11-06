@@ -171,7 +171,7 @@ async def test_live_worker_knobs_beat_env_and_bump_knobs_rev(tmp_path, monkeypat
     worker, _ = make_worker(tmp_path, FakeController())
     rev0 = worker.knobs_rev
     knobs = {"sync_interval_s": 30, "drain_budget_s": 9, "sync_exclude": ["big/"],
-             "restore_threads": 2, "memory": {"drain": 0.9, "spike_mb": 4000}}
+             "restore_threads": 2, "memory": {"drain": 0.9}}
     worker._live_from({"type_spec": spec(worker=knobs).model_dump(mode="json")})
     assert (worker.cfg.sync_interval, worker.cfg.drain_budget) == (30, 9)
     assert restore_threads() == 2
@@ -188,7 +188,7 @@ async def test_live_worker_knobs_beat_env_and_bump_knobs_rev(tmp_path, monkeypat
     await worker.client.aclose()
 
 
-async def test_memory_loop_samples_the_cgroup_and_logs_each_agent(tmp_path, monkeypatch):
+async def test_memory_loop_samples_the_cgroup_and_logs(tmp_path, monkeypatch, caplog):
     from flock.worker.cgroup import CgroupMem
 
     from .test_worker_cgroup import v2
@@ -198,18 +198,14 @@ async def test_memory_loop_samples_the_cgroup_and_logs_each_agent(tmp_path, monk
     monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.02")
     worker, _ = make_worker(tmp_path, FakeController())
     worker.cgroup = CgroupMem(tmp_path / "fs", env={})
-    await worker.dispatch(AssignCommand(agent="researcher-0001", type="researcher", spec=spec(),
-                                        restore=False))
-    rt = worker.agents["researcher-0001"]
-    await until(lambda: rt.setup_done)
-    rt.workdir_files = 7
+    caplog.set_level("INFO", logger="flock.worker")
     task = asyncio.create_task(worker.memory_loop())
     try:
-        await until(lambda: any(e.type == "agent_memory" for e in worker.outbox.take()))
+        await until(lambda: "memory: rss" in caplog.text)
     finally:
         task.cancel()
     assert worker.mem.limit_mb == 11264 and worker.mem.nonreclaim_mb == 1300
-    assert worker.heartbeat_payload().mem == worker.mem and not rt.dirty
+    assert worker.heartbeat_payload().mem == worker.mem
     await worker.client.aclose()
 
 

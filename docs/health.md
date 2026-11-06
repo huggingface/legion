@@ -186,7 +186,7 @@ them); `flock.status.normalise` maps each to one schema:
 | `agent.message` | `message` | agent | a harness message (user, assistant, tool result) |
 | `agent.turn_started`, `agent.turn_ended`, `agent.turn_interrupted` | same | agent | a turn starts, ends, is cut (`reason: timeout` makes the agent stuck) |
 | `agent.session_started`, `agent.session_resumed`, `agent.session_restarted` | same | agent | the harness session |
-| `agent.sync`, `agent.error`, `agent.prompt_deferred`, `agent.harness_recycled`, ... | same | agent | any other worker event: `agent.<stored type>` |
+| `agent.sync`, `agent.error`, `agent.prompt_deferred`, ... | same | agent | any other worker event: `agent.<stored type>` |
 | `agent.stuck` | `stuck` | swarm | the controller first sees an agent stuck (its turn timed out) |
 | `agent.nudged` | `nudge` | swarm | a stuck agent got its type's `resume_prompt` |
 | `agent.spawned`, `agent.child_removed` | `spawned`, `child_removed` | parent agent | a child spawned or removed |

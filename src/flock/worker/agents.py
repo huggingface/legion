@@ -5,8 +5,7 @@ Phases of the harness process: none -> starting -> running -> (stopping) -> none
   forwarded in order once it is up; later prompts go straight to the running process.
 - The burst ends when the harness has been idle for `idle_grace`, when a turn exceeds its
   timeout (process killed, agent `stuck` until the next turn), on stop/unassign, on drain
-  once the in-flight turn ends, or on `recycle` at the next turn boundary (a fresh process
-  resumes the same session: memory relief, a new model endpoint).
+  once the in-flight turn ends.
 The worker never schedules or queues beyond the startup buffer.
 """
 
@@ -134,10 +133,6 @@ class AgentRuntime:
         self.dirty = False
         self.allow_starts = True
         self._stop_req: str | None = None
-        # recycle(): end the burst at the next turn boundary; the next prompt starts a fresh
-        # process on the same session. Not _stop_req: the burst's finally must restart.
-        self._recycle_pending: str | None = None
-        self.pss_mb: float | None = None  # the harness's PSS, set by the worker's memory loop
         self._exit_code: int | None = None  # the harness's exit status (`exited` event)
         self._burst: asyncio.Task | None = None
         self._ready = asyncio.Event()
@@ -287,9 +282,6 @@ class AgentRuntime:
                 # awaiting, an earlier prompt's turn may already run in the harness (its
                 # turn_started not seen yet): this prompt joins it.
                 self._apply_live()
-                if self._recycle_pending:  # the fresh process takes it (_watch ends this one)
-                    self.buffer.append(text)
-                    return
                 text = self._with_notes(text)
             self.awaiting = True
         try:
@@ -353,7 +345,7 @@ class AgentRuntime:
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
             self.start_rev = self.rev
-            self._recycle_pending, self._exit_code = None, None
+            self._exit_code = None
             self.save_state()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
                              "parent": self.parent})
@@ -412,10 +404,6 @@ class AgentRuntime:
                 log.warning("%s: turn exceeded %.0fs; killing the harness", self.name, timeout)
                 self._interrupt("timeout")
                 self.stuck = True
-                return
-            if not busy and self._recycle_pending:
-                self.emit("harness_recycled", {"reason": self._recycle_pending, "pss_mb": self.pss_mb})
-                self._recycle_pending = None
                 return
             if not busy and now - self._last_activity >= self.idle_grace:
                 return
@@ -660,14 +648,6 @@ class AgentRuntime:
     @property
     def live(self) -> bool:
         return self.phase != "none"
-
-    def recycle(self, reason: str) -> bool:
-        """Restart the harness process at the next turn boundary, resuming the same session
-        (`harness_recycled`). Only a running process; False when there is none to recycle."""
-        if self.phase != "running" or self._recycle_pending:
-            return False
-        self._recycle_pending = reason
-        return True
 
     async def stop(self, reason: str = "stop") -> None:
         """Kill the harness process if any (interrupting a turn); the agent stays assigned."""
