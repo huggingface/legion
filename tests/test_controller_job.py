@@ -522,6 +522,47 @@ def test_controller_job_launch_arguments(monkeypatch):
         "hf://buckets/me/flock/controller/g")
 
 
+def test_controller_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
+    """The controller job's bootstrap on stubs (python3, uv, flock-controller; buckets read
+    from a local folder): flock[controller] is installed with uv.lock's versions and msgboard's
+    shipped wheel (never its private git source), as the workers' bootstrap does."""
+    import tarfile
+
+    from .test_jobs import MSGBOARD, fake_wheel
+
+    stubs, log, bucket = tmp_path / "stubs", tmp_path / "calls.log", tmp_path / "bucket"
+    wheels, deps = tmp_path / "wheels", tmp_path / "deps"  # the script's /opt/wheels
+    for d in (stubs, wheels, deps, bucket / "ns/f/dist"):
+        d.mkdir(parents=True)
+    (bucket / "ns/f/dist/w.whl").write_text("")
+    fake_wheel(deps / MSGBOARD)
+    (deps / "constraints.txt").write_text("huggingface-hub==1.33.0\n")
+    with tarfile.open(bucket / "ns/f/dist/harbor-deps.tar", "w") as tar:
+        tar.add(deps, arcname=".")
+    for name, body in [  # python3 -c '<fetch>' <url> <file>: copied from the local bucket
+        ("python3", f'[ "$1" != -c ] || cp "{bucket}/${{3#hf://buckets/}}" "$4"'),
+        ("uv", 'for a; do [ "${prev:-}" = --overrides ] && cat "$a" >> LOG; prev=$a; done'),
+        ("flock-controller", ""),
+    ]:
+        (stubs / name).write_text(f'#!/bin/sh\necho "{name} $1 $2 $3" >> {log}\n'
+                                  + body.replace("LOG", str(log)) + "\n")
+        (stubs / name).chmod(0o755)
+    script = jobdeploy.bootstrap_command()[2].replace("/opt/wheels", str(wheels))
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path),
+           "FLOCK_WHEEL_URL": "hf://buckets/ns/f/dist/w.whl", "FLOCK_DATA": str(tmp_path / "d")}
+    r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True,
+                       timeout=30, check=False)
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text().splitlines()
+    assert calls[0] == "python3 -m pip install"
+    i = calls.index("uv pip install -q")
+    assert calls[i + 1] == f"msgboard @ file://{wheels}/{MSGBOARD}"  # the overrides file
+    assert (wheels / "constraints.txt").read_text() == "huggingface-hub==1.33.0\n"
+    assert calls[-1].startswith("flock-controller")
+    assert f'"$WHEEL[controller]" -c {wheels}/constraints.txt' in script
+    assert "huggingface_hub==2" not in script  # the constraints pin it
+
+
 def test_deploy_job_dry_run_never_prints_secret_values(capsys):
     env = {"FLOCK_TOKEN": "flock-secret-value", "HF_TOKEN": "hf_secret_value",
            "ANTHROPIC_KEY": "sk-secret", "OPENAI_API_KEY": "sk-openai-secret"}

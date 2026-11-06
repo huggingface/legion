@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import sys
 import time
 from collections.abc import Mapping
@@ -23,30 +22,40 @@ API_PORT = 7860
 STATUS_PORT = 7861
 ALIAS = "controller"
 IMAGE = "python:3.12-slim"
-HF_HUB_VERSION = "2.2.0"  # matches jobs.HF_HUB_VERSION (workers)
 DATA_DIR = "/state/flock"  # job disk: ephemeral, synced to FLOCK_STATE_URL
 ROLE_LABEL = "flock-role"
 GROUP_LABEL = "flock-group"
 DEFAULT_GROUP = "flock"
 
+# As the workers' (flock.controller.jobs): msgboard is private on GitHub (a job cannot clone it),
+# so its wheel and uv.lock's versions come in harbor-deps.tar next to flock's wheel
+# (scripts/publish-wheel.sh); uv installs flock with those pins and msgboard's wheel.
 _BOOTSTRAP = r"""set -euo pipefail
 t0=$(date +%s)
-pip() { python3 -m pip install -q --no-cache-dir --root-user-action=ignore "$@"; }
-pip "huggingface_hub=={hub}"
+python3 -m pip install -q --no-cache-dir --root-user-action=ignore huggingface_hub uv
 mkdir -p /opt/wheels "$FLOCK_DATA"
-WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
-python3 -c 'import sys; from huggingface_hub import HfApi
+fetch() {  # fetch hf://buckets/<namespace>/<bucket>/<path> <file>
+  python3 -c 'import sys; from huggingface_hub import HfApi
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
-' "$FLOCK_WHEEL_URL" "$WHEEL"
-pip "$WHEEL[controller]" "huggingface_hub=={hub}"
+' "$1" "$2"
+}
+WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
+fetch "$FLOCK_WHEEL_URL" "$WHEEL"
+fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar || {
+  echo "bootstrap: no harbor-deps.tar next to the wheel: scripts/publish-wheel.sh" >&2
+  exit 1; }
+tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
+echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
+uv pip install -q --system --no-cache "$WHEEL[controller]" -c /opt/wheels/constraints.txt \
+  --overrides /opt/wheels/overrides.txt
 echo "bootstrap: $(($(date +%s) - t0)) s; $(python3 --version)"
 exec flock-controller
 """
 
 
 def bootstrap_command() -> list[str]:
-    return ["bash", "-c", _BOOTSTRAP.replace("{hub}", shlex.quote(HF_HUB_VERSION))]
+    return ["bash", "-c", _BOOTSTRAP]
 
 
 def default_state_url(wheel_url: str, group: str) -> str:
@@ -102,7 +111,7 @@ def run_job_args(
 
 
 def public_status_supported() -> bool:
-    """huggingface_hub 1.33 (the harbor extra's pin) has no `expose_public`; the public status
+    """huggingface_hub 1.33 (uv.lock's pin, Harbor's) has no `expose_public`; the public status
     page is optional, so without it the controller starts and the page is just not exposed."""
     import inspect
 

@@ -91,19 +91,14 @@ uv run flock stop hello --delete --yes   # ends the run and writes the bundle
 
 ### Run the controller
 
-As an HF Docker Space (the tested setup):
+As an HF Job in the workers' network group (job mode; see
+[docs/deploy-job.md](docs/deploy-job.md)). The wheel's directory also gets `harbor-deps.tar`
+(msgboard's wheel and uv.lock's versions), which the controller job and the workers install from:
 
 ```sh
-export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
+export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
 uv run hf buckets create <you>/flock --private                # once: wheels and agent state
-W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # wheel for workers
-uv run scripts/deploy-space.sh "$W" <you>/flock
-```
-
-As an HF Job in the workers' network group (job mode, for swarms past a few dozen workers:
-no Spaces edge between workers and the controller; see [docs/deploy-job.md](docs/deploy-job.md)):
-
-```sh
+W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)   # needs GitHub access to msgboard
 uv run scripts/deploy-job.sh "$W" --group <name>     # prints the job's two URLs
 export FLOCK_URL=https://<job id>--7860.hf.jobs       # API through the jobs proxy
 # the CLI sends HF_TOKEN to the proxy and FLOCK_TOKEN as X-Flock-Token;
@@ -111,6 +106,9 @@ export FLOCK_URL=https://<job id>--7860.hf.jobs       # API through the jobs pro
 # (only with a huggingface_hub whose run_job has `expose_public`; else just the API; the launch says so)
 uv run scripts/deploy-job.sh --down --group <name> "$W"   # teardown: cancel + delete its state
 ```
+
+The HF Docker Space deployment (`scripts/deploy-space.sh`) is unsupported for now: its build
+cannot install msgboard, a private GitHub repo (Dockerfile.controller).
 
 Or locally:
 

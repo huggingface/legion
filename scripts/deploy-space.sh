@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Deploy the controller to a public Docker Space and configure it.
+# Unsupported for now: the build cannot install msgboard (private), see Dockerfile.controller;
+# run the controller as an HF Job instead (scripts/deploy-job.sh, docs/deploy-job.md).
 #   scripts/deploy-space.sh <wheel-url> <space-id>     e.g. <you>/flock
 # JOB_LABELS sets the deployment-wide worker job labels (default experiment=flock-m1).
 # Needs HF_TOKEN and FLOCK_TOKEN in the environment (ANTHROPIC_KEY is optional); values are never

@@ -1,7 +1,8 @@
 # Controller as an HF Job (job mode)
 
 Added 2026-10-20. Decision 32 in [design.md](design.md). The Space deployment
-(`scripts/deploy-space.sh`) stays for small swarms; use job mode once a swarm has
+(`scripts/deploy-space.sh`) is unsupported for now (its build cannot install the private
+msgboard, Dockerfile.controller); before that it served small swarms, and job mode once a swarm had
 more than a few dozen worker jobs.
 
 ## Results (2026-10-20)
@@ -82,9 +83,10 @@ secrets that are set), then `export FLOCK_URL=...` (`--run RUN_DIR` records it i
 "Lifecycle").
 
 The script (`python -m flock.controller.jobdeploy`) launches `python:3.12-slim`. That
-image installs `huggingface_hub`, downloads the wheel from the bucket, installs
-`wheel[controller]` and runs `flock-controller`, so no image build is needed. Workers
-still bootstrap from the same wheel. The job gets:
+image installs `huggingface_hub` and uv, downloads the wheel and `harbor-deps.tar` next to it
+from the bucket, installs `wheel[controller]` with that tar's msgboard wheel and uv.lock's
+versions, and runs `flock-controller`, so no image build is needed. Workers bootstrap from the
+same wheel and tar. The job gets:
 
 | | value |
 |---|---|

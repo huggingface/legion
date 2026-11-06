@@ -7,6 +7,10 @@ RUN useradd -m -u 1000 user
 WORKDIR /app
 COPY pyproject.toml README.md* ./
 COPY src ./src
+# Not buildable as is: flock needs msgboard, a private GitHub repo the build cannot clone.
+# shortcut: the Space path is unsupported until msgboard is public or the build fetches
+# harbor-deps.tar (scripts/publish-wheel.sh) with a build secret; staging that tar in this
+# public Space would publish msgboard. Run the controller as an HF Job (docs/deploy-job.md).
 RUN pip install --no-cache-dir ".[controller]"
 
 ENV PORT=7860 \
