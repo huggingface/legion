@@ -16,7 +16,8 @@ types.calc.replicas: 2 -> 3
 ```
 
 It reads the folder exactly as `flock launch` does: the spec, `system_prompt_file`, the loop
-prompt files, the comms kickoff and protocols, and the tools folder. It checks the folder,
+prompt files, the comms kickoff and protocols, and the tools folder. (`system_prompt*` and
+`comms:` come only from a hand-written swarm spec, not a Harbor spec; a follow-up removes them.) It checks the folder,
 compares it with the spec the controller is running and applies it. The output is one line per
 change: the tools version (old -> new, with the tools added and removed), the prompts changed
 per type, then every other key as `path: old -> new`. When nothing changed it prints

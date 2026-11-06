@@ -342,10 +342,9 @@ models:                        # optional aliases
 types:
   researcher:
     harness: harbor            # the only one; written by the compile step of a Harbor spec
+    harbor: {task: ..., config: ..., roster: ..., tools: ..., resources: ...}  # the compile step's
     model: "hf:Qwen/Qwen3.8-27B:deepinfra"
-    image: null                # default worker image; override to add tools/skills
-    system_prompt_file: prompts/researcher.md   # written to the workdir as AGENTS.md
-    env: {MSGBOARD_URL: https://lvwerra-msgboard-demo.hf.space}
+    image: null                # default worker image
     secrets: [HF_TOKEN]
     labels: {team: eval}
     replicas: 3000

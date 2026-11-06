@@ -12,6 +12,8 @@ container (on hf-sandbox each agent gets its own agent token instead).
 
 The swarm-level `world:` block is the controller's side: it starts the world (`compute: local`)
 or connects to one already running (`url:`), and fetches and checks its manifest at every apply.
+A Harbor spec has no `world:` block: it is reachable only from a hand-written swarm spec, and a
+follow-up removes it. The rest of this page up to "Protocol" is about that block.
 
 ```yaml
 # spec.yaml
@@ -31,7 +33,7 @@ claim is exclusive.
 | `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). The controller starts it with `compute: local`; with `compute: slurm` the run's world job does (docs/slurm.md "Deploying"), next to `url`. |
 | `world.dir` | Where `command` runs, relative to the spec file. Defaults to the spec's directory. |
 | `world.url` | A world that is already running (a Job, a Space, your laptop). Required with `compute: hf-jobs`. With `compute: local` it is used when there is no `command`. |
-| `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys; workers never get it. A started world without it gets a generated secret. |
+| `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys; workers do not get this one (the Harbor world resource's own `token_env` is read on the worker). A started world without it gets a generated secret. |
 
 The controller writes `world.endpoint` (the URL it calls) and `world.manifest` into the spec it
 stores. `GET /swarms/{swarm}` shows them, and the run bundle (`run.json`) keeps them. The secret is never

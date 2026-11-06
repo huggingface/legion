@@ -8,7 +8,8 @@ mentions come back as `resource` events, which wake loops whose `loop.on` lists 
 launch.
 
 The swarm-level `comms:` block is the controller's side: it resolves a channel and posts a
-kickoff once, and `board: space` gives a run its own board Space.
+kickoff once, and `board: space` gives a run its own board Space. A Harbor spec has no `comms:`
+block: it is reachable only from a hand-written swarm spec, and a follow-up removes it.
 
 ```yaml
 comms:

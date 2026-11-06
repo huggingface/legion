@@ -73,6 +73,9 @@ git clone https://github.com/huggingface/flock && cd flock
 uv sync                              # Harbor comes with flock
 ```
 
+Installing needs GitHub access to msgboard (a private dependency); jobs install it from the
+`harbor-deps.tar` that `scripts/publish-wheel.sh` ships next to the wheel.
+
 `uv sync` does not activate the environment, so the commands below go through `uv run` (or
 run `source .venv/bin/activate` once). A bare `flock` may be util-linux's file-locking tool,
 a different program; `uv run` also gives the scripts a Python with `huggingface_hub`.
