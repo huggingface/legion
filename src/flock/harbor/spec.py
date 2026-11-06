@@ -46,6 +46,8 @@ from .config import (
 )
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# the tools a role without `spawn:` rules is not shown (it may still prompt its parent)
+SPAWNING = ("spawn.spawn", "spawn.remove")
 PROVIDER = "inference"  # the compiled spec's provider: prices and admits the run's models
 
 
@@ -246,6 +248,8 @@ class Spec(Config):
             and not self.resources["board"].get("url")
         ):
             raise ValueError("hf-sandbox has no mounts: set resources.board.url")
+        if backend == "hf-sandbox" and "spawn" in self.resources:
+            raise ValueError("resources.spawn needs a mount: use backend docker or podman")
         if backend == "hf-sandbox" and (self.resources.get("board") or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
             self.resources["board"].setdefault("transport", "http")
@@ -349,6 +353,10 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             until = flock_duration(spec.limits.run_timeout_seconds)
             loop = loop.model_copy(update={"while_": loop.while_.model_copy(
                 update={"until": until})})
+        tools = bundle.manifest if bundle is not None else {}
+        if tools and name not in spec.spawn:
+            tools = {**tools, "tools": {k: v for k, v in tools["tools"].items()
+                                        if k not in SPAWNING}}
         types[name] = {
             **packing,
             "harness": "harbor",
@@ -370,7 +378,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "role": label[name],
                 "role_text": role.role_file.read_text(encoding="utf-8") if role.role_file else "",
                 "roster": roster,
-                "tools": bundle.manifest if bundle is not None else {},
+                "tools": tools,
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,
                 "folders": folders,

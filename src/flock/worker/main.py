@@ -488,7 +488,7 @@ class Worker:
                                            type_name=cfg.type, fetch=self._fetch_tools)
         # harness harbor: what its agents' Trials share on this worker (flock.worker.harbor)
         self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event,
-                                 folders=self.tools.folder)
+                                 folders=self.tools.folder, controller=self.controller_call)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
         self.identities = identities or Identities()

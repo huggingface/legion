@@ -301,6 +301,42 @@ keeps them until removed; it does nothing until prompted.
   spawning).
 ```
 
+## Harbor agents
+
+A `harness: harbor` agent runs in a Trial (the task's container) without the worker's gateway,
+so it calls the controller through the `spawn` resource and the `spawn.*` tools
+(`flock.harbor.plugins`, copied into the run's `resources/` and `tools/` like `board`):
+
+```yaml
+resources: {spawn: {}}
+tools: [spawn.*]
+agents:
+  roles:
+    leader: {count: 1}
+    helper: {count: 0, workers: {initial: 1, max_extra: 2}}
+spawn: {leader: {types: [helper], max: 3}}
+limits: {spawned_total: 50}
+```
+
+| Tool | Call |
+|---|---|
+| `spawn.spawn {type, prompt?, key?}` | `POST /agents/<me>/spawn`: the ack `{name, created, parent, type, depth}`, or the refusal's `reason: detail` |
+| `spawn.prompt {agent, text}` | `POST /agents/<agent>/prompt`: a child, a descendant, or the parent |
+| `spawn.status {agent?}` | `GET /agents/<agent>` (yourself by default: `parent`, `children`, `depth`) |
+| `spawn.remove {agent}` | `DELETE /agents/<agent>`: a descendant and its subtree |
+
+- **Auth.** Each agent's Trial mounts its own Unix socket (`/run/flock-spawn.sock`), served on
+  the worker. The worker sends each call with that agent's own token (the gateway's route
+  allow-list above): the socket, never the request, decides whose token is used, and the controller
+  checks the token's scope and the caps (`spawn:`, `workers`, `limits`) exactly as for any
+  other agent. No token enters the container.
+- **Tools per role.** A role without a `spawn:` rule is not shown `spawn.spawn` and
+  `spawn.remove` (the controller refuses them anyway); every role keeps `spawn.prompt` and
+  `spawn.status`, so a child reports to its parent (`spawn.status` names it) with `spawn.prompt`.
+- **Children** are Harbor agents of the child role, placed and started by the controller as
+  above, one Trial each.
+- **Backends:** docker and podman. `hf-sandbox` has no mounts: `resources.spawn` is refused there.
+
 ## Not yet
 
 - Pre-warming is a possible later feature. Today a worker is opened only for agents that

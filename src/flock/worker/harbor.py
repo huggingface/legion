@@ -7,7 +7,8 @@ the next one. The worker stops the resources when it exits.
 Each agent is added to the resources as its Trial starts and removed when it leaves (another
 worker of the type, a spawned agent and a re-assigned one alike), and the resources' events for
 an agent (the board's mentions) go to `emit(agent, event)`, which the worker forwards as the
-agent's `resource` event.
+agent's `resource` event. A resource with a `controller` attribute (resources.spawn) gets
+`controller`, the worker's call to the controller as one of its agents (that agent's token).
 """
 
 from __future__ import annotations
@@ -27,11 +28,14 @@ log = logging.getLogger(__name__)
 
 class HarborHost:
     def __init__(self, root: Path, emit: Callable[[str, dict], None] | None = None,
-                 folders: Callable[[str], Awaitable[Path]] | None = None) -> None:
+                 folders: Callable[[str], Awaitable[Path]] | None = None,
+                 controller: Callable[[str, str, dict], Awaitable[Any]] | None = None) -> None:
         self.root = Path(root)  # bundle, sources, resource state and exports
         self.emit = emit  # (agent, {"resource", "kind", "data"}): a resource's event
         # version -> the run's tools and resources folders unpacked here (ToolsManager.folder)
         self.folders = folders
+        # the worker's controller_call(agent, entry, args): a call as that agent (its own token)
+        self.controller = controller
         self.resources: Any = None  # flock.harbor Resources, started; None until prepared
         self.bundle: Any = None  # shepherd's ToolBundle; None: the run has no tools
         self.task_path: Path | None = None  # the pinned task, downloaded for every agent here
@@ -85,6 +89,9 @@ class HarborHost:
                     secrets=[key] if key else [],
                     required=self.bundle.manifest["requires"] if self.bundle else (),
                     incremental=True)
+            for provider in resources.providers.values():
+                if hasattr(provider, "controller"):  # resources.spawn: calls as one agent
+                    provider.controller = self.controller
             try:
                 await resources.start()
             except BaseException:
