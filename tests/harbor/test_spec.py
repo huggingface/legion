@@ -335,13 +335,18 @@ def test_a_loop_without_until_ends_at_the_run_timeout(tmp_path):
     assert swarm.types["safety"].loop.while_.until == "2h"  # its own
 
 
-def test_workers_env_refuses_secret_names(tmp_path):
+@pytest.mark.parametrize("path, where", [
+    (lambda d: d["workers"], "workers"),
+    (lambda d: d["agents"]["roles"]["safety"].setdefault("workers", {}),
+     "agents.roles.safety.workers"),
+])
+def test_workers_env_refuses_secret_names(tmp_path, path, where):
     data = load_spec_yaml(COMPILE)
-    data["workers"]["env"] = {"CHATBOT_REPO": "ns/chat", "OPENAI_API_KEY": "sk-x"}
+    path(data)["env"] = {"CHATBOT_REPO": "ns/chat", "OPENAI_API_KEY": "sk-x"}
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
-    with pytest.raises(ValueError, match="workers.env: OPENAI_API_KEY look like secrets"):
+    with pytest.raises(ValueError, match=f"{where}.env: OPENAI_API_KEY cannot be set here"):
         compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 

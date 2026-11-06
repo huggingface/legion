@@ -110,7 +110,7 @@ class Workers(Settings):
     idle_grace: str | None = None
     turn_timeout: str | None = None
     worker: WorkerKnobs | None = None
-    # the workers' own env (no secrets: it is in the spec): what a task's `[environment.env]`
+    # the workers' own env (no secret-looking names, checked by compile_spec: it is in the spec): what a task's `[environment.env]`
     # `${VAR}` reads, as Harbor fills it from the worker's environment
     env: dict[str, str] | None = None
     initial: int | None = Field(default=None, ge=0, strict=True)
@@ -316,11 +316,17 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     if remote and spec.environment.kwargs.get("forward_hf_token"):
         raise ValueError("environment.kwargs.forward_hf_token would put the workers' Hub token "
                          "in every sandbox: leave it unset")
-    if bad := sorted(k for k in spec.workers.env or {} if is_sensitive_env_key(k)):
-        raise ValueError(f"workers.env: {', '.join(bad)} look like secrets, and this block is "
-                         "stored in the spec and lands in the worker job's plain env: pass "
-                         "secrets by name through inference.api_key_env or a resource's "
-                         "token_env (the controller's secrets path), not here")
+    for where, w in [("workers", spec.workers)] + [
+            (f"agents.roles.{n}.workers", r.workers) for n, r in roles.items() if r.workers]:
+        if bad := sorted(k for k in w.env or {} if is_sensitive_env_key(k)):
+            # Harbor's check is a loose substring match: KEY, TOKEN, SECRET, PASSWORD,
+            # CREDENTIAL, AUTH anywhere in a name refuse it, harmless or not
+            raise ValueError(f"{where}.env: {', '.join(bad)} cannot be set here: the block is "
+                             "stored in the spec and lands in the worker job's plain env, and "
+                             "names containing KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/AUTH are "
+                             "refused even if harmless. The spec has no way to pass a task "
+                             "secret: only the inference key and resource tokens are passed "
+                             "as secrets")
     for name, options in spec.resources.items():
         if options.get("token_env") == ADMIN_TOKEN_ENV:
             raise ValueError(f"resources.{name}.token_env: {ADMIN_TOKEN_ENV} is the world's "
