@@ -65,7 +65,10 @@ def build_tool_bundle(directory: Path, names: list[str], destination: Path):
                 if subset is not None:
                     raise ValueError(f"Invalid dependency file: {name}")
                 continue
-            if path.suffix == ".pyc" or path.name == "direct_url.json":
+            # RECORD hashes the venv's bin/ scripts (shebang = install path): not portable
+            if path.suffix == ".pyc" or path.name == "direct_url.json" or (
+                path.name == "RECORD" and path.parent.name.endswith(".dist-info")
+            ):
                 continue
             if path.suffix in (".so", ".pyd", ".dll", ".pth"):
                 raise ValueError(

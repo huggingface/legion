@@ -152,3 +152,26 @@ async def test_setup_failure_propagates(tools):
     with pytest.raises(RuntimeError, match="missing dependency"):
         await callbacks[TrialEvent.AGENT_START](None)
     agent.exec_as_agent.assert_awaited_once()
+
+
+def test_bundle_hash_ignores_dist_info_record(tools, tmp_path, monkeypatch):
+    # RECORD hashes bin/ scripts whose shebang is the venv path: it differs per install path
+    (tools / "dep.py").write_text('DEPENDENCIES = ["flockfakedep"]\ndef f() -> dict:\n    """f."""\n    return {}\nTOOLS = {"f": f}\n')
+    hashes = []
+    for i in range(2):
+        site = tmp_path / f"venv{i}"
+        info = site / "flockfakedep-1.0.dist-info"
+        info.mkdir(parents=True)
+        (site / "flockfakedep.py").write_text("X = 1\n")
+        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: flockfakedep\nVersion: 1.0\n")
+        (info / "RECORD").write_text(f"flockfakedep.py,,\n../../../bin/x,sha256={i},\n"
+                                     "flockfakedep-1.0.dist-info/METADATA,,\n"
+                                     "flockfakedep-1.0.dist-info/RECORD,,\n")
+        monkeypatch.syspath_prepend(str(site))
+        b = build_tool_bundle(tools, ["dep.*"], tools / f"b{i}.tar.gz")
+        hashes.append(b.sha256)
+    assert hashes[0] == hashes[1]
+    with tarfile.open(b.archive) as archive:
+        names = archive.getnames()
+    assert "flockfakedep.py" in names and "flockfakedep-1.0.dist-info/METADATA" in names
+    assert "flockfakedep-1.0.dist-info/RECORD" not in names
