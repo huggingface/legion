@@ -731,8 +731,21 @@ class Chatbot4World(World):
             if self._draft(pr):
                 raise ToolError(f"PR #{pr} is a draft whose head is not on the Hub yet; its author "
                                 f"must retry open_pr with pr={pr}")
+            rec = rec or self.store.get("prs", str(pr))  # ended PRs move to the cold table
+            if rec is not None and rec["state"] == "merged":
+                raise ToolError(f"PR #{pr} is already merged", "pr_merged")
+            if rec is not None and rec["state"] == "closed":
+                by = f" by {rec['closed_by']}" if rec.get("closed_by") else ""
+                why = f": {rec['close_reason'][:INBOX_SNIPPET]}" if rec.get("close_reason") else ""
+                raise ToolError(f"PR #{pr} was closed{by}{why}", "pr_closed")
             raise ToolError("no open PR with that number")
         return rec
+
+    def _already_merged(self, pr):
+        """The merged event of PR pr, or None when the world has no merged record of it."""
+        with self.lock:
+            rec = self.state["prs"].get(str(pr)) or self.store.get("prs", str(pr))
+            return self._merged_event(rec) if rec is not None and rec["state"] == "merged" else None
 
     def _draft(self, pr):
         return next((d for d in self.state["drafts"].values() if d["pr"] == pr), None)
@@ -1495,7 +1508,11 @@ class Chatbot4World(World):
         conflict with main, or a rebase that changes the diff, is refused."""
         steps, outcome, started = {}, "error", time.monotonic()
         try:
-            result = self._merge(agent, pr, steps)
+            try:
+                result = self._merge(agent, pr, steps)
+            except ToolError as exc:  # agents retry merged PRs: answer, don't refuse
+                if exc.code != "pr_merged" or not (result := self._already_merged(pr)):
+                    raise
             outcome = "already_merged" if result.get("already_merged") else "merged"
             return result
         except BaseException as exc:
@@ -1717,6 +1734,8 @@ class Chatbot4World(World):
             rec = self.state["prs"].get(str(pr))
             if rec is not None and rec["state"] == "open":
                 self._reconcile(rec["author"])
+            if merged := self._already_merged(pr):  # nothing to close
+                return merged
             rec = self._pr(pr)
             if rec["author"] != agent.name and agent.name not in self.operators:
                 raise ToolError("only the author or the run operator can close this PR")

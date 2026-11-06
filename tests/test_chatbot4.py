@@ -616,8 +616,8 @@ def test_restore_from_an_archive_older_than_a_merge_reconciles(setup):
     restarted = Chatbot4World(world.ws, world.repo)
     assert restarted.list_prs() == []
     assert restarted.list_prs("merged")[0]["merged_sha"] == merged
-    with pytest.raises(ToolError, match="no open PR"):
-        restarted.merge_pr(Agent("birch"), rec["pr"])
+    again = restarted.merge_pr(Agent("birch"), rec["pr"])  # a merged PR answers with its merge
+    assert again["already_merged"] and again["merged_sha"] == merged
 
 
 def test_close_pr_frees_the_cap_and_is_limited_to_author_or_operator(setup):
@@ -633,7 +633,7 @@ def test_close_pr_frees_the_cap_and_is_limited_to_author_or_operator(setup):
     world.operators = {"operator"}
     world.close_pr(Agent("operator"), two["pr"], "abandoned")
     assert {r["pr"] for r in world.list_prs("closed")} == {one["pr"], two["pr"]}
-    with pytest.raises(ToolError, match="no open PR"):
+    with pytest.raises(ToolError, match="was closed by cedar: superseded by a smaller PR"):
         world.review_pr(Agent("birch"), one["pr"], one["head_sha"], "approve", "late review")
     events = [json.loads(line) for line in (world.ws / "prs.jsonl").read_text().splitlines()]
     assert [e["agent"] for e in events if e["event"] == "pr_closed"] == ["cedar", "operator"]
@@ -1251,8 +1251,7 @@ def test_merge_pr_logs_one_timing_line_per_call(setup, caplog):
                                      lambda c: _module(c, "time", None))
     caplog.set_level("INFO", logger="chatbot4")
     world.merge_pr(Agent("oak"), second["pr"])
-    with pytest.raises(ToolError):
-        world.merge_pr(Agent("oak"), second["pr"])  # merged now: refused before any step
+    assert world.merge_pr(Agent("oak"), second["pr"])["already_merged"]  # answered before any step
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("merge_pr ")]
     assert len(lines) == 2 and lines[0].startswith(f"merge_pr pr={second['pr']} outcome=merged total=")
     steps = dict(item.split("=") for item in lines[0].split()[3:])
@@ -1260,7 +1259,7 @@ def test_merge_pr_logs_one_timing_line_per_call(setup, caplog):
                           "replay", "approvals", "contract", "shared_tests", "main_lock_wait",
                           "push", "update_ref", "hub_merge", "fetch", "tree_check"}
     assert all(float(v) >= 0 for v in steps.values())
-    assert lines[1].startswith(f"merge_pr pr={second['pr']} outcome=tool_error total=")
+    assert lines[1].startswith(f"merge_pr pr={second['pr']} outcome=already_merged total=")
 
 
 def test_temporary_checkouts_go_to_chatbot_tmp_dir(setup, tmp_path, monkeypatch):
@@ -1463,6 +1462,40 @@ def test_git_maintenance_packs_refs_and_cruft_packs_unreachable_loose_objects(se
     assert len(repo.git("for-each-ref", "--format=%(refname)", f"refs/flock/pr/{rec['pr']}/").split()) == 2
     assert re.search(r"^count: 0$", repo.git("count-objects", "-v"), re.MULTILINE)
     repo.git("cat-file", "-e", orphans[0])  # packed into the cruft pack, not pruned
+
+
+def test_merged_and_closed_prs_answer_instead_of_no_open_pr(setup):
+    world, clone, _remote = setup
+    _module(clone, "weather", None)
+    merged = submit(world, clone, branch="merged")
+    approve(world, merged)
+    sha = world.merge_pr(Agent("birch"), merged["pr"])["merged_sha"]
+    _module(clone, "time", None)
+    closed = submit(world, clone, branch="closed")
+    world.close_pr(Agent("cedar"), closed["pr"], "superseded")
+
+    def check():
+        for call in (lambda: world.merge_pr(Agent("oak"), merged["pr"]),
+                     lambda: world.close_pr(Agent("cedar"), merged["pr"], "done")):
+            result = call()
+            assert result["already_merged"] and result["merged_sha"] == sha
+        with pytest.raises(ToolError, match=f"PR #{merged['pr']} is already merged") as err:
+            approve(world, merged, "oak")
+        assert err.value.code == "pr_merged"
+        for call in (lambda: world.merge_pr(Agent("oak"), closed["pr"]),
+                     lambda: approve(world, closed, "oak")):
+            with pytest.raises(ToolError, match=f"PR #{closed['pr']} was closed by cedar: superseded") as err:
+                call()
+            assert err.value.code == "pr_closed"
+        with pytest.raises(ToolError, match="no open PR with that number"):
+            world.merge_pr(Agent("oak"), 999)
+
+    check()
+    world.legacy_json = False
+    with world.lock:  # ended long ago: both move to the cold table
+        world.ended.update({str(merged["pr"]): 0.0, str(closed["pr"]): 0.0})
+        assert world._move_cold(time.time()) and not world.state["prs"]
+    check()
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):
@@ -2054,8 +2087,8 @@ def test_status_change_on_a_closed_pr_is_not_retried(setup, monkeypatch):
         raise ToolError(f"PR #{pr} is already merged on the Hub", "pr_merged")
 
     monkeypatch.setattr(world.repo.hub, "merge", merged)
-    with pytest.raises(ToolError, match="already merged on the Hub"):
-        world.merge_pr(Agent("birch"), two["pr"])
+    result = world.merge_pr(Agent("birch"), two["pr"])  # answered with the (Hub's) merge
+    assert result["already_merged"] and result["merged_sha"] is None
     assert merges == [two["pr"]] and world.state["prs"][str(two["pr"])]["state"] == "merged"
 
     # a queued comment on a closed PR is dropped, not retried 12 times
