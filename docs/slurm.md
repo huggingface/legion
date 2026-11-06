@@ -359,7 +359,8 @@ of `ps`. Run a task you do not trust on `hf-sandbox`.
 A private task repo is pinned on the operator's machine too (`flock init` and `flock launch` run
 Harbor's plain `git`: `ls-remote`, then a shallow fetch to list the tasks), where no helper is set up. Export one in that shell first; it
 reads `HF_TOKEN` from the environment, so no token is on any command line (the empty value first
-drops other helpers for huggingface.co):
+drops other helpers for huggingface.co). `HF_TOKEN` must be *exported* in this shell: a value
+only present in the run's `run.env` is not seen by git:
 
 ```sh
 export GIT_CONFIG_COUNT=2 \
