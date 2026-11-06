@@ -83,7 +83,7 @@ def run_job_args(
         "FLOCK_JOB_LABELS": job_labels,
         "PYTHONUNBUFFERED": "1",
     }
-    return {
+    out = {
         "image": IMAGE,
         "command": bootstrap_command(),
         "env": env,
@@ -92,11 +92,23 @@ def run_job_args(
         "timeout": timeout,
         "labels": {ROLE_LABEL: "controller", GROUP_LABEL: group},
         "expose": [API_PORT],
-        "expose_public": [STATUS_PORT],
         "network_group": group,
         "network_aliases": [ALIAS],
         "namespace": namespace,
     }
+    if public_status_supported():
+        out["expose_public"] = [STATUS_PORT]
+    return out
+
+
+def public_status_supported() -> bool:
+    """huggingface_hub 1.33 (the harbor extra's pin) has no `expose_public`; the public status
+    page is optional, so without it the controller starts and the page is just not exposed."""
+    import inspect
+
+    from huggingface_hub import HfApi
+
+    return "expose_public" in inspect.signature(HfApi.run_job).parameters
 
 
 def collect_secrets(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
@@ -205,7 +217,10 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
     job = api.run_job(**kwargs)
     print(f"controller job: {job.id} ({job.url})")
     print(f"API (HF token via the jobs proxy): https://{job.id}--{API_PORT}.hf.jobs")
-    print(f"status page (public, read-only):  https://{job.id}--{STATUS_PORT}.hf.jobs")
+    if "expose_public" in kwargs:
+        print(f"status page (public, read-only):  https://{job.id}--{STATUS_PORT}.hf.jobs")
+    else:
+        print("status page: not exposed (this huggingface_hub has no expose_public)")
     print(f"workers: http://${{HF_NETWORK_GROUP_PREFIX}}{ALIAS}:{API_PORT} in group {a.group}")
     print(f"export FLOCK_URL=https://{job.id}--{API_PORT}.hf.jobs")
     return 0

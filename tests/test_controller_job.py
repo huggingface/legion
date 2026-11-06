@@ -493,7 +493,16 @@ def _free_port() -> int:
 # --------------------------------------------------------------------------- deploy-job.sh
 
 
-def test_controller_job_launch_arguments():
+def test_controller_job_without_expose_public(monkeypatch):
+    monkeypatch.setattr(jobdeploy, "public_status_supported", lambda: False)
+    kw = jobdeploy.run_job_args(wheel_url="hf://buckets/me/f/x.whl", group="g", namespace="me",
+                                flavor="cpu-upgrade", timeout="1h", state_url="s", job_labels="",
+                                secrets={})
+    assert "expose_public" not in kw and kw["expose"] == [7860]
+
+
+def test_controller_job_launch_arguments(monkeypatch):
+    monkeypatch.setattr(jobdeploy, "public_status_supported", lambda: True)
     kw = jobdeploy.run_job_args(
         wheel_url="hf://buckets/me/flock/dist/abc/flock-0.0.1-py3-none-any.whl",
         group="flock-smoke", namespace="me", flavor="cpu-upgrade", timeout="48h",
