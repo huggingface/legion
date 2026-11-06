@@ -13,7 +13,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-pytest.importorskip("harbor")
 uvicorn = pytest.importorskip("uvicorn")
 
 import flock.harbor

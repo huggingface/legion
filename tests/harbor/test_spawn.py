@@ -12,8 +12,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-pytest.importorskip("harbor")
-
 import flock.harbor
 from flock.controller import localrun
 from flock.harbor.spec import Spec, compile_spec

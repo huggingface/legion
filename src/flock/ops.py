@@ -107,16 +107,12 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
     import asyncio
     import tempfile
 
+    from flock.harbor import sources
+    from flock.harbor.spec import Spec, compile_spec, pack_folders
+    from flock.harbor.tools.bundle import build_tool_bundle
     from flock.specrender import read_env_file
     from flock.tools.loader import ToolsError
 
-    try:
-        from flock.harbor import sources
-        from flock.harbor.spec import Spec, compile_spec, pack_folders
-        from flock.harbor.tools.bundle import build_tool_bundle
-    except ImportError as e:
-        raise SpecError([(f"{path}: a Harbor spec (top-level `task:`) needs flock's harbor "
-                          f"extra (pip install 'flock[harbor]'): {e}")]) from None
     env = {**os.environ, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
     spec = Spec.load(path, env)
     try:

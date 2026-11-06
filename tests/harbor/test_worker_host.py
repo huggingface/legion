@@ -14,8 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("harbor")
-
 import flock.harbor
 from flock import secrets_file
 from flock.harbor import launch, sources

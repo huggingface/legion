@@ -9,8 +9,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-pytest.importorskip("harbor")
-
 from flock.harbor.harnesses.pi import HF_CHAT_EXTENSION
 
 

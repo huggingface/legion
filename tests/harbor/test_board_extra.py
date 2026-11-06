@@ -3,9 +3,6 @@
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("harbor")
-
 from msgboard.client import BoardError, Client
 
 import flock.harbor

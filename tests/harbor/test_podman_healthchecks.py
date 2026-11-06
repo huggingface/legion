@@ -6,8 +6,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("harbor")
-
 spec = importlib.util.spec_from_file_location(
     "podman_healthchecks", Path(__file__).parents[2] / "src/flock/harbor/podman_healthchecks.py"
 )

@@ -10,9 +10,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-
-pytest.importorskip("harbor")
-
 from msgboard.client import BoardError, Client
 
 import flock.harbor

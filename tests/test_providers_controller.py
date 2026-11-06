@@ -276,7 +276,6 @@ def test_api_for_every_harness_is_chat_completions():
 
 
 async def test_preflight_sends_harbor_models_as_harbors_pi_does(preflight_client):
-    pytest.importorskip("harbor")
     fake, seen = fake_provider()
     m = "gpu1:huggingface/deepseek-ai/V4-Flash:novita"
     spec = pspec(preflight_providers(), h={**HB, "model": m})

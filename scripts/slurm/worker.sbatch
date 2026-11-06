@@ -116,7 +116,7 @@ log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM typ
 if [ "${FLOCK_HARNESS:-}" = harbor ]; then
   # ---------------------------------------------------------------- harbor: rootless podman here
   export PODMAN_COMPOSE_PROVIDER=$VENV/bin/podman-compose
-  [ -x "$PODMAN_COMPOSE_PROVIDER" ] || die "$PODMAN_COMPOSE_PROVIDER is missing: install flock[harbor] in $VENV"
+  [ -x "$PODMAN_COMPOSE_PROVIDER" ] || die "$PODMAN_COMPOSE_PROVIDER is missing: install flock in $VENV"
   PODMAN=$(command -v podman) || die "podman is not on PATH"
   PODMAN_LOCAL=$(mktemp -d /tmp/flock-podman.XXXXXX) || die "cannot create the podman storage dir"
   trap podman_cleanup EXIT

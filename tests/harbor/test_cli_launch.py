@@ -15,11 +15,8 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
-
-pytest.importorskip("harbor")
-
 from harbor.models.task.id import GitTaskId
+from typer.testing import CliRunner
 
 import flock.harbor
 from flock import cli, rundir

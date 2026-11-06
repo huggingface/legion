@@ -2,9 +2,6 @@
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("harbor")
-
 import yaml
 from pydantic import ValidationError
 

@@ -9,9 +9,6 @@ import re
 from types import SimpleNamespace
 
 import pytest
-
-pytest.importorskip("harbor")
-
 from harbor.environments import hf_sandbox
 from harbor.environments.base import ExecResult
 from harbor.environments.docker import docker

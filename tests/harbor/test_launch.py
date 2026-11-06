@@ -5,9 +5,6 @@ import signal
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("harbor")
-
 from harbor.models.task.id import GitTaskId
 from harbor.models.trial.result import AgentInfo, TrialResult
 from msgboard.client import Client

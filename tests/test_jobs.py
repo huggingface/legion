@@ -37,7 +37,7 @@ def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
     assert "astral.sh/uv/install.sh" in script
     assert 'hf buckets cp "$1" "$2"' in script and 'fetch "$FLOCK_WHEEL_URL"' in script
     assert "download_bucket_files" in script  # Python API fallback
-    assert 'uv tool install -q "$WHEEL[worker]"' in script and "pip install" in script
+    assert 'uv tool install -q --python 3.12 "$WHEEL"' in script
     assert "WORK_ROOT=/work/agents" in script and "pi" not in script.split()
     assert script.rstrip().endswith("exec flock-worker")
     assert "{" + "hub}" not in script  # the pin is filled in
@@ -72,9 +72,9 @@ def fake_wheel(path: Path, requires: tuple[str, ...] = ()) -> Path:
     return path
 
 
-def test_bootstrap_installs_the_harbor_extra(tmp_path):
+def test_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
     """The bootstrap script on stubs (uv, hf from a local bucket, curl, mkdir, flock,
-    flock-worker). A harbor worker installs flock[harbor] on Python 3.12 with uv.lock's versions
+    flock-worker). A worker installs flock on Python 3.12 with uv.lock's versions
     as constraints and msgboard overridden to the wheel shipped next to flock's (never its
     private git source) and gets shepherd's git credential helper for huggingface.co."""
     stubs, log, bucket = tmp_path / "stubs", tmp_path / "calls.log", tmp_path / "bucket"
@@ -105,7 +105,7 @@ def test_bootstrap_installs_the_harbor_extra(tmp_path):
                        capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, r.stderr
     calls = log.read_text().splitlines()
-    i = calls.index(f"uv tool install -q --python 3.12 {wheels}/w.whl[harbor] -c "
+    i = calls.index(f"uv tool install -q --python 3.12 {wheels}/w.whl -c "
                     f"{wheels}/constraints.txt --overrides {wheels}/overrides.txt")
     assert calls[i + 1] == f"msgboard @ file://{wheels}/{MSGBOARD}"  # the overrides file
     assert (wheels / "constraints.txt").read_text().startswith("harbor==0.25.0")
@@ -114,14 +114,14 @@ def test_bootstrap_installs_the_harbor_extra(tmp_path):
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not installed")
 def test_the_override_replaces_msgboards_git_source(tmp_path):
-    """What the harbor bootstrap relies on: uv's --overrides replaces the harbor extra's
-    `msgboard @ git+` requirement (pyproject's, in flock's wheel metadata) with the shipped
-    wheel. Offline and without the override, uv cannot resolve it."""
-    harbor = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())[
-        "project"]["optional-dependencies"]["harbor"]
-    (git,) = [r for r in harbor if r.startswith("msgboard @ git+")]
-    flock = fake_wheel(tmp_path / "flock-0.0.1-py3-none-any.whl", (f'{git} ; extra == "harbor"',))
-    (tmp_path / "req.in").write_text(f"flock[harbor] @ file://{flock}\n")
+    """What the bootstrap relies on: uv's --overrides replaces flock's `msgboard @ git+`
+    requirement (pyproject's, in flock's wheel metadata) with the shipped wheel. Offline and
+    without the override, uv cannot resolve it."""
+    deps = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())[
+        "project"]["dependencies"]
+    (git,) = [r for r in deps if r.startswith("msgboard @ git+")]
+    flock = fake_wheel(tmp_path / "flock-0.0.1-py3-none-any.whl", (git,))
+    (tmp_path / "req.in").write_text(f"flock @ file://{flock}\n")
     (tmp_path / "overrides.txt").write_text(f"msgboard @ file://{fake_wheel(tmp_path / MSGBOARD)}\n")
 
     def compile_(*extra):

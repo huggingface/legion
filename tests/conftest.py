@@ -137,7 +137,6 @@ def no_local_checkpoint(monkeypatch):
 def tiny(tmp_path, monkeypatch):
     """A tiny real run (tests/tinyrun.py) working in tmp_path, Harbor faked in each of its
     processes (tests/harbor/site/sitecustomize.py), the task pin in this one."""
-    pytest.importorskip("harbor")
     from flock.harbor import sources
 
     from .harbor import fake_worker

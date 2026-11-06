@@ -10,9 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-pytest.importorskip("harbor")
-
 from harbor.agents.factory import AgentFactory
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext

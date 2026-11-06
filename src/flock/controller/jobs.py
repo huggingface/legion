@@ -19,10 +19,8 @@ DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
 # Bootstrap mode: no prebuilt image. A stock image installs uv and the flock wheel at job start
 # (about 10 s; was hf://buckets/cmpatino/legacy-swarmchat-experiments/common/job_bootstrap.sh),
-# then runs the worker. Versions match Dockerfile.worker, which stays the eventual path. Harbor
-# types get `flock[harbor]` on a uv-managed Python 3.12 instead, with msgboard's wheel and
-# uv.lock's versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh
-# --harbor).
+# then runs the worker on a uv-managed Python 3.12 (Harbor needs it), with msgboard's wheel and
+# uv.lock's versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh).
 # shortcut: a Node image (it was for the Pi CLI); any image with curl works, switch when retested
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
 HF_HUB_VERSION = "2.2.0"
@@ -43,34 +41,27 @@ HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_mi
 }
 WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
 fetch "$FLOCK_WHEEL_URL" "$WHEEL"
-if [ "${FLOCK_HARNESS:-}" = harbor ]; then
-  # msgboard is private on GitHub (a job cannot clone it): its wheel, and uv.lock's versions for
-  # every worker of the run, come next to flock's wheel; Harbor needs Python 3.12+
-  fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar || {
-    echo "bootstrap: no harbor-deps.tar next to the wheel: scripts/publish-wheel.sh --harbor" >&2
-    exit 1; }
-  tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
-  echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
-  uv tool install -q --python 3.12 "$WHEEL[harbor]" -c /opt/wheels/constraints.txt \
-    --overrides /opt/wheels/overrides.txt
-  # Harbor downloads tasks with Git. Scope HF_TOKEN authentication to the Hub,
-  # without writing a token or changing the user's Git configuration. (shepherd's launch.slurm)
-  if [[ -n "${HF_TOKEN:-}" ]]; then
-    git_slot=${GIT_CONFIG_COUNT:-0}
-    export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
-    export "GIT_CONFIG_VALUE_${git_slot}="
-    git_slot=$((git_slot + 1))
-    export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
-    export "GIT_CONFIG_VALUE_${git_slot}="'!f() { if [ "$1" = get ]; then printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; fi; }; f'
-    export GIT_CONFIG_COUNT=$((git_slot + 1))
-  fi
-  export GIT_TERMINAL_PROMPT=0
-else
-  uv tool install -q "$WHEEL[worker]" --with huggingface_hub=={hub} \
-    || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" huggingface_hub=={hub}
+# msgboard is private on GitHub (a job cannot clone it): its wheel, and uv.lock's versions for
+# every worker of the run, come next to flock's wheel
+fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar || {
+  echo "bootstrap: no harbor-deps.tar next to the wheel: scripts/publish-wheel.sh" >&2
+  exit 1; }
+tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
+echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
+uv tool install -q --python 3.12 "$WHEEL" -c /opt/wheels/constraints.txt \
+  --overrides /opt/wheels/overrides.txt
+# Harbor downloads tasks with Git. Scope HF_TOKEN authentication to the Hub,
+# without writing a token or changing the user's Git configuration. (shepherd's launch.slurm)
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  git_slot=${GIT_CONFIG_COUNT:-0}
+  export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
+  export "GIT_CONFIG_VALUE_${git_slot}="
+  git_slot=$((git_slot + 1))
+  export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
+  export "GIT_CONFIG_VALUE_${git_slot}="'!f() { if [ "$1" = get ]; then printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; fi; }; f'
+  export GIT_CONFIG_COUNT=$((git_slot + 1))
 fi
-# Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
-command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
+export GIT_TERMINAL_PROMPT=0
 export WORK_ROOT=/work/agents
 export PYTHONUNBUFFERED=1
 mkdir -p /work/agents

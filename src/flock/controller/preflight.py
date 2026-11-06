@@ -173,9 +173,7 @@ def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str
     """Distinct provider-backed (provider, model id, reasoning, API) in the spec, with their
     types and the API to probe."""
     seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
-    if spec.types:
-        # lazy: harbor is an optional extra the controller runs without
-        from harbor.agents.agent_auth_resolution import parse_model_name
+    from harbor.agents.agent_auth_resolution import parse_model_name  # lazy: a heavy import
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
         api = api_for(ts.harness)
