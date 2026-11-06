@@ -352,6 +352,22 @@ Every user of a node can read a process's command line (`ps`): a Trial's `compos
 the agent's env (its inference key, resource tokens) and sensitive-looking names (`*_TOKEN`,
 `*_API_KEY`, `*SECRET*`, `*PASSWORD*`) by name only. A task's `[verifier.env]` value taken from
 a secret must have such a name, or it stays on the command line.
+The pinned task is trusted with the host's container engine: its compose file and its
+`[environment.env]` reach podman (or docker) as written, and flock only keeps secret values out
+of `ps`. Run a task you do not trust on `hf-sandbox`.
+
+A private task repo is pinned on the operator's machine too (`flock init` and `flock launch` run
+Harbor's plain `git`: `ls-remote`, then a shallow fetch to list the tasks), where no helper is set up. Export one in that shell first; it
+reads `HF_TOKEN` from the environment, so no token is on any command line (the empty value first
+drops other helpers for huggingface.co):
+
+```sh
+export GIT_CONFIG_COUNT=2 \
+  GIT_CONFIG_KEY_0=credential.https://huggingface.co.helper GIT_CONFIG_VALUE_0= \
+  GIT_CONFIG_KEY_1=credential.https://huggingface.co.helper \
+  GIT_CONFIG_VALUE_1='!f() { test "$1" = get && printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; }; f'
+GIT_TERMINAL_PROMPT=0 git ls-remote <task repo URL> HEAD   # check: a sha, no prompt
+```
 
 ## Singletons on Spot
 
