@@ -385,16 +385,19 @@ class Chatbot4World(World):
         while not self.stopping.wait(5.0):
             self._sync_hub_states(every=HUB_SYNC_EVERY)
             if time.monotonic() - maintained >= GIT_MAINTAIN_EVERY:
-                maintained = time.monotonic()
                 self._maintain_repo()
+                maintained = time.monotonic()  # the period counts from the end of a pass
 
     def _maintain_repo(self):
         """Pack refs and gc (Repository.maintain). Never raises."""
+        info = {}
         try:
-            self.repo.maintain()
-            log.info("git maintenance: refs packed; gc done")
+            self.repo.maintain(info)
+            outcome = "done"
         except Exception as exc:  # noqa: BLE001 - retried at the next period
-            log.warning("git maintenance failed: %s", type(exc).__name__)
+            outcome = f"failed ({type(exc).__name__})"
+        line = " ".join(f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}" for k, v in info.items())
+        (log.info if outcome == "done" else log.warning)("git maintenance %s: %s", outcome, line)
 
     def close(self, timeout=4.0):
         """Write the state now and stop the background threads within timeout seconds in all

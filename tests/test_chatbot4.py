@@ -1485,7 +1485,7 @@ def test_without_union_paths_deck_appends_still_conflict(setup_v8):
     assert err.value.code == "conflict"
 
 
-def test_git_maintenance_packs_refs_and_cruft_packs_unreachable_loose_objects(setup):
+def test_git_maintenance_packs_refs_and_cruft_packs_unreachable_loose_objects(setup, caplog):
     world, clone, _remote = setup
     repo = world.repo
     rec = submit(world, clone)
@@ -1495,7 +1495,13 @@ def test_git_maintenance_packs_refs_and_cruft_packs_unreachable_loose_objects(se
     repo.git("config", "gc.auto", "20")
     orphans = [repo.git("hash-object", "-w", "--stdin", data=f"orphan {i}".encode())
                for i in range(30)]  # unreachable loose objects, as refused rebases leave behind
+    caplog.set_level("INFO", logger="chatbot4")
     world._maintain_repo()
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("git maintenance"))
+    info = dict(item.split("=") for item in line.split(": ", 1)[1].split())
+    assert line.startswith("git maintenance done: ") and int(info["loose_before"]) >= 30
+    assert set(info) == {"loose_before", "pack_refs_s", "gc_auto_s", "gc_full_s", "loose_after"}
+    assert info["loose_after"] == "0"
     assert not [f for f in (repo.root / "refs").rglob("*") if f.is_file()]  # all in packed-refs
     assert len(repo.git("for-each-ref", "--format=%(refname)", f"refs/flock/pr/{rec['pr']}/").split()) == 2
     assert re.search(r"^count: 0$", repo.git("count-objects", "-v"), re.MULTILINE)
@@ -1534,6 +1540,28 @@ def test_merged_and_closed_prs_answer_instead_of_no_open_pr(setup):
         world.ended.update({str(merged["pr"]): 0.0, str(closed["pr"]): 0.0})
         assert world._move_cold(time.time()) and not world.state["prs"]
     check()
+
+
+def test_a_timed_out_grouped_git_kills_its_children_too(setup, tmp_path):
+    repo, pidfile = setup[0].repo, tmp_path / "child.pid"
+    slow = f"alias.slow=!sh -c 'sleep 60 & echo $! > {pidfile}; wait'"
+    with pytest.raises(subprocess.TimeoutExpired):
+        repo.git("-c", slow, "slow", timeout=1, group=True)
+    child = Path(f"/proc/{pidfile.read_text().strip()}/stat")
+    for _ in range(50):  # killed: gone, or a zombie until reaped
+        if not child.exists() or child.read_text().split(") ")[1][0] == "Z":
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("the grouped git's child outlived the timeout")
+
+
+def test_a_stale_gc_pid_is_removed_at_start(setup):
+    world, _clone, _remote = setup
+    pid = world.repo.root / "gc.pid"
+    pid.write_text("12345 another-node")  # a gc stopped with a world that ran on another node
+    restarted = Chatbot4World(world.ws, Repository(world.repo.root, world.repo.remote))
+    assert not pid.exists() and restarted.repo.loose() >= 0
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):

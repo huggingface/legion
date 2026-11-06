@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -79,16 +80,34 @@ class Repository:
             self.attributes.write_text("".join(f"{p} merge=union\n" for p in union))
         # Fetches start no background gc: it packed refs outside refs_lock. maintain() runs gc.
         self.git("config", "maintenance.auto", "false")
+        # Only this world runs gc here: a gc.pid is a gc stopped with a world that ran elsewhere,
+        # and git would honour it for 12 h.
+        (root / "gc.pid").unlink(missing_ok=True)
         self.fetch()
 
-    def git(self, *args, at=None, data=None, env=None, timeout=120):
-        return self.git_bytes(*args, at=at, data=data, env=env, timeout=timeout).decode().strip()
+    def git(self, *args, at=None, data=None, env=None, timeout=120, group=False):
+        return self.git_bytes(*args, at=at, data=data, env=env, timeout=timeout,
+                              group=group).decode().strip()
 
-    def git_bytes(self, *args, at=None, data=None, env=None, timeout=120):
+    def git_bytes(self, *args, at=None, data=None, env=None, timeout=120, group=False):
         """Run git and return its raw stdout (for diffs and file contents, which need not be
-        UTF-8). Failures raise like git()."""
-        p = subprocess.run(["git", "-C", str(at or self.root), *args], input=data,
-                           capture_output=True, env=env or self.env, timeout=timeout, check=False)
+        UTF-8). Failures raise like git(). group: git runs in its own process group, and a
+        timeout kills the whole group (gc's repack and pack-objects too), then raises."""
+        argv = ["git", "-C", str(at or self.root), *args]
+        if group:
+            with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env or self.env,
+                                  start_new_session=True) as proc:
+                try:
+                    out, err = proc.communicate(data, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    raise
+            p = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        else:
+            p = subprocess.run(argv, input=data, capture_output=True, env=env or self.env,
+                               timeout=timeout, check=False)
         if p.returncode:
             # Git's stderr can contain remote data or credentials: never expose it to agents;
             # the world's log gets it redacted.
@@ -200,20 +219,37 @@ class Repository:
         with self.refs_lock:
             self.git("update-ref", "--stdin", data="".join(f"update {ref} {sha}\n" for ref, sha in refs).encode())
 
-    def maintain(self):
+    def maintain(self, info):
         """Keep the bare repository fast: pack every ref, then gc --auto in the foreground (it
         ignores and removes a gc.log). gc --auto never packs unreachable loose objects (rebased
         and refused commits), so past gc.auto of them a full gc --cruft packs them (what fixed
-        the live v8 world: 120k loose objects, merges at 3/h)."""
+        the live v8 world: 120k loose objects, merges at 3/h). Fills info with the loose-object
+        counts and each step's seconds, also when a step fails."""
+        info["loose_before"] = self.loose()
+        start = time.monotonic()
         with self.refs_lock:
             self.git("pack-refs", "--all")
+        info["pack_refs_s"], start = time.monotonic() - start, time.monotonic()
         # gc.packRefs off: refs were packed above under refs_lock, never while the world writes one
+        # pack.threads=2: a full repack leaves the world's other git work some cores
         gc = ("-c", "gc.autoDetach=false", "-c", "gc.cruftPacks=true", "-c", "gc.packRefs=false",
-              "gc", "--quiet")
-        self.git(*gc, "--auto", timeout=1800)
-        loose = int(re.search(r"^count: (\d+)", self.git("count-objects", "-v"), re.MULTILINE)[1])
+              "-c", "pack.threads=2", "gc", "--quiet")
+        try:
+            self.git(*gc, "--auto", timeout=1800, group=True)
+        finally:
+            info["gc_auto_s"], start = time.monotonic() - start, time.monotonic()
+        loose = self.loose()
         if loose > int(self.git("config", "--get", "--default", "6700", "gc.auto")):
-            self.git(*gc, timeout=1800)
+            try:
+                self.git(*gc, timeout=1800, group=True)
+            finally:
+                info["gc_full_s"] = time.monotonic() - start
+            loose = self.loose()
+        info["loose_after"] = loose
+
+    def loose(self):
+        """Loose objects in the repository (git count-objects)."""
+        return int(re.search(r"^count: (\d+)", self.git("count-objects", "-v"), re.MULTILINE)[1])
 
     def sha(self, ref="main"):
         if ref.startswith("pr:") and ref[3:].isdigit():
