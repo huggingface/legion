@@ -77,7 +77,6 @@ loop:                                         # v8's, for 3 h
   resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
 limits:
   run_timeout_seconds: 11400                  # 3 h plus 10 min
-  agent_timeout_seconds: 11400
   agent_max_turns: 150                        # v8's max_turns (per round there)
   budget_usd: 60
   trial_hours: 20                             # plus turn_timeout must stay under hf-sandbox's 24 h
