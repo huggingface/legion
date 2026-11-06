@@ -521,9 +521,11 @@ changed so the approvals no longer match. Before merging it
 runs the bot contract and the repository's `tests/` files matching `CHATBOT_MERGE_TESTS`
 (default `test_deck.py`; empty disables) on the tree it would make main, isolated and bounded
 at 60 s, and refuses when they fail there but pass on main. `CHATBOT_UNION_PATHS` (gitattributes
-patterns, e.g. `deck/*.jsonl`; empty by default) makes every replay onto main, in `merge_pr`
-and in `open_pr` updates, merge those paths with `merge=union` (both sides' lines kept) from a
-world-side attributes file; the shared tests then catch a duplicate it lets through.
+patterns, e.g. `deck/*.jsonl`; empty by default) makes `merge_pr`'s replay onto main merge
+those paths with `merge=union` (both sides' lines kept) from a world-side attributes file; the
+approval check refuses a replay whose diff changed (e.g. a deleted line kept) and the shared
+tests a duplicate. `open_pr` replays never use it. A PR may not add or change a
+`.gitattributes` (`fixed_interface`); deleting one is allowed.
 `prs.jsonl` records PR events with both the main parent and PR head for merges.
 `eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
 this implementation does not start an evaluator. A merge whose main afterwards is not the tree

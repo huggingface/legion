@@ -1055,6 +1055,9 @@ class Chatbot4World(World):
                      if ".git" not in f.relative_to(tree).parts]
         for name in names:
             f = tree / name
+            if PurePosixPath(name).name == ".gitattributes" and f.is_file():  # deleting one is fine
+                raise ToolError(f"{name[:200]} is not accepted: .gitattributes changes how the world "
+                                "merges", "fixed_interface")
             if not name.endswith(".py") or not f.is_file():
                 continue
             try:
@@ -1608,7 +1611,9 @@ class Chatbot4World(World):
                 try:
                     with _timed(steps, "replay"):
                         self.repo.git("reset", "-q", "--soft", base, at=tree)  # the PR's change, staged on its base
-                        new = self.repo.commit(tree, base, rec["author"], rec["title"], onto=main)
+                        # Union paths only here: a replay whose diff changed is refused below.
+                        new = self.repo.commit(tree, base, rec["author"], rec["title"], onto=main,
+                                               union=True)
                 except ToolError as exc:
                     if exc.code != "stale_base":
                         raise

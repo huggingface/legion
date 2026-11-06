@@ -264,17 +264,18 @@ class Repository:
             self.patch_ids[key] = out.stdout.decode().split()[0] if out.stdout.strip() else None
         return self.patch_ids[key]
 
-    def commit(self, tree, parent, author, title, onto=None):
-        """Commit tree on parent; with onto != parent, replay that commit onto it."""
+    def commit(self, tree, parent, author, title, onto=None, union=False):
+        """Commit tree on parent; with onto != parent, replay that commit onto it (with union,
+        CHATBOT_UNION_PATHS merge as merge=union: only where a changed diff is refused)."""
         who = ("-c", f"user.name={author}", "-c", f"user.email={author}@flock.invalid")
         self.git("add", "-A", at=tree)
         self.git(*who, "commit", "--allow-empty", "-m", title, at=tree)
         sha = self.git("rev-parse", "HEAD", at=tree)
         if onto and onto != parent:
             self.git("checkout", "-q", "--detach", onto, at=tree)
-            union = ("-c", f"core.attributesFile={self.attributes}") if self.attributes else ()
+            attributes = ("-c", f"core.attributesFile={self.attributes}") if union and self.attributes else ()
             try:
-                self.git(*who, *union, "cherry-pick", "--allow-empty", "--keep-redundant-commits", sha,
+                self.git(*who, *attributes, "cherry-pick", "--allow-empty", "--keep-redundant-commits", sha,
                          at=tree)
             except ToolError:
                 unmerged = subprocess.run(["git", "-C", str(tree), "diff", "--name-only", "-z",

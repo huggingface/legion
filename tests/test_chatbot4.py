@@ -1395,15 +1395,46 @@ def test_union_paths_leave_code_conflicts_refused(setup_v8_union):
     assert err.value.code == "conflict"
 
 
+def _drop_last_deck_line(clone):
+    deck = clone / "deck/multi.jsonl"
+    deck.write_text("".join(deck.read_text().splitlines(keepends=True)[:-1]))
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
-def test_union_paths_apply_to_an_update_from_an_older_main(setup_v8_union):
-    world, clone, second = _two_prs(setup_v8_union, lambda c: _deck_line(c, "multi-new-1", "hi", "one"),
+def test_union_paths_only_at_merge_where_a_kept_deleted_line_is_refused(setup_v8_union):
+    # main deletes the deck's last line; the PR, on the older main, appends after it.
+    world, clone, second = _two_prs(setup_v8_union, _drop_last_deck_line,
                                     lambda c: _deck_line(c, "multi-new-2", "hi", "two"))
-    _deck_line(clone, "multi-new-3", "hi", "three")  # the author's update, still on the old main
-    updated = submit(world, clone, branch="two", pr=second["pr"])
-    assert updated["rebased_from"] == second["base_sha"] and updated["base_sha"] == world.repo.sha()
-    deck = world.repo.git("show", f"{updated['head_sha']}:deck/multi.jsonl").splitlines()
-    assert [json.loads(line)["id"] for line in deck[-3:]] == ["multi-new-1", "multi-new-2", "multi-new-3"]
+    with pytest.raises(ToolError, match="changes its diff") as err:  # union kept the deleted line
+        world.merge_pr(Agent("oak"), second["pr"])
+    assert err.value.code == "rebase_changed"
+    _deck_line(clone, "multi-new-3", "hi", "three")  # an update still on the older main
+    with pytest.raises(ToolError, match="conflict with main") as err:
+        submit(world, clone, branch="two", pr=second["pr"])
+    assert err.value.code == "stale_base"
+
+
+def test_a_pr_may_not_add_or_change_gitattributes_but_may_delete_one(setup):
+    world, clone, remote = setup
+    for path in (".gitattributes", "bot/modules/.gitattributes"):
+        (clone / path).write_text("* merge=union\n")
+        with pytest.raises(ToolError, match=r"\.gitattributes is not accepted") as err:
+            submit(world, clone, branch="attributes")
+        assert err.value.code == "fixed_interface"
+        (clone / path).unlink()
+    outside = clone.parent / "outside"  # main already has one: a PR may delete it
+    git(clone.parent, "clone", "-q", str(remote), str(outside))
+    (outside / ".gitattributes").write_text("*.txt text\n")
+    _commit(outside)
+    git(outside, "push", "-q", "origin", "HEAD:main")
+    world.repo.fetch()
+    git(clone, "pull", "-q", "origin", "main")
+    (clone / ".gitattributes").write_text("* merge=union\n")
+    with pytest.raises(ToolError, match="is not accepted"):
+        submit(world, clone, branch="attributes")  # changing it is refused too
+    (clone / ".gitattributes").unlink()
+    _module(clone, "weather", None)
+    assert submit(world, clone, branch="attributes")["state"] == "open"
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="seed-v8 imports copy: Python 3.12+")
