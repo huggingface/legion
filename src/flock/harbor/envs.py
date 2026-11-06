@@ -3,6 +3,8 @@ it for every Trial: `ENVIRONMENTS`)."""
 
 import asyncio
 import contextvars
+import hashlib
+import re
 
 from harbor.environments import hf_sandbox
 from harbor.environments.docker.docker import DockerEnvironment
@@ -56,6 +58,12 @@ class Podman(_EnvOffArgv, PodmanEnvironment):
     pass
 
 
+def sandbox_name(session_id: str, image: str) -> str:
+    """A short, stable job name. The Hub derives one from the image's last path segment, which
+    for `repo@sha256:<64 hex>` is over the 100-character `labels.name` limit."""
+    return f"{re.sub(r'[^a-zA-Z0-9_-]', '-', session_id)[:60]}-{hashlib.sha256(image.encode()).hexdigest()[:8]}"
+
+
 class HFSandbox(hf_sandbox.HFSandboxEnvironment):
     """Harbor 0.25.0's hf-sandbox, whose `Sandbox.create` also gets
     - `namespace` (`environment.kwargs.namespace`): the user or org the sandboxes run and bill
@@ -83,6 +91,7 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
             idle_timeout=self._idle_timeout,
             forward_hf_token=self._forward_hf_token,
             namespace=self._namespace,
+            labels={"name": sandbox_name(self.session_id, image)},
             token=secret_env().get("HF_TOKEN") or None,
         )
         try:

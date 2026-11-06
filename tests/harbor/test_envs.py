@@ -5,6 +5,7 @@ in an argv)."""
 
 import asyncio
 import importlib.metadata
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,7 @@ from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConf
 from harbor.models.trial.paths import TrialPaths
 
 from flock import secrets_file
-from flock.harbor.envs import ENVIRONMENTS, HFSandbox
+from flock.harbor.envs import ENVIRONMENTS, HFSandbox, sandbox_name
 
 
 @pytest.mark.parametrize("kwargs, namespace, file_token, token", [
@@ -53,6 +54,14 @@ async def test_namespace_and_token_reach_sandbox_create(
     (kw,) = calls
     assert (kw["namespace"], kw["token"], kw["image"]) == (namespace, token, "python:3.12")
     assert kw["flavor"] == kwargs.get("flavor", "cpu-basic")
+    assert kw["labels"]["name"].startswith("s-")
+
+
+def test_sandbox_name_is_short_for_a_digest_image():
+    image = "ghcr.io/org/img@sha256:" + "a" * 64
+    name = sandbox_name("trial/x" * 30, image)
+    assert len(name) <= 100 and re.fullmatch(r"[A-Za-z0-9_-]+", name)
+    assert name == sandbox_name("trial/x" * 30, image) != sandbox_name("trial/x" * 30, "other")
 
 
 async def _done():
