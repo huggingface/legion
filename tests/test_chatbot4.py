@@ -2107,7 +2107,6 @@ def test_pr_refs_are_fetched_anonymously_first(setup, monkeypatch):
     git(remote, "update-ref", "refs/pr/99", gap)
     assert repo.fetch_pr_refs([99], delays=()) == []
     assert seen == [(False, False, True), (False, True, False)]
-    repo.anonymous = False  # disabled (a local or private remote): straight to the token
 
 
 def test_hub_fetches_offer_only_mains_history(setup, monkeypatch):

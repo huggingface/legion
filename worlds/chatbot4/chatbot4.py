@@ -1274,7 +1274,7 @@ class Chatbot4World(World):
                                started + CALL_BUDGET - 2 * PUSH_ESTIMATE_S)
             if old_head is not None:  # an open PR: replace only the expected head
                 with self._hub_write(agent, "push", pr, deadline):
-                    old_head = self._lease_push(agent, pr, sha, f"refs/pr/{pr}", old_head, started)
+                    old_head = self._lease_push(agent, pr, sha, old_head, started)
             else:
                 with self._hub_write(agent, "open_pr", pr, deadline) as slot:
                     if pr is None:
@@ -1299,12 +1299,13 @@ class Chatbot4World(World):
             return pr, sha, main, old_head
         raise ToolError("main kept moving while opening the PR; open it again", "busy")
 
-    def _lease_push(self, agent, pr, sha, ref, expected, started):
-        """Push sha to refs/pr/N (ref) with a lease on expected; the caller
-        holds a Hub slot, never the world lock. On a stale lease (the Hub's ref moved past the
-        world's record, e.g. after a restart from an older archive), read the Hub's value from
-        the refs API (or, failing that, fetch it with git), adopt it (for refs/pr/N: into the record's head_sha) and retry the push once.
-        Returns the expected value the push landed with."""
+    def _lease_push(self, agent, pr, sha, expected, started):
+        """Push sha to refs/pr/N with a lease on expected; the caller holds a Hub slot, never
+        the world lock. On a stale lease (the Hub's ref moved past the world's record, e.g.
+        after a restart from an older archive), read the Hub's value from the refs API (or,
+        failing that, fetch it with git), adopt it into the record's head_sha and retry the
+        push once. Returns the expected value the push landed with."""
+        ref = f"refs/pr/{pr}"
         try:
             self.repo.push(sha, ref, expected=expected)
             return expected
@@ -1670,7 +1671,7 @@ class Chatbot4World(World):
                     if new != head:  # the Hub merges refs/pr/N as it is: publish the rebase first
                         # A stale lease (e.g. a rebase pushed just before a restart) adopts the Hub head.
                         with _timed(steps, "push"):
-                            self._lease_push(agent, pr, new, f"refs/pr/{pr}", head, time.monotonic())
+                            self._lease_push(agent, pr, new, head, time.monotonic())
                         with _timed(steps, "update_ref"):  # waits for refs_lock
                             self.repo.update_refs((f"refs/pr/{pr}", new), (f"refs/flock/pr/{pr}/{new}", new))
                         with self.lock:  # reviews stay: they match the rebased head by patch-id

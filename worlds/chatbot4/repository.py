@@ -335,7 +335,7 @@ class Repository:
 
     def push(self, sha, ref, expected=None, force=False):
         """Push sha to ref; expected replaces only that head; force overwrites a ref the
-        world owns outright (a PR or branch it created and nobody else writes)."""
+        world owns outright (a PR it created and nobody else writes)."""
         options = [f"--force-with-lease={ref}:{expected}"] if expected else []
         self.git("push", *options, "origin", f"{'+' if force and not expected else ''}{sha}:{ref}")
 
@@ -403,7 +403,7 @@ class Hub:
         return {d.num: d.status for d in self.request("get_repo_discussions") if d.is_pull_request}
 
     def refs(self):
-        """{ref: sha} for the Hub's refs/pr/N and refs/heads/<branch>, from the refs API (a
+        """{ref: sha} for the Hub's branches and refs/pr/N, from the refs API (a
         read: no Hub-write slot). Cached for CHATBOT_HUB_REFS_TTL_S so a burst costs one
         request; on failure, a WARNING and the stale cache (or {})."""
         with self.refs_lock:
