@@ -125,6 +125,7 @@ uv run scripts/deploy-job.sh "$W" --group <name>     # prints the job's two URLs
 export FLOCK_URL=https://<job id>--7860.hf.jobs       # API through the jobs proxy
 # the CLI sends HF_TOKEN to the proxy and FLOCK_TOKEN as X-Flock-Token;
 # https://<job id>--7861.hf.jobs is the public, read-only status page
+# (only with a huggingface_hub whose run_job has `expose_public`; else just the API; the launch says so)
 uv run scripts/deploy-job.sh --down --group <name> "$W"   # teardown: cancel + delete its state
 ```
 
