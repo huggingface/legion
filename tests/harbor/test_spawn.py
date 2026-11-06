@@ -27,7 +27,8 @@ from .test_cli_launch import pins  # noqa: F401 - the fixture
 
 PLUGINS = Path(flock.harbor.__file__).with_name("plugins")
 tools = load_module(PLUGINS / "tools" / "spawn.py")
-SpawnResource = load_module(PLUGINS / "resources" / "spawn.py").Resource
+resource_module = load_module(PLUGINS / "resources" / "spawn.py")
+SpawnResource = resource_module.Resource
 
 
 class Refusing(AgentRoutes):
@@ -86,7 +87,7 @@ async def test_the_socket_names_the_agent_not_the_request(proxied, monkeypatch):
         await asyncio.to_thread(tools._call, "GET", "/workers")
 
 
-async def test_a_bad_line_is_an_error_and_a_removed_agent_has_no_socket(proxied):
+async def test_a_bad_line_is_an_error_and_a_removed_agent_has_no_socket(proxied, monkeypatch):
     _, resource = proxied
     path = resource.bind(AGENT)["mounts"][0]["source"]
 
@@ -97,6 +98,8 @@ async def test_a_bad_line_is_an_error_and_a_removed_agent_has_no_socket(proxied)
             return json.loads(s.makefile("rb").readline())
 
     assert "bad request" in (await asyncio.to_thread(raw, b"[1]\n"))["error"]
+    monkeypatch.setattr(resource_module, "READ_S", 0.1)  # a client that never sends its line
+    assert "TimeoutError" in (await asyncio.to_thread(raw, b""))["error"]
     await resource.remove([AGENT])
     assert not Path(path).exists()
 

@@ -320,7 +320,7 @@ limits: {spawned_total: 50}
 
 | Tool | Call |
 |---|---|
-| `spawn.spawn {type, prompt?, key?}` | `POST /agents/<me>/spawn`: the child's `name`, or the refusal's `reason: detail` |
+| `spawn.spawn {type, prompt?, key?}` | `POST /agents/<me>/spawn`: the ack `{name, created, parent, type, depth}`, or the refusal's `reason: detail` |
 | `spawn.prompt {agent, text}` | `POST /agents/<agent>/prompt`: a child, a descendant, or the parent |
 | `spawn.status {agent?}` | `GET /agents/<agent>` (yourself by default: `parent`, `children`, `depth`) |
 | `spawn.remove {agent}` | `DELETE /agents/<agent>`: a descendant and its subtree |

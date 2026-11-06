@@ -10,6 +10,7 @@ cannot. Needs a mount: docker or podman, not hf-sandbox.
 """
 
 import asyncio
+import contextlib
 import itertools
 import json
 import tempfile
@@ -28,15 +29,13 @@ class Resource:
         self.metadata = {}
         # flock: set by the worker (flock.worker.harbor): controller_call(agent, entry, args)
         self.controller = None
-        self.initial = list(agents)
         self.directory = tempfile.TemporaryDirectory(prefix="flock-spawn-")
-        self.servers, self.paths = {}, {}
+        self.servers, self.paths, self.slots = {}, {}, {}
         self.numbers = itertools.count()  # socket file names: AF_UNIX paths are short
 
     async def start(self):
         if self.controller is None:
             raise RuntimeError("resources.spawn runs on a flock worker only")
-        await self.add(self.initial)
 
     async def add(self, names):
         for name in names:
@@ -46,6 +45,9 @@ class Resource:
                     partial(self._serve, name), path, limit=LINE_MAX)
                 path.chmod(0o666)  # the containing host directory is private
                 self.paths[name] = path
+                # one call at a time per agent: the worker's controller client has a few
+                # connections, shared with its heartbeat and poll
+                self.slots.setdefault(name, asyncio.Semaphore(1))  # kept: a call in flight
 
     async def remove(self, names):
         for name in names:
@@ -54,19 +56,19 @@ class Resource:
                 self.paths.pop(name).unlink(missing_ok=True)
 
     async def _serve(self, agent, reader, writer):
-        # shortcut: no cap on one agent's concurrent calls (the world's proxy has 8); add one
-        # if agents fire spawn calls in parallel
         try:
             try:
                 request = json.loads(await asyncio.wait_for(reader.readline(), READ_S))
                 if not isinstance(request, dict):
                     raise ValueError("a request is a JSON object")
-                result = await self.controller(agent, "controller:request", request)
+                async with self.slots[agent]:
+                    result = await self.controller(agent, "controller:request", request)
                 answer = result.output
             except Exception as exc:  # a bad line; never the controller's own answer
                 answer = json.dumps({"error": f"bad request: {type(exc).__name__}: {exc}"})
-            writer.write(answer.encode() + b"\n")
-            await writer.drain()
+            with contextlib.suppress(ConnectionError):  # the client hung up
+                writer.write(answer.encode() + b"\n")
+                await writer.drain()
         finally:
             writer.close()
 
