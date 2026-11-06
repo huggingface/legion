@@ -80,11 +80,11 @@ DESCRIPTION_CHARS = 4000  # PR description characters returned by get_pr  # Hub 
 # about to make main ("" disables): the cheap checks of what two PRs can break together.
 MERGE_TESTS = os.environ.get("CHATBOT_MERGE_TESTS", "test_deck.py").strip()
 MERGE_TESTS_TIMEOUT_S = 60.0  # past this the shared tests are skipped (logged), not failed
-# The merge queue: failures that keep a PR queued (retried after 5, 10, 20, 40 s; after
-# MERGE_TRIES in a row it goes last, so one PR's lasting error never stalls the others).
+# The merge queue: failures that keep a PR queued, retried after its own backoff (first
+# delay, longest delay; doubling) while the PRs behind it go ahead.
 MERGE_RETRY_CODES = (*TRANSIENT_CODES, "hub_busy", "busy", "stale_lease", "paused")
-MERGE_TRIES = 5
-MERGE_REASON = 600  # refusal characters quoted in the inbox
+MERGE_BACKOFF = (5.0, 600.0)
+MERGE_REASON = 1500  # refusal characters quoted in the inbox
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
 
@@ -245,8 +245,8 @@ class Chatbot4World(World):
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
         # (main sha, the shared tests pass on it; None: they timed out there), see _shared_tests
         self.main_tests = (None, False)
-        # PR number -> (head, main, ToolError) of its last refused merge: merge_pr answers a
-        # re-queue of the same head on the same main at once (agents retry in loops).
+        # PR number -> (head, main, code, message) of its last merge refused by the checks of
+        # that head on that main: merge_pr answers a re-queue of both at once (agents retry).
         self.refused = {}
         self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
@@ -340,8 +340,9 @@ class Chatbot4World(World):
         if not self.save_sync:
             self.saver = threading.Thread(target=self._saver, name="chatbot4-save", daemon=True)
             self.saver.start()
+        self.merger = threading.Thread(target=self._merge_loop, name="chatbot4-merge-queue", daemon=True)
         if self.MERGER:
-            threading.Thread(target=self._merge_loop, name="chatbot4-merge-queue", daemon=True).start()
+            self.merger.start()
         _LIVE[str(self.ws.resolve())] = self
 
     # -- review comment outbox -------------------------------------------------------------
@@ -1533,7 +1534,7 @@ class Chatbot4World(World):
         self._check_paused("merge")
         with self.lock:
             queue = self.state["merge_queue"]
-            position = next((i for i, e in enumerate(queue, 1) if e["pr"] == pr), None)
+            position = self._queued().get(pr)
             rec = self.state["prs"].get(str(pr))
             if position is None or rec is None or rec["state"] not in ("open", "merging"):
                 try:
@@ -1543,9 +1544,9 @@ class Chatbot4World(World):
                         raise
                     return merged
                 self._approved(rec)
-                head, main, refusal = self.refused.get(pr, (None, None, None))
+                head, main, code, message = self.refused.get(pr, (None,) * 4)
                 if head == rec["head_sha"] and main == self.repo.sha():
-                    raise ToolError(refusal.message, refusal.code)
+                    raise ToolError(message, code)
                 queue.append({"pr": pr, "by": agent.name, "ts": time.time(), "tries": 0, "next_at": 0.0})
                 position = len(queue)
                 self._dirty("_", "merge_queue")
@@ -1556,36 +1557,43 @@ class Chatbot4World(World):
                 "note": "the world merges the queue in order; the outcome (merged, or why not) "
                         "arrives in the inbox of your next world tool result"}
 
+    def _queued(self):
+        """{PR number: position} of the merge queue (lock held)."""
+        return {e["pr"]: i for i, e in enumerate(self.state["merge_queue"], 1)}
+
     def _merge_loop(self):
-        """Background thread: merge the queue's first PR whenever it is due and merges are not
-        paused."""
+        """Background thread: merge the queue (_merge_next) while merges are not paused; when
+        no queued PR is due, wait for the soonest retry or a new one."""
         while not self.stopping.is_set():
-            with self.lock:
-                head = next(iter(self.state["merge_queue"]), None)
-            wait = 5.0 if head is None or self._prs_paused() or self.paused("merge") else (
-                head["next_at"] - time.time())
-            if wait > 0:
-                self.merge_wake.wait(min(wait, 5.0))
-                self.merge_wake.clear()
+            self.merge_wake.clear()  # before looking: a merge_pr from now on ends the wait
+            if self._prs_paused() or self.paused("merge"):
+                self.merge_wake.wait(5.0)
                 continue
             try:
-                self._merge_next()
+                if self._merge_next() is not None:
+                    continue
             except ToolError:
-                pass  # settled by _merge_next; its timing line has the code
+                continue  # settled by _merge_next; its timing line has the code
             except Exception:  # kept queued with a backoff by _merge_next
-                log.exception("merge queue: PR #%s failed", head["pr"])
+                log.exception("merge queue: a merge failed")
                 self.stopping.wait(1.0)
+                continue
+            with self.lock:
+                now = time.time()
+                soonest = min((e["next_at"] for e in self.state["merge_queue"]), default=now + 5.0)
+            self.merge_wake.wait(min(5.0, max(0.1, soonest - now)))
 
     def _merge_next(self):
-        """Run the queue's first PR (the merger thread; tests call this directly) as the agent
-        that queued it and return the merge. A merge or a refusal takes it off the queue, a
-        refusal with news for the author and that agent; a failure in MERGE_RETRY_CODES (or
-        not a ToolError) keeps it first with a backoff, or last after MERGE_TRIES in a row.
-        Failures are re-raised."""
+        """Run the first queued PR whose retry time has come (None: none) as the agent that
+        queued it and return the merge. A merge or a refusal takes it off the queue, a refusal
+        with news for the author and that agent; a failure in MERGE_RETRY_CODES (or not a
+        ToolError) keeps its place with a backoff (MERGE_BACKOFF), the PRs behind it going
+        ahead meanwhile. Failures are re-raised."""
         with self.lock:
-            if not self.state["merge_queue"]:
+            now = time.time()
+            entry = next((e for e in self.state["merge_queue"] if e["next_at"] <= now), None)
+            if entry is None:
                 return None
-            entry = self.state["merge_queue"][0]
         pr, agent = entry["pr"], Agent(entry["by"])
         steps, outcome, started = {}, "error", time.monotonic()
         try:
@@ -1605,26 +1613,18 @@ class Chatbot4World(World):
             return result
         except BaseException as exc:
             outcome = getattr(exc, "code", None) or type(exc).__name__
-            retry, main = not isinstance(exc, ToolError) or exc.code in MERGE_RETRY_CODES, None
-            if not retry:
-                with contextlib.suppress(ToolError):
-                    main = self.repo.sha()  # the main this run checked: only merges move it
             with self.lock:
-                queue = self.state["merge_queue"]
-                if retry:
+                if not isinstance(exc, ToolError) or exc.code in MERGE_RETRY_CODES:
                     entry["tries"] += 1
-                    entry["next_at"] = time.time() + 5 * 2 ** (entry["tries"] - 1)
-                    if entry["tries"] >= MERGE_TRIES:  # lets the others go first
-                        queue.remove(entry)
-                        queue.append({**entry, "tries": 0, "next_at": 0.0})
+                    entry["next_at"] = time.time() + min(
+                        MERGE_BACKOFF[1], MERGE_BACKOFF[0] * 2 ** (entry["tries"] - 1))
                 else:
-                    queue.remove(entry)
+                    self.state["merge_queue"].remove(entry)
+                    if checked := getattr(exc, "checked", None):  # the head and main the checks saw
+                        self.refused[pr] = (*checked, exc.code, exc.message)
                     rec = self.state["prs"].get(str(pr)) or self.store.get("prs", str(pr))
-                    if rec is not None and exc.code in ("conflict", "rebase_changed", "shared_tests",
-                                                        "fixed_interface", "compile"):
-                        self.refused[pr] = (rec["head_sha"], main, exc)  # only head and main decide these
                     reason = exc.message[:MERGE_REASON]
-                    if rec is not None:
+                    if rec is not None and rec["state"] != "closed":  # a close told the author already
                         self._unnotify(rec["author"], pr, "mergeable")
                         self._notify(rec["author"], pr, "merge", f"your PR #{pr} was not merged: {reason}")
                     if rec is None or rec["author"] != agent.name:
@@ -1639,13 +1639,6 @@ class Chatbot4World(World):
 
     def _merge(self, agent, pr, steps):
         """Merge PR pr as agent (the merge queue's turn of it)."""
-        with _timed(steps, "ttl_refresh"):
-            self.repo.refresh(FETCH_TTL)
-        with self.lock:
-            rec = self._pr(pr)
-            self._approved(rec)
-            if self._reconcile(rec["author"]) and rec["state"] == "merged":
-                return self._merged_event(rec)
         lane_at = time.monotonic()
         # The merge lane's slot is taken before the locks (see _hub_write) and held through the
         # rebase, the checks and the Hub merge: the merge queue's thread holds it, so a merge
@@ -1658,11 +1651,19 @@ class Chatbot4World(World):
                 self.repo.refresh(0)
             with self.lock:
                 rec = self._pr(pr)
+                # Already in main (e.g. a Hub merge that landed though its call failed): done.
+                if self._reconcile(rec["author"]) and rec["state"] == "merged":
+                    return self._merged_event(rec)
+                self._approved(rec)
                 if any(p[2] == pr for p in self.pending.values()):
                     raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
                 main, base, head = self.repo.sha(), rec["base_sha"], rec["head_sha"]
                 view = {**rec, "reviews": dict(rec["reviews"])}
-            new = self._check_merge(pr, view, main, steps)
+            try:
+                new = self._check_merge(pr, view, main, steps)
+            except ToolError as exc:
+                exc.checked = (head, main)  # what the refusal is about (merge_pr's cache)
+                raise
             lock_at = time.monotonic()
             with self.main_lock:
                 steps["main_lock_wait"] = time.monotonic() - lock_at
@@ -1782,7 +1783,8 @@ class Chatbot4World(World):
         lines = ["Hello", "My name is Sam", "", "What is my name?", "Bye"]
         verdict = run(tree, lines)
         if not verdict["ok"]:
-            raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total")
+            raise ToolError("bot contract failed: one nonempty reply per input, no crash, 300s total",
+                            "contract")
 
     def _shared_tests(self, pr, tree, main):
         """Refuse a merge that turns the shared tests (MERGE_TESTS) red: two PRs can each pass
@@ -1904,7 +1906,7 @@ class Chatbot4World(World):
         A PR with "draft": true is open on the Hub but its head is not pushed yet (head_sha is
         null); it counts toward its author's open PRs and cannot be reviewed or merged until
         its author retries open_pr with pr=<number>. state open also lists PRs whose merge
-        is running ("state": "merging").
+        is running ("state": "merging"). A PR in the merge queue has "queued": its position.
         Returns a list of PRs; if you have unread inbox news it is
         {"prs": [...], "inbox": [...], "pr_budget": {...}} (the swarm's new-PR budget).
         """
@@ -1924,6 +1926,10 @@ class Chatbot4World(World):
                  "branch": d["branch"], "base_sha": d["base_sha"], "head_sha": None,
                  "url": d["url"], "title": d["title"], "reviews": {}}
                 for d in self.state["drafts"].values() if not author or d["author"] == author]
+            queued = self._queued()
+            for rec in records:
+                if rec["pr"] in queued:
+                    rec["queued"] = queued[rec["pr"]]
         if state in ("merged", "closed", "all"):  # cold records never change: read unlocked
             records[:0] = [rec for _, rec in self.store.iter("prs", cold=True)
                            if (state == "all" or rec["state"] == state)
@@ -1940,7 +1946,8 @@ class Chatbot4World(World):
     def get_pr(self, pr: int, path: str | None = None) -> dict:
         """Show a PR from the world's copy, no git fetch needed: its head and base SHAs, the
         changed files with +/- line counts and the diff against its base. With path: that
-        file's full content at the PR head and its diff only."""
+        file's full content at the PR head and its diff only. A PR in the merge queue has
+        "queued": its position."""
         if path is not None:
             rel = PurePosixPath(path) if isinstance(path, str) else None
             if (not path or rel is None or rel.is_absolute() or ".." in rel.parts
@@ -1956,6 +1963,8 @@ class Chatbot4World(World):
                 raise ToolError("no PR with that number")
             rec = {k: rec.get(k) for k in ("pr", "title", "author", "state", "branch", "url",
                                            "description", "head_sha", "base_sha")}
+            if position := self._queued().get(pr):
+                rec["queued"] = position
         head, base = rec["head_sha"], rec["base_sha"]
         with contextlib.suppress(ToolError):  # main moves rarely without the world: cheap
             self.repo.refresh(FETCH_TTL)

@@ -530,12 +530,14 @@ runs the bot contract and the repository's `tests/` files matching `CHATBOT_MERG
 (default `test_deck.py`; empty disables) on the tree it would make main, isolated and bounded
 at 60 s, and refuses when they fail there but pass on main. A merge tells the author, the
 approvers and the agent that queued it through their inbox; a refusal drops the PR from the
-queue and tells the author and that agent why (and `merge_pr` answers a re-queue of the same
-head on the same main with that refusal at once). Hub and git failures, a lane refusal or an
-update in progress keep the PR first, retried after 5, 10, 20 and 40 s; after five in a row it
-goes last. Each queue run logs one `merge_pr pr=N outcome=... total=...` timing line. The
-inbox is the only path for this news: it rides on the agent's next successful world tool
-result. `CHATBOT_UNION_PATHS` (gitattributes
+queue and tells the author (unless the PR was closed) and that agent why; when the checks
+refused that head on that main (conflict, `rebase_changed`, `shared_tests`, `contract`,
+`fixed_interface`, `compile`), `merge_pr` answers a re-queue of both with that refusal at once.
+Hub and git failures, a lane refusal or an update in progress keep the PR's place, retried
+after its own backoff (5 s doubling to 10 min) while the PRs behind it go ahead. `get_pr` and
+`list_prs` show a queued PR's `queued` position. Each queue run logs one `merge_pr pr=N
+outcome=... total=...` timing line. The inbox is the only path for this news: it rides on the
+agent's next successful world tool result. `CHATBOT_UNION_PATHS` (gitattributes
 patterns, e.g. `deck/*.jsonl`; empty by default) makes `merge_pr`'s replay onto main merge
 those paths with `merge=union` (both sides' lines kept) from a world-side attributes file; the
 approval check refuses a replay whose diff changed (e.g. a deleted line kept) and the shared

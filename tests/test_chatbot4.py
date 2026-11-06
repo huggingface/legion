@@ -108,7 +108,12 @@ def merge(world, agent, pr):
     """merge_pr, then the merge queue's run of its first PR (this one in these tests): the
     merge, or the refusal raised."""
     out = world.merge_pr(agent, pr)
-    return world._merge_next() if out.get("queued") else out
+    if not out.get("queued"):
+        return out
+    for entry in world.state["merge_queue"]:
+        if entry["pr"] == pr:
+            entry["next_at"] = 0.0  # a retry's time has come
+    return world._merge_next()
 
 
 def approve(world, rec, who="birch"):
@@ -1044,6 +1049,29 @@ def test_merge_pr_refuses_a_stale_pr_that_conflicts_with_main(setup):
     assert [e["kind"] for e in world.state["inbox"]["cedar"]] == ["merge"]
 
 
+def test_a_pr_fixed_during_its_refused_checks_is_queued_again(setup, monkeypatch):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "greeting", "Hey!"),
+                                    lambda c: _module(c, "greeting", "Hi!"))
+    pr, real, fixed = second["pr"], world._check_merge, []
+
+    def check_while_the_author_fixes_it(*args):  # the author resolves it on main meanwhile
+        git(clone, "fetch", "-q", "origin")
+        git(clone, "reset", "-q", "--hard", "origin/main")
+        _module(clone, "greeting", "Hi!")
+        _commit(clone, "fixed")
+        fixed.append(submit(world, clone, branch="two", pr=pr))
+        return real(*args)
+
+    monkeypatch.setattr(world, "_check_merge", check_while_the_author_fixes_it)
+    world.merge_pr(Agent("oak"), pr)
+    with pytest.raises(ToolError, match="conflicts with main"):
+        world._merge_next()  # the old head conflicts
+    monkeypatch.setattr(world, "_check_merge", real)
+    approve(world, fixed[0])
+    assert world.merge_pr(Agent("oak"), pr)["queued"]  # the refusal was about the old head
+    assert world._merge_next()["head_sha"] == fixed[0]["head_sha"]
+
+
 def test_merge_pr_refuses_a_rebase_that_changes_the_diff(setup):
     _hotspot(setup)
 
@@ -1109,19 +1137,37 @@ def test_the_merge_queue_survives_a_restart_and_its_thread_merges_it(setup, monk
     rec = submit(world, clone)
     approve(world, rec)
     assert world.merge_pr(Agent("birch"), rec["pr"])["queued"]
+    world.admin.pause(["merge"])  # kept across the restart (knobs.json)
     world.close()
+    real_merge, calls = world.repo.hub.merge, []
+
+    def broken_once(pr, comment):  # not a ToolError: the thread logs it and retries
+        calls.append(pr)
+        if len(calls) == 1:
+            raise RuntimeError("a bug")
+        return real_merge(pr, comment)
+
+    monkeypatch.setattr(world.repo.hub, "merge", broken_once)
+    monkeypatch.setattr(chatbot4, "MERGE_BACKOFF", (0.2, 1.0))
     monkeypatch.setattr(Chatbot4World, "MERGER", True)
-    world = Chatbot4World(world.ws, world.repo)  # the queue restored; its thread merges it
+    world = Chatbot4World(world.ws, world.repo)  # the queue restored; its thread runs it
     try:
+        time.sleep(1)
+        assert not calls and world.merger.is_alive()  # paused: it waits
+        world.admin.resume(["merge"])
+        world.merge_wake.set()
         deadline = time.monotonic() + 30
         while world.state["merge_queue"] and time.monotonic() < deadline:
             time.sleep(0.1)
+        assert calls == [rec["pr"]] * 2 and world.merger.is_alive()
         out = world.call("list_prs", {"state": "merged"}, Agent("birch"))
         assert [r["pr"] for r in out["prs"]] == [rec["pr"]]
         assert out["prs"][0]["merged_sha"] == git(remote, "rev-parse", "main")
         assert f"PR #{rec['pr']} you queued is merged (just now)" in out["inbox"]
     finally:
         world.close()
+    world.merger.join(10)
+    assert not world.merger.is_alive()  # close() stops it
 
 
 def test_a_hub_merge_failure_after_the_rebase_keeps_the_record_on_the_rebased_head(setup, monkeypatch):
@@ -1246,9 +1292,7 @@ def test_a_hub_merge_that_lands_then_errors_is_seen_by_the_next_merge(setup, mon
     assert git(remote, "rev-parse", "main^{tree}") == git(remote, "rev-parse", f"{out['head_sha']}^{{tree}}")
 
 
-def test_transient_merge_failures_keep_the_pr_first_then_let_others_go(setup, monkeypatch):
-    import chatbot4
-
+def test_a_transient_merge_failure_keeps_the_pr_queued_while_the_next_goes_ahead(setup, monkeypatch):
     world, clone, remote = setup
     other = clone.parent / "other"
     git(clone.parent, "clone", "-q", str(remote), str(other))
@@ -1258,7 +1302,7 @@ def test_transient_merge_failures_keep_the_pr_first_then_let_others_go(setup, mo
     b = submit(world, clone, "cedar", "b")
     approve(world, a)
     approve(world, b)
-    real_merge, fails = world.repo.hub.merge, [1, 1, 1]
+    real_merge, fails = world.repo.hub.merge, [1]
 
     def flaky(pr, comment):
         if fails:
@@ -1267,22 +1311,48 @@ def test_transient_merge_failures_keep_the_pr_first_then_let_others_go(setup, mo
         return real_merge(pr, comment)
 
     monkeypatch.setattr(world.repo.hub, "merge", flaky)
-    monkeypatch.setattr(chatbot4, "MERGE_TRIES", 2)
     world.merge_pr(Agent("oak"), a["pr"])
     world.merge_pr(Agent("oak"), b["pr"])
     with pytest.raises(ToolError, match="Hub request failed"):
         world._merge_next()
     queue = world.state["merge_queue"]
-    assert [e["pr"] for e in queue] == [a["pr"], b["pr"]] and queue[0]["tries"] == 1
-    assert queue[0]["next_at"] > time.time()  # backoff: the merger thread waits for it
-    with pytest.raises(ToolError, match="Hub request failed"):
-        world._merge_next()  # MERGE_TRIES in a row: A goes last
-    assert [(e["pr"], e["tries"]) for e in queue] == [(b["pr"], 0), (a["pr"], 0)]
+    assert [(e["pr"], e["tries"]) for e in queue] == [(a["pr"], 1), (b["pr"], 0)]
+    assert queue[0]["next_at"] > time.time()  # A keeps its place and waits for its backoff
+    assert world._merge_next()["pr"] == b["pr"]  # B goes ahead meanwhile
+    assert world._merge_next() is None  # nothing due
+    queue[0]["next_at"] = 0.0  # A's retry is due: it lands on B's main
+    assert world._merge_next()["rebased_from"] == a["base_sha"] and not queue
+    assert not any(e["kind"] == "merge" for box in world.state["inbox"].values() for e in box)
+
+
+def test_a_retry_after_a_landed_merge_and_a_failed_fetch_finds_it_merged(setup, monkeypatch):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                     lambda c: _module(c, "time", None))
+    pr = second["pr"]
+    real_merge, real_fetch, hiccup = world.repo.hub.merge, world.repo.fetch, []
+
+    def merge_then_fail(pr_, comment):  # landed, but the call fails, and so does the next fetch
+        real_merge(pr_, comment)
+        hiccup.append(1)
+        raise ToolError("Hub request failed; retry later", "hub_error")
+
+    def fetch():
+        if hiccup and hiccup.pop():
+            raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+        return real_fetch()
+
+    monkeypatch.setattr(world.repo.hub, "merge", merge_then_fail)
+    monkeypatch.setattr(world.repo, "fetch", fetch)
+    world.merge_pr(Agent("oak"), pr)
     with pytest.raises(ToolError, match="Hub request failed"):
         world._merge_next()
-    assert world._merge_next()["pr"] == b["pr"]  # B, then A: both land, nobody told of a refusal
-    assert world._merge_next()["pr"] == a["pr"] and not queue
-    assert not any(e["kind"] == "merge" for box in world.state["inbox"].values() for e in box)
+    monkeypatch.setattr(world.repo.hub, "merge", real_merge)
+    world.state["merge_queue"][0]["next_at"] = 0.0  # the retry
+    assert world._merge_next()["already_merged"] and not world.state["merge_queue"]
+    assert world.state["prs"][str(pr)]["state"] == "merged"
+    assert [e["kind"] for e in world.state["inbox"]["cedar"]][-1] == "merged"  # no refusal sent
+    lines = [json.loads(line) for line in (world.ws / "eval-queue.jsonl").read_text().splitlines()]
+    assert lines[-1]["pr"] == pr and lines[-1]["reconciled"]
 
 
 def test_merge_queue_logs_one_timing_line_per_run(setup, caplog):
@@ -1294,7 +1364,7 @@ def test_merge_queue_logs_one_timing_line_per_run(setup, caplog):
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("merge_pr ")]
     assert len(lines) == 1 and lines[0].startswith(f"merge_pr pr={second['pr']} outcome=merged total=")
     steps = dict(item.split("=") for item in lines[0].split()[3:])
-    assert set(steps) == {"total", "ttl_refresh", "lane_wait", "refresh", "checkout",
+    assert set(steps) == {"total", "lane_wait", "refresh", "checkout",
                           "replay", "approvals", "contract", "shared_tests", "main_lock_wait",
                           "push", "update_ref", "hub_merge", "fetch", "tree_check"}
     assert all(float(v) >= 0 for v in steps.values())
@@ -2550,8 +2620,7 @@ def test_a_slow_hub_merge_does_not_block_reads(setup, monkeypatch):
         assert world.get_pr(rec["pr"])["head_sha"] == rec["head_sha"]
         world.list_prs("all")
         assert time.monotonic() - started < 2, "reads waited for the Hub merge"
-        with pytest.raises(ToolError, match="being merged; retry shortly"):  # no second merge
-            merge(world, Agent("pine"), rec["pr"])
+        assert world.merge_pr(Agent("pine"), rec["pr"])["position"] == 1  # no second merge
         with pytest.raises(ToolError, match="being merged; retry shortly"):
             approve(world, rec, "pine")
         assert [(r["pr"], r["state"]) for r in world.list_prs()] == [(rec["pr"], "merging")]
