@@ -1,8 +1,10 @@
-"""Tiny real runs (AGENTS.md "Tests"): a `compute: local` swarm in a temp folder, driven by the
-`flock` CLI in-process (the same `flock.ops`/`flock.client` calls a Python API makes). The
-controller and its workers are real processes running the `llm` harness against
-tests/fake_openai.py; nothing of flock is faked. The `tiny` fixture (conftest.py) gives one per
-test, in its own working directory, and kills whatever is left at the end."""
+"""Tiny real runs (AGENTS.md "Tests"): a Harbor spec run in a temp folder, driven by the `flock`
+CLI in-process (the same `flock.ops`/`flock.client` calls a Python API makes). The controller and
+its workers are real processes running `harness: harbor`; only Harbor is faked, in each of them
+(tests/harbor/site/sitecustomize.py): every agent's Trial is the real FlockPi on a fake
+environment whose `pi` answers `reply-N` (tests/harbor/test_adapter.py), and the task pin and
+download need no Hub. The `tiny` fixture (conftest.py) gives one per test, in its own working
+directory, and kills whatever is left at the end."""
 
 from __future__ import annotations
 
@@ -22,34 +24,36 @@ from flock import cli
 from flock.client import Client
 
 LOCAL = "{kind: local, worker_unknown_after: 10s, worker_dead_after: 11s, crash_backoff: 100ms}"
-# USD per 1M tokens, so one fake turn (~100 tokens in, 7 out) costs about $0.1
+# A Harbor spec, one role `writer`. USD per 1M tokens: a fake turn (1500 tokens in, 100 out)
+# costs $1.6. TINY_FAKE_HARBOR in the workers' env too: a fake Hub job gets only the spec's env.
 SPEC = """\
-swarm: tiny
+name: tiny
+model: fake-model
+task: {{repo: "https://huggingface.co/datasets/ns/tasks", selector: t}}
+inference: {{api_key_env: FAKE_KEY}}
+environment: {{backend: {backend}}}
+pricing: [1000, 1000, 1000]
 compute: {compute}
-providers:
-  fake: {{type: openai_compat, base_url: "{url}", api_key_env: FAKE_KEY,
-          pricing: {{"*": [1000, 1000, 1000]}}}}
-types:
-  writer:
-    harness: llm
-    model: fake:fake-model
-    replicas: {replicas}
-    agents_per_worker: 2
-    env: {{HEARTBEAT_INTERVAL: "0.5"{env}}}
+workers: {{agents_per_worker: 2, env: {{TINY_FAKE_HARBOR: "1", HEARTBEAT_INTERVAL: "0.5"{env}}}}}
+agents:
+  roles:
+    writer:
+      count: {replicas}
 """
 
 
 class TinyRun:
-    def __init__(self, root: Path, url: str, monkeypatch) -> None:
-        self.root, self.url, self.mp = root, url, monkeypatch
-        self.log = root / "requests.jsonl"  # every model request (fake_openai)
+    def __init__(self, root: Path, monkeypatch) -> None:
+        self.root, self.mp = root, monkeypatch
         self.procs: list[subprocess.Popen] = []
 
-    def spec(self, replicas: int = 1, extra: str = "", env: str = "", compute: str = LOCAL) -> str:
-        """Write spec.yaml (SPEC, `env` added to the type's env, plus `extra` YAML at the end
-        of the type) and return its name."""
-        text = SPEC.format(url=self.url, replicas=replicas, env=env and f", {env}",
-                           compute=compute) + extra
+    def spec(self, replicas: int = 1, extra: str = "", env: str = "", compute: str = LOCAL,
+             backend: str = "docker") -> str:
+        """Write spec.yaml (SPEC, `env` added to the workers' env, plus `extra` YAML at the end
+        of role `writer`) and return its name. `backend`: what compute allows (slurm: podman,
+        hf-jobs: hf-sandbox); faked either way."""
+        text = SPEC.format(replicas=replicas, env=env and f", {env}", compute=compute,
+                           backend=backend) + extra
         (self.root / "spec.yaml").write_text(text)
         return "spec.yaml"
 
@@ -91,17 +95,13 @@ class TinyRun:
         out = self.flock("status", name, "--events", "--json", "--only", only)
         return [json.loads(x) for x in out.splitlines()]
 
-    def results(self, name: str) -> list[str]:
-        """The text of each tool result in the agent's events, in order."""
-        return [d["message"]["content"][0]["text"] for e in self.events(name, "agent.message")
-                if (d := e["data"])["message"]["role"] == "toolResult"]
-
-    def said(self, agent: str) -> list[list[str]]:
-        """The user messages of each model request made for `agent` (its system message names
-        it), in order."""
-        bodies = [json.loads(x)["body"] for x in self.log.read_text().splitlines()]
-        return [[m["content"] for m in b["messages"] if m["role"] == "user"] for b in bodies
-                if b["messages"][0]["content"].startswith(f"You are {agent},")]
+    def said(self, agent: str) -> list[str]:
+        """The prompts of the agent's Pi session, in order: the fake environment's session file
+        (tests/harbor/test_adapter.py FakeEnv), as its worker last kept it. A Trial's first
+        prompt starts with the task's instruction."""
+        kept = max(self.root.rglob(f"_harbor/{agent}/pi/sessions/s.jsonl"),
+                   key=lambda p: p.stat().st_mtime)
+        return [json.loads(x)["prompt"] for x in kept.read_text().splitlines()]
 
     def controller(self, data: Path, port: int = 0, compute: str = "local") -> int:
         """Start `flock-controller` for `compute` with its state in `data` (a controller that

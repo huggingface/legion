@@ -106,7 +106,9 @@ class FakeEnv:
         f.pi.append(command)
         f.pi_env.append(env)
         n = len(f.pi)
-        if n in f.hold:
+        words = shlex.split(command)
+        prompt = words[words.index("2>&1") - 1]
+        if n in f.hold or prompt.endswith("[hold]"):  # [hold]: a tiny run's long turn
             await f.gate(n).wait()
         if self.killed:
             self.killed = False
@@ -131,7 +133,8 @@ class FakeEnv:
         sessions = self.logs_dir / "pi" / "sessions"
         sessions.mkdir(parents=True, exist_ok=True)
         with (sessions / "s.jsonl").open("a") as out:
-            out.write(json.dumps({"call": n}) + "\n")
+            # the prompt too: the tiny runs' "what the model was told" (tests/tinyrun.py)
+            out.write(json.dumps({"call": n, "prompt": prompt}) + "\n")
         return ExecResult(return_code=0)
 
 
@@ -141,7 +144,7 @@ class Trial(FakeTrial):
     def __init__(self, config, fakes):
         super().__init__(config, [])
         self.logs_dir = logs_dir = config.trials_dir / config.trial_name / "agent"
-        logs_dir.mkdir(parents=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)  # as Harbor: a new worker reuses t1
         self.agent = AgentFactory.create_agent_from_config(config.agent, logs_dir=logs_dir)
         remote = logs_dir if fakes.mounted else logs_dir.parent / "remote"
         remote.mkdir(exist_ok=True)

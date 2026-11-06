@@ -27,11 +27,11 @@ Be conservative about adding tests.
   (spec/models, controller, worker, CLI lifecycle, harness adapters, comms, checkpoint/resume) carries a clear
   regression risk that a test covers best. Do not add tests for specific worlds or experiments.
 - **Prefer one tiny real run over many isolated tests.** Use the smallest real setup that shows the behaviour:
-  a real controller and worker, a real spec, local compute and a fake model server.
+  a real controller and worker, a real spec, local compute and a fake Harbor environment (tests/tinyrun.py).
 - **Use real objects, not stand-ins.** Do not use `MagicMock`, `SimpleNamespace`, `object.__new__` (building an
   instance without its `__init__`) or monkeypatched internals in place of flock's own objects: they only have
   what the test author thought of, so the test keeps passing when the real code changes. Fake only what cannot
-  run in the test environment: the Hub, HF Jobs, Slurm, model servers.
+  run in the test environment: the Hub, HF Jobs, Slurm, model servers, containers.
 - **Test through the public surface** (the CLI, the controller API, the spec, public functions) rather than
   private methods: a test that calls a private method usually has to build the object around it by hand and
   breaks on any refactor. Call a private function directly only when its behaviour cannot be reached
