@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -247,7 +248,12 @@ class HarborAdapter:
         with exposed():  # it reads the inference key from os.environ; a Slurm worker has a file
             tc = launch.build_trial_config(config, task, self.root, self.agent,
                                            self._instructions())
-        tc.trial_name = f"{self.agent}-t{self.attempt}"
+        # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
+        # it: the swarm (the worker's SWARM) keeps another run's agent-0000-t1 on this host
+        # alive; a worker relaunched in this run reuses, and so cleans up, its own names.
+        # shortcut: two runs of one swarm name on one host still share names; add a run id then
+        swarm = os.environ.get("SWARM")
+        tc.trial_name = f"{swarm + '-' if swarm else ''}{self.agent}-t{self.attempt}"
         tc.agent.name, tc.agent.import_path = None, "flock.harbor.agent:FlockPi"
         # FlockPi serves turns for trial_hours; its last turn may take a turn_timeout more
         tc.agent.override_timeout_sec = (

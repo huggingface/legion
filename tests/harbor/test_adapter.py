@@ -252,6 +252,21 @@ async def start(a, session_id=None):
     return await a.start(a.workdir, session_id, a.spec), a.events()
 
 
+async def test_a_trial_is_named_for_its_swarm(fakes, tmp_path, monkeypatch):
+    """Harbor's compose project is `<trial_name>__env` and its start takes down whatever runs
+    under that name: another swarm's agent-0000 on this host must not share it."""
+    from harbor.environments.docker.docker import _sanitize_docker_compose_project_name
+
+    monkeypatch.setenv("SWARM", "crew-2")  # the worker's env
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    await a.send("Go.")
+    assert (await read(events, "turn_ended"))[0].data == {"trial": "crew-2-agent-0000-t1"}
+    project = f"{fakes.trials[0].config.trial_name}__env"
+    assert _sanitize_docker_compose_project_name(project) == project  # a valid name as it is
+    await a.stop()
+
+
 async def test_one_trial_across_bursts(fakes, tmp_path):
     a = adapter(tmp_path)
     sid, events = await start(a)
