@@ -115,18 +115,6 @@ async def test_zero_usage_turn_is_flagged_and_logged_once(tmp_path, caplog):
     assert "usage_missing" not in turn(native, TokenUsage())  # only provider-backed types
 
 
-async def test_env_dropped_event_once_per_spec_rev(tmp_path):
-    ts = typespec(w={"harness": "llm", "model": "hf:Qwen/Q"})["w"]
-    adapter = ScriptedAdapter(tmp_path / "home")
-    adapter.env_dropped_names = ["JUNK", "MY_TOKEN"]
-    rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents", adapter=adapter,
-                      outbox=Outbox(), secret_source={})
-    rt._report_env_dropped()
-    rt._report_env_dropped()
-    evs = [e for e in rt.outbox._q if e.type == "env_dropped"]
-    assert len(evs) == 1 and evs[0].data["data"]["names"] == ["JUNK", "MY_TOKEN"]
-
-
 def test_heartbeat_carries_the_pinned_server(tmp_path):
     from flock.worker.adapters.llm import pick_endpoint
 

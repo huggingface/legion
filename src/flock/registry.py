@@ -1,11 +1,7 @@
 """The harness and compute-backend registries: adding either is one module plus one entry here
 (docs/design.md, "Adding a harness or a compute backend"). The spec loader, controller, worker
 and CLI all read these entries. Code is named by import path ("module:function") and imported
-only when used, so the controller never imports worker-only dependencies.
-
-Still by hand for a new harness CLI: its install line in Dockerfile.worker and in the bootstrap
-script (`_BOOTSTRAP`, flock/controller/jobs.py), and, if it keeps state in a home directory, that
-variable in controller/local.py, controller/slurm.py and the bootstrap script."""
+only when used, so the controller never imports worker-only dependencies."""
 
 from __future__ import annotations
 
@@ -21,7 +17,6 @@ class HarnessEntry:
     provider_type: str  # the provider `type` a provider-backed model must have
     api: str  # the wire API it speaks to that provider (preflight probes this one)
     instructions_file: str  # the instructions file written into each agent's workdir
-    version: str | None = None  # pinned CLI version (also in Dockerfile.worker); None: in-process
     sends_extra: bool = False  # it can add a model's `extra` request-body fields
 
 

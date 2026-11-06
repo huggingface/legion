@@ -156,46 +156,8 @@ def pin_env_deny(path: str | Path) -> list[str]:
     return sorted({*ENV_DENY, *(d.get("env_deny") or [])})
 
 
-def example_args(tool: ToolDef) -> dict[str, Any]:
-    """Placeholder arguments for the instructions' example call (required parameters only)."""
-    sample = {"string": "...", "integer": 1, "number": 1.0, "boolean": True, "array": [],
-              "object": {}}
-    out: dict[str, Any] = {}
-    props = tool.parameters.get("properties") or {}
-    def first(schema: dict[str, Any]) -> str | None:  # ["integer", "null"] -> "integer"
-        t = schema.get("type")
-        return next((x for x in t if x != "null"), None) if isinstance(t, list) else t
-
-    for name in tool.parameters.get("required") or []:
-        p = props.get(name) or {}
-        if "enum" in p:
-            out[name] = p["enum"][0]
-        elif first(p) == "array" and first(p.get("items") or {}) == "string":
-            out[name] = ["..."]
-        else:
-            out[name] = sample.get(first(p) or "", "...")
-    return out
-
-
 SECTION_START = "<!-- flock:tools -->"
 SECTION_END = "<!-- /flock:tools -->"
-
-
-def instructions_section(ts: Toolset) -> str:
-    """The generated "Tools" section for CLI harnesses' AGENTS.md ("" without tools)."""
-    if not ts.tools:
-        return ""
-    how = ("Call these with the `flock-tool` command from your shell. It prints the result (JSON "
-           "or text) and exits 1 on an error, whose message it prints as `{\"error\": ...}`. "
-           "`flock-tool --list` shows each tool's parameters as JSON schema.")
-    title = f"## Tools (version {ts.version})" if ts.version else "## Tools"
-    lines = [SECTION_START, title, "", how, ""]
-    for t in ts.tools:
-        args = json.dumps(example_args(t), ensure_ascii=False)
-        lines += [f"- `{t.name}`: {t.description or '(no description)'}",
-                  f"  Example: `flock-tool {t.name} --json '{args}'`"]
-    lines += ["", SECTION_END]
-    return "\n".join(lines)
 
 
 def replace_section(text: str, section: str, start_mark: str = SECTION_START,
@@ -211,4 +173,4 @@ def replace_section(text: str, section: str, start_mark: str = SECTION_START,
     return (text.rstrip("\n") + "\n\n" if text.strip() else "") + section + "\n"
 
 
-__all__ = ["PIN_ENV", "Toolset", "instructions_section", "read_pin", "replace_section"]
+__all__ = ["PIN_ENV", "Toolset", "read_pin", "replace_section"]

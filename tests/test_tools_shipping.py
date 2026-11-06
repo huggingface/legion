@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from flock import cli
 from flock.models import AssignCommand, SwarmSpec, type_spec_rev
 from flock.tools.bundle import pack
-from flock.tools.toolset import PIN_ENV, Toolset, read_pin
+from flock.tools.toolset import PIN_ENV, read_pin
 from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 from flock.worker.tools import ToolsManager
@@ -503,20 +503,10 @@ def test_flock_tool_without_a_pin(tmp_path):
     assert p.returncode == 2 and "no tools here" in p.stdout
 
 
-def test_instructions_section_round_trip():
-    from flock.tools.loader import ToolDef
-    from flock.tools.toolset import example_args, instructions_section, replace_section
+def test_replace_section_round_trip():
+    from flock.tools.toolset import SECTION_END, SECTION_START, replace_section
 
-    ts = Toolset(version="v", dir=Path("/x"), swarm="s", type="t", data_dir=Path("/d"), tools=(
-        ToolDef("run_bot", "Run a bot.", {"type": "object", "properties": {
-            "path": {"type": "string"}, "messages": {"type": "array", "items": {"type": "string"}}},
-            "required": ["path", "messages"]}, "m", "run_bot"),))
-    sec = instructions_section(ts)
-    assert """flock-tool run_bot --json '{"path": "...", "messages": ["..."]}'""" in sec
-    nullable = ToolDef("f", "F.", {"type": "object", "properties": {
-        "n": {"type": ["integer", "null"]}, "xs": {"type": ["array", "null"], "items": {
-            "type": ["string", "null"]}}}, "required": ["n", "xs"]}, "m", "f")
-    assert example_args(nullable) == {"n": 1, "xs": ["..."]}
+    sec = f"{SECTION_START}\n## Tools\n{SECTION_END}"
     once = replace_section("Hello.\n", sec)
     assert once == f"Hello.\n\n{sec}\n" and replace_section(once, sec) == once
     assert replace_section(once, "") == "Hello.\n"

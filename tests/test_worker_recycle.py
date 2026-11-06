@@ -1,6 +1,6 @@
-"""Single-agent recycle (docs/pi.md "Memory"): a fresh harness process on the same session at a
-turn boundary, from the memory watchdog or a changed model endpoint; and a
-harness SIGKILLed mid-turn (the OOM killer) as a transient failure."""
+"""Single-agent recycle (docs/slurm.md "Memory"): a fresh harness process on the same session at
+a turn boundary, from the memory watchdog; and a harness SIGKILLed mid-turn (the OOM killer) as
+a transient failure."""
 
 from __future__ import annotations
 
@@ -25,29 +25,6 @@ async def test_recycle_now_ends_an_idle_process(tmp_path):
     await rt.prompt("again")
     await until(lambda: rt.state.turns == 2)
     assert ad.starts == [None, "s-1"]
-
-
-class EndpointAdapter(ScriptedAdapter):
-    """update_spec reports a changed model endpoint once, as PiAdapter does."""
-
-    model = "m-1"
-
-    def update_spec(self, spec):
-        changed, self.model = spec.model != self.model, spec.model
-        return changed
-
-
-async def test_endpoint_change_recycles_before_the_next_turn(tmp_path):
-    ad = EndpointAdapter(tmp_path / "home")
-    rt, _ = runtime(tmp_path, adapter=ad, idle_grace="5s")
-    await rt.setup(restore=False)
-    await rt.prompt("one")
-    await until(lambda: rt.state.turns == 1)
-    rt.set_live(spec=rt.spec.model_copy(update={"model": "m-2"}))
-    await rt.prompt("two")  # a turn boundary: the new spec applies, then a fresh process runs it
-    await until(lambda: rt.state.turns == 2)
-    assert ad.starts == [None, "s-1"] and ad.sent == ["one", "two"]
-    assert [d["reason"] for d in custom(rt, "harness_recycled")] == ["endpoint"]
 
 
 class OomOnce(ScriptedAdapter):

@@ -37,7 +37,7 @@ from flock.models import (
 )
 from flock.registry import HARNESSES
 from flock.secrets_file import secret_env
-from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
+from flock.tools.toolset import PIN_ENV, Toolset, replace_section
 from flock.worker import comms as comms_mod
 from flock.worker.adapters.base import (
     AdapterEvent,
@@ -166,7 +166,6 @@ class AgentRuntime:
         self.last_sync: datetime | None = None
         self.unsynced: str | None = None  # the last push's error (heartbeat `unsynced`)
         self.dirty = False
-        self._env_dropped_rev: str | None = None
         self.allow_starts = True
         self._stop_req: str | None = None
         # recycle(): end the burst at the next turn boundary; the next prompt starts a fresh
@@ -197,7 +196,6 @@ class AgentRuntime:
         if toolbox is not None and getattr(adapter, "toolbox", False) is None:
             adapter.toolbox = toolbox  # type: ignore[attr-defined]
         self._turn_tools: str | None = None  # tools version of the turn in flight
-        self._tools_section: str | None = None  # last generated instructions section
         self._pinned: Toolset | None = None  # pinned when a prompt was forwarded between turns
         # `every: turn_end` (docs/loop.md): set by loop_start, cleared by loop_stop / a limit
         self.loop: LoopStartCommand | None = None
@@ -256,7 +254,6 @@ class AgentRuntime:
                 ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
             except OSError as e:
                 log.warning("%s: cannot write the tools pin: %s", self.name, e)
-        self._write_tools_section(ts)
         self._write_comms_section()
         self._write_world_section()
         return ts
@@ -293,15 +290,6 @@ class AgentRuntime:
     def emit(self, kind: str, data: dict[str, Any] | None = None) -> None:
         self._emit(self.log.custom(kind, data, turn_id=self.turn_id))
 
-    def _report_env_dropped(self) -> None:
-        """Names (never values) the harness isolation dropped; once per spec revision."""
-        names = getattr(self.adapter, "env_dropped_names", None)
-        rev = type_spec_rev(self.spec)
-        if names and rev != self._env_dropped_rev:
-            self._env_dropped_rev = rev
-            log.warning("%s: isolation dropped env names %s", self.name, ", ".join(names))
-            self.emit("env_dropped", {"names": names})
-
     # ------------------------------------------------------------------ live changes (docs/live.md)
     def set_live(self, spec: TypeSpec) -> None:
         """A changed type spec from the controller. Held until the agent's next turn boundary;
@@ -320,13 +308,13 @@ class AgentRuntime:
         if (self.spec.system_prompt, self.spec.system_prompt_file) != before:
             if self._instructions_written:
                 self._instructions_written = False
-                self._tools_section = self._comms_section = None  # sections are rewritten
+                self._comms_section = None  # the section is rewritten
                 self._write_instructions()
             harness = self.spec.harness.value
             self._note("your system prompt changed" if harness == "llm" else
                        f"your instructions in {INSTRUCTIONS_FILE[harness]} changed; re-read them")
-        if (update := getattr(self.adapter, "update_spec", None)) and update(self.spec):
-            self.recycle("endpoint")  # the new models.json needs a fresh process
+        if update := getattr(self.adapter, "update_spec", None):
+            update(self.spec)
 
     def _note(self, what: str) -> None:
         if self.state.turn_seq > 0:  # an agent that never had a turn starts on the new setup
@@ -409,10 +397,8 @@ class AgentRuntime:
             self.emit("prompt_deferred", {"text": text, "reason": reason, **self._loop_untaken()})
         self.buffer.clear()
 
-    def _prepare_workdir(self, tools: Toolset | None = None) -> None:
+    def _prepare_workdir(self) -> None:
         self._write_instructions()
-        if tools is not None:
-            self._write_tools_section(tools)
         self._write_comms_section()
         self._write_world_section()
 
@@ -444,21 +430,6 @@ class AgentRuntime:
                 self._note(f"the Team board section of {target.name} changed; re-read it")
         self._comms_section = section
 
-    def _write_tools_section(self, tools: Toolset) -> None:
-        """The generated Tools section of AGENTS.md (CLI harnesses; llm gets function
-        tools instead), rewritten when the toolset changes."""
-        if (self.spec.harness.value == "llm" or not self.workdir.is_dir()
-                or not self._own_instructions):
-            return
-        section = instructions_section(tools)
-        if section != (self._tools_section or ""):
-            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
-            text = target.read_text() if target.is_file() else ""
-            target.write_text(replace_section(text, section))
-            if self._tools_section is not None:  # docs/live.md: a running harness reads it again
-                self._note(f"your tools changed; re-read the Tools section of {target.name}")
-        self._tools_section = section
-
     @property
     def _own_instructions(self) -> bool:
         """AGENTS.md go in the workdir; a harbor Trial gets its own from Harbor."""
@@ -472,7 +443,6 @@ class AgentRuntime:
         if self.spec.system_prompt is not None:
             target.write_text(self.spec.system_prompt)
             self._instructions_written = True
-            self._tools_section = None  # the base file was replaced: its section is gone
             return
         if not self.spec.system_prompt_file:
             return
@@ -483,7 +453,6 @@ class AgentRuntime:
             if c.is_file():
                 target.write_text(c.read_text())
                 self._instructions_written = True
-                self._tools_section = None  # the base file was replaced: its section is gone
                 return
         log.warning("%s: system_prompt_file %s not found", self.name, src)
 
@@ -531,9 +500,9 @@ class AgentRuntime:
                 await self.comms.on_prompt(self.name, self.spec.harness.value)
             if self.world is not None:  # open the gateway for flock-tool; agent_start hook
                 await self.world.on_prompt(self.name, self.spec.harness.value, self.comms)
-            self._write_instructions()  # before the tools section is generated into it
+            self._write_instructions()  # before the sections are written into it
             tools = self._pin_tools()
-            self._prepare_workdir(tools)
+            self._prepare_workdir()
             env = await self.harness_env()
             old = self.state.session_id
             env.update(self.flock_env)
@@ -558,7 +527,6 @@ class AgentRuntime:
             self.start_rev = self.rev
             self._recycle_pending, self._exit_code = None, None
             self.save_state()
-            self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
                              "parent": self.parent})
             self.phase = "running"

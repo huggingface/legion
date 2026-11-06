@@ -1,7 +1,6 @@
 """flock.registry: every harness and compute entry is complete and its code imports."""
 
 import inspect
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -18,8 +17,6 @@ def test_harness_entry_is_complete(name):
     assert list(inspect.signature(load(h.adapter)).parameters)[:3] == ["workdir", "name", "spec"]
     assert h.instructions_file.endswith(".md")
     assert Harness(name) == name
-    if h.version:  # Dockerfile.worker is edited by hand
-        assert f"@{h.version}" in (Path(__file__).parents[1] / "Dockerfile.worker").read_text()
 
 
 @pytest.mark.parametrize("kind", COMPUTE)
