@@ -1916,13 +1916,13 @@ def test_legacy_hub_outbox_in_prs_json_moves_to_the_outbox_file(setup):
 
 
 def _hub_moved_past_the_record(world, clone, remote):
-    """Open a PR, then push a newer head to the Hub's refs/pr/N and branch behind the world's
+    """Open a PR, then push a newer head to the Hub's refs/pr/N behind the world's
     back (a push in the gap before a restart from an older archive)."""
     rec = submit(world, clone)
     _module(clone, "gap", "from the gap")
     _commit(clone, "pushed in the gap")
     gap = git(clone, "rev-parse", "HEAD")
-    git(clone, "push", "-q", str(remote), f"+{gap}:refs/pr/{rec['pr']}", f"+{gap}:refs/heads/{rec['branch']}")
+    git(clone, "push", "-q", str(remote), f"+{gap}:refs/pr/{rec['pr']}")
     assert world.state["prs"][str(rec["pr"])]["head_sha"] == rec["head_sha"] != gap
     return rec, gap
 
@@ -1935,7 +1935,6 @@ def test_stale_lease_adopts_the_hub_head_and_retries_once(setup, caplog):
     new = submit(world, clone, pr=rec["pr"])
     assert new["head_sha"] not in (rec["head_sha"], gap)
     assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
-    assert git(remote, "rev-parse", f"refs/heads/{rec['branch']}") == new["head_sha"]
     assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
     assert f"adopted Hub head for PR #{rec['pr']} after a stale lease" in caplog.text
     assert world.metrics()["stale_lease_adoptions_total"] == 1
@@ -1980,11 +1979,19 @@ def test_a_normal_update_never_fetches_pr_refs(setup, monkeypatch):
     world, clone, remote = setup
     rec = submit(world, clone)
     monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda *a, **k: pytest.fail("fetched"))
-    monkeypatch.setattr(world.repo, "fetch_ref", lambda *a, **k: pytest.fail("fetched"))
     _module(clone, "later", "a later change")
     new = submit(world, clone, pr=rec["pr"])
     assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
     assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
+
+
+def test_open_and_update_push_no_agent_branch(setup):
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    _module(clone, "later", "a later change")
+    submit(world, clone, pr=rec["pr"])
+    assert git(remote, "for-each-ref", "refs/heads/agents") == ""
+    assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}")
 
 
 def test_a_lease_rejection_has_its_own_code(setup):
@@ -2003,18 +2010,15 @@ def test_stale_lease_adopts_the_hub_head_from_the_refs_api(setup, monkeypatch, c
     rec, gap = _hub_moved_past_the_record(world, clone, remote)
     assert not world.repo.has_commit(gap)  # the lease needs the sha only, not the object
     calls = []
-    world.repo.hub.refs = lambda: calls.append(1) or {f"refs/pr/{rec['pr']}": gap,
-                                                      f"refs/heads/{rec['branch']}": gap}
+    world.repo.hub.refs = lambda: calls.append(1) or {f"refs/pr/{rec['pr']}": gap}
     monkeypatch.setattr(world.repo, "fetch_pr_refs", lambda *a, **k: pytest.fail("fetched"))
-    monkeypatch.setattr(world.repo, "fetch_ref", lambda *a, **k: pytest.fail("fetched"))
     caplog.set_level("WARNING")
     _module(clone, "later", "a later change")
     new = submit(world, clone, pr=rec["pr"])
     assert git(remote, "rev-parse", f"refs/pr/{rec['pr']}") == new["head_sha"]
-    assert git(remote, "rev-parse", f"refs/heads/{rec['branch']}") == new["head_sha"]
     assert world.state["prs"][str(rec["pr"])]["head_sha"] == new["head_sha"]
     assert f"adopted Hub head for PR #{rec['pr']} after a stale lease (via API)" in caplog.text
-    assert calls == [1]  # the branch push then leases on the adopted head: no second lookup
+    assert calls == [1]
 
 
 @pytest.mark.parametrize("api", ["empty", "raises"])
@@ -2104,9 +2108,6 @@ def test_pr_refs_are_fetched_anonymously_first(setup, monkeypatch):
     assert repo.fetch_pr_refs([99], delays=()) == []
     assert seen == [(False, False, True), (False, True, False)]
     repo.anonymous = False  # disabled (a local or private remote): straight to the token
-    seen.clear()
-    assert repo.fetch_ref(f"refs/heads/{rec['branch']}", "refs/flock/hub/x")
-    assert seen == [(False, True, False)]
 
 
 def test_hub_fetches_offer_only_mains_history(setup, monkeypatch):
@@ -2125,8 +2126,7 @@ def test_hub_fetches_offer_only_mains_history(setup, monkeypatch):
     assert repo.fetch_pr_refs([rec["pr"]]) == []  # anonymous
     repo.anonymous = False
     assert repo.fetch_pr_refs([rec["pr"]]) == []  # with the token
-    assert repo.fetch_ref(f"refs/heads/{rec['branch']}", "refs/flock/hub/x")
-    assert len(fetches) == 4
+    assert len(fetches) == 3
     for args in fetches:  # git -c protocol.version=2 [...] fetch ... --negotiation-tip=refs/heads/main
         at = args.index("fetch")
         assert args[:2] == ("-c", "protocol.version=2")

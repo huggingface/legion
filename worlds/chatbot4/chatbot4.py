@@ -1275,7 +1275,6 @@ class Chatbot4World(World):
             if old_head is not None:  # an open PR: replace only the expected head
                 with self._hub_write(agent, "push", pr, deadline):
                     old_head = self._lease_push(agent, pr, sha, f"refs/pr/{pr}", old_head, started)
-                    self._lease_push(agent, pr, sha, f"refs/heads/{branch_ref}", old_head, started)
             else:
                 with self._hub_write(agent, "open_pr", pr, deadline) as slot:
                     if pr is None:
@@ -1301,7 +1300,7 @@ class Chatbot4World(World):
         raise ToolError("main kept moving while opening the PR; open it again", "busy")
 
     def _lease_push(self, agent, pr, sha, ref, expected, started):
-        """Push sha to ref (refs/pr/N or the PR's branch) with a lease on expected; the caller
+        """Push sha to refs/pr/N (ref) with a lease on expected; the caller
         holds a Hub slot, never the world lock. On a stale lease (the Hub's ref moved past the
         world's record, e.g. after a restart from an older archive), read the Hub's value from
         the refs API (or, failing that, fetch it with git), adopt it (for refs/pr/N: into the record's head_sha) and retry the push once.
@@ -1327,33 +1326,25 @@ class Chatbot4World(World):
             via = " (via API)" if hub else ""
         if not hub:
             room = started + CALL_BUDGET - time.monotonic()
-            if ref == f"refs/pr/{pr}":
-                local = ref
-                fetched = not self.repo.fetch_pr_refs([pr], delays=(1,) if room > 1 + 2 * PUSH_ESTIMATE_S else ())
-            else:
-                local = f"refs/flock/hub/{ref.removeprefix('refs/')}"
-                fetched = self.repo.fetch_ref(ref, local)
+            fetched = not self.repo.fetch_pr_refs([pr], delays=(1,) if room > 1 + 2 * PUSH_ESTIMATE_S else ())
             if fetched:
                 try:
-                    hub = self.repo.git("rev-parse", "--verify", f"{local}^{{commit}}")
+                    hub = self.repo.git("rev-parse", "--verify", f"{ref}^{{commit}}")
                 except ToolError:
                     hub = None
         if not hub or hub == expected:
             log.warning("stale lease on %s for PR #%s (agent=%s): Hub head not fetched; refused",
                         ref, pr, agent.name)
             raise refusal
-        if ref == f"refs/pr/{pr}":
-            with self.lock:
-                rec = self.state["prs"].get(str(pr))
-                if rec is None or rec["state"] not in ("open", "merging") or rec["head_sha"] != expected:
-                    raise ToolError("the PR was merged or closed during the update")
-                rec["head_sha"] = hub
-                self._dirty("prs", pr)
-                self._save()
-            log.warning("adopted Hub head for PR #%s after a stale lease%s: %s -> %s",
-                        pr, via, expected[:12], hub[:12])
-        else:
-            log.warning("adopted Hub value of %s for PR #%s after a stale lease%s", ref, pr, via)
+        with self.lock:
+            rec = self.state["prs"].get(str(pr))
+            if rec is None or rec["state"] not in ("open", "merging") or rec["head_sha"] != expected:
+                raise ToolError("the PR was merged or closed during the update")
+            rec["head_sha"] = hub
+            self._dirty("prs", pr)
+            self._save()
+        log.warning("adopted Hub head for PR #%s after a stale lease%s: %s -> %s",
+                    pr, via, expected[:12], hub[:12])
         self._count("stale_adoptions")
         if time.monotonic() + PUSH_ESTIMATE_S > started + CALL_BUDGET:
             raise refusal
@@ -1364,7 +1355,7 @@ class Chatbot4World(World):
                 raise
             log.warning("stale lease again on %s for PR #%s (agent=%s); refused", ref, pr, agent.name)
             raise refusal from None
-        return hub if ref == f"refs/pr/{pr}" else expected
+        return hub
 
     def _land(self, agent, snapshot, base, title, branch_ref, number, sha, main, started, slot):
         """Push the head of the world's own (draft) Hub PR and mark it ready; the caller holds
@@ -1373,9 +1364,8 @@ class Chatbot4World(World):
         delays = list(PUSH_RETRY_DELAYS)
         while True:
             try:
-                # refs/pr/N and the agent's branch are written only by the world: overwrite.
+                # refs/pr/N is written only by the world: overwrite.
                 self.repo.push(sha, f"refs/pr/{number}", force=True)
-                self.repo.push(sha, f"refs/heads/{branch_ref}", force=True)
                 self.repo.hub.ready(number)
                 return sha, main
             except ToolError as exc:

@@ -193,18 +193,6 @@ class Repository:
                         time.sleep(delay)
         return missing
 
-    def fetch_ref(self, remote_ref, local_ref):
-        """Fetch one ref from the Hub into local_ref, anonymously first, then with the token.
-        Never raises: returns False on failure."""
-        if self.fetch_anonymous(f"+{remote_ref}:{local_ref}"):
-            return True
-        try:
-            with self.refs_lock:
-                self.hub_fetch("origin", f"+{remote_ref}:{local_ref}")
-            return True
-        except Exception:  # noqa: BLE001 - logged by git(); the caller refuses cleanly
-            return False
-
     def refresh(self, max_age):
         """Fetch unless a fetch started within max_age seconds. The world updates its own
         refs after every push and merge, so this only catches up with outside changes; with
