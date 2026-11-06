@@ -149,10 +149,10 @@ def test_the_smoke_spec_compiles(monkeypatch, pins):
     assert h.config["limits"]["trial_hours"] == 0.15
 
 
-def test_the_v8_harbor_spec_compiles(monkeypatch, pins):
+def test_the_swarmchat_harbor_spec_compiles(monkeypatch, pins):
     env = {"TASK_REV": "c" * 40, "BOARD_URL": "https://board.example",
            "WORLD_URL": "https://world.example", "CHATBOT_REPO": "ns/chat"}
-    swarm = experiment_spec(monkeypatch, pins, "v8-harbor", "c" * 40, env)
+    swarm = experiment_spec(monkeypatch, pins, "swarmchat-harbor", "c" * 40, env)
     assert (swarm.swarm, swarm.compute.kind, len(swarm.types)) == ("v8h-1", "hf-jobs", 6)
     h = swarm.types["answers"].harbor
     assert h.config["environment"]["kwargs"]["namespace"] == "HuggingFaceSwarms"

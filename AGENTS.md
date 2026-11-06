@@ -10,7 +10,7 @@ casually: controller, worker and CLI all import it.
 - `src/flock/worker/` — worker loop, harness adapters (`llm`, `harbor`; see docs/llm-harness.md), bucket sync, msgboard identity, comms hub (docs/comms.md).
 - `src/flock/comms/` — msgboard client, the built-in comms tools and their rules (docs/comms.md).
 - `src/flock/cli.py` — `flock` CLI (typer) over the controller API.
-- `experiments/` — Harbor experiments (`harbor-smoke`, `v8-harbor`). Earlier experiments and their results are archived in `hf://buckets/cmpatino/legacy-swarmchat-experiments` (README inside).
+- `experiments/` — Harbor experiments (`harbor-smoke`, `swarmchat-harbor`). Earlier experiments and their results are archived in `hf://buckets/cmpatino/legacy-swarmchat-experiments` (README inside).
 - `tests/` — pytest; no network, no real jobs. Fake the Hub client and the harness processes.
 
 ## Conventions

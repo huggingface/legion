@@ -1,4 +1,5 @@
-# Copied from origin/harbor-v8 9f0865b:experiments/v8-harbor/spec.yaml (owned by that branch).
+# Copied from origin/harbor-v8 9f0865b:experiments/v8-harbor/spec.yaml (owned by that branch;
+# experiments/swarmchat-harbor here).
 # v8 (hf://buckets/cmpatino/legacy-swarmchat-experiments/v8: six lanes, prompts) in shepherd's config shape: it loads with
 # flock.harbor.config as copied from shepherd f3970bc. Each agent runs the Harbor task
 # chatbot4-v8-agent in its own container; the shared chatbot4 world and the board are resources,

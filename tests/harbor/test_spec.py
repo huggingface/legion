@@ -13,7 +13,7 @@ from flock.harbor.spec import Spec, compile_spec, substitute
 from flock.models import SwarmSpec, load_spec_yaml, loop_refusals
 
 EXAMPLES = Path(__file__).parent / "examples"
-V8_FIXTURE = Path(__file__).parent / "fixtures" / "v8-harbor-spec.yaml"
+SWARMCHAT_FIXTURE = Path(__file__).parent / "fixtures" / "swarmchat-harbor-spec.yaml"
 RESOURCES = Path(flock.harbor.__file__).parent / "plugins" / "resources"
 
 
@@ -24,7 +24,7 @@ def within(small, big):
 
 
 @pytest.mark.parametrize(
-    "example", [*sorted(EXAMPLES.glob("*.yaml")), V8_FIXTURE], ids=lambda p: p.name
+    "example", [*sorted(EXAMPLES.glob("*.yaml")), SWARMCHAT_FIXTURE], ids=lambda p: p.name
 )
 def test_shepherd_configs_load_unchanged(example):
     shepherd, spec = Config.load(example), Spec.load(example, env={})
@@ -32,8 +32,8 @@ def test_shepherd_configs_load_unchanged(example):
     assert spec.loop is None and spec.agents.roster() == shepherd.agents.roster()
 
 
-def test_v8_harbor_spec_loads():
-    spec = Spec.load(V8_FIXTURE, env={})
+def test_swarmchat_harbor_spec_loads():
+    spec = Spec.load(SWARMCHAT_FIXTURE, env={})
     assert list(spec.roles()) == [
         "understanding", "answers", "conversation", "routing", "quality", "safety",
     ]
