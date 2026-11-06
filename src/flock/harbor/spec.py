@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+from harbor.utils.env import is_sensitive_env_key
 from pydantic import BeforeValidator, Field, field_validator, model_validator
 
 from flock.models import (
@@ -315,6 +316,11 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     if remote and spec.environment.kwargs.get("forward_hf_token"):
         raise ValueError("environment.kwargs.forward_hf_token would put the workers' Hub token "
                          "in every sandbox: leave it unset")
+    if bad := sorted(k for k in spec.workers.env or {} if is_sensitive_env_key(k)):
+        raise ValueError(f"workers.env: {', '.join(bad)} look like secrets, and this block is "
+                         "stored in the spec and lands in the worker job's plain env: pass "
+                         "secrets by name through inference.api_key_env or a resource's "
+                         "token_env (the controller's secrets path), not here")
     for name, options in spec.resources.items():
         if options.get("token_env") == ADMIN_TOKEN_ENV:
             raise ValueError(f"resources.{name}.token_env: {ADMIN_TOKEN_ENV} is the world's "

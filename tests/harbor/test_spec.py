@@ -335,6 +335,16 @@ def test_a_loop_without_until_ends_at_the_run_timeout(tmp_path):
     assert swarm.types["safety"].loop.while_.until == "2h"  # its own
 
 
+def test_workers_env_refuses_secret_names(tmp_path):
+    data = load_spec_yaml(COMPILE)
+    data["workers"]["env"] = {"CHATBOT_REPO": "ns/chat", "OPENAI_API_KEY": "sk-x"}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="workers.env: OPENAI_API_KEY look like secrets"):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
 def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, settings, clock):
     """A task's `[environment.env]` `${VAR}` is filled from the worker's own env (Harbor's
     resolve_env_vars): `workers.env` puts it there, in every type and every launched job."""
