@@ -532,7 +532,7 @@ def check_task(spec: SwarmSpec) -> Check:
              for ts in spec.types.values() if ts.harbor}
     if not tasks:
         return Check("harbor task", None, "not a Harbor spec")
-    sha = re.compile(r"[0-9a-f]{40}")
+    sha = re.compile(r"[0-9a-fA-F]{40}")
     for t in tasks.values():
         for what, value in (("registry_commit", t.get("registry_commit")),
                             ("task.git_commit_id", (t.get("task") or {}).get("git_commit_id"))):

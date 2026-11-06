@@ -164,6 +164,7 @@ def test_bundle_hash_ignores_dist_info_record(tools, tmp_path, monkeypatch):
         info.mkdir(parents=True)
         (site / "flockfakedep.py").write_text("X = 1\n")
         (info / "METADATA").write_text("Metadata-Version: 2.1\nName: flockfakedep\nVersion: 1.0\n")
+        (info / "INSTALLER").write_text(["pip", "uv"][i] + "\n")
         (info / "RECORD").write_text(f"flockfakedep.py,,\n../../../bin/x,sha256={i},\n"
                                      "flockfakedep-1.0.dist-info/METADATA,,\n"
                                      "flockfakedep-1.0.dist-info/RECORD,,\n")
@@ -174,4 +175,4 @@ def test_bundle_hash_ignores_dist_info_record(tools, tmp_path, monkeypatch):
     with tarfile.open(b.archive) as archive:
         names = archive.getnames()
     assert "flockfakedep.py" in names and "flockfakedep-1.0.dist-info/METADATA" in names
-    assert "flockfakedep-1.0.dist-info/RECORD" not in names
+    assert not {"flockfakedep-1.0.dist-info/RECORD", "flockfakedep-1.0.dist-info/INSTALLER"} & set(names)
