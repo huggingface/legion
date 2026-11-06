@@ -372,8 +372,8 @@ class Chatbot4World(World):
         while not self.stopping.wait(5.0):
             self._sync_hub_states(every=HUB_SYNC_EVERY)
             if time.monotonic() - maintained >= GIT_MAINTAIN_EVERY:
-                maintained = time.monotonic()
                 self._maintain_repo()
+                maintained = time.monotonic()  # the period counts from the end of a pass
 
     def _maintain_repo(self):
         """Pack refs and gc (Repository.maintain). Never raises."""

@@ -231,8 +231,9 @@ class Repository:
             self.git("pack-refs", "--all")
         info["pack_refs_s"], start = time.monotonic() - start, time.monotonic()
         # gc.packRefs off: refs were packed above under refs_lock, never while the world writes one
+        # pack.threads=2: a full repack leaves the world's other git work some cores
         gc = ("-c", "gc.autoDetach=false", "-c", "gc.cruftPacks=true", "-c", "gc.packRefs=false",
-              "gc", "--quiet")
+              "-c", "pack.threads=2", "gc", "--quiet")
         try:
             self.git(*gc, "--auto", timeout=1800, group=True)
         finally:
