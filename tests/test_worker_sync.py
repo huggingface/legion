@@ -9,7 +9,7 @@ import pytest
 
 from flock.worker.sync import MODES_FILE, BucketSync, apply_modes, collect_modes, parse_bucket
 
-from .worker_fakes import MemoryStore, runtime, until
+from .worker_fakes import HangStore, MemoryStore, runtime, until
 
 
 def test_parse_bucket():
@@ -946,3 +946,38 @@ async def test_no_base_and_no_restore_without_free_disk(tmp_path, umask022, monk
     monkeypatch.setattr(shutil, "disk_usage", lambda p: full)
     rt2, res = await _restored(tmp_path / "b", store)
     assert res.failed == [PRE + BASE_TAR] and not rt2.sync.mirror_deletes(rt2)
+
+
+async def test_a_hung_push_times_out_and_the_agent_waits_for_its_thread(tmp_path, monkeypatch):
+    aborts = []
+    monkeypatch.setattr("huggingface_hub.utils._xet.abort_xet_session", lambda: aborts.append(1))
+    monkeypatch.setenv("FLOCK_PUSH_TIMEOUT_S", "1")
+    store = HangStore()
+    rt, _ = runtime(tmp_path, sync=BucketSync(store, "sw"))
+    pre = "sw/researcher/researcher-0001/"
+    try:
+        await rt.setup(restore=False)
+        rt.workdir.mkdir(parents=True, exist_ok=True)
+        (rt.workdir / "f.txt").write_text("x")
+        await rt.sync_now("periodic")
+        # the session went up before the workdir push hung
+        assert store.order == ["upload", f"sync_up:{pre}workdir"]
+        assert pre + "sessions/researcher-0001.state.json" in store.files
+        assert rt.dirty and rt.unsynced == "periodic sync timed out after 1 s in step sync_up"
+        assert aborts == [1] and rt.sync.busy(rt)
+        await rt.sync_now("periodic")  # its thread still runs: no second push
+        assert len(store.order) == 2 and "previous push still running" in rt.unsynced
+        store.gate.set()
+        await until(lambda: not rt.sync.busy(rt))
+        await rt.sync_now("periodic")
+        assert rt.unsynced is None and not rt.dirty and pre + "workdir/f.txt" in store.files
+        # a drain's push that hangs: no retry, no xet abort (other agents' pushes run)
+        store.gate.clear()
+        rt.sync.stop_rebase = True
+        (rt.workdir / "f.txt").write_text("y")
+        n = len(store.order)
+        await rt.sync_now("drain")
+        assert rt.unsynced.startswith("drain sync timed out") and aborts == [1]
+        assert store.order[n:].count(f"sync_up:{pre}workdir") == 1
+    finally:
+        store.gate.set()

@@ -216,3 +216,22 @@ class GatedStore(MemoryStore):
         if not self.gate.wait(10):
             raise RuntimeError("gate never opened")
         super().download(files)
+
+
+class HangStore(MemoryStore):
+    """`sync_up` of a prefix containing `hang` blocks until `gate` is set (a hung xet commit);
+    `order` records each call ("upload", "sync_up:<prefix>")."""
+
+    def __init__(self, hang: str = "") -> None:
+        super().__init__()
+        self.hang, self.gate, self.order = hang, threading.Event(), []
+
+    def upload(self, files):
+        self.order.append("upload")
+        super().upload(files)
+
+    def sync_up(self, local, prefix, **kw):
+        self.order.append(f"sync_up:{prefix}")
+        if self.hang in prefix:
+            self.gate.wait(10)
+        super().sync_up(local, prefix, **kw)

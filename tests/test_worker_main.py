@@ -27,8 +27,9 @@ from flock.worker import main as wmain
 from flock.worker.comms import CommsHub
 from flock.worker.events import utcnow
 from flock.worker.main import ControllerClient, Worker, WorkerConfig
+from flock.worker.sync import BucketSync
 
-from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
+from .worker_fakes import HangStore, MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
 WID = "sw-researcher-w0000"
 
@@ -479,3 +480,29 @@ def test_workdir_ephemeral_rejects_escapes(bad):
     with pytest.raises(ValueError):
         WorkdirSpec(ephemeral=[bad])
     assert WorkdirSpec(ephemeral=["scratch"]).ephemeral == ["scratch/"]
+
+
+async def test_a_hung_push_does_not_stop_the_sync_cycle(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("huggingface_hub.utils._xet.abort_xet_session", lambda: None)
+    monkeypatch.setenv("FLOCK_PUSH_TIMEOUT_S", "1")
+    caplog.set_level("INFO", logger="flock.worker")
+    ctrl = FakeController()
+    store = HangStore(hang="/researcher-0001/")
+    names = ["researcher-0001", "researcher-0002"]
+    ctrl.batches = [[AssignCommand(agent=n, type="researcher", spec=spec(idle_grace="10s"),
+                                   restore=False) for n in names],
+                    [PromptCommand(agent=n, prompt_id=n, text="go") for n in names]]
+    worker, _ = make_worker(tmp_path, ctrl, sync=BucketSync(store, "sw"))
+    run = asyncio.create_task(worker.run())
+    try:
+        await until(lambda: "sync cycle: 2 of 2 agents" in caplog.text, timeout=5)
+        assert "sync_up:sw/researcher/researcher-0002/workdir" in store.order
+        assert "researcher-0001: periodic sync timed out after 1 s in step sync_up" in caplog.text
+        await until(lambda: "researcher-0001: periodic push skipped: previous push still running"
+                    in caplog.text, timeout=5)
+        await worker.drain("test")
+        assert worker.agents["researcher-0001"].unsynced.startswith("drain sync skipped")
+        assert worker.agents["researcher-0002"].unsynced is None
+    finally:
+        store.gate.set()
+    assert await asyncio.wait_for(run, 5) == 0

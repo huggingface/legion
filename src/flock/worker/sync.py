@@ -57,6 +57,18 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   push after a restore uploads only real changes; session and harness files are marked as
   pushed (`_mark`).
 
+Push order and timeout (v8, 2026-11-06: ~20 of 28 workers' periodic syncs hung for hours
+inside an xet upload commit, which has no timeout; one stuck push stopped every later cycle):
+
+- A push uploads the changed session, state and harness files first, then the workdir, then
+  `meta.json` (it describes the mirrored workdir). A push that hangs or is cut keeps the session.
+- `AgentRuntime.sync_now` gives each push `push_timeout()` s (env FLOCK_PUSH_TIMEOUT_S, default
+  1800). On timeout the agent stays dirty and `unsynced` names the step it was in
+  (`BucketSync.step`); a periodic push then aborts the process's xet session (`abort_xet`), not
+  during a drain or preempt nor while a restore runs (it would cancel their transfers too).
+- The timed-out push's thread cannot be killed: while it runs (`BucketSync.busy`) the agent's
+  pushes are skipped, so its stale plan never lands after newer files.
+
 Base tar (the type's `workdir.base: true`; off by default). A restore of N small files costs N
 downloads; a base turns most of them into one:
 
@@ -116,6 +128,7 @@ BASE_TAR = "workdir.base.tar"  # under the agent prefix (module docstring, "Base
 BASE_JSON = "workdir.base.json"
 RESTORE_BATCH = 1000  # default of FLOCK_RESTORE_BATCH
 RESTORE_THREADS = 4  # default of FLOCK_RESTORE_THREADS
+PUSH_TIMEOUT_S = 1800  # default of FLOCK_PUSH_TIMEOUT_S
 # The type's `worker:` values for this module (sync_exclude, restore_batch, restore_threads),
 # set live by `Worker.apply_knobs`; each one present wins over its env variable.
 SPEC_KNOBS: dict[str, object] = {}
@@ -139,6 +152,25 @@ def restore_threads() -> int:
     """Batches of one agent's restore downloaded in parallel: the spec's, else env
     FLOCK_RESTORE_THREADS (>= 1), else RESTORE_THREADS."""
     return SPEC_KNOBS.get("restore_threads") or _env_int("FLOCK_RESTORE_THREADS", RESTORE_THREADS, 32)
+
+
+def push_timeout() -> int:
+    """Seconds one push may take (env FLOCK_PUSH_TIMEOUT_S, default PUSH_TIMEOUT_S): then
+    `AgentRuntime.sync_now` gives up on it (module docstring, "Push timeout")."""
+    return _env_int("FLOCK_PUSH_TIMEOUT_S", PUSH_TIMEOUT_S)
+
+
+def abort_xet() -> None:
+    """huggingface_hub's `abort_xet_session`: cancels this process's in-flight xet transfers
+    (every agent's, also restores) and drops the shared session; the next call gets a new one."""
+    try:
+        from huggingface_hub.utils import _xet
+    except ImportError:
+        return
+    if (abort := getattr(_xet, "abort_xet_session", None)) is None:
+        log.warning("huggingface_hub has no abort_xet_session; xet session kept")
+        return
+    abort()
 
 
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
@@ -794,6 +826,8 @@ class BucketSync:
         self._quota_note: dict[str, str] = {}  # per agent prefix: the quota note last queued
         self._base: dict[str, dict] = {}  # per agent prefix: its committed workdir.base.json
         self._building: set[str] = set()  # agent prefixes with a base tar being made
+        self.step: dict[str, str] = {}  # per agent prefix: the push step last started
+        self._running: dict[str, set[int]] = {}  # per agent prefix: its running push threads
         self.stop_rebase = False  # set by drain/preempt: base builds stop, none start
         self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]
@@ -851,16 +885,42 @@ class BucketSync:
             self.stats.add("errors", "push_failed")
             raise
 
+    async def _thread(self, rt: AgentRuntime, step: str, fn, *args):
+        """`asyncio.to_thread` for one push step: `step[prefix]` names it (a push timeout's log
+        line) and `busy()` stays true while the thread runs, also after its push was cancelled."""
+        pre = self.prefix(rt)
+        self.step[pre] = step
+        running = self._running.setdefault(pre, set())
+
+        def run():
+            me = threading.get_ident()
+            running.add(me)
+            try:
+                return fn(*args)
+            finally:
+                running.discard(me)
+
+        return await asyncio.to_thread(run)
+
+    def busy(self, rt: AgentRuntime) -> bool:
+        """A push thread of the agent is still running (a timed-out push's may never end)."""
+        return bool(self._running.get(self.prefix(rt)))
+
     async def _push(self, rt: AgentRuntime, rebase: bool = False) -> int:
         pre = self.prefix(rt)
         if pre in self._restoring:  # never mirror a half-restored agent (module docstring)
             log.warning("%s: push skipped, its restore is still running", rt.name)
             return 0
+        # sessions first: a workdir push that hangs or is cut (drain, preempt) keeps them
+        files = self._changed(self.collect(rt))
+        if files:
+            await self._thread(rt, "sessions", self.store.upload, files)
+            self._mark(files)
         meta: list[tuple[Path, str]] = []
         if rt.spec.persist_workdir and rt.workdir.is_dir():
             exclude = workdir_excludes() + ephemeral_excludes(rt.spec)
             ws = WorkdirStats()
-            await asyncio.to_thread(write_modes, rt.workdir, ws, exclude)
+            await self._thread(rt, "walk", write_modes, rt.workdir, ws, exclude)
             rt.workdir_files, rt.workdir_stats = ws.files, ws
             self._quota(rt, ws)
             stats = {"files": ws.files, "bytes": ws.bytes}
@@ -876,18 +936,17 @@ class BucketSync:
             w = rt.spec.workdir or WorkdirSpec()
             if not (w.base and (pre in self._base or (rebase and delete))
                     and await self._push_base(rt, exclude, w, rebase and delete, ws)):
-                await asyncio.to_thread(self.store.sync_up, rt.workdir, pre + "workdir",
-                                        delete=delete, exclude=exclude)
+                await self._thread(rt, "sync_up", functools.partial(
+                    self.store.sync_up, rt.workdir, pre + "workdir", delete=delete,
+                    exclude=exclude))
                 if pre in self._base and delete:  # base turned off: the full mirror replaces it
-                    await asyncio.to_thread(self.store.delete, [pre + BASE_JSON, pre + BASE_TAR])
+                    await self._thread(rt, "delete_base", self.store.delete,
+                                       [pre + BASE_JSON, pre + BASE_TAR])
                     self._base.pop(pre)
-        files = self._changed(self.collect(rt)) + meta
-        if files:
-            await asyncio.to_thread(self.store.upload, files)
-            self._mark(files)
-            if meta:
-                self._meta[pre] = stats
-        return len(files)
+        if meta:  # after the workdir: meta.json describes the mirrored workdir
+            await self._thread(rt, "meta", self.store.upload, meta)
+            self._meta[pre] = stats
+        return len(files) + len(meta)
 
     def _index_path(self, rt: AgentRuntime) -> Path:
         return rt.sessions_dir / f"{rt.name}.base-index.json"
@@ -906,15 +965,15 @@ class BucketSync:
 
         async def send() -> dict[str, float | None]:
             remote = {r[len(dpre):]: mt for r, mt in
-                      await asyncio.to_thread(self.store.list_info, dpre)}
+                      await self._thread(rt, "list", self.store.list_info, dpre)}
             up = [(rt.workdir / r, dpre + r) for r, mt in files.items()
                   if remote.get(r) is None or abs(remote[r] - mt) > 2e-3]
             if up:
-                await asyncio.to_thread(self.store.upload, up)
+                await self._thread(rt, "upload_delta", self.store.upload, up)
             return remote
 
         if base is not None:
-            files, links, deleted = await asyncio.to_thread(delta)
+            files, links, deleted = await self._thread(rt, "delta", delta)
         if may_rebase and (base is None or time.time() - base["created_at"] >= w.base_interval_s
                            or len(files) + len(links) + len(deleted) > w.base_delta_files):
             if not _fits([(rt.sessions_dir, ws.bytes + ws.files * TAR_PER_FILE)]):
@@ -922,7 +981,7 @@ class BucketSync:
                             rt.name, ws.summary())
             elif (new := await self._make_base(rt, exclude)) is not None:
                 base = new
-                files, links, deleted = await asyncio.to_thread(delta)
+                files, links, deleted = await self._thread(rt, "delta", delta)
         if base is None:
             return False
         remote = await send()
@@ -932,7 +991,7 @@ class BucketSync:
             await asyncio.sleep(0.1)
         if self._base.get(pre) is not base:  # ... and was committed: diff against it
             base = self._base[pre]
-            files, links, deleted = await asyncio.to_thread(delta)
+            files, links, deleted = await self._thread(rt, "delta", delta)
             remote = await send()
         if base.get("deleted", []) != deleted or base.get("links", {}) != links:
             await self._write_base(rt, {**base, "deleted": deleted, "links": links})
@@ -952,9 +1011,9 @@ class BucketSync:
             index = _load_index(self._index_path(rt))
             return [dpre + r for r in remote if stale(index, r)]
 
-        gone = await asyncio.to_thread(stale_all)
+        gone = await self._thread(rt, "stale", stale_all)
         if gone:  # deltas now in the base, or deleted
-            await asyncio.to_thread(self.store.delete, gone)
+            await self._thread(rt, "delete_stale", self.store.delete, gone)
         return True
 
     async def _make_base(self, rt: AgentRuntime, exclude: list[str]) -> dict | None:
@@ -967,13 +1026,13 @@ class BucketSync:
         self._building.add(pre)
         try:
             t0 = time.time()
-            index = await asyncio.to_thread(write_base_tar, rt.workdir, exclude, tar,
-                                            lambda: self.stop_rebase)
+            index = await self._thread(rt, "base_tar", write_base_tar, rt.workdir, exclude, tar,
+                                       lambda: self.stop_rebase)
             if index is None or self.stop_rebase:
                 log.info("%s: workdir base build stopped (drain or preempt)", rt.name)
                 return None
-            await asyncio.to_thread(_write_synced, new_idx, json.dumps(index))
-            await asyncio.to_thread(self.store.upload, [(tar, pre + BASE_TAR)])
+            await self._thread(rt, "base_index", _write_synced, new_idx, json.dumps(index))
+            await self._thread(rt, "upload_base", self.store.upload, [(tar, pre + BASE_TAR)])
             base = {"created_at": t0, "files": len(index),
                     "bytes": sum(s for _, s in index.values()), "deleted": [], "links": {}}
             await self._write_base(rt, base)
@@ -990,7 +1049,7 @@ class BucketSync:
         path = rt.sessions_dir / f"{rt.name}.base.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(base))
-        await asyncio.to_thread(self.store.upload, [(path, self.prefix(rt) + BASE_JSON)])
+        await self._thread(rt, "manifest", self.store.upload, [(path, self.prefix(rt) + BASE_JSON)])
         self._base[self.prefix(rt)] = base
 
     async def _restore_base(self, rt: AgentRuntime,

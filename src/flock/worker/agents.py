@@ -48,7 +48,7 @@ from flock.worker.adapters.base import (
 )
 from flock.worker.events import Outbox, SessionLog, utcnow
 from flock.worker.loop import render
-from flock.worker.sync import WorkdirStats, reset_ephemeral
+from flock.worker.sync import WorkdirStats, abort_xet, push_timeout, reset_ephemeral
 from flock.world import hub as world_hub
 
 if TYPE_CHECKING:
@@ -163,6 +163,7 @@ class AgentRuntime:
         self.last_sync: datetime | None = None
         self.unsynced: str | None = None  # the last push's error (heartbeat `unsynced`)
         self.dirty = False
+        self._push_timed_out = False  # the last push timed out (its thread may still run)
         self._env_dropped_rev: str | None = None
         self.allow_starts = True
         self._stop_req: str | None = None
@@ -938,17 +939,39 @@ class AgentRuntime:
             log.warning("%s: %s sync skipped, the agent's restore has not finished; "
                         "the bucket copy stays as it is", self.name, reason)
             return
+        step = lambda: self.sync.step.get(self.sync.prefix(self), "?")
+        if self._push_timed_out and self.sync.busy(self):  # its stale plan must not land later
+            self.unsynced = f"{reason} sync skipped: previous push still running ({step()})"
+            log.warning("%s: %s push skipped: previous push still running (step %s)",
+                        self.name, reason, step())
+            return
+        self._push_timed_out = False
         self.emit("sync", {"reason": reason})
         self.save_state()
         # the last push before a worker exits (drain, unassign) is retried once
         for attempt in range(2 if reason in ("drain", "unassign") else 1):
+            self.dirty = False  # a change during the push marks the agent dirty again
+            limit = push_timeout()
             try:
-                await self.sync.push(self, rebase=reason == "periodic")
-                self.last_sync, self.dirty, self.unsynced = utcnow(), False, None
+                async with asyncio.timeout(limit) as tm:
+                    await self.sync.push(self, rebase=reason == "periodic")
+                self.last_sync, self.unsynced = utcnow(), None
                 return
             except Exception as e:  # noqa: BLE001 - reported in the heartbeat, never dropped
-                self.unsynced = f"{reason} sync failed: {type(e).__name__}: {e}"[:300]
-                log.warning("%s: %s (attempt %d)", self.name, self.unsynced, attempt + 1)
+                self.dirty = True
+                if not tm.expired():
+                    self.unsynced = f"{reason} sync failed: {type(e).__name__}: {e}"[:300]
+                    log.warning("%s: %s (attempt %d)", self.name, self.unsynced, attempt + 1)
+                    continue
+                self._push_timed_out = True
+                self.unsynced = f"{reason} sync timed out after {limit} s in step {step()}"
+                log.warning("%s: %s; agent stays dirty", self.name, self.unsynced)
+                # not in a drain/preempt (other agents' pushes run) nor during a restore
+                if reason == "periodic" and not self.sync.stop_rebase \
+                        and not self.sync.restore_progress:
+                    log.warning("%s: aborting the xet session for the next push", self.name)
+                    abort_xet()
+                return
 
     def heartbeat(self) -> AgentHeartbeat:
         working = self.turn_id is not None or self.awaiting or (self.phase == "starting" and bool(self.buffer))
