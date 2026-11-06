@@ -21,6 +21,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -955,11 +956,6 @@ class AgentRuntime:
         )
 
     def endpoint(self) -> str | None:
-        """`host:port` of the model server this agent is pinned to (`base_urls`, by
-        `pick_endpoint`): the one its last turn used, else the one it will use."""
-        from flock.worker.adapters.llm import endpoint_host, pick_endpoint
-
-        r = self.spec.resolved_model
-        urls = r.provider.endpoints if r is not None else []
-        return endpoint_host(getattr(self.adapter, "_endpoint", None)
-                             or pick_endpoint(self.name, urls))
+        """`host:port` of the model server the agent's Trial calls (the provider's `base_url`)."""
+        url = self.spec.resolved_model.provider.base_url if self.spec.resolved_model else None
+        return (urlsplit(url).netloc or url) if url else None

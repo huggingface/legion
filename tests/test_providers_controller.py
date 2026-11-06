@@ -289,7 +289,8 @@ async def test_preflight_sends_harbor_models_as_harbors_pi_does(preflight_client
 
 async def test_preflight_fails_without_a_tool_call_or_its_follow_up(preflight_client):
     spec = pspec(preflight_providers(), pixel={**HB, "model": "gpu1:Qwen/Small"})
-    for kw, err in (({"tool_call": False}, "no tool call"), ({"follow_up_fails": True}, "follow-up turn")):
+    for kw, err in (({"tool_call": False}, "no tool call"), ({"text_call": True}, "no tool call"),
+                    ({"follow_up_fails": True}, "follow-up turn")):
         fake, _ = fake_provider(**kw)
         async with await preflight_client(fake, SECRETS) as c:
             [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
