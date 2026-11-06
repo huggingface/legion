@@ -22,7 +22,7 @@
 #   CONTAINER_MOUNTS and <run>/hosts. Agent files go to /work/flock/agents/{work,llm} on the
 #   container root (node disk, deleted with the container; not /tmp, a tmpfs counted against the
 #   job memory). The paths carry no worker id, so a slot relaunched under a new id restores its
-#   agents to the same absolute paths: a Pi session resumes only from the cwd it was written from.
+#   agents to the same absolute paths.
 #   Without an image flock-worker runs here, in this job's shell (exec), with the env file's paths.
 # - FLOCK_HARNESS=harbor (the env file): each agent is a Harbor Trial in a rootless podman
 #   container, which cannot run inside Enroot, so flock-worker runs here (never in CONTAINER) as

@@ -66,8 +66,7 @@ def minimal_env(
 def credential_env_names(spec: TypeSpec) -> list[str]:
     """Every environment variable through which a harness process holds its provider key: the
     provider's `api_key_env` (the harness reads it itself). Tool calls (`flock-tool`,
-    docs/tools.md) get none of them. Empty for a harness-native model, whose keys are ordinary
-    declared `secrets`."""
+    docs/tools.md) get none of them. Empty for a type not yet resolved in a SwarmSpec."""
     r = spec.resolved_model
     return [] if r is None else [r.provider.api_key_env]
 

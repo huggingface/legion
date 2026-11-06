@@ -295,7 +295,7 @@ env variable, then the default):
 
 | Nonreclaimable / limit | Worker |
 |---|---|
-| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it); recycles the agent with the largest harness PSS at its next turn boundary, at most one per `FLOCK_MEM_RECYCLE_GAP_S` (600) |
+| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it), for the controller's rotation (below). The per-agent recycle needs a harness process PSS, which neither `llm` nor `harbor` reports yet |
 | ≥ `FLOCK_MEM_DRAIN` (0.85) | drain: turns still running after `FLOCK_MEM_DRAIN_DEADLINE_S` (300) are interrupted (`drain_deadline`, resumed with `resume_prompt` after the restart), sync, exit 0: a planned restart |
 | ≥ `FLOCK_MEM_PREEMPT` (0.93), or a new `oom_kill` in `memory.events` | `preempt("memory")`, as on SIGUSR1: exit 75, relaunched at once |
 

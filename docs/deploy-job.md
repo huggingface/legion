@@ -66,7 +66,7 @@ HF Jobs network group, so worker traffic never crosses an edge or a proxy.
 ## Deploy
 
 ```sh
-export HF_TOKEN=... ANTHROPIC_KEY=... FLOCK_TOKEN=$(openssl rand -hex 24)
+export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
 W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)
 scripts/deploy-job.sh "$W" --group flock-run3 [--flavor cpu-upgrade] [--timeout 48h] \
     [--secret OPENAI_API_KEY ...] [--dry-run]

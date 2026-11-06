@@ -171,7 +171,7 @@ requests show the model the proper form; the pi message carries `toolCallsFromTe
 
 - Session file: `$FLOCK_LLM_HOME/sessions/<agent>/<session id>.jsonl` (`/state/llm` in the
   worker image), one Chat Completions message per line, appended as the turn runs. It is the
-  adapter's only `session_files()` entry, synced to the bucket like Pi's.
+  adapter's only `session_files()` entry, synced to the bucket.
 - Resume reloads it (a missing file is a `ResumeError`: fresh session plus the restart prompt).
   The system message is rebuilt on every start from the preamble and the workdir's `AGENTS.md`,
   so prompt changes apply to old sessions. Tool calls left without a result by an interrupted
