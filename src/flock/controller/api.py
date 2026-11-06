@@ -71,11 +71,9 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorkerStatus,
-    comms_tools,
     loop_refusals,
     type_spec_rev,
     worker_type_spec,
-    world_tools,
 )
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
@@ -254,7 +252,7 @@ def agent_status(
         name=a["name"],
         swarm=a["swarm"],
         type=a["type"],
-        harness=ts.harness if ts else Harness.llm,  # its type left the spec: a placeholder
+        harness=ts.harness if ts else Harness.harbor,  # its type left the spec: a placeholder
         model=ts.model if ts else "unknown",
         provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},
@@ -907,11 +905,6 @@ def create_app(
             raise HTTPException(400, "; ".join(refused))
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
-            if old is not None and old.harness != ts.harness and store.list_agents(swarm, type_name):
-                raise HTTPException(400, f"types.{type_name}.harness: a running type's harness "
-                                         f"cannot change ({old.harness.value} -> "
-                                         f"{ts.harness.value}); remove the type first or use a "
-                                         "new type name")
             # a harbor worker prepares the task, tools and resources once and each agent keeps
             # its Trial inputs: only the roster (agent counts) may change live
             fixed = old is not None and old.harbor and ts.harbor and [
@@ -1563,22 +1556,6 @@ def create_app(
             reap_ephemeral(hb)
         out: dict[str, Any] = {"ok": True}
         spec = sw["spec"] if sw else None
-        if spec is not None and spec.tools_version is not None and w is not None:
-            # the swarm's current tools (docs/tools.md): a re-apply reaches running workers here
-            ts = spec.types.get(w["type"])
-            out["tools"] = {"version": spec.tools_version, "select": ts.folder_tools if ts else None}
-        if spec is not None and spec.comms is not None and w is not None:
-            # comms rules and protocols are live (docs/comms.md): a re-apply reaches workers here
-            ts = spec.types.get(w["type"])
-            out["comms"] = {**spec.comms.model_dump(mode="json", exclude={"kickoff"}),
-                            "tools": comms_tools(ts, spec.comms) if ts else []}
-        if spec is not None and spec.world is not None and w is not None:
-            # the world's manifest, re-fetched at every apply (docs/world.md)
-            ts = spec.types.get(w["type"])
-            out["world"] = {**spec.world.model_dump(mode="json", exclude={"down_pause_s"}),
-                            "tools": world_tools(ts, spec.world) if ts else []}
-            if (down := health.down_since.get(w["swarm"])) is not None:
-                out["world"]["down_since"] = _dt(down).isoformat()  # the hub refuses at once
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
             # docs/live.md: a changed type spec (prompts, limits, ...) reaches the worker here; it applies them at each agent's next turn boundary

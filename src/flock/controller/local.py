@@ -77,8 +77,8 @@ def _children_map() -> dict[int, list[int]]:
 
 
 def descendants(pid: int) -> list[int]:
-    """Every live descendant of `pid`, also those in their own session (the `llm` harness starts
-    each bash tool with start_new_session, outside the worker's process group)."""
+    """Every live descendant of `pid`, also those in their own session (outside the worker's
+    process group)."""
     kids, found, todo = _children_map(), [], [pid]
     while todo:
         for child in kids.get(todo.pop(), []):
@@ -121,8 +121,8 @@ class _Proc:
 @dataclass
 class LocalJobsClient:
     """Launch, inspect and cancel worker subprocesses. `root` holds `agents/` (WORK_ROOT,
-    shared by all workers so a restarted slot finds its agents' workdirs), `state/llm`
-    (FLOCK_LLM_HOME) and `logs/<worker>.log` (stdout and stderr of each process)."""
+    shared by all workers so a restarted slot finds its agents' workdirs) and
+    `logs/<worker>.log` (stdout and stderr of each process)."""
 
     root: Path
     command: list[str] = field(default_factory=lambda: list(WORKER_COMMAND))
@@ -149,7 +149,6 @@ class LocalJobsClient:
                 if not k.startswith("FLOCK_") or k in KEEP_FLOCK_ENV}
         local = {
             "WORK_ROOT": str(self.work_root),
-            "FLOCK_LLM_HOME": str(self.root / "state" / "llm"),
             # The worker exits when the controller process is gone (no orphans after a kill -9).
             "FLOCK_LOCAL_PARENT_PID": str(os.getpid()),
         }
@@ -183,8 +182,7 @@ class LocalJobsClient:
         with self._lock:
             self.procs[job_id] = _Proc(job_id, worker_id, popen, dict(labels), dict(env),
                                        time.monotonic(), float(timeout), log_file, handle,
-                                       kill_grace=HARBOR_STOP_GRACE
-                                       if spec.harness.value == "harbor" else 0.0)
+                                       kill_grace=HARBOR_STOP_GRACE)
         log.info("launched %s for %s (pid %d)", job_id, worker_id, popen.pid)
         return job_id
 

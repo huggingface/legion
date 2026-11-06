@@ -58,8 +58,10 @@ class TinyRun:
         return "spec.yaml"
 
     def flock(self, *args: str, code: int = 0) -> str:
-        """`flock ARGS` in-process; asserts the exit code, returns stdout and stderr."""
-        r = CliRunner().invoke(cli.app, list(args))
+        """`flock ARGS` (`flock-agent` for spawn and remove) in-process; asserts the exit code,
+        returns stdout and stderr."""
+        r = CliRunner().invoke(cli.agent_app if args[0] in ("spawn", "remove") else cli.app,
+                               list(args))
         assert r.exit_code == code, (args, r.output, r.exception)
         return r.output
 

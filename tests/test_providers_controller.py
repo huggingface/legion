@@ -262,8 +262,7 @@ async def test_preflight_probes_chat_completions(preflight_client):
     assert chat["usage_reported"] and chat["warning"] is None
     chats = [x for x in seen if x["path"] == "chat"]
     assert len(chats) == 2 and chats[0]["auth"] == "Bearer v"
-    assert "stream" not in chats[0] and chats[0]["chat_template_kwargs"] == {"enable_thinking": False}
-    assert "response_format" not in chats[0]  # the agent's output schema, not the probe's
+    assert "stream" not in chats[0] and "chat_template_kwargs" not in chats[0]  # Pi sends no `extra`
     assert chats[0]["tools"][0]["function"]["name"] == "get_time" and chats[0]["temperature"] == 0
     m2 = chats[1]["messages"]
     assert [m["role"] for m in m2] == ["user", "assistant", "tool"]

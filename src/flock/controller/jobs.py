@@ -72,9 +72,8 @@ fi
 # Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
 command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
 export WORK_ROOT=/work/agents
-export FLOCK_LLM_HOME=/state/llm
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/llm
+mkdir -p /work/agents
 echo "bootstrap: $(($(date +%s) - t0)) s"  # flock-worker logs the Python it runs on
 exec flock-worker
 """

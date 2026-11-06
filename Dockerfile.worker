@@ -24,10 +24,9 @@ RUN uv python install 3.12 \
 
 # Fixed paths: restore puts files back at identical absolute paths on every worker.
 ENV WORK_ROOT=/work/agents \
-    FLOCK_LLM_HOME=/state/llm \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /work/agents /state/llm
+RUN mkdir -p /work/agents
 
 WORKDIR /work
 ENTRYPOINT ["flock-worker"]

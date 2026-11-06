@@ -19,7 +19,7 @@
 # - CONTAINER (an image from CONTAINER_IMAGE_<type> / FLOCK_CONTAINER_IMAGE / CONTAINER_IMAGE):
 #   flock-worker runs in an Enroot/Pyxis container through `srun ... worker.sbatch --inner`: home
 #   not mounted, the shared disk read-only and limited to the venv, repo, slurm dir,
-#   CONTAINER_MOUNTS and <run>/hosts. Agent files go to /work/flock/agents/{work,llm} on the
+#   CONTAINER_MOUNTS and <run>/hosts. Agent files go to /work/flock/agents/work on the
 #   container root (node disk, deleted with the container; not /tmp, a tmpfs counted against the
 #   job memory). The paths carry no worker id, so a slot relaunched under a new id restores its
 #   agents to the same absolute paths.
@@ -51,12 +51,12 @@
 set -uo pipefail  # no -e: the traps and the wait loop must keep running after a signal
 
 # run_worker: make the agent dirs, write the secrets file, exec flock-worker without the secrets
-# in its environment. Input: VENV WORK_ROOT FLOCK_LLM_HOME SECRET_NAMES and the secrets.
+# in its environment. Input: VENV WORK_ROOT SECRET_NAMES and the secrets.
 run_worker() {
   local f v
   local -a unset_args=()
   umask 077
-  mkdir -p "$WORK_ROOT" "$FLOCK_LLM_HOME" || { echo "worker.sbatch: cannot create $WORK_ROOT" >&2; exit 2; }
+  mkdir -p "$WORK_ROOT" || { echo "worker.sbatch: cannot create $WORK_ROOT" >&2; exit 2; }
   f=$(mktemp "$(dirname "$WORK_ROOT")/flock-worker-secrets.XXXXXX") || exit 2
   for v in $SECRET_NAMES; do  # only the names that are set: an empty NAME= would shadow nothing useful
     [ -z "${!v:-}" ] || printf '%s=%s\n' "$v" "${!v}" >> "$f" || exit 2
@@ -162,7 +162,6 @@ elif [ -z "$CONTAINER_IMAGE" ]; then
 else
   # ---------------------------------------------------------------- the container
   export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent>
-  export FLOCK_LLM_HOME=/work/flock/agents/llm    # llm harness sessions
   container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for FLOCK_CTL_HOST_FILE
 fi
 

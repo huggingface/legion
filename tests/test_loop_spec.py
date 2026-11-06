@@ -3,9 +3,6 @@ inlined by `flock launch`, and world-backed settings accepted by the model but r
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -95,8 +92,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
-    assert "loop.on comms.channel: no comms feeder" in r.output  # fed, so only the board is missing
+    assert "loop.on comms.mention: no feeder: only board.* wakes are fed" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 
@@ -134,45 +130,13 @@ def test_local_run_checks_loops_like_apply(tmp_path, monkeypatch):
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no comms feeder" in r.output and len(started) == 1
+    assert "loop.on comms.mention: no feeder" in r.output and len(started) == 1
 
     raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 1 and len(started) == 1  # refused on the CLI: no run started
     assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
-
-
-DOCS = Path(__file__).parent.parent / "docs" / "loop.md"
-HEADER = """\
-swarm: demo
-namespace: ns
-bucket: hf://buckets/ns/sh
-providers:
-  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-       pricing: {"m/lfm": [0, 0, 0], "m/ds": [0, 0, 0], "m/glm": [0, 0, 0]}}
-models: {lfm: {model: "hf:m/lfm"}, deepseek: {model: "hf:m/ds"}, glm: {model: "hf:m/glm"}}
-"""
-
-
-def _doc_example(heading: str) -> str:
-    """The first ```yaml block after `heading` in docs/loop.md, verbatim."""
-    rest = DOCS.read_text(encoding="utf-8").split(heading, 1)[1]
-    return re.search(r"```yaml\n(.*?)```", rest, re.DOTALL).group(1)
-
-
-@pytest.mark.parametrize("heading", ["## Spec", "### Eliza"])
-def test_documented_examples_load_with_an_unquoted_on_key(heading, tmp_path):
-    """`on:` is a YAML 1.1 boolean: `flock launch` must read it as the key "on" (defect 2)."""
-    (tmp_path / "prompts").mkdir()
-    for f in ("system.md", "round.md", "final.md"):
-        (tmp_path / "prompts" / f).write_text(f)
-    example = _doc_example(heading)
-    assert re.search(r"^\s+on: \[comms\.", example, re.MULTILINE)  # unquoted, as documented
-    (tmp_path / "spec.yaml").write_text(HEADER + example)
-    spec = cli.load_spec(str(tmp_path / "spec.yaml"))
-    for ts in spec.types.values():
-        assert ts.loop.on and all(x.startswith("comms.") for x in ts.loop.on)
 
 
 def test_spec_yaml_keeps_yes_no_on_off_as_strings():

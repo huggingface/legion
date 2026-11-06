@@ -46,7 +46,6 @@ HOOK_EVENTS = ("agent_start", "agent_done", "turn")
 
 WORLD_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-RESERVED = frozenset({"bash", "done"})  # the llm harness's own tools
 
 
 class WorkspaceUpload(BaseModel):
@@ -84,8 +83,6 @@ class WorldTool(BaseModel):
     def _name(cls, v: str) -> str:
         if not TOOL_NAME_RE.match(v):
             raise ValueError(f"tool name {v!r} must match {TOOL_NAME_RE.pattern}")
-        if v in RESERVED:
-            raise ValueError(f"tool name {v!r} is reserved (the llm harness's own tool)")
         return v
 
     @field_validator("parameters")

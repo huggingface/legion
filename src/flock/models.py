@@ -133,10 +133,8 @@ class ProviderSpec(BaseModel):
 
     type: Literal["openai_compat", "anthropic"]
     base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
-    # Several servers of one model (openai_compat, the `llm` harness): each agent is pinned to one
-    # by a stable hash of its name (rendezvous hashing) and keeps it while it stays listed, so
-    # its prefix cache stays warm. `base_url` is the one-element form; with `base_urls` it
-    # defaults to the first; other harnesses use `base_url`.
+    # Several servers of one model (openai_compat): preflight probes each and health scrapes each
+    # one's metrics; agents call `base_url`, which defaults to the first.
     base_urls: list[str] | None = None
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
@@ -190,7 +188,7 @@ class ProviderSpec(BaseModel):
             if len(set(urls)) != len(urls):
                 raise ValueError("base_urls must not repeat a URL")
             if self.type != "openai_compat":
-                raise ValueError("base_urls is for openai_compat providers (the llm harness)")
+                raise ValueError("base_urls is for openai_compat providers")
             self.base_urls = urls
             if self.base_url is None:
                 self.base_url = urls[0]
@@ -213,8 +211,8 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only; kept for
-    # spec portability elsewhere.
+    # Raw request-body fields (swarmlab's `extra`). Not sent (Harbor's Pi cannot); kept for
+    # spec portability, with a warning at launch.
     extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
@@ -284,10 +282,15 @@ REMOVED: dict[str, set[str]] = {
     "LoopSpec": {"first", "context", "stagger", "stop_when"},
     "LoopWhile": {"idle_rounds", "score"},
     "LoopFinal": {"add_tools"},
-    "TypeSpec": {"tool_memory_mb", "node_heap_mb"},  # the removed pi harness's memory limits
+    # the removed pi harness's memory limits, the removed llm harness's settings
+    "TypeSpec": {"tool_memory_mb", "node_heap_mb", "context_tokens", "tool_choice", "done_tool",
+                 "bash", "chars_per_token", "tool_output_chars", "msgboard_invite"},
+    # the removed worker comms hub's budgets
+    "WorkerKnobs": {"comms_rate", "comms_burst", "comms_agent_rate", "comms_agent_burst",
+                    "comms_poll_cycle_s"},
 }
 _warned: set[tuple[str, str]] = set()
-REMOVED_HARNESSES = frozenset({"pi", "claude", "codex"})  # a stored spec gets a clear refusal
+REMOVED_HARNESSES = frozenset({"pi", "claude", "codex", "llm"})  # a stored spec: a clear refusal
 
 
 def _is_set(v: Any) -> bool:
@@ -622,11 +625,6 @@ class WorkerKnobs(_Removable):
 
     drain_budget_s: float | None = Field(default=None, gt=0)  # FLOCK_DRAIN_BUDGET_S
     sync_interval_s: float | None = Field(default=None, ge=10)  # SYNC_INTERVAL
-    comms_rate: float | None = Field(default=None, ge=0)  # FLOCK_COMMS_RATE (0: off)
-    comms_burst: float | None = Field(default=None, ge=1)  # FLOCK_COMMS_BURST
-    comms_agent_rate: float | None = Field(default=None, ge=0)  # FLOCK_COMMS_AGENT_RATE
-    comms_agent_burst: float | None = Field(default=None, ge=1)  # FLOCK_COMMS_AGENT_BURST
-    comms_poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # FLOCK_COMMS_POLL_CYCLE_S
     sync_exclude: list[str] | None = None  # FLOCK_SYNC_EXCLUDE (added to the defaults)
     restore_batch: int | None = Field(default=None, ge=1)  # FLOCK_RESTORE_BATCH
     restore_threads: int | None = Field(default=None, ge=1, le=32)  # FLOCK_RESTORE_THREADS
@@ -791,26 +789,10 @@ class TypeSpec(_Removable):
     turn_timeout: str = "30m"
     max_turns: int | None = None  # per prompt, passed to the harness
     max_budget_usd: float | None = None  # per prompt, passed to the harness
-    # harness llm only: transcript size (estimated tokens) that triggers compaction; None: 32k
-    context_tokens: int | None = None
-    # harness llm only: chat-completions `tool_choice` on every call: auto (default) | required |
-    # none | bash (force that tool). A forcing value makes each prompt one action.
-    tool_choice: Literal["auto", "required", "none", "bash"] | None = None
-    # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
-    # required. With it a forced turn runs several steps; without it, one action per prompt.
-    done_tool: bool | None = None
-    # harness llm only: false takes the `bash` tool away (the agent keeps its folder and comms
-    # tools); None: on.
-    bash: bool | None = None
-    # harness llm only: starting chars/token for the size estimate (calibrated online from the
-    # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
-    chars_per_token: float | None = None
-    tool_output_chars: int | None = None
     persist_workdir: bool = True
     workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
     worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
-    msgboard_invite: str | None = None  # name of the secret holding the invite code
     # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
     # `flock launch` refuses a name the folder does not define. None: no folder tools.
     tools: list[str] | Literal["all"] | None = None
@@ -888,20 +870,6 @@ class TypeSpec(_Removable):
             raise ValueError("must be >= 0")
         return v
 
-    @field_validator("chars_per_token")
-    @classmethod
-    def _cpt(cls, v: float | None) -> float | None:
-        if v is not None and not 0.5 <= v <= 8:
-            raise ValueError("chars_per_token must be between 0.5 and 8")
-        return v
-
-    @field_validator("tool_output_chars")
-    @classmethod
-    def _toc(cls, v: int | None) -> int | None:
-        if v is not None and v < 200:
-            raise ValueError("tool_output_chars must be >= 200")
-        return v
-
     @field_validator("harness", mode="before")
     @classmethod
     def _removed_harness(cls, v: Any) -> Any:
@@ -910,29 +878,13 @@ class TypeSpec(_Removable):
                              "or remove the swarm with flock <= cf322fc")
         return v
 
-    @field_validator("context_tokens")
-    @classmethod
-    def _context_tokens(cls, v: int | None) -> int | None:
-        if v is not None and v < 256:
-            raise ValueError("context_tokens must be >= 256")
-        return v
-
     @model_validator(mode="after")
-    def _bash_llm_only(self) -> TypeSpec:
-        if self.bash is False and self.harness != Harness.llm:
-            raise ValueError(f"bash: false: only the llm harness has a bash tool to take away "
-                             f"(this type's harness is {self.harness.value})")
-        if self.bash is False and self.tool_choice == "bash":
-            raise ValueError("bash: false contradicts tool_choice: bash (it forces the bash tool)")
+    def _checks(self) -> TypeSpec:
         if self.ephemeral and self.replicas:
             raise ValueError("ephemeral: true is for spawned agents only; set replicas: 0")
-        if (self.harness.value == "harbor") != (self.harbor is not None):
-            raise ValueError("the `harbor:` block goes with harness harbor, which needs it "
-                             "(written by the compile step of a flock.harbor spec)")
-        board = [x for x in (self.loop.on if self.loop else []) if x.startswith("board.")]
-        if board and self.harness.value != "harbor":
-            raise ValueError(f"loop.on {', '.join(board)}: board.* wakes come from harness "
-                             "harbor's board resource; use comms.* here")
+        if self.harbor is None:
+            raise ValueError("harness harbor needs the `harbor:` block (written by the compile "
+                             "step of a flock.harbor spec)")
         return self
 
     @field_validator("workers")
@@ -1016,7 +968,7 @@ class ComputeSpec(_Removable):
     venv: str | None = None  # written to the env file as FLOCK_VENV for the script
     secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
     # workers run in a container whose /tmp is RAM: every agent/harness path goes under this
-    # root instead: <root>/flock/<worker id>/{work,llm,home,hf,tmp}
+    # root instead: <root>/flock/<worker id>/{work,home,hf,tmp}
     container_root: str | None = None
     container_image: str | None = None  # an Enroot image (.sqsh): FLOCK_CONTAINER_IMAGE
 
@@ -1126,10 +1078,6 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
-            llm_only = ("tool_choice", "done_tool", "context_tokens", "chars_per_token",
-                        "tool_output_chars")
-            if ts.harness != Harness.llm and any(getattr(ts, f) is not None for f in llm_only):
-                raise ValueError(f"types.{type_name}: {', '.join(llm_only)} are for harness llm only")
             if r is None:
                 raise ValueError(
                     f"types.{type_name}.model: harness {ts.harness.value!r} needs a provider-backed "
@@ -1424,7 +1372,8 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
 # Placeholders the worker fills in loop prompts; any other `{name}` is left as written.
 LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
 NEEDS_WORLD = "needs a world (not in this version)"
-# board.*: the board resource's events (harness harbor); comms.*: the worker's comms hub
+# board.*: the board resource's events (harness harbor); comms.*: fed by the removed worker comms
+# hub (no feeder now: a warning at launch)
 _LOOP_SOURCE_RE = re.compile(r"^(board|comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 
@@ -1588,8 +1537,8 @@ class LoopSpec(_Removable):
 
 
 def hit_max_turns(turn_ended: dict) -> bool:
-    """A `turn_ended` that stopped at the type's `max_turns` (llm, Pi, Codex: `reason`; Claude:
-    `subtype`). Not a failed turn for a loop: with `tool_choice: required` it is how turns end."""
+    """A `turn_ended` that stopped at the type's `max_turns` (Pi: `reason`; Claude: `subtype`).
+    Not a failed turn for a loop."""
     return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
 
 
@@ -1707,7 +1656,8 @@ class RestoreProgress(BaseModel):
 
 
 class ToolCounters(BaseModel):
-    """One world tool's calls since this worker process started (world/hub.py)."""
+    """One world tool's calls since this worker process started (the removed worker world hub;
+    kept so stored heartbeats still load)."""
 
     n: int = 0
     err: int = 0
@@ -2072,7 +2022,7 @@ class PreflightResult(BaseModel):
     provider: str
     types: list[str]
     # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic) |
-    # "chat_completions" (openai_compat for llm types)
+    # "chat_completions" (openai_compat; Harbor's Pi)
     api: str
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
     # Not probed (e.g. the key is not in the controller's environment): neither ok nor failed.

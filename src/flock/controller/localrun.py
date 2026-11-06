@@ -7,7 +7,7 @@ controller) on 127.0.0.1 with a generated token; the reconcile loop launches wor
 `LocalJobsClient` as subprocesses. The run lives in `<data-dir>/<swarm>-<UTC time>/`:
 
     controller/   the controller's SQLite store and raw event streams
-    agents/       agent workdirs (WORK_ROOT)     state/   harness state (FLOCK_LLM_HOME)
+    agents/       agent workdirs (WORK_ROOT)
     logs/         controller.log, <worker>.log, world-<swarm>.log (a started world)
     run.json      the bundle: spec (secret-looking env values redacted), totals, per agent,
                   each type's loop and the budget

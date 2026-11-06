@@ -83,7 +83,7 @@ async def test_the_socket_names_the_agent_not_the_request(proxied, monkeypatch):
     # still AGENT's token: the controller's scope check refuses another agent's subtree
     assert ctrl.agent_calls[-1] == ("POST", "/agents/other-0001/spawn",
                                     "Bearer flock_at_leader", {})
-    with pytest.raises(RuntimeError, match="not allowed through the gateway"):
+    with pytest.raises(RuntimeError, match="not allowed for an agent"):
         await asyncio.to_thread(tools._call, "GET", "/workers")
 
 

@@ -45,8 +45,8 @@ TOOL_SCHEMA: dict[str, Any] = {
 
 
 def chat_request(r: ResolvedModel) -> dict[str, Any]:
-    """Turn one: non-streamed, temperature 0, `extra` on top."""
-    body: dict[str, Any] = {
+    """Turn one: non-streamed, temperature 0. A model's `extra` is not sent: Pi does not."""
+    return {
         "model": r.model_id,
         "messages": [{"role": "user", "content": PROMPT}],
         "tools": [{"type": "function", "function": {"name": "get_time", "description": TOOL_DESCRIPTION,
@@ -54,12 +54,7 @@ def chat_request(r: ResolvedModel) -> dict[str, Any]:
         "tool_choice": "auto",
         "temperature": 0,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        **(r.extra or {}),
     }
-    body.pop("stream", None)
-    # an agent's response_format describes its own output, which the get_time probe cannot match
-    body.pop("response_format", None)
-    return body
 
 
 class ProbeError(Exception):
@@ -175,8 +170,8 @@ def api_for(harness: Harness) -> str:
 
 
 def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str]]:
-    """Distinct provider-backed (provider, model id, reasoning, API, `extra`) in the spec, with
-    their types and the API to probe."""
+    """Distinct provider-backed (provider, model id, reasoning, API) in the spec, with their
+    types and the API to probe."""
     seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
     if spec.types:
         # lazy: harbor is an optional extra the controller runs without
@@ -186,7 +181,7 @@ def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str
         api = api_for(ts.harness)
         # Harbor's Pi sends the id without the provider prefix
         r = r.model_copy(update={"model_id": parse_model_name(r.model_id)[1]})
-        key = (r.provider_name, r.model_id, r.reasoning, api, json.dumps(r.extra, sort_keys=True))
+        key = (r.provider_name, r.model_id, r.reasoning, api)
         seen.setdefault(key, (r, [], api))[1].append(type_name)
     return list(seen.values())
 

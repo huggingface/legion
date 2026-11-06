@@ -28,8 +28,7 @@ import yaml
 from pydantic import ValidationError
 
 from flock.client import Client, ClientError, local_run
-from flock.models import SwarmSpec, comms_tools, loop_refusals
-from flock.registry import HARNESSES
+from flock.models import SwarmSpec, loop_refusals
 from flock.specrender import render, source_of
 
 
@@ -165,24 +164,12 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
                 ts.harbor.config[key] = was.harbor.config[key]
 
 
-# `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
-COMMS_WAKES = {f"comms.{k}": k for k in ("mention", "thread", "dm", "channel")}  # = controller.api.COMMS_WAKE_EVENTS values
-
-
 def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
-    """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
-    if ts.harbor is not None and src.startswith("board."):  # the board resource's watch
-        # shortcut: not checked against resources.board.wake (the plugin's kinds)
-        return None if "board" in ts.harbor.resources else "no feeder: the run has no board resource"
-    kind = COMMS_WAKES.get(src)
-    if kind is None:
-        return "no feeder in this version (comms.mention, comms.thread, comms.dm and comms.channel are fed)"
-    if spec.comms is None or not comms_tools(ts, spec.comms):
-        return ("no comms feeder: the type is not on the board (set `comms: true` and the "
-                "swarm-level `comms:` block)")
-    if kind not in spec.comms.wake:
-        return f"no comms feeder: comms.wake does not list {kind}"
-    return None
+    """Why `src` in a type's `loop.on` can never wake its loop; None when the board feeds it."""
+    if not src.startswith("board."):
+        return "no feeder: only board.* wakes are fed (the board resource)"
+    # shortcut: not checked against resources.board.wake (the plugin's kinds)
+    return None if "board" in ts.harbor.resources else "no feeder: the run has no board resource"
 
 
 def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
@@ -215,16 +202,12 @@ def provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
 
 
-# Harnesses that cannot add request-body fields, so a model's `extra` is kept but not sent.
-EXTRA_NOT_SENT = frozenset(name for name, h in HARNESSES.items() if not h.sends_extra)
-
-
 def extra_warnings(spec: SwarmSpec) -> list[str]:
+    """Harbor's Pi cannot add request-body fields: a model's `extra` is kept but not sent."""
     return [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
             f"{ts.harness.value} harness (docs/open-models.md)"
             for name, ts in spec.types.items()
-            if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
-            and ts.resolved_model.extra]
+            if ts.resolved_model is not None and ts.resolved_model.extra]
 
 
 def preflight_lines(results: list[dict]) -> list[str]:

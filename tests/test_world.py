@@ -31,7 +31,6 @@ from flock.controller.api import create_app as controller_app
 from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import Settings, reconcile
 from flock.models import (
-    AssignCommand,
     SwarmSpec,
     TypeSpec,
     WorldSpec,
@@ -159,7 +158,6 @@ def test_manifest_validation():
         "type": "object", "properties": {}}
     for bad, msg in [({"world_api": "v2"}, "not supported"), ({"name": "Bad Name"}, "must match"),
                      ({"tools": [{"name": "a"}, {"name": "a"}]}, "listed twice"),
-                     ({"tools": [{"name": "done"}]}, "reserved"),
                      ({"tools": [{"name": "a", "parameters": {"type": "array"}}]}, "type object"),
                      ({"version": " "}, "version")]:
         with pytest.raises(ValidationError, match=msg):
@@ -326,8 +324,7 @@ def controller(store):
     return app
 
 
-async def test_apply_fetches_the_manifest_and_hands_the_world_to_workers(controller, store,
-                                                                         taskboard):
+async def test_apply_fetches_the_manifest(controller, store, taskboard):
     r = await controller.state.put(world_spec(taskboard.url))
     assert r.status_code == 200, r.text
     stored = store.get_swarm("sw")["spec"]
@@ -337,17 +334,7 @@ async def test_apply_fetches_the_manifest_and_hands_the_world_to_workers(control
     assert SECRET not in json.dumps(stored.model_dump(mode="json"))
     controller.state.tick()
     (launch,) = controller.state.jobs.launches
-    assert launch["secrets"][TOKEN_ENV] == SECRET  # a job secret, never in the spec
-    wid = launch["worker_id"]
-    transport = httpx.ASGITransport(app=controller)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t",
-                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
-        batch = (await c.get(f"/workers/{wid}/commands", params={"wait": 0})).json()["commands"]
-        assigns = [AssignCommand.model_validate(x) for x in batch if x["kind"] == "assign"]
-        assert assigns and all(a.world.manifest.name == "taskboard" for a in assigns)
-        hb = {"worker": wid, "deadline": "2030-01-01T00:00:00Z", "draining": False, "agents": []}
-        out = (await c.post(f"/workers/{wid}/heartbeat", json=hb)).json()
-    assert out["world"]["endpoint"] == taskboard.url and out["world"]["tools"][0] == "list_tasks"
+    assert TOKEN_ENV not in launch["secrets"]  # the world's secret never reaches a worker
 
 
 async def test_apply_refuses_a_world_it_cannot_use(controller, taskboard):
@@ -375,9 +362,9 @@ async def test_apply_refuses_a_world_it_cannot_use(controller, taskboard):
 def test_fetch_manifest_reports_an_invalid_manifest():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"world_api": "v1", "name": "w", "version": "1",
-                                         "tools": [{"name": "bash"}]})
+                                         "tools": [{"name": "1x"}]})
 
-    with pytest.raises(WorldError, match=r"invalid manifest .*reserved"):
+    with pytest.raises(WorldError, match=r"invalid manifest .*must match"):
         fetch_manifest("http://w", "t", transport=httpx.MockTransport(handler))
 
 

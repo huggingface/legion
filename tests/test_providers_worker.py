@@ -6,7 +6,6 @@ from __future__ import annotations
 import pytest
 
 from flock.models import SwarmSpec, TypeSpec
-from flock.worker.adapters.base import minimal_env
 from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
 
@@ -51,15 +50,6 @@ def worker_env(monkeypatch):
 
 
 # --------------------------------------------------------------------------- base
-
-
-def test_minimal_env_is_an_allowlist():
-    env = minimal_env(WORKER_ENV, {"X": "1", "HF_TOKEN": "explicit"}, keep=("CODEX_HOME",))
-    assert env["PATH"] == "/usr/bin:/bin" and env["LC_ALL"] == "C.UTF-8" and env["X"] == "1"
-    assert env["CODEX_HOME"] == "/state/codex" and env["HF_TOKEN"] == "explicit"
-    for leaked in ("FLOCK_TOKEN", "WORKER_INCARNATION", "VLLM_KEY", "GITHUB_TOKEN",
-                   "MSGBOARD_INVITE_X", "CLAUDE_CONFIG_DIR"):
-        assert leaked not in env
 
 
 # --------------------------------------------------------------------------- runtime

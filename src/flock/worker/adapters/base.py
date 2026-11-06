@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -39,36 +39,6 @@ class AdapterEvent:
     error: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
     raw: Any = None
-
-
-# What a harness process inherits from the worker's own environment. Everything else (FLOCK_TOKEN,
-# job secrets, the incarnation) stays in the worker; the harness gets only these plus what the
-# worker passes explicitly (spec.env, the type's declared secrets, identity, the provider key).
-BASE_ENV = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ", "TMPDIR",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
-})
-BASE_ENV_PREFIXES = ("LC_", "XDG_")
-
-
-def minimal_env(
-    parent: Mapping[str, str], explicit: Mapping[str, str], keep: Iterable[str] = ()
-) -> dict[str, str]:
-    """The harness environment: allowlisted names from `parent` (BASE_ENV, LC_*, XDG_*, plus
-    `keep`, e.g. the harness's config-dir variable), then `explicit` on top."""
-    names = BASE_ENV | set(keep)
-    env = {k: v for k, v in parent.items() if k in names or k.startswith(BASE_ENV_PREFIXES)}
-    env.update(explicit)
-    return env
-
-
-def credential_env_names(spec: TypeSpec) -> list[str]:
-    """Every environment variable through which a harness process holds its provider key: the
-    provider's `api_key_env` (the harness reads it itself). Tool calls (`flock-tool`,
-    docs/tools.md) get none of them. Empty for a type not yet resolved in a SwarmSpec."""
-    r = spec.resolved_model
-    return [] if r is None else [r.provider.api_key_env]
 
 
 HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b",
@@ -102,9 +72,8 @@ class HarnessAdapter(Protocol):
         env: dict[str, str] | None = None,
     ) -> str:
         """Start a process. Resume `session_id` (raise ResumeError if impossible) or create a
-        new session. Returns the session id in use. `env` is everything the worker passes on
-        (spec.env, declared secrets, identity, the provider key under `api_key_env`); the
-        process gets that plus `minimal_env`'s allowlist, never the worker's whole environment."""
+        new session. Returns the session id in use. `env` is what the worker passes on
+        (spec.env, declared secrets, the provider key under `api_key_env`)."""
         ...
 
     async def send(self, text: str) -> None: ...
@@ -121,7 +90,7 @@ class HarnessAdapter(Protocol):
 
 
 class EventQueue:
-    """Small helper both adapters use: a queue whose iterator ends after `exited`."""
+    """A queue whose iterator ends after `exited`."""
 
     def __init__(self) -> None:
         self._q: asyncio.Queue[AdapterEvent] = asyncio.Queue()
@@ -145,18 +114,3 @@ def pi_tokens(u: dict[str, Any] | None) -> TokenUsage:
                       cache_read=int(u.get("cacheRead") or 0),
                       cache_write=int(u.get("cacheWrite") or 0),
                       reasoning=int(u.get("reasoning") or 0))
-
-
-def pi_usage(u: TokenUsage) -> dict[str, Any]:
-    """TokenUsage as a pi `usage` object (cost left at zero; the controller prices tokens)."""
-    d: dict[str, Any] = {
-        "input": u.input,
-        "output": u.output,
-        "cacheRead": u.cache_read,
-        "cacheWrite": u.cache_write,
-        "totalTokens": u.input + u.output + u.cache_read + u.cache_write,
-        "cost": {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0},
-    }
-    if u.reasoning:
-        d["reasoning"] = u.reasoning
-    return d

@@ -18,8 +18,7 @@ from flock.tools.bundle import (
     read_manifest,
     version_of,
 )
-from flock.tools.loader import ToolsError, describe, load_dir, select
-from flock.tools.runner import check_args
+from flock.tools.loader import ToolsError, check_args, describe, load_dir, select
 from flock.tools.spec import prepare
 
 from .conftest import FAKE_PROVIDERS, HB
@@ -107,7 +106,6 @@ def test_schema_covers_every_annotation_type(tmp_path):
     ("def f(x: set) -> int:\n    'Doc.'\n", "unsupported type"),
     ("def f(x: int | str) -> int:\n    'Doc.'\n", "unions other than"),
     ("def f(*xs: int) -> int:\n    'Doc.'\n", "*args / **kwargs"),
-    ("def bash(x: int) -> int:\n    'Doc.'\n", "'bash' is reserved"),
     ("def f(x: int -> int:\n    'Doc.'\n", "bad.py: syntax error line 1"),
     ("import nonexistent_pkg_xyz\n", "bad.py: import failed: ModuleNotFoundError"),
     ("raise RuntimeError('boom at import')\n", "bad.py: import failed: RuntimeError: boom at import"),
@@ -164,9 +162,6 @@ def test_readonly_tools_are_flagged_in_the_manifest(tmp_path):
     assert {t.name: t.readonly for t in m.tools} == {"task_board": True, "claim": False}
     assert {t["name"]: t.get("readonly") for t in m.to_json()["tools"]} == {"task_board": True,
                                                                        "claim": None}
-    from flock.comms.tools import tool_def as comms_tool
-    assert [comms_tool(e).readonly for e in ("comms:post", "comms:read", "comms:search")] == [
-        False, True, True]
 
 
 def test_select_is_strict():

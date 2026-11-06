@@ -44,7 +44,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from starlette.datastructures import Headers
 
-from flock.tools.runner import check_args
+from flock.tools.loader import check_args
 from flock.world import Admin, Agent, ToolError, World
 from flock.world.protocol import (
     ADMIN_TOKEN_ENV,

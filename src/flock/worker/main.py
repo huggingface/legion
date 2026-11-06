@@ -52,7 +52,6 @@ from flock.models import (
     AssignCommand,
     Command,
     CommandBatch,
-    CommsSpec,
     DrainCommand,
     EventBatch,
     LoopStartCommand,
@@ -65,16 +64,12 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerKnobs,
     WorkerMem,
-    comms_tools,
     parse_duration,
     type_spec_rev,
-    world_tools,
 )
 from flock.registry import HARNESSES, load
 from flock.secrets_file import load as load_secrets
 from flock.secrets_file import secret_env
-from flock.tools.runner import Result
-from flock.tools.toolset import Toolset
 from flock.worker import sync as sync_mod
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
@@ -89,10 +84,8 @@ from flock.worker.cgroup import (
     harness_and_tools,
     process_tree,
 )
-from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
 from flock.worker.harbor import HarborHost
-from flock.worker.identity import Identities
 from flock.worker.sync import (
     BucketStats,
     BucketSync,
@@ -103,7 +96,6 @@ from flock.worker.sync import (
     workdir_excludes,
 )
 from flock.worker.tools import ToolsManager, tools_root
-from flock.world.hub import WorldHub
 from flock.world.protocol import fill_host
 
 log = logging.getLogger("flock.worker")
@@ -154,17 +146,6 @@ class WorkerConfig:
     # start and again when the controller stops answering (it may have moved host)
     url_template: str | None = None
     host_file: str | None = None
-    # FLOCK_COMMS_POLL_CYCLE_S: overrides the spec's comms.poll_cycle_s (extended board
-    # polling: each agent's feed about once per this many seconds; spec default 300)
-    comms_poll_cycle_s: float | None = None
-    # FLOCK_COMMS_RATE / FLOCK_COMMS_BURST: the worker's board request budget (token bucket
-    # shared by the poller and every comms tool call); 0 turns it off
-    comms_rate: float = 0.5
-    comms_burst: float = 5.0
-    # FLOCK_COMMS_AGENT_RATE / _BURST: one agent's comms tool calls per second beyond which
-    # calls are refused locally (default 6/min, burst 10); 0 turns it off
-    comms_agent_rate: float = 0.1
-    comms_agent_burst: float = 10.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -192,12 +173,6 @@ class WorkerConfig:
             incarnation=env.get("WORKER_INCARNATION") or None,
             parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
             else None,
-            comms_poll_cycle_s=float(env["FLOCK_COMMS_POLL_CYCLE_S"])
-            if env.get("FLOCK_COMMS_POLL_CYCLE_S") else None,
-            comms_rate=float(env.get("FLOCK_COMMS_RATE") or 0.5),
-            comms_burst=float(env.get("FLOCK_COMMS_BURST") or 5.0),
-            comms_agent_rate=float(env.get("FLOCK_COMMS_AGENT_RATE") or 0.1),
-            comms_agent_burst=float(env.get("FLOCK_COMMS_AGENT_BURST") or 10.0),
         )
 
 
@@ -342,7 +317,7 @@ class ControllerClient:
 
     async def forward(self, method: str, path: str, token: str, *, params: dict | None = None,
                       body: object = None, budget: float = 60.0) -> httpx.Response:
-        """An agent's own call (the gateway's `controller` route): sent with the agent's token
+        """An agent's own call (controller_call): sent with the agent's token
         instead of the worker's, retried and re-resolved like every route here; the answer is
         returned whatever its status. Only a GET is retried after the request may have reached
         the controller, so a prompt is never delivered twice.
@@ -360,7 +335,7 @@ class ControllerClient:
 
 
 _SEG = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
-# What an agent's `flock` CLI may call through the gateway: the routes an agent token may use
+# What an agent may call through its worker (controller_call): the routes an agent token may use
 # (flock.controller.spawn.agent_may, which still checks the subtree on the controller).
 AGENT_ROUTES = tuple((m, re.compile(p)) for m, p in (
     ("GET", r"/whoami"),
@@ -372,6 +347,15 @@ AGENT_ROUTES = tuple((m, re.compile(p)) for m, p in (
     ("DELETE", rf"/agents/{_SEG}"),
     ("GET", rf"/swarms/{_SEG}/agents"),
 ))
+
+
+@dataclass
+class Result:
+    """A controller_call's answer: `output` is `{status, body}` or `{error}` as JSON."""
+
+    output: str
+    error: bool
+    duration_s: float = 0.0
 
 
 def agent_route_allowed(method: str, path: str) -> bool:
@@ -423,9 +407,8 @@ def limit_malloc_arenas(env: Mapping[str, str] = os.environ, arenas: int = ARENA
 
 def knobs_rev(cfg: WorkerConfig, mem: Mapping[str, float] | None = None) -> str:
     """A short hash of the settings this worker runs with (shown next to `spec_rev`)."""
-    knobs = [cfg.drain_budget, cfg.sync_interval, cfg.comms_poll_cycle_s, cfg.comms_rate,
-             cfg.comms_burst, cfg.comms_agent_rate, cfg.comms_agent_burst, workdir_excludes(),
-             restore_batch(), restore_threads(), sorted((mem or {}).items())]
+    knobs = [cfg.drain_budget, cfg.sync_interval, workdir_excludes(), restore_batch(),
+             restore_threads(), sorted((mem or {}).items())]
     return hashlib.sha256(json.dumps(knobs).encode()).hexdigest()[:12]
 
 
@@ -476,36 +459,19 @@ class Worker:
         *,
         adapter_factory: Callable[[str, TypeSpec], HarnessAdapter] | None = None,
         sync: BucketSync | None = None,
-        identities: Identities | None = None,
         tools: ToolsManager | None = None,
-        comms: CommsHub | None = None,
-        world: WorldHub | None = None,
         cgroup: CgroupMem | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
-        self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
-                                           type_name=cfg.type, fetch=self._fetch_tools)
+        self.tools = tools or ToolsManager(tools_root(cfg.work_root), fetch=self._fetch_tools)
         # harness harbor: what its agents' Trials share on this worker (flock.worker.harbor)
         self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event,
                                  folders=self.tools.folder, controller=self.controller_call)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
-        self.identities = identities or Identities()
         self.outbox = Outbox()
         self.agents: dict[str, AgentRuntime] = {}
-        # comms (docs/comms.md): one hub per worker, one board poller for all its agents
-        self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
-                                       runtime=self.agents.get,
-                                       poll_cycle_env=cfg.comms_poll_cycle_s,
-                                       rate=cfg.comms_rate, burst=cfg.comms_burst,
-                                       agent_rate=cfg.comms_agent_rate,
-                                       agent_burst=cfg.comms_agent_burst)
-        # the swarm's world (docs/world.md): its tools, reached through the same gateway
-        self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
-                                       runtime=self.agents.get)
-        self.comms.routes["world"] = self.world.call
-        self.comms.routes["controller"] = self.controller_call
         self.draining = False
         self.drain_window = cfg.drain_window
         self._drained = asyncio.Event()
@@ -537,19 +503,11 @@ class Worker:
     def apply_knobs(self, knobs: WorkerKnobs | None) -> None:
         """The type's `worker:` block (assign and live spec): each value set wins over the
         worker's env, which wins over the default. Takes effect at once (sync and drain read
-        `cfg` when they run; the comms budgets and sync excludes are updated here)."""
+        `cfg` when they run; the sync excludes are updated here)."""
         k, env, cfg = knobs or WorkerKnobs(), self._env_cfg, self.cfg
         pick = (lambda v, e: e if v is None else v)
         cfg.drain_budget = pick(k.drain_budget_s, env.drain_budget)
         cfg.sync_interval = pick(k.sync_interval_s, env.sync_interval)
-        cfg.comms_rate = pick(k.comms_rate, env.comms_rate)
-        cfg.comms_burst = pick(k.comms_burst, env.comms_burst)
-        cfg.comms_agent_rate = pick(k.comms_agent_rate, env.comms_agent_rate)
-        cfg.comms_agent_burst = pick(k.comms_agent_burst, env.comms_agent_burst)
-        cfg.comms_poll_cycle_s = pick(k.comms_poll_cycle_s, env.comms_poll_cycle_s)
-        self.comms.set_rate(cfg.comms_rate, cfg.comms_burst, cfg.comms_agent_rate,
-                            cfg.comms_agent_burst)
-        self.comms.poll_cycle_s = k.comms_poll_cycle_s  # env stays below comms.poll_cycle_s
         sync_mod.SPEC_KNOBS = {n: v for n in ("sync_exclude", "restore_batch", "restore_threads")
                                if (v := getattr(k, n)) is not None}  # one rebind: no empty window
         self.mem_knobs = {MEM_KNOB_ENV[n]: v for n, v in
@@ -573,10 +531,10 @@ class Worker:
         return await self.client.tools_bundle(self.cfg.swarm, version)
 
     async def controller_call(self, agent: str, entry: str, args: dict) -> Result:
-        """`controller:request {method, path, params?, json?}` from the agent's `flock` CLI
-        through the gateway (docs/spawn.md): an allowlisted route, sent with the agent's own
-        token by this worker's client, which follows the controller when it moves. The result
-        is `{status, body}`; a call that still fails after retries emits
+        """`controller:request {method, path, params?, json?}` from the agent's `spawn.*` tools
+        (the Harbor spawn resource, docs/spawn.md): an allowlisted route, sent with the agent's
+        own token by this worker's client, which follows the controller when it moves. The
+        result is `{status, body}`; a call that still fails after retries emits
         `controller_call_failed {path, error}` on the agent's stream."""
         t0 = time.monotonic()
         method, path = str(args.get("method") or "").upper(), str(args.get("path") or "")
@@ -587,7 +545,7 @@ class Worker:
             return Result(json.dumps({"error": error}), True, time.monotonic() - t0)
 
         if entry != "controller:request" or not agent_route_allowed(method, path):
-            return fail(f"controller: {method} {path} is not allowed through the gateway")
+            return fail(f"controller: {method} {path} is not allowed for an agent")
         if rt is None or not token:
             return fail("controller: this agent has no flock token on this worker")
         params, body = args.get("params"), args.get("json")
@@ -608,29 +566,6 @@ class Worker:
         return Result(json.dumps({"status": r.status_code, "body": out}), r.status_code >= 400,
                       time.monotonic() - t0)
 
-    def _toolbox(self, agent: str) -> Callable[[], Toolset]:
-        """What a turn of `agent` may call: the folder tools of the current version plus the
-        agent's built-in comms and world tools."""
-
-        def toolset() -> Toolset:
-            ts = self.world.toolset_for(
-                agent, self.comms.toolset_for(agent, self.tools.current()), self.comms)
-            if ts.gateway is None and self.comms.address is not None:  # `flock` CLI calls
-                ts = dataclasses.replace(ts, gateway=self.comms.address,
-                                         gateway_key=self.comms.key(agent))
-            return ts
-
-        return toolset
-
-    def _world_credential(self) -> None:
-        """The world now belongs to another secret than the one this worker was launched with
-        (a re-apply changed its endpoint or secret): drain, so the controller relaunches the
-        worker with the new one. Until then the hub refuses calls under the new configuration;
-        turns pinned to the old one finish against the old world (docs/world.md)."""
-        if self.world.needs_restart() and not self.draining:
-            log.warning("world credential changed; draining to be relaunched with the new one")
-            self._spawn(self.drain("world credential changed"))
-
     def _resource_event(self, agent: str, event: dict) -> None:
         """A harbor resource's event for one of this worker's agents (a board mention): the
         agent's `resource` event, which the controller turns into `<resource>.<kind>` wakes."""
@@ -645,14 +580,10 @@ class Worker:
         if isinstance(cmd, AssignCommand):
             if pending := self._unassigning.get(cmd.agent):  # re-assign right after unassign
                 await asyncio.shield(pending)
-            self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
             self.apply_knobs(cmd.spec.worker)
-            self.world.configure(cmd.world, world_tools(cmd.spec, cmd.world))
-            self._world_credential()
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].set_live(spec=cmd.spec)  # at its next turn boundary
                 self._set_lineage(self.agents[cmd.agent], cmd)
-                self.tools.want(cmd.tools_version, cmd.spec.folder_tools)
                 return
             if self.draining:
                 log.warning("assign %s ignored while draining", cmd.agent)
@@ -660,9 +591,7 @@ class Worker:
             rt = AgentRuntime(cmd.agent, cmd.type, cmd.spec, swarm=self.cfg.swarm,
                               work_root=self.cfg.work_root,
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
-                              sync=self.sync, identities=self.identities,
-                              working_count=self.working_count, toolbox=self._toolbox(cmd.agent),
-                              comms=self.comms, world=self.world)
+                              sync=self.sync, working_count=self.working_count)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.spec_rev = type_spec_rev(cmd.spec)
@@ -716,8 +645,6 @@ class Worker:
         self._wave = (start, n + 1, snap)
         self._restoring += 1
         try:
-            # the swarm's tools version is on disk before the agent's first turn (docs/tools.md)
-            await self.tools.ensure(cmd.tools_version, cmd.spec.folder_tools)
             await rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt)
         finally:
             self._restoring -= 1
@@ -734,8 +661,6 @@ class Worker:
             if rt.spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
                 rt.purge()
         finally:
-            self.comms.forget(rt.name)
-            self.world.on_done(rt.name, "unassigned")
             self.agents.pop(rt.name, None)
             self._unassigning.pop(rt.name, None)
 
@@ -778,7 +703,7 @@ class Worker:
                                interrupted=sorted(self._interrupted),
                                agents=[a.heartbeat() for a in self.agents.values()],
                                mem=self.mem, restore=self.restore_progress(),
-                               tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev,
+                               knobs_rev=self.knobs_rev,
                                wants_rotation=self.wants_rotation,
                                unsynced={a.name: a.unsynced for a in self.agents.values()
                                          if a.unsynced})
@@ -800,11 +725,6 @@ class Worker:
             resp = await self.client.heartbeat(self.heartbeat_payload(),
                                                budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
             if isinstance(resp, dict) and not self.draining:
-                tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
-                self.tools.want(tools.get("version"), tools.get("select"))
-                self._comms_from(resp.get("comms"))
-                self.world.configure_raw(resp.get("world"))
-                self._world_credential()
                 self._live_from(resp)
             return True
         except httpx.HTTPError as e:
@@ -812,22 +732,6 @@ class Worker:
             if _stale(e) and not self.stale:
                 self._spawn(self.abandon(f"heartbeat: {e}"))
             return False
-
-    def _comms_from(self, raw: object) -> None:
-        """The swarm's comms block from a heartbeat response: rules and protocols changed by a
-        re-apply reach this worker here (docs/comms.md, "Live settings")."""
-        if not isinstance(raw, dict):
-            if self.comms.spec is not None:
-                self.comms.configure(None, [])
-            return
-        raw = dict(raw)
-        tools = raw.pop("tools", None)
-        try:
-            spec = CommsSpec.model_validate(raw)
-        except ValueError as e:
-            log.warning("heartbeat: unreadable comms block: %s", e)
-            return
-        self.comms.configure(spec, tools if isinstance(tools, list) else [])
 
     def _live_from(self, resp: dict) -> None:
         """A changed type spec (docs/live.md): every agent takes it at its next turn boundary."""
@@ -898,8 +802,7 @@ class Worker:
         """What the worker holds that can grow, for the periodic memory line."""
         return {"outbox_events": len(self.outbox), "outbox_bytes": self.outbox.bytes,
                 "outbox_dropped": self.outbox.dropped, "agents": len(self.agents),
-                "live": self.working_count(), "tasks": len(asyncio.all_tasks()),
-                "comms_cache": len(self.comms._cache) if hasattr(self.comms, "_cache") else None}
+                "live": self.working_count(), "tasks": len(asyncio.all_tasks())}
 
     def memory_start(self) -> None:
         """Once: where the memory numbers come from, and a warning for a work root in RAM."""
@@ -1196,8 +1099,6 @@ class Worker:
             # the loops are stopped: the heartbeat after the events flush is the last one
             self.drained = self._drain_done
             await self._final_reports()
-        await self.comms.aclose()
-        await self.world.aclose()
         await self.client.aclose()
         log.info("drained; exiting%s", " (preempted)" if self.preempted else "")
         return PREEMPT_EXIT if self.preempted else 0
@@ -1243,10 +1144,6 @@ def run_and_exit(coro, *, exit: Callable[[int], object] = os._exit) -> None:
 
 
 def main() -> None:
-    from flock.isolation import enabled, protect_supervisor
-
-    if enabled():
-        protect_supervisor()
     limit_malloc_arenas()  # before any thread starts
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")

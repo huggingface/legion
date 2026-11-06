@@ -305,29 +305,6 @@ def test_events_of_a_removed_agent(monkeypatch):
     assert page["events"][0]["name"] == "agent.turn_ended" and page["events"][0]["agent"] == "w-0001"
 
 
-def test_hidden_old_events_and_agents(monkeypatch):
-    """Prompts in resumed runs still call them: raw JSONL and the old agents table."""
-    evs = [{"type": "spawned", "ts": "t", "agent": "l-0000", "data": {"child": "l-0000-a-0001"}}]
-    rows = [{"name": "l-0000-a-0001", "state": "working", "provider": None, "worker": "w0",
-             "turns": 2, "pending": 0, "cost_usd": 0.01, "last_heartbeat": "t"}]
-    seen = []
-
-    def call(_, method, path, **kw):
-        seen.append(path)
-        return {"agents": rows, "cursor": None} if path.endswith("/agents") else \
-            {"events": evs, "next": 1}
-
-    monkeypatch.setattr(Client, "_call", call)
-    r = runner.invoke(cli.app, ["events", "l-0000", "--wait", "--timeout", "0"])
-    assert r.exit_code == 0 and json.loads(r.stdout.splitlines()[0]) == evs[0]
-    assert "  events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
-    r = runner.invoke(cli.app, ["agents", "s", "--parent", "l-0000"])
-    lines = r.output.splitlines()
-    assert lines[0].split() == ["name", "state", "provider", "worker", "turns", "pending", "cost",
-                                "last_heartbeat"]
-    assert lines[1].split()[:3] == ["l-0000-a-0001", "working", "-"]  # awk '$2=="working"'
-
-
 def test_status_prints_the_age_of_heartbeat_and_snapshot_numbers(monkeypatch):
     now = time.time()
     hb = datetime.fromtimestamp(now - 12, UTC).isoformat()

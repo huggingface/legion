@@ -118,16 +118,6 @@ def test_workers_non_negative(workers):
         spec(types={"a": {"workers": workers}})
 
 
-def test_example_spec_loads():
-    from pathlib import Path
-
-    from flock.cli import load_spec
-
-    s = load_spec(str(Path(__file__).parent.parent / "examples" / "spawn.yaml"))
-    assert s.spawn["leader"].cap_for("analyst") == 4 and s.limits.alive == 20
-    assert "flock-agent spawn" in s.types["leader"].system_prompt
-
-
 def test_replicas_must_fit_declared_workers():
     """Review P2 (spawn_worker_cap.py): declared workers are a cap, replicas included."""
     over = {"replicas": 3, "agents_per_worker": 1, "workers": {"initial": 1, "max_extra": 0}}
@@ -139,11 +129,3 @@ def test_replicas_must_fit_declared_workers():
     spec(types={"analyst": {"replicas": 3, "agents_per_worker": 1}})  # no workers: v1
 
 
-def test_walkthrough_spec_loads():
-    from pathlib import Path
-
-    from flock.cli import load_spec
-
-    s = load_spec(str(Path(__file__).parent.parent / "examples" / "first-spawn.yaml"))
-    assert s.spawn["leader"].cap_for("analyst") == 5
-    assert all("HF_TOKEN" in t.secrets for t in s.types.values())

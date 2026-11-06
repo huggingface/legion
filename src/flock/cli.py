@@ -720,8 +720,8 @@ def pretty_event(ev: dict) -> str:
     return " ".join(x for x in (ts, f"{turn:>5}", name, who, summary) if x)
 
 
-agent_app = typer.Typer(cls=_Group, help="Inside an agent (FLOCK_AGENT_TOKEN): spawn and remove "
-                        "child agents (docs/spawn.md).", no_args_is_help=True)
+agent_app = typer.Typer(cls=_Group, help="Spawn and remove child agents of an agent "
+                        "(docs/spawn.md).", no_args_is_help=True)
 
 
 @agent_app.command()
@@ -747,38 +747,10 @@ def remove(name: str) -> None:
     typer.echo(json.dumps(_api().remove(name)))
 
 
-# Hidden aliases: agents of runs started before flock-agent still call `flock spawn|remove`.
-app.command("spawn", hidden=True)(spawn)
-app.command("remove", hidden=True)(remove)
-
-
 # Hidden: run5-era Slurm world jobs call `flock world serve`
 # (hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/slurm/world-inner.sh).
 app.add_typer(world_app, name="world", hidden=True)
 
-
-# Hidden, old output: prompts in resumed runs' sessions call `flock events <child> --wait`
-# (examples/prompts) and parse `flock agents SWARM --parent`
-# (hf://buckets/cmpatino/legacy-swarmchat-experiments/pixel/run/leader.md).
-@app.command("events", hidden=True)
-def old_events(name: str, after: int = typer.Option(0, "--after"),
-               follow: bool = typer.Option(False, "--follow", "-f"),
-               wait: bool = typer.Option(False, "--wait"),
-               timeout: float = typer.Option(600, "--timeout"),
-               pretty: bool = typer.Option(False, "--pretty")) -> None:
-    """Raw JSONL (or `status --events` lines with --pretty); see `flock status --events`."""
-    _print_events(_api(), name, "", after, follow, wait, not pretty, timeout, raw=not pretty)
-
-
-@app.command("agents", hidden=True)
-def old_agents(swarm: str, type: str = typer.Option(None, "--type"),
-               state: str = typer.Option(None, "--state"),
-               parent: str = typer.Option(None, "--parent")) -> None:
-    """The old table (name state provider worker ...); see `flock status --type/--state/--parent`."""
-    _table([[a["name"], a["state"], a.get("provider") or "-", a["worker"], a["turns"],
-             a["pending"], f"${a['cost_usd']:.4f}", a["last_heartbeat"]]
-            for a in _api().agents(swarm, type=type, state=state, parent=parent)],
-           ["name", "state", "provider", "worker", "turns", "pending", "cost", "last_heartbeat"])
 
 if __name__ == "__main__":
     app()

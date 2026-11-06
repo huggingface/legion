@@ -29,7 +29,6 @@ flock = "flock.cli:app"
 flock-agent = "flock.cli:agent_app"
 flock-controller = "flock.controller.main:main"
 flock-worker = "flock.worker.main:main"
-flock-tool = "flock.tools.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from flock.comms.board import AsyncBoard, SyncBoard, same_board
+from flock.comms.board import SyncBoard
 from flock.comms.tools import Refused, check_content, check_rate
 from flock.controller.comms import CommsError, resolve
 from flock.models import (
@@ -170,8 +170,6 @@ def test_board_urls_have_one_spelling():
     for url in ("http://board.invalid/", "HTTP://Board.Invalid", "http://board.invalid:80//"):
         assert normalize_board_url(url) == "http://board.invalid"
     assert normalize_board_url("https://b.invalid:8443/x/") == "https://b.invalid:8443/x"
-    assert same_board("http://board.invalid/", "http://BOARD.invalid")
-    assert not same_board("http://board.invalid", "http://board.invalid:8080")
 
 
 # --------------------------------------------------------------------------- sixth review of #16
@@ -183,17 +181,13 @@ URLS = [("http://[::1]:8080/", "http://[::1]:8080"), ("https://[2001:db8::1]/", 
 
 
 @pytest.mark.parametrize(("url", "want"), URLS)
-async def test_normalised_board_urls_are_idempotent_and_build_clients(url, want):
+def test_normalised_board_urls_are_idempotent_and_build_clients(url, want):
     once = normalize_board_url(url)
     assert once == want and normalize_board_url(once) == once
     spec = CommsSpec(url=url, invite_env="INV", channel="team")
     assert spec.url == want
     sync = SyncBoard(spec.url)
+    assert str(sync.http.base_url).rstrip("/") == want
     sync.close()
-    board = AsyncBoard(spec.url)
-    try:
-        assert board.url == want and same_board(board.url, url)
-    finally:
-        await board.aclose()
 
 

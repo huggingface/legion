@@ -15,7 +15,6 @@ def test_harness_entry_is_complete(name):
     h = HARNESSES[name]
     # harbor's also takes the worker's `host` (flock.worker.harbor)
     assert list(inspect.signature(load(h.adapter)).parameters)[:3] == ["workdir", "name", "spec"]
-    assert h.instructions_file.endswith(".md")
     assert Harness(name) == name
 
 
@@ -27,7 +26,7 @@ def test_compute_entry_is_complete(kind):
 
 def test_unknown_names_keep_their_errors():
     with pytest.raises(ValidationError,
-                       match="Input should be 'llm' or 'harbor'"):
+                       match="Input should be 'harbor'"):
         TypeSpec.model_validate({"harness": "nope"})
     with pytest.raises(ValidationError, match="Input should be 'hf-jobs', 'local' or 'slurm'"):
         ComputeSpec(kind="nope")

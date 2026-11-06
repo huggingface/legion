@@ -10,7 +10,7 @@ import yaml
 from typer.testing import CliRunner
 
 from flock import cli
-from flock.models import AssignCommand, SwarmSpec, type_spec_rev
+from flock.models import AssignCommand, SwarmSpec
 from flock.tools.bundle import pack
 
 from .conftest import FAKE_PROVIDERS, HB, wire
@@ -130,17 +130,11 @@ async def test_controller_checks_bundles_and_tells_workers(tmp_path, client, sto
     assert (await client.get("/swarms/demo/tools/0000000000000000")).status_code == 404
     assert (await client.get("/swarms/demo/tools")).json()["current"] == b.version
 
-    # the assign carries the version; the heartbeat response carries version + selection
+    # the assign carries the version
     tick()
     [w] = store.list_workers("demo")
     [cmd] = [AssignCommand.model_validate_json(c["body"]) for c in store.commands_for(w["id"])]
     assert cmd.tools_version == b.version and cmd.spec.tools == ["add"]
-    store.update_worker(w["id"], job_id="job-1", incarnation="inc-1")
-    hb = {"worker": w["id"], "deadline": "2026-10-15T09:00:00Z", "agents": [],
-          "spec_rev": type_spec_rev(cmd.spec)}  # the worker has this type spec (docs/live.md)
-    r = await client.post(f"/workers/{w['id']}/heartbeat", json=hb, params={"incarnation": "inc-1"})
-    assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "tools": {"version": b.version, "select": ["add"]}}
 
 
 async def test_bundle_retention_keeps_the_current_version(store):

@@ -16,19 +16,14 @@ class HarnessEntry:
     # (harbor's also takes `host=`, the worker's HarborHost)
     provider_type: str  # the provider `type` a provider-backed model must have
     api: str  # the wire API it speaks to that provider (preflight probes this one)
-    instructions_file: str  # the instructions file written into each agent's workdir
-    sends_extra: bool = False  # it can add a model's `extra` request-body fields
 
 
 HARNESSES: dict[str, HarnessEntry] = {
-    # in-process chat-completions loop (docs/llm-harness.md)
-    "llm": HarnessEntry("flock.worker.adapters.llm:make_adapter", "openai_compat",
-                        "chat_completions", "AGENTS.md", sends_extra=True),
     # one Harbor Trial per agent on shepherd's task path (flock.harbor). Harbor installs Pi
     # (flock.harbor.config.PI_VERSION) in the task's container and the Trial delivers the
-    # instructions; the host workdir's AGENTS.md is not the agent's
+    # instructions
     "harbor": HarnessEntry("flock.worker.adapters.harbor:make_adapter", "openai_compat",
-                           "chat_completions", "AGENTS.md"),
+                           "chat_completions"),
 }
 
 # `compute.kind` / FLOCK_COMPUTE -> "module:function"; function(env, deployment, data_dir) ->

@@ -50,7 +50,7 @@ def make_run(tmp_path, flock_worker, env_extra="", cluster_extra=""):
         "# Secrets this worker expects from the cluster's secrets file: FLOCK_TOKEN HF_TOKEN "
         "OPENAI_API_KEY\n"
         "DEADLINE=2026-11-05T00:00:00+00:00\nDRAIN_WINDOW=10m\nFLOCK_URL='http://${CTL_HOST}'\n"
-        f"FLOCK_LLM_HOME={tmp_path / 'w' / 'llm'}\nSWARM=s\nTYPE=t\n"
+        f"SWARM=s\nTYPE=t\n"
         f"WORK_ROOT={tmp_path / 'w' / 'work'}\nWORKER_ID=s-t-w0001\nWORKER_INCARNATION=abc\n"
         + env_extra)
     for f in (run / "run.env", env_file):

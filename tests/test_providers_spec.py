@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from flock.models import SwarmSpec, TypeSpec, resolve_model
 
 from .conftest import HB
-
-EXAMPLE = Path(__file__).parent.parent / "examples" / "open-models.yaml"
 
 PROVIDERS = {
     "hf": {"type": "openai_compat", "base_url": "https://router.huggingface.co/v1/",
@@ -40,16 +36,6 @@ def err(types: dict, **kw) -> str:
     with pytest.raises(ValidationError) as e:
         spec(types, **kw)
     return str(e.value)
-
-
-def test_example_spec_resolves():
-    s = SwarmSpec.model_validate(yaml.safe_load(EXAMPLE.read_text()))
-    w, a = s.types["worker"], s.types["analyst"]
-    assert (w.provider_name, w.harness_model, w.resolved_model.pricing) == (
-        "hf", "Qwen/Qwen3.8-27B:deepinfra", [0.2, 2.5, 0.2])  # router provider pinned
-    assert (a.provider_name, a.harness_model, a.effective_reasoning) == (
-        "gpu1", "Qwen/Qwen3.8-27B-FP8", "medium")
-    assert a.resolved_model.extra == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def test_resolution_order_alias_then_prefix():

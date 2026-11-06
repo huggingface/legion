@@ -43,13 +43,10 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorldSpec,
-    comms_tools,
     max_workers,
     parse_duration,
     worker_type_spec,
 )
-from flock.world.host import world_token
-from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
 
 log = logging.getLogger("flock.reconcile")
 
@@ -761,15 +758,9 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "BUCKET": spec.bucket,
     }
     secrets = {"FLOCK_TOKEN": s.token}
-    names = [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]
-    if comms_tools(ts, spec.comms):  # the worker joins its agents with the swarm's invite
-        names.append(spec.comms.invite_env)
+    names = list(ts.secrets)
     if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
         names.append(ts.resolved_model.provider.api_key_env)
-    if spec.world is not None and (wt := world_token(spec, s.token, s.secret_source)):
-        # the world's shared secret (docs/world.md), as of this launch: a worker whose secret no
-        # longer matches the world's `credential_id` drains and is relaunched with the new one
-        secrets[WORLD_TOKEN_ENV] = wt
     for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]

@@ -3,9 +3,8 @@
 Config: FLOCK_URL and FLOCK_TOKEN (sent as X-Flock-Token; a `*.hf.jobs` URL or
 FLOCK_PROXY_AUTH=hf also sends HF_TOKEN as the bearer the jobs proxy wants). Without FLOCK_URL,
 a local run `flock launch` started in this directory (`.flock/current`, docs/local.md) is used.
-Inside an agent the worker sets FLOCK_AGENT_TOKEN (that agent's scoped token, which wins over
-FLOCK_TOKEN), FLOCK_AGENT and FLOCK_PARENT; when the agent's pin file (FLOCK_TOOLS_PIN) names a
-worker gateway, calls go through it instead. See docs/spawn.md for what an agent may call.
+With FLOCK_AGENT_TOKEN (an agent's scoped token, which wins over FLOCK_TOKEN) calls act as that
+agent. See docs/spawn.md for what an agent may call.
 
 Methods take and return plain data (dicts, `SwarmSpec`); a refused or failed call raises
 `ClientError`.
@@ -30,8 +29,7 @@ from flock.models import AGENT_NAME_RE, SwarmSpec
 
 class ClientError(Exception):
     """A controller call that failed: `status` (None without an HTTP answer, e.g. no HF token
-    for the jobs proxy or the worker gateway failing) and the reply `body`; str() is the line
-    the CLI prints."""
+    for the jobs proxy) and the reply `body`; str() is the line the CLI prints."""
 
     def __init__(self, message: str, status: int | None = None, body: str = ""):
         super().__init__(message)
@@ -158,45 +156,6 @@ def _request(c: httpx.Client, method: str, path: str, **kw) -> httpx.Response:
     raise AssertionError("unreachable")
 
 
-def gateway(env: Mapping[str, str] = os.environ) -> tuple[str, str, str] | None:
-    """(address, key, agent) of the worker gateway named in the agent's pin file
-    (FLOCK_TOOLS_PIN), or None outside an agent or on a worker without one."""
-    from flock.tools.toolset import PIN_ENV, read_pin
-
-    if not (pin := env.get(PIN_ENV)):
-        return None
-    try:
-        ts, agent, _ = read_pin(pin)
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    return (ts.gateway, ts.gateway_key or "", agent) if ts.gateway else None
-
-
-def _call_gateway(gw: tuple[str, str, str], method: str, path: str, timeout: float | None,
-                  **kw) -> Any:
-    """One controller call through the worker (`controller:request`): the worker sends it with
-    this agent's token to wherever the controller is now, retrying there."""
-    import asyncio
-
-    from flock.tools.toolset import gateway_call
-
-    address, key, agent = gw
-    args = {"method": method, "path": path, "params": kw.get("params"), "json": kw.get("json")}
-    r = asyncio.run(gateway_call(address, key, agent, "controller:request", args,
-                                 timeout=(timeout or 60) + 120))
-    try:
-        out = json.loads(r.output)
-    except ValueError:
-        out = {}
-    if not isinstance(out, dict) or "status" not in out:
-        err = out.get("error") if isinstance(out, dict) else None
-        raise ClientError(f"error: {err or r.output}")
-    if out["status"] >= 400:
-        body = out["body"] if isinstance(out["body"], str) else json.dumps(out["body"])
-        raise ClientError(f"error {out['status']}: {body}", out["status"], body)
-    return out["body"]
-
-
 class Client:
     """The controller API. Base URL and auth come from `env` (default the process
     environment) at each call, as described in the module docstring."""
@@ -230,8 +189,6 @@ class Client:
         return api
 
     def _call(self, method: str, path: str, *, timeout: float | None = None, **kw) -> Any:
-        if (gw := gateway(self.env)) is not None:  # inside an agent: its worker (docs/spawn.md)
-            return _call_gateway(gw, method, path, timeout, **kw)
         if timeout is not None:  # per request, without the TestClient's `timeout` deprecation
             kw["extensions"] = {"timeout": httpx.Timeout(timeout).as_dict()}
         r = self._send(method, path, **kw)
@@ -275,9 +232,9 @@ class Client:
 
     @property
     def as_agent(self) -> bool:
-        """Running inside an agent (its scoped token or its worker's gateway): names are
+        """Acting as an agent (its scoped token): names are
         agents, never swarms."""
-        return bool(self.env.get("FLOCK_AGENT_TOKEN") or gateway(self.env))
+        return bool(self.env.get("FLOCK_AGENT_TOKEN"))
 
     def is_swarm(self, name: str) -> bool:
         """A swarm, unless it names an agent: a numeric agent name (`...-NNNN`) that is not a

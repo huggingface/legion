@@ -210,23 +210,6 @@ async def test_drain_finishes_inflight_turn(tmp_path):
     assert adapter.starts == [None] and "prompt_deferred" in event_types(rt)
 
 
-async def test_msgboard_env_injected(tmp_path):
-    class FakeIds:
-        async def env_for(self, agent, spec):
-            return {"MSGBOARD_URL": "https://mb", "MSGBOARD_TOKEN": "tok"}
-
-        def principal(self, agent):
-            return agent
-
-    rt, adapter = runtime(tmp_path, env={"FOO": "1"})
-    rt.identities = FakeIds()
-    await rt.setup(restore=False)
-    await rt.prompt("hi")
-    await until(lambda: adapter.sent == ["hi"])
-    assert adapter.envs[0] == {"FOO": "1", "MSGBOARD_URL": "https://mb", "MSGBOARD_TOKEN": "tok"}
-    assert rt.heartbeat().msgboard_principal == "researcher-0001"
-
-
 async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
     """A drain, preemption or unassign that lands while setup() still restores leaves the
     bucket copy as it is: nothing is pushed for that agent."""

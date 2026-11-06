@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from flock.controller.api import create_app
-from flock.models import SwarmSpec, WorkerHeartbeat
+from flock.models import SwarmSpec
 from flock.world.host import WorldError, follow_world_host, world_endpoint
 from flock.world.protocol import origin_matches
 
@@ -86,26 +86,6 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
                                     {"WORLD_TOKEN": SECRET}, env=env)
             assert new is not None and new.world.endpoint == second.url
             assert new.world.credential_id == stored.credential_id  # same credential
-            store.update_swarm_spec(new)
-
-            # a worker gets the new endpoint with its next heartbeat
-            from flock.controller.jobs import FakeJobsClient
-            from flock.controller.reconcile import reconcile
-
-            reconcile(store, FakeJobsClient(), clock(), _settings())
-            wid = "demo-researcher-w0000"
-            hb = WorkerHeartbeat(worker=wid, deadline=clock(), agents=[])
-            r = await c.post(f"/workers/{wid}/heartbeat", json=hb.model_dump(mode="json"))
-            assert r.status_code == 200
-            block = r.json()["world"]
-            assert block["endpoint"] == second.url
-
     finally:
         first.close()
         second.close()
-
-
-def _settings():
-    from flock.controller.reconcile import Settings
-
-    return Settings(public_url="http://ctl:7860", token=TOKEN, secret_source={})
