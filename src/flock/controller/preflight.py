@@ -186,14 +186,15 @@ def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str
     types, the API to probe and the llm tool_choice. `extra` and `tool_choice` are part of the
     key for chat completions (they are sent)."""
     seen: dict[tuple, tuple[ResolvedModel, list[str], str, str | None]] = {}
+    if any(ts.harness == "harbor" for ts in spec.types.values()):
+        # lazy: harbor is an optional extra the controller runs without
+        from harbor.agents.agent_auth_resolution import parse_model_name
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
         if r is None:
             continue
         api = api_for(ts.harness)
         if ts.harness == "harbor":  # Harbor's Pi sends the id without the provider prefix
-            from harbor.agents.agent_auth_resolution import parse_model_name
-
             r = r.model_copy(update={"model_id": parse_model_name(r.model_id)[1]})
         extra = json.dumps(r.extra, sort_keys=True) if api == "chat_completions" else None
         choice = ts.tool_choice if api == "chat_completions" else None
