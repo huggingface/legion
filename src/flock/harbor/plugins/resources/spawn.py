@@ -18,6 +18,7 @@ from pathlib import Path
 
 SOCKET = "/run/flock-spawn.sock"
 LINE_MAX = 1 << 20  # a request line (a long first prompt fits)
+READ_S = 60  # a client that never sends its line
 
 
 class Resource:
@@ -57,7 +58,7 @@ class Resource:
         # if agents fire spawn calls in parallel
         try:
             try:
-                request = json.loads(await reader.readline())
+                request = json.loads(await asyncio.wait_for(reader.readline(), READ_S))
                 if not isinstance(request, dict):
                     raise ValueError("a request is a JSON object")
                 result = await self.controller(agent, "controller:request", request)
