@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from flock.worker.cgroup import MB, CgroupMem, fs_type
 
 
@@ -105,8 +107,7 @@ def test_agent_memory_of_a_live_process_tree(tmp_path):
     import subprocess
     import sys
 
-    from flock.worker.adapters.pi import _descendants
-    from flock.worker.cgroup import agent_memory
+    from flock.worker.cgroup import _descendants, agent_memory
 
     (tmp_path / "tmp").mkdir()
     (tmp_path / "tmp" / "f").write_bytes(b"x" * MB)
@@ -119,6 +120,24 @@ def test_agent_memory_of_a_live_process_tree(tmp_path):
     assert m["pi_pss_mb"] > 0 and m["tmp_mb"] == 1.0 and m["tmpfs_root_mb"] is not None
     assert m["tools_pss_mb"] > 0 and m["tools_by_comm"]
     assert agent_memory(None, _descendants, tmp_path / "tmp") == {"tmp_mb": 1.0}
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="Linux /proc")
+def test_kill_all_kills_only_the_same_live_processes():
+    import os
+    import subprocess
+    import sys
+
+    from flock.worker.cgroup import _descendants, _kill_all
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        [(pid, start)] = [p for p in _descendants(os.getpid()) if p[0] == child.pid]
+        assert _kill_all([(pid, "not-its-start-time")]) == 0  # a reused pid is left alone
+        assert _kill_all([(pid, start)]) == 1 and child.wait(timeout=5) == -9
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_oom_score_adj_is_raised_for_the_sandbox(tmp_path):

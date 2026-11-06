@@ -35,7 +35,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -58,6 +57,7 @@ from flock.worker.adapters.base import (
     transient_error,
 )
 from flock.worker.adapters.base import pi_tokens as _usage
+from flock.worker.cgroup import _descendants, _kill_all
 
 log = logging.getLogger(__name__)
 
@@ -327,55 +327,6 @@ class PiMapper:
 
 class RpcError(RuntimeError):
     pass
-
-
-def process_tree() -> tuple[dict[int, list[int]], dict[int, str]]:
-    """One /proc walk: parent pid -> children, and pid -> start time (Linux; empty elsewhere)."""
-    children: dict[int, list[int]] = {}
-    starts: dict[int, str] = {}
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return children, starts
-    for d in entries:
-        if not d.isdigit():
-            continue
-        try:
-            stat = Path(f"/proc/{d}/stat").read_text()
-        except OSError:
-            continue
-        fields = stat[stat.rfind(")") + 2:].split()
-        children.setdefault(int(fields[1]), []).append(int(d))
-        starts[int(d)] = fields[19]
-    return children, starts
-
-
-def _descendants(pid: int, tree: tuple[dict[int, list[int]], dict[int, str]] | None = None
-                 ) -> list[tuple[int, str]]:
-    """(pid, start time) of every live descendant of `pid`, from `tree` (process_tree) or a
-    fresh /proc walk."""
-    children, starts = tree or process_tree()
-    out, todo = [], [pid]
-    while todo:
-        for c in children.get(todo.pop(), []):
-            out.append((c, starts[c]))
-            todo.append(c)
-    return out
-
-
-def _kill_all(procs: list[tuple[int, str]]) -> int:
-    """SIGKILL each (pid, start time) that is still the same process. Returns the count."""
-    n = 0
-    for pid, start in procs:
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            if stat[stat.rfind(")") + 2:].split()[19] != start:
-                continue
-            os.kill(pid, signal.SIGKILL)
-            n += 1
-        except (OSError, IndexError):
-            continue
-    return n
 
 
 class PiAdapter:

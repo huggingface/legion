@@ -82,9 +82,12 @@ from flock.worker.cgroup import (
     TMPFS_TYPES,
     CgroupMem,
     MemThresholds,
+    _descendants,
+    _kill_all,
     agent_memory,
     fs_type,
     harness_and_tools,
+    process_tree,
 )
 from flock.worker.comms import CommsHub
 from flock.worker.events import Outbox, parse_iso, utcnow
@@ -449,8 +452,6 @@ def _harness_pid(rt: AgentRuntime) -> int | None:
 
 def _kill_tools(rt: AgentRuntime) -> int:
     """SIGKILL the agent's tool processes, not its harness (the spike guard)."""
-    from flock.worker.adapters.pi import _descendants, _kill_all
-
     if (pid := _harness_pid(rt)) is None:
         return 0
     return _kill_all(harness_and_tools(pid, _descendants)[1])
@@ -918,8 +919,6 @@ class Worker:
     def agent_memory(self, tmp: bool = True) -> list[tuple[AgentRuntime, dict]]:
         """Per agent: harness and tool PSS, tmpfs root, tmp dir (`tmp`), workdir files
         (blocking: /proc and directory walks; run in a thread)."""
-        from flock.worker.adapters.pi import _descendants, process_tree
-
         tree = process_tree()  # one /proc walk for every agent
 
         def descendants(pid: int) -> list[tuple[int, str]]:
