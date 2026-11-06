@@ -63,11 +63,14 @@ inside an xet upload commit, which has no timeout; one stuck push stopped every 
 - A push uploads the changed session, state and harness files first, then the workdir, then
   `meta.json` (it describes the mirrored workdir). A push that hangs or is cut keeps the session.
 - `AgentRuntime.sync_now` gives each push `push_timeout()` s (env FLOCK_PUSH_TIMEOUT_S, default
-  1800). On timeout the agent stays dirty and `unsynced` names the step it was in
-  (`BucketSync.step`); a periodic push then aborts the process's xet session (`abort_xet`), not
-  during a drain or preempt nor while a restore runs (it would cancel their transfers too).
+  3600; set it in the type's `env:`). On timeout the agent stays dirty and `unsynced` names the
+  step it was in (`BucketSync.step`); then the process's xet session is aborted (`abort_xet`),
+  except during a drain or preempt or while a restore runs (it cancels their transfers too;
+  a cancelled xet call is a store error, never the KeyboardInterrupt xet raises).
+- huggingface_hub's HTTP client gets a timeout (`HTTP_TIMEOUT_S`, 600 s): it has none.
 - The timed-out push's thread cannot be killed: while it runs (`BucketSync.busy`) the agent's
-  pushes are skipped, so its stale plan never lands after newer files.
+  pushes are skipped (`BucketSync.timed_out`, per prefix: also for a re-created runtime), so
+  its stale plan never lands after newer files.
 
 Base tar (the type's `workdir.base: true`; off by default). A restore of N small files costs N
 downloads; a base turns most of them into one:
@@ -96,6 +99,7 @@ downloads; a base turns most of them into one:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import functools
 import json
@@ -123,12 +127,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 UPLOAD_CHUNK = 200
+HTTP_TIMEOUT_S = 600  # huggingface_hub's client in the worker (`count_hub_http`)
 MODES_FILE = ".flock-modes.json"
 BASE_TAR = "workdir.base.tar"  # under the agent prefix (module docstring, "Base tar")
 BASE_JSON = "workdir.base.json"
 RESTORE_BATCH = 1000  # default of FLOCK_RESTORE_BATCH
 RESTORE_THREADS = 4  # default of FLOCK_RESTORE_THREADS
-PUSH_TIMEOUT_S = 1800  # default of FLOCK_PUSH_TIMEOUT_S
+PUSH_TIMEOUT_S = 3600  # default of FLOCK_PUSH_TIMEOUT_S (v8 pushes took up to ~20 min)
 # The type's `worker:` values for this module (sync_exclude, restore_batch, restore_threads),
 # set live by `Worker.apply_knobs`; each one present wins over its env variable.
 SPEC_KNOBS: dict[str, object] = {}
@@ -170,7 +175,19 @@ def abort_xet() -> None:
     if (abort := getattr(_xet, "abort_xet_session", None)) is None:
         log.warning("huggingface_hub has no abort_xet_session; xet session kept")
         return
+    t0 = time.monotonic()
     abort()
+    log.warning("xet session aborted in %.1f s", time.monotonic() - t0)
+
+
+@contextlib.contextmanager
+def _xet_aborted_is_an_error():
+    """After `abort_xet`, a concurrent xet call raises KeyboardInterrupt, which asyncio would
+    re-raise and end the worker: a normal store error instead."""
+    try:
+        yield
+    except KeyboardInterrupt as e:
+        raise RuntimeError("xet session aborted") from e
 
 
 RESTORE_BACKOFF = (1.0, 4.0, 10.0)  # seconds before each per-file retry round
@@ -588,6 +605,9 @@ def count_hub_http(stats: BucketStats) -> None:
 
     def factory():
         client = default_client_factory()
+        # no timeout by default: a hung list or POST /batch would block a push forever;
+        # http_backoff retries a timeout (a resent addFile carries the same xetHash)
+        client.timeout = HTTP_TIMEOUT_S
         client.event_hooks["request"].append(on_request)
         client.event_hooks.setdefault("response", []).append(on_response)
         return client
@@ -641,7 +661,9 @@ class HubBucketStore:
         for i in range(0, len(files), UPLOAD_CHUNK):
             self.stats.add("ops", "batch_bucket_files")
             chunk = files[i : i + UPLOAD_CHUNK]
-            self.api.batch_bucket_files(self.bucket_id, add=[(str(p), self.base + r) for p, r in chunk])
+            with _xet_aborted_is_an_error():
+                self.api.batch_bucket_files(self.bucket_id,
+                                            add=[(str(p), self.base + r) for p, r in chunk])
 
     def list(self, prefix: str) -> list[str]:
         return [r for r, _ in self.list_info(prefix)]
@@ -673,13 +695,16 @@ class HubBucketStore:
         self.stats.add("ops", "download_bucket_files")
         for _, local in files:
             local.parent.mkdir(parents=True, exist_ok=True)
-        self.api.download_bucket_files(self.bucket_id, [(self.base + r, str(p)) for r, p in files])
+        with _xet_aborted_is_an_error():
+            self.api.download_bucket_files(self.bucket_id,
+                                           [(self.base + r, str(p)) for r, p in files])
 
     def delete(self, paths: list[str]) -> None:
         for i in range(0, len(paths), UPLOAD_CHUNK):
             self.stats.add("ops", "batch_bucket_files")
             chunk = paths[i : i + UPLOAD_CHUNK]
-            self.api.batch_bucket_files(self.bucket_id, delete=[self.base + r for r in chunk])
+            with _xet_aborted_is_an_error():
+                self.api.batch_bucket_files(self.bucket_id, delete=[self.base + r for r in chunk])
 
     def _url(self, prefix: str) -> str:
         return f"hf://buckets/{self.bucket_id}/{self.base}{prefix}".rstrip("/")
@@ -687,13 +712,15 @@ class HubBucketStore:
     def sync_up(self, local: Path, prefix: str, *, delete: bool = True,
                 exclude: list[str] | None = None) -> None:
         self.stats.add("ops", "sync_bucket_up")
-        self.api.sync_bucket(str(local), self._url(prefix), delete=delete, exclude=exclude or None,
-                             quiet=True)
+        with _xet_aborted_is_an_error():
+            self.api.sync_bucket(str(local), self._url(prefix), delete=delete,
+                                 exclude=exclude or None, quiet=True)
 
     def sync_down(self, prefix: str, local: Path) -> None:
         self.stats.add("ops", "sync_bucket_down")
         local.mkdir(parents=True, exist_ok=True)
-        self.api.sync_bucket(self._url(prefix), str(local), quiet=True)
+        with _xet_aborted_is_an_error():
+            self.api.sync_bucket(self._url(prefix), str(local), quiet=True)
 
 
 @dataclass
@@ -828,6 +855,7 @@ class BucketSync:
         self._building: set[str] = set()  # agent prefixes with a base tar being made
         self.step: dict[str, str] = {}  # per agent prefix: the push step last started
         self._running: dict[str, set[int]] = {}  # per agent prefix: its running push threads
+        self.timed_out: set[str] = set()  # agent prefixes whose last push timed out
         self.stop_rebase = False  # set by drain/preempt: base builds stop, none start
         self._quota_at: dict[str, float] = {}  # per agent prefix: monotonic time of the last note
         # per agent prefix with a restore in flight: [files done, files listed, started (UTC)]

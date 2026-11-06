@@ -163,7 +163,6 @@ class AgentRuntime:
         self.last_sync: datetime | None = None
         self.unsynced: str | None = None  # the last push's error (heartbeat `unsynced`)
         self.dirty = False
-        self._push_timed_out = False  # the last push timed out (its thread may still run)
         self._env_dropped_rev: str | None = None
         self.allow_starts = True
         self._stop_req: str | None = None
@@ -939,13 +938,14 @@ class AgentRuntime:
             log.warning("%s: %s sync skipped, the agent's restore has not finished; "
                         "the bucket copy stays as it is", self.name, reason)
             return
-        step = lambda: self.sync.step.get(self.sync.prefix(self), "?")
-        if self._push_timed_out and self.sync.busy(self):  # its stale plan must not land later
+        pre = self.sync.prefix(self)
+        step = lambda: self.sync.step.get(pre, "?")
+        if pre in self.sync.timed_out and self.sync.busy(self):  # its stale plan must not land later
             self.unsynced = f"{reason} sync skipped: previous push still running ({step()})"
             log.warning("%s: %s push skipped: previous push still running (step %s)",
                         self.name, reason, step())
             return
-        self._push_timed_out = False
+        self.sync.timed_out.discard(pre)
         self.emit("sync", {"reason": reason})
         self.save_state()
         # the last push before a worker exits (drain, unassign) is retried once
@@ -963,12 +963,11 @@ class AgentRuntime:
                     self.unsynced = f"{reason} sync failed: {type(e).__name__}: {e}"[:300]
                     log.warning("%s: %s (attempt %d)", self.name, self.unsynced, attempt + 1)
                     continue
-                self._push_timed_out = True
+                self.sync.timed_out.add(pre)
                 self.unsynced = f"{reason} sync timed out after {limit} s in step {step()}"
                 log.warning("%s: %s; agent stays dirty", self.name, self.unsynced)
                 # not in a drain/preempt (other agents' pushes run) nor during a restore
-                if reason == "periodic" and not self.sync.stop_rebase \
-                        and not self.sync.restore_progress:
+                if not self.sync.stop_rebase and not self.sync.restore_progress:
                     log.warning("%s: aborting the xet session for the next push", self.name)
                     abort_xet()
                 return

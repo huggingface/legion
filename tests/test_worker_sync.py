@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -967,6 +968,10 @@ async def test_a_hung_push_times_out_and_the_agent_waits_for_its_thread(tmp_path
         assert aborts == [1] and rt.sync.busy(rt)
         await rt.sync_now("periodic")  # its thread still runs: no second push
         assert len(store.order) == 2 and "previous push still running" in rt.unsynced
+        again, _ = runtime(tmp_path, sync=rt.sync)  # unassigned and assigned again
+        again.setup_done = True
+        await again.sync_now("unassign")
+        assert len(store.order) == 2 and "previous push still running" in again.unsynced
         store.gate.set()
         await until(lambda: not rt.sync.busy(rt))
         await rt.sync_now("periodic")
@@ -981,3 +986,52 @@ async def test_a_hung_push_times_out_and_the_agent_waits_for_its_thread(tmp_path
         assert store.order[n:].count(f"sync_up:{pre}workdir") == 1
     finally:
         store.gate.set()
+
+
+async def test_no_xet_abort_while_a_restore_runs(tmp_path, monkeypatch):
+    aborts = []
+    monkeypatch.setattr("huggingface_hub.utils._xet.abort_xet_session", lambda: aborts.append(1))
+    monkeypatch.setenv("FLOCK_PUSH_TIMEOUT_S", "1")
+    store = HangStore()
+    rt, _ = runtime(tmp_path, sync=BucketSync(store, "sw"))
+    try:
+        await rt.setup(restore=False)
+        rt.workdir.mkdir(parents=True, exist_ok=True)
+        rt.sync.restore_progress["sw/researcher/other/"] = [0, 10, None]
+        await rt.sync_now("periodic")
+        assert rt.unsynced.startswith("periodic sync timed out") and aborts == []
+    finally:
+        store.gate.set()
+
+
+async def test_a_change_during_a_push_keeps_the_agent_dirty(tmp_path):
+    store = HangStore()
+    rt, _ = runtime(tmp_path, sync=BucketSync(store, "sw"))
+    try:
+        await rt.setup(restore=False)
+        rt.workdir.mkdir(parents=True, exist_ok=True)
+        push = asyncio.create_task(rt.sync_now("periodic"))
+        await until(lambda: rt.sync.busy(rt))
+        rt.emit("note")
+        store.gate.set()
+        await push
+        assert rt.unsynced is None and rt.dirty
+    finally:
+        store.gate.set()
+
+
+async def test_an_aborted_xet_call_is_a_push_failure_not_an_interrupt(tmp_path, monkeypatch):
+    from flock.worker.sync import HubBucketStore
+
+    def aborted(*a, **kw):
+        raise KeyboardInterrupt
+
+    hub = HubBucketStore("hf://buckets/ns/name/b")
+    for name in ("batch_bucket_files", "sync_bucket", "download_bucket_files"):
+        monkeypatch.setattr(hub.api, name, aborted)
+    rt, _ = runtime(tmp_path, sync=BucketSync(hub, "sw"))
+    await rt.setup(restore=False)
+    await rt.sync_now("periodic")
+    assert rt.unsynced == "periodic sync failed: RuntimeError: xet session aborted" and rt.dirty
+    with pytest.raises(RuntimeError, match="xet session aborted"):
+        hub.download([("x", tmp_path / "x")])
