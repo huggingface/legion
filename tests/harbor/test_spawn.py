@@ -21,7 +21,7 @@ from flock.harbor.tools.bundle import build_tool_bundle
 from flock.harbor.tools.runner import load_module
 from flock.ops import check_spec, read_spec
 
-from ..test_agent_gateway import AGENT, AgentRoutes, gateway_worker
+from ..test_agent_controller_calls import AGENT, AgentRoutes, gateway_worker
 from .test_adapter import TASK
 from .test_cli_launch import pins  # noqa: F401 - the fixture
 

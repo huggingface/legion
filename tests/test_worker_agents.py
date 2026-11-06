@@ -227,24 +227,6 @@ async def test_msgboard_env_injected(tmp_path):
     assert rt.heartbeat().msgboard_principal == "researcher-0001"
 
 
-async def test_system_prompt_written(tmp_path):
-    prompt = tmp_path / "researcher.md"
-    prompt.write_text("You are a researcher.")
-    rt, adapter = runtime(tmp_path, system_prompt_file=str(prompt))
-    await rt.setup(restore=False)
-    await rt.prompt("hi")
-    await until(lambda: adapter.sent == ["hi"])
-    assert (rt.workdir / "AGENTS.md").read_text() == "You are a researcher."
-
-
-async def test_inline_system_prompt_wins_over_file(tmp_path):
-    rt, adapter = runtime(tmp_path, system_prompt="Keep notes.md.", system_prompt_file="missing.md")
-    await rt.setup(restore=False)
-    await rt.prompt("hi")
-    await until(lambda: adapter.sent == ["hi"])
-    assert (rt.workdir / "AGENTS.md").read_text() == "Keep notes.md."
-
-
 async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):
     """A drain, preemption or unassign that lands while setup() still restores leaves the
     bucket copy as it is: nothing is pushed for that agent."""

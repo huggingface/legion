@@ -27,6 +27,8 @@ from flock.controller.reconcile import AgentState, Settings, agent_state, reconc
 from flock.controller.store import Store
 from flock.models import AgentHeartbeat, Event, PromptCommand, SwarmSpec, WorkerHeartbeat
 
+from .conftest import HB
+
 TOKEN = "sim-token"
 ROUND = 3.0  # s
 HEARTBEAT_ROUNDS = 10  # 30 s
@@ -44,7 +46,7 @@ def sim_spec(max_working: int, per_worker: int = 25, agents: int = 1000) -> Swar
         for prov, _ in shape.values()
     }
     types = {
-        name: {"harness": "llm", "model": f"{prov}:LFM2.5-2.6B", "replicas": n,
+        name: {**HB, "model": f"{prov}:LFM2.5-2.6B", "replicas": n,
                "agents_per_worker": per_worker}
         for name, (prov, n) in shape.items()
     }

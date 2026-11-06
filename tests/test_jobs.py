@@ -14,7 +14,6 @@ import pytest
 
 from flock.controller.jobs import (
     BOOTSTRAP_IMAGE,
-    HF_HUB_VERSION,
     WORKER_COMMAND,
     HubJobsClient,
     bootstrap_command,
@@ -22,11 +21,13 @@ from flock.controller.jobs import (
 from flock.controller.main import parse_labels
 from flock.models import TypeSpec
 
+from .conftest import HB
+
 WHEEL = "hf://buckets/ns/sh/dist/abc/flock-0.0.1-py3-none-any.whl"
 
 
 def _spec(**kw) -> TypeSpec:
-    return TypeSpec(harness="llm", model="claude-haiku-5-5", **kw)
+    return TypeSpec(**HB, model="claude-haiku-5-5", **kw)
 
 
 def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
@@ -71,8 +72,7 @@ def fake_wheel(path: Path, requires: tuple[str, ...] = ()) -> Path:
     return path
 
 
-@pytest.mark.parametrize("harness", ["llm", "harbor"])
-def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness):
+def test_bootstrap_installs_the_harbor_extra(tmp_path):
     """The bootstrap script on stubs (uv, hf from a local bucket, curl, mkdir, flock,
     flock-worker). A harbor worker installs flock[harbor] on Python 3.12 with uv.lock's versions
     as constraints and msgboard overridden to the wheel shipped next to flock's (never its
@@ -98,17 +98,13 @@ def test_bootstrap_installs_each_harness_its_extra(tmp_path, harness):
         (stubs / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n'
                                   + body.replace("LOG", str(log)) + "\n")
         (stubs / name).chmod(0o755)
-    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "FLOCK_HARNESS": harness,
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "FLOCK_HARNESS": "harbor",
            "FLOCK_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl", "HF_TOKEN": "hf_test_token"}
     cmd = bootstrap_command()
     r = subprocess.run([*cmd[:2], cmd[2].replace("/opt/wheels", str(wheels))], env=env,
                        capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, r.stderr
     calls = log.read_text().splitlines()
-    if harness == "llm":
-        assert f"uv tool install -q {wheels}/w.whl[worker] --with huggingface_hub=={HF_HUB_VERSION}" in calls
-        assert calls[-1] == "flock-worker "  # no git helper
-        return
     i = calls.index(f"uv tool install -q --python 3.12 {wheels}/w.whl[harbor] -c "
                     f"{wheels}/constraints.txt --overrides {wheels}/overrides.txt")
     assert calls[i + 1] == f"msgboard @ file://{wheels}/{MSGBOARD}"  # the overrides file

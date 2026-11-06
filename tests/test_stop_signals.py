@@ -17,7 +17,6 @@ import httpx
 import pytest
 
 from .test_controller_job import FakeBucket, StateSync, _built, _free_port
-from .test_local_run_e2e import _env
 from .test_world import TASKBOARD
 
 SEQUENCES = [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"), ("SIGTERM",)]
@@ -56,7 +55,8 @@ def test_world_serve_stops_once(tmp_path, signals):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = {**_env(tmp_path), "FLOCK_WORLD_TOKEN": "w0rld-t0ken",
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("FLOCK_")},
+           "HOME": str(tmp_path / "home"), "FLOCK_WORLD_TOKEN": "w0rld-t0ken",
            "TASKBOARD_DB": str(tmp_path / "taskboard.db")}
     proc = subprocess.Popen([sys.executable, "-m", "flock.world", "serve",
                              "taskboard:TaskBoard", "--port", str(port)],

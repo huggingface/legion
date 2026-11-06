@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from flock import cli
 from flock.client import connect
-from flock.controller import localrun
+from flock.controller import local, localrun
 from flock.controller.api import create_app
 from flock.controller.local import LocalJobsClient
 from flock.controller.reconcile import Settings, reconcile
@@ -31,17 +31,17 @@ from flock.current import clear_current, read_current, write_current
 from flock.models import ComputeSpec, SwarmSpec
 from flock.worker.main import Worker, WorkerConfig
 
-from .conftest import TOKEN, make_spec
+from .conftest import HB, TOKEN, make_spec
 
 runner = CliRunner()
-LLM_TYPE = {"harness": "llm", "model": "fake:m", "replicas": 2}
+TYPE = {**HB, "model": "fake:m", "replicas": 2}
 FAKE = {"fake": {"type": "openai_compat", "base_url": "http://127.0.0.1:9/v1",
                  "api_key_env": "FAKE_KEY", "self_hosted": True}}
 
 
 def local_spec(**kw) -> SwarmSpec:
     return SwarmSpec.model_validate({"swarm": "loc", "compute": "local", "providers": FAKE,
-                                     "types": {"w": {**LLM_TYPE, **kw}}})
+                                     "types": {"w": {**TYPE, **kw}}})
 
 
 # --------------------------------------------------------------------------- spec
@@ -50,7 +50,7 @@ def local_spec(**kw) -> SwarmSpec:
 def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
     spec = make_spec()
     assert spec.compute.kind == "hf-jobs"
-    types = {"a": LLM_TYPE}
+    types = {"a": TYPE}
     with pytest.raises(ValueError, match="namespace and bucket required for compute hf-jobs"):
         SwarmSpec.model_validate({"swarm": "s", "providers": FAKE, "types": types})
     with pytest.raises(ValueError, match="bucket required"):
@@ -73,7 +73,7 @@ def test_compute_local_short_and_long_form():
     short = local_spec()
     assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
     long = SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local"},
-                                     "providers": FAKE, "types": {"a": LLM_TYPE}})
+                                     "providers": FAKE, "types": {"a": TYPE}})
     assert long.compute.kind == "local"
     again = SwarmSpec.model_validate(short.model_dump(mode="json"))  # stored form round-trips
     assert again.compute.kind == "local"
@@ -184,7 +184,8 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     assert jobs.inspect("local-9999", namespace="").stage == "DELETED"
 
 
-def test_local_jobs_error_cancel_and_timeout(tmp_path):
+def test_local_jobs_error_cancel_and_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(local, "HARBOR_STOP_GRACE", 0.0)  # the timeout's SIGKILL follows at once
     jobs = LocalJobsClient(root=tmp_path, command=_script(DUMP_ENV),
                            base_env={"PATH": os.environ["PATH"]})
     ts = local_spec().types["w"]
@@ -441,9 +442,10 @@ def _pid_dead(pid: int) -> bool:
     return not _alive(pid)
 
 
-def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
-    # a "worker" that ignores SIGTERM and has a tool in its own session (as the llm harness
-    # starts bash): the group SIGKILL misses the tool, the descendant sweep does not
+def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path, monkeypatch):
+    # a "worker" that ignores SIGTERM and has a child in its own session: the group SIGKILL
+    # misses the child, the descendant sweep does not
+    monkeypatch.setattr(local, "HARBOR_STOP_GRACE", 0.0)
     code = ("import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "p = subprocess.Popen(['sleep', '600'], start_new_session=True); "
             "open('tool.pid', 'w').write(str(p.pid)); time.sleep(600)")
@@ -463,7 +465,7 @@ def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
 async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     spec = SwarmSpec.model_validate({
         "swarm": "budget", "compute": "local", "limits": {"budget_usd": 10},
-        "providers": FAKE, "types": {"w": {**LLM_TYPE, "replicas": 0}}})
+        "providers": FAKE, "types": {"w": {**TYPE, "replicas": 0}}})
     out = io.StringIO()
     task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path, until=30, refresh=0.1, grace=0, out=out)))

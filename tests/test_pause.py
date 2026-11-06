@@ -3,22 +3,17 @@ world is down (docs/health.md), on the fake controller app and a fake clock."""
 
 from __future__ import annotations
 
-import json
-
 import httpx
 
 from flock.controller.api import create_app
 from flock.controller.health import Health
 from flock.controller.reconcile import swarm_stream
-from flock.models import SwarmSpec, WorldManifest
-from flock.world.hub import WorldHub
-from flock.world.protocol import TOKEN_ENV
+from flock.models import SwarmSpec
 
 from . import test_loop_controller
 from .conftest import make_spec
 from .test_health import FakeWorld
 from .test_loop_controller import A0, A1, prompts
-from .test_world import world_block
 
 sim = test_loop_controller.sim  # the fixture
 
@@ -184,24 +179,3 @@ async def test_world_down_pause_off_per_swarm(store, clock):
     assert "holds" not in store.swarm_flags("demo")
 
 
-async def test_hub_refuses_at_once_when_the_heartbeat_says_the_world_is_down():
-    seen = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(1)
-        return httpx.Response(200, json={"ok": True, "text": "fine"})
-
-    hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
-                   transport=httpx.MockTransport(handler))
-    m = WorldManifest(world_api="v1", name="w", version="1",
-                      tools=[{"name": "a"}, {"name": "peek", "annotations": {"readOnlyHint": True}}])
-    block = {**world_block("http://w", m, "t").model_dump(mode="json"), "tools": ["a", "peek"]}
-    hub.configure_raw({**block, "down_since": "2026-10-28T14:05:00+00:00"})
-    for tool in ("world:a", "world:peek"):  # read-only calls too
-        body = json.loads((await hub.call("x", tool, {})).output)
-        assert body["local"] and body["code"] == "world_down"
-        assert body["error"] == "world w down since 14:05 UTC; do local work or end your turn"
-    assert seen == []
-    hub.configure_raw(block)  # back up
-    assert not (await hub.call("x", "world:a", {})).error and seen == [1]
-    await hub.aclose()

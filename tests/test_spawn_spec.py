@@ -14,13 +14,13 @@ from flock.models import (
     root_depth,
 )
 
-from .conftest import FAKE_PROVIDERS
+from .conftest import FAKE_PROVIDERS, HB
 
 
 def spec(spawn=None, limits=None, types=None) -> SwarmSpec:
-    base = {"harness": "llm", "model": "fake:m"}
+    base = {**HB, "model": "fake:m"}
     types = types or {
-        "leader": {"harness": "llm", "model": "fake:lead", "replicas": 1,
+        "leader": {**HB, "model": "fake:lead", "replicas": 1,
                    "workers": {"initial": 1, "max_extra": 0}},
         "analyst": {"replicas": 0, "workers": {"initial": 1, "max_extra": 3}},
         "helper": {"replicas": 0, "workers": {"initial": 0, "max_extra": 2}},

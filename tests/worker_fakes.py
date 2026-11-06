@@ -17,7 +17,7 @@ from flock.worker.sync import BucketSync
 
 
 def spec(**kw) -> TypeSpec:
-    base = {"harness": "llm", "model": "m-1", "idle_grace": "200ms", "turn_timeout": "2s",
+    base = {"harness": "harbor", "harbor": {"task": {}, "config": {"task": {}}}, "model": "m-1", "idle_grace": "200ms", "turn_timeout": "2s",
             "drain_window": "1s"}
     return TypeSpec.model_validate({**base, **kw})
 
@@ -27,7 +27,7 @@ class ScriptedAdapter:
     `turn_time` later with one assistant message and its usage; prompts during a turn
     are folded into it. `hang=True` turns never end. A resume needs `<home>/<sid>.jsonl`."""
 
-    harness = "llm"
+    harness = "harbor"
 
     def __init__(self, home: Path, *, start_delay: float = 0.0, turn_time: float = 0.05,
                  hang: bool = False, log: list | None = None) -> None:

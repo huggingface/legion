@@ -10,17 +10,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from flock.models import LoopMeta, LoopStartCommand, TokenUsage
-from flock.tools.loader import ToolDef
-from flock.tools.runner import Result
-from flock.tools.toolset import Toolset
 from flock.worker import agents as agents_mod
 from flock.worker.adapters.base import AdapterEvent
-from flock.worker.adapters.llm import LLMAdapter
-from flock.worker.agents import AgentRuntime
-from flock.worker.events import Outbox
 from flock.worker.loop import render
 
-from .test_worker_llm import llm_spec
 from .worker_fakes import ScriptedAdapter, runtime, until
 
 T0 = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
@@ -205,64 +198,6 @@ async def test_a_wake_outside_the_round_count_keeps_the_round(tmp_path):
     assert custom(rt, "loop_prompt")[-1] == {"kind": "loop", "round": 3, "why": "wake: comms.mention",
                                              "counted": False}
     await rt.stop()
-
-
-async def test_a_call_runs_with_the_turns_pinned_tools(tmp_path):
-    """Review of #19: a tools re-apply lands after the `llm` adapter pinned v1 for a turn but
-    before the worker consumed its `turn_started`. The call runs with v1."""
-    called: list[str] = []
-
-    def tools(version: str) -> Toolset:
-        async def call(entry, args):
-            called.append(version)
-            return Result("ok", False)
-
-        return Toolset(version, tmp_path, "s", "a", tmp_path / "data", tools=(
-            ToolDef("action", "Dummy action", {"type": "object", "properties": {}}, "dummy",
-                    "action", builtin="dummy:action"),), builtin_call=call)
-
-    current = [tools("v1")]
-    toolbox = lambda: current[0]
-    adapter = LLMAdapter(tmp_path / "agent", agent="a-0001", home=tmp_path / "home", toolbox=toolbox)
-    outbox = Outbox()
-    rt = AgentRuntime("a-0001", "a", llm_spec(), swarm="s", work_root=tmp_path / "agents",
-                      adapter=adapter, outbox=outbox, toolbox=toolbox)
-    rt.workdir.mkdir(parents=True)
-    await rt.setup(restore=False)
-    entered, release = asyncio.Event(), asyncio.Event()
-    n = 0
-
-    async def fake_complete():
-        nonlocal n
-        n += 1
-        if n == 1:
-            entered.set()
-            await release.wait()
-            msg = {"role": "assistant", "content": None, "tool_calls": [{
-                "id": "c1", "type": "function", "function": {"name": "action", "arguments": "{}"}}]}
-        else:
-            msg = {"role": "assistant", "content": "Done."}
-        return {"choices": [{"message": msg}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
-
-    adapter._complete = fake_complete
-    await adapter.start(rt.workdir, None, rt.spec, env={})
-    pump = None
-    try:
-        await adapter.send("Take one action.")
-        await asyncio.wait_for(entered.wait(), 3)
-        current[0] = tools("v2")  # a heartbeat installs v2 mid-turn
-        pump = asyncio.create_task(rt._pump())
-        await until(lambda: rt.turn_id is not None)
-        release.set()
-        await until(lambda: rt.state.turns == 1)
-        evs = outbox.take()
-        ended = next(e.data["data"] for e in evs if e.type == "turn_ended")
-        assert called == ["v1"] and ended["tools_version"] == "v1"
-        assert ended["tool_calls"] == 1
-    finally:
-        await adapter.stop()
-        if pump is not None:
-            await asyncio.wait_for(pump, 3)
 
 
 class StoppedAdapter(ScriptedAdapter):

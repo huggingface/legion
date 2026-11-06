@@ -112,32 +112,6 @@ async def test_worker_budget_tool_calls_wait_briefly_and_the_poller_yields(monke
     assert e.value.code == "board_busy" and "worker request budget" in str(e.value)
 
 
-async def test_tool_call_reports_board_busy_to_the_model(monkeypatch):
-    from flock.models import ALL_COMMS_TOOLS, CommsSpec
-    from flock.worker.comms import CommsHub
-
-    def handler(r):
-        if r.url.path == "/v1/join":
-            return httpx.Response(200, json={"token": "tok", "principal": {"id": 1, "external_id": "dev-0000"}})
-        if r.url.path == "/v1/channels":
-            return httpx.Response(200, json={"channels": [{"id": 12, "name": "team", "member": True}]})
-        if r.url.path == "/v1/activity":
-            return httpx.Response(200, json={"messages": [], "next_cursor": 0})
-        return httpx.Response(429, headers={"retry-after": "30"})
-
-    hub = CommsHub(swarm="sw", env={"INV": "c"}, transport=httpx.MockTransport(handler), rate=0.5)
-    hub.configure(CommsSpec(url="http://b.invalid", invite_env="INV", channel="team", channel_id=12),
-                  list(ALL_COMMS_TOOLS))
-    try:
-        first = await hub.call("dev-0000", "comms:read", {})
-        assert first.error
-        second = await hub.call("dev-0000", "comms:read", {})
-        assert second.error and "board busy (rate limited), retry in" in second.output
-        assert hub.limiter.rate == 0.5
-    finally:
-        await hub.aclose()
-
-
 async def test_429_log_lines_never_carry_tokens_cookies_or_queries(monkeypatch, caplog):
     import logging
 

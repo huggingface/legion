@@ -10,10 +10,9 @@ import pytest
 from flock.controller.api import create_app
 from flock.models import SwarmSpec, WorkerHeartbeat
 from flock.world.host import WorldError, follow_world_host, world_endpoint
-from flock.world.hub import WorldHub
-from flock.world.protocol import TOKEN_ENV, credential_id, origin_matches
+from flock.world.protocol import origin_matches
 
-from .conftest import FAKE_PROVIDERS, TOKEN
+from .conftest import FAKE_PROVIDERS, HB, TOKEN
 from .test_world import SECRET, Recorder, Served
 
 TEMPLATE = "http://${WORLD_HOST}"
@@ -66,7 +65,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
             "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "world": {"url": TEMPLATE, "token_env": "WORLD_TOKEN"},
             "providers": FAKE_PROVIDERS,
-            "types": {"researcher": {"harness": "llm", "model": "fake:m",
+            "types": {"researcher": {**HB, "model": "fake:m",
                                      "replicas": 1, "world_tools": True}},
         })
         app = create_app(store, TOKEN, clock=clock)
@@ -101,18 +100,6 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
             block = r.json()["world"]
             assert block["endpoint"] == second.url
 
-        hub = WorldHub(swarm="demo", type_name="researcher", env={TOKEN_ENV: SECRET})
-        hub.configure_raw(block)
-        assert not hub.needs_restart()  # the secret still binds: no drain, no relaunch
-        snap = hub.snapshot()
-        assert snap is not None and snap.endpoint == second.url and snap.send_token
-        # a different (unlisted) origin would not be trusted
-        hub.configure_raw({**block, "endpoint": "https://elsewhere.example/x"})
-        assert hub.needs_restart()
-        t = "http://${WORLD_HOST}:7860"  # the endpoint's port is the one the job bound
-        hub.configure_raw({**block, "credential_origin": t, "credential_id": credential_id(SECRET, t),
-                           "endpoint": "http://ip-10-53-93-119:44951"})
-        assert not hub.needs_restart()
     finally:
         first.close()
         second.close()

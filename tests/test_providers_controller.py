@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from flock.controller.api import create_app
 from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 
-from .conftest import TOKEN
+from .conftest import HB, TOKEN
 
 PROVIDERS = {
     "hf": {"type": "openai_compat", "base_url": "https://router.example/v1", "api_key_env": "HF_TOKEN",
@@ -26,9 +26,9 @@ PROVIDERS = {
 
 def pspec(providers=None, **types) -> SwarmSpec:
     types = types or {
-        "worker": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B", "replicas": 2,
+        "worker": {**HB, "model": "hf:Qwen/Qwen3.8-27B", "replicas": 2,
                    "agents_per_worker": 2, "secrets": ["HF_TOKEN"]},
-        "local": {"harness": "llm", "model": "gpu1:Qwen/Small", "replicas": 1},
+        "local": {**HB, "model": "gpu1:Qwen/Small", "replicas": 1},
     }
     return SwarmSpec.model_validate({"swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b",
                                      "providers": providers or PROVIDERS, "types": types})
@@ -144,9 +144,9 @@ def preflight_providers():
 
 def preflight_spec(**extra_types) -> SwarmSpec:
     return pspec(preflight_providers(), **{
-        "worker": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
-        "worker2": {"harness": "llm", "model": "hf:Qwen/Qwen3.8-27B"},
-        "local": {"harness": "llm", "model": "gpu1:Qwen/Small", "reasoning": "off"},
+        "worker": {**HB, "model": "hf:Qwen/Qwen3.8-27B"},
+        "worker2": {**HB, "model": "hf:Qwen/Qwen3.8-27B"},
+        "local": {**HB, "model": "gpu1:Qwen/Small", "reasoning": "off"},
         **extra_types,
     })
 
@@ -245,14 +245,14 @@ async def test_preflight_uses_applied_spec_without_body(preflight_client):
         assert (await c.post("/swarms/p/preflight", json=other)).status_code == 400
 
 
-async def test_preflight_probes_chat_completions_for_llm_types(preflight_client):
+async def test_preflight_probes_chat_completions(preflight_client):
     fake, seen = fake_provider()
     extra = {"chat_template_kwargs": {"enable_thinking": False}, "response_format": {"type": "json_object"}}
     spec = SwarmSpec.model_validate({
         "swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": preflight_providers(),
         "models": {"small": {"model": "gpu1:Qwen/Small", "extra": extra}},
-        "types": {"pixel": {"harness": "llm", "model": "small"},
-                  "pixel2": {"harness": "llm", "model": "small"}}})
+        "types": {"pixel": {**HB, "model": "small"},
+                  "pixel2": {**HB, "model": "small"}}})
     async with await preflight_client(fake, SECRETS) as c:
         rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
     assert rep["ok"] is True
@@ -280,31 +280,15 @@ async def test_preflight_sends_harbor_models_as_harbors_pi_does(preflight_client
     pytest.importorskip("harbor")
     fake, seen = fake_provider()
     m = "gpu1:huggingface/deepseek-ai/V4-Flash:novita"
-    spec = pspec(preflight_providers(), h={"harness": "harbor", "model": m,
-                                           "harbor": {"task": {}, "config": {}}},
-                 l={"harness": "llm", "model": m})
+    spec = pspec(preflight_providers(), h={**HB, "model": m})
     async with await preflight_client(fake, SECRETS) as c:
         rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
-    assert len(rep["results"]) == 2  # unchanged id for llm, prefix dropped for harbor
-    assert {x["model"] for x in seen} == {"huggingface/deepseek-ai/V4-Flash:novita",
-                                          "deepseek-ai/V4-Flash:novita"}
+    assert len(rep["results"]) == 1  # the provider prefix dropped, as Harbor's Pi sends it
+    assert {x["model"] for x in seen} == {"deepseek-ai/V4-Flash:novita"}
 
 
-async def test_preflight_llm_accepts_a_tool_call_written_as_text(preflight_client):
-    spec = pspec(preflight_providers(), pixel={"harness": "llm", "model": "gpu1:Qwen/Small"})
-    fake, seen = fake_provider(text_call=True)
-    async with await preflight_client(fake, SECRETS) as c:
-        [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
-    assert x["ok"] and x["api"] == "chat_completions" and "wrote its tool call as text" in x["warning"]
-    assert seen[1]["messages"][1]["tool_calls"][0]["function"]["name"] == "get_time"
-    # a forced tool_choice on the type: named -> the probe's own tool; follow-up back to auto
-    forced = pspec(preflight_providers(), pixel={"harness": "llm", "model": "gpu1:Qwen/Small",
-                                                 "tool_choice": "bash"})
-    fake, seen = fake_provider()
-    async with await preflight_client(fake, SECRETS) as c:
-        [x] = (await c.post("/swarms/p/preflight", json=forced.model_dump(mode="json"))).json()["results"]
-    assert x["ok"] and seen[0]["tool_choice"] == {"type": "function", "function": {"name": "get_time"}}
-    assert seen[1]["tool_choice"] == "auto"
+async def test_preflight_fails_without_a_tool_call_or_its_follow_up(preflight_client):
+    spec = pspec(preflight_providers(), pixel={**HB, "model": "gpu1:Qwen/Small"})
     for kw, err in (({"tool_call": False}, "no tool call"), ({"follow_up_fails": True}, "follow-up turn")):
         fake, _ = fake_provider(**kw)
         async with await preflight_client(fake, SECRETS) as c:
@@ -349,7 +333,7 @@ async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, mon
         monkeypatch.delenv("FLOCK_MAX_WORKING_ENFORCE", raising=False)
     else:
         monkeypatch.setenv("FLOCK_MAX_WORKING_ENFORCE", env)
-    spec = pspec(CAP_PROVIDERS, worker={"harness": "llm", "model": "p:test", "replicas": 2})
+    spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 2})
     wid = "p-worker-w0000"
     async with await _cap_client(store, clock, None) as c:
         assert (await put(c, spec)).status_code == 200
@@ -377,7 +361,7 @@ async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, mon
 
 
 async def test_max_working_counts_admissions_between_heartbeats(store, clock, tick):
-    spec = pspec(CAP_PROVIDERS, worker={"harness": "llm", "model": "p:test", "replicas": 2,
+    spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 2,
                                         "agents_per_worker": 1})
     async with await _cap_client(store, clock, True) as c:
         assert (await put(c, spec)).status_code == 200

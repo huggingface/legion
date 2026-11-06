@@ -226,24 +226,19 @@ async def test_a_round_before_the_fetch_does_not_take_the_line(sim):
     assert [c["text"] for c in await sim.commands()] == ["round {round}"]
 
 
-@pytest.mark.parametrize("harness, wake, event", [
-    ("llm", "comms.mention", mention(11, 19820, "cmpatino")),
-    ("harbor", "board.mention", ("resource", {"resource": "board", "kind": "mention", "data": {
-        "msg_id": 11, "thread": 19820, "from": "cmpatino", "identity_type": "user"}})),
-])
-async def test_llm_and_harbor_types_get_the_line(sim, harness, wake, event):
-    """The line is plain text after the template, so any harness renders it. A harbor type's
-    board events are `resource` events from the board resource: wake `board.mention`."""
-    kw = {"harbor": {"task": {}, "config": {}}} if harness == "harbor" else {}
-    got = await started(sim, {**CTRL, "on": [wake]}, harness=harness, model="fake:m", secrets=[], **kw)
+async def test_harbor_types_get_the_line(sim):
+    """The line is plain text after the template. A harbor type's board events are `resource`
+    events from the board resource: wake `board.mention`."""
+    wake = "board.mention"
+    event = ("resource", {"resource": "board", "kind": "mention", "data": {
+        "msg_id": 11, "thread": 19820, "from": "cmpatino", "identity_type": "user"}})
+    got = await started(sim, {**CTRL, "on": [wake]}, model="fake:m", secrets=[])
     assert got[A0]["loop"]["kind"] == "loop"
     await sim.events(A0, event)
     sim.tick(2.1)
     got = prompts(await sim.commands())
     assert got[A0]["loop"]["why"] == f"wake: {wake}"
     assert line(got[A0]["text"]) == HEAD + "@cmpatino mentioned you in thread 19820. Read them if useful."
-    spec = sim.store.get_swarm("demo")["spec"]
-    assert spec.types["researcher"].harness.value == harness
 
 
 def test_spec_accepts_and_round_trips_the_key():

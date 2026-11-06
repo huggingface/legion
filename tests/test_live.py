@@ -8,7 +8,6 @@ import json
 import textwrap
 from pathlib import Path
 
-import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -20,16 +19,12 @@ from flock.live import (
 )
 from flock.models import (
     AgentHeartbeat,
-    HarborSpec,
-    Harness,
     SwarmSpec,
     type_spec_rev,
 )
 from flock.tools.bundle import pack
-from flock.tools.toolset import Toolset
 
-from .conftest import make_spec, wire
-from .worker_fakes import runtime, spec, until
+from .conftest import HB, make_spec, wire
 
 runner = CliRunner()
 
@@ -49,9 +44,9 @@ PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://gpu.invalid/v1
 
 
 def raw(**types) -> dict:
-    base = {"researcher": {"harness": "llm", "model": "gpu:m", "replicas": 2,
+    base = {"researcher": {**HB, "model": "gpu:m", "replicas": 2,
                            "agents_per_worker": 2},
-            "calc": {"harness": "llm", "model": "gpu:m", "replicas": 2, "agents_per_worker": 2,
+            "calc": {**HB, "model": "gpu:m", "replicas": 2, "agents_per_worker": 2,
                      "tools": ["add"]}}
     return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
             "providers": PROVIDERS, "types": {**base, **types}}
@@ -80,7 +75,7 @@ def test_diff_lists_tools_prompts_and_keys():
         ("prompts changed: calc (system_prompt); "
          "comms (kickoff (posted once per channel: not posted again))"),
         "types.calc.replicas: 2 -> 3",
-        "+ type r (llm, replicas 1)",
+        "+ type r (harbor, replicas 1)",
         "- type x (its agents are removed)",
         "limits.budget_usd: 10.0 -> 15.0",
     ]
@@ -185,20 +180,6 @@ async def test_an_update_changes_the_worker_liveness_timings(client, store, tick
     assert await state() == "unknown"
 
 
-async def test_apply_refuses_a_harness_change_for_a_running_type(client, store, tick, tmp_path):
-    spec = await applied(client, tmp_path, tick)
-    harbor = {"harness": Harness.harbor, "harbor": HarborSpec(task={}, config={})}
-    calc = spec.types["calc"]
-    spec.types["calc"] = calc.model_copy(update=harbor)
-    r = await client.put("/swarms/demo", json=spec.model_dump(mode="json"))
-    assert r.status_code == 400 and "types.calc.harness: a running type's harness" in r.text
-    spec.types["fresh"] = calc.model_copy(update={"replicas": 0})
-    spec.types["calc"] = calc
-    assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
-    spec.types["fresh"] = spec.types["fresh"].model_copy(update=harbor)  # no agents: may change
-    assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
-
-
 async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client, store, tick,
                                                                          tmp_path):
     spec = await applied(client, tmp_path, tick)
@@ -225,72 +206,6 @@ async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client
     assert evs[1]["diff_summary"] == hist[1]["diff"]
 
 
-def test_bash_switch_is_llm_only_in_the_spec():
-    with pytest.raises(ValueError, match="only the llm harness"):
-        spec(bash=False, harness="harbor", harbor={"task": {}, "config": {}})
-    with pytest.raises(ValueError, match="contradicts tool_choice"):
-        SwarmSpec.model_validate(raw(calc={"harness": "llm", "model": "gpu:m", "bash": False,
-                                           "tool_choice": "bash"}))
-
-
-# --------------------------------------------------------------------------- the runtime side
-
-
-async def test_a_new_system_prompt_applies_at_the_next_turn_with_a_note(tmp_path):
-    rt, adapter = runtime(tmp_path, system_prompt="v1")
-    await rt.setup(restore=False)
-    rt.set_live(spec=spec(system_prompt="v0"))  # before any turn: applied, no note
-    await rt.prompt("one")
-    await until(lambda: rt.state.turns == 1)
-    assert adapter.sent == ["one"] and (rt.workdir / "AGENTS.md").read_text() == "v0"
-    adapter.turn_time = 0.3
-    await rt.prompt("two")
-    await until(lambda: rt.turn_id is not None)
-    rt.set_live(spec=spec(system_prompt="v2"))
-    await rt.prompt("steer")  # joins the turn in flight: no boundary, nothing applied
-    assert (rt.workdir / "AGENTS.md").read_text() == "v0" and adapter.sent[-1] == "steer"
-    await until(lambda: rt.state.turns == 2)
-    adapter.turn_time = 0.05
-    await rt.prompt("three")
-    await until(lambda: adapter.sent[-1].endswith("three"))
-    assert (rt.workdir / "AGENTS.md").read_text() == "v2"
-    assert adapter.sent[-1] == "[flock] Since your last turn: your system prompt changed.\n\nthree"
-    await until(lambda: rt.state.turns == 3)
-    await rt.prompt("four")
-    await until(lambda: adapter.sent[-1].endswith("four"))
-    assert adapter.sent[-1] == "four"  # once
-    await rt.stop()
-
-
-async def test_a_changed_board_section_gets_a_note(tmp_path):
-    class Hub:  # the parts of CommsHub a runtime calls
-        text = "<!-- flock:comms -->\nrules v1\n<!-- /flock:comms -->"
-
-        async def on_prompt(self, agent, harness):
-            pass
-
-        def section(self, agent):
-            return self.text
-
-        def deny_env(self):
-            return []
-
-    rt, adapter = runtime(tmp_path, system_prompt="base")
-    rt.comms = hub = Hub()
-    rt.toolbox = lambda: Toolset(version=None, dir=None, swarm="sw", type="researcher",
-                                 data_dir=tmp_path / "data")  # as the worker always sets one
-    await rt.setup(restore=False)
-    await rt.prompt("one")
-    await until(lambda: rt.state.turns == 1)
-    hub.text = hub.text.replace("v1", "v2")  # a re-apply changed the rules or protocols
-    await rt.prompt("two")
-    await until(lambda: adapter.sent[-1].endswith("two"))
-    assert "rules v2" in (rt.workdir / "AGENTS.md").read_text()
-    assert adapter.sent[-1] == ("[flock] Since your last turn: the Team board section of "
-                                "AGENTS.md changed; re-read it.\n\ntwo")
-    await rt.stop()
-
-
 # --------------------------------------------------------------------------- the CLI
 
 
@@ -299,7 +214,7 @@ def _experiment(root: Path, *, replicas: int = 2, prompt: str = "You are a resea
     (root / "prompts").mkdir(parents=True, exist_ok=True)
     (root / "prompts" / "system.md").write_text(prompt)
     _tools(root, tools)
-    t = {"harness": "llm", "model": "p:m", "replicas": replicas,
+    t = {**HB, "model": "p:m", "replicas": replicas,
          "agents_per_worker": 2, "system_prompt_file": "prompts/system.md", "tools": ["add"],
          **type_extra}
     f = root / "spec.yaml"
@@ -333,10 +248,6 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
     assert applied.tools_version == v2 and applied.types["researcher"].replicas == 3
     assert applied.types["researcher"].system_prompt == "You are a careful researcher."
 
-    _experiment(exp, replicas=3, prompt="You are a careful researcher.", tools=TOOLS_V2,
-                harness="harbor", harbor={"task": {}, "config": {}})
-    r = runner.invoke(cli.app, ["update", str(exp)])
-    assert r.exit_code == 1 and "refused: types.researcher.harness" in r.output, r.output
     (exp / "spec.yaml").write_text("types: [unclosed\n")
     r = runner.invoke(cli.app, ["update", str(exp)])
     assert r.exit_code == 1 and "spec.yaml" in r.output
@@ -385,7 +296,7 @@ def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, s
 
 
 async def test_put_replicas_keep_and_dry_run(client, store):
-    spec = SwarmSpec.model_validate(raw(calc={"harness": "llm", "model": "gpu:m", "replicas": 2,
+    spec = SwarmSpec.model_validate(raw(calc={**HB, "model": "gpu:m", "replicas": 2,
                                               "agents_per_worker": 2}))
     assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
     spec.types["calc"].replicas = 5

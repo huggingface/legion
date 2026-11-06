@@ -16,7 +16,7 @@ from flock.models import PreflightReport, PreflightResult
 from flock.ops import read_spec
 from flock.specrender import read_env_file
 
-from .conftest import FAKE_PROVIDERS
+from .conftest import FAKE_PROVIDERS, HB
 
 runner = CliRunner()
 SPEC = {
@@ -26,7 +26,7 @@ SPEC = {
     "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"},
     "providers": FAKE_PROVIDERS,
     "types": {"researcher": {
-        "harness": "llm", "model": "fake:m", "replicas": 2, "agents_per_worker": 2,
+        **HB, "model": "fake:m", "replicas": 2, "agents_per_worker": 2,
         "secrets": ["ANTHROPIC_API_KEY"], "system_prompt_file": "prompts/system.md",
         "env": {"MSGBOARD_URL": "${BOARD_URL:-https://board.invalid}"}}},
 }
@@ -533,7 +533,7 @@ def test_check_task_wants_commits(tmp_path):
         return NS(types={"a": NS(harbor=NS(task=t))})
 
     sha = "a" * 40
-    assert rundir.check_task(_spec(tmp_path)).ok is None  # not a Harbor spec
+    assert rundir.check_task(_spec(tmp_path)).ok is True
     ok = rundir.check_task(spec(sha, sha))
     assert ok.ok is True and "pinned" in ok.detail
     bad = rundir.check_task(spec(sha, "main"))

@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 from flock import cli, ops
 from flock.client import Client
 
-from .conftest import TOKEN, make_spec, wire, write_spec
+from .conftest import HB, TOKEN, make_spec, wire, write_spec
 
 runner = CliRunner()
 
@@ -74,7 +74,7 @@ PROVIDER_SPEC = {
     "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
                            "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
     "models": {"q": {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
-    "types": {"worker": {"harness": "llm", "model": "q", "replicas": 1}},
+    "types": {"worker": {**HB, "model": "q", "replicas": 1}},
 }
 
 
@@ -172,15 +172,15 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
 
 def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     wire(monkeypatch, app)
-    bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "llm", "model": "native"}}}
+    bad = {**PROVIDER_SPEC, "types": {"writer": {**HB, "model": "native"}}}
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(bad))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1
-    assert "types.writer.model: harness 'llm' needs a provider-backed model" in r.output
+    assert "types.writer.model: harness 'harbor' needs a provider-backed model" in r.output
 
 
-def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
+def test_warn_extra_that_is_not_sent():
     from flock.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({
@@ -190,15 +190,9 @@ def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
         "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
                    "plain": {"model": "p:m"}},
         "types": {"hb": {"harness": "harbor", "model": "m", "harbor": {"task": {}, "config": {}}},
-                  "l": {"harness": "llm", "model": "m"},
                   "nox": {"harness": "harbor", "model": "plain", "harbor": {"task": {}, "config": {}}}}})
     err = "\n".join(ops.extra_warnings(spec))
-    assert "type hb: `extra`" in err and "type l:" not in err and "nox" not in err
-    # the llm harness sends `extra` as body fields: never warned (PR #7 adds the harness)
-    assert "llm" not in ops.EXTRA_NOT_SENT
-    monkeypatch.setattr(ops, "EXTRA_NOT_SENT", frozenset({"llm"}))
-    err = "\n".join(ops.extra_warnings(spec))
-    assert "type l:" in err and "type hb:" not in err
+    assert "type hb: `extra`" in err and "nox" not in err
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):

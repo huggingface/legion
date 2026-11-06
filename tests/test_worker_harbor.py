@@ -88,7 +88,6 @@ def test_the_worker_host_reaches_harbor_adapters_only(tmp_path):
     a = make("researcher-0001", spec(**HARBOR))
     assert isinstance(a, HarborAdapter) and a.host is worker.harbor
     assert worker.harbor.root == tmp_path / "agents" / "_harbor" / "_worker"
-    assert not hasattr(make("researcher-0002", spec(harness="llm")), "host")
 
 
 async def test_the_worker_closes_its_host_at_exit(tmp_path):
@@ -133,17 +132,17 @@ async def test_every_exit_path_closes_the_trials_in_parallel(tmp_path, path):
 
 
 def test_a_local_harbor_worker_gets_time_to_stop_its_trials(tmp_path, monkeypatch):
-    """SIGTERM, then 0.3 s until the worker has stopped its Trials: a harbor worker is not
-    SIGKILLed after the 0.1 s grace that other workers get."""
+    """SIGTERM, then 0.3 s until the worker has stopped its Trials: it is not SIGKILLed after
+    the 0.1 s grace."""
     monkeypatch.setattr(local, "HARBOR_STOP_GRACE", 5.0)
     script = "trap 'sleep 0.3; exit 3' TERM; echo up; sleep 30 & wait"
     jobs = local.LocalJobsClient(root=tmp_path, command=["sh", "-c", script])
     codes = {}
-    for harness in (Harness.llm, Harness.harbor):
+    for harness in (Harness.harbor,):
         ts = spec().model_copy(update={"harness": harness})
         job = jobs.launch(harness.value, ts, {"WORKER_ID": harness.value}, {}, {}, 60, namespace="")
         while "up" not in "".join(jobs.logs_tail(job, namespace="")):
             time.sleep(0.01)
         jobs.kill_all(grace=0.1)
         codes[harness.value] = jobs.procs[job].popen.returncode
-    assert codes == {"llm": -9, "harbor": 3}
+    assert codes == {"harbor": 3}

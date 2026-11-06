@@ -13,14 +13,14 @@ from flock.controller.api import create_app
 from flock.models import AgentHeartbeat, Event, WorkerHeartbeat
 
 from .admission_sim import simulate
-from .conftest import TOKEN
+from .conftest import HB, TOKEN
 from .test_providers_controller import CAP_PROVIDERS, pspec, put
 
 W0, W1 = "p-worker-w0000", "p-worker-w0001"
 
 
 def _spec():
-    return pspec(CAP_PROVIDERS, worker={"harness": "llm", "model": "p:test", "replicas": 2,
+    return pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 2,
                                         "agents_per_worker": 1})
 
 

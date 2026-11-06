@@ -1,5 +1,6 @@
-"""Agent -> controller calls through the worker gateway (docs/spawn.md, "CLI inside an agent"),
-and the worker following a controller that moved host."""
+"""Agent -> controller calls through the worker (`Worker.controller_call`, what the Harbor spawn
+resource sends each agent's calls to; docs/spawn.md), and the worker following a controller that
+moved host."""
 
 from __future__ import annotations
 
@@ -76,17 +77,13 @@ async def gateway_worker(tmp_path, ctrl):
     worker, _ = make_worker(tmp_path, ctrl)
     await worker.dispatch(AssignCommand(agent=AGENT, type="researcher", spec=spec(),
                                         restore=False, agent_token="flock_at_leader"))
-    await worker.comms.start_gateway()
     return worker
 
 
 async def call(worker, args, agent=AGENT):
     import json
 
-    from flock.tools.toolset import gateway_call
-
-    r = await gateway_call(worker.comms.address, worker.comms.key(agent), agent,
-                           "controller:request", args)
+    r = await worker.controller_call(agent, "controller:request", args)
     return r.error, json.loads(r.output)
 
 
@@ -129,16 +126,6 @@ async def test_gateway_refuses_other_routes(tmp_path, method, path):
     await worker.client.aclose()
 
 
-async def test_wrong_key_is_refused(tmp_path):
-    from flock.tools.toolset import gateway_call
-
-    worker = await gateway_worker(tmp_path, AgentRoutes("controller"))
-    r = await gateway_call(worker.comms.address, "guess", AGENT, "controller:request",
-                           {"method": "GET", "path": "/whoami"})
-    assert r.error and "unknown agent or key" in r.output
-    await worker.client.aclose()
-
-
 async def test_persistent_failure_emits_controller_call_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(wmain, "_retry_delay", lambda attempt, retry_after: 20.0)
     ctrl = AgentRoutes("nowhere")  # never reachable, wherever the host file points
@@ -151,29 +138,6 @@ async def test_persistent_failure_emits_controller_call_failed(tmp_path, monkeyp
     assert len(events) == 1 and events[0].agent == AGENT
     assert events[0].data["data"]["path"] == f"/agents/{AGENT}/prompt"
     assert "ConnectError" in events[0].data["data"]["error"]
-    await worker.client.aclose()
-
-
-async def test_cli_call_goes_through_the_gateway_when_the_pin_names_one(tmp_path, monkeypatch):
-    import asyncio
-
-    from flock.client import Client, gateway
-
-    ctrl = AgentRoutes("controller")
-    worker = await gateway_worker(tmp_path, ctrl)
-    pin = worker.agents[AGENT].pin_path
-    worker.agents[AGENT]._pin_tools()  # what the turn start writes
-    monkeypatch.setenv("FLOCK_TOOLS_PIN", str(pin))
-    monkeypatch.setenv("FLOCK_URL", "http://stale-host:7860")  # frozen at harness start
-    monkeypatch.delenv("FLOCK_AGENT_TOKEN", raising=False)
-    monkeypatch.setattr("flock.client.connect", lambda *_: pytest.fail("direct call"))
-    ack = await asyncio.to_thread(Client()._call, "POST", f"/agents/{AGENT}/spawn",
-                                  json={"type": "analyst"})
-    assert ack["name"] == f"{AGENT}-analyst-0001"
-    assert Client().as_agent  # no FLOCK_AGENT_TOKEN needed any more
-
-    monkeypatch.delenv("FLOCK_TOOLS_PIN")  # no gateway: the direct path, as before
-    assert gateway() is None
     await worker.client.aclose()
 
 

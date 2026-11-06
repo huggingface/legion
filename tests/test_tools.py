@@ -1,9 +1,8 @@
-"""Tools folder: loader and schema builder, the subprocess runner, bundles, apply-time selection."""
+"""Tools folder: loader and schema builder, argument checks, bundles, apply-time selection."""
 
 from __future__ import annotations
 
 import io
-import json
 import tarfile
 import textwrap
 from pathlib import Path
@@ -11,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from flock.models import SwarmSpec
-from flock.tools import Context
 from flock.tools.bundle import (
     MANIFEST_NAME,
     extract,
@@ -21,10 +19,10 @@ from flock.tools.bundle import (
     version_of,
 )
 from flock.tools.loader import ToolsError, describe, load_dir, select
-from flock.tools.runner import check_args, context_dict, run_tool
+from flock.tools.runner import check_args
 from flock.tools.spec import prepare
 
-from .conftest import FAKE_PROVIDERS
+from .conftest import FAKE_PROVIDERS, HB
 
 
 def write(folder: Path, name: str, src: str) -> Path:
@@ -212,19 +210,6 @@ def test_nullable_means_null_accepted_not_omittable(tmp_path):
     assert check_args(plain, {"x": 1, "xs": [1, None]}) == "xs[1] must be integer, got null"
 
 
-async def test_nullable_calls_match_the_schema(tmp_path):
-    folder = write(tmp_path / "tools", "n.py", NULLABLE_SRC).parent
-    m = load_dir(folder)
-    wd = tmp_path / "wd"
-    r = await run_tool(m.get("opt"), {"x": None, "tags": [None], "mode": None}, tools_dir=folder,
-                       workdir=wd)
-    assert (r.output, r.error) == ("None/[None]/None/None", False)
-    r = await run_tool(m.get("opt"), {"tags": [], "mode": "a"}, tools_dir=folder, workdir=wd)
-    assert r.error and "missing required argument(s): x" in r.output
-    r = await run_tool(m.get("plain"), {"x": None, "xs": []}, tools_dir=folder, workdir=wd)
-    assert r.error and "x must be integer, got null" in r.output
-
-
 def test_check_args():
     params = {"type": "object", "properties": {"a": {"type": "integer"}, "xs": {
         "type": "array", "items": {"type": "string"}}, "f": {"type": "number"}},
@@ -235,141 +220,6 @@ def test_check_args():
     assert "a must be integer, got bool" in check_args(params, {"a": True})
     assert "xs[1] must be string" in check_args(params, {"a": 1, "xs": ["x", 2]})
     assert "must be a JSON object" in check_args(params, ["a"])
-
-
-# --------------------------------------------------------------------------- runner
-
-
-RUN_SRC = '''
-    import os
-    import sys
-    import time
-
-    from flock.tools import Context, ToolError
-
-
-    def add(a: int, b: int) -> int:
-        """Add."""
-        print("this goes to stderr, not into the result")
-        return a + b
-
-
-    def text(s: str) -> str:
-        """Strings come back as is."""
-        return s.upper()
-
-
-    def boom(x: int) -> int:
-        """Raises."""
-        raise ValueError(f"bad x {x}")
-
-
-    def refuse() -> str:
-        """Raises a ToolError."""
-        raise ToolError("not allowed right now")
-
-
-    def slow(seconds: float) -> str:
-        """Sleeps."""
-        time.sleep(seconds)
-        return "slept"
-
-
-    def big(n: int) -> str:
-        """Returns n bytes."""
-        return "x" * n
-
-
-    def die() -> str:
-        """Kills its own process."""
-        os._exit(3)
-
-
-    def leaves_child() -> str:
-        """Starts a background process that keeps stderr open."""
-        import subprocess
-        subprocess.Popen(["sleep", "30"])
-        return "left one"
-
-
-    def who(ctx: Context) -> dict:
-        """The context and the cwd."""
-        (ctx.data_dir / "note").write_text("kept")
-        return {"agent": ctx.agent, "type": ctx.type, "swarm": ctx.swarm, "cwd": os.getcwd(),
-                "workdir": str(ctx.workdir), "version": ctx.tools_version,
-                "env": os.environ.get("MY_VAR"), "ctx_env": ctx.env.get("MY_VAR"),
-                "path0": sys.path[0]}
-
-
-    async def later(x: int) -> dict:
-        """Async."""
-        return {"x": x * 2}
-'''
-
-
-@pytest.fixture
-def run_env(tmp_path):
-    folder = write(tmp_path / "tools", "t.py", RUN_SRC).parent
-    m = load_dir(folder)
-    wd = tmp_path / "work"
-    return m, folder, wd
-
-
-async def test_runner_results_and_errors(run_env, tmp_path):
-    m, folder, wd = run_env
-    r = await run_tool(m.get("add"), {"a": 2, "b": 3}, tools_dir=folder, workdir=wd)
-    assert (r.output, r.error) == ("5", False)
-    r = await run_tool(m.get("text"), {"s": "hi"}, tools_dir=folder, workdir=wd)
-    assert r.output == "HI"
-    r = await run_tool(m.get("later"), {"x": 4}, tools_dir=folder, workdir=wd)
-    assert json.loads(r.output) == {"x": 8}
-    r = await run_tool(m.get("boom"), {"x": 7}, tools_dir=folder, workdir=wd)
-    assert r.error and json.loads(r.output) == {"error": "ValueError: bad x 7"}
-    r = await run_tool(m.get("refuse"), {}, tools_dir=folder, workdir=wd)
-    assert r.error and json.loads(r.output) == {"error": "not allowed right now"}
-    r = await run_tool(m.get("add"), {"a": "2", "b": 3}, tools_dir=folder, workdir=wd)
-    assert r.error and "a must be integer" in json.loads(r.output)["error"]
-    r = await run_tool(m.get("die"), {}, tools_dir=folder, workdir=wd)
-    assert r.error and "the tool process died" in json.loads(r.output)["error"]
-
-
-async def test_runner_timeout_kills_the_call(run_env):
-    m, folder, wd = run_env
-    r = await run_tool(m.get("slow"), {"seconds": 30}, tools_dir=folder, workdir=wd, timeout=0.5)
-    assert r.error and json.loads(r.output) == {"error": "slow: timed out after 0.5s and was killed"}
-    assert r.duration_s < 5
-
-
-async def test_runner_caps_the_result_size(run_env):
-    m, folder, wd = run_env
-    r = await run_tool(m.get("big"), {"n": 5000}, tools_dir=folder, workdir=wd, max_bytes=10_000)
-    assert not r.error and len(r.output) == 5000
-    r = await run_tool(m.get("big"), {"n": 3_000_000}, tools_dir=folder, workdir=wd, max_bytes=10_000)
-    assert r.error and "over the 10000-byte limit" in r.output
-
-
-async def test_runner_does_not_wait_for_leftover_processes(run_env):
-    m, folder, wd = run_env
-    r = await run_tool(m.get("leaves_child"), {}, tools_dir=folder, workdir=wd, timeout=10)
-    assert (r.output, r.error) == ("left one", False) and r.duration_s < 5
-
-
-async def test_runner_context_cwd_env_and_isolation(run_env, tmp_path):
-    m, folder, wd = run_env
-    wd.mkdir(parents=True)
-    (wd / "t.py").write_text("raise SystemExit('the agent planted this')\n")  # never imported
-    data = tmp_path / "data"
-    data.mkdir()
-    ctx = Context(agent="dev-0001", type="dev", swarm="s1", workdir=wd, data_dir=data,
-                  tools_dir=folder, tools_version="0123456789abcdef", env={"MY_VAR": "v"})
-    r = await run_tool(m.get("who"), {}, tools_dir=folder, workdir=wd, ctx=context_dict(ctx),
-                       env={"MY_VAR": "v", "PATH": "/usr/bin:/bin"})
-    assert not r.error, r.output
-    out = json.loads(r.output)
-    assert out == {"agent": "dev-0001", "type": "dev", "swarm": "s1", "cwd": str(wd),
-                   "workdir": str(wd), "version": "0123456789abcdef", "env": "v", "ctx_env": "v",
-                   "path0": str(folder.resolve())}
-    assert (data / "note").read_text() == "kept"
 
 
 # --------------------------------------------------------------------------- bundles
@@ -429,7 +279,7 @@ def test_extract_checks_hash_and_members(tmp_path):
 
 
 def spec_with(tmp_path, tools=None, tools_dir=None, **extra) -> tuple[SwarmSpec, Path]:
-    t = {"harness": "llm", "model": "fake:m"}
+    t = {**HB, "model": "fake:m"}
     if tools is not None:
         t["tools"] = tools
     raw = {"swarm": "s", "namespace": "ns", "bucket": "b", "providers": FAKE_PROVIDERS,
@@ -463,52 +313,11 @@ def test_prepare_selection_and_defaults(tmp_path):
 
 def test_spec_fields_are_optional_and_checked():
     base = {"swarm": "s", "namespace": "ns", "bucket": "b", "providers": FAKE_PROVIDERS,
-            "types": {"dev": {"harness": "llm", "model": "fake:m"}}}
+            "types": {"dev": {**HB, "model": "fake:m"}}}
     s = SwarmSpec.model_validate(base)
     assert s.tools_dir is None and s.tools_version is None and s.types["dev"].tools is None
     with pytest.raises(ValueError, match="tools_version is written by `flock launch`"):
         SwarmSpec.model_validate({**base, "tools_version": "nothex"})
     with pytest.raises(ValueError):
-        SwarmSpec.model_validate({**base, "types": {"dev": {"harness": "llm", "model": "fake:m",
+        SwarmSpec.model_validate({**base, "types": {"dev": {**HB, "model": "fake:m",
                                                             "tools": "some"}}})
-
-
-# --------------------------------------------------------------------------- the docs example
-
-
-async def test_example_folder_works(tmp_path):
-    """examples/tools-demo (the docs/tools.md example): its spec selects tools the folder has, and
-    ws_write + run_bot do what the docs say."""
-    import yaml
-
-    from flock.tools.toolset import Toolset
-
-    spec_file = Path(__file__).parent.parent / "examples" / "tools-demo" / "spec.yaml"
-    spec = SwarmSpec.model_validate(yaml.safe_load(spec_file.read_text()))
-    b = prepare(spec, spec_file)
-    assert b is not None and b.manifest.names() == ["ws_write", "run_bot"]
-    w = b.manifest.get("ws_write")
-    assert w.parameters["required"] == ["filename", "content", "reason"] and w.ctx == "ctx"
-    assert w.parameters["properties"]["filename"]["description"].startswith("a plain file name")
-    dest = extract(b.data, tmp_path / "tools" / b.version, b.version)
-    ts = Toolset(version=b.version, dir=dest, swarm="tools-demo", type="dev",
-                 data_dir=tmp_path / "data", tools=tuple(b.manifest.tools))
-    wd = tmp_path / "agents" / "dev-0000"
-    wd.mkdir(parents=True)
-    env = {"PATH": "/usr/bin:/bin"}
-    bot = "import sys\nfor line in sys.stdin:\n    print('You said: ' + line.strip())\n"
-    r = await ts.call("ws_write", {"filename": "bot.py", "content": bot, "reason": "first bot"},
-                      agent="dev-0000", workdir=wd, env=env)
-    assert not r.error and json.loads(r.output) == {"written": "ws/bot.py", "chars": len(bot)}
-    r = await ts.call("ws_write", {"filename": "bad.py", "content": "def (", "reason": "x"},
-                      agent="dev-0000", workdir=wd, env=env)
-    assert r.error and "not written: syntax error line 1" in r.output
-    r = await ts.call("run_bot", {"path": "ws/bot.py", "messages": ["hi", "bye"]},
-                      agent="dev-0000", workdir=wd, env=env)
-    assert json.loads(r.output) == {"conversation": [{"user": "hi", "bot": "You said: hi"},
-                                                     {"user": "bye", "bot": "You said: bye"}]}
-    r = await ts.call("run_bot", {"path": "../../etc/passwd", "messages": ["x"]},
-                      agent="dev-0000", workdir=wd, env=env)
-    assert r.error and "no such file in your workdir" in r.output
-    log = [json.loads(x) for x in (tmp_path / "data" / "writes.jsonl").read_text().splitlines()]
-    assert log[0]["agent"] == "dev-0000" and log[0]["tools_version"] == b.version

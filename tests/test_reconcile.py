@@ -32,7 +32,7 @@ from flock.models import (
     parse_duration,
 )
 
-from .conftest import TOKEN, make_spec
+from .conftest import HB, TOKEN, make_spec
 
 CMD = TypeAdapter(Command)
 W0, W1 = "demo-researcher-w0000", "demo-researcher-w0001"
@@ -562,7 +562,7 @@ def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, ti
         "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
         "providers": {"p": {"type": "openai_compat", "base_url": "http://fake/v1",
                             "api_key_env": "K", "self_hosted": True, "max_working": 1}},
-        "types": {"researcher": {"harness": "llm", "model": "p:m", "replicas": 1,
+        "types": {"researcher": {**HB, "model": "p:m", "replicas": 1,
                                  "resume_prompt": "go on"}}})
     store.put_swarm(spec, 0)
     tick()

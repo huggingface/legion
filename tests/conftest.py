@@ -37,9 +37,14 @@ class Clock:
         return self.t
 
 
-# A provider-backed placeholder model for specs whose harness never runs (`fake:m`).
+# A provider-backed placeholder model for specs whose harness never runs (`fake:m`), with the
+# smallest `harbor:` block a harbor type validates with (no Trial ever starts from it).
 FAKE_PROVIDERS = {"fake": {"type": "openai_compat", "base_url": "http://fake.invalid/v1",
                            "api_key_env": "FAKE_KEY", "self_hosted": True}}
+SHA = "0" * 40
+HARBOR = {"task": {"registry_commit": SHA, "task": {"git_commit_id": SHA}},
+          "config": {"task": {}}}  # pinned, as the compile step writes it
+HB = {"harness": "harbor", "harbor": HARBOR}  # a placeholder harbor type: {**HB, "model": ...}
 
 
 def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
@@ -48,7 +53,8 @@ def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
     full = {}
     for name, overrides in types.items():
         base = {
-            "harness": "llm",
+            "harness": "harbor",
+            "harbor": HARBOR,
             "model": "fake:m",
             "secrets": ["ANTHROPIC_API_KEY"],
             "env": {"MSGBOARD_URL": "https://example.invalid"},
