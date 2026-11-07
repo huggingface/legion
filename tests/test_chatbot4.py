@@ -3080,3 +3080,38 @@ def test_record_verdict_round_trip_inbox_and_metrics(setup):
     assert m["main_verdicts_last_hour_script"] == 0
     names = {t["name"]: t for t in world.manifest()["tools"]}
     assert {"record_verdict", "verdicts"} <= set(names)
+
+
+def test_world_status_queue_refusals_shared_tests_and_counts(setup, monkeypatch):
+    world, clone, second = _two_prs(setup, lambda c: _module(c, "greeting", "Hey!"),
+                                    lambda c: _module(c, "greeting", "Hi!"))
+    with pytest.raises(ToolError, match="conflicts with main"):
+        merge(world, Agent("oak"), second["pr"])
+    third = clone.parent / "third"
+    git(clone.parent, "clone", "-q", str(setup[2]), str(third))
+    _module(third, "farewell", "Bye!")
+    _commit(third)
+    rec = submit(world, third, author="maple", branch="third")
+    approve(world, rec)
+    world.merge_pr(Agent("oak"), rec["pr"])
+    world.state["merge_queue"][0]["ts"] -= 150  # queued 2.5 minutes ago
+    runs = iter([{"ok": True, "status": "ok", "output": ""},
+                 {"ok": False, "status": "timeout", "output": ""}])
+    monkeypatch.setattr(chatbot4, "run_tests", lambda *a: next(runs))
+    main = world.repo.sha()
+    world._shared_tests(1, clone, main)
+    world._shared_tests(1, clone, main)  # times out: merged without them (+1 run: the first merge)
+    out = world.call("world_status", {}, Agent("steward"))
+    assert out["merge_queue"] == [{"pr": rec["pr"], "position": 1, "queued_by": "oak",
+                                   "minutes_waiting": 2.5, "tries": 0}]
+    assert out["merge_queue_total"] == 1 and out["merges_last_hour"] == 1
+    assert out["refusals_last_hour"] == {"by_code": {"conflict": 1}, "last": [
+        {"pr": second["pr"], "code": "conflict", "minutes_ago": 0.0}]}
+    tests = out["shared_tests"]
+    assert (tests["main_sha"], tests["result"], tests["minutes_ago"]) == (main[:12], "timeout", 0.0)
+    assert tests["last_hour"]["runs"] == 3 and tests["last_hour"]["timeouts"] == 1
+    assert isinstance(tests["seconds"], float)
+    # open: the refused PR (approved, not queued) and the queued one (approved)
+    assert (out["open_prs"], out["approved_not_queued"], out["unreviewed"]) == (2, 1, 0)
+    assert {"opens_last_hour", "new_pr_limit"} <= set(out)
+    assert "world_status" in {t["name"] for t in world.manifest()["tools"]}

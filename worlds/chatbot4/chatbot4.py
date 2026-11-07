@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import collections
 import contextlib
 import contextvars
 import functools
@@ -85,6 +86,7 @@ MERGE_TESTS_TIMEOUT_S = 60.0  # past this the shared tests are skipped (logged),
 MERGE_RETRY_CODES = (*TRANSIENT_CODES, "hub_busy", "busy", "stale_lease", "paused")
 MERGE_BACKOFF = (5.0, 600.0)
 MERGE_REASON = 1500  # refusal characters quoted in the inbox
+STATUS_QUEUE_MAX = 50  # merge queue entries listed by world_status
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
 
@@ -248,6 +250,10 @@ class Chatbot4World(World):
         # PR number -> (head, main, code, message) of its last merge refused by the checks of
         # that head on that main: merge_pr answers a re-queue of both at once (agents retry).
         self.refused = {}
+        # For world_status, in memory only (a restart starts them empty): merge-queue refusals
+        # {"ts", "pr", "code"} and shared-test runs {"ts", "main_sha", "result", "seconds"}.
+        self.merge_refusals = collections.deque(maxlen=1000)
+        self.test_runs = collections.deque(maxlen=200)
         self.pending = {}  # open_pr reservations: token -> (author, branch ref, pr or None, key)
         self.operators = {n.strip() for n in os.environ.get("CHATBOT_OPERATORS", "").split(",") if n.strip()}
         # Pause open_pr/merge_pr: CHATBOT_PRS_PAUSED=1 at start, or the flag file, checked per call.
@@ -1623,6 +1629,7 @@ class Chatbot4World(World):
                     if rec is None or rec["author"] != agent.name:
                         self._notify(agent.name, pr, "merge", f"PR #{pr} you queued was not merged: {reason}")
                     self._event("merge_pr_refused", agent, pr=pr, code=exc.code, reason=exc.message[:500])
+                    self.merge_refusals.append({"ts": time.time(), "pr": pr, "code": exc.code})
                 self._dirty("_", "merge_queue")
                 self._save()
             raise
@@ -1785,7 +1792,12 @@ class Chatbot4World(World):
         or time out, do not refuse it: that is not this PR's doing."""
         if not MERGE_TESTS or self.main_tests == (main, None):  # timed out on this main already
             return
+        started = time.monotonic()
         result = run_tests(tree, MERGE_TESTS, MERGE_TESTS_TIMEOUT_S)
+        with self.lock:
+            self.test_runs.append({"ts": time.time(), "main_sha": main[:12], "seconds": round(
+                time.monotonic() - started, 1), "result": "ok" if result["ok"] else (
+                "timeout" if result["status"] == "timeout" else "fail")})
         if result["ok"]:
             return
         if result["status"] == "timeout":
@@ -2075,6 +2087,51 @@ class Chatbot4World(World):
             recs = [dict(r) for r in reversed(self.state["verdicts"])
                     if not target or r["target"] == target][:limit]
         return {"verdicts": recs}
+
+    @tool(read_only=True)
+    def world_status(self) -> dict:
+        """The swarm's collaboration health: the merge queue (who waits, for how long), merges
+        and new PRs in the last hour against the new-PR limit, merge refusals in the last hour
+        by code, the shared tests' last run at merge, and open PRs that are approved but not
+        queued or have no review of their current head. Times are in minutes."""
+        now = time.time()
+        with self.lock:
+            budget = self._budget()
+            queue = self.state["merge_queue"]
+            entries = [{"pr": e["pr"], "position": i, "queued_by": e["by"],
+                        "minutes_waiting": round((now - e["ts"]) / 60, 1), "tries": e["tries"]}
+                       for i, e in enumerate(queue[:STATUS_QUEUE_MAX], 1)]
+            queued, total = {e["pr"] for e in queue}, len(queue)
+            refusals = [r for r in self.merge_refusals if now - r["ts"] < WINDOW]
+            tests = [t for t in self.test_runs if now - t["ts"] < WINDOW]
+            last = dict(self.test_runs[-1]) if self.test_runs else None
+            open_prs = approved = unreviewed = 0
+            for rec in self.state["prs"].values():
+                if rec["state"] not in ("open", "merging"):
+                    continue
+                open_prs += 1
+                # shortcut: reviews of the exact head only (no patch-id git calls), so an
+                # approval carried over a clean rebase is not seen here; list_prs has the truth.
+                seen = {r["verdict"] for name, r in rec["reviews"].items()
+                            if name != rec["author"] and r["head_sha"] == rec["head_sha"]}
+                unreviewed += not seen
+                approved += (seen == {"approve"} and rec["pr"] not in queued)
+        if last:
+            last["minutes_ago"] = round((now - last.pop("ts")) / 60, 1)
+            last["last_hour"] = {"runs": len(tests),
+                                 "timeouts": sum(t["result"] == "timeout" for t in tests),
+                                 "avg_seconds": round(sum(t["seconds"] for t in tests) / len(tests), 1)
+                                 if tests else None}
+        return {"merge_queue": entries, "merge_queue_total": total,
+                "merges_last_hour": budget["merged_last_hour"],
+                "opens_last_hour": budget["opened_last_hour"],
+                "new_pr_limit": budget["limit"] if self.budget_on else None,
+                "refusals_last_hour": {
+                    "by_code": dict(collections.Counter(r["code"] for r in refusals)),
+                    "last": [{"pr": r["pr"], "code": r["code"],
+                              "minutes_ago": round((now - r["ts"]) / 60, 1)} for r in refusals[:-11:-1]]},
+                "shared_tests": last, "open_prs": open_prs, "approved_not_queued": approved,
+                "unreviewed": unreviewed}
 
     @tool(pool="slow")
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:
