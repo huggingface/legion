@@ -3113,6 +3113,20 @@ def test_world_status_queue_refusals_shared_tests_and_counts(setup, monkeypatch)
     assert isinstance(tests["seconds"], float)
     # open: the refused PR (approved, refused on this head) and the queued one (approved)
     assert (out["open_prs"], out["approved_not_queued"], out["approved_refused"],
-            out["unreviewed"]) == (2, 0, 1, 0)
+            out["unreviewed"], out["changes_requested"]) == (2, 0, 1, 0, 0)
+    assert out["approved_refused_prs"] == [{"pr": second["pr"], "code": "conflict"}]
+    prs = {}
+    for name in ("four", "five", "six"):  # unreviewed, approved, changes requested
+        _module(third, name, f"{name}!")
+        _commit(third)
+        prs[name] = submit(world, third, author=f"ash-{name}", branch=name)
+    approve(world, prs["five"])
+    _review(world, prs["six"], "birch", "request_changes")
+    out = world.world_status()
+    assert out["approved_not_queued_prs"] == [prs["five"]["pr"]]
+    assert out["unreviewed_prs"] == [prs["four"]["pr"]]
+    assert out["changes_requested_prs"] == [prs["six"]["pr"]]
+    assert (out["open_prs"], out["approved_not_queued"], out["unreviewed"],
+            out["changes_requested"]) == (5, 1, 1, 1)
     assert {"opens_last_hour", "new_pr_limit"} <= set(out)
     assert "world_status" in {t["name"] for t in world.manifest()["tools"]}

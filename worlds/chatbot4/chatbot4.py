@@ -86,7 +86,7 @@ MERGE_TESTS_TIMEOUT_S = 60.0  # past this the shared tests are skipped (logged),
 MERGE_RETRY_CODES = (*TRANSIENT_CODES, "hub_busy", "busy", "stale_lease", "paused")
 MERGE_BACKOFF = (5.0, 600.0)
 MERGE_REASON = 1500  # refusal characters quoted in the inbox
-STATUS_QUEUE_MAX = 50  # merge queue entries listed by world_status
+STATUS_QUEUE_MAX = 50  # entries per list in world_status (the counts give the totals)
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
 
@@ -2096,7 +2096,9 @@ class Chatbot4World(World):
         PRs (drafts excluded) that are approved but not queued (approved_refused: the queue
         refused that same head) or have no review of their current head. Refusals and test
         runs count since the world last restarted. An approval kept across a clean rebase is
-        not counted here; list_prs(needs_review=true) applies it. Times are in minutes."""
+        not counted here; list_prs(needs_review=true) applies it. Times are in minutes.
+        Queue only PRs in approved_not_queued_prs; for approved_refused_prs ask the author to
+        fix the refusal. PR lists are capped at 50, oldest first (the counts give the totals)."""
         now = time.time()
         with self.lock:
             budget = self._budget()
@@ -2108,8 +2110,8 @@ class Chatbot4World(World):
             refusals = [r for r in self.merge_refusals if now - r["ts"] < WINDOW]
             tests = [t for t in self.test_runs if now - t["ts"] < WINDOW]
             last = dict(self.test_runs[-1]) if self.test_runs else None
-            open_prs = approved = approved_refused = unreviewed = 0
-            for rec in self.state["prs"].values():
+            open_prs, approved, refused, unreviewed, changes = 0, [], [], [], []
+            for rec in sorted(self.state["prs"].values(), key=lambda r: r["pr"]):
                 if rec["state"] not in ("open", "merging"):
                     continue
                 open_prs += 1
@@ -2117,12 +2119,16 @@ class Chatbot4World(World):
                 # approval carried over a clean rebase is not seen here; list_prs has the truth.
                 seen = {r["verdict"] for name, r in rec["reviews"].items()
                         if name != rec["author"] and r["head_sha"] == rec["head_sha"]}
-                unreviewed += not seen
-                if seen == {"approve"} and rec["pr"] not in queued:
-                    if self.refused.get(rec["pr"], (None,))[0] == rec["head_sha"]:
-                        approved_refused += 1  # re-queueing it would fail again
+                if not seen:
+                    unreviewed.append(rec["pr"])
+                elif "request_changes" in seen:
+                    changes.append(rec["pr"])
+                elif rec["pr"] not in queued:
+                    head, _main, code, _message = self.refused.get(rec["pr"], (None,) * 4)
+                    if head == rec["head_sha"]:  # re-queueing it would fail again
+                        refused.append({"pr": rec["pr"], "code": code})
                     else:
-                        approved += 1
+                        approved.append(rec["pr"])
         if last:
             last["minutes_ago"] = round((now - last.pop("ts")) / 60, 1)
             last["last_hour"] = {"runs": len(tests),
@@ -2137,8 +2143,11 @@ class Chatbot4World(World):
                     "by_code": dict(collections.Counter(r["code"] for r in refusals)),
                     "last": [{"pr": r["pr"], "code": r["code"],
                               "minutes_ago": round((now - r["ts"]) / 60, 1)} for r in refusals[:-11:-1]]},
-                "shared_tests": last, "open_prs": open_prs, "approved_not_queued": approved,
-                "approved_refused": approved_refused, "unreviewed": unreviewed}
+                "shared_tests": last, "open_prs": open_prs,
+                "approved_not_queued": len(approved), "approved_not_queued_prs": approved[:STATUS_QUEUE_MAX],
+                "approved_refused": len(refused), "approved_refused_prs": refused[:STATUS_QUEUE_MAX],
+                "unreviewed": len(unreviewed), "unreviewed_prs": unreviewed[:STATUS_QUEUE_MAX],
+                "changes_requested": len(changes), "changes_requested_prs": changes[:STATUS_QUEUE_MAX]}
 
     @tool(pool="slow")
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:
