@@ -2092,8 +2092,11 @@ class Chatbot4World(World):
     def world_status(self) -> dict:
         """The swarm's collaboration health: the merge queue (who waits, for how long), merges
         and new PRs in the last hour against the new-PR limit, merge refusals in the last hour
-        by code, the shared tests' last run at merge, and open PRs that are approved but not
-        queued or have no review of their current head. Times are in minutes."""
+        by code, the shared tests' last run at merge (null until a merge runs them), and open
+        PRs (drafts excluded) that are approved but not queued (approved_refused: the queue
+        refused that same head) or have no review of their current head. Refusals and test
+        runs count since the world last restarted. An approval kept across a clean rebase is
+        not counted here; list_prs(needs_review=true) applies it. Times are in minutes."""
         now = time.time()
         with self.lock:
             budget = self._budget()
@@ -2105,7 +2108,7 @@ class Chatbot4World(World):
             refusals = [r for r in self.merge_refusals if now - r["ts"] < WINDOW]
             tests = [t for t in self.test_runs if now - t["ts"] < WINDOW]
             last = dict(self.test_runs[-1]) if self.test_runs else None
-            open_prs = approved = unreviewed = 0
+            open_prs = approved = approved_refused = unreviewed = 0
             for rec in self.state["prs"].values():
                 if rec["state"] not in ("open", "merging"):
                     continue
@@ -2113,9 +2116,13 @@ class Chatbot4World(World):
                 # shortcut: reviews of the exact head only (no patch-id git calls), so an
                 # approval carried over a clean rebase is not seen here; list_prs has the truth.
                 seen = {r["verdict"] for name, r in rec["reviews"].items()
-                            if name != rec["author"] and r["head_sha"] == rec["head_sha"]}
+                        if name != rec["author"] and r["head_sha"] == rec["head_sha"]}
                 unreviewed += not seen
-                approved += (seen == {"approve"} and rec["pr"] not in queued)
+                if seen == {"approve"} and rec["pr"] not in queued:
+                    if self.refused.get(rec["pr"], (None,))[0] == rec["head_sha"]:
+                        approved_refused += 1  # re-queueing it would fail again
+                    else:
+                        approved += 1
         if last:
             last["minutes_ago"] = round((now - last.pop("ts")) / 60, 1)
             last["last_hour"] = {"runs": len(tests),
@@ -2131,7 +2138,7 @@ class Chatbot4World(World):
                     "last": [{"pr": r["pr"], "code": r["code"],
                               "minutes_ago": round((now - r["ts"]) / 60, 1)} for r in refusals[:-11:-1]]},
                 "shared_tests": last, "open_prs": open_prs, "approved_not_queued": approved,
-                "unreviewed": unreviewed}
+                "approved_refused": approved_refused, "unreviewed": unreviewed}
 
     @tool(pool="slow")
     def run_bot(self, ref_or_path: str, lines: list[str]) -> dict:

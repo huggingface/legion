@@ -3111,7 +3111,8 @@ def test_world_status_queue_refusals_shared_tests_and_counts(setup, monkeypatch)
     assert (tests["main_sha"], tests["result"], tests["minutes_ago"]) == (main[:12], "timeout", 0.0)
     assert tests["last_hour"]["runs"] == 3 and tests["last_hour"]["timeouts"] == 1
     assert isinstance(tests["seconds"], float)
-    # open: the refused PR (approved, not queued) and the queued one (approved)
-    assert (out["open_prs"], out["approved_not_queued"], out["unreviewed"]) == (2, 1, 0)
+    # open: the refused PR (approved, refused on this head) and the queued one (approved)
+    assert (out["open_prs"], out["approved_not_queued"], out["approved_refused"],
+            out["unreviewed"]) == (2, 0, 1, 0)
     assert {"opens_last_hour", "new_pr_limit"} <= set(out)
     assert "world_status" in {t["name"] for t in world.manifest()["tools"]}
