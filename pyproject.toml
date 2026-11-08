@@ -38,7 +38,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-  "live: deploys real boards to Hugging Face Spaces; skipped unless FLOCK_LIVE_SPACES is set",
+  "live: deploys a real board to a Hugging Face Space; skipped unless FLOCK_LIVE_SPACES is set",
 ]
 
 [tool.ruff]

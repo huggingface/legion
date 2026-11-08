@@ -23,27 +23,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from flock.results import write_json
 
 HEALTH_CHECK_SECONDS = 5
-# While agents run: a Space hand-over keeps answering reads, health checks
-# included. A new container that isn't handed the board (the old one crashed, or
-# none of its uploads landed for 5 minutes) waits 5 minutes from when it starts
-# looking, then restores and serves. That is msgboard's default
-# MSGBOARD_LEASE_STALE_AFTER, which Flock doesn't change. In msgboard's crash test,
-# with a 60 s window, the board served again 79 s after the crash; with 300 s that
-# is about 320 s, so only a longer outage fails the run.
+# While agents run, a Space board can be unreachable for minutes and come back: a
+# restart, or a crash, after which msgboard waits for the old container's lease to
+# go stale before it restores. Only a longer outage fails the run.
 SPACE_OUTAGE_GRACE_SECONDS = 420
 # After the run, Resources.finish gives export 120 s and a Space board's stop()
-# 120 s, so an outage then can fail the run sooner. Export only reads, which a
-# hand-over serves except while the new container restores (a few seconds); a
-# failing request gives up within about 45 s. Revocation retries for 15 s, or for
-# 100 s once the board itself says it is handing over: writes are refused until
-# the new container serves, 10-21 s after a restart, but minutes when bucket
-# uploads are slow (there is no fixed bound). Each request step has a 2 s timeout,
-# but connecting tries every address the host resolves to and DNS has no timeout,
-# so the last attempt can end later. stop()'s limit leaves room for that.
+# 120 s, so an outage then can fail the run sooner. A failing export request gives
+# up within about 45 s. Revocation retries for 15 s, or for 100 s once the board
+# itself says it is shutting down or starting, that is, restarting. Each request
+# step has a 2 s timeout, but connecting tries every address the host resolves to
+# and DNS has no timeout, so the last attempt can end later. stop()'s limit leaves
+# room for that.
 EXPORT_CLIENT = {"timeout": 5, "max_retries": 5}
 REVOKE_SECONDS = 15
-HANDOVER_SECONDS = 100
-HANDOVER_CODES = ("shutting_down", "starting")
+RESTART_SECONDS = 100
+RESTART_CODES = ("shutting_down", "starting")
 
 
 class Options(BaseModel):
@@ -107,7 +101,7 @@ class Resource:
             900 if self.options.space_id else 120
         )
         self.stop_timeout_seconds = (
-            HANDOVER_SECONDS + 20 if self.options.space_id else 30
+            RESTART_SECONDS + 20 if self.options.space_id else 30
         )
         if self.options.space_id:
             self.hf_token = get_token()
@@ -286,9 +280,13 @@ class Resource:
             "private": self.options.private,
             "hf_token": self.hf_token,
         }
+        # -P keeps resources/ off the worker's sys.path, so a provider module named
+        # like one it imports can't shadow it. It exits if this process dies first.
         self.deploy_process = await asyncio.create_subprocess_exec(
             sys.executable,
+            "-P",
             str(Path(__file__).with_name("message_board_deploy.py")),
+            str(os.getpid()),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
         )
@@ -487,8 +485,8 @@ class Resource:
 
     def _revoke_agent_tokens(self):
         """The Space outlives the run, so the agents' tokens must not. Every token
-        is tried, and tried again, until REVOKE_SECONDS run out, or HANDOVER_SECONDS
-        once the board says it is handing over."""
+        is tried, and tried again, until REVOKE_SECONDS run out, or RESTART_SECONDS
+        once the board says it is restarting."""
         start = time.monotonic()
         deadline = start + REVOKE_SECONDS
         pending = dict(self.credentials)
@@ -509,8 +507,8 @@ class Resource:
                         # proxy's (a moved Space, a refused HF token) says nothing.
                         if (exc.status, exc.code) != (404, "not_found"):
                             error = exc
-                            if exc.status == 503 and exc.code in HANDOVER_CODES:
-                                deadline = max(deadline, start + HANDOVER_SECONDS)
+                            if exc.status == 503 and exc.code in RESTART_CODES:
+                                deadline = max(deadline, start + RESTART_SECONDS)
                             continue
                     except Exception as exc:
                         error = exc

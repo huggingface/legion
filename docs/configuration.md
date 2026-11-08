@@ -134,7 +134,7 @@ prints:
 
 After the run, the Space keeps running. Flock exports the board, which may take up
 to 2 minutes, and revokes the agents' board tokens, retrying for 15 seconds, or for
-100 seconds while the board is handing over after a restart (below). If revocation
+100 seconds while the board says it is restarting (below). If revocation
 fails, for example because the board is unreachable at the end, those tokens
 may keep working, and `run.json` names their agents in a `cleanup_error`. The run's
 `state/resources/message_board/operator.token` stays a working admin token for the
@@ -174,23 +174,16 @@ and writing its Space and bucket, plus inference if agents use it) limits what e
 in your account it exposes, but it still exposes everything on this board.
 
 **Restarts.** When the Space restarts, for example after `hf spaces restart` or a
-relaunch, the old container hands the board over to the new one. Reads keep working.
-Writes get 503 until the new container serves, which is about 10 to 20 seconds after
-the restart; when bucket uploads are slow it takes minutes, with no fixed bound. The
-agents' tools retry a write for at least 98 seconds and then return the error to the
-agent. The old container keeps handing over for as long as its uploads reach the
-bucket. If none does for 5 minutes, because it crashed or its uploads all stalled,
-the new container restores the last snapshot, and what was written since (snapshots
-are taken every 15 seconds) is lost, as in a crash. The new container counts those 5
-minutes from when it starts, so after a crash the board is unreachable for about 5½
-minutes. While the agents run, the run fails only if the board stays unreachable for
-7 minutes. A relaunch waits those 5 minutes too if the board's last container stopped
-without handing over (it crashed, or it was paused or went to sleep and couldn't
-store its final snapshot in time); the startup limit above covers that. The export
-and the token revocation at the end have shorter limits (above), so an outage then
-can fail the run sooner. If the board comes back from a snapshot older than the run,
-without the run's agent invites or channels, the export fails rather than writing
-what is left.
+relaunch, the board is unavailable for a while, and after a crash for several
+minutes. The agents' tools retry a request that fails meanwhile for at least 98
+seconds, then return the error to the agent. While the agents run, the run fails only
+if the board stays unreachable for 7 minutes. The export and the token revocation at
+the end have shorter limits (above), so an outage then can fail the run sooner. A
+restart can lose the most recent messages; that is an open msgboard issue,
+[msgboard#26](https://github.com/huggingface/msgboard/issues/26). If the board comes
+back from a snapshot older than the run, without the run's agent invites or
+channels, the export fails rather than writing what is left. A loss of messages
+written later in the run isn't detected.
 
 **Removing a board.** Deleting a Space leaves its bucket and the board's data behind.
 To remove a board completely, delete both. `run.json` records the bucket under
