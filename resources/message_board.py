@@ -9,7 +9,7 @@ import socket
 import sys
 import tempfile
 import time
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -28,10 +28,11 @@ HEALTH_CHECK_SECONDS = 5
 # bucket lease for 120 s, so only a longer outage fails the run.
 SPACE_OUTAGE_GRACE_SECONDS = 180
 # Resources.finish gives export 120 s and stop() 30 s. An export request rides out
-# a restart's 503s (about 10 s) and fails within about 45 s; revocation keeps
-# trying for 20 s.
+# a restart's 503s (about 10 s) and fails within about 45 s. Revocation keeps
+# trying for 15 s, with at most 2 s per network step of an attempt, so even an
+# attempt that stalls at the end fits in stop()'s limit.
 EXPORT_CLIENT = {"timeout": 5, "max_retries": 5}
-REVOKE_SECONDS = 20
+REVOKE_SECONDS = 15
 
 
 class Options(BaseModel):
@@ -87,6 +88,7 @@ class Resource:
         self.url = ""
         self.credentials = {}
         self.channel_ids = set()
+        self.invite_ids = set()
         self.metadata = {}
         self.operator_token = None
         self.space = self.hf_token = None
@@ -134,11 +136,6 @@ class Resource:
             raise ValueError("Board resource requires an operator/admin token")
         await call(self.provision, self.agents)
         invite = await call(self._admin_invite, identity["id"]) if self.space else None
-        if self.space:
-            self.client.close()
-            self.client = Client(
-                self.url, self.operator_token, **EXPORT_CLIENT, **self._gate()
-            )
         dist = importlib.metadata.distribution("msgboard")
         self.metadata.update(
             {
@@ -311,6 +308,7 @@ class Resource:
                 channels=sorted(self.channel_ids),
                 max_uses=1,
             )
+            self.invite_ids.add(invite["id"])
             with Client.join(
                 self.url,
                 invite["code"],
@@ -384,13 +382,30 @@ class Resource:
         return {"board": "board.jsonl", "channels": "channels.json"}
 
     def _export(self, directory):
+        # A Space board gets an export client that fits Resources.finish's limit,
+        # also when startup failed before it finished.
+        board = (
+            Client(self.url, self.operator_token, **EXPORT_CLIENT, **self._gate())
+            if self.space
+            else nullcontext(self.client)
+        )
+        with board as client:
+            self._write_export(client, directory)
+
+    def _write_export(self, client, directory):
+        # A Space restored from a snapshot older than this run lacks what it made.
+        if self.invite_ids - {invite["id"] for invite in client.invites()}:
+            raise RuntimeError(
+                "The board no longer has this run's agent invites; it was restored "
+                "from a snapshot older than the run"
+            )
         ids = {
             c["identity"].get("principal", c["identity"])["id"]
             for c in self.credentials.values()
         }
         channels = []
-        for channel in self.client.list_channels():
-            info = self.client.channel_info(channel["id"])
+        for channel in client.list_channels():
+            info = client.channel_info(channel["id"])
             if (
                 channel["id"] in self.channel_ids
                 or (info.get("created_by") or {}).get("id") in ids
@@ -399,7 +414,6 @@ class Resource:
                 channels.append(channel)
         lost = self.channel_ids - {channel["id"] for channel in channels}
         if lost:
-            # A Space that restarted from an older snapshot has lost recent data.
             raise RuntimeError(
                 f"The board no longer has the run's channels with IDs {sorted(lost)}"
             )
@@ -409,7 +423,7 @@ class Resource:
             for channel in channels:
                 after = 0
                 while True:
-                    messages = self.client.read(channel["id"], after=after, limit=100)[
+                    messages = client.read(channel["id"], after=after, limit=100)[
                         "messages"
                     ]
                     if not messages:
@@ -434,16 +448,20 @@ class Resource:
         pending = dict(self.credentials)
         error = None
         with Client(
-            self.url, self.operator_token, timeout=5, max_retries=0, **self._gate()
+            self.url, self.operator_token, max_retries=0, **self._gate()
         ) as client:
             while pending and time.monotonic() < deadline:
                 for name, credential in list(pending.items()):
-                    if time.monotonic() >= deadline:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
                         break
+                    client.timeout = min(2, left)
                     try:
                         client.revoke_token(auth.parse_token(credential["token"])[0])
                     except BoardError as exc:
-                        if exc.status != 404:  # 404: the board has no such token
+                        # Only the board's own 404 means it has no such token. A
+                        # proxy's (a moved Space, a refused HF token) says nothing.
+                        if (exc.status, exc.code) != (404, "not_found"):
                             error = exc
                             continue
                     except Exception as exc:
@@ -451,11 +469,16 @@ class Resource:
                         continue
                     del pending[name]
                 if pending:
-                    time.sleep(1)
+                    time.sleep(max(0, min(1, deadline - time.monotonic())))
         if pending:
+            reason = (
+                f"{type(error).__name__}: {error}"
+                if error
+                else "not tried before the deadline"
+            )
             raise RuntimeError(
                 f"Could not revoke the board tokens of {', '.join(pending)}, which "
-                f"may still work: {type(error).__name__}: {error}"
+                f"may still work: {reason}"
             )
 
     async def stop(self):

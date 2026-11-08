@@ -2,11 +2,15 @@
 
 import asyncio
 import json
+import shutil
 import stat
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
 from huggingface_hub.errors import HFValidationError
+from msgboard import auth
 from msgboard.client import BoardError, Client
 from msgboard.space import DeployError
 
@@ -24,6 +28,21 @@ class FakeTime:
 
     def sleep(self, seconds):
         self.now += seconds
+
+
+class Html404(BaseHTTPRequestHandler):
+    """A proxy in front of a Space that won't pass requests on (an HTML 404)."""
+
+    def do_DELETE(self):
+        body = b"<html><body><h1>404</h1></body></html>"
+        self.send_response(404)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
 
 
 def gated(url, token):
@@ -222,7 +241,7 @@ async def test_space_revocation_tries_every_token_and_names_only_failures(
     with pytest.raises(RuntimeError, match="board tokens of agent-001, which may"):
         await resource.stop()
     assert attempts == [0, 1]  # agent-002, retried a second later
-    assert 20 <= clock.now <= 21  # agent-001 was tried until the 20 s deadline
+    assert clock.now == message_board_module.REVOKE_SECONDS  # agent-001, until then
     with Client(fake_space.url, tokens["agent-002"]) as agent:
         with pytest.raises(BoardError, match="401"):
             agent.me()
@@ -244,3 +263,91 @@ async def test_space_export_fails_when_the_board_lost_the_runs_channels(
             await resource.export(tmp_path)
     finally:
         await resource.stop()
+
+
+@pytest.mark.parametrize("answer", ["board", "proxy"])
+async def test_space_revocation_trusts_only_the_boards_own_404(
+    fake_space,
+    message_board_provider,
+    message_board_module,
+    tmp_path,
+    monkeypatch,
+    answer,
+):
+    resource = message_board_provider(
+        {"space_id": "board"},
+        state_dir=tmp_path / "state",
+        agents=["agent-001", "agent-002"],
+        secrets=[],
+    )
+    await resource.start()
+    tokens = {name: c["token"] for name, c in resource.credentials.items()}
+    # A well-formed token the board never issued: the board answers 404 not_found.
+    resource.credentials["agent-001"]["token"] = auth.new_token()[1]
+    clock = FakeTime()
+    monkeypatch.setattr(message_board_module, "time", clock)
+    proxy = None
+    if answer == "proxy":
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Html404)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        resource.url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    try:
+        if answer == "board":
+            await resource.stop()
+            assert clock.now == 0  # nothing left to retry
+            with Client(fake_space.url, tokens["agent-002"]) as agent:
+                with pytest.raises(BoardError, match="401"):
+                    agent.me()
+        else:
+            with pytest.raises(
+                RuntimeError,
+                match="agent-001, agent-002, which may still work: BoardError: 404 "
+                "http_error",
+            ):
+                await resource.stop()
+            assert clock.now == message_board_module.REVOKE_SECONDS
+            with Client(fake_space.url, tokens["agent-002"]) as agent:
+                assert agent.me()["external_id"] == "agent-002"
+    finally:
+        if proxy:
+            proxy.shutdown()
+            proxy.server_close()
+
+
+async def test_space_export_fails_after_a_rollback_to_before_the_relaunch(
+    fake_space, message_board_provider, tmp_path
+):
+    from msgboard.space.app import ensure_board
+
+    options = {"space_id": "board"}
+    first = message_board_provider(
+        options, state_dir=tmp_path / "run-1", agents=["agent-001"], secrets=[]
+    )
+    try:
+        await first.start()
+    finally:
+        await first.stop()
+    data = fake_space.directory / "data"
+    fake_space.stop()
+    shutil.copytree(data, tmp_path / "snapshot")  # the bucket's snapshot at this point
+    fake_space.start()
+    second = message_board_provider(
+        options, state_dir=tmp_path / "run-2", agents=["agent-001"], secrets=[]
+    )
+    try:
+        await second.start()
+        # A restart that restores the older snapshot (msgboard#26). The channels are
+        # still there; this run's agent invites are not.
+        fake_space.stop()
+        shutil.rmtree(data)
+        shutil.copytree(tmp_path / "snapshot", data)
+        ensure_board(data, second.operator_token)  # the Space app does this on boot
+        fake_space.start()
+        with Client(fake_space.url, second.operator_token) as board:
+            await asyncio.to_thread(board.wait_ready, 60)
+        with pytest.raises(
+            RuntimeError, match="no longer has this run's agent invites"
+        ):
+            await second.export(tmp_path)
+    finally:
+        await second.stop()

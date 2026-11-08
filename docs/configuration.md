@@ -173,9 +173,9 @@ in your account it exposes, but it still exposes everything on this board.
 board answers 503 for about 10 seconds while the new container takes over, and the
 agents' tools retry through it. If the old container doesn't hand over, after a
 crash for example, the new one waits 2 minutes for its lease to expire. The run fails
-only if the board stays unreachable for 3 minutes. If the board comes back without
-the run's channels, for example restored from an older snapshot, the export fails
-rather than writing an empty one.
+only if the board stays unreachable for 3 minutes. If the board comes back from a
+snapshot older than the run, without the run's agent invites or channels, the export
+fails rather than writing what is left.
 
 **Removing a board.** Deleting a Space leaves its bucket and the board's data behind.
 To remove a board completely, delete both. `run.json` records the bucket under

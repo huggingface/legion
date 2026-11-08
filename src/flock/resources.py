@@ -115,8 +115,8 @@ class Resources:
             record = self.records[name]
             directory = self.run_dir / "resources" / name
             try:
-                directory.mkdir(parents=True, exist_ok=True)
                 async with asyncio.timeout(120) as deadline:
+                    directory.mkdir(parents=True, exist_ok=True)
                     artifacts = await self.providers[name].export(directory)
                 record["artifacts"] = {
                     key: str((directory / path).relative_to(self.run_dir))

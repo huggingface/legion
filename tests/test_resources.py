@@ -1,3 +1,6 @@
+import errno
+from pathlib import Path
+
 import pytest
 
 from flock.resources import Resources
@@ -83,3 +86,44 @@ class Resource:
         await resources.start()
     assert resources.records["slow"]["status"] == "failed"
     assert resources.records["slow"]["metadata"] == {"deployed": "somewhere"}
+
+
+async def test_finish_keeps_a_storage_error_and_still_stops(tmp_path, monkeypatch):
+    module = """
+class Resource:
+    def __init__(self, options, *, state_dir, agents, secrets):
+        self.state_dir = state_dir
+        self.metadata = {}
+    async def start(self):
+        self.state_dir.mkdir(parents=True)
+    async def wait(self):
+        import asyncio
+        await asyncio.Future()
+    async def export(self, directory):
+        return {}
+    async def stop(self):
+        (self.state_dir / "stopped").touch()
+"""
+    for name in ("first", "second"):
+        (tmp_path / f"{name}.py").write_text(module)
+    resources = Resources(
+        tmp_path,
+        {"first": {}, "second": {}},
+        run_dir=tmp_path / "run",
+        agents=[],
+        secrets=[],
+    )
+    await resources.start()
+    mkdir = Path.mkdir
+
+    def network_storage(self, *args, **kwargs):
+        if self == tmp_path / "run/resources/first":
+            raise TimeoutError(errno.ETIMEDOUT, "Connection timed out")
+        return mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", network_storage)
+    assert await resources.finish() is True
+    assert resources.records["first"]["export_error"].startswith("TimeoutError: [Errno")
+    assert "export_error" not in resources.records["second"]
+    for name in ("first", "second"):
+        assert (tmp_path / "run/state/resources" / name / "stopped").exists()
