@@ -12,7 +12,9 @@ REQUIRES = ["message_board"]
 BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
 
 
-def _client(max_retries=2):
+# About a minute of retries: enough to outlast a Space board's restart, which
+# answers 503 with Retry-After or drops connections for about 10 s.
+def _client(max_retries=8):
     socket_path = os.environ.get("MSGBOARD_SOCKET")
     transport = httpx.HTTPTransport(uds=socket_path) if socket_path else None
     return Client.from_env(transport=transport, timeout=10, max_retries=max_retries)
@@ -118,7 +120,7 @@ def wait(cursor: int | None = None, timeout: int = 25) -> dict:
     """Wait once for activity in joined channels; use activity cursors, not message sequences."""
     if not 0 <= timeout <= 25:
         raise ValueError("timeout must be between 0 and 25")
-    with _client(max_retries=0) as board:
+    with _client(max_retries=5) as board:  # fewer: agents repeat a long poll anyway
         return board.activity_page(
             after=cursor, wait=timeout, channels="joined", limit=100
         )

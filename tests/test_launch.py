@@ -1,12 +1,13 @@
 import asyncio
 import json
 import signal
+import time
 from pathlib import Path
 
 import pytest
 from harbor.models.task.id import GitTaskId
 from harbor.models.trial.result import AgentInfo, TrialResult
-from msgboard.client import Client
+from msgboard.client import BoardError, Client
 
 from flock import launch
 from flock.config import AgentSettings, Config
@@ -598,46 +599,44 @@ async def test_board_tools_require_configured_resource(prepared):
         await launch.run_experiment(prepared)
 
 
-async def test_external_board_integration_leaves_server_alive(
-    prepared, tmp_path, monkeypatch, message_board_provider
+async def test_space_board_starts_off_the_run_clock_and_outlives_the_run(
+    fake_space, prepared, monkeypatch, message_board_module
 ):
-    server = message_board_provider(
-        {}, state_dir=tmp_path / "server", agents=[], secrets=[]
-    )
-    try:
-        await server.start()
-        monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
-        prepared.resources = {
-            "message_board": {
-                "url": server.url,
-                "token_env": "BOARD_ADMIN",
-                "channels": ["general", "findings"],
-            }
-        }
+    prepared.limits.run_timeout_seconds = 3
+    prepared.resources = {"message_board": {"space_id": "user/board", "private": True}}
+    deploy = fake_space.deploy
 
-        async def factory(config):
-            assert "MSGBOARD_SOCKET" not in config.agent.env
-            assert not config.environment.mounts
-            assert server.operator_token not in config.agent.env.values()
-            return FakeTrial(config, [])
+    def slow_deploy(*args, **kwargs):  # a build that takes longer than the run may
+        time.sleep(4)
+        return deploy(*args, **kwargs)
 
-        monkeypatch.setattr(launch.Trial, "create", factory)
+    monkeypatch.setattr(message_board_module, "deploy", slow_deploy)
 
-        directory, code = await launch.run_experiment(prepared)
-        data = json.loads((directory / "run.json").read_text())
-        assert code == 0
-        assert data["resources"]["message_board"]["metadata"]["mode"] == "external"
-        assert server.operator_token not in (directory / "run.json").read_text()
-        assert server.process.returncode is None
-        assert server.client.me()["role"] == "admin"
-        assert not (directory / "state/resources/message_board/data").exists()
-        assert not (directory / "state/resources/message_board/board.log").exists()
-        assert set(c["name"] for c in server.client.list_channels()) == {
-            "general",
-            "findings",
-        }
-    finally:
-        await server.stop()
+    async def factory(config):
+        assert config.agent.env["MSGBOARD_HF_TOKEN"] == "test-inference-secret"
+        assert "MSGBOARD_SOCKET" not in config.agent.env
+        assert not config.environment.mounts
+        assert "127.0.0.1" in config.agent.extra_allowed_hosts
+        return FakeTrial(config, [])
+
+    monkeypatch.setattr(launch.Trial, "create", factory)
+
+    directory, code = await launch.run_experiment(prepared)
+    data = json.loads((directory / "run.json").read_text())
+    assert code == 0 and data["status"] == "completed"
+    metadata = data["resources"]["message_board"]["metadata"]
+    assert metadata["mode"] == "space" and metadata["url"] == fake_space.url
+    assert metadata["space"]["id"] == "user/board"
+    assert metadata["space"]["bucket"] == "user/board-bucket"
+    assert metadata["space"]["msgboard_revision"] == "r" * 40
+    state = directory / "state/resources/message_board"
+    operator_token = (state / "operator.token").read_text().strip()
+    assert operator_token not in (directory / "run.json").read_text()
+    assert fake_space.process.poll() is None
+    for credential in json.loads((state / "participants.json").read_text()).values():
+        with Client(fake_space.url, credential["token"]) as client:
+            with pytest.raises(BoardError, match="401"):
+                client.me()
 
 
 @pytest.mark.parametrize("backend,delete", [("docker", True), ("podman", False)])

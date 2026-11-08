@@ -1,4 +1,4 @@
-"""A managed local msgboard or a connection to a dedicated existing board."""
+"""The run's msgboard: a local board managed by the run, or a board on a Hugging Face Space."""
 
 import asyncio
 import importlib.metadata
@@ -9,41 +9,31 @@ import socket
 import sys
 import tempfile
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from huggingface_hub import get_token
+from huggingface_hub.utils import validate_repo_id
+from msgboard import auth
 from msgboard.client import Client
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from msgboard.space import deploy, resolve_space_id
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flock.results import write_json
+
+HEALTH_CHECK_SECONDS = 5
+# A Space restart answers 503 for about 10 s, and a crashed container keeps the
+# bucket lease for 120 s, so only a longer outage fails the run.
+SPACE_OUTAGE_GRACE_SECONDS = 180
 
 
 class Options(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    url: str | None = None
-    token_env: str = Field(
-        default="MSGBOARD_OPERATOR_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
-    )
     channels: list[str] = Field(default_factory=lambda: ["general"], min_length=1)
-
-    @field_validator("url")
-    @classmethod
-    def endpoint(cls, value):
-        if value is None:
-            return value
-        url = urlsplit(value)
-        if (
-            url.scheme not in ("http", "https")
-            or not url.hostname
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-        ):
-            raise ValueError(
-                "message_board.url must be HTTP(S) without embedded credentials, query or fragment"
-            )
-        return value.rstrip("/")
+    space_id: str | None = None
+    private: bool | None = None
+    startup_timeout_seconds: float | None = Field(default=None, gt=0)
 
     @field_validator("channels")
     @classmethod
@@ -53,6 +43,19 @@ class Options(BaseModel):
         ):
             raise ValueError("channels must be unique lowercase channel names")
         return value
+
+    @field_validator("space_id")
+    @classmethod
+    def hub_space_id(cls, value):
+        if value is not None:
+            validate_repo_id(value)  # `name` or `namespace/name`
+        return value
+
+    @model_validator(mode="after")
+    def space_only_options(self):
+        if self.private is not None and self.space_id is None:
+            raise ValueError("message_board.private is only valid with space_id")
+        return self
 
 
 async def call(function, *args):
@@ -75,41 +78,61 @@ class Resource:
         self.secrets = secrets
         self.process = self.client = self.log = None
         self.socket_directory = self.socket_path = None
-        self.url = self.options.url or ""
+        self.url = ""
         self.credentials = {}
         self.channel_ids = set()
         self.metadata = {}
         self.operator_token = None
-        if self.options.url:
-            self.operator_token = os.environ.get(self.options.token_env)
-            if not self.operator_token:
+        self.space = self.hf_token = None
+        self.startup_timeout_seconds = self.options.startup_timeout_seconds or (
+            900 if self.options.space_id else 120
+        )
+        if self.options.space_id:
+            self.hf_token = get_token()
+            if not self.hf_token:
                 raise ValueError(
-                    f"Set {self.options.token_env} to an operator token for message_board.url"
+                    "Set HF_TOKEN or run `hf auth login` for message_board.space_id"
                 )
-            self.secrets.append(self.operator_token)
+            self.secrets.append(self.hf_token)
+
+    def _gate(self):
+        """Client options for a private Space: its gate takes the launcher's HF token."""
+        if not (self.space and self.space.private):
+            return {}
+        return {
+            "headers": {"Authorization": f"Bearer {self.hf_token}"},
+            "token_header": "X-Msgboard-Token",
+        }
 
     async def start(self):
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_dir.chmod(0o700)
-        if not self.options.url:
+        if self.options.space_id:
+            await self._start_space()
+            # Retries outlast a restart that follows wait_ready().
+            self.client = Client(
+                self.url,
+                self.operator_token,
+                timeout=10,
+                max_retries=10,
+                **self._gate(),
+            )
+        else:
             await self._start_local()
-        self.client = Client(self.url, self.operator_token, timeout=5, max_retries=2)
+            self.client = Client(
+                self.url, self.operator_token, timeout=5, max_retries=2
+            )
         identity = await call(self.client.me)
-        if identity.get("principal", identity).get("role") != "admin":
+        identity = identity.get("principal", identity)
+        if identity.get("role") != "admin":
             raise ValueError("Board resource requires an operator/admin token")
-        if self.options.url:
-            people = await call(self.client.people)
-            conflicts = {p["external_id"] for p in people} & set(self.agents)
-            if conflicts:
-                raise ValueError(
-                    f"Board already has participant identities: {', '.join(sorted(conflicts))}; use a dedicated board"
-                )
         await call(self.provision, self.agents)
+        invite = await call(self._admin_invite, identity["id"]) if self.space else None
         dist = importlib.metadata.distribution("msgboard")
         self.metadata = {
             "url": self.url,
-            "mode": "external" if self.options.url else "managed",
-            "transport": "http" if self.options.url else "unix",
+            "mode": "space" if self.space else "local",
+            "transport": "http" if self.space else "unix",
             "channels": self.options.channels,
             "client_version": dist.version,
             "client_revision": json.loads(dist.read_text("direct_url.json") or "{}")
@@ -117,7 +140,24 @@ class Resource:
             .get("commit_id"),
         }
         print(f"Board: {self.url}", flush=True)
-        if not self.options.url:
+        if self.space:
+            self.metadata["space"] = {
+                "id": self.space.space_id,
+                "bucket": self.space.bucket_id,
+                "private": self.space.private,
+                "created": self.space.created,
+                "commit": self.space.commit,
+                "msgboard_revision": self.space.msgboard_revision,
+                "admin_invite_created": invite is not None,
+            }
+            if invite:
+                print(
+                    "Board admin invite (single use; open it and click "
+                    f'"Join with Hugging Face"): {invite}',
+                    flush=True,
+                )
+            print(f"Board token file: {self.state_dir / 'operator.token'}", flush=True)
+        else:
             print(f"Board token file: {self.data_dir / 'operator.token'}", flush=True)
 
     async def _start_local(self):
@@ -171,6 +211,77 @@ class Resource:
                     await asyncio.sleep(0.1)
         raise RuntimeError("msgboard did not become ready; see resource board.log")
 
+    async def _start_space(self):
+        loop = asyncio.get_running_loop()
+        # Keep time to provision before Resources stops the startup.
+        ready_by = loop.time() + self.startup_timeout_seconds - 30
+        # A new operator token on every launch: deploy() makes it the Space's
+        # admin credential, so a relaunch needs nothing from earlier runs.
+        _, self.operator_token, _ = auth.new_token()
+        self.secrets.append(self.operator_token)
+        # Saved before deploy() replaces the Space's secret, so it is never lost.
+        descriptor = os.open(
+            self.state_dir / "operator.token",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(self.operator_token + "\n")
+        space_id = self.options.space_id
+        try:
+            space_id = await call(
+                partial(resolve_space_id, space_id, hf_token=self.hf_token)
+            )
+            self.space = await call(
+                partial(
+                    deploy,
+                    space_id,
+                    operator_token=self.operator_token,
+                    private=self.options.private,
+                    hf_token=self.hf_token,
+                )
+            )
+        except Exception as exc:
+            # DeployError, Hub HTTP errors, HFValidationError and network errors alike.
+            raise RuntimeError(
+                f"Could not deploy the board to Space {space_id}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        self.url = self.space.url
+        page = f"https://huggingface.co/spaces/{self.space.space_id}"
+        print(f"Board Space: {page} (waiting for it to build and start)", flush=True)
+        # Short waits, so cancelling the launch doesn't wait out a long one.
+        with Client(self.url, self.operator_token, timeout=5, **self._gate()) as probe:
+            while True:
+                try:
+                    await call(
+                        probe.wait_ready, max(1, min(10, ready_by - loop.time()))
+                    )
+                    return
+                except TimeoutError as exc:
+                    if loop.time() >= ready_by:
+                        raise RuntimeError(
+                            f"Board Space {self.space.space_id} was not ready within "
+                            f"message_board.startup_timeout_seconds ({exc}); see {page}"
+                        ) from None
+
+    def _admin_invite(self, operator_id):
+        """A single-use admin invite link for a person, unless a person is already admin."""
+        if any(
+            person["identity_type"] == "user"
+            and person["role"] == "admin"
+            and not person["disabled"]
+            and person["id"] != operator_id
+            for person in self.client.people()
+        ):
+            return None
+        invite = self.client.create_invite(
+            "human", role="admin", max_uses=1, label="Flock admin invite"
+        )
+        link = f"{self.url}/?invite={invite['code']}"
+        self.secrets.extend([invite["code"], link])
+        return link
+
     def provision(self, names):
         visible = {channel["name"]: channel for channel in self.client.list_channels()}
         for name in self.options.channels:
@@ -178,6 +289,7 @@ class Resource:
             self.channel_ids.add(channel.get("channel", channel)["id"])
         participants = []
         for name in names:
+            # Joining a named invite again re-keys an agent that an earlier run made.
             invite = self.client.create_invite(
                 agent_name=name,
                 role="member",
@@ -185,7 +297,7 @@ class Resource:
                 channels=sorted(self.channel_ids),
                 max_uses=1,
             )
-            with Client.join(self.url, invite["code"]) as agent:
+            with Client.join(self.url, invite["code"], **self._gate()) as agent:
                 credential = {"identity": agent.identity, "token": agent.token}
                 self.credentials[name] = credential
                 participants.append(credential)
@@ -197,6 +309,9 @@ class Resource:
     def bind(self, name):
         credential = self.credentials[name]
         env = {"MSGBOARD_URL": self.url, "MSGBOARD_TOKEN": credential["token"]}
+        if self.space and self.space.private:
+            # Client.from_env sends it to the Space's gate, and the board token apart.
+            env["MSGBOARD_HF_TOKEN"] = self.hf_token
         mounts = []
         hosts = [urlsplit(self.url).hostname]
         if self.socket_path:
@@ -221,11 +336,23 @@ class Resource:
         if self.process:
             code = await self.process.wait()
             raise RuntimeError(f"Board exited unexpectedly ({code})")
-        # Remote failures are detected through authenticated HTTP health checks.
-        with Client(self.url, self.operator_token, timeout=5, max_retries=0) as probe:
+        # A Space board is watched through authenticated HTTP health checks.
+        loop = asyncio.get_running_loop()
+        with Client(
+            self.url, self.operator_token, timeout=5, max_retries=0, **self._gate()
+        ) as probe:
+            healthy = loop.time()
             while True:
-                await asyncio.sleep(5)
-                await call(probe.me)
+                await asyncio.sleep(HEALTH_CHECK_SECONDS)
+                try:
+                    await call(probe.me)
+                    healthy = loop.time()
+                except Exception as exc:
+                    if loop.time() - healthy > SPACE_OUTAGE_GRACE_SECONDS:
+                        raise RuntimeError(
+                            f"Board Space unreachable for {SPACE_OUTAGE_GRACE_SECONDS} s: "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
 
     async def export(self, directory):
         if not self.client or (self.process and self.process.returncode is not None):
@@ -273,6 +400,20 @@ class Resource:
                     after = next_seq
         temporary.replace(directory / "board.jsonl")
 
+    def _revoke_agent_tokens(self):
+        """The Space outlives the run, so the agents' tokens must not."""
+        pending = list(self.credentials)
+        try:
+            while pending:
+                token = self.credentials[pending[0]]["token"]
+                self.client.revoke_token(auth.parse_token(token)[0])
+                pending.pop(0)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Board tokens still work for {', '.join(pending)}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
     async def stop(self):
         if self.process and self.process.returncode is None:
             with suppress(ProcessLookupError):
@@ -283,9 +424,13 @@ class Resource:
                 with suppress(ProcessLookupError):
                     self.process.kill()
                 await self.process.wait()
-        if self.client:
-            self.client.close()
-        if self.log:
-            self.log.close()
-        if self.socket_directory:
-            self.socket_directory.cleanup()
+        try:
+            if self.space and self.client:
+                await call(self._revoke_agent_tokens)
+        finally:
+            if self.client:
+                self.client.close()
+            if self.log:
+                self.log.close()
+            if self.socket_directory:
+                self.socket_directory.cleanup()

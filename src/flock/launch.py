@@ -250,6 +250,9 @@ async def _run_experiment(config: Config):
             save()
 
     try:
+        # Resources start under their own limits (a Space build takes minutes),
+        # so startup doesn't count against run_timeout_seconds.
+        await resources.start()
         async with asyncio.timeout(config.limits.run_timeout_seconds):
             resolved = await resolve_task(config.task)
             manifest["source"] = resolved.manifest()
@@ -258,7 +261,6 @@ async def _run_experiment(config: Config):
             manifest["artifacts"]["task_instruction"] = "inputs/task.md"
             networks = TrialNetworks(run_id, engine=config.environment.backend)
             await networks.start()
-            await resources.start()
             manifest["networks"] = networks.allocations
             for record in participants:
                 name = record["name"]

@@ -61,14 +61,20 @@ class Resources:
             self.attempted.append(name)
             record = self.records[name]
             record["status"] = "starting"
+            # Resources may need longer, e.g. to build a Space.
+            limit = getattr(provider, "startup_timeout_seconds", 120)
             try:
-                async with asyncio.timeout(120):
+                async with asyncio.timeout(limit) as deadline:
                     await provider.start()
                 record.update(status="ready", metadata=provider.metadata)
                 self.watchers.append(asyncio.create_task(self._watch(name, provider)))
             except BaseException as exc:
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    exc = RuntimeError(
+                        f"Resource {name} did not start within {limit:g} s"
+                    )
                 record.update(status="failed", error=safe_error(exc, self.secrets))
-                raise
+                raise exc
 
     def bind(self, name, config):
         metadata = {}
