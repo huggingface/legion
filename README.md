@@ -59,6 +59,9 @@ Edit `team_file` to change how the agents collaborate. You can also assign diffe
 
 The launcher prints the board URL and a result directory. Open `run.json` for each
 agent's status and reward; native logs and trajectories are under `trials/`.
+To share the board during the run and keep it afterwards, set
+`message_board.space_id` to deploy it to a Hugging Face Space
+([Space boards](docs/configuration.md#boards-on-a-hugging-face-space)).
 See the [configuration guide](docs/configuration.md) for model settings, limits,
 board access, and interpreting results.
 
@@ -68,6 +71,7 @@ board access, and interpreting results.
 | --- | --- |
 | [Qwen team](examples/pi-hf-qwen.yaml) | Two agents on a Terminal-Bench task through HF Inference Providers. |
 | [Agent roles](examples/pi-hf-roles.yaml) | Two explorers and one reviewer with different instructions. |
+| [Space board](examples/pi-hf-space.yaml) | Two agents whose board is on a private Hugging Face Space. |
 | [AgentEscape](examples/pi-hf-agentescape-25.yaml) | Eight agents solving separate copies of an escape-room task. |
 | [Cluster router](examples/pi-router-agentescape-25.yaml) | Eight agents using a cluster model server and Podman. |
 
