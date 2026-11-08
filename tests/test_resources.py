@@ -9,8 +9,10 @@ from flock.resources import Resources
 
 
 @pytest.fixture
-async def server(board_provider, tmp_path):
-    resource = board_provider({}, state_dir=tmp_path / "server", agents=[], secrets=[])
+async def server(message_board_provider, tmp_path):
+    resource = message_board_provider(
+        {}, state_dir=tmp_path / "server", agents=[], secrets=[]
+    )
     try:
         await resource.start()
         yield resource
@@ -19,12 +21,12 @@ async def server(board_provider, tmp_path):
 
 
 async def test_external_board_scoped_export_and_memberships(
-    server, board_provider, tmp_path, monkeypatch
+    server, message_board_provider, tmp_path, monkeypatch
 ):
     unrelated = server.client.create_channel("unrelated")
     server.client.post(unrelated["id"], "Keep this data on the existing board")
     monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
-    resource = board_provider(
+    resource = message_board_provider(
         {
             "url": server.url,
             "token_env": "BOARD_ADMIN",
@@ -71,11 +73,11 @@ async def test_external_board_scoped_export_and_memberships(
 
 
 async def test_external_name_conflict_does_not_rotate_existing_token(
-    server, board_provider, tmp_path, monkeypatch
+    server, message_board_provider, tmp_path, monkeypatch
 ):
     original = server.provision(["agent-001"])[0]
     monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
-    resource = board_provider(
+    resource = message_board_provider(
         {"url": server.url, "token_env": "BOARD_ADMIN", "channels": ["do-not-create"]},
         state_dir=tmp_path / "external",
         agents=["agent-001"],
@@ -92,11 +94,11 @@ async def test_external_name_conflict_does_not_rotate_existing_token(
 
 
 async def test_external_member_token_rejected_before_provisioning(
-    server, board_provider, tmp_path, monkeypatch
+    server, message_board_provider, tmp_path, monkeypatch
 ):
     member = server.provision(["member"])[0]
     monkeypatch.setenv("BOARD_ADMIN", member["token"])
-    resource = board_provider(
+    resource = message_board_provider(
         {"url": server.url, "token_env": "BOARD_ADMIN"},
         state_dir=tmp_path / "external",
         agents=["new-agent"],
@@ -122,19 +124,19 @@ async def test_external_member_token_rejected_before_provisioning(
     ],
 )
 def test_board_options_reject_invalid_config_without_echoing_values(
-    board_provider, tmp_path, options
+    message_board_provider, tmp_path, options
 ):
     with pytest.raises(ValueError) as exc:
-        board_provider(options, state_dir=tmp_path, agents=[], secrets=[])
+        message_board_provider(options, state_dir=tmp_path, agents=[], secrets=[])
     assert "secret" not in str(exc.value)
 
 
 def test_missing_external_credential_fails_during_preflight(
-    board_provider, tmp_path, monkeypatch
+    message_board_provider, tmp_path, monkeypatch
 ):
     monkeypatch.delenv("ABSENT_BOARD_TOKEN", raising=False)
     with pytest.raises(ValueError, match="Set ABSENT_BOARD_TOKEN"):
-        board_provider(
+        message_board_provider(
             {"url": "https://example.com", "token_env": "ABSENT_BOARD_TOKEN"},
             state_dir=tmp_path,
             agents=[],
@@ -183,10 +185,10 @@ class Resource:
 
 
 async def test_external_health_monitor_detects_board_loss(
-    server, board_provider, tmp_path, monkeypatch
+    server, message_board_provider, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
-    resource = board_provider(
+    resource = message_board_provider(
         {"url": server.url, "token_env": "BOARD_ADMIN"},
         state_dir=tmp_path / "external",
         agents=[],

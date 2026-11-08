@@ -14,11 +14,11 @@ task:
 team_file: ../prompts/team.md
 resources_dir: ../resources
 resources:
-  board:
+  message_board:
     channels: [general]
 tools_dir: ../tools
 tools:
-  - board.*
+  - message_board.*
 agents:
   roles:
     explorer:

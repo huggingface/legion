@@ -16,11 +16,11 @@ task:
 team_file: ../prompts/agentescape-team.md
 resources_dir: ../resources
 resources:
-  board:
+  message_board:
     channels: [general]
 tools_dir: ../tools
 tools:
-  - board.*
+  - message_board.*
 agents:
   count: 4
 environment:

@@ -3,7 +3,7 @@
 [Back to the README](../README.md)
 
 This directory contains tool implementations supplied to experiments. Currently,
-[board.py](board.py) provides message-board operations. The reusable code that
+[message_board.py](message_board.py) provides message-board operations. The reusable code that
 packages, installs, and executes tools lives in [src/flock/tools](../src/flock/tools/).
 
 Tools are ordinary Python functions. Agents invoke them through their existing shell
@@ -11,8 +11,9 @@ tool using `flock-tool`; they are not registered as native Pi tools or MCP tools
 
 ## How tools reach agents
 
-1. The experiment selects functions from `tools_dir` using names such as `board.post`
-   or `board.*`. Each module declares its public functions in a `TOOLS` mapping.
+1. The experiment selects functions from `tools_dir` using names such as
+   `message_board.post` or `message_board.*`. Each module declares its public
+   functions in a `TOOLS` mapping.
 2. The [runner](../src/flock/tools/runner.py) imports the selected modules and
    derives argument schemas from type annotations, defaults, and docstrings.
 3. The [bundler](../src/flock/tools/bundle.py) freezes the modules, declared
@@ -143,12 +144,12 @@ For tools that need packages or services, three optional module attributes apply
 | `BUNDLE_FILES` | Distribution names mapped to exact installed file paths, for copying only a package subset. Declare that subset's runtime dependencies separately. |
 | `REQUIRES` | Names of experiment resources that must be configured before the tools can run. |
 
-For example, [board.py](board.py) declares:
+For example, [message_board.py](message_board.py) declares:
 
 ```python
 DEPENDENCIES = ["httpx"]
 BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
-REQUIRES = ["board"]
+REQUIRES = ["message_board"]
 ```
 
 The bundler copies packages from the launcher's installed environment, rather than
@@ -157,7 +158,7 @@ Only pure Python dependencies are supported; native extensions and dependency ex
 are rejected. Keep tool modules self-contained apart from their declared dependencies.
 
 `REQUIRES` does not start a service by itself. The board tools need a matching
-`resources.board` configuration. The [board resource provider](../resources/board.py)
+`resources.message_board` configuration. The [board resource provider](../resources/message_board.py)
 starts or connects to the shared board, provisions identities, and binds each
 agent's credentials and connection settings. The tool functions read those settings
 from their environment and call the service. Resource setup runs once per experiment;
@@ -170,7 +171,7 @@ wheel contains the core machinery; users supply their own tool and resource modu
 
 For a new shared service, add `<name>.py` under `resources_dir` and configure it
 under `resources.<name>`. Resource providers run once on the launcher; tool functions
-run inside each agent's environment. Follow [resources/board.py](../resources/board.py):
+run inside each agent's environment. Follow [resources/message_board.py](../resources/message_board.py):
 
 - Export `Resource(options, *, state_dir, agents, secrets)`; validate options in its
   constructor without starting the service.

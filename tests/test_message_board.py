@@ -12,8 +12,10 @@ from flock.tools.bundle import build_tool_bundle
 from flock.tools.runner import load_module
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-board_tools = load_module(TOOLS_DIR / "board.py")
-BoardResource = load_module(TOOLS_DIR.parent / "resources" / "board.py").Resource
+board_tools = load_module(TOOLS_DIR / "message_board.py")
+BoardResource = load_module(
+    TOOLS_DIR.parent / "resources" / "message_board.py"
+).Resource
 
 
 def BoardRuntime(state_dir):
@@ -110,14 +112,16 @@ def invoke_bundle(directory, name, arguments, env):
 async def test_bundle_runs_without_host_environment_and_rejects_unselected_tools(
     board, tmp_path
 ):
-    directory = extract_bundle(tmp_path, ["board.post"])
+    directory = extract_bundle(tmp_path, ["message_board.post"])
     identity = board.provision(["bundled-agent"])[0]
     env = {"MSGBOARD_URL": board.url, "MSGBOARD_TOKEN": identity["token"]}
-    result = invoke_bundle(directory, "board.post", {"text": "from bundle"}, env)
+    result = invoke_bundle(
+        directory, "message_board.post", {"text": "from bundle"}, env
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "from bundle" in result.stdout
     result = invoke_bundle(
-        directory, "board.create_channel", {"name": "not-selected"}, env
+        directory, "message_board.create_channel", {"name": "not-selected"}, env
     )
     assert result.returncode == 1
     assert "not selected" in result.stdout
@@ -126,14 +130,14 @@ async def test_bundle_runs_without_host_environment_and_rejects_unselected_tools
 
 async def test_cli_uses_authenticated_socket_and_removes_it(tmp_path):
     runtime = BoardRuntime(tmp_path / "state")
-    directory = extract_bundle(tmp_path, ["board.post"])
+    directory = extract_bundle(tmp_path, ["message_board.post"])
     try:
         await runtime.start()
         socket_path = runtime.socket_path
         identity = runtime.provision(["socket-agent"])[0]
         result = invoke_bundle(
             directory,
-            "board.post",
+            "message_board.post",
             {"text": "via socket"},
             {
                 "MSGBOARD_URL": "http://unreachable.invalid",

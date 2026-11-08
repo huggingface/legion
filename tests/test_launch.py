@@ -43,7 +43,7 @@ def test_reasoning_effort_reaches_native_pi(monkeypatch, tmp_path, effort):
 
 
 @pytest.fixture
-def prepared(monkeypatch, tmp_path, board_provider):
+def prepared(monkeypatch, tmp_path, message_board_provider):
     spec = Config.load(Path("examples/pi-hf.yaml"))
     spec.output_dir = tmp_path / "results"
     monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
@@ -170,14 +170,19 @@ async def test_concurrent_participants_and_separate_artifacts(
     assert len({p["result_path"] for p in data["participants"]}) == 2
     assert "test-inference-secret" not in (directory / "run.json").read_text()
     assert (
-        len((directory / "resources/board/board.jsonl").read_text().splitlines()) == 2
+        len(
+            (directory / "resources/message_board/board.jsonl").read_text().splitlines()
+        )
+        == 2
     )
     assert data["tools"]["sha256"]
-    assert data["configuration"]["tools"] == prepared.tools == ["board.*"]
-    assert "board.*" not in data["tools"]["tools"]
-    assert {"board.read", "board.post", "board.create_channel"} <= data["tools"][
-        "tools"
-    ].keys()
+    assert data["configuration"]["tools"] == prepared.tools == ["message_board.*"]
+    assert "message_board.*" not in data["tools"]["tools"]
+    assert {
+        "message_board.read",
+        "message_board.post",
+        "message_board.create_channel",
+    } <= data["tools"]["tools"].keys()
     assert (directory / "inputs/task.md").read_text() == (
         "Solve the task using a peer's contribution"
     )
@@ -191,7 +196,7 @@ async def test_concurrent_participants_and_separate_artifacts(
             directory / participant["instructions_path"]
         ).read_text() == agent_instructions
         assert participant["name"] in agent_instructions
-        assert "board.post" in agent_instructions
+        assert "message_board.post" in agent_instructions
         assert "Changed after startup" not in agent_instructions
         assert "Share useful findings" not in agent_instructions
         if instructions:
@@ -286,7 +291,9 @@ async def test_roles_run_concurrently_with_separate_frozen_prompts(
         snapshot = data["artifacts"]["role_instructions"][role]
         assert snapshot == f"inputs/roles/{role}.md"
         assert (directory / snapshot).read_text(encoding="utf-8") == text
-    channels = json.loads((directory / "resources/board/channels.json").read_text())
+    channels = json.loads(
+        (directory / "resources/message_board/channels.json").read_text()
+    )
     assert {m["external_id"] for m in channels[0]["members"]} >= set(
         participant_instructions
     )
@@ -369,23 +376,23 @@ async def test_deadline_cancels_trials_and_exports_partial_board(prepared, monke
         p["rewards"] is None and p["status"] == "timed_out"
         for p in data["participants"]
     )
-    assert (directory / "resources/board/board.jsonl").exists()
+    assert (directory / "resources/message_board/board.jsonl").exists()
 
 
 @pytest.mark.parametrize("stop", ["interrupt", "sigterm", "board_exit"])
 async def test_resource_failure_cancels_peers_and_retains_state(
-    prepared, monkeypatch, board_provider, stop
+    prepared, monkeypatch, message_board_provider, stop
 ):
     events = []
     runtimes = []
 
-    original_start = board_provider.start
+    original_start = message_board_provider.start
 
     async def tracked_start(self):
         runtimes.append(self)
         await original_start(self)
 
-    monkeypatch.setattr(board_provider, "start", tracked_start)
+    monkeypatch.setattr(message_board_provider, "start", tracked_start)
 
     async def factory(config):
         return FakeTrial(config, events, mode="wait")
@@ -421,10 +428,10 @@ async def test_resource_failure_cancels_peers_and_retains_state(
     assert runtimes[0].process.returncode is not None
     assert runtimes[0].data_dir.is_dir()
     if interrupted:
-        assert (directory / "resources/board/board.jsonl").exists()
+        assert (directory / "resources/message_board/board.jsonl").exists()
     else:
         assert "exited unexpectedly" in data["error"]
-        assert data["resources"]["board"]["export_error"]
+        assert data["resources"]["message_board"]["export_error"]
 
 
 @pytest.mark.parametrize("handler_kind", ["default", "custom", "asyncio"])
@@ -452,11 +459,13 @@ async def test_preflight_failure_preserves_sigterm_handler(monkeypatch, handler_
         signal.signal(signal.SIGTERM, previous_handler)
 
 
-async def test_export_failure_returns_nonzero(prepared, monkeypatch, board_provider):
+async def test_export_failure_returns_nonzero(
+    prepared, monkeypatch, message_board_provider
+):
     def fail_export(self, directory):
         raise OSError("disk full")
 
-    monkeypatch.setattr(board_provider, "_export", fail_export)
+    monkeypatch.setattr(message_board_provider, "_export", fail_export)
 
     async def factory(config):
         return FakeTrial(config, [])
@@ -466,7 +475,7 @@ async def test_export_failure_returns_nonzero(prepared, monkeypatch, board_provi
     directory, code = await launch.run_experiment(prepared)
     data = json.loads((directory / "run.json").read_text())
     assert code == 1 and data["status"] == "failed"
-    assert "disk full" in data["resources"]["board"]["export_error"]
+    assert "disk full" in data["resources"]["message_board"]["export_error"]
     assert all(p["rewards"] == {"reward": 1.0} for p in data["participants"])
 
 
@@ -579,25 +588,27 @@ async def test_no_resources_or_tools_runs_independently(
     assert all(p["status"] == "completed" for p in data["participants"])
     assert data["resources"] == {}
     assert "msgboard" not in data["versions"]
-    assert not (directory / "state/resources/board").exists()
+    assert not (directory / "state/resources/message_board").exists()
     assert all(p["resources"] == {} for p in data["participants"])
 
 
 async def test_board_tools_require_configured_resource(prepared):
     prepared.resources = {}
-    with pytest.raises(ValueError, match="require resources: board"):
+    with pytest.raises(ValueError, match="require resources: message_board"):
         await launch.run_experiment(prepared)
 
 
 async def test_external_board_integration_leaves_server_alive(
-    prepared, tmp_path, monkeypatch, board_provider
+    prepared, tmp_path, monkeypatch, message_board_provider
 ):
-    server = board_provider({}, state_dir=tmp_path / "server", agents=[], secrets=[])
+    server = message_board_provider(
+        {}, state_dir=tmp_path / "server", agents=[], secrets=[]
+    )
     try:
         await server.start()
         monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
         prepared.resources = {
-            "board": {
+            "message_board": {
                 "url": server.url,
                 "token_env": "BOARD_ADMIN",
                 "channels": ["general", "findings"],
@@ -615,12 +626,12 @@ async def test_external_board_integration_leaves_server_alive(
         directory, code = await launch.run_experiment(prepared)
         data = json.loads((directory / "run.json").read_text())
         assert code == 0
-        assert data["resources"]["board"]["metadata"]["mode"] == "external"
+        assert data["resources"]["message_board"]["metadata"]["mode"] == "external"
         assert server.operator_token not in (directory / "run.json").read_text()
         assert server.process.returncode is None
         assert server.client.me()["role"] == "admin"
-        assert not (directory / "state/resources/board/data").exists()
-        assert not (directory / "state/resources/board/board.log").exists()
+        assert not (directory / "state/resources/message_board/data").exists()
+        assert not (directory / "state/resources/message_board/board.log").exists()
         assert set(c["name"] for c in server.client.list_channels()) == {
             "general",
             "findings",

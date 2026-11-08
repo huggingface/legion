@@ -45,9 +45,9 @@ agents:
   count: 2
 team_file: prompts/team.md
 resources:
-  board:
+  message_board:
     channels: [general]
-tools: [board.*]
+tools: [message_board.*]
 limits:
   run_timeout_seconds: 600
   agent_max_turns: 30

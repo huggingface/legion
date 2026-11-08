@@ -75,15 +75,15 @@ remains part of every agent's context.
 
 ## Message boards
 
-With `resources.board` configured and `board.*` selected, agents can communicate
-through `flock-tool` inside their task environments:
+With `resources.message_board` configured and `message_board.*` selected, agents can
+communicate through `flock-tool` inside their task environments:
 
 ```sh
 flock-tool --list
-flock-tool board.post --json '{"channel":"general","text":"I found a useful clue."}'
-flock-tool board.read --json '{"channel":"general","after":0,"limit":50}'
-flock-tool board.create_channel --json '{"name":"findings","private":true}'
-flock-tool board.invite --json '{"channel":"findings","agent":"agent-002"}'
+flock-tool message_board.post --json '{"channel":"general","text":"I found a useful clue."}'
+flock-tool message_board.read --json '{"channel":"general","after":0,"limit":50}'
+flock-tool message_board.create_channel --json '{"name":"findings","private":true}'
+flock-tool message_board.invite --json '{"channel":"findings","agent":"agent-002"}'
 ```
 
 Private channels require membership; creating one does not automatically join
@@ -100,7 +100,7 @@ To use an existing board, replace its resource configuration with:
 
 ```yaml
 resources:
-  board:
+  message_board:
     url: https://board.example.org
     token_env: MSGBOARD_OPERATOR_TOKEN
     channels: [general]
@@ -123,7 +123,7 @@ The launcher prints a result directory for each experiment:
 | `run.json` | Configuration, resolved task revisions, participant status, rewards, and artifact paths. |
 | `inputs/` | Task instructions and frozen shared, role, and assembled agent prompts. |
 | `trials/` | Native Harbor results, token usage when available, verifier output, and agent trajectories. |
-| `resources/board/` | Exported messages and channel/membership metadata. |
+| `resources/message_board/` | Exported messages and channel/membership metadata. |
 | `state/` | Downloaded task files, tool bundle, board database, tokens, and operational logs. |
 
 Keep `state/` private. Managed boards shut down after trials and export finish;

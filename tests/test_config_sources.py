@@ -24,7 +24,7 @@ def test_explicit_dataset_still_requires_a_version(dataset):
         {"limits": {"run_timeout_seconds": float("inf")}},
         {"limits": {"agent_timeout_seconds": 0}},
         {"inference": {"base_url": "https://secret@router.huggingface.co/v1"}},
-        {"board": {"mode": "shared"}},
+        {"message_board": {"mode": "shared"}},
     ],
 )
 def test_unsupported_or_unsafe_configuration_is_rejected(update):
