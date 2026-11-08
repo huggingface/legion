@@ -3,7 +3,6 @@
 import asyncio
 import json
 import stat
-import threading
 
 import httpx
 import pytest
@@ -12,6 +11,19 @@ from msgboard.client import BoardError, Client
 from msgboard.space import DeployError
 
 HF_TOKEN = "hf_test-launcher-secret"
+
+
+class FakeTime:
+    """Stands in for the board module's `time`: only sleeping moves the clock."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
 
 
 def gated(url, token):
@@ -138,38 +150,54 @@ async def test_space_deploy_failures_are_launch_errors(
     finally:
         await resource.stop()
     assert str(exc.value).startswith(
-        f"Could not deploy the board to Space user/board: {type(error).__name__}: "
+        f"Could not deploy the board to Space board: {type(error).__name__}: "
     )
     assert (tmp_path / "state/operator.token").exists()
 
 
 async def test_space_outage_fails_the_run_only_after_the_grace_period(
-    fake_space, message_board_provider, message_board_module, tmp_path, monkeypatch
+    message_board_provider, message_board_module, tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("HF_TOKEN", HF_TOKEN)
+    clock = FakeTime()
+    answers = ["up", "down", "down", "up"] + ["down"] * 100  # a restart, then gone
+    checks = []
+
+    class Probe:
+        """The Space's health as the watcher sees it, one check every 5 s."""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+        def me(self):
+            clock.sleep(5)
+            checks.append(clock.now)
+            if answers[len(checks) - 1] == "down":
+                raise httpx.ConnectError("Space restarting")
+            return {"role": "admin"}
+
+    monkeypatch.setattr(message_board_module, "time", clock)
+    monkeypatch.setattr(message_board_module, "Client", Probe)
+    monkeypatch.setattr(message_board_module, "HEALTH_CHECK_SECONDS", 0)
     resource = message_board_provider(
         {"space_id": "board"}, state_dir=tmp_path / "state", agents=[], secrets=[]
     )
-    try:
-        await resource.start()
-        monkeypatch.setattr(message_board_module, "HEALTH_CHECK_SECONDS", 0.2)
-        monkeypatch.setattr(message_board_module, "SPACE_OUTAGE_GRACE_SECONDS", 4)
-        watcher = asyncio.create_task(resource.wait())
-        fake_space.stop()  # a restart: down for a moment, then back
-        await asyncio.sleep(0.5)
-        fake_space.start()
-        await asyncio.sleep(5)
-        assert not watcher.done()
-        fake_space.stop()
-        with pytest.raises(RuntimeError, match="unreachable for 4 s"):
-            await asyncio.wait_for(watcher, timeout=10)
-    finally:
-        await resource.stop()
+    with pytest.raises(RuntimeError, match="unreachable for 180 s"):
+        await asyncio.wait_for(resource.wait(), timeout=30)
+    # The 10 s outage passed; the run failed at the first check more than 180 s
+    # after the last good one (at 20 s).
+    assert checks[-1] == 205
 
 
 async def test_space_revocation_tries_every_token_and_names_only_failures(
     fake_space, message_board_provider, message_board_module, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(message_board_module, "REVOKE_SECONDS", 6)
     resource = message_board_provider(
         {"space_id": "board"},
         state_dir=tmp_path / "state",
@@ -179,12 +207,22 @@ async def test_space_revocation_tries_every_token_and_names_only_failures(
     await resource.start()
     tokens = {name: c["token"] for name, c in resource.credentials.items()}
     resource.credentials["agent-001"]["token"] = "not-a-board-token"  # keeps failing
-    fake_space.stop()  # a restart as the run ends
-    threading.Timer(1, fake_space.start).start()
-    started = asyncio.get_running_loop().time()
+    clock = FakeTime()
+    attempts = []
+    revoke = Client.revoke_token
+
+    def restarting(self, token_id):  # the board is restarting at the first attempt
+        attempts.append(clock.now)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("Space restarting")
+        return revoke(self, token_id)
+
+    monkeypatch.setattr(message_board_module, "time", clock)
+    monkeypatch.setattr(Client, "revoke_token", restarting)
     with pytest.raises(RuntimeError, match="board tokens of agent-001, which may"):
         await resource.stop()
-    assert asyncio.get_running_loop().time() - started < 12
+    assert attempts == [0, 1]  # agent-002, retried a second later
+    assert 20 <= clock.now <= 21  # agent-001 was tried until the 20 s deadline
     with Client(fake_space.url, tokens["agent-002"]) as agent:
         with pytest.raises(BoardError, match="401"):
             agent.me()

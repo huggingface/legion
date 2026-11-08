@@ -1,7 +1,6 @@
 import asyncio
 import json
 import signal
-import time
 from pathlib import Path
 
 import pytest
@@ -599,18 +598,21 @@ async def test_board_tools_require_configured_resource(prepared):
         await launch.run_experiment(prepared)
 
 
-async def test_space_board_starts_off_the_run_clock_and_outlives_the_run(
-    fake_space, prepared, monkeypatch, message_board_module
+async def test_space_board_starts_before_the_run_deadline_and_outlives_the_run(
+    fake_space, prepared, monkeypatch
 ):
-    prepared.limits.run_timeout_seconds = 3
+    from types import SimpleNamespace
+
     prepared.resources = {"message_board": {"space_id": "user/board", "private": True}}
-    deploy = fake_space.deploy
+    deadlines = []
+    launch_asyncio = SimpleNamespace(**vars(asyncio))
 
-    def slow_deploy(*args, **kwargs):  # a build that takes longer than the run may
-        time.sleep(4)
-        return deploy(*args, **kwargs)
+    def run_deadline(seconds):  # a Space build must not count against the run
+        deadlines.append((seconds, len(fake_space.deploys)))
+        return asyncio.timeout(seconds)
 
-    monkeypatch.setattr(message_board_module, "deploy", slow_deploy)
+    launch_asyncio.timeout = run_deadline
+    monkeypatch.setattr(launch, "asyncio", launch_asyncio)
 
     async def factory(config):
         assert config.agent.env["MSGBOARD_HF_TOKEN"] == "test-inference-secret"
@@ -624,6 +626,7 @@ async def test_space_board_starts_off_the_run_clock_and_outlives_the_run(
     directory, code = await launch.run_experiment(prepared)
     data = json.loads((directory / "run.json").read_text())
     assert code == 0 and data["status"] == "completed"
+    assert deadlines == [(prepared.limits.run_timeout_seconds, 1)]
     metadata = data["resources"]["message_board"]["metadata"]
     assert metadata["mode"] == "space" and metadata["url"] == fake_space.url
     assert metadata["space"]["id"] == "user/board"

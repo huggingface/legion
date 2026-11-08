@@ -18,7 +18,7 @@ from huggingface_hub import get_token
 from huggingface_hub.utils import validate_repo_id
 from msgboard import auth
 from msgboard.client import BoardError, Client
-from msgboard.space import deploy, resolve_space_id
+from msgboard.space import deploy
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flock.results import write_json
@@ -232,15 +232,12 @@ class Resource:
         )
         with os.fdopen(descriptor, "w") as stream:
             stream.write(self.operator_token + "\n")
-        space_id = self.options.space_id
         try:
-            space_id = await call(
-                partial(resolve_space_id, space_id, hf_token=self.hf_token)
-            )
+            # deploy() puts a bare name in the token's account; Deployment has the full ID.
             self.space = await call(
                 partial(
                     deploy,
-                    space_id,
+                    self.options.space_id,
                     operator_token=self.operator_token,
                     private=self.options.private,
                     hf_token=self.hf_token,
@@ -249,7 +246,7 @@ class Resource:
         except Exception as exc:
             # DeployError, Hub HTTP errors, HFValidationError and network errors alike.
             raise RuntimeError(
-                f"Could not deploy the board to Space {space_id}: "
+                f"Could not deploy the board to Space {self.options.space_id}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         self.url = self.space.url
@@ -362,18 +359,17 @@ class Resource:
             code = await self.process.wait()
             raise RuntimeError(f"Board exited unexpectedly ({code})")
         # A Space board is watched through authenticated HTTP health checks.
-        loop = asyncio.get_running_loop()
         with Client(
             self.url, self.operator_token, timeout=5, max_retries=0, **self._gate()
         ) as probe:
-            healthy = loop.time()
+            healthy = time.monotonic()
             while True:
                 await asyncio.sleep(HEALTH_CHECK_SECONDS)
                 try:
                     await call(probe.me)
-                    healthy = loop.time()
+                    healthy = time.monotonic()
                 except Exception as exc:
-                    if loop.time() - healthy > SPACE_OUTAGE_GRACE_SECONDS:
+                    if time.monotonic() - healthy > SPACE_OUTAGE_GRACE_SECONDS:
                         raise RuntimeError(
                             f"Board Space unreachable for {SPACE_OUTAGE_GRACE_SECONDS} s: "
                             f"{type(exc).__name__}: {exc}"

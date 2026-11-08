@@ -43,9 +43,6 @@ class FakeSpace:
             self.port = reservation.getsockname()[1]
         self.url = f"http://127.0.0.1:{self.port}"
 
-    def resolve_space_id(self, space_id, *, hf_token=None):
-        return space_id if "/" in space_id else f"user/{space_id}"
-
     def deploy(self, space_id, *, operator_token, private=None, hf_token=None):
         from msgboard.space import Deployment
         from msgboard.space.app import ensure_board
@@ -56,6 +53,8 @@ class FakeSpace:
         self.stop()
         ensure_board(self.directory / "data", operator_token)
         self.start()  # it serves a little later, as a Space does
+        if "/" not in space_id:  # a bare name goes in the token's account
+            space_id = f"user/{space_id}"
         return Deployment(
             space_id=space_id,
             url=self.url,
@@ -92,9 +91,6 @@ def fake_space(message_board_module, monkeypatch, tmp_path):
     monkeypatch.setenv("HF_TOKEN", "hf_test-launcher-secret")
     space = FakeSpace(tmp_path / "space")
     monkeypatch.setattr(message_board_module, "deploy", space.deploy)
-    monkeypatch.setattr(
-        message_board_module, "resolve_space_id", space.resolve_space_id
-    )
     try:
         yield space
     finally:
