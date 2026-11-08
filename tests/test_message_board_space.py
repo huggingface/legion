@@ -190,3 +190,19 @@ async def test_space_revocation_tries_every_token_and_names_only_failures(
             agent.me()
     with Client(fake_space.url, tokens["agent-001"]) as agent:
         assert agent.me()["external_id"] == "agent-001"
+
+
+async def test_space_export_fails_when_the_board_lost_the_runs_channels(
+    fake_space, message_board_provider, tmp_path
+):
+    resource = message_board_provider(
+        {"space_id": "board"}, state_dir=tmp_path / "state", agents=[], secrets=[]
+    )
+    try:
+        await resource.start()
+        # As after a restart from a snapshot older than the run.
+        resource.client.delete_channel(resource.client.channel_id("general"), "general")
+        with pytest.raises(RuntimeError, match="no longer has the run's channels"):
+            await resource.export(tmp_path)
+    finally:
+        await resource.stop()

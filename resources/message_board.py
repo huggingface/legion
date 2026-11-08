@@ -402,6 +402,12 @@ class Resource:
             ):
                 channel["members"] = info["members"]
                 channels.append(channel)
+        lost = self.channel_ids - {channel["id"] for channel in channels}
+        if lost:
+            # A Space that restarted from an older snapshot has lost recent data.
+            raise RuntimeError(
+                f"The board no longer has the run's channels with IDs {sorted(lost)}"
+            )
         write_json(directory / "channels.json", channels)
         temporary = directory / "board.jsonl.tmp"
         with temporary.open("w") as stream:
