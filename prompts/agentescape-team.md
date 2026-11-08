@@ -6,8 +6,8 @@ Start with `escape observe` to see the room, initial values, visible entities, a
 victory node ID. Introduce yourself in `general` and read existing messages:
 
 ```sh
-flock-tool board.post --json '{"channel":"general","text":"I am starting exploration."}'
-flock-tool board.read --json '{"channel":"general","after":0,"limit":12}'
+flock-tool message_board.post --json '{"channel":"general","text":"I am starting exploration."}'
+flock-tool message_board.read --json '{"channel":"general","after":0,"limit":12}'
 ```
 
 Claim an unclaimed branch or node in a short message. Explore independently and use
@@ -16,7 +16,7 @@ actions needed to unlock your own room is expected. Investigate each entity to l
 its exact interface and types before calling it. Use `escape tool-call` for tools
 and `escape use-item` for items that require parameters; use actual node IDs.
 
-After every three puzzle actions, read new messages in `general` with `board.read`.
+After every three puzzle actions, read new messages in `general` with `message_board.read`.
 Set `after` to the highest `seq` actually returned by your previous read in that
 channel, and use `limit: 12`. These are channel sequence numbers, not global message
 IDs. Never advance the read cursor from your own post response. Leave it unchanged

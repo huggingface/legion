@@ -41,7 +41,7 @@ class Options(BaseModel):
             or url.fragment
         ):
             raise ValueError(
-                "board.url must be HTTP(S) without embedded credentials, query or fragment"
+                "message_board.url must be HTTP(S) without embedded credentials, query or fragment"
             )
         return value.rstrip("/")
 
@@ -84,7 +84,7 @@ class Resource:
             self.operator_token = os.environ.get(self.options.token_env)
             if not self.operator_token:
                 raise ValueError(
-                    f"Set {self.options.token_env} to an operator token for board.url"
+                    f"Set {self.options.token_env} to an operator token for message_board.url"
                 )
             self.secrets.append(self.operator_token)
 
@@ -150,7 +150,7 @@ class Resource:
         self.url = f"http://127.0.0.1:{port}"
         self.process = await asyncio.create_subprocess_exec(
             sys.executable,
-            str(Path(__file__).with_name("board_server.py")),
+            str(Path(__file__).with_name("message_board_server.py")),
             str(self.data_dir),
             "127.0.0.1",
             str(port),

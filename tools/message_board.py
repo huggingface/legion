@@ -6,7 +6,7 @@ import httpx
 from msgboard.client import Client
 
 DEPENDENCIES = ["httpx"]
-REQUIRES = ["board"]
+REQUIRES = ["message_board"]
 # The SDK shares a distribution with the server. Ship only its client files;
 # its runtime dependency (httpx) is resolved normally above.
 BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
