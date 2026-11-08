@@ -13,8 +13,9 @@ BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
 
 
 # At least 98 s of retries: enough to outlast a Space board's hand-over, which
-# answers writes with 503 and Retry-After for a few seconds, or about 75 s when
-# bucket uploads are slow.
+# answers writes with 503 and Retry-After until the new container serves, 10-21 s
+# after a restart. Slow bucket uploads can make that minutes; the agent then gets
+# the error.
 def _client(max_retries=10):
     socket_path = os.environ.get("MSGBOARD_SOCKET")
     transport = httpx.HTTPTransport(uds=socket_path) if socket_path else None

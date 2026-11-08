@@ -25,18 +25,21 @@ from flock.results import write_json
 HEALTH_CHECK_SECONDS = 5
 # While agents run: a Space hand-over keeps answering reads, health checks
 # included. A new container that isn't handed the board (the old one crashed, or
-# its uploads are throttled) waits until the old lease is 5 minutes stale, then
-# restores and starts, so only a longer outage fails the run.
+# none of its uploads landed for 5 minutes) waits 5 minutes from when it starts
+# looking, then restores and serves. That is msgboard's default
+# MSGBOARD_LEASE_STALE_AFTER, which Flock doesn't change. In msgboard's crash test,
+# with a 60 s window, the board served again 79 s after the crash; with 300 s that
+# is about 320 s, so only a longer outage fails the run.
 SPACE_OUTAGE_GRACE_SECONDS = 420
 # After the run, Resources.finish gives export 120 s and a Space board's stop()
 # 120 s, so an outage then can fail the run sooner. Export only reads, which a
 # hand-over serves except while the new container restores (a few seconds); a
 # failing request gives up within about 45 s. Revocation retries for 15 s, or for
-# 100 s once the board itself says it is handing over: a hand-over pauses writes
-# for a few seconds, and longer when bucket uploads are throttled (75 s was seen;
-# there is no fixed bound). Each request step has a 2 s timeout, but connecting
-# tries every address the host resolves to and DNS has no timeout, so the last
-# attempt can end later. stop()'s limit leaves room for that.
+# 100 s once the board itself says it is handing over: writes are refused until
+# the new container serves, 10-21 s after a restart, but minutes when bucket
+# uploads are slow (there is no fixed bound). Each request step has a 2 s timeout,
+# but connecting tries every address the host resolves to and DNS has no timeout,
+# so the last attempt can end later. stop()'s limit leaves room for that.
 EXPORT_CLIENT = {"timeout": 5, "max_retries": 5}
 REVOKE_SECONDS = 15
 HANDOVER_SECONDS = 100
