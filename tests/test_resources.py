@@ -1,6 +1,3 @@
-import errno
-from pathlib import Path
-
 import pytest
 
 from flock.resources import Resources
@@ -97,7 +94,7 @@ class Resource:
     )
 
 
-async def test_finish_keeps_a_storage_error_and_still_stops(tmp_path, monkeypatch):
+async def test_finish_keeps_a_storage_error_and_still_stops(tmp_path):
     module = """
 class Resource:
     def __init__(self, options, *, state_dir, agents, secrets):
@@ -123,16 +120,11 @@ class Resource:
         secrets=[],
     )
     await resources.start()
-    mkdir = Path.mkdir
-
-    def network_storage(self, *args, **kwargs):
-        if self == tmp_path / "run/resources/first":
-            raise TimeoutError(errno.ETIMEDOUT, "Connection timed out")
-        return mkdir(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "mkdir", network_storage)
+    # A file where the first export directory goes: creating it fails.
+    (tmp_path / "run/resources").mkdir(parents=True)
+    (tmp_path / "run/resources/first").touch()
     assert await resources.finish() is True
-    assert resources.records["first"]["export_error"].startswith("TimeoutError: [Errno")
+    assert resources.records["first"]["export_error"].startswith("FileExistsError")
     assert "export_error" not in resources.records["second"]
     for name in ("first", "second"):
         assert (tmp_path / "run/state/resources" / name / "stopped").exists()

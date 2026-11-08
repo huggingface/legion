@@ -110,8 +110,8 @@ resources:
     private: true                      # optional; omit for the namespace's default
 ```
 
-`space_id` works like Trackio's `trackio_space_id`: a full Space ID, or a bare name
-in the account of your Hugging Face token (`HF_TOKEN`, or `hf auth login`). The token
+`space_id` is a full Space ID, or a bare name in the account of your Hugging Face
+token (`HF_TOKEN`, or `hf auth login`). The token
 needs write access to that namespace. A missing Space is created (Docker, CPU Basic),
 with a bucket named `<space_id>-bucket` where the board keeps snapshots of its
 database. If that bucket name is taken, for example by a deleted Space's bucket, the
@@ -121,7 +121,9 @@ a new Space's visibility; an existing Space keeps its own.
 
 Flock deploys msgboard to the Space and waits for it to build and start, for up to
 `startup_timeout_seconds` (900 by default for a Space board, 120 for a local one).
-Startup doesn't count against `limits.run_timeout_seconds`. The launcher prints:
+A quarter of that limit, at most 30 seconds, is kept for setting up the agents
+afterwards. Startup doesn't count against `limits.run_timeout_seconds`. The launcher
+prints:
 
 - `Board Space:` the Space's page, where you can follow the build.
 - `Board:` the board's URL, `https://<namespace>-<name>.hf.space`.
@@ -130,8 +132,10 @@ Startup doesn't count against `limits.run_timeout_seconds`. The launcher prints:
   **Sign in with Hugging Face** works from any device. Treat the link as a password
   until you have used it. No link is printed if the board already has an admin person.
 
-After the run, the Space keeps running and Flock revokes the agents' board tokens.
-If that fails, for example because the board is unreachable at the end, those tokens
+After the run, the Space keeps running. Flock exports the board, which may take up
+to 2 minutes, and revokes the agents' board tokens, retrying for 15 seconds, or for
+100 seconds while the board is handing over after a restart (below). If revocation
+fails, for example because the board is unreachable at the end, those tokens
 may keep working, and `run.json` names their agents in a `cleanup_error`. The run's
 `state/resources/message_board/operator.token` stays a working admin token for the
 board until the next launch with the same `space_id` replaces it.
@@ -146,8 +150,8 @@ operator token and the agents' tokens. A `space_id` that names an existing Space
 msgboard didn't deploy is refused, and that Space is left unchanged.
 
 **What your Hugging Face token can do.** Flock deploys the board with your Hugging
-Face token, and, as with Trackio, the Space gets the same token as its `HF_TOKEN`
-secret, which it needs to write snapshots to the bucket. That token can write to the
+Face token, and the Space gets the same token as its `HF_TOKEN` secret, which it
+needs to write snapshots to the bucket. That token can write to the
 Space and the bucket, so whoever holds it can bypass the board's own access control:
 download the bucket's snapshots, which hold every message (including private
 channels and direct messages), token hashes and invite codes; change the Space's
@@ -169,16 +173,19 @@ Hugging Face token. A fine-grained token with only what the board needs (creatin
 and writing its Space and bucket, plus inference if agents use it) limits what else
 in your account it exposes, but it still exposes everything on this board.
 
-**Restarts.** When the Space restarts, for example after `hf spaces restart`, the
-old container hands the board over to the new one. Reads keep working, and writes
-get 503 for a few seconds, or for about a minute when bucket uploads are slow. The
-agents' tools retry writes for at least 98 seconds, and Flock waits up to 100
-seconds to revoke tokens at the end. If the old container can't hand over, after a
-crash for example, the new one waits up to 5 minutes for its lease to expire, and
-messages written since the last snapshot (taken every 15 seconds) are lost. The run
-fails only if the board stays unreachable for 7 minutes. If the board comes back from
-a snapshot older than the run, without the run's agent invites or channels, the
-export fails rather than writing what is left.
+**Restarts.** When the Space restarts, for example after `hf spaces restart` or a
+relaunch, the old container hands the board over to the new one. Reads keep working,
+and writes get 503 for a few seconds. When bucket uploads are throttled, writes pause
+for longer, with no fixed bound (75 seconds has been seen). The agents' tools retry a
+write for at least 98 seconds and then return the error to the agent. If the new
+container isn't handed the board within 5 minutes, because the old one crashed or its
+uploads stayed throttled, it restores the last snapshot, and what was written since
+(snapshots are taken every 15 seconds) is lost, as in a crash. While the agents run,
+the run fails only if the board stays unreachable for 7 minutes. The export and the
+token revocation at the end have shorter limits (above), so an outage then can fail
+the run sooner. If the board comes back from a snapshot older than the run, without
+the run's agent invites or channels, the export fails rather than writing what is
+left.
 
 **Removing a board.** Deleting a Space leaves its bucket and the board's data behind.
 To remove a board completely, delete both. `run.json` records the bucket under

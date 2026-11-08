@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 from contextlib import nullcontext, suppress
-from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,22 +17,26 @@ from huggingface_hub import get_token
 from huggingface_hub.utils import validate_repo_id
 from msgboard import auth
 from msgboard.client import BoardError, Client
-from msgboard.space import deploy
+from msgboard.space import Deployment
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from flock.results import write_json
 
 HEALTH_CHECK_SECONDS = 5
-# A Space hand-over keeps answering reads, health checks included. After a crash,
-# the new container waits up to 5 minutes for the old one's bucket lease to go
-# stale, then restores and starts, so only a longer outage fails the run.
+# While agents run: a Space hand-over keeps answering reads, health checks
+# included. A new container that isn't handed the board (the old one crashed, or
+# its uploads are throttled) waits until the old lease is 5 minutes stale, then
+# restores and starts, so only a longer outage fails the run.
 SPACE_OUTAGE_GRACE_SECONDS = 420
-# Resources.finish gives export 120 s. Reads pass during a hand-over, except while
-# the new container restores (a few seconds), which an export request rides out;
-# it fails within about 45 s. Revocation keeps trying for 15 s, with at most 2 s
-# per network step of an attempt. A hand-over pauses writes for a few seconds, or
-# about 75 s when bucket uploads are slow, so while the board itself answers 503
-# for one, revocation keeps trying for 100 s. Stop's limit leaves room for that.
+# After the run, Resources.finish gives export 120 s and a Space board's stop()
+# 120 s, so an outage then can fail the run sooner. Export only reads, which a
+# hand-over serves except while the new container restores (a few seconds); a
+# failing request gives up within about 45 s. Revocation retries for 15 s, or for
+# 100 s once the board itself says it is handing over: a hand-over pauses writes
+# for a few seconds, and longer when bucket uploads are throttled (75 s was seen;
+# there is no fixed bound). Each request step has a 2 s timeout, but connecting
+# tries every address the host resolves to and DNS has no timeout, so the last
+# attempt can end later. stop()'s limit leaves room for that.
 EXPORT_CLIENT = {"timeout": 5, "max_retries": 5}
 REVOKE_SECONDS = 15
 HANDOVER_SECONDS = 100
@@ -96,7 +99,7 @@ class Resource:
         self.invite_ids = set()
         self.metadata = {}
         self.operator_token = None
-        self.space = self.hf_token = None
+        self.space = self.hf_token = self.deploy_process = None
         self.startup_timeout_seconds = self.options.startup_timeout_seconds or (
             900 if self.options.space_id else 120
         )
@@ -223,8 +226,10 @@ class Resource:
 
     async def _start_space(self):
         loop = asyncio.get_running_loop()
-        # Keep time to provision before Resources stops the startup.
-        ready_by = loop.time() + self.startup_timeout_seconds - 30
+        # Keep time to provision before Resources stops the startup: a quarter of
+        # the limit, at most 30 s.
+        limit = self.startup_timeout_seconds
+        ready_by = loop.time() + limit - min(30, limit / 4)
         # A new operator token on every launch: deploy() makes it the Space's
         # admin credential, so a relaunch needs nothing from earlier runs.
         _, self.operator_token, _ = auth.new_token()
@@ -237,23 +242,8 @@ class Resource:
         )
         with os.fdopen(descriptor, "w") as stream:
             stream.write(self.operator_token + "\n")
-        try:
-            # deploy() puts a bare name in the token's account; Deployment has the full ID.
-            self.space = await call(
-                partial(
-                    deploy,
-                    self.options.space_id,
-                    operator_token=self.operator_token,
-                    private=self.options.private,
-                    hf_token=self.hf_token,
-                )
-            )
-        except Exception as exc:
-            # DeployError, Hub HTTP errors, HFValidationError and network errors alike.
-            raise RuntimeError(
-                f"Could not deploy the board to Space {self.options.space_id}: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        # deploy() puts a bare name in the token's account; Deployment has the full ID.
+        self.space = await self._deploy()
         self.url = self.space.url
         # Recorded now, so a failed startup still names the Space and its bucket.
         self.metadata = {
@@ -283,6 +273,44 @@ class Resource:
                             f"Board Space {self.space.space_id} was not ready within "
                             f"message_board.startup_timeout_seconds ({exc}); see {page}"
                         ) from None
+
+    async def _deploy(self):
+        """deploy() in a worker process, killed when the startup limit runs out or
+        the launch is cancelled, since its Hub calls have no timeout."""
+        request = {
+            "space_id": self.options.space_id,
+            "operator_token": self.operator_token,
+            "private": self.options.private,
+            "hf_token": self.hf_token,
+        }
+        self.deploy_process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(Path(__file__).with_name("message_board_deploy.py")),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        try:
+            output, _ = await self.deploy_process.communicate(
+                json.dumps(request).encode()
+            )
+        finally:
+            if self.deploy_process.returncode is None:
+                with suppress(ProcessLookupError):
+                    self.deploy_process.kill()
+                await self.deploy_process.wait()
+        try:
+            result = json.loads(output.decode().splitlines()[-1])
+        except (IndexError, ValueError):
+            result = {}
+        if "deployment" not in result:
+            # DeployError, Hub HTTP errors, HFValidationError and network errors alike.
+            error = result.get("error") or (
+                f"the deploy process exited with code {self.deploy_process.returncode}"
+            )
+            raise RuntimeError(
+                f"Could not deploy the board to Space {self.options.space_id}: {error}"
+            )
+        return Deployment(**result["deployment"])
 
     def _admin_invite(self, operator_id):
         """A single-use admin invite link for a person, unless a person is already admin."""
@@ -382,6 +410,11 @@ class Resource:
                         ) from exc
 
     async def export(self, directory):
+        if self.options.space_id and not self.client:
+            raise RuntimeError(
+                f"Board Space {self.options.space_id} did not start, so there is "
+                "nothing to export"
+            )
         if not self.client or (self.process and self.process.returncode is not None):
             raise RuntimeError(
                 "Board unavailable; retained any local database in resource state"

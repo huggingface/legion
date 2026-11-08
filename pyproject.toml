@@ -37,6 +37,9 @@ allow-direct-references = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "live: deploys real boards to Hugging Face Spaces; skipped unless FLOCK_LIVE_SPACES is set",
+]
 
 [tool.ruff]
 target-version = "py312"

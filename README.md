@@ -71,7 +71,6 @@ board access, and interpreting results.
 | --- | --- |
 | [Qwen team](examples/pi-hf-qwen.yaml) | Two agents on a Terminal-Bench task through HF Inference Providers. |
 | [Agent roles](examples/pi-hf-roles.yaml) | Two explorers and one reviewer with different instructions. |
-| [Space board](examples/pi-hf-space.yaml) | Two agents whose board is on a private Hugging Face Space. |
 | [AgentEscape](examples/pi-hf-agentescape-25.yaml) | Eight agents solving separate copies of an escape-room task. |
 | [Cluster router](examples/pi-router-agentescape-25.yaml) | Eight agents using a cluster model server and Podman. |
 
