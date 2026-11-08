@@ -8,6 +8,7 @@ import re
 import socket
 import sys
 import tempfile
+import time
 from contextlib import suppress
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,11 @@ HEALTH_CHECK_SECONDS = 5
 # A Space restart answers 503 for about 10 s, and a crashed container keeps the
 # bucket lease for 120 s, so only a longer outage fails the run.
 SPACE_OUTAGE_GRACE_SECONDS = 180
+# Resources.finish gives export 120 s and stop() 30 s. An export request rides out
+# a restart's 503s (about 10 s) and fails within about 45 s; revocation keeps
+# trying for 20 s.
+EXPORT_CLIENT = {"timeout": 5, "max_retries": 5}
+REVOKE_SECONDS = 20
 
 
 class Options(BaseModel):
@@ -128,28 +134,27 @@ class Resource:
             raise ValueError("Board resource requires an operator/admin token")
         await call(self.provision, self.agents)
         invite = await call(self._admin_invite, identity["id"]) if self.space else None
+        if self.space:
+            self.client.close()
+            self.client = Client(
+                self.url, self.operator_token, **EXPORT_CLIENT, **self._gate()
+            )
         dist = importlib.metadata.distribution("msgboard")
-        self.metadata = {
-            "url": self.url,
-            "mode": "space" if self.space else "local",
-            "transport": "http" if self.space else "unix",
-            "channels": self.options.channels,
-            "client_version": dist.version,
-            "client_revision": json.loads(dist.read_text("direct_url.json") or "{}")
-            .get("vcs_info", {})
-            .get("commit_id"),
-        }
+        self.metadata.update(
+            {
+                "url": self.url,
+                "mode": "space" if self.space else "local",
+                "transport": "http" if self.space else "unix",
+                "channels": self.options.channels,
+                "client_version": dist.version,
+                "client_revision": json.loads(dist.read_text("direct_url.json") or "{}")
+                .get("vcs_info", {})
+                .get("commit_id"),
+            }
+        )
         print(f"Board: {self.url}", flush=True)
         if self.space:
-            self.metadata["space"] = {
-                "id": self.space.space_id,
-                "bucket": self.space.bucket_id,
-                "private": self.space.private,
-                "created": self.space.created,
-                "commit": self.space.commit,
-                "msgboard_revision": self.space.msgboard_revision,
-                "admin_invite_created": invite is not None,
-            }
+            self.metadata["space"]["admin_invite_created"] = invite is not None
             if invite:
                 print(
                     "Board admin invite (single use; open it and click "
@@ -248,6 +253,19 @@ class Resource:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         self.url = self.space.url
+        # Recorded now, so a failed startup still names the Space and its bucket.
+        self.metadata = {
+            "url": self.url,
+            "mode": "space",
+            "space": {
+                "id": self.space.space_id,
+                "bucket": self.space.bucket_id,
+                "private": self.space.private,
+                "created": self.space.created,
+                "commit": self.space.commit,
+                "msgboard_revision": self.space.msgboard_revision,
+            },
+        }
         page = f"https://huggingface.co/spaces/{self.space.space_id}"
         print(f"Board Space: {page} (waiting for it to build and start)", flush=True)
         # Short waits, so cancelling the launch doesn't wait out a long one.
@@ -297,13 +315,21 @@ class Resource:
                 channels=sorted(self.channel_ids),
                 max_uses=1,
             )
-            with Client.join(self.url, invite["code"], **self._gate()) as agent:
+            with Client.join(
+                self.url,
+                invite["code"],
+                timeout=self.client.timeout,
+                max_retries=self.client.max_retries,
+                **self._gate(),
+            ) as agent:
                 credential = {"identity": agent.identity, "token": agent.token}
                 self.credentials[name] = credential
                 participants.append(credential)
                 self.secrets.append(agent.token)
                 write_json(self.state_dir / "participants.json", self.credentials)
                 (self.state_dir / "participants.json").chmod(0o600)
+            # A re-key doesn't use up the invite, so it would keep making tokens.
+            self.client.revoke_invite(invite["id"])
         return participants
 
     def bind(self, name):
@@ -401,18 +427,30 @@ class Resource:
         temporary.replace(directory / "board.jsonl")
 
     def _revoke_agent_tokens(self):
-        """The Space outlives the run, so the agents' tokens must not."""
-        pending = list(self.credentials)
-        try:
-            while pending:
-                token = self.credentials[pending[0]]["token"]
-                self.client.revoke_token(auth.parse_token(token)[0])
-                pending.pop(0)
-        except Exception as exc:
+        """The Space outlives the run, so the agents' tokens must not. Every token
+        is tried, and tried again, until REVOKE_SECONDS run out."""
+        deadline = time.monotonic() + REVOKE_SECONDS
+        pending = dict(self.credentials)
+        error = None
+        with Client(
+            self.url, self.operator_token, timeout=5, max_retries=0, **self._gate()
+        ) as client:
+            while pending and time.monotonic() < deadline:
+                for name, credential in list(pending.items()):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        client.revoke_token(auth.parse_token(credential["token"])[0])
+                        del pending[name]
+                    except Exception as exc:
+                        error = exc
+                if pending:
+                    time.sleep(1)
+        if pending:
             raise RuntimeError(
                 f"Board tokens still work for {', '.join(pending)}: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+                f"{type(error).__name__}: {error}"
+            )
 
     async def stop(self):
         if self.process and self.process.returncode is None:
@@ -425,7 +463,7 @@ class Resource:
                     self.process.kill()
                 await self.process.wait()
         try:
-            if self.space and self.client:
+            if self.space and self.credentials:
                 await call(self._revoke_agent_tokens)
         finally:
             if self.client:

@@ -72,6 +72,7 @@ class Resource:
     def __init__(self, options, *, state_dir, agents, secrets):
         self.metadata = {}
     async def start(self):
+        self.metadata["deployed"] = "somewhere"
         await asyncio.sleep(10)
 """
     )
@@ -81,3 +82,4 @@ class Resource:
     with pytest.raises(RuntimeError, match="slow did not start within 0.2 s"):
         await resources.start()
     assert resources.records["slow"]["status"] == "failed"
+    assert resources.records["slow"]["metadata"] == {"deployed": "somewhere"}

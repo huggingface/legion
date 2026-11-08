@@ -3,6 +3,7 @@
 import asyncio
 import json
 import stat
+import threading
 
 import httpx
 import pytest
@@ -81,6 +82,8 @@ async def test_space_board_run_then_relaunch(
         assert len(fake_space.deploys) == 2
         assert fake_space.deploys[1]["operator_token"] != first.operator_token
         assert not second.metadata["space"]["admin_invite_created"]
+        # The re-key didn't use up its invite, so it was revoked.
+        assert all(i["status"] != "active" for i in second.client.invites())
         assert "invite" not in capsys.readouterr().out
         with (
             gated(fake_space.url, first.operator_token) as old,
@@ -161,3 +164,29 @@ async def test_space_outage_fails_the_run_only_after_the_grace_period(
             await asyncio.wait_for(watcher, timeout=10)
     finally:
         await resource.stop()
+
+
+async def test_space_revocation_tries_every_token_and_names_only_failures(
+    fake_space, message_board_provider, message_board_module, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(message_board_module, "REVOKE_SECONDS", 6)
+    resource = message_board_provider(
+        {"space_id": "board"},
+        state_dir=tmp_path / "state",
+        agents=["agent-001", "agent-002"],
+        secrets=[],
+    )
+    await resource.start()
+    tokens = {name: c["token"] for name, c in resource.credentials.items()}
+    resource.credentials["agent-001"]["token"] = "not-a-board-token"  # keeps failing
+    fake_space.stop()  # a restart as the run ends
+    threading.Timer(1, fake_space.start).start()
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RuntimeError, match="Board tokens still work for agent-001: "):
+        await resource.stop()
+    assert asyncio.get_running_loop().time() - started < 12
+    with Client(fake_space.url, tokens["agent-002"]) as agent:
+        with pytest.raises(BoardError, match="401"):
+            agent.me()
+    with Client(fake_space.url, tokens["agent-001"]) as agent:
+        assert agent.me()["external_id"] == "agent-001"

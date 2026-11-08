@@ -73,7 +73,11 @@ class Resources:
                     exc = RuntimeError(
                         f"Resource {name} did not start within {limit:g} s"
                     )
-                record.update(status="failed", error=safe_error(exc, self.secrets))
+                record.update(
+                    status="failed",
+                    error=safe_error(exc, self.secrets),
+                    metadata=provider.metadata,
+                )
                 raise exc
 
     def bind(self, name, config):
@@ -112,23 +116,27 @@ class Resources:
             directory = self.run_dir / "resources" / name
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                async with asyncio.timeout(120):
+                async with asyncio.timeout(120) as deadline:
                     artifacts = await self.providers[name].export(directory)
                 record["artifacts"] = {
                     key: str((directory / path).relative_to(self.run_dir))
                     for key, path in artifacts.items()
                 }
             except Exception as exc:
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    exc = RuntimeError("Export did not finish within 120 s")
                 record["export_error"] = safe_error(exc, self.secrets)
                 failed = True
         for name in reversed(self.attempted):
             record = self.records[name]
             try:
-                async with asyncio.timeout(30):
+                async with asyncio.timeout(30) as deadline:
                     await self.providers[name].stop()
                 if record["status"] == "ready":
                     record["status"] = "stopped"
             except Exception as exc:
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    exc = RuntimeError("Stop did not finish within 30 s")
                 record["cleanup_error"] = safe_error(exc, self.secrets)
                 failed = True
         return failed
