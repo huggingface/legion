@@ -177,6 +177,8 @@ run inside each agent's environment. Follow [resources/message_board.py](../reso
   constructor without starting the service.
 - Implement async `start()`, `wait()`, `export(directory)`, and `stop()`. Set public
   `metadata` after startup and clean up only infrastructure the provider owns.
+  Flock gives `start()` 120 s, `export()` 120 s and `stop()` 30 s; a provider that
+  needs longer sets `startup_timeout_seconds` or `stop_timeout_seconds`.
 - Implement `bind(agent_name)` to supply per-agent `env`, `mounts`, `allowed_hosts`,
   and public `metadata`. Add generated secrets to the supplied redaction list.
 

@@ -12,9 +12,10 @@ REQUIRES = ["message_board"]
 BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
 
 
-# About a minute of retries: enough to outlast a Space board's restart, which
-# answers 503 with Retry-After or drops connections for about 10 s.
-def _client(max_retries=8):
+# At least 98 s of retries: enough to outlast a Space board's hand-over, which
+# answers writes with 503 and Retry-After for a few seconds, or about 75 s when
+# bucket uploads are slow.
+def _client(max_retries=10):
     socket_path = os.environ.get("MSGBOARD_SOCKET")
     transport = httpx.HTTPTransport(uds=socket_path) if socket_path else None
     return Client.from_env(transport=transport, timeout=10, max_retries=max_retries)

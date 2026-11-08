@@ -24,15 +24,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from flock.results import write_json
 
 HEALTH_CHECK_SECONDS = 5
-# A Space restart answers 503 for about 10 s, and a crashed container keeps the
-# bucket lease for 120 s, so only a longer outage fails the run.
-SPACE_OUTAGE_GRACE_SECONDS = 180
-# Resources.finish gives export 120 s and stop() 30 s. An export request rides out
-# a restart's 503s (about 10 s) and fails within about 45 s. Revocation keeps
-# trying for 15 s, with at most 2 s per network step of an attempt, so even an
-# attempt that stalls at the end fits in stop()'s limit.
+# A Space hand-over keeps answering reads, health checks included. After a crash,
+# the new container waits up to 5 minutes for the old one's bucket lease to go
+# stale, then restores and starts, so only a longer outage fails the run.
+SPACE_OUTAGE_GRACE_SECONDS = 420
+# Resources.finish gives export 120 s. Reads pass during a hand-over, except while
+# the new container restores (a few seconds), which an export request rides out;
+# it fails within about 45 s. Revocation keeps trying for 15 s, with at most 2 s
+# per network step of an attempt. A hand-over pauses writes for a few seconds, or
+# about 75 s when bucket uploads are slow, so while the board itself answers 503
+# for one, revocation keeps trying for 100 s. Stop's limit leaves room for that.
 EXPORT_CLIENT = {"timeout": 5, "max_retries": 5}
 REVOKE_SECONDS = 15
+HANDOVER_SECONDS = 100
+HANDOVER_CODES = ("shutting_down", "starting")
 
 
 class Options(BaseModel):
@@ -94,6 +99,9 @@ class Resource:
         self.space = self.hf_token = None
         self.startup_timeout_seconds = self.options.startup_timeout_seconds or (
             900 if self.options.space_id else 120
+        )
+        self.stop_timeout_seconds = (
+            HANDOVER_SECONDS + 20 if self.options.space_id else 30
         )
         if self.options.space_id:
             self.hf_token = get_token()
@@ -443,8 +451,10 @@ class Resource:
 
     def _revoke_agent_tokens(self):
         """The Space outlives the run, so the agents' tokens must not. Every token
-        is tried, and tried again, until REVOKE_SECONDS run out."""
-        deadline = time.monotonic() + REVOKE_SECONDS
+        is tried, and tried again, until REVOKE_SECONDS run out, or HANDOVER_SECONDS
+        once the board says it is handing over."""
+        start = time.monotonic()
+        deadline = start + REVOKE_SECONDS
         pending = dict(self.credentials)
         error = None
         with Client(
@@ -463,6 +473,8 @@ class Resource:
                         # proxy's (a moved Space, a refused HF token) says nothing.
                         if (exc.status, exc.code) != (404, "not_found"):
                             error = exc
+                            if exc.status == 503 and exc.code in HANDOVER_CODES:
+                                deadline = max(deadline, start + HANDOVER_SECONDS)
                             continue
                     except Exception as exc:
                         error = exc

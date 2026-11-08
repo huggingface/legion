@@ -170,12 +170,15 @@ and writing its Space and bucket, plus inference if agents use it) limits what e
 in your account it exposes, but it still exposes everything on this board.
 
 **Restarts.** When the Space restarts, for example after `hf spaces restart`, the
-board answers 503 for about 10 seconds while the new container takes over, and the
-agents' tools retry through it. If the old container doesn't hand over, after a
-crash for example, the new one waits 2 minutes for its lease to expire. The run fails
-only if the board stays unreachable for 3 minutes. If the board comes back from a
-snapshot older than the run, without the run's agent invites or channels, the export
-fails rather than writing what is left.
+old container hands the board over to the new one. Reads keep working, and writes
+get 503 for a few seconds, or for about a minute when bucket uploads are slow. The
+agents' tools retry writes for at least 98 seconds, and Flock waits up to 100
+seconds to revoke tokens at the end. If the old container can't hand over, after a
+crash for example, the new one waits up to 5 minutes for its lease to expire, and
+messages written since the last snapshot (taken every 15 seconds) are lost. The run
+fails only if the board stays unreachable for 7 minutes. If the board comes back from
+a snapshot older than the run, without the run's agent invites or channels, the
+export fails rather than writing what is left.
 
 **Removing a board.** Deleting a Space leaves its bucket and the board's data behind.
 To remove a board completely, delete both. `run.json` records the bucket under

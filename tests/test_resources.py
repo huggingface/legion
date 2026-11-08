@@ -66,16 +66,21 @@ class Resource:
         )
 
 
-async def test_resource_startup_limit_is_the_resources_own(tmp_path):
+async def test_resource_limits_are_the_resources_own(tmp_path):
     (tmp_path / "slow.py").write_text(
         """
 import asyncio
 class Resource:
     startup_timeout_seconds = 0.2
+    stop_timeout_seconds = 0.3
     def __init__(self, options, *, state_dir, agents, secrets):
         self.metadata = {}
     async def start(self):
         self.metadata["deployed"] = "somewhere"
+        await asyncio.sleep(10)
+    async def export(self, directory):
+        return {}
+    async def stop(self):
         await asyncio.sleep(10)
 """
     )
@@ -86,6 +91,10 @@ class Resource:
         await resources.start()
     assert resources.records["slow"]["status"] == "failed"
     assert resources.records["slow"]["metadata"] == {"deployed": "somewhere"}
+    assert await resources.finish() is True
+    assert resources.records["slow"]["cleanup_error"].endswith(
+        "Stop did not finish within 0.3 s"
+    )
 
 
 async def test_finish_keeps_a_storage_error_and_still_stops(tmp_path, monkeypatch):

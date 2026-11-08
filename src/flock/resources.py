@@ -129,14 +129,15 @@ class Resources:
                 failed = True
         for name in reversed(self.attempted):
             record = self.records[name]
+            limit = getattr(self.providers[name], "stop_timeout_seconds", 30)
             try:
-                async with asyncio.timeout(30) as deadline:
+                async with asyncio.timeout(limit) as deadline:
                     await self.providers[name].stop()
                 if record["status"] == "ready":
                     record["status"] = "stopped"
             except Exception as exc:
                 if isinstance(exc, TimeoutError) and deadline.expired():
-                    exc = RuntimeError("Stop did not finish within 30 s")
+                    exc = RuntimeError(f"Stop did not finish within {limit:g} s")
                 record["cleanup_error"] = safe_error(exc, self.secrets)
                 failed = True
         return failed

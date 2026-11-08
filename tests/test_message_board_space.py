@@ -5,16 +5,31 @@ import json
 import shutil
 import stat
 import threading
+from contextlib import contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
+import msgboard.client
 import pytest
 from huggingface_hub.errors import HFValidationError
 from msgboard import auth
 from msgboard.client import BoardError, Client
 from msgboard.space import DeployError
 
+from flock.tools.runner import load_module
+
 HF_TOKEN = "hf_test-launcher-secret"
+HTML = {"Content-Type": "text/html"}
+# What the board answers to writes while it hands its bucket to a new container.
+HANDING_OVER = (
+    503,
+    {"Content-Type": "application/json", "Retry-After": "2"},
+    json.dumps(
+        {"error": {"code": "shutting_down", "message": "server is shutting down"}}
+    ).encode(),
+)
 
 
 class FakeTime:
@@ -30,19 +45,48 @@ class FakeTime:
         self.now += seconds
 
 
-class Html404(BaseHTTPRequestHandler):
-    """A proxy in front of a Space that won't pass requests on (an HTML 404)."""
+@contextmanager
+def gate(board_url, answer):
+    """The Space's gate in front of the board, at the yielded URL. It passes each
+    request on, unless answer(method) returns (status, headers, body) instead."""
 
-    def do_DELETE(self):
-        body = b"<html><body><h1>404</h1></body></html>"
-        self.send_response(404)
-        self.send_header("Content-Type", "text/html")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    class Gate(BaseHTTPRequestHandler):
+        def relay(self):
+            reply = answer(self.command)
+            if reply is None:
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                headers = {
+                    name: value
+                    for name, value in self.headers.items()
+                    if name.lower() not in ("host", "content-length", "connection")
+                }
+                passed = httpx.request(
+                    self.command, board_url + self.path, headers=headers, content=body
+                )
+                reply = (
+                    passed.status_code,
+                    {"Content-Type": passed.headers["content-type"]},
+                    passed.content,
+                )
+            status, headers, body = reply
+            self.send_response(status)
+            for name, value in {**headers, "Content-Length": len(body)}.items():
+                self.send_header(name, str(value))
+            self.end_headers()
+            self.wfile.write(body)
 
-    def log_message(self, *args):
-        pass
+        do_GET = do_POST = do_DELETE = relay
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Gate)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def gated(url, token):
@@ -179,7 +223,9 @@ async def test_space_outage_fails_the_run_only_after_the_grace_period(
 ):
     monkeypatch.setenv("HF_TOKEN", HF_TOKEN)
     clock = FakeTime()
-    answers = ["up", "down", "down", "up"] + ["down"] * 100  # a restart, then gone
+    # A crash that a new container takes over once the old lease is 5 minutes
+    # stale, then gone for good.
+    answers = ["up"] + ["down"] * 65 + ["up"] + ["down"] * 100
     checks = []
 
     class Probe:
@@ -207,11 +253,11 @@ async def test_space_outage_fails_the_run_only_after_the_grace_period(
     resource = message_board_provider(
         {"space_id": "board"}, state_dir=tmp_path / "state", agents=[], secrets=[]
     )
-    with pytest.raises(RuntimeError, match="unreachable for 180 s"):
+    with pytest.raises(RuntimeError, match="unreachable for 420 s"):
         await asyncio.wait_for(resource.wait(), timeout=30)
-    # The 10 s outage passed; the run failed at the first check more than 180 s
-    # after the last good one (at 20 s).
-    assert checks[-1] == 205
+    # The 330 s outage passed; the run failed at the first check more than 420 s
+    # after the last good one (at 335 s).
+    assert checks[-1] == 760
 
 
 async def test_space_revocation_tries_every_token_and_names_only_failures(
@@ -286,12 +332,13 @@ async def test_space_revocation_trusts_only_the_boards_own_404(
     resource.credentials["agent-001"]["token"] = auth.new_token()[1]
     clock = FakeTime()
     monkeypatch.setattr(message_board_module, "time", clock)
-    proxy = None
-    if answer == "proxy":
-        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Html404)
-        threading.Thread(target=proxy.serve_forever, daemon=True).start()
-        resource.url = f"http://127.0.0.1:{proxy.server_address[1]}"
-    try:
+    html_404 = (404, HTML, b"<html><body><h1>404</h1></body></html>")
+    with (
+        gate(fake_space.url, lambda method: html_404)
+        if answer == "proxy"
+        else nullcontext(fake_space.url)
+    ) as url:
+        resource.url = url
         if answer == "board":
             await resource.stop()
             assert clock.now == 0  # nothing left to retry
@@ -308,10 +355,90 @@ async def test_space_revocation_trusts_only_the_boards_own_404(
             assert clock.now == message_board_module.REVOKE_SECONDS
             with Client(fake_space.url, tokens["agent-002"]) as agent:
                 assert agent.me()["external_id"] == "agent-002"
+
+
+@pytest.mark.parametrize("answer", ["hand-over", "paused"])
+async def test_space_revocation_waits_out_a_hand_over_but_not_a_paused_space(
+    fake_space,
+    message_board_provider,
+    message_board_module,
+    tmp_path,
+    monkeypatch,
+    answer,
+):
+    resource = message_board_provider(
+        {"space_id": "board"},
+        state_dir=tmp_path / "state",
+        agents=["agent-001", "agent-002"],
+        secrets=[],
+    )
+    await resource.start()
+    tokens = {name: c["token"] for name, c in resource.credentials.items()}
+    clock = FakeTime()
+    monkeypatch.setattr(message_board_module, "time", clock)
+    # Writes are refused for 75 s: a hand-over while bucket uploads are slow, or
+    # the gate's own 503 for a paused Space.
+    refusal = HANDING_OVER if answer == "hand-over" else (503, HTML, b"paused")
+    with gate(
+        fake_space.url, lambda method: refusal if clock.now < 75 else None
+    ) as url:
+        resource.url = url
+        if answer == "hand-over":
+            await resource.stop()
+            assert clock.now == 75
+        else:
+            with pytest.raises(
+                RuntimeError,
+                match="agent-001, agent-002, which may still work: BoardError: 503 "
+                "http_error",
+            ):
+                await resource.stop()
+            assert clock.now == message_board_module.REVOKE_SECONDS
+    for name, token in tokens.items():
+        with Client(fake_space.url, token) as agent:
+            if answer == "hand-over":
+                with pytest.raises(BoardError, match="401"):
+                    agent.me()
+            else:
+                assert agent.me()["external_id"] == name
+
+
+async def test_agent_post_outlasts_a_slow_hand_over(
+    fake_space, message_board_provider, tmp_path, monkeypatch
+):
+    board_tools = load_module(
+        Path(__file__).resolve().parents[1] / "tools/message_board.py"
+    )
+    resource = message_board_provider(
+        {"space_id": "board", "private": True},
+        state_dir=tmp_path / "state",
+        agents=["agent-001"],
+        secrets=[],
+    )
+    await resource.start()
+    try:
+        for name, value in resource.bind("agent-001")["env"].items():
+            monkeypatch.setenv(name, value)
+        clock = FakeTime()
+        monkeypatch.setattr(msgboard.client, "time", clock)
+        # The shortest backoff the client's jitter allows.
+        monkeypatch.setattr(
+            msgboard.client, "random", SimpleNamespace(random=lambda: 0.0)
+        )
+        with gate(
+            fake_space.url,
+            lambda method: (
+                HANDING_OVER if method == "POST" and clock.now < 75 else None
+            ),
+        ) as url:
+            monkeypatch.setenv("MSGBOARD_URL", url)
+            board_tools.post("found it")
+        assert clock.now > 75
+        general = resource.client.channel_id("general")
+        messages = resource.client.read(general)["messages"]
+        assert [message["body"] for message in messages] == ["found it"]
     finally:
-        if proxy:
-            proxy.shutdown()
-            proxy.server_close()
+        await resource.stop()
 
 
 async def test_space_export_fails_after_a_rollback_to_before_the_relaunch(
