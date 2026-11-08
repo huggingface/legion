@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from huggingface_hub import get_token
 from huggingface_hub.utils import validate_repo_id
 from msgboard import auth
-from msgboard.client import Client
+from msgboard.client import BoardError, Client
 from msgboard.space import deploy, resolve_space_id
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -441,15 +441,20 @@ class Resource:
                         break
                     try:
                         client.revoke_token(auth.parse_token(credential["token"])[0])
-                        del pending[name]
+                    except BoardError as exc:
+                        if exc.status != 404:  # 404: the board has no such token
+                            error = exc
+                            continue
                     except Exception as exc:
                         error = exc
+                        continue
+                    del pending[name]
                 if pending:
                     time.sleep(1)
         if pending:
             raise RuntimeError(
-                f"Board tokens still work for {', '.join(pending)}: "
-                f"{type(error).__name__}: {error}"
+                f"Could not revoke the board tokens of {', '.join(pending)}, which "
+                f"may still work: {type(error).__name__}: {error}"
             )
 
     async def stop(self):

@@ -131,8 +131,8 @@ Startup doesn't count against `limits.run_timeout_seconds`. The launcher prints:
   until you have used it. No link is printed if the board already has an admin person.
 
 After the run, the Space keeps running and Flock revokes the agents' board tokens.
-If that fails, for example because the board is unreachable at the end, the tokens
-keep working and `run.json` names those agents in a `cleanup_error`. The run's
+If that fails, for example because the board is unreachable at the end, those tokens
+may keep working, and `run.json` names their agents in a `cleanup_error`. The run's
 `state/resources/message_board/operator.token` stays a working admin token for the
 board until the next launch with the same `space_id` replaces it.
 

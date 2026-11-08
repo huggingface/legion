@@ -182,7 +182,7 @@ async def test_space_revocation_tries_every_token_and_names_only_failures(
     fake_space.stop()  # a restart as the run ends
     threading.Timer(1, fake_space.start).start()
     started = asyncio.get_running_loop().time()
-    with pytest.raises(RuntimeError, match="Board tokens still work for agent-001: "):
+    with pytest.raises(RuntimeError, match="board tokens of agent-001, which may"):
         await resource.stop()
     assert asyncio.get_running_loop().time() - started < 12
     with Client(fake_space.url, tokens["agent-002"]) as agent:
