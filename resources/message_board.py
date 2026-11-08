@@ -263,7 +263,6 @@ class Resource:
                 "private": self.space.private,
                 "created": self.space.created,
                 "commit": self.space.commit,
-                "msgboard_revision": self.space.msgboard_revision,
             },
         }
         page = f"https://huggingface.co/spaces/{self.space.space_id}"

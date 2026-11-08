@@ -628,7 +628,6 @@ async def test_space_board_starts_off_the_run_clock_and_outlives_the_run(
     assert metadata["mode"] == "space" and metadata["url"] == fake_space.url
     assert metadata["space"]["id"] == "user/board"
     assert metadata["space"]["bucket"] == "user/board-bucket"
-    assert metadata["space"]["msgboard_revision"] == "r" * 40
     state = directory / "state/resources/message_board"
     operator_token = (state / "operator.token").read_text().strip()
     assert operator_token not in (directory / "run.json").read_text()

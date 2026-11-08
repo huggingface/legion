@@ -63,7 +63,6 @@ class FakeSpace:
             created=len(self.deploys) == 1,
             private=bool(private),
             commit="c" * 40,
-            msgboard_revision="r" * 40,
         )
 
     def start(self):

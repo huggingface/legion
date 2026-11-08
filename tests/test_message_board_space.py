@@ -49,7 +49,7 @@ async def test_space_board_run_then_relaunch(
         space = first.metadata["space"]
         assert first.metadata["mode"] == "space"
         assert space["id"] == "user/board" and space["bucket"] == "user/board-bucket"
-        assert space["admin_invite_created"] and space["msgboard_revision"] == "r" * 40
+        assert space["admin_invite_created"]
         output = capsys.readouterr().out
         invite = output.split('"Join with Hugging Face"): ', 1)[1].split()[0]
         assert invite.startswith(fake_space.url + "/?invite=")
