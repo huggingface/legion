@@ -159,7 +159,8 @@ agents' tools retry through it. The run fails only if the board stays unreachabl
 for 3 minutes.
 
 **Removing a board.** Deleting a Space leaves its bucket and the board's data behind.
-To remove a board completely, delete both:
+To remove a board completely, delete both. `run.json` records the bucket under
+`resources.message_board.metadata.space.bucket`.
 
 ```sh
 hf repos delete your-name/escape-room-1 --repo-type space
