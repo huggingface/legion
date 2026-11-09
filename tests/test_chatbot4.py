@@ -3130,3 +3130,27 @@ def test_world_status_queue_refusals_shared_tests_and_counts(setup, monkeypatch)
             out["changes_requested"]) == (5, 1, 1, 1)
     assert {"opens_last_hour", "new_pr_limit"} <= set(out)
     assert "world_status" in {t["name"] for t in world.manifest()["tools"]}
+
+
+def test_agent_checkouts_are_capped_and_the_merger_takes_no_slot(setup, monkeypatch):
+    world, clone, remote = setup
+    rec = submit(world, clone)
+    approve(world, rec)
+    monkeypatch.setattr(chatbot4, "CHECKOUT_WAIT_S", 0.1)
+    held = 0
+    while world.checkouts.acquire(blocking=False):  # every checkout slot is taken by agents
+        held += 1
+    assert held == 8  # the default (CHATBOT_CHECKOUT_SLOTS)
+    try:
+        for call in (lambda: world.run_bot("main", ["hi"]),
+                     lambda: submit(world, clone, author="pine", branch="other")):
+            with pytest.raises(ToolError, match="busy checking out") as exc:
+                call()
+            assert exc.value.code == "busy"
+        result = merge(world, Agent("cedar"), rec["pr"])  # the merger does not wait for them
+        assert git(remote, "rev-parse", "main") == result["merged_sha"]
+    finally:
+        for _ in range(held):
+            world.checkouts.release()
+    assert world.run_bot("main", ["hi"])["ok"]  # slots released after a call
+    assert world.run_bot("main", ["hi"])["ok"]

@@ -54,6 +54,7 @@ NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 CALL_BUDGET = float(os.environ.get("CHATBOT_CALL_BUDGET_S", "50"))
 PUSH_RETRY_DELAYS = (2, 5)
 PUSH_ESTIMATE_S = 8.0  # time kept free for one more push attempt
+CHECKOUT_WAIT_S = 10.0  # an agent's tool waits this long for a checkout slot, then gets "busy"
 BUSY = "the Hub is busy; retry in about a minute"
 INBOX_MAX = 20  # unread inbox entries kept per agent (oldest dropped)
 INBOX_SNIPPET = 160  # review comment characters quoted in an inbox entry
@@ -245,6 +246,9 @@ class Chatbot4World(World):
         self.seed_dir = HERE / os.environ.get("CHATBOT_SEED_DIR", "seed")
         self.fixed = {name: (self.seed_dir / name).read_bytes() for name in FIXED}
         self.slots = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_RUN_SLOTS", "26")))
+        # Full-tree checkouts (+ build) by agents' tools; the merger takes none, so it never waits
+        # behind them. Uncapped, ~70 at once saturated the CPUs (a 1 s checkout took 100 s).
+        self.checkouts = threading.BoundedSemaphore(int(os.environ.get("CHATBOT_CHECKOUT_SLOTS", "8")))
         # (main sha, the shared tests pass on it; None: they timed out there), see _shared_tests
         self.main_tests = (None, False)
         # PR number -> (head, main, code, message) of its last merge refused by the checks of
@@ -1258,7 +1262,7 @@ class Chatbot4World(World):
 
     def _build(self, agent, snapshot, base, title, main):
         """Commit the upload on base, replayed onto main (outside the world lock)."""
-        with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
+        with self._checkout_slot(), tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             self.repo.checkout(base, tree)
             self._files(snapshot, tree)
@@ -2155,24 +2159,34 @@ class Chatbot4World(World):
         with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             snapshot = UPLOAD.get()
-            if ref_or_path == "main" or ref_or_path.startswith("pr:"):
-                self.repo.refresh(FETCH_TTL)
-                sha = self.repo.sha(ref_or_path)
-                self.repo.checkout(sha, tree)
-            elif isinstance(snapshot, dict):
-                sha = snapshot.get("base_sha")
-                if isinstance(sha, str) and self.repo.ancestor(sha, "main"):
-                    self.repo.checkout(sha, tree)  # then only changed files are written/compiled
-                    self._contract(tree, self._files(snapshot, tree))
-                elif "patch" in snapshot:
-                    raise ToolError("unknown base; send the full tree", "need_full")
+            with self._checkout_slot():  # released before the run, which has its own slots
+                if ref_or_path == "main" or ref_or_path.startswith("pr:"):
+                    self.repo.refresh(FETCH_TTL)
+                    sha = self.repo.sha(ref_or_path)
+                    self.repo.checkout(sha, tree)
+                elif isinstance(snapshot, dict):
+                    sha = snapshot.get("base_sha")
+                    if isinstance(sha, str) and self.repo.ancestor(sha, "main"):
+                        self.repo.checkout(sha, tree)  # then only changed files are written/compiled
+                        self._contract(tree, self._files(snapshot, tree))
+                    elif "patch" in snapshot:
+                        raise ToolError("unknown base; send the full tree", "need_full")
+                    else:
+                        tree.mkdir()
+                        self._files(snapshot, tree)
+                        self._contract(tree)
                 else:
-                    tree.mkdir()
-                    self._files(snapshot, tree)
-                    self._contract(tree)
-            else:
-                raise ToolError("use main, pr:<number>, or a clone path inside your workspace")
+                    raise ToolError("use main, pr:<number>, or a clone path inside your workspace")
             return {"ref": ref_or_path, "sha": sha, **self._run(tree, lines)}
+
+    @contextlib.contextmanager
+    def _checkout_slot(self):
+        if not self.checkouts.acquire(timeout=CHECKOUT_WAIT_S):
+            raise ToolError("the world is busy checking out trees; retry in a minute", "busy")
+        try:
+            yield
+        finally:
+            self.checkouts.release()
 
     def _run(self, tree, lines):
         if not self.slots.acquire(timeout=10):
