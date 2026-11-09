@@ -181,8 +181,7 @@ class Chatbot4World(World):
         # Lock order: Hub write lane slot, then main_lock, then self.lock (the state lock).
         self.lock = threading.RLock()
         # The compare-and-swap on main: held by merges across the Hub merge and the fetch that
-        # moves local main, and by the "did main move" check before a Hub PR is created. The
-        # state lock is taken only around record reads and updates, never across a Hub call.
+        # moves local main. The state lock is taken only around record reads and updates, never across a Hub call.
         self.main_lock = threading.Lock()
         self.ancestry = {}  # (head, main sha) -> head is in main; read and written under self.lock
         self.db = self.ws / "prs.json"
@@ -823,8 +822,7 @@ class Chatbot4World(World):
                     if kind := self._outcome(exc):
                         slot.fail(kind)
                     raise
-                if not getattr(slot, "idle", False):  # a slot that wrote nothing reports nothing
-                    slot.ok()
+                slot.ok()
         except LaneBusy as busy:
             self._busy(agent, what, pr, reason=busy.reason, retry_after_s=busy.retry_after_s)
 
@@ -1279,6 +1277,8 @@ class Chatbot4World(World):
         for _attempt in range(3):
             main = self.repo.sha()
             sha = self._build(agent, snapshot, base, title, main)
+            if pr is None and self.repo.sha() != main:  # nothing on the Hub yet: rebuild on a moved main
+                continue
             if deadline is None:
                 deadline = min(time.monotonic() + self.hub_wait,
                                started + CALL_BUDGET - 2 * PUSH_ESTIMATE_S)
@@ -1288,11 +1288,9 @@ class Chatbot4World(World):
             else:
                 with self._hub_write(agent, "open_pr", pr, deadline) as slot:
                     if pr is None:
+                        # A main that moves during this wait is kept, not rebuilt (that burned the
+                        # reserved slot): the base is seconds old and merge_pr replays a stale base.
                         self._create_gap(agent, deadline)
-                        with self.main_lock:  # nothing exists on the Hub yet: redo on a moved main
-                            if self.repo.sha() != main:
-                                slot.idle = True
-                                continue
                         pr = self.repo.hub.open(title, f"Agent: {agent.name}\nBase: {main}\n\n{description}")
                         with self.lock:  # the reservation becomes a counted open
                             self.open_reserved.discard(token)

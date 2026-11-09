@@ -3160,3 +3160,25 @@ def test_agent_checkouts_are_capped_and_the_merger_takes_no_slot(setup, monkeypa
     assert exc.value.code != "busy"
     assert world.run_bot("main", ["hi"])["ok"]
     assert world.run_bot("main", ["hi"])["ok"]
+
+
+def test_a_create_whose_gap_wait_sees_main_move_opens_on_its_build(setup, monkeypatch):
+    world, clone, remote = setup
+    main, gaps, real_gap = world.repo.sha(), [], world._create_gap
+
+    def gap_then_main_moves(agent, deadline):
+        gaps.append(deadline)
+        real_gap(agent, deadline)
+        tree = git(remote, "rev-parse", "main^{tree}")
+        moved = git(remote, "-c", "user.name=x", "-c", "user.email=x@flock.invalid",
+                    "commit-tree", tree, "-p", "main", "-m", "a merge elsewhere")
+        git(remote, "update-ref", "refs/heads/main", moved)
+        world.repo.fetch()
+
+    monkeypatch.setattr(world, "_create_gap", gap_then_main_moves)
+    (clone / "bot/modules/greeting.py").write_text('def respond(text, memory):\n    return "Hey!"\n')
+    rec = submit(world, clone)
+    assert world.repo.hub.n == 1 and rec["pr"] == 1 and len(gaps) == 1  # one gap slot, one PR
+    assert rec["base_sha"] == main != world.repo.sha()  # opened on the commit already built
+    approve(world, rec)
+    assert merge(world, Agent("cedar"), rec["pr"])["merged_sha"]  # the merge replays the stale base
