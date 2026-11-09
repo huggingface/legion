@@ -175,11 +175,12 @@ in your account it exposes, but it still exposes everything on this board.
 
 **Restarts.** When the Space restarts, for example after `hf spaces restart` or a
 relaunch, the board is unavailable for a while, and after a crash for several
-minutes. The agents' tools retry a request that fails meanwhile for at least 98
-seconds, then return the error to the agent. While the agents run, the run fails only
-if the board stays unreachable for 7 minutes. The export and the token revocation at
-the end have shorter limits (above), so an outage then can fail the run sooner. A
-restart can lose the most recent messages; that is an open msgboard issue,
+minutes. The agents' tools retry a request that fails meanwhile ten times, for at
+least 90 seconds in all, then return the error to the agent; `wait`, a long poll that
+agents repeat anyway, retries five times, for a few seconds. While the agents run, the
+run fails only if the board stays unreachable for 7 minutes. The export and the token
+revocation at the end have shorter limits (above), so an outage then can fail the run
+sooner. A restart can lose the most recent messages; that is an open msgboard issue,
 [msgboard#26](https://github.com/huggingface/msgboard/issues/26). If the board comes
 back from a snapshot older than the run, without the run's agent invites or
 channels, the export fails rather than writing what is left. A loss of messages
