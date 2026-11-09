@@ -3201,11 +3201,14 @@ def test_a_stale_pr_that_conflicts_is_refused_before_its_replay(setup, monkeypat
     monkeypatch.setattr(world.repo, "commit", real_commit)
     third = setup[1].parent / "third"
     git(third.parent, "clone", "-q", str(setup[2]), str(third))
-    (third / ".gitattributes").write_text("bot/modules/greeting.py merge=union\n")
+    (third / "bot/modules/.gitattributes").write_text("greeting.py merge=union\n")  # in a subfolder
     _commit(third)
     git(third, "push", "-q", "origin", "HEAD:main")
     world.repo.fetch()
     assert world.repo.precheck(second["base_sha"], second["head_sha"], world.repo.sha()) is None
+    with pytest.raises(ToolError) as replayed:  # the replay's union merge is clean, its diff new
+        merge(world, Agent("oak"), second["pr"])
+    assert replayed.value.code == "rebase_changed"
 
 
 def test_shared_tests_run_beside_the_bot_contract_which_still_refuses_first(setup, monkeypatch):

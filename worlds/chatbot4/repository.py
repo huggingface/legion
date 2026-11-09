@@ -333,15 +333,19 @@ class Repository:
         """Raise commit(union=True)'s stale_base error when replaying base..head onto `onto`
         conflicts, found by git merge-tree in the bare repository (no checkout, well under a
         second). Silent when it cannot tell the same answer: another merge base, a
-        .gitattributes in either tree (the replay's checkout would honour it), or a git older
-        than 2.38 (no --write-tree)."""
-        if (self.git("merge-base", "--all", onto, head) != base
-                or any(self.git("ls-tree", "--name-only", sha, ".gitattributes") for sha in (onto, head))):
+        .gitattributes anywhere in either tree (the replay's checkout would honour it), a git
+        older than 2.38 (no --write-tree), or any git error or timeout."""
+        try:
+            if (self.git("merge-base", "--all", onto, head) != base
+                    or any(name.rsplit("/", 1)[-1] == ".gitattributes" for sha in (onto, head)
+                           for name in self.git("ls-tree", "-r", "--name-only", sha).splitlines())):
+                return
+            attributes = ("-c", f"core.attributesFile={self.attributes}") if self.attributes else ()
+            out = subprocess.run(["git", "-C", str(self.root), *attributes, "merge-tree", "--write-tree",
+                                  "--name-only", "-z", "--no-messages", onto, head],
+                                 env=self.env, capture_output=True, timeout=60, check=False)
+        except (ToolError, subprocess.TimeoutExpired):
             return
-        attributes = ("-c", f"core.attributesFile={self.attributes}") if self.attributes else ()
-        out = subprocess.run(["git", "-C", str(self.root), *attributes, "merge-tree", "--write-tree",
-                              "--name-only", "-z", "--no-messages", onto, head],
-                             env=self.env, capture_output=True, timeout=60, check=False)
         if out.returncode == 1:  # 1: conflicts (tree, then the conflicted paths); 0: clean
             raise _stale_base(base, onto, out.stdout.decode(errors="replace").split("\0")[1:])
 
