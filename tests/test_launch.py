@@ -598,48 +598,6 @@ async def test_board_tools_require_configured_resource(prepared):
         await launch.run_experiment(prepared)
 
 
-async def test_external_board_integration_leaves_server_alive(
-    prepared, tmp_path, monkeypatch, message_board_provider
-):
-    server = message_board_provider(
-        {}, state_dir=tmp_path / "server", agents=[], secrets=[]
-    )
-    try:
-        await server.start()
-        monkeypatch.setenv("BOARD_ADMIN", server.operator_token)
-        prepared.resources = {
-            "message_board": {
-                "url": server.url,
-                "token_env": "BOARD_ADMIN",
-                "channels": ["general", "findings"],
-            }
-        }
-
-        async def factory(config):
-            assert "MSGBOARD_SOCKET" not in config.agent.env
-            assert not config.environment.mounts
-            assert server.operator_token not in config.agent.env.values()
-            return FakeTrial(config, [])
-
-        monkeypatch.setattr(launch.Trial, "create", factory)
-
-        directory, code = await launch.run_experiment(prepared)
-        data = json.loads((directory / "run.json").read_text())
-        assert code == 0
-        assert data["resources"]["message_board"]["metadata"]["mode"] == "external"
-        assert server.operator_token not in (directory / "run.json").read_text()
-        assert server.process.returncode is None
-        assert server.client.me()["role"] == "admin"
-        assert not (directory / "state/resources/message_board/data").exists()
-        assert not (directory / "state/resources/message_board/board.log").exists()
-        assert set(c["name"] for c in server.client.list_channels()) == {
-            "general",
-            "findings",
-        }
-    finally:
-        await server.stop()
-
-
 @pytest.mark.parametrize("backend,delete", [("docker", True), ("podman", False)])
 def test_podman_retains_images_shared_by_trials(prepared, tmp_path, backend, delete):
     prepared.environment.backend = backend

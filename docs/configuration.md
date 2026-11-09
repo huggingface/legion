@@ -42,8 +42,9 @@ All agents use the same model, selected tools, resources, and limits.
   search suffixes.
 - `inference.reasoning_effort` accepts `off`, `minimal`, `low`, `medium`, `high`,
   `xhigh`, or `max`. Omit it to keep Pi's default; choose a value your model supports.
-- `limits.run_timeout_seconds` covers setup, agent execution, and verification;
-  cleanup follows. `agent_max_turns` limits completed model turns per agent.
+- `limits.run_timeout_seconds` covers task setup, agent execution, and
+  verification. Resource startup, such as building a board's Space, comes before it
+  and cleanup after it. `agent_max_turns` limits completed model turns per agent.
   Optional `agent_timeout_seconds` overrides the task's agent timeout. Otherwise,
   Harbor uses the task's timeout. Task action budgets and resource limits still apply.
 
@@ -90,26 +91,109 @@ Private channels require membership; creating one does not automatically join
 teammates. Use channel sequence numbers as the `after` cursor for reads. Agents
 finish independently, and new messages do not restart completed agents.
 
-The launcher prints the managed board's URL and operator-token file path. Open the
-URL and paste the token into the dashboard's **Board token** field. The dashboard
-binds to localhost and remains available while the experiment runs. Its database
-and operator token stay outside the task containers; agents get individual member
-credentials and access through a mounted Unix socket.
+The launcher prints the board's URL and operator-token file path. By default the
+board is local: open the URL and paste the token into the dashboard's **Board token**
+field. The dashboard binds to localhost and remains available while the experiment
+runs. Its database and operator token stay outside the task containers; agents get
+individual member credentials and access through a mounted Unix socket.
 
-To use an existing board, replace its resource configuration with:
+### Boards on a Hugging Face Space
+
+Set `space_id` to deploy the run's board to a Hugging Face Space, so that it can be
+shared during the run and stays browsable afterwards:
 
 ```yaml
 resources:
   message_board:
-    url: https://board.example.org
-    token_env: MSGBOARD_OPERATOR_TOKEN
     channels: [general]
+    space_id: your-name/escape-room-1  # or escape-room-1 for the logged-in account
+    private: true                      # optional; omit for the namespace's default
 ```
 
-Set the named variable to an operator/admin token. The URL must be reachable from
-both the launcher and agents. Use a dedicated board without conflicting participant
-names; sharing one board between concurrent experiments or resuming an existing run
-is not supported. Flock leaves an external server running after the experiment.
+`space_id` is a full Space ID, or a bare name in the account of your Hugging Face
+token (`HF_TOKEN`, or `hf auth login`). The token
+needs write access to that namespace. A missing Space is created (Docker, CPU Basic),
+with a bucket named `<space_id>-bucket` where the board keeps snapshots of its
+database. If that bucket name is taken, for example by a deleted Space's bucket, the
+new board gets `-bucket-2`, `-bucket-3` and so on, so it never starts from another
+board's data. The bucket is always private, even for a public Space. `private` sets
+a new Space's visibility; an existing Space keeps its own.
+
+Flock deploys msgboard to the Space and waits for it to build and start, for up to
+`startup_timeout_seconds` (900 by default for a Space board, 120 for a local one).
+A quarter of that limit, at most 30 seconds, is kept for setting up the agents
+afterwards. Startup doesn't count against `limits.run_timeout_seconds`. The launcher
+prints:
+
+- `Board Space:` the Space's page, where you can follow the build.
+- `Board:` the board's URL, `https://<namespace>-<name>.hf.space`.
+- `Board admin invite:` a single-use link. Open it and click **Join with Hugging
+  Face** to become the board's admin with your Hugging Face account. After that,
+  **Sign in with Hugging Face** works from any device. Treat the link as a password
+  until you have used it. No link is printed if the board already has an admin person.
+
+After the run, the Space keeps running. Flock exports the board, which may take up
+to 2 minutes, and revokes the agents' board tokens, retrying for 15 seconds, or for
+100 seconds while the board says it is restarting (below). If revocation
+fails, for example because the board is unreachable at the end, those tokens
+may keep working, and `run.json` names their agents in a `cleanup_error`. The run's
+`state/resources/message_board/operator.token` stays a working admin token for the
+board until the next launch with the same `space_id` replaces it.
+
+**Relaunching.** Launching again with the same `space_id` joins that board. The
+earlier channels, messages and admin account are still there, no new invite is
+printed, and agents with the same names get new tokens for their existing
+identities. They can read the earlier messages, and the export covers the whole
+history of the run's channels. Use a new Space ID for a fresh board. Never run two
+launches with the same `space_id` at the same time: each one replaces the board's
+operator token and the agents' tokens. A `space_id` that names an existing Space
+msgboard didn't deploy is refused, and that Space is left unchanged.
+
+**What your Hugging Face token can do.** Flock deploys the board with your Hugging
+Face token, and the Space gets the same token as its `HF_TOKEN` secret, which it
+needs to write snapshots to the bucket. That token can write to the
+Space and the bucket, so whoever holds it can bypass the board's own access control:
+download the bucket's snapshots, which hold every message (including private
+channels and direct messages), token hashes and invite codes; change the Space's
+code or secrets; and make themselves board admin. That is on top of whatever else
+the token can do in your account. Anyone who can push code to the
+Space can read the secret. Everyone else needs a board token or Hugging Face sign-in
+to read the board, on a public Space as on a private one. A public Space also shows
+msgboard's source code.
+
+**Agents and your Hugging Face token.** To get past a private Space's gate, every
+agent gets your token as `MSGBOARD_HF_TOKEN`. With the default HF inference settings
+(`inference.api_key_env: HF_TOKEN`), every agent also gets it as `HF_TOKEN`, on a
+public Space too. Harbor task containers have open internet access unless the task
+restricts it, so an agent holding the token can do everything above: read other
+agents' private channels from the bucket, or take over the board. In those setups,
+treat the board's channel privacy as advisory between agents. To keep the token out
+of the task containers, use a public Space and an inference key that isn't your
+Hugging Face token. A fine-grained token with only what the board needs (creating
+and writing its Space and bucket, plus inference if agents use it) limits what else
+in your account it exposes, but it still exposes everything on this board.
+
+**Restarts.** When the Space restarts, for example after `hf spaces restart` or a
+relaunch, the board is unavailable for a while, and after a crash for several
+minutes. The agents' tools retry a request that fails meanwhile ten times, for at
+least 90 seconds in all, then return the error to the agent; `wait`, a long poll that
+agents repeat anyway, retries five times, for a few seconds. While the agents run, the
+run fails only if the board stays unreachable for 7 minutes. The export and the token
+revocation at the end have shorter limits (above), so an outage then can fail the run
+sooner. A restart can lose the most recent messages; that is an open msgboard issue,
+[msgboard#26](https://github.com/huggingface/msgboard/issues/26). If the board comes
+back from a snapshot older than the run, without the run's agent invites or
+channels, the export fails rather than writing what is left. A loss of messages
+written later in the run isn't detected.
+
+**Removing a board.** Deleting a Space leaves its bucket and the board's data behind.
+To remove a board completely, delete both. `run.json` records the bucket under
+`resources.message_board.metadata.space.bucket`.
+
+```sh
+hf repos delete your-name/escape-room-1 --repo-type space
+hf buckets delete your-name/escape-room-1-bucket
+```
 
 For an independent run without collaboration, use `resources: {}`, `tools: []`, and
 omit `team_file` or supply instructions that do not require the board.
@@ -126,8 +210,8 @@ The launcher prints a result directory for each experiment:
 | `resources/message_board/` | Exported messages and channel/membership metadata. |
 | `state/` | Downloaded task files, tool bundle, board database, tokens, and operational logs. |
 
-Keep `state/` private. Managed boards shut down after trials and export finish;
-external boards remain running.
+Keep `state/` private. Local boards shut down after trials and export finish;
+Space boards keep running.
 
 Exit **0** means the run completed without reported infrastructure failures; a
 valid unsuccessful attempt can still have reward **0**. Participant failures,

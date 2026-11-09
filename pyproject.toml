@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
   "harbor==0.25.0",
   "podman-compose==1.5.0",
-  "msgboard @ git+https://github.com/huggingface/msgboard.git@5234ffd70b388ba9b64daa1dc8275a03230814f9",
+  "msgboard[hf] @ git+https://github.com/huggingface/msgboard.git@563911d586e3435f2aadb25d7a8f565cce828406",
   "pydantic>=2.12",
   "PyYAML>=6.0.2",
   "exceptiongroup>=1.3", # board bundle also supports Python 3.10 task images
@@ -37,6 +37,9 @@ allow-direct-references = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "live: deploys a real board to a Hugging Face Space; skipped unless FLOCK_LIVE_SPACES is set",
+]
 
 [tool.ruff]
 target-version = "py312"
