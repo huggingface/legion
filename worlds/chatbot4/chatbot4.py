@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import base64
 import collections
+import concurrent.futures
 import contextlib
 import contextvars
 import functools
@@ -1754,6 +1755,7 @@ class Chatbot4World(World):
             if base != main:
                 try:
                     with _timed(steps, "replay"):
+                        self.repo.precheck(base, head, main)  # a conflict costs no replay
                         self.repo.git("reset", "-q", "--soft", base, at=tree)  # the PR's change, staged on its base
                         # Union paths only here: a replay whose diff changed is refused below.
                         new = self.repo.commit(tree, base, rec["author"], rec["title"], onto=main,
@@ -1773,10 +1775,14 @@ class Chatbot4World(World):
                     raise ToolError(f"rebasing PR #{pr} onto main {main[:12]} changes its diff, so it "
                                     "needs a fresh review: rebase onto origin/main, update the PR and "
                                     "ask for a review", "rebase_changed") from None
-            with _timed(steps, "contract"):
-                self._bot_contract(tree, self.repo.changed(main, new))
-            with _timed(steps, "shared_tests"):
-                self._shared_tests(pr, tree, main)
+            # The shared tests run beside the bot contract (both read the tree only); leaving the
+            # pool waits for them, so the tree outlives them and a contract refusal still comes first.
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                tests = pool.submit(self._shared_tests, pr, tree, main)
+                with _timed(steps, "contract"):
+                    self._bot_contract(tree, self.repo.changed(main, new))
+                with _timed(steps, "shared_tests"):  # the wait left after the contract
+                    tests.result()
         return new
 
     def _bot_contract(self, tree, names):

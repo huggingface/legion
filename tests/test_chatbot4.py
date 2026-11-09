@@ -3182,3 +3182,50 @@ def test_a_create_whose_gap_wait_sees_main_move_opens_on_its_build(setup, monkey
     assert rec["base_sha"] == main != world.repo.sha()  # opened on the commit already built
     approve(world, rec)
     assert merge(world, Agent("cedar"), rec["pr"])["merged_sha"]  # the merge replays the stale base
+
+
+def test_a_stale_pr_that_conflicts_is_refused_before_its_replay(setup, monkeypatch):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "greeting", "Hey!"),
+                                    lambda c: _module(c, "greeting", "Hi!"))
+
+    def no_replay(*args, **kwargs):
+        raise AssertionError("the merge-tree pre-check should have refused it")
+
+    real_commit = world.repo.commit
+    monkeypatch.setattr(world.repo, "commit", no_replay)
+    with pytest.raises(ToolError, match=r"conflicts with main \w+ in bot/modules/greeting.py:") as err:
+        merge(world, Agent("oak"), second["pr"])
+    assert err.value.code == "conflict"
+    # A .gitattributes in the tree (the replay's checkout honours it, merge-tree here does
+    # not): the pre-check stays silent and the replay decides.
+    monkeypatch.setattr(world.repo, "commit", real_commit)
+    third = setup[1].parent / "third"
+    git(third.parent, "clone", "-q", str(setup[2]), str(third))
+    (third / ".gitattributes").write_text("bot/modules/greeting.py merge=union\n")
+    _commit(third)
+    git(third, "push", "-q", "origin", "HEAD:main")
+    world.repo.fetch()
+    assert world.repo.precheck(second["base_sha"], second["head_sha"], world.repo.sha()) is None
+
+
+def test_shared_tests_run_beside_the_bot_contract_which_still_refuses_first(setup, monkeypatch):
+    world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
+                                    lambda c: _module(c, "time", None))
+    monkeypatch.setattr(chatbot4, "MERGE_TESTS", "test_*.py")
+    tests_started, trees = threading.Event(), []
+
+    def fake_tests(tree, pattern, timeout):
+        trees.append(tree)
+        tests_started.set()
+        return {"ok": False, "status": "exit 1", "output": "FAIL: test_x (t.T)"}
+
+    def fake_bot(tree, lines, timeout=300):
+        assert tests_started.wait(5), "the shared tests did not start beside the contract"
+        trees.append(tree)
+        return {"ok": False}
+
+    monkeypatch.setattr(chatbot4, "run_tests", fake_tests)
+    monkeypatch.setattr(chatbot4, "run", fake_bot)
+    with pytest.raises(ToolError) as err:
+        merge(world, Agent("cedar"), second["pr"])
+    assert err.value.code == "contract" and trees[0] == trees[1]  # one tree, the contract's refusal

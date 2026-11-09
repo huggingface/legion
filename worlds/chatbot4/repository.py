@@ -324,20 +324,39 @@ class Repository:
                                           timeout=60, check=False).stdout.decode(errors="replace")
                 subprocess.run(["git", "-C", str(tree), "cherry-pick", "--abort"], env=self.env,
                                capture_output=True, timeout=60, check=False)
-                error = ToolError(f"your branch is based on {parent}, main is {onto}, and your "
-                                  "changes conflict with main: pull, rebase onto origin/main, "
-                                  "then open again", "stale_base")
-                error.files = [name for name in unmerged.split("\0") if name]  # the conflicting paths
-                raise error from None
+                raise _stale_base(parent, onto, unmerged.split("\0")) from None
             sha = self.git("rev-parse", "HEAD", at=tree)
         self.git("fetch", "--no-write-fetch-head", str(tree), sha)
         return sha
+
+    def precheck(self, base, head, onto):
+        """Raise commit(union=True)'s stale_base error when replaying base..head onto `onto`
+        conflicts, found by git merge-tree in the bare repository (no checkout, well under a
+        second). Silent when it cannot tell the same answer: another merge base, a
+        .gitattributes in either tree (the replay's checkout would honour it), or a git older
+        than 2.38 (no --write-tree)."""
+        if (self.git("merge-base", "--all", onto, head) != base
+                or any(self.git("ls-tree", "--name-only", sha, ".gitattributes") for sha in (onto, head))):
+            return
+        attributes = ("-c", f"core.attributesFile={self.attributes}") if self.attributes else ()
+        out = subprocess.run(["git", "-C", str(self.root), *attributes, "merge-tree", "--write-tree",
+                              "--name-only", "-z", "--no-messages", onto, head],
+                             env=self.env, capture_output=True, timeout=60, check=False)
+        if out.returncode == 1:  # 1: conflicts (tree, then the conflicted paths); 0: clean
+            raise _stale_base(base, onto, out.stdout.decode(errors="replace").split("\0")[1:])
 
     def push(self, sha, ref, expected=None, force=False):
         """Push sha to ref; expected replaces only that head; force overwrites a ref the
         world owns outright (a PR it created and nobody else writes)."""
         options = [f"--force-with-lease={ref}:{expected}"] if expected else []
         self.git("push", *options, "origin", f"{'+' if force and not expected else ''}{sha}:{ref}")
+
+
+def _stale_base(parent, onto, files):
+    error = ToolError(f"your branch is based on {parent}, main is {onto}, and your changes "
+                      "conflict with main: pull, rebase onto origin/main, then open again", "stale_base")
+    error.files = list(dict.fromkeys(name for name in files if name))  # the conflicting paths
+    return error
 
 
 FINAL_CODES = {"closed": "pr_closed", "merged": "pr_merged"}
