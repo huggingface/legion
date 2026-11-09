@@ -278,7 +278,7 @@ class Resource:
             "space_id": self.options.space_id,
             "operator_token": self.operator_token,
             "private": self.options.private,
-            "hf_token": self.hf_token,
+            "token": self.hf_token,
         }
         # -P keeps resources/ off the worker's sys.path, so a provider module named
         # like one it imports can't shadow it. It exits if this process dies first.

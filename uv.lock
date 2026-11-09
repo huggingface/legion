@@ -681,7 +681,7 @@ dev = [
 requires-dist = [
     { name = "exceptiongroup", specifier = ">=1.3" },
     { name = "harbor", specifier = "==0.25.0" },
-    { name = "msgboard", extras = ["hf"], git = "https://github.com/huggingface/msgboard.git?rev=d303f3340b603938068107ae75d1b53e0e0a3653" },
+    { name = "msgboard", extras = ["hf"], git = "https://github.com/huggingface/msgboard.git?rev=563911d586e3435f2aadb25d7a8f565cce828406" },
     { name = "packaging", specifier = ">=24" },
     { name = "podman-compose", specifier = "==1.5.0" },
     { name = "pydantic", specifier = ">=2.12" },
@@ -1292,7 +1292,7 @@ wheels = [
 [[package]]
 name = "msgboard"
 version = "0.1.0"
-source = { git = "https://github.com/huggingface/msgboard.git?rev=d303f3340b603938068107ae75d1b53e0e0a3653#d303f3340b603938068107ae75d1b53e0e0a3653" }
+source = { git = "https://github.com/huggingface/msgboard.git?rev=563911d586e3435f2aadb25d7a8f565cce828406#563911d586e3435f2aadb25d7a8f565cce828406" }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
