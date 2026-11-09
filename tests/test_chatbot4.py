@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -3140,7 +3142,7 @@ def test_agent_checkouts_are_capped_and_the_merger_takes_no_slot(setup, monkeypa
     held = 0
     while world.checkouts.acquire(blocking=False):  # every checkout slot is taken by agents
         held += 1
-    assert held == 8  # the default (CHATBOT_CHECKOUT_SLOTS)
+    assert held == int(os.environ.get("CHATBOT_CHECKOUT_SLOTS", "8"))
     try:
         for call in (lambda: world.run_bot("main", ["hi"]),
                      lambda: submit(world, clone, author="pine", branch="other")):
@@ -3152,5 +3154,9 @@ def test_agent_checkouts_are_capped_and_the_merger_takes_no_slot(setup, monkeypa
     finally:
         for _ in range(held):
             world.checkouts.release()
-    assert world.run_bot("main", ["hi"])["ok"]  # slots released after a call
+    world.checkouts = threading.BoundedSemaphore(1)  # a leaked permit would show at once
+    with pytest.raises(ToolError) as exc:
+        world.run_bot("pr:999", ["hi"])  # fails while holding the slot
+    assert exc.value.code != "busy"
+    assert world.run_bot("main", ["hi"])["ok"]
     assert world.run_bot("main", ["hi"])["ok"]

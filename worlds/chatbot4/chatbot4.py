@@ -1412,7 +1412,8 @@ class Chatbot4World(World):
         if code == "stale_base":
             raise ToolError(f"{failure.message}; your PR #{number} is kept: retry open_pr with "
                             f"pr={number}", "stale_base")
-        self._count("hub_busy_total")
+        if code != "busy":  # busy: no checkout slot for the rebuild, not a Hub refusal
+            self._count("hub_busy_total")
         raise ToolError(f"the Hub did not accept the push for your PR #{number}; retry open_pr "
                         f"with pr={number} in a minute", "hub_busy", retry_after_s=60)
 
@@ -2159,9 +2160,10 @@ class Chatbot4World(World):
         with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             snapshot = UPLOAD.get()
+            if hub_ref := ref_or_path == "main" or ref_or_path.startswith("pr:"):
+                self.repo.refresh(FETCH_TTL)  # outside the checkout slot: a fetch holds no permit
             with self._checkout_slot():  # released before the run, which has its own slots
-                if ref_or_path == "main" or ref_or_path.startswith("pr:"):
-                    self.repo.refresh(FETCH_TTL)
+                if hub_ref:
                     sha = self.repo.sha(ref_or_path)
                     self.repo.checkout(sha, tree)
                 elif isinstance(snapshot, dict):
