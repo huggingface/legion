@@ -103,13 +103,21 @@ type.
 
 ## Names
 
-`naming:` (swarm-level; a Harbor spec does not expose it yet) picks how agents are named; it applies to replicas and spawned
-children alike.
+`naming:` picks how agents are named; it applies to replicas and spawned children alike. A
+Harbor spec takes `words` (its default) or `shepherd`; it cannot change in a running swarm.
 
 | `naming` | replicas | spawned children |
 |---|---|---|
-| `numeric` (default) | `<type>-NNNN` (the slot) | `<parent>-<type>-NNNN` (the per-swarm counter) |
-| `words` | `<adjective>-<noun>`, e.g. `amber-otter` | the same, e.g. `brisk-lantern` |
+| `words` (a Harbor spec's default) | `<adjective>-<noun>`, e.g. `amber-otter` | the same, e.g. `brisk-lantern` |
+| `shepherd` (Harbor) | shepherd's names: `agent-001`, ... numbered across the roles in order | `<parent>-<type>-NNNN` |
+| `numeric` (a swarm spec's default) | `<type>-NNNN` (the slot) | `<parent>-<type>-NNNN` (the per-swarm counter) |
+
+**For task authors:** agent names are opaque strings. Verifiers and instructions must not
+assume a format; flock's default names are random words. `naming: shepherd` exists for tasks
+that already expect `agent-NNN` (experiments/mini-swarm). With it, only the last role's count
+may change in a running swarm: names run across the roles, so an earlier role's change would
+rename running agents, and `flock update` refuses it. With words, each agent's instructions list
+its teammates and their roles as the controller has named them.
 
 ```yaml
 naming: words

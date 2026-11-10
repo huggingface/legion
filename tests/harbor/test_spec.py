@@ -461,3 +461,84 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
     reconcile(store, jobs, clock(), settings)
     now = {a["name"]: a["type"] for a in store.list_agents(swarm.swarm)}
     assert roles.items() <= now.items() and len(now) == len(roles) + 1
+
+
+SHEPHERD = """name: crew
+model: m/x
+task: {repo: https://huggingface.co/datasets/a/b, selector: v8}
+naming: shepherd
+agents:
+  roles:
+    explorer: {count: 2}
+    reviewer: {count: REVIEWERS}
+"""
+
+
+def shepherd_swarm(tmp_path, reviewers=1, ramp=None):
+    text = SHEPHERD.replace("REVIEWERS", str(reviewers))
+    if ramp:
+        text = text.replace(f"{{count: {reviewers}}}", f"{{count: {reviewers}, ramp: {ramp}}}")
+    (tmp_path / "spec.yaml").write_text(text)
+    return compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
+def test_naming_shepherd_gives_shepherds_names(tmp_path):
+    """`naming: shepherd`: the names shepherd's launcher gives the same config (its roster()),
+    numbered across the roles in order."""
+    swarm = shepherd_swarm(tmp_path)
+    want = Config.model_validate(
+        {k: v for k, v in yaml.safe_load((tmp_path / "spec.yaml").read_text()).items()
+         if k != "naming"}).agents.roster()
+    assert swarm.naming == "shepherd"
+    assert {a: ts.harbor.role for ts in swarm.types.values() for a in ts.harbor.names()} == (
+        want) == {"agent-001": "explorer", "agent-002": "explorer", "agent-003": "reviewer"}
+
+
+def test_naming_shepherd_updates_never_rename_running_agents(tmp_path):
+    from flock.ops import SpecError, keep_pins
+
+    old = shepherd_swarm(tmp_path)
+    grown = shepherd_swarm(tmp_path, reviewers=3)  # the last role may grow
+    keep_pins(old, grown)
+    assert grown.types["reviewer"].harbor.names() == ["agent-003", "agent-004", "agent-005"]
+    data = yaml.safe_load((tmp_path / "spec.yaml").read_text())
+    data["agents"]["roles"]["explorer"]["count"] = 3
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(SpecError, match="a count change before role reviewer renumbers"):
+        keep_pins(old, compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK))
+    words = old.model_copy(update={"naming": "words"})
+    with pytest.raises(SpecError, match="names never change in a run"):
+        keep_pins(words, shepherd_swarm(tmp_path))
+
+
+def test_naming_shepherd_a_raised_ramp_gets_shepherds_names(tmp_path, store, clock):
+    """The last role's ramp raised (count 1 -> 3): its new agents get agent-NNN names, never
+    `<type>-NNNN` (the ramp is compared too, not only the replicas, which a ramp keeps at 0)."""
+    from flock.controller.naming import replica_names
+    from flock.ops import keep_pins
+
+    old = shepherd_swarm(tmp_path, ramp="{start: 1, add: 1, every: 10m}")
+    raised = shepherd_swarm(tmp_path, reviewers=3, ramp="{start: 1, add: 1, every: 10m}")
+    assert raised.types["reviewer"].replicas == old.types["reviewer"].replicas == 0
+    keep_pins(old, raised)
+    store.put_swarm(raised, 0)
+    assert replica_names(store, raised, "reviewer", 3, clock().timestamp()) == [
+        "agent-003", "agent-004", "agent-005"]
+    # past the roster (live replicas above the count): the next free agent-NNN names
+    assert replica_names(store, raised, "explorer", 3, clock().timestamp()) == [
+        "agent-001", "agent-002", "agent-006"]
+
+
+def test_old_type_names_are_refused_by_name(tmp_path):
+    """A run launched before (`agent-0000`, no roles): the refusal names agents.count and says
+    why, not `None`."""
+    from flock.ops import SpecError, keep_pins
+
+    (tmp_path / "spec.yaml").write_text(
+        "name: crew\nmodel: m/x\ntask: {repo: https://huggingface.co/datasets/a/b, selector: v8}"
+        "\nnaming: shepherd\nagents: {count: 2}\n")
+    new = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    old = new.model_copy(deep=True)
+    old.types["agent"].harbor.roster = {"agent-0000": None, "agent-0001": None}
+    with pytest.raises(SpecError, match=r"before agents.count renumbers .* old `<type>-NNNN`"):
+        keep_pins(old, new)

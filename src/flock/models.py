@@ -733,8 +733,8 @@ class HarborSpec(BaseModel):
     team: str = ""  # the team_file's text
     role: str | None = None  # the role named in the instructions (None: agents.count)
     role_text: str = ""  # the role_file's text
-    # every replica's name -> role: filled by the controller in each assign (names are flock's
-    # random words, reserved on the controller); empty in the stored spec
+    # every replica's name -> role: with `naming: shepherd`, shepherd's names compiled from the
+    # counts; with words empty here, and filled by the controller in each assign
     roster: dict[str, str | None] = Field(default_factory=dict)
     tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
     tools_sha256: str | None = None
@@ -743,6 +743,10 @@ class HarborSpec(BaseModel):
     # uploaded as the swarm's tools bundle of that version: a worker fetches and unpacks it in
     # its own run dir (None: config's tools_dir and resources_dir, read where they are)
     folders: str | None = None
+
+    def names(self) -> list[str]:
+        """This type's replica names by slot, with `naming: shepherd` (its roster's)."""
+        return [a for a, r in self.roster.items() if r == self.role]
 
 
 class TypeSpec(_Removable):
@@ -1044,9 +1048,10 @@ class SwarmSpec(BaseModel):
     # The run's flock-overview row (docs/dashboard.md); None: not registered.
     dashboard: DashboardSpec | None = None
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
-    # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
-    # reserved and never reused while the swarm exists).
-    naming: Literal["numeric", "words"] = "numeric"
+    # `<parent>-<type>-NNNN`), `words` (`<adjective>-<noun>`, unique on the controller,
+    # reserved and never reused while the swarm exists; a Harbor spec's default) or `shepherd`
+    # (Harbor types: their roster's names, shepherd's `agent-001`, ...; children as numeric).
+    naming: Literal["numeric", "words", "shepherd"] = "numeric"
 
     @field_validator("tools_version")
     @classmethod

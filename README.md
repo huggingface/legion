@@ -22,7 +22,8 @@ them.
   one type per role (`harness: harbor`: each agent is a Harbor Trial running Pi).
   `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
-- **Stable agent identities:** agents are named `<type>-NNNN`. The same name
+- **Stable agent identities:** agents get flock's random names (`amber-otter`), or shepherd's
+  `agent-001`, ... with `naming: shepherd` (docs/spawn.md "Names"). The same name
   keeps the same harness session and workdir across worker restarts.
 - **Durable sessions:** workers sync each agent's session and workdir to a
   bucket and restore them on relaunch, so an agent resumes with its context
@@ -166,8 +167,8 @@ Model servers: [docs/open-models.md](docs/open-models.md).
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...
 uv run flock launch demo.yaml
 uv run flock status demo                 # counts by type and state, cost
-uv run flock prompt agent-0007 "Report your progress."
-uv run flock status agent-0007 --events --follow  # agent.turn_started, agent.turn_ended, ...
+uv run flock prompt amber-otter "Report your progress."
+uv run flock status amber-otter --events --follow  # agent.turn_started, agent.turn_ended, ...
 uv run flock stop demo --release      # drain, sync every agent, free the workers
 uv run flock launch demo              # resume
 uv run flock stop demo --delete

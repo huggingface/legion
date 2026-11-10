@@ -15,7 +15,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from harbor.utils.env import is_sensitive_env_key
 from pydantic import BeforeValidator, Field, field_validator, model_validator
@@ -174,6 +174,9 @@ class Spec(Config):
     bucket: str = ""
     dashboard: DashboardSpec | None = None
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
+    # agent names: flock's random `<adjective>-<noun>` (words), or shepherd's roster() names
+    # (`agent-001`, ... numbered across the roles in order) for a task that relies on them
+    naming: Literal["words", "shepherd"] = "words"
 
     @field_validator("compute", mode="before")
     @classmethod
@@ -371,6 +374,8 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "tools": tools,
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,
+                # shepherd's names and roles; words: none here, each assign carries the run's
+                "roster": spec.agents.roster() if spec.naming == "shepherd" else {},
                 "folders": folders,
             },
         }
@@ -393,8 +398,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         "spawn": spec.spawn,
         "limits": spec.limits.model_dump(include={"alive", "spawned_total", "budget_usd"}),
         "compute": spec.compute,
-        # flock's random names (`<adjective>-<noun>`): a task must not rely on a name format
-        "naming": "words",
+        "naming": spec.naming,
     })
     most = [max_workers(ts.model_copy(update={"replicas": ts.replicas_ramp.max}) if ts.replicas_ramp
                         else ts) for ts in swarm.types.values()]  # a ramp's max, not its start

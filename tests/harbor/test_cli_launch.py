@@ -219,6 +219,7 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     ts = swarm.types["agent"]
     assert (ts.replicas, ts.agents_per_worker) == (3, 3)  # one worker: it deploys the board
     assert ts.harbor.resources == {"message_board": {"space_id": "mini-swarm", "private": False}}
+    assert swarm.naming == "shepherd" and ts.harbor.names() == ["agent-001", "agent-002", "agent-003"]
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
     assert ts.secrets == ["HF_TOKEN"]  # the worker deploys the Space and starts the sandboxes

@@ -589,7 +589,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     hard = flags.get("budget_stop") == "hard" or store.held(a, flags)  # or paused
     hold = bool(resume) and (hard or bool(r and r.provider.max_working))
     held, resume = (resume, None) if hold else (None, resume)
-    if ts.harbor:  # the run's agents as they are now: their names and roles for the instructions
+    if ts.harbor and not ts.harbor.roster:  # words: the run's agents as they are now, with roles
         ts = ts.model_copy(update={"harbor": ts.harbor.model_copy(
             update={"roster": harbor_roster(store, a["swarm"])})})
     cmd = AssignCommand(

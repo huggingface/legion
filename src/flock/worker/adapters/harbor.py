@@ -251,7 +251,7 @@ class HarborAdapter:
             tc = launch.build_trial_config(config, task, self.root, self.agent,
                                            self._instructions(), config.api_key())
         # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
-        # it: the swarm (the worker's SWARM) keeps another run's agent-0000-t1 on this host
+        # it: the swarm (the worker's SWARM) keeps another run's <agent>-t1 on this host
         # alive; a worker relaunched in this run reuses, and so cleans up, its own names.
         # shortcut: two runs of one swarm name on one host still share names; add a run id then
         swarm = os.environ.get("SWARM")

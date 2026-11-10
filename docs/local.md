@@ -78,9 +78,9 @@ same directory:
 ```sh
 uv run flock status
 uv run flock status hello --type agent
-uv run flock prompt agent-0001 "Report your progress."
+uv run flock prompt amber-otter "Report your progress."
 uv run flock prompt --swarm hello --type agent --state idle "Next round."
-uv run flock status agent-0001 --events --follow
+uv run flock status amber-otter --events --follow
 ```
 
 From elsewhere: `FLOCK_CURRENT=/path/to/.flock/current flock status`, or set `FLOCK_URL` and
@@ -121,8 +121,9 @@ A long-lived local controller can also be started by hand:
 
 ## What differs locally
 
-- Agent names follow the spec's `naming:` as on HF Jobs: `<type>-NNNN` by default,
-  `<adjective>-<noun>` with `naming: words` (docs/spawn.md "Names"); the run bundle's
+- Agent names follow the spec's `naming:` as on HF Jobs: a Harbor spec's random words by default,
+  shepherd's `agent-001`, ... with `naming: shepherd`, `<type>-NNNN` for a swarm spec
+  (docs/spawn.md "Names"); the run bundle's
   `events/<name>.jsonl` and `agents/<name>/` use the same names.
 
 Same code as on jobs: the spec, the API and CLI, the reconcile loop and placement

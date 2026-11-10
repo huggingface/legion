@@ -138,9 +138,38 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
     """A Harbor type keeps the task revision its run pinned while the spec names the same task
     (a branch that moved since is not a change), and the folder paths it was launched from
     while the folders' content is the same (the run folder moved or copied, `--ref`'s copy:
-    workers unpack the shipped folders). The roster is not in the file: the controller sends
-    each assign the run's agents as they are (reconcile.harbor_roster). Changes `spec` in
-    place."""
+    workers unpack the shipped folders). With `naming: shepherd` the roster (every role's
+    agents, compiled from the file's counts) keeps the running agents of each role whose live
+    replicas and ramp were kept (`keep_replicas` first), so teammates are never told of agents
+    that do not exist; a count change that would rename running agents is refused. With words
+    there is no roster in the file: each assign carries the run's agents (reconcile.harbor_roster).
+    Changes `spec` in place."""
+    if any(ts.harbor for ts in spec.types.values()) and old.naming != spec.naming:
+        old_names = " (old `<type>-NNNN` names)" if old.naming == "numeric" else ""
+        raise SpecError([(f"naming: the run names its agents `{old.naming}`{old_names}, the "
+                          f"file `{spec.naming}`: names never change in a run: launch a new run")])
+    if spec.naming == "shepherd":
+        kept = {old.types[n].harbor.role for n, ts in spec.types.items() if n in old.types
+                and ts.harbor and old.types[n].harbor and ts.replicas == old.types[n].replicas
+                and ts.replicas_ramp == old.types[n].replicas_ramp}
+        running = next((t.harbor.roster for t in old.types.values() if t.harbor), {})  # run-wide
+        new = next((t.harbor.roster for t in spec.types.values() if t.harbor), {})
+
+        def first(roster):  # role -> its first name
+            return {r: a for a, r in reversed(roster.items())}
+
+        if moved := [r for r, a in first(running).items() if first(new).get(r, a) != a]:
+            # shepherd's names run across the roles: another count would rename running agents
+            where = ", ".join("agents.count" if r is None else f"role {r}" for r in moved)
+            raise SpecError([(f"agents.roles: a count change before {where} renumbers its "
+                              "agents (names run agent-001, ... across the roles in order): "
+                              "change only the last role's count, or launch a new run; or the "
+                              "run was launched with old `<type>-NNNN` names: launch a new run")])
+        for ts in spec.types.values():
+            if ts.harbor:  # a role's names: its role label in the run-wide roster
+                ts.harbor.roster = {
+                    **{a: r for a, r in running.items() if r in kept},
+                    **{a: r for a, r in ts.harbor.roster.items() if r not in kept}}
     for name, ts in spec.types.items():
         was = old.types.get(name)
         if not (ts.harbor and was and was.harbor):
