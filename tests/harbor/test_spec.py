@@ -466,7 +466,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
 SHEPHERD = """name: crew
 model: m/x
 task: {repo: https://huggingface.co/datasets/a/b, selector: v8}
-naming: shepherd
+naming: consecutive-id
 agents:
   roles:
     explorer: {count: 2}
@@ -482,19 +482,19 @@ def shepherd_swarm(tmp_path, reviewers=1, ramp=None):
     return compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 
-def test_naming_shepherd_gives_shepherds_names(tmp_path):
-    """`naming: shepherd`: the names shepherd's launcher gives the same config (its roster()),
+def test_naming_consecutive_id_gives_shepherds_names(tmp_path):
+    """`naming: consecutive-id`: the names shepherd's launcher gives the same config (its roster()),
     numbered across the roles in order."""
     swarm = shepherd_swarm(tmp_path)
     want = Config.model_validate(
         {k: v for k, v in yaml.safe_load((tmp_path / "spec.yaml").read_text()).items()
          if k != "naming"}).agents.roster()
-    assert swarm.naming == "shepherd"
+    assert swarm.naming == "consecutive-id"
     assert {a: ts.harbor.role for ts in swarm.types.values() for a in ts.harbor.names()} == (
         want) == {"agent-001": "explorer", "agent-002": "explorer", "agent-003": "reviewer"}
 
 
-def test_naming_shepherd_updates_never_rename_running_agents(tmp_path):
+def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
     from flock.ops import SpecError, keep_pins
 
     old = shepherd_swarm(tmp_path)
@@ -511,7 +511,7 @@ def test_naming_shepherd_updates_never_rename_running_agents(tmp_path):
         keep_pins(words, shepherd_swarm(tmp_path))
 
 
-def test_naming_shepherd_a_raised_ramp_gets_shepherds_names(tmp_path, store, clock):
+def test_naming_consecutive_id_a_raised_ramp_gets_shepherds_names(tmp_path, store, clock):
     """The last role's ramp raised (count 1 -> 3): its new agents get agent-NNN names, never
     `<type>-NNNN` (the ramp is compared too, not only the replicas, which a ramp keeps at 0)."""
     from flock.controller.naming import replica_names
@@ -536,7 +536,7 @@ def test_old_type_names_are_refused_by_name(tmp_path):
 
     (tmp_path / "spec.yaml").write_text(
         "name: crew\nmodel: m/x\ntask: {repo: https://huggingface.co/datasets/a/b, selector: v8}"
-        "\nnaming: shepherd\nagents: {count: 2}\n")
+        "\nnaming: consecutive-id\nagents: {count: 2}\n")
     new = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
     old = new.model_copy(deep=True)
     old.types["agent"].harbor.roster = {"agent-0000": None, "agent-0001": None}

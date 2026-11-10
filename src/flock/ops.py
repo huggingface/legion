@@ -138,7 +138,7 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
     """A Harbor type keeps the task revision its run pinned while the spec names the same task
     (a branch that moved since is not a change), and the folder paths it was launched from
     while the folders' content is the same (the run folder moved or copied, `--ref`'s copy:
-    workers unpack the shipped folders). With `naming: shepherd` the roster (every role's
+    workers unpack the shipped folders). With `naming: consecutive-id` the roster (every role's
     agents, compiled from the file's counts) keeps the running agents of each role whose live
     replicas and ramp were kept (`keep_replicas` first), so teammates are never told of agents
     that do not exist; a count change that would rename running agents is refused. With words
@@ -148,7 +148,7 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
         old_names = " (old `<type>-NNNN` names)" if old.naming == "numeric" else ""
         raise SpecError([(f"naming: the run names its agents `{old.naming}`{old_names}, the "
                           f"file `{spec.naming}`: names never change in a run: launch a new run")])
-    if spec.naming == "shepherd":
+    if spec.naming == "consecutive-id":
         kept = {old.types[n].harbor.role for n, ts in spec.types.items() if n in old.types
                 and ts.harbor and old.types[n].harbor and ts.replicas == old.types[n].replicas
                 and ts.replicas_ramp == old.types[n].replicas_ramp}

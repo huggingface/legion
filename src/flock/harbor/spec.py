@@ -176,7 +176,7 @@ class Spec(Config):
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
     # agent names: flock's random `<adjective>-<noun>` (words), or shepherd's roster() names
     # (`agent-001`, ... numbered across the roles in order) for a task that relies on them
-    naming: Literal["words", "shepherd"] = "words"
+    naming: Literal["words", "consecutive-id"] = "words"
 
     @field_validator("compute", mode="before")
     @classmethod
@@ -375,7 +375,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,
                 # shepherd's names and roles; words: none here, each assign carries the run's
-                "roster": spec.agents.roster() if spec.naming == "shepherd" else {},
+                "roster": spec.agents.roster() if spec.naming == "consecutive-id" else {},
                 "folders": folders,
             },
         }

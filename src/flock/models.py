@@ -733,8 +733,8 @@ class HarborSpec(BaseModel):
     team: str = ""  # the team_file's text
     role: str | None = None  # the role named in the instructions (None: agents.count)
     role_text: str = ""  # the role_file's text
-    # every replica's name -> role: with `naming: shepherd`, shepherd's names compiled from the
-    # counts; with words empty here, and filled by the controller in each assign
+    # every replica's name -> role: with `naming: consecutive-id`, shepherd's names compiled
+    # from the counts; with words empty here, and filled by the controller in each assign
     roster: dict[str, str | None] = Field(default_factory=dict)
     tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
     tools_sha256: str | None = None
@@ -745,7 +745,7 @@ class HarborSpec(BaseModel):
     folders: str | None = None
 
     def names(self) -> list[str]:
-        """This type's replica names by slot, with `naming: shepherd` (its roster's)."""
+        """This type's replica names by slot, with `naming: consecutive-id` (its roster's)."""
         return [a for a, r in self.roster.items() if r == self.role]
 
 
@@ -1049,9 +1049,10 @@ class SwarmSpec(BaseModel):
     dashboard: DashboardSpec | None = None
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
     # `<parent>-<type>-NNNN`), `words` (`<adjective>-<noun>`, unique on the controller,
-    # reserved and never reused while the swarm exists; a Harbor spec's default) or `shepherd`
-    # (Harbor types: their roster's names, shepherd's `agent-001`, ...; children as numeric).
-    naming: Literal["numeric", "words", "shepherd"] = "numeric"
+    # reserved and never reused while the swarm exists; a Harbor spec's default) or
+    # `consecutive-id` (Harbor types: their roster's names, shepherd's `agent-001`, ...;
+    # children as numeric).
+    naming: Literal["numeric", "words", "consecutive-id"] = "numeric"
 
     @field_validator("tools_version")
     @classmethod

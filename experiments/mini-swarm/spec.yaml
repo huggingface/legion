@@ -8,7 +8,7 @@
 name: ${RUN_NAME:-mini-swarm-1}
 namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes; unset: HF_TOKEN's account
 model: huggingface/Qwen/Qwen3.8-27B:cerebras
-naming: shepherd                              # agent-001..003: the task's test expects agent-NNN
+naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
 task:

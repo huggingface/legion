@@ -23,7 +23,7 @@ them.
   `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
 - **Stable agent identities:** agents get flock's random names (`amber-otter`), or shepherd's
-  `agent-001`, ... with `naming: shepherd` (docs/spawn.md "Names"). The same name
+  `agent-001`, ... with `naming: consecutive-id` (docs/spawn.md "Names"). The same name
   keeps the same harness session and workdir across worker restarts.
 - **Durable sessions:** workers sync each agent's session and workdir to a
   bucket and restore them on relaunch, so an agent resumes with its context
