@@ -141,8 +141,8 @@ def test_the_smoke_spec_compiles(monkeypatch, pins):
     assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("hsmoke-1", "slurm", ["agent"])
     h = swarm.types["agent"].harbor
     assert h.config["environment"]["backend"] == "podman"
-    assert h.resources["board"]["rules"]["max_len"] == 1200
-    assert "transport" not in h.resources["board"]  # managed: the rule proxy's socket
+    assert h.resources["message_board"]["rules"]["max_len"] == 1200
+    assert "transport" not in h.resources["message_board"]  # managed: the rule proxy's socket
     assert h.config["limits"]["trial_hours"] == 0.15
 
 
@@ -152,9 +152,10 @@ def test_the_swarmchat_harbor_spec_compiles(monkeypatch, pins):
     swarm = experiment_spec(monkeypatch, pins, "swarmchat-harbor", "c" * 40, env)
     assert (swarm.swarm, swarm.compute.kind, len(swarm.types)) == ("v8h-1", "hf-jobs", 6)
     h = swarm.types["answers"].harbor
-    assert h.config["environment"]["kwargs"]["namespace"] == "HuggingFaceSwarms"
-    assert h.resources["board"]["transport"] == h.resources["world"]["transport"] == "http"
-    assert len(h.resources["board"]["channels"]) == 7  # the poller watches only these
+    assert h.config["environment"]["flavor"] == "cpu-basic"
+    assert h.config["namespace"] == "HuggingFaceSwarms"  # the sandboxes bill there too
+    assert h.resources["message_board"]["transport"] == h.resources["world"]["transport"] == "http"
+    assert len(h.resources["message_board"]["channels"]) == 7  # the poller watches only these
     for ts in swarm.types.values():
         assert ts.env == {"CHATBOT_REPO": "ns/chat"} and ts.agents_per_worker == 1
         assert ts.secrets == ["MSGBOARD_OPERATOR_TOKEN", "CHATBOT_WORLD_TOKEN", "HF_TOKEN"]
@@ -166,9 +167,9 @@ def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
     (which would copy what it points to). Init's run.env names the board's default token,
     known once the spec is compiled."""
     exp = experiment(tmp_path / "exp",
-                     resources="{fake: {mount: true}, board: {url: https://board.example}}")
-    board = Path(flock.harbor.__file__).with_name("plugins") / "resources" / "board.py"
-    shutil.copy(board, exp / "resources" / "board.py")
+                     resources="{fake: {mount: true}, message_board: {url: https://board.example}}")
+    board = Path(flock.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
+    shutil.copy(board, exp / "resources" / "message_board.py")
     shutil.move(exp / "tools", tmp_path / "shared")
     (exp / "tools").symlink_to(tmp_path / "shared")
     assert read_spec(str(exp / "spec.yaml")).types["agent"].harbor.folders

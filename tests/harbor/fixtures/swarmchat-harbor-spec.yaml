@@ -3,7 +3,7 @@
 # v8 (hf://buckets/cmpatino/legacy-swarmchat-experiments/v8: six lanes, prompts) in shepherd's config shape: it loads with
 # flock.harbor.config as copied from shepherd f3970bc. Each agent runs the Harbor task
 # chatbot4-v8-agent in its own container; the shared chatbot4 world and the board are resources,
-# reached through the world.* and board.* tools. Differences from v8: prompts/system.md names
+# reached through the world.* and message_board.* tools. Differences from v8: prompts/system.md names
 # $CHATBOT_REPO and shepherd's tool calls, and arrives in the first prompt (not as a system
 # prompt); no board rules, notifications or ramps; one agent per lane.
 #
@@ -29,9 +29,9 @@ task:
   selector: chatbot4-v8-agent
   revision: main                              # CHANGE-ME: the published commit SHA
 team_file: prompts/system.md
-resources_dir: ../../src/flock/harbor/plugins/resources
+resources_dir: ../../src/flock/harbor/builtin/resources
 resources:
-  board:
+  message_board:
     url: https://CHANGE-ME-board.hf.space     # a dedicated board; operator token in MSGBOARD_OPERATOR_TOKEN
     channels: [general]
   world:
@@ -39,10 +39,10 @@ resources:
     token_env: CHATBOT_WORLD_TOKEN            # = the world's FLOCK_WORLD_TOKEN; one world per run,
                                               # a new secret each run (same secret + name = same agent)
     # transport: http                         # hf-sandbox; the default unix suits docker/podman
-tools_dir: ../../src/flock/harbor/plugins/tools
+tools_dir: ../../src/flock/harbor/builtin/tools
 tools:
-  - board.*
-  - board_extra.*                             # react, doc, edit_doc: v8's board tools beyond shepherd's
+  - message_board.*
+  - message_board_extra.*                             # react, doc, edit_doc: v8's board tools beyond shepherd's
   - world.*
 agents:
   roles:

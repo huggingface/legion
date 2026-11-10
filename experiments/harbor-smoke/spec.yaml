@@ -22,9 +22,9 @@ task:
 team_file: team.md
 resources_dir: resources                       # links to flock's plugins; `flock init` copies them
 resources:
-  board: {channels: [general], rules: {max_len: 1200, min_post_gap: 10s}}
+  message_board: {channels: [general], rules: {max_len: 1200, min_post_gap: 10s}}
 tools_dir: tools                               # links to flock's plugins, as resources
-tools: [board.*]
+tools: [message_board.*]
 agents: {count: 2}
 environment: {backend: podman}
 workers: {agents_per_worker: 2, turn_timeout: 15m}

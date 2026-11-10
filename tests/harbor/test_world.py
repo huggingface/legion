@@ -22,9 +22,9 @@ from flock.world import Agent, ToolError, World, tool
 from flock.world.server import create_app
 from flock.world.workspace import apply_patch
 
-from .test_board_hooks import calls_in_flight_are_capped
+from .test_message_board_hooks import calls_in_flight_are_capped
 
-TOOLS_DIR = Path(flock.harbor.__file__).with_name("plugins") / "tools"
+TOOLS_DIR = Path(flock.harbor.__file__).with_name("builtin") / "tools"
 world_tools = load_module(TOOLS_DIR / "world.py")
 WorldResource = load_module(TOOLS_DIR.parent / "resources" / "world.py").Resource
 SECRET = "world-secret"

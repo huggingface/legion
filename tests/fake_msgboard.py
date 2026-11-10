@@ -9,8 +9,9 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
   and refuses posts with 409 channel_archived, like the real board.
 - GET /v1/channels?name=, POST /v1/channels/{id}/members, PATCH /v1/principals/{id}
 - GET /v1/health, GET /v1/join/{code} (404 or status active); POST /v1/channels {name} (409 channel_exists for a taken name);
-  POST /v1/invites {kind, channels: names or ids, agent_name, max_uses, ...} -> 201 {code}: a
-  named invite joins that name; a used-up one is 410 invite_inactive
+  POST /v1/invites {kind, channels: names or ids, agent_name, max_uses, ...} -> 201 {id, code}: a
+  named invite joins that name; a used-up one is 410 invite_inactive. GET /v1/invites lists them
+  (revoked ones too, `revoked: true`); DELETE /v1/invites/{id} revokes one
 - GET /v1/me: the caller's principal, `role` admin for a person (the operator), else member
 - POST /v1/channels/{id}/messages {body, reply_to}: Idempotency-Key required; a repeated key from
   the same sender returns the first message (200). A reply joins its parent's thread. `@name`
@@ -261,7 +262,7 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
                     return self.fail(404, "not_found", "this invite link is not valid")
                 meta = board.invite_meta.get(body.get("code"), {})
                 name = meta.get("agent_name") or body.get("name") or ""
-                if meta.get("uses") == 0:
+                if meta.get("uses") == 0 or meta.get("revoked"):
                     return self.fail(410, "invite_inactive", "this invite link is used up")
                 with board.lock:
                     if meta.get("uses"):
@@ -289,8 +290,19 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
                 code = f"inv-{board._n}"
                 board.invites[code] = [c for c, n in board.channels.items()
                                        if {c, n} & set(body.get("channels", []))]
-                board.invite_meta[code] = {"agent_name": body.get("agent_name"), "uses": body.get("max_uses")}
-                return self.send(201, {"code": code, **body})
+                board.invite_meta[code] = {"agent_name": body.get("agent_name"), "uses": body.get("max_uses"),
+                                           "id": board._n}
+                return self.send(201, {"id": board._n, "code": code, **body})
+            if method == "GET" and u.path == "/v1/invites":
+                return self.send(200, {"invites": [{"id": m["id"], "revoked": m.get("revoked", False)}
+                                                   for m in board.invite_meta.values()]})
+            if method == "DELETE" and u.path.startswith("/v1/invites/"):
+                meta = next((m for m in board.invite_meta.values()
+                             if str(m["id"]) == u.path.rsplit("/", 1)[1]), None)
+                if meta is None:
+                    return self.fail(404, "not_found", "no such invite")
+                meta["revoked"] = True
+                return self.send(200, {"id": meta["id"], "revoked": True})
             if method == "POST" and u.path == "/v1/channels" and body.get("name") in board.channels.values():
                 return self.fail(409, "channel_exists", "a channel with this name already exists")
             if method == "POST" and u.path in ("/v1/channels", "/v1/dms"):
@@ -436,6 +448,9 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
 
         def do_PATCH(self) -> None:
             self.route("PATCH")
+
+        def do_DELETE(self) -> None:
+            self.route("DELETE")
 
     return H
 

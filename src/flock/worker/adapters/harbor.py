@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -217,7 +218,8 @@ class HarborAdapter:
         h = self.spec.harbor
         roster = h.roster if self.agent in h.roster else {**h.roster, self.agent: h.role}
         return build_agent_instructions(
-            self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team, h.role_text)
+            self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team, h.role_text,
+            run_id=os.environ.get("SWARM"))  # as shepherd's launcher: the run (swarm) a board spans
 
     async def _new_trial(self, restore: bool) -> None:
         """Create the agent's next Trial, run it in the background and wait until FlockPi
@@ -245,9 +247,9 @@ class HarborAdapter:
                             h.task["dataset"], getattr(self.host, "task_path", None))
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
-        with exposed():  # it reads the inference key from os.environ; a Slurm worker has a file
+        with exposed():  # the inference key from os.environ; a Slurm worker has a file
             tc = launch.build_trial_config(config, task, self.root, self.agent,
-                                           self._instructions())
+                                           self._instructions(), config.api_key())
         # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
         # it: the swarm (the worker's SWARM) keeps another run's agent-0000-t1 on this host
         # alive; a worker relaunched in this run reuses, and so cleans up, its own names.
@@ -258,7 +260,13 @@ class HarborAdapter:
         # FlockPi serves turns for trial_hours; its last turn may take a turn_timeout more
         tc.agent.override_timeout_sec = (
             trial_seconds + parse_duration(self.spec.turn_timeout).total_seconds())
-        tc.environment.kwargs = dict(config.environment.kwargs)
+        if config.environment.backend == "hf-sandbox":
+            # job_timeout is the sandbox's idle timeout, and a running command is no activity:
+            # shepherd's outlasts its one Pi command (the run) by 60 s, flock's one turn (FlockPi
+            # probes between turns). Billed to the spec's namespace (unset: the token's owner).
+            tc.environment.kwargs.update(
+                job_timeout=math.ceil(parse_duration(self.spec.turn_timeout).total_seconds()) + 60,
+                namespace=config.namespace or None)
         # flock's subclasses: no secret in an argv (docker, podman); hf-sandbox's namespace
         tc.environment.import_path = ENVIRONMENTS[config.environment.backend]
         if self.resources is not None:

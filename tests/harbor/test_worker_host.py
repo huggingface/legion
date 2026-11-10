@@ -25,7 +25,7 @@ from flock.worker.harbor import HarborHost
 from .. import fake_msgboard
 from .test_adapter import TASK, FakeEnv, Fakes, Trial, read
 
-BOARD = Path(flock.harbor.__file__).with_name("plugins") / "resources" / "board.py"
+BOARD = Path(flock.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
 
 SPEC = """
 name: host
@@ -208,9 +208,9 @@ async def test_board_agents_join_on_any_worker_spawned_and_reassigned(world, tmp
     hf-sandbox has no mounts, so the board's rules are not enforced: each Trial says so."""
     board, server, url = fake_msgboard.serve()
     monkeypatch.setenv("MSGBOARD_OPERATOR_TOKEN", board.token_for("operator", "user"))
-    shutil.copy(BOARD, tmp_path / "resources" / "board.py")
+    shutil.copy(BOARD, tmp_path / "resources" / "message_board.py")
     (tmp_path / "spec.yaml").write_text(SPEC.replace(
-        "{fake: {mount: MOUNT}}", f"{{fake: {{mount: false}}, board: {{url: '{url}', "
+        "{fake: {mount: MOUNT}}", f"{{fake: {{mount: false}}, message_board: {{url: '{url}', "
         "channels: [flock-test], rules: {max_len: 2000}}}"))
     ts = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK, None).types["agent"]
     events, hosts = [], []

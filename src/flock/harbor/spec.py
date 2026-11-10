@@ -15,7 +15,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated
 
 from harbor.utils.env import is_sensitive_env_key
 from pydantic import BeforeValidator, Field, field_validator, model_validator
@@ -30,6 +30,7 @@ from flock.models import (
     WorkerKnobs,
     agent_name,
     load_spec_yaml,
+    max_workers,
     parse_duration,
 )
 from flock.world.protocol import ADMIN_TOKEN_ENV
@@ -81,7 +82,7 @@ class Ramp(Settings):
 
 class Loop(LoopSpec):
     """flock's loop (docs/loop.md) plus `resume_prompt`, the type's prompt after a restart.
-    Board wakes are `board.<kind>`; `comms.<kind>` is read as `board.<kind>`."""
+    Board wakes are `message_board.<kind>`; `comms.<kind>` is read as `message_board.<kind>`."""
 
     resume_prompt: str = (
         "Your session was restarted. Check your notes and state, and continue your work."
@@ -93,7 +94,8 @@ class Loop(LoopSpec):
         if not isinstance(value, list):
             return value
         return [
-            "board." + x.removeprefix("comms.") if isinstance(x, str) and x.startswith("comms.")
+            "message_board." + x.removeprefix("comms.")
+            if isinstance(x, str) and x.startswith("comms.")
             else x
             for x in value
         ]
@@ -148,13 +150,6 @@ class Agents(AgentSettings):
     roles: dict[RoleName, Role] | None = Field(default=None, min_length=1)
 
 
-class Environment(EnvironmentSettings):
-    backend: Literal["docker", "podman", "hf-sandbox"] = "docker"
-    # Harbor's EnvironmentConfig.kwargs; hf-sandbox: flavor, job_timeout, forward_hf_token, and
-    # flock's `namespace` (the org sandboxes bill to; flock.harbor.envs)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-
-
 class Inference(InferenceSettings):
     max_working: int | None = Field(default=None, ge=1, strict=True)  # agents in a turn at once
 
@@ -169,14 +164,14 @@ class SpecLimits(Limits):
 class Spec(Config):
     agents: Agents = Field(default_factory=Agents)
     inference: Inference = Field(default_factory=Inference)
-    environment: Environment = Field(default_factory=Environment)
+    environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     limits: SpecLimits = Field(default_factory=SpecLimits)
     loop: Loop | None = None
     pricing: Pricing | None = None
     workers: Workers = Field(default_factory=Workers)
     # Where flock's workers run (docs/local.md); a shepherd config runs here, on its engine.
     compute: ComputeSpec = Field(default_factory=lambda: ComputeSpec(kind="local"))
-    namespace: str = ""
+    namespace: str = ""  # bills the HF Jobs workers and the hf-sandbox sandboxes (unset: the token's)
     bucket: str = ""
     dashboard: DashboardSpec | None = None
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
@@ -242,17 +237,11 @@ class Spec(Config):
                     f"hf-sandbox caps a sandbox at 24 h: limits.trial_hours plus {name}'s "
                     f"turn_timeout ({turn}, a Trial's last turn) must stay below it"
                 )
-        if (
-            backend == "hf-sandbox"
-            and "board" in self.resources
-            and not self.resources["board"].get("url")
-        ):
-            raise ValueError("hf-sandbox has no mounts: set resources.board.url")
         if backend == "hf-sandbox" and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
-        if backend == "hf-sandbox" and (self.resources.get("board") or {}).get("rules"):
+        if backend == "hf-sandbox" and (self.resources.get("message_board") or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
-            self.resources["board"].setdefault("transport", "http")
+            self.resources["message_board"].setdefault("transport", "http")
         budgets = limits.budget_usd is not None or any(
             loop.while_.agent_usd is not None or loop.while_.budget_usd is not None
             for loop in loops
@@ -276,10 +265,12 @@ class Spec(Config):
         # YAML 1.2 booleans, as flock's specs: `on:` stays a key
         data = load_spec_yaml(path.read_text())
         spec = cls.model_validate(substitute(data, os.environ if env is None else env))
-        # as shepherd's Config.load
-        spec.output_dir = (here / spec.output_dir.expanduser()).resolve()
-        spec.tools_dir = (here / spec.tools_dir.expanduser()).resolve()
-        spec.resources_dir = (here / spec.resources_dir.expanduser()).resolve()
+        # as shepherd's Config.load: a path set in the YAML is relative to it
+        for field in ("output_dir", "tools_dir", "resources_dir"):
+            value = getattr(spec, field)
+            if field in spec.model_fields_set:
+                value = here / value.expanduser()
+            setattr(spec, field, value.resolve())
         if spec.team_file is not None:
             spec.team_file = (here / spec.team_file.expanduser()).resolve()
         roles = (spec.agents.roles or {}).values()
@@ -307,7 +298,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     roster = {agent_name(n, i): label[n] for n, role in roles.items() for i in range(role.count)}
     # the folders: a worker builds the tool bundle and loads the resource modules from them
     config = spec.model_dump(mode="json", include={
-        "inference", "task", "environment", "tools_dir", "tools", "resources_dir"})
+        "inference", "task", "environment", "tools_dir", "tools", "resources_dir", "namespace"})
     config["limits"] = spec.limits.model_dump(
         include={"agent_max_turns", "agent_timeout_seconds", "trial_hours"}
     )
@@ -318,9 +309,10 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         raise ValueError("inference.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
                          "sandboxes) and would reach every agent's container: name an "
                          "inference-only token, e.g. HF_INFERENCE_TOKEN")
-    if remote and spec.environment.kwargs.get("forward_hf_token"):
-        raise ValueError("environment.kwargs.forward_hf_token would put the workers' Hub token "
-                         "in every sandbox: leave it unset")
+    board = spec.resources.get("message_board") or {}
+    if remote and board.get("space_id") and board.get("private") is not False:
+        raise ValueError("resources.message_board.private: set it to false: a private Space's "
+                         "gate needs the workers' Hub token in every agent's container")
     for where, w in [("workers", spec.workers)] + [
             (f"agents.roles.{n}.workers", r.workers) for n, r in roles.items() if r.workers]:
         if bad := sorted(k for k in w.env or {} if is_sensitive_env_key(k)):
@@ -384,7 +376,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "folders": folders,
             },
         }
-    return SwarmSpec.model_validate({
+    swarm = SwarmSpec.model_validate({
         "swarm": spec.name,
         "namespace": spec.namespace,
         "bucket": spec.bucket,
@@ -404,6 +396,15 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         "limits": spec.limits.model_dump(include={"alive", "spawned_total", "budget_usd"}),
         "compute": spec.compute,
     })
+    most = [max_workers(ts.model_copy(update={"replicas": ts.replicas_ramp.max}) if ts.replicas_ramp
+                        else ts) for ts in swarm.types.values()]  # a ramp's max, not its start
+    if board.get("space_id") and sum(most) > 1:
+        # each worker runs its own resources, and each deploy() rotates the board's operator token
+        raise ValueError("resources.message_board.space_id: the worker that starts the board "
+                         "deploys it, so a run of more than one worker (a role each, or "
+                         "agents_per_worker below the count) cannot: deploy the board once and "
+                         "set message_board.url and token_env, or fit the run on one worker")
+    return swarm
 
 
 def pack_folders(tools_dir, resources_dir):
@@ -424,7 +425,8 @@ def pack_folders(tools_dir, resources_dir):
 
 def resource_secrets(spec: Spec) -> list[str]:
     """The env names resources read a token from on the worker: a plugin's `token_env` (its
-    default too) when it connects to a `url`. A missing module is the worker's error."""
+    default too) when it connects to a `url`, HF_TOKEN when it deploys a Space (`space_id`). A
+    missing module is the worker's error."""
     from .resources import load_module
 
     names = []
@@ -434,6 +436,8 @@ def resource_secrets(spec: Spec) -> list[str]:
         settings = schema.model_validate(options) if schema is not None else None
         if getattr(settings, "url", None) and getattr(settings, "token_env", None):
             names.append(settings.token_env)
+        if getattr(settings, "space_id", None):
+            names.append("HF_TOKEN")
     return names
 
 

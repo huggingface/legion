@@ -23,7 +23,7 @@ from ..test_agent_controller_calls import AGENT, AgentRoutes, gateway_worker
 from .test_adapter import TASK
 from .test_cli_launch import pins  # noqa: F401 - the fixture
 
-PLUGINS = Path(flock.harbor.__file__).with_name("plugins")
+PLUGINS = Path(flock.harbor.__file__).with_name("builtin")
 tools = load_module(PLUGINS / "tools" / "spawn.py")
 resource_module = load_module(PLUGINS / "resources" / "spawn.py")
 SpawnResource = resource_module.Resource

@@ -668,7 +668,7 @@ def create_app(
     the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
     `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
     A harbor resource's `resource` event {resource, kind, data} goes the same way, as
-    `<resource>.<kind>` (a board mention: `board.mention`).
+    `<resource>.<kind>` (a board mention: `message_board.mention`).
     `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.

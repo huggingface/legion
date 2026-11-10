@@ -14,7 +14,7 @@ from flock.harbor.tools.runner import load_module
 from flock.worker.main import main
 from tests.harbor import test_adapter
 
-tool = load_module(Path(flock.harbor.__file__).with_name("plugins") / "tools" / "spawn.py")
+tool = load_module(Path(flock.harbor.__file__).with_name("builtin") / "tools" / "spawn.py")
 
 
 async def download(task, directory):  # as fake_worker.py's (importing it would run it)

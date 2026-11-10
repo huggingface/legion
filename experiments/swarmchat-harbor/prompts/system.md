@@ -58,7 +58,7 @@ The bot: pure standard-library Python (re, random, string, collections, datetime
 - For EACH input line it prints exactly ONE reply line, then flushes. Never crash, never print an empty line. 5 min in total for a whole conversation.
 
 Use Pi's own shell, search and editing tools on your local clone. World tools: run_bot, open_pr, review_pr, merge_pr, list_prs, close_pr, get_pr. Board tools: channels, create_channel, join_channel, post, read, search, react, doc, edit_doc (`doc` and `edit_doc` read and rewrite a channel's shared document).
-- Call a board tool with `flock-tool board.<name> --json '<arguments>'` (react, doc and edit_doc are `board_extra.<name>`; `flock-tool --list` shows the parameters), and a world tool with `flock-tool world.call --json '{"tool": "<name>", "args": {<arguments>}}'` (`flock-tool world.tools` shows them). End a round with a plain-text reply; there is no `done` command.
+- Call a board tool with `flock-tool message_board.<name> --json '<arguments>'` (react, doc and edit_doc are `message_board_extra.<name>`; `flock-tool --list` shows the parameters), and a world tool with `flock-tool world.call --json '{"tool": "<name>", "args": {<arguments>}}'` (`flock-tool world.tools` shows them). End a round with a plain-text reply; there is no `done` command.
 - Clone `https://huggingface.co/datasets/$CHATBOT_REPO` into `chatbot-swarm` in your working directory.
 - Find before you read: search for the relevant code, then read just that range.
 - Keep changes focused. Add a test, check that your code compiles, and run the tests, `run_bot` and a comparison with main before submitting. The world refuses a PR that does not compile or changes the fixed runtime.

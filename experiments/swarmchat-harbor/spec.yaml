@@ -1,12 +1,12 @@
 # swarmchat-harbor: v8 (hf://buckets/cmpatino/legacy-swarmchat-experiments/v8: six lanes, its
 # prompts) on flock's Harbor path, on HF Jobs: one agent per lane, each a dedicated hf-sandbox
 # Trial of the task chatbot4-v8-agent, started by its own worker job. The shared chatbot4 world and a dedicated board are resources, reached over
-# HTTP through the world.* and board.* tools. `flock init` writes every ${VAR} below into run.env.
+# HTTP through the world.* and message_board.* tools. `flock init` writes every ${VAR} below into run.env.
 # Differences from v8: prompts/system.md names $CHATBOT_REPO and shepherd's tool calls, and
 # arrives in the first prompt (not as a system prompt); one agent per lane, no ramps; the board's
 # rules are not enforced on hf-sandbox (no mounts, no rule proxy: run.json warns).
 name: ${RUN_NAME:-v8h-1}
-namespace: HuggingFaceSwarms                   # bills the workers and the sandboxes (kwargs)
+namespace: HuggingFaceSwarms                   # bills the workers and the sandboxes
 bucket: hf://buckets/HuggingFaceSwarms/v8h-test
 compute: hf-jobs
 harness: pi
@@ -26,7 +26,7 @@ task:
 team_file: prompts/system.md
 resources_dir: resources                       # links to flock's plugins; `flock init` copies them
 resources:
-  board:
+  message_board:
     url: '${BOARD_URL}'                       # a dedicated, public board Space (sandboxes hold no HF token)
     token_env: MSGBOARD_OPERATOR_TOKEN        # its operator token (the worker's, never an agent's)
     # listed so the poller watches them: a mention in a channel not listed wakes no one
@@ -46,8 +46,8 @@ resources:
     transport: http                           # no mounts on hf-sandbox: each agent's own token
 tools_dir: tools                               # links to flock's plugins, as resources
 tools:
-  - board.*
-  - board_extra.*                             # react, doc, edit_doc: v8's board tools beyond shepherd's
+  - message_board.*
+  - message_board_extra.*                     # react, doc, edit_doc: v8's board tools beyond shepherd's
   - world.*
 agents:
   roles:
@@ -59,8 +59,7 @@ agents:
     safety: {role_file: prompts/lanes/safety.md}
 environment:
   backend: hf-sandbox
-  # job_timeout is the sandbox's idle timeout: longer than turn_timeout
-  kwargs: {flavor: cpu-basic, namespace: HuggingFaceSwarms, job_timeout: 3h}
+  flavor: cpu-basic                           # each sandbox's; its idle timeout is turn_timeout + 60 s
 workers:
   agents_per_worker: 1
   flavor: cpu-basic
@@ -71,7 +70,7 @@ loop:                                         # v8's, for 3 h
   prompt_file: prompts/round.md
   every: turn_end
   notices: true
-  on: [board.mention, board.thread, board.channel]
+  on: [message_board.mention, message_board.thread, message_board.channel]
   while: {until: 3h, max_rounds: 10000}
   final: {prompt_file: prompts/final.md, reserve_usd: 3}
   resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'

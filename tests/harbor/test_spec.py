@@ -14,7 +14,7 @@ from flock.models import SwarmSpec, load_spec_yaml, loop_refusals
 
 EXAMPLES = Path(__file__).parent / "examples"
 SWARMCHAT_FIXTURE = Path(__file__).parent / "fixtures" / "swarmchat-harbor-spec.yaml"
-RESOURCES = Path(flock.harbor.__file__).parent / "plugins" / "resources"
+RESOURCES = Path(flock.harbor.__file__).parent / "builtin" / "resources"
 
 
 def within(small, big):
@@ -37,7 +37,7 @@ def test_swarmchat_harbor_spec_loads():
     assert list(spec.roles()) == [
         "understanding", "answers", "conversation", "routing", "quality", "safety",
     ]
-    assert "world.*" in spec.tools and set(spec.resources) == {"board", "world"}
+    assert "world.*" in spec.tools and set(spec.resources) == {"message_board", "world"}
     assert spec.compute.kind == "local" and spec.environment.backend == "docker"
 
 
@@ -49,8 +49,8 @@ task:
   selector: v8
 team_file: prompts/system.md
 resources:
-  board: {url: '${BOARD_URL:-https://board.example}', channels: [general]}
-tools: [board.*]
+  message_board: {url: '${BOARD_URL:-https://board.example}', channels: [general]}
+tools: [message_board.*]
 agents:
   roles:
     answers: &lane
@@ -64,7 +64,7 @@ agents:
       ramp: {start: 3, add: 3, every: 30m}
 environment:
   backend: hf-sandbox
-  kwargs: {flavor: cpu-basic}
+  flavor: cpu-basic
 limits:
   run_timeout_seconds: 180000
   agent_max_turns: 150
@@ -73,7 +73,7 @@ pricing: [0.3, 1.2, 0.03]
 loop:
   prompt_file: prompts/round.md
   every: turn_end
-  on: [comms.mention, board.thread]
+  on: [comms.mention, message_board.thread]
   while: {until: 48h, max_rounds: 10000, agent_usd: 5}
   final: {prompt_file: prompts/final.md, reserve_usd: 20}
   resume_prompt: Your previous turn was interrupted. Continue.
@@ -97,7 +97,7 @@ def test_v8_shaped_spec_loads(tmp_path):
     assert safety.role_file == tmp_path / "prompts" / "lanes" / "safety.md"
     assert spec.environment.model_dump() == {
         "backend": "hf-sandbox",
-        "kwargs": {"flavor": "cpu-basic"},
+        "flavor": "cpu-basic",
     }
     assert (spec.limits.trial_hours, spec.limits.budget_usd) == (23, 400)
     loop = spec.loop
@@ -107,10 +107,10 @@ def test_v8_shaped_spec_loads(tmp_path):
         "48h",
         "The run is ending.",
     )
-    assert loop.on == ["board.mention", "board.thread"]  # comms.* is read as board.*
-    assert "transport" not in spec.resources["board"]
+    assert loop.on == ["message_board.mention", "message_board.thread"]  # comms.* is read as message_board.*
+    assert "transport" not in spec.resources["message_board"]
     ruled = v8_spec(tmp_path, V8.replace("[general]}", "[general], rules: {max_len: 2000}}"))
-    assert ruled.resources["board"]["transport"] == "http"  # no mounts: no rule proxy
+    assert ruled.resources["message_board"]["transport"] == "http"  # no mounts: no rule proxy
     # run.json holds this dump; it validates again as written
     dumped = spec.model_dump(mode="json")
     assert dumped["loop"]["while"]["max_rounds"] == 10000
@@ -121,7 +121,7 @@ def test_v8_shaped_spec_loads(tmp_path):
     "edit, error",
     [
         (lambda d: d["limits"].update(run_timeout_seconds=3600), "longer than loop.while.until"),
-        (lambda d: d["resources"]["board"].pop("url"), "set resources.board.url"),
+        (lambda d: d["resources"]["message_board"].pop("url"), "set message_board.space_id"),
         (lambda d: d.pop("pricing"), "budgets need pricing"),
         (
             lambda d: d["agents"]["roles"]["safety"]["ramp"].update(start=7),
@@ -142,11 +142,11 @@ def test_v8_shaped_spec_loads(tmp_path):
          "would apply to each of the 2 roles sharing the run's loop"),
         (lambda d: d["agents"]["roles"]["safety"].update(model="huggingface/other/M"),
          "agents.roles.safety has its own model: budgets need its pricing"),
-        (lambda d: d["environment"].update(backend="docker") or d.update(compute="hf-jobs"),
+        (lambda d: d.update(environment={"backend": "docker"}) or d.update(compute="hf-jobs"),
          "compute hf-jobs cannot run containers"),
-        (lambda d: d["environment"].update(backend="docker") or d.update(compute="slurm"),
+        (lambda d: d.update(environment={"backend": "docker"}) or d.update(compute="slurm"),
          "compute slurm runs rootless"),
-        (lambda d: d["loop"].update(on=["slack.mention"]), "expected board.<name>"),
+        (lambda d: d["loop"].update(on=["slack.mention"]), "expected message_board.<name>"),
     ],
 )
 def test_spec_checks(tmp_path, edit, error):
@@ -177,8 +177,8 @@ model: huggingface/Qwen/Qwen3.8-27B
 inference: {max_working: 40, reasoning_effort: high, api_key_env: HF_INFERENCE_TOKEN}
 task: {repo: https://huggingface.co/datasets/HuggingFaceSwarms/v8-harbor, selector: v8}
 team_file: team.md
-resources: {board: {url: https://board.example, channels: [general]}}
-tools: [board.*]
+resources: {message_board: {url: https://board.example, channels: [general]}}
+tools: [message_board.*]
 agents:
   roles:
     answers:
@@ -190,7 +190,7 @@ agents:
       pricing: [1, 2, 0.1]
       workers: {agents_per_worker: 1, max_extra: 2}
       loop: {prompt: 'Safety round {round}.', every: 5m, on: [comms.mention], while: {until: 2h}}
-environment: {backend: hf-sandbox, kwargs: {flavor: cpu-basic}}
+environment: {backend: hf-sandbox, flavor: cpu-basic}
 workers: {agents_per_worker: 10, turn_timeout: 20m, worker: {sync_interval_s: 60}}
 limits: {run_timeout_seconds: 180000, agent_max_turns: 150, budget_usd: 400, alive: 10}
 pricing: [0.3, 1.2, 0.03]
@@ -209,7 +209,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
         (tmp_path / name).write_text(text)
     (tmp_path / "spec.yaml").write_text(COMPILE + f"resources_dir: {RESOURCES}\n")
     spec = Spec.load(tmp_path / "spec.yaml", env={})
-    bundle = SimpleNamespace(manifest={"tools": {"board.post": {}}, "requires": ["board"]},
+    bundle = SimpleNamespace(manifest={"tools": {"message_board.post": {}}, "requires": ["message_board"]},
                              sha256="f" * 64)
     swarm = compile_spec(spec, TASK, bundle)
 
@@ -254,7 +254,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
         "answers-0000": "answers", "answers-0001": "answers", "answers-0002": "answers",
         "safety-0000": "safety",
     }
-    assert h.resources == {"board": {"url": "https://board.example", "channels": ["general"]}}
+    assert h.resources == {"message_board": {"url": "https://board.example", "channels": ["general"]}}
     assert h.config == {
         "model": "huggingface/Qwen/Qwen3.8-27B",
         "inference": {
@@ -265,10 +265,10 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
         },
         "task": {"repo": "https://huggingface.co/datasets/HuggingFaceSwarms/v8-harbor",
                  "dataset": None, "selector": "v8", "revision": "main"},
-        "environment": {"backend": "hf-sandbox", "kwargs": {"flavor": "cpu-basic"}},
+        "environment": {"backend": "hf-sandbox", "flavor": "cpu-basic"},
         "limits": {"agent_max_turns": 150, "agent_timeout_seconds": None, "trial_hours": 23},
-        "tools_dir": str(spec.tools_dir), "tools": ["board.*"],
-        "resources_dir": str(spec.resources_dir),
+        "tools_dir": str(spec.tools_dir), "tools": ["message_board.*"],
+        "resources_dir": str(spec.resources_dir), "namespace": "",
     }
     assert Spec.model_validate(h.config).model == h.config["model"]  # the worker rebuilds it
 
@@ -279,7 +279,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert safety.workers.model_dump() == {"initial": None, "max_extra": 2}
     assert (safety.harbor.role, safety.harbor.role_text) == ("safety", "")
     assert (safety.loop.prompt, safety.loop.every, safety.loop.on) == (
-        "Safety round {round}.", "5m", ["board.mention"],
+        "Safety round {round}.", "5m", ["message_board.mention"],
     )
     assert safety.loop.final is None and safety.resume_prompt.startswith("Your session")
 
@@ -289,11 +289,10 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
 
 @pytest.mark.parametrize("edit, error", [
     (lambda d: d["inference"].pop("api_key_env"), "HF_TOKEN is the workers' Hub token"),
-    (lambda d: d["inference"].pop("api_key_env") or d["environment"].update(backend="podman")
+    (lambda d: d["inference"].pop("api_key_env") or d.update(environment={"backend": "podman"})
      or d.update(compute="slurm"), "HF_TOKEN is the workers' Hub token"),
-    (lambda d: d["resources"]["board"].update(token_env="FLOCK_WORLD_ADMIN_TOKEN"),
+    (lambda d: d["resources"]["message_board"].update(token_env="FLOCK_WORLD_ADMIN_TOKEN"),
      "FLOCK_WORLD_ADMIN_TOKEN is the world's admin secret"),
-    (lambda d: d["environment"]["kwargs"].update(forward_hf_token=True), "forward_hf_token"),
 ])
 def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
     data = load_spec_yaml(COMPILE)
@@ -303,11 +302,36 @@ def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match=error):
         compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
-    data["environment"].update(backend="docker")  # local docker: the operator's own token
-    data["resources"]["board"].pop("token_env", None)
+    data["environment"] = {"backend": "docker"}  # local docker: the operator's own token
+    data["resources"]["message_board"].pop("token_env", None)
     data.pop("compute", None)
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
+def test_a_space_board_is_public_and_on_one_worker(tmp_path):
+    """A worker deploys a space_id board (and rotates its operator token): one worker per run,
+    and a private Space's gate would need the workers' Hub token in every container."""
+    data = load_spec_yaml(COMPILE)
+    data["resources"]["message_board"] = {"space_id": "ns/board", "channels": ["general"]}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+
+    def compiled():
+        (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+        return compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+    with pytest.raises(ValueError, match="private: set it to false"):
+        compiled()
+    data["resources"]["message_board"]["private"] = False
+    with pytest.raises(ValueError, match="more than one worker"):
+        compiled()
+    data["agents"]["roles"].pop("safety")
+    data.pop("spawn")
+    data["agents"]["roles"]["answers"].update(count=3, workers={"agents_per_worker": 3})
+    data["agents"]["roles"]["answers"].pop("ramp", None)
+    h = compiled().types["answers"]
+    assert "HF_TOKEN" in h.secrets  # the worker deploys the Space with it
 
 
 def test_roles_sharing_the_run_loop_split_its_reserve(tmp_path):

@@ -1373,9 +1373,9 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
 # Placeholders the worker fills in loop prompts; any other `{name}` is left as written.
 LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
 NEEDS_WORLD = "needs a world (not in this version)"
-# board.*: the board resource's events (harness harbor); comms.*: fed by the removed worker comms
-# hub (no feeder now: a warning at launch)
-_LOOP_SOURCE_RE = re.compile(r"^(board|comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
+# message_board.*: the message_board resource's events (harness harbor); board.* (its name before
+# shepherd #94) and comms.* (the removed worker comms hub): no feeder now, a warning at launch
+_LOOP_SOURCE_RE = re.compile(r"^(message_board|board|comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 
 class LoopWhile(_Removable):
@@ -1490,7 +1490,7 @@ class LoopSpec(_Removable):
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock launch`
     every: str = "turn_end"
-    on: list[str] = Field(default_factory=list)  # comms.mention, board.mention, world.event:*
+    on: list[str] = Field(default_factory=list)  # message_board.mention, world.event:*
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
     wake: LoopWake = Field(default_factory=LoopWake)
@@ -1519,8 +1519,8 @@ class LoopSpec(_Removable):
     def _sources(cls, v: list[str]) -> list[str]:
         for x in v:
             if not _LOOP_SOURCE_RE.match(x):
-                raise ValueError(f"{x!r}: expected board.<name>, comms.<name>, world.<name> or "
-                                 "artifacts.<name>")
+                raise ValueError(f"{x!r}: expected message_board.<name>, comms.<name>, "
+                                 "world.<name> or artifacts.<name>")
         return v
 
     @model_validator(mode="after")

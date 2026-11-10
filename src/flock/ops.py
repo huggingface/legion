@@ -162,10 +162,11 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
 
 def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
     """Why `src` in a type's `loop.on` can never wake its loop; None when the board feeds it."""
-    if not src.startswith("board."):
-        return "no feeder: only board.* wakes are fed (the board resource)"
-    # shortcut: not checked against resources.board.wake (the plugin's kinds)
-    return None if "board" in ts.harbor.resources else "no feeder: the run has no board resource"
+    if not src.startswith("message_board."):
+        return "no feeder: only message_board.* wakes are fed (the message_board resource)"
+    # shortcut: not checked against resources.message_board.wake (the plugin's kinds)
+    return None if "message_board" in ts.harbor.resources else (
+        "no feeder: the run has no message_board resource")
 
 
 def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
