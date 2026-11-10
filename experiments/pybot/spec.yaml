@@ -3,7 +3,7 @@
 # are resources, reached over HTTP through the world.* and message_board.* tools. What it needs,
 # cost and how to launch: README.md. `flock init` writes every ${VAR} below into run.env.
 name: ${RUN_NAME:-pybot-1}
-namespace: HuggingFaceSwarms                   # bills the workers and the sandboxes
+namespace: ${NAMESPACE:-HuggingFaceSwarms}     # bills the workers and the sandboxes
 bucket: ${BUCKET}                              # the run's checkpoint bucket, hf://buckets/<ns>/<name>
 compute: hf-jobs
 harness: pi
@@ -44,7 +44,12 @@ resources:
                                               # a new secret each run (same secret + name = same agent)
     transport: http                           # no mounts on hf-sandbox: each agent's own token
 tools:
-  - message_board.*
+  - message_board.post
+  - message_board.read
+  - message_board.search
+  - message_board.channels
+  - message_board.create_channel
+  - message_board.join_channel
   - message_board_extra.*                     # react, doc, edit_doc
   - world.*                                   # every lane, world_status included
 agents:

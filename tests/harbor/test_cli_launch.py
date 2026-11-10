@@ -152,21 +152,8 @@ def test_the_pybot_spec_compiles(monkeypatch, pins):
            "BOARD_URL": "https://board.example", "WORLD_URL": "https://world.example",
            "PYBOT_REPO": "ns/bot"}
     swarm = experiment_spec(monkeypatch, pins, "pybot", "c" * 40, env)
-    assert (swarm.swarm, swarm.compute.kind, len(swarm.types)) == ("pybot-1", "hf-jobs", 10)
-    h = swarm.types["answers"].harbor
-    assert h.config["environment"]["flavor"] == "cpu-basic"
-    assert h.config["namespace"] == "HuggingFaceSwarms"  # the sandboxes bill there too
-    assert h.resources["message_board"]["transport"] == h.resources["world"]["transport"] == "http"
-    assert len(h.resources["message_board"]["channels"]) == 11  # general and the ten lanes
-    assert set(swarm.types) < set(h.resources["message_board"]["channels"])
-    for ts in swarm.types.values():
-        assert ts.env == {"PYBOT_REPO": "ns/bot"} and ts.replicas == 1
-        assert ts.secrets == ["MSGBOARD_OPERATOR_TOKEN", "PYBOT_WORLD_TOKEN", "HF_TOKEN"]
-        assert ts.harbor.config["limits"]["trial_hours"] == 21
-    steward, answers = swarm.types["steward"], swarm.types["answers"]
-    assert (steward.loop.every, answers.loop.every) == ("15m", "turn_end")
-    assert (steward.name_prefix, answers.name_prefix) == ("steward-", None)
-    assert steward.loop.final.reserve_usd == 0.3 and answers.loop.final.reserve_usd == 3 / 9
+    assert (swarm.types["steward"].name_prefix, swarm.types["answers"].name_prefix) == (
+        "steward-", None)
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):

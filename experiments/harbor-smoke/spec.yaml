@@ -4,7 +4,7 @@
 # share its managed board. `flock init` writes every ${VAR} below into run.env.
 name: ${RUN_NAME:-hsmoke-1}
 namespace: HuggingFaceSwarms
-bucket: ${BUCKET:-hf://buckets/HuggingFaceSwarms/v8h-test}
+bucket: ${BUCKET:-hf://buckets/HuggingFaceSwarms/harbor-smoke-test}
 compute: {kind: slurm, partition: '${SLURM_PARTITION:-}', cpus: 4, mem: 7G, time: '2:00:00'}
 model: huggingface/Qwen/Qwen3.8-27B:deepinfra
 # [input, output, cached] USD per 1M tokens (docs/open-models.md; input/output matched the

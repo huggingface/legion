@@ -127,7 +127,8 @@ types:
 ```
 
 A Harbor spec sets it per role (`agents.roles.<role>.name_prefix`, words only), e.g.
-`steward: {name_prefix: steward-, ...}` in experiments/pybot.
+`steward: {name_prefix: steward-, ...}` in experiments/pybot. Changing it with `flock update`
+affects only new names: running agents and reserved names keep theirs.
 
 - **Words.** About 190 adjectives (colors, simple qualities) and 340 nouns (animals, fruits,
   plants, everyday objects), lowercase, letters and hyphens only, so every name is a valid

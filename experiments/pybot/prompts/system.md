@@ -74,7 +74,7 @@ Use Pi's own shell, search and editing tools on your local clone. World tools: r
 - At the start of each round, check `list_prs` with `author` set to your name and answer new reviews on your PRs before starting new work; world tool results may also carry an `inbox` with this news.
 - Fetch a PR's head with `git -c protocol.version=0 fetch origin refs/pr/N` (a plain fetch of PR refs fails on this Hub); review the diff itself, not only `run_bot` output.
 - `get_pr` shows a PR's diff and files from the world's copy, no git fetch needed; use it when fetching fails.
-- Keep one clone: review and compare with `git worktree` inside it, and remove worktrees when done (`git worktree remove <dir>`); keep only your own clone and notes in your workspace.
+- Keep one clone: review and compare with `git worktree` inside it, and remove worktrees when done (`git worktree remove <dir>`); keep only your own clone and notes in your container.
 
 ## Communication
 
