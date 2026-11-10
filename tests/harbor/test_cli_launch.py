@@ -206,3 +206,17 @@ def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
                   (result.run_dir / "events" / f"{agent}.jsonl").read_text().splitlines()]
         assert "reply-" in json.dumps([e for e in events if e["type"] == "message"])
         assert not [e for e in events if e["type"] == "error"], events
+
+
+def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
+    for key in ("SANDBOX_NAMESPACE", "BOARD_SPACE"):
+        monkeypatch.delenv(key, raising=False)
+    swarm = experiment_spec(monkeypatch, pins, "mini-swarm",
+                            "d0e1fee0f1036a80d5400d67f7fad9143668ba94")
+    assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("mini-swarm-1", "local", ["agent"])
+    ts = swarm.types["agent"]
+    assert (ts.replicas, ts.agents_per_worker) == (3, 3)  # one worker: it deploys the board
+    assert ts.harbor.resources == {"message_board": {"space_id": "mini-swarm", "private": False}}
+    assert ts.harbor.config["tools"] == ["message_board.*"]
+    assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
+    assert ts.secrets == ["HF_TOKEN"]  # the worker deploys the Space and starts the sandboxes

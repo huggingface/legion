@@ -348,6 +348,9 @@ class Resource:
         _, self.operator_token, _ = auth.new_token()
         self.secrets.append(self.operator_token)
         # Saved before deploy() replaces the Space's secret, so it is never lost.
+        token_file = self.state_dir / "operator.token"
+        if token_file.exists():  # flock: a restarted local worker shares its state dir; keep both
+            token_file.rename(token_file.with_name(f"operator.token.{time.time_ns()}"))
         descriptor = os.open(
             self.state_dir / "operator.token",
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,

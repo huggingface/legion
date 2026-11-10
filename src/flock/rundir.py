@@ -262,7 +262,8 @@ def shipped_folders(spec_file: Path) -> list[Path]:
         return []
     if not (isinstance(data, dict) and "task" in data):
         return []
-    return [Path(str(data.get(f"{k}_dir") or k)) for k in ("tools", "resources")]
+    # unset: flock's built-in ones (flock.harbor.config.BUILTIN), not the experiment's
+    return [Path(str(data[f"{k}_dir"])) for k in ("tools", "resources") if data.get(f"{k}_dir")]
 
 
 def copy_experiment(src: Path | None, dst: Path, rep: InitReport,

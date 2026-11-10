@@ -334,6 +334,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     # besides the inference key (the provider's): what the workers read on their own host
     secrets = resource_secrets(spec) + (["HF_TOKEN"] if spec.environment.backend == "hf-sandbox"
                                         else [])  # sandboxes start with the worker's HF token
+    secrets = list(dict.fromkeys(secrets))  # a Space board's HF_TOKEN may be the sandboxes' too
     types = {}
     for name, role in roles.items():
         model = role.model or spec.model
