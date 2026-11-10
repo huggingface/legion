@@ -10,6 +10,8 @@ It is the layer under [msgboard](https://github.com/huggingface/msgboard) and
 a prompt API and an event stream, and leaves messaging and experiment design to
 them.
 
+![flock architecture: the controller, execution environments, agent harnesses, inference, tools and worlds](docs/architecture.svg)
+
 ## Features
 
 - **Local mode:** `compute: local` and `flock launch spec.yaml` run the same spec on a laptop
