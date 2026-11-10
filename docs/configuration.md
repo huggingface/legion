@@ -212,9 +212,10 @@ omit `team_file` or supply instructions that do not require the board.
 
 - `docker` (the default) and `podman`: a local Harbor task container per agent,
   each on its own network.
-- `hf-sandbox`: an HF Sandbox (`huggingface_hub.Sandbox`, through Harbor's
-  `hf-sandbox` environment) per agent, which is an HF Job on `environment.flavor` hardware (`cpu-basic` by
-  default). No Docker is needed on the launching machine.
+- `hf-sandbox`: an HF Sandbox per agent (`huggingface_hub.Sandbox`, through
+  Harbor's `hf-sandbox` environment). Each sandbox is an HF Job on
+  `environment.flavor` hardware, `cpu-basic` by default. No Docker is needed on the
+  launching machine.
 
 ```yaml
 resources:
@@ -229,8 +230,8 @@ environment:
 reached through a Unix socket mounted into the task container, and a sandbox can't
 mount it. It also can't run:
 
-- tasks with several containers (`environment/docker-compose.yaml`) or a
-  `Dockerfile`: the task must set a prebuilt, public `[environment].docker_image`;
+- tasks without a prebuilt, public `[environment].docker_image`: a sandbox can't
+  build a `Dockerfile` or run several containers (`docker-compose.yaml`);
 - resources that mount files or sockets into the task environment;
 - network allowlists or `no-network` tasks (sandboxes have open internet access);
 - commands as different users: everything runs as the image's default user.
@@ -240,11 +241,12 @@ after an idle period that Flock sets to the run timeout plus 60 seconds, so one 
 behind by a killed launcher doesn't run for long. Check with `hf jobs ps`.
 
 **Cost.** Each agent runs one HF Job for its trial: sandbox start, Pi install and
-the agent's run, then grading. For mini-swarm that is a few minutes of `cpu-basic`
-per agent, plus the model's inference. The Space board runs on free CPU Basic
-hardware. Jobs run, and are billed, under the account that owns the token, since
-Harbor 0.25 doesn't pass a namespace to the sandbox, so they can't be billed to an
-organization yet. The account must be able to run HF Jobs.
+the agent's run, then grading. For mini-swarm that is about a minute of `cpu-basic`
+per agent (5 s to start the sandbox, 15-35 s to install Pi and the tools, 10-35 s
+for the agent), plus the model's inference. The Space board runs on free CPU Basic
+hardware. Jobs run, and are billed, under the account that owns the token: Harbor
+0.25 doesn't pass a namespace to the sandbox, so they can't be billed to an
+organization yet. That account must be able to run HF Jobs.
 
 **Tokens.** The token needs Jobs permission (`job.write`) for the sandboxes, and
 Inference for the model. As with the Docker backends, every agent receives the

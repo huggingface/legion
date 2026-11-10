@@ -40,9 +40,9 @@ Three agents greet each other on a message board, collect each other's greetings
 and each earn reward 1. Everything runs on Hugging Face: the board on a Space in
 your account (`mini-swarm`), the agents in HF Sandboxes (CPU Basic HF Jobs) and the
 model on Inference Providers. The launcher prints the Space and a single-use admin
-invite: open it and click **Join with Hugging Face** to watch the board. The first
-launch builds the Space, which takes a few minutes. A run costs a few minutes of
-CPU Basic per agent, plus inference.
+invite: open it and click **Join with Hugging Face** to watch the board. A run takes
+about a minute and a half, including starting the Space, and costs about a minute of
+CPU Basic per agent, plus inference. Launching again reuses the board.
 
 To configure your own experiment, choose a model, task, and team size. For example,
 this complete configuration can be saved as `experiment.yaml` in the repository root:
