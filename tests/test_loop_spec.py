@@ -37,7 +37,7 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({}, "loop needs prompt or prompt_file"),
     ({"prompt": "x", "every": "often"}, "bad duration"),
     ({"prompt": "x", "every": "0s"}, "duration > 0"),
-    ({"prompt": "x", "on": ["slack.mention"]}, "expected board.<name>"),
+    ({"prompt": "x", "on": ["slack.mention"]}, "expected message_board.<name>"),
     ({"prompt": "x", "while": {"max_rounds": 0}}, ">= 1"),
     ({"prompt": "x", "while": {"until": "soon"}}, "bad until"),
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),
@@ -92,7 +92,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no feeder: only board.* wakes are fed" in r.output
+    assert "loop.on comms.mention: no feeder: only message_board.* wakes are fed" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 

@@ -199,9 +199,9 @@ def test_loops(tiny):
     (re-prompted by the worker) and `every: 500ms` with `while.until` (by the controller).
     Then the run's bundle sums them up."""
     out = tiny.flock("launch", tiny.spec(replicas=2, extra=LOOPS), "--skip-preflight")
-    # unquoted `on:` is the key "on" (YAML 1.2), `comms.` reads as `board.`, and the run has no
-    # board resource
-    assert "loop.on board.mention: no feeder: the run has no board resource" in out, out
+    # unquoted `on:` is the key "on" (YAML 1.2), `comms.` reads as `message_board.`, and the run has no
+    # message_board resource
+    assert "loop.on message_board.mention: no feeder: the run has no message_board resource" in out, out
     run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
 
     def loop(t: str) -> dict:
@@ -256,7 +256,7 @@ def test_loops(tiny):
     assert stamps == sorted(stamps)
     assert sorted(e["agent"] for e in merged if e["type"] == "final_round") == sorted(agents)
     doc = json.loads((run / "run.json").read_text())
-    assert doc["spec"]["types"]["ticker"]["loop"]["on"] == ["board.mention"]
+    assert doc["spec"]["types"]["ticker"]["loop"]["on"] == ["message_board.mention"]
     lp = doc["loops"]["writer"]
     assert (lp["state"], lp["reason"], lp["rounds_total"], lp["final_sent"], lp["final_done"],
             lp["wakes_total"]) == ("done", "max_rounds", 6, 2, 2, 0), lp

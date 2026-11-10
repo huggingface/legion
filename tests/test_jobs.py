@@ -119,7 +119,7 @@ def test_the_override_replaces_msgboards_git_source(tmp_path):
     without the override, uv cannot resolve it."""
     deps = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())[
         "project"]["dependencies"]
-    (git,) = [r for r in deps if r.startswith("msgboard @ git+")]
+    (git,) = [r for r in deps if r.startswith(("msgboard @ git+", "msgboard[hf] @ git+"))]
     flock = fake_wheel(tmp_path / "flock-0.0.1-py3-none-any.whl", (git,))
     (tmp_path / "req.in").write_text(f"flock @ file://{flock}\n")
     (tmp_path / "overrides.txt").write_text(f"msgboard @ file://{fake_wheel(tmp_path / MSGBOARD)}\n")
