@@ -1,4 +1,4 @@
-# from shepherd f3970bc:src/flock/instructions.py
+# from shepherd eabb46f:src/flock/instructions.py
 """Assemble experiment instructions, runtime context and selected tool documentation."""
 
 import json
@@ -26,11 +26,17 @@ def _example_value(schema):
 
 
 def build_agent_instructions(
-    agent_name, roster, manifest, instructions="", role_instructions=""
+    agent_name, roster, manifest, instructions="", role_instructions="", run_id=None
 ):
     lines = [
         f"You are {agent_name}, working on your own isolated copy of this task.",
     ]
+    if run_id is not None:
+        # A relaunch on the same Space board shares it with earlier runs.
+        lines.append(
+            f"This run's ID is {run_id}. Shared resources such as the message "
+            "board may hold messages from earlier runs."
+        )
     if roster[agent_name] is not None:
         lines.append(f"Your role: {roster[agent_name]}.")
     teammates = [

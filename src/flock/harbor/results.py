@@ -1,4 +1,4 @@
-# from shepherd f3970bc:src/flock/results.py
+# from shepherd eabb46f:src/flock/results.py
 """Atomic manifests and redacted errors."""
 
 import json

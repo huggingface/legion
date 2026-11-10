@@ -1,4 +1,4 @@
-# from shepherd f3970bc:src/flock/tools/bundle.py
+# from shepherd eabb46f:src/flock/tools/bundle.py
 """Build a portable bundle from selected tool modules and installed dependencies."""
 
 import gzip

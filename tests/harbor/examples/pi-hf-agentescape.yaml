@@ -1,23 +1,13 @@
 # Single five-node AgentEscapeBench task; requires private HF repository access.
 name: pi-hf-agentescape
-harness: pi
 model: huggingface/Qwen/Qwen3.8-27B:cerebras
-inference:
-  base_url: https://router.huggingface.co/v1
-  api_key_env: HF_TOKEN
-  api_format: openai_chat_completions
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor
   selector: agentescape-5-skeleton-032856e7
   revision: eeccfb09a986db1670b56673b22ebea4d473d2a8
 team_file: ../prompts/team.md
-resources_dir: ../resources
 resources:
-  board:
-    channels: [general]
-tools_dir: ../tools
-tools:
-  - board.*  # All tools exported by tools/board.py
+  message_board:  # a local board; its tools are selected automatically
 agents:
   count: 2
 environment:
@@ -25,4 +15,3 @@ environment:
 limits:
   run_timeout_seconds: 3600
   agent_max_turns: 30
-output_dir: ../results

@@ -1,4 +1,4 @@
-# from shepherd f3970bc:tests/test_tools.py
+# from shepherd eabb46f:tests/test_tools.py
 import json
 import os
 import subprocess
@@ -104,7 +104,10 @@ def test_bundle_is_reproducible_and_runs_generic_async_tools(tools):
     agent_instructions = build_agent_instructions(
         "agent-001", {"agent-001": None}, first.manifest
     )
-    assert "sample.add" in agent_instructions and "board.post" not in agent_instructions
+    assert (
+        "sample.add" in agent_instructions
+        and "message_board.post" not in agent_instructions
+    )
 
 
 async def test_setup_hook_is_generic_and_runs_once(tools):

@@ -1,4 +1,4 @@
-# from shepherd f3970bc:tests/test_roles.py
+# from shepherd eabb46f:tests/test_roles.py
 from pathlib import Path
 
 import pytest

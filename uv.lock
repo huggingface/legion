@@ -656,7 +656,7 @@ dependencies = [
     { name = "harbor" },
     { name = "httpx" },
     { name = "huggingface-hub" },
-    { name = "msgboard" },
+    { name = "msgboard", extra = ["hf"] },
     { name = "packaging" },
     { name = "podman-compose" },
     { name = "pydantic" },
@@ -690,7 +690,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "jinja2", marker = "extra == 'controller'", specifier = ">=3.1" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
-    { name = "msgboard", git = "https://github.com/huggingface/msgboard.git?rev=5234ffd70b388ba9b64daa1dc8275a03230814f9" },
+    { name = "msgboard", extras = ["hf"], git = "https://github.com/huggingface/msgboard.git?rev=563911d586e3435f2aadb25d7a8f565cce828406" },
     { name = "packaging", specifier = ">=24" },
     { name = "podman-compose", specifier = "==1.5.0" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -1427,11 +1427,16 @@ wheels = [
 [[package]]
 name = "msgboard"
 version = "0.1.0"
-source = { git = "https://github.com/huggingface/msgboard.git?rev=5234ffd70b388ba9b64daa1dc8275a03230814f9#5234ffd70b388ba9b64daa1dc8275a03230814f9" }
+source = { git = "https://github.com/huggingface/msgboard.git?rev=563911d586e3435f2aadb25d7a8f565cce828406#563911d586e3435f2aadb25d7a8f565cce828406" }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+hf = [
+    { name = "huggingface-hub" },
 ]
 
 [[package]]

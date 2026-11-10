@@ -1,4 +1,4 @@
-# from shepherd f3970bc:tests/test_results.py
+# from shepherd eabb46f:tests/test_results.py
 
 
 from flock.harbor.results import safe_error

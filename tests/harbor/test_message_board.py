@@ -1,21 +1,20 @@
-# from shepherd f3970bc:tests/test_board.py
+# from shepherd eabb46f:tests/test_message_board.py
 import json
 import os
 import subprocess
 import sys
 import tarfile
-from pathlib import Path
 
 import pytest
 from msgboard.client import BoardError, Client
 
-import flock.harbor
+from flock.harbor.config import BUILTIN
 from flock.harbor.tools.bundle import build_tool_bundle
 from flock.harbor.tools.runner import load_module
 
-TOOLS_DIR = Path(flock.harbor.__file__).with_name("plugins") / "tools"
-board_tools = load_module(TOOLS_DIR / "board.py")
-BoardResource = load_module(TOOLS_DIR.parent / "resources" / "board.py").Resource
+TOOLS_DIR = BUILTIN / "tools"
+board_tools = load_module(TOOLS_DIR / "message_board.py")
+BoardResource = load_module(BUILTIN / "resources" / "message_board.py").Resource
 
 
 def BoardRuntime(state_dir):
@@ -112,14 +111,16 @@ def invoke_bundle(directory, name, arguments, env):
 async def test_bundle_runs_without_host_environment_and_rejects_unselected_tools(
     board, tmp_path
 ):
-    directory = extract_bundle(tmp_path, ["board.post"])
+    directory = extract_bundle(tmp_path, ["message_board.post"])
     identity = board.provision(["bundled-agent"])[0]
     env = {"MSGBOARD_URL": board.url, "MSGBOARD_TOKEN": identity["token"]}
-    result = invoke_bundle(directory, "board.post", {"text": "from bundle"}, env)
+    result = invoke_bundle(
+        directory, "message_board.post", {"text": "from bundle"}, env
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "from bundle" in result.stdout
     result = invoke_bundle(
-        directory, "board.create_channel", {"name": "not-selected"}, env
+        directory, "message_board.create_channel", {"name": "not-selected"}, env
     )
     assert result.returncode == 1
     assert "not selected" in result.stdout
@@ -128,14 +129,14 @@ async def test_bundle_runs_without_host_environment_and_rejects_unselected_tools
 
 async def test_cli_uses_authenticated_socket_and_removes_it(tmp_path):
     runtime = BoardRuntime(tmp_path / "state")
-    directory = extract_bundle(tmp_path, ["board.post"])
+    directory = extract_bundle(tmp_path, ["message_board.post"])
     try:
         await runtime.start()
         socket_path = runtime.socket_path
         identity = runtime.provision(["socket-agent"])[0]
         result = invoke_bundle(
             directory,
-            "board.post",
+            "message_board.post",
             {"text": "via socket"},
             {
                 "MSGBOARD_URL": "http://unreachable.invalid",

@@ -1,4 +1,4 @@
-# from shepherd f3970bc:src/flock/resources.py
+# from shepherd eabb46f:src/flock/resources.py
 """Load experiment resources and manage their lifecycle without provider-specific code."""
 
 import asyncio
@@ -65,14 +65,24 @@ class Resources:
             self.attempted.append(name)
             record = self.records[name]
             record["status"] = "starting"
+            # Resources may need longer, e.g. to build a Space.
+            limit = getattr(provider, "startup_timeout_seconds", 120)
             try:
-                async with asyncio.timeout(120):
+                async with asyncio.timeout(limit) as deadline:
                     await provider.start()
                 record.update(status="ready", metadata=provider.metadata)
                 self.watchers.append(asyncio.create_task(self._watch(name, provider)))
             except BaseException as exc:
-                record.update(status="failed", error=safe_error(exc, self.secrets))
-                raise
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    exc = RuntimeError(
+                        f"Resource {name} did not start within {limit:g} s"
+                    )
+                record.update(
+                    status="failed",
+                    error=safe_error(exc, self.secrets),
+                    metadata=provider.metadata,
+                )
+                raise exc
 
     def bind(self, name, config):
         metadata = {}
@@ -132,24 +142,29 @@ class Resources:
             record = self.records[name]
             directory = self.run_dir / "resources" / name
             try:
-                directory.mkdir(parents=True, exist_ok=True)
-                async with asyncio.timeout(120):
+                async with asyncio.timeout(120) as deadline:
+                    directory.mkdir(parents=True, exist_ok=True)
                     artifacts = await self.providers[name].export(directory)
                 record["artifacts"] = {
                     key: str((directory / path).relative_to(self.run_dir))
                     for key, path in artifacts.items()
                 }
             except Exception as exc:
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    exc = RuntimeError("Export did not finish within 120 s")
                 record["export_error"] = safe_error(exc, self.secrets)
                 failed = True
         for name in reversed(self.attempted):
             record = self.records[name]
+            limit = getattr(self.providers[name], "stop_timeout_seconds", 30)
             try:
-                async with asyncio.timeout(30):
+                async with asyncio.timeout(limit) as deadline:
                     await self.providers[name].stop()
                 if record["status"] == "ready":
                     record["status"] = "stopped"
             except Exception as exc:
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    exc = RuntimeError(f"Stop did not finish within {limit:g} s")
                 record["cleanup_error"] = safe_error(exc, self.secrets)
                 failed = True
         return failed

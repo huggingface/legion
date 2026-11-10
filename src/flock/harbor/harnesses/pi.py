@@ -1,4 +1,4 @@
-# from shepherd f3970bc:src/flock/harnesses/pi.py
+# from shepherd eabb46f:src/flock/harnesses/pi.py
 """Compatibility setup for native Pi against Hugging Face's chat API."""
 
 import json

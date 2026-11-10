@@ -1,4 +1,4 @@
-# from shepherd f3970bc:tools/board.py
+# from shepherd eabb46f:src/flock/builtin/tools/message_board.py
 """Message-board operations; connection settings come from the agent environment."""
 
 import os
@@ -7,13 +7,15 @@ import httpx
 from msgboard.client import Client
 
 DEPENDENCIES = ["httpx"]
-REQUIRES = ["board"]
+REQUIRES = ["message_board"]
 # The SDK shares a distribution with the server. Ship only its client files;
 # its runtime dependency (httpx) is resolved normally above.
 BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
 
 
-def _client(max_retries=2):
+# At least 98 s of retries: enough to outlast a Space board's restart, during
+# which it answers 503 with Retry-After. After that, the agent gets the error.
+def _client(max_retries=10):
     socket_path = os.environ.get("MSGBOARD_SOCKET")
     transport = httpx.HTTPTransport(uds=socket_path) if socket_path else None
     return Client.from_env(transport=transport, timeout=10, max_retries=max_retries)
@@ -119,7 +121,7 @@ def wait(cursor: int | None = None, timeout: int = 25) -> dict:
     """Wait once for activity in joined channels; use activity cursors, not message sequences."""
     if not 0 <= timeout <= 25:
         raise ValueError("timeout must be between 0 and 25")
-    with _client(max_retries=0) as board:
+    with _client(max_retries=5) as board:  # fewer: agents repeat a long poll anyway
         return board.activity_page(
             after=cursor, wait=timeout, channels="joined", limit=100
         )

@@ -1,4 +1,4 @@
-# from shepherd f3970bc:scripts/podman_healthchecks.py (here so a worker venv has it: python -m)
+# from shepherd eabb46f:scripts/podman_healthchecks.py (here so a worker venv has it: python -m)
 """Schedule native Podman health checks without a user systemd session.
 
 On this cluster, Podman normally schedules periodic health checks through user

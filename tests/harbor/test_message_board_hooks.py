@@ -17,9 +17,9 @@ from flock.harbor.tools.runner import load_module
 
 from .. import fake_msgboard
 
-TOOLS_DIR = Path(flock.harbor.__file__).with_name("plugins") / "tools"
-board_tools = load_module(TOOLS_DIR / "board.py")
-BoardResource = load_module(TOOLS_DIR.parent / "resources" / "board.py").Resource
+TOOLS_DIR = Path(flock.harbor.__file__).with_name("builtin") / "tools"
+board_tools = load_module(TOOLS_DIR / "message_board.py")
+BoardResource = load_module(TOOLS_DIR.parent / "resources" / "message_board.py").Resource
 
 
 @pytest.fixture
@@ -157,3 +157,25 @@ async def test_rule_proxy_checks_posts_and_opens_only_the_board_tools_routes(
     finally:
         await resource.stop()
     assert not Path(mount["source"]).exists()
+
+
+async def test_a_url_board_fails_the_run_only_after_the_outage_grace(tmp_path, monkeypatch):
+    """`url` (a board that is up) is watched as shepherd's Space board: health checks every
+    HEALTH_CHECK_SECONDS, an error only once it has been unreachable for the grace."""
+    board, server, board.url = fake_msgboard.serve(prefix="/boards/x")
+    operator = board.token_for("operator", "user")
+    monkeypatch.setenv("MSGBOARD_OPERATOR_TOKEN", operator)
+    resource = await started(board, tmp_path / "state")
+    globals_ = type(resource).wait.__globals__
+    monkeypatch.setitem(globals_, "HEALTH_CHECK_SECONDS", 0.05)
+    monkeypatch.setitem(globals_, "SPACE_OUTAGE_GRACE_SECONDS", 0.5)
+    try:
+        watching = asyncio.create_task(resource.wait())
+        await asyncio.sleep(0.2)
+        assert not watching.done()  # healthy
+        del board.tokens[operator]  # every health check fails now (401)
+        with pytest.raises(RuntimeError, match="unreachable for 0.5 s"):
+            await asyncio.wait_for(watching, timeout=5)
+    finally:
+        await resource.stop()
+        server.shutdown()

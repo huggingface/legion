@@ -1,4 +1,4 @@
-"""Board operations beyond shepherd's board.* (reactions, channel docs); the same connection."""
+"""Board operations beyond message_board.* (reactions, channel docs); the same connection."""
 
 import os
 
@@ -6,15 +6,15 @@ import httpx
 from msgboard.client import Client
 
 DEPENDENCIES = ["httpx"]
-REQUIRES = ["board"]
+REQUIRES = ["message_board"]
 BUNDLE_FILES = {"msgboard": ["msgboard/__init__.py", "msgboard/client.py"]}
 
 
 def _client():
-    # As board.py's: a tool module cannot import another one from the bundle.
+    # As message_board.py's: a tool module cannot import another one from the bundle.
     socket_path = os.environ.get("MSGBOARD_SOCKET")
     transport = httpx.HTTPTransport(uds=socket_path) if socket_path else None
-    return Client.from_env(transport=transport, timeout=10, max_retries=2)
+    return Client.from_env(transport=transport, timeout=10, max_retries=10)
 
 
 def react(message_id: int, emoji: str, channel: str = "general") -> dict:

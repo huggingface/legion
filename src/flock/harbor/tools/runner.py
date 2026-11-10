@@ -1,4 +1,4 @@
-# from shepherd f3970bc:src/flock/tools/runner.py
+# from shepherd eabb46f:src/flock/tools/runner.py
 """Load and invoke selected Python tools. The sandbox runtime uses Python 3.10+."""
 
 import argparse

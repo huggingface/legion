@@ -1,12 +1,13 @@
-# from shepherd f3970bc:tests/test_config_sources.py
+# from shepherd eabb46f:tests/test_config_sources.py
 from pathlib import Path
 
 import pytest
+import yaml
 from harbor.models.registry import DatasetMetadata
 from harbor.models.task.id import GitTaskId
 from pydantic import ValidationError
 
-from flock.harbor.config import Config, TaskSettings
+from flock.harbor.config import BUILTIN, Config, TaskSettings
 from flock.harbor.sources import resolve_task
 
 EXAMPLES = Path(__file__).parent / "examples"
@@ -27,13 +28,35 @@ def test_explicit_dataset_still_requires_a_version(dataset):
         {"limits": {"run_timeout_seconds": float("inf")}},
         {"limits": {"agent_timeout_seconds": 0}},
         {"inference": {"base_url": "https://secret@router.huggingface.co/v1"}},
-        {"board": {"mode": "shared"}},
+        {"message_board": {"mode": "shared"}},
     ],
 )
 def test_unsupported_or_unsafe_configuration_is_rejected(update):
     data = Config.load(EXAMPLES / "pi-hf.yaml").model_dump()
     data.update(update)
     with pytest.raises(ValidationError):
+        Config.model_validate(data)
+
+
+def test_config_defaults_and_hf_sandbox_board(tmp_path, monkeypatch):
+    example = (EXAMPLES / "mini-swarm.yaml").resolve()
+    monkeypatch.chdir(tmp_path)
+    spec = Config.load(example)
+    # Defaults: Flock's own resources and tools, the board's tools, ./results.
+    assert spec.resources_dir == BUILTIN / "resources"
+    assert spec.tools_dir == BUILTIN / "tools"
+    assert spec.output_dir == tmp_path / "results"
+    assert spec.tools == ["message_board.*"]
+    assert spec.environment.flavor == "cpu-basic"
+    data = yaml.safe_load(example.read_text())
+    # An explicit empty list opts out of the board's tools.
+    assert Config.model_validate({**data, "tools": []}).tools == []
+    # A sandbox can't reach a local board, but needs no board at all.
+    assert Config.model_validate({**data, "resources": {}}).tools == []
+    with pytest.raises(ValidationError, match="space_id"):
+        Config.model_validate({**data, "resources": {"message_board": None}})
+    data["environment"] = {"backend": "docker", "flavor": "cpu-basic"}
+    with pytest.raises(ValidationError, match="only valid with hf-sandbox"):
         Config.model_validate(data)
 
 

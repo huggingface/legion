@@ -1,4 +1,4 @@
-# from shepherd f3970bc:tests/test_networking.py
+# from shepherd eabb46f:tests/test_networking.py
 import ipaddress
 import json
 
