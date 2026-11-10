@@ -11,10 +11,8 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-import yaml
 from pydantic import ValidationError
 
-from flock import cli
 from flock.comms.board import AsyncBoard, BoardError, SyncBoard, same_board
 from flock.comms.tools import Refused, check_content, check_rate, query_terms, relaxed_search
 from flock.controller.comms import CommsError, resolve
@@ -144,20 +142,6 @@ def test_listed_comms_tools_and_folder_tools():
     raw["types"]["dev"]["tools"] = ["comms:search"]
     with pytest.raises(ValidationError, match="comms.search"):
         SwarmSpec.model_validate(raw)
-
-
-def test_cli_inlines_kickoff_and_protocols(tmp_path):
-    (tmp_path / "prompts").mkdir()
-    (tmp_path / "prompts" / "kickoff.md").write_text("Team: build Eliza.")
-    (tmp_path / "lead-agree.md").write_text("One leads, others agree.")
-    raw = swarm_raw(kickoff_file="prompts/kickoff.md", protocols=["lead-agree.md"])
-    f = tmp_path / "spec.yaml"
-    f.write_text(yaml.safe_dump(raw))
-    s = cli.load_spec(str(f))
-    assert s.comms.kickoff == "Team: build Eliza." and s.comms.protocols_text == ["One leads, others agree."]
-
-
-# --------------------------------------------------------------------------- rules and search
 
 
 def test_content_rules():

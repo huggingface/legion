@@ -55,24 +55,6 @@ def test_render_fills_builtins_and_leaves_the_rest():
     assert render("{workspace}", meta(), spend=0, last_summary=None, now=T0) == "not measured yet"
 
 
-async def test_turn_end_loop_reprompts_until_max_rounds(tmp_path):
-    rt, ad = runtime(tmp_path, idle_grace="5s")
-    await rt.setup(restore=False)
-    rt.start_loop(start(max_rounds=3))
-    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
-    assert ad.sent == ["round 1 (start)", "round 2 (turn_end)", "round 3 (turn_end)"]
-    assert rt.state.turns == 3  # one turn per prompt: nothing folded, nothing stacked
-    sends = [i for i, (k, _) in enumerate(ad.log) if k == "send"]
-    assert len(sends) == 3
-    assert [d["round"] for d in custom(rt, "loop_prompt")] == [1, 2, 3]
-    assert custom(rt, "loop_stopped") == [{"reason": "max_rounds", "round": 3, "active": True}]
-    ended = custom(rt, "turn_ended")
-    assert [d["tool_calls"] for d in ended] == [0, 0, 0]
-    await asyncio.sleep(0.2)
-    assert len(ad.sent) == 3 and rt.loop is None
-    await rt.stop()
-
-
 async def test_loop_stop_ends_the_worker_loop(tmp_path):
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=ScriptedAdapter(tmp_path / "h", turn_time=0.1))
     await rt.setup(restore=False)

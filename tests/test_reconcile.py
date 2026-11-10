@@ -43,11 +43,12 @@ def queued(store: Store, wid: str) -> list:
     return [CMD.validate_json(c["body"]) for c in store.commands_for(wid)]
 
 
-def heartbeat(store, clock, wid, agents, draining=False):
+def heartbeat(store, clock, wid, agents, draining=False, drained=False):
     hb = WorkerHeartbeat(
         worker=wid,
         deadline=clock() + timedelta(hours=24),
         draining=draining,
+        drained=drained,
         agents=[AgentHeartbeat(name=n, state=s, turn_id=tid) for n, s, tid in agents],
     )
     assert record_heartbeat(store, wid, hb, clock())
@@ -245,6 +246,26 @@ def test_drained_completed_in_a_released_swarm_ends(store, jobs, clock, tick):
     assert kinds(tick()) == ["end"]  # no restart, no launch
     (ev,) = [e for e in store.read_events("_swarm.demo", 0) if e["type"] == "end"]
     assert fs.normalise(ev, "demo")["name"] == "worker.ended" and ev["data"]["detail"] == "COMPLETED"
+
+
+def test_a_drained_worker_ends_its_slot_without_waiting_for_its_job(store, jobs, clock, tick):
+    """The drain's last heartbeat (`drained`): the next pass ends the slot and cancels the job,
+    without waiting up to INSPECT_EVERY (15 s) for the scheduler to show the job ended."""
+    store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
+    tick()
+    store.put_swarm_flags("demo", {"released": {"since": 0, "reason": "", "by": "op"}})
+    assert "release" in kinds(tick())  # the drain
+    idle = [("researcher-0000", "idle", None)]
+    heartbeat(store, clock, W0, idle, draining=True)
+    job = jobs.job_for(W0)
+    clock.advance(1)
+    assert kinds(tick()) == []  # inspected: its job still runs, so the slot stays
+    heartbeat(store, clock, W0, idle, draining=True, drained=True)
+    clock.advance(1)
+    assert kinds(tick()) == ["end"]
+    assert jobs.cancels == [job] and store.get_worker(W0)["job_id"] is None
+    (ev,) = [e for e in store.read_events("_swarm.demo", 0) if e["type"] == "end"]
+    assert ev["data"]["detail"] == "COMPLETED: drained: worker reported it"
 
 
 def test_completed_without_drain_is_a_crash(store, jobs, clock, tick):

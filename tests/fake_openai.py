@@ -267,7 +267,8 @@ def serve(port: int, log_path: str) -> ThreadingHTTPServer:
     """Start in a daemon thread; returns the server (`server.server_port`)."""
     Handler.log_path = log_path
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05},  # fast shutdown()
+                     daemon=True).start()
     return srv
 
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Fake scancel: the job becomes CANCELLED.
+# Fake scancel: a pending or running job becomes CANCELLED (an ended one keeps its state); a
+# running one (sbatch's SLURM_STUB_RUN) gets SIGTERM.
 set -eu
 S="$SLURM_STUB_DIR"
 echo "scancel $*" >> "$S/calls"
 for id in "$@"; do
-  [ -f "$S/jobs/$id.state" ] && echo "CANCELLED by $(id -u)" > "$S/jobs/$id.state"
+  grep -qsE "^(PENDING|RUNNING)" "$S/jobs/$id.state" && echo "CANCELLED by $(id -u)" > "$S/jobs/$id.state"
+  [ -f "$S/jobs/$id.pid" ] && { kill -TERM -- "-$(cat "$S/jobs/$id.pid")" 2>/dev/null || true; }
 done
 exit 0

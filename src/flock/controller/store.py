@@ -242,6 +242,8 @@ class Store:
             self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
         if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
             self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
+        if "drained" not in cols:  # the current job's last heartbeat said `drained`
+            self._x("ALTER TABLE workers ADD COLUMN drained INTEGER NOT NULL DEFAULT 0")
         if "telemetry" not in cols:  # the last heartbeat's mem/restore/tools/knobs_rev (JSON)
             self._x("ALTER TABLE workers ADD COLUMN telemetry TEXT")
         if "started_at" not in cols:  # launch-timeout clock: last time the job was seen queued

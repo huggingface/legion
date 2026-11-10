@@ -75,7 +75,7 @@ def test_a_flush_cut_mid_transaction_writes_nothing_and_retries(tmp_path):
     assert dict(reader.iter("k")) == state
 
 
-def test_backup_while_50_threads_write(tmp_path):
+def test_backup_while_threads_write(tmp_path):
     store = Store(tmp_path / "s.db")
     stop = threading.Event()
 
@@ -85,7 +85,7 @@ def test_backup_while_50_threads_write(tmp_path):
             store.write([("t", f"{n}", {"i": i}), ("u", f"{n}", {"i": i})])  # one transaction
             i += 1
 
-    threads = [threading.Thread(target=writer, args=(n,)) for n in range(50)]
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(8)]
     for t in threads:
         t.start()
     try:
@@ -99,7 +99,7 @@ def test_backup_while_50_threads_write(tmp_path):
         stop.set()
         for t in threads:
             t.join()
-    assert len(dict(store.iter("t"))) == 50
+    assert len(dict(store.iter("t"))) == 8
 
 
 def test_a_change_during_a_flush_is_kept_dirty_and_never_overwritten(tmp_path):

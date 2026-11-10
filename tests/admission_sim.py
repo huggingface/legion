@@ -30,19 +30,23 @@ from flock.models import AgentHeartbeat, Event, PromptCommand, SwarmSpec, Worker
 TOKEN = "sim-token"
 ROUND = 3.0  # s
 HEARTBEAT_ROUNDS = 10  # 30 s
-TYPES = {"painter-a": ("gpu1", 334), "painter-b": ("gpu2", 333), "painter-c": ("gpu3", 333)}
+def sim_types(agents: int = 1000) -> dict[str, tuple[str, int]]:
+    """type -> (provider, replicas): `agents` split over 3 types (334 + 333 + 333)."""
+    return {f"painter-{c}": (f"gpu{i + 1}", agents // 3 + (i < agents % 3))
+            for i, c in enumerate("abc")}
 
 
-def sim_spec(max_working: int, per_worker: int = 25) -> SwarmSpec:
+def sim_spec(max_working: int, per_worker: int = 25, agents: int = 1000) -> SwarmSpec:
+    shape = sim_types(agents)
     providers = {
         prov: {"type": "openai_compat", "base_url": f"http://{prov}:8000/v1",
                "api_key_env": "VLLM_API_KEY", "self_hosted": True, "max_working": max_working}
-        for prov, _ in TYPES.values()
+        for prov, _ in shape.values()
     }
     types = {
         name: {"harness": "codex", "model": f"{prov}:LFM2.5-2.6B", "replicas": n,
                "agents_per_worker": per_worker}
-        for name, (prov, n) in TYPES.items()
+        for name, (prov, n) in shape.items()
     }
     return SwarmSpec.model_validate({"swarm": "px", "namespace": "ns", "bucket": "hf://buckets/ns/b",
                                      "providers": providers, "types": types})
@@ -69,7 +73,7 @@ class _Clock:
 
 
 async def simulate(rounds: int = 60, max_working: int = 128, seed: int = 0,
-                   data_dir: str | None = None) -> SimResult:
+                   data_dir: str | None = None, agents: int = 1000) -> SimResult:
     rng = random.Random(seed)
     tmp = tempfile.TemporaryDirectory() if data_dir is None else None
     store = Store(data_dir or tmp.name)
@@ -78,8 +82,8 @@ async def simulate(rounds: int = 60, max_working: int = 128, seed: int = 0,
     settings = Settings(public_url="http://sim", token=TOKEN, secret_source={"VLLM_API_KEY": "k"},
                         rng=random.Random(seed))
     app = create_app(store, TOKEN, clock=clock, enforce_max_working=True)
-    spec = sim_spec(max_working)
-    prov_of = {name: prov for name, (prov, _) in TYPES.items()}
+    spec = sim_spec(max_working, agents=agents)
+    prov_of = {name: prov for name, (prov, _) in sim_types(agents).items()}
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://sim",
                                  headers={"Authorization": f"Bearer {TOKEN}"}) as c:

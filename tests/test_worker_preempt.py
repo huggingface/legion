@@ -148,7 +148,7 @@ async def test_sigusr1_preempts_within_budget_and_restart_restores(tmp_path):
 
 
 async def test_preempt_is_bounded_by_the_budget(tmp_path):
-    store = SlowStore(delay=5.0)  # a bucket that hangs far past the budget
+    store = SlowStore(delay=3.0)  # a bucket that hangs past the budget and the bound below
     ctrl = FakeController()
     ctrl.batches = [[AssignCommand(agent=n, type="researcher", spec=spec(idle_grace="10s"),
                                    restore=False) for n in names(3)]]

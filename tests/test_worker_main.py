@@ -272,6 +272,7 @@ async def test_drain_sequence_at_deadline(tmp_path):
     assert "prompt_deferred" in [e.type for e in ctrl.events if e.agent == "researcher-0002"]
     assert {"researcher-0001", "researcher-0002"} <= set(sync.pushed)  # final sync per agent
     assert ctrl.heartbeats[-1].draining is True
+    assert [hb.drained for hb in ctrl.heartbeats].count(True) == 1 and ctrl.heartbeats[-1].drained
     assert adapters["researcher-0001"].stops == 1
 
 
