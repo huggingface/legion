@@ -1,11 +1,12 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from harbor.models.registry import DatasetMetadata
 from harbor.models.task.id import GitTaskId
 from pydantic import ValidationError
 
-from flock.config import Config, TaskSettings
+from flock.config import FLOCK_ROOT, Config, TaskSettings
 from flock.sources import resolve_task
 
 
@@ -31,6 +32,24 @@ def test_unsupported_or_unsafe_configuration_is_rejected(update):
     data = Config.load(Path("examples/pi-hf.yaml")).model_dump()
     data.update(update)
     with pytest.raises(ValidationError):
+        Config.model_validate(data)
+
+
+def test_hf_sandbox_needs_a_space_board(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    spec = Config.load(FLOCK_ROOT / "examples/mini-swarm.yaml")
+    # Defaults: Flock's own resources and tools, the board's tools, ./results.
+    assert spec.resources_dir == FLOCK_ROOT / "resources"
+    assert spec.tools_dir == FLOCK_ROOT / "tools"
+    assert spec.output_dir == tmp_path / "results"
+    assert spec.tools == ["message_board.*"]
+    assert spec.environment.flavor == "cpu-basic"
+    data = yaml.safe_load((FLOCK_ROOT / "examples/mini-swarm.yaml").read_text())
+    data["resources"]["message_board"] = None  # a local board
+    with pytest.raises(ValidationError, match="space_id"):
+        Config.model_validate(data)
+    data["environment"] = {"backend": "docker", "flavor": "cpu-basic"}
+    with pytest.raises(ValidationError, match="only valid with hf-sandbox"):
         Config.model_validate(data)
 
 

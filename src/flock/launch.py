@@ -2,7 +2,7 @@
 
 import asyncio
 import importlib.metadata
-import os
+import math
 import shutil
 import signal
 import threading
@@ -29,7 +29,26 @@ from .tools.bundle import build_tool_bundle
 from .tools.setup import TOOLS_MANIFEST, attach_tool_setup
 
 
-def build_trial_config(config, resolved, run_dir, name, agent_instructions):
+def environment_config(config):
+    backend = config.environment.backend
+    if backend == "hf-sandbox":
+        # The sandbox's idle timeout doesn't count a running foreground command as
+        # activity, and Pi's whole run is one command, so it must outlast the run.
+        # delete=True kills the sandbox (an HF Job) when the trial ends.
+        return EnvironmentConfig(
+            type=backend,
+            kwargs={
+                "flavor": config.environment.flavor,
+                "job_timeout": math.ceil(config.limits.run_timeout_seconds) + 60,
+            },
+            delete=True,
+        )
+    # Podman Compose force-removes shared images with `down --rmi local`.
+    # delete=False still removes trial containers; job cleanup owns images.
+    return EnvironmentConfig(type=backend, delete=backend != "podman")
+
+
+def build_trial_config(config, resolved, run_dir, name, agent_instructions, api_key):
     inference = config.inference
     agent_kwargs = {"version": PI_VERSION, "max_turns": config.limits.agent_max_turns}
     if inference.reasoning_effort is not None:
@@ -53,7 +72,7 @@ def build_trial_config(config, resolved, run_dir, name, agent_instructions):
             model_api_key_name=inference.api_key_env,
             model_api_format=inference.api_format,
             env={
-                inference.api_key_env: os.environ[inference.api_key_env],
+                inference.api_key_env: api_key,
                 "FLOCK_TOOLS_MANIFEST": TOOLS_MANIFEST,
             },
             extra_allowed_hosts=[
@@ -61,12 +80,7 @@ def build_trial_config(config, resolved, run_dir, name, agent_instructions):
             ],
             kwargs=agent_kwargs,
         ),
-        # Podman Compose force-removes shared images with `down --rmi local`.
-        # delete=False still removes trial containers; job cleanup owns images.
-        environment=EnvironmentConfig(
-            type=config.environment.backend,
-            delete=config.environment.backend != "podman",
-        ),
+        environment=environment_config(config),
         extra_instructions=[agent_instructions],
     )
 
@@ -95,8 +109,8 @@ async def run_experiment(config: Config):
 
 
 async def _run_experiment(config: Config):
-    config.check_credentials()
-    config.check_model_connection()
+    api_key = config.api_key()
+    config.check_model_connection(api_key)
     instructions = (
         config.team_file.read_text(encoding="utf-8")
         if config.team_file is not None
@@ -123,7 +137,7 @@ async def _run_experiment(config: Config):
         {"name": name, "role": role, "status": "pending", "rewards": None}
         for name, role in roster.items()
     ]
-    secrets = [os.environ[config.inference.api_key_env]]
+    secrets = [api_key]
     resources = Resources(
         config.resources_dir,
         config.resources,
@@ -259,9 +273,11 @@ async def _run_experiment(config: Config):
             source_path = await download_task(resolved, state / "sources")
             shutil.copy2(source_path / "instruction.md", inputs / "task.md")
             manifest["artifacts"]["task_instruction"] = "inputs/task.md"
-            networks = TrialNetworks(run_id, engine=config.environment.backend)
-            await networks.start()
-            manifest["networks"] = networks.allocations
+            # HF Sandboxes are separate VMs, with no local networks to create.
+            if config.environment.backend != "hf-sandbox":
+                networks = TrialNetworks(run_id, engine=config.environment.backend)
+                await networks.start()
+                manifest["networks"] = networks.allocations
             for record in participants:
                 name = record["name"]
                 agent_instructions = build_agent_instructions(
@@ -270,6 +286,7 @@ async def _run_experiment(config: Config):
                     bundle.manifest,
                     instructions,
                     role_instructions.get(record["role"], ""),
+                    run_id=run_id,
                 )
                 instructions_file = inputs / f"{name}-instructions.md"
                 instructions_file.write_text(agent_instructions, encoding="utf-8")
@@ -277,9 +294,18 @@ async def _run_experiment(config: Config):
                     instructions_file.relative_to(run_dir)
                 )
                 trial_config = build_trial_config(
-                    config, resolved, run_dir, name, agent_instructions
+                    config, resolved, run_dir, name, agent_instructions, api_key
                 )
                 record["resources"] = resources.bind(name, trial_config)
+                if (
+                    config.environment.backend == "hf-sandbox"
+                    and trial_config.environment.mounts
+                ):
+                    # Harbor's hf-sandbox backend would silently ignore them.
+                    raise ValueError(
+                        "environment.backend hf-sandbox can't mount the files or "
+                        "sockets a resource asked for"
+                    )
                 if networks:
                     overlay = await networks.create(
                         name, state / f"{name}-network.json"
