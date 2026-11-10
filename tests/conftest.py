@@ -1,9 +1,9 @@
 import os
-from pathlib import Path
 
 import pytest
 
 from flock import resources
+from flock.config import BUILTIN
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
@@ -11,9 +11,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 @pytest.fixture
 def message_board_provider(monkeypatch):
     original = resources.load_module
-    module = original(
-        Path(__file__).resolve().parents[1] / "resources" / "message_board.py"
-    )
+    module = original(BUILTIN / "resources" / "message_board.py")
     monkeypatch.setattr(
         resources,
         "load_module",

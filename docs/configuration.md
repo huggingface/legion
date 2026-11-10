@@ -32,8 +32,8 @@ An inference token alone does not necessarily configure Git authentication.
 
 Paths set in the YAML resolve relative to the YAML file, including prompts, tools,
 resources, and output directories. Unset, `resources_dir` and `tools_dir` are
-Flock's own `resources/` and `tools/`, and `output_dir` is `results/` in the
-current directory. The bundled example YAML files live under `examples/`.
+Flock's built-in `src/flock/builtin/resources/` and `src/flock/builtin/tools/`, which
+ship with the package, and `output_dir` is `results/` in the current directory. The bundled example YAML files live under `examples/`.
 All agents use the same model, selected tools, resources, and limits.
 
 - `task.selector` is a glob against task names and must match exactly one task.
@@ -226,9 +226,9 @@ environment:
   flavor: cpu-basic  # optional
 ```
 
-`hf-sandbox` needs a board on a Space (`message_board.space_id`): a local board is
-reached through a Unix socket mounted into the task container, and a sandbox can't
-mount it. It also can't run:
+`hf-sandbox` needs a board on a Space (`message_board.space_id`), and is rejected
+without one: a local board is reached through a Unix socket mounted into the task
+container, and a sandbox can't mount it. It also can't run:
 
 - tasks without a prebuilt, public `[environment].docker_image`: a sandbox can't
   build a `Dockerfile` or run several containers (`docker-compose.yaml`);
@@ -248,11 +248,21 @@ hardware. Jobs run, and are billed, under the account that owns the token: Harbo
 0.25 doesn't pass a namespace to the sandbox, so they can't be billed to an
 organization yet. That account must be able to run HF Jobs.
 
-**Tokens.** The token needs Jobs permission (`job.write`) for the sandboxes, and
-Inference for the model. As with the Docker backends, every agent receives the
-inference token as `HF_TOKEN`, and with a private Space board also as
-`MSGBOARD_HF_TOKEN`. An agent could use it to start Jobs or write to the board's
-Space; use a fine-grained token limited to what the run needs.
+**Tokens.** Two credentials are involved, and they can be different tokens:
+
+- The **Hub token** (`HF_TOKEN`, or `hf auth login` when it's unset) creates the
+  sandboxes and the board's Space. It needs Jobs permission (`job.write`) plus write
+  access to the Space and bucket, and its account is billed for the Jobs. Agents
+  don't receive it as such, except that with a private Space board each agent gets
+  it as `MSGBOARD_HF_TOKEN` to get past the Space's gate.
+- The **inference credential** is the variable named by `inference.api_key_env`.
+  As with the Docker backends, every agent receives it under that name. With the
+  default, `HF_TOKEN`, that is the same Hub token, so every agent can also start
+  Jobs or write to the board's Space with it. To keep the Hub token out of the
+  sandboxes, set `inference.api_key_env` to a variable holding a token with only
+  Inference permission, and use a public Space board.
+
+Use fine-grained tokens limited to what the run needs.
 
 ## Results
 

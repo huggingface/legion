@@ -2,9 +2,10 @@
 
 [Back to the README](../README.md)
 
-This directory contains tool implementations supplied to experiments. Currently,
-[message_board.py](message_board.py) provides message-board operations. The reusable code that
-packages, installs, and executes tools lives in [src/flock/tools](../src/flock/tools/).
+Flock's built-in tools live in [src/flock/builtin/tools](../src/flock/builtin/tools/) and ship
+with the package. Currently, [message_board.py](../src/flock/builtin/tools/message_board.py)
+provides message-board operations. The reusable code that packages, installs, and
+executes tools lives in [src/flock/tools](../src/flock/tools/).
 
 Tools are ordinary Python functions. Agents invoke them through their existing shell
 tool using `flock-tool`; they are not registered as native Pi tools or MCP tools.
@@ -34,8 +35,9 @@ globals do not persist between calls. Persistent state belongs in files or a ser
 
 ## Example: a calculator
 
-Create `tools/calculator.py` with the following contents. This is a copyable example;
-the repository does not ship a calculator module.
+Create `src/flock/builtin/tools/calculator.py` in your checkout with the following
+contents. This is a copyable example; the repository does not ship a calculator
+module.
 
 ```python
 def add(x: int, y: int = 0) -> dict:
@@ -74,8 +76,10 @@ tools:
   - calculator.*
 ```
 
-Tools come from Flock's `tools/` directory. To keep them elsewhere, set `tools_dir`,
-which resolves relative to the YAML file, not the shell's working directory.
+Tools come from Flock's built-in directory, `src/flock/builtin/tools/`. To keep them
+elsewhere, set `tools_dir`, which resolves relative to the YAML file, not the shell's
+working directory. That directory replaces the built-in one, so copy
+`message_board.py` into it if the experiment uses a board.
 Only exact names and the complete-module wildcard (`module.*`) are supported.
 Do not combine `calculator.*` and `calculator.add`: overlapping or duplicate
 selections are rejected, as are unknown tools. Omitting `tools` selects none.
@@ -157,20 +161,21 @@ Only pure Python dependencies are supported; native extensions and dependency ex
 are rejected. Keep tool modules self-contained apart from their declared dependencies.
 
 `REQUIRES` does not start a service by itself. The board tools need a matching
-`resources.message_board` configuration. The [board resource provider](../resources/message_board.py)
+`resources.message_board` configuration. The [board resource provider](../src/flock/builtin/resources/message_board.py)
 starts or connects to the shared board, provisions identities, and binds each
 agent's credentials and connection settings. The tool functions read those settings
 from their environment and call the service. Resource setup runs once per experiment;
 tool execution happens inside each participant's environment.
 
-The source distribution includes these tool implementations and this guide. The
-wheel contains the core machinery; users supply their own tool and resource modules.
+The wheel and the source distribution both include the built-in tools and resource
+providers, so the defaults work from a checkout and from an installed wheel.
 
 ## Adding resource providers
 
-For a new shared service, add `<name>.py` under `resources_dir` and configure it
-under `resources.<name>`. Resource providers run once on the launcher; tool functions
-run inside each agent's environment. Follow [resources/message_board.py](../resources/message_board.py):
+For a new shared service, add `<name>.py` under `resources_dir` (by default
+`src/flock/builtin/resources/`) and configure it under `resources.<name>`. Resource
+providers run once on the launcher; tool functions run inside each agent's
+environment. Follow [message_board.py](../src/flock/builtin/resources/message_board.py):
 
 - Export `Resource(options, *, state_dir, agents, secrets)`; validate options in its
   constructor without starting the service.

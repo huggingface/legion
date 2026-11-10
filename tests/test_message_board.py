@@ -3,19 +3,17 @@ import os
 import subprocess
 import sys
 import tarfile
-from pathlib import Path
 
 import pytest
 from msgboard.client import BoardError, Client
 
+from flock.config import BUILTIN
 from flock.tools.bundle import build_tool_bundle
 from flock.tools.runner import load_module
 
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
+TOOLS_DIR = BUILTIN / "tools"
 board_tools = load_module(TOOLS_DIR / "message_board.py")
-BoardResource = load_module(
-    TOOLS_DIR.parent / "resources" / "message_board.py"
-).Resource
+BoardResource = load_module(BUILTIN / "resources" / "message_board.py").Resource
 
 
 def BoardRuntime(state_dir):

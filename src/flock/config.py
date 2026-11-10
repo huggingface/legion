@@ -11,8 +11,8 @@ from huggingface_hub import get_token
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PI_VERSION = "1.5.0"
-# Flock's own resource providers and tools, in the checkout Flock runs from.
-FLOCK_ROOT = Path(__file__).resolve().parents[2]
+# Flock's own resource providers and tools, shipped inside the package.
+BUILTIN = Path(__file__).resolve().parent / "builtin"
 
 
 class Settings(BaseModel):
@@ -131,10 +131,10 @@ class Config(Settings):
     inference: InferenceSettings = Field(default_factory=InferenceSettings)
     task: TaskSettings
     team_file: Path | None = None
-    resources_dir: Path = FLOCK_ROOT / "resources"
+    resources_dir: Path = BUILTIN / "resources"
     # `message_board:` with no settings means the defaults.
     resources: dict[str, dict | None] = Field(default_factory=dict)
-    tools_dir: Path = FLOCK_ROOT / "tools"
+    tools_dir: Path = BUILTIN / "tools"
     tools: list[str] = Field(default_factory=list)
     agents: AgentSettings = Field(default_factory=AgentSettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
@@ -151,12 +151,8 @@ class Config(Settings):
             tool.startswith("message_board.") for tool in self.tools
         ):
             self.tools = ["message_board.*", *self.tools]
-        board = self.resources.get("message_board")
-        if (
-            self.environment.backend == "hf-sandbox"
-            and board is not None
-            and not board.get("space_id")
-        ):
+        board = self.resources.get("message_board") or {}
+        if self.environment.backend == "hf-sandbox" and not board.get("space_id"):
             # Agents reach a local board through a mounted Unix socket, and a
             # sandbox can't mount it.
             raise ValueError(
@@ -168,7 +164,7 @@ class Config(Settings):
     @classmethod
     def load(cls, path: Path):
         """Paths set in the YAML resolve relative to it. By default, resources and
-        tools come from Flock's checkout and results go to ./results."""
+        tools are Flock's built-in ones and results go to ./results."""
         path = path.resolve()
         spec = cls.model_validate(yaml.safe_load(path.read_text()))
         for field in ("output_dir", "tools_dir", "resources_dir"):

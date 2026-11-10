@@ -118,7 +118,7 @@ covers task structure, validation, and publishing.
 
 ## Adding tools
 
-Create a module such as `tools/calculator.py`:
+Create a module such as `src/flock/builtin/tools/calculator.py`:
 
 ```python
 def add(x: int, y: int = 0) -> dict:
@@ -132,5 +132,5 @@ TOOLS = {"add": add}
 Add `calculator.add` to your experiment's `tools` list. Flock makes it available
 to every agent and includes its documentation in their instructions.
 
-See the [tools guide](tools/README.md) for invocation examples, supported types,
+See the [tools guide](docs/tools.md) for invocation examples, supported types,
 dependencies, and shared resource providers.

@@ -28,11 +28,11 @@ import pytest
 from huggingface_hub import HfApi, get_token
 from msgboard.client import BoardError, Client
 
+from flock.config import BUILTIN
 from flock.resources import load_module
 
-ROOT = Path(__file__).resolve().parents[1]
-board = load_module(ROOT / "resources/message_board.py")
-board_tools = load_module(ROOT / "tools/message_board.py")
+board = load_module(BUILTIN / "resources/message_board.py")
+board_tools = load_module(BUILTIN / "tools/message_board.py")
 PREFIX = os.environ.get("FLOCK_LIVE_SPACES")
 
 pytestmark = [

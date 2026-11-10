@@ -28,7 +28,7 @@ dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12"]
 packages = ["src/flock"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src/flock/**", "/scripts/**", "/tools/*.py", "/tools/README.md", "/resources/*.py", "/prompts/*.md", "/tests/**", "/examples/*.yaml", "/launch.slurm", "/docs/**", "/README.md", "/pyproject.toml", "/uv.lock"]
+include = ["/src/flock/**", "/scripts/**", "/prompts/*.md", "/tests/**", "/examples/*.yaml", "/launch.slurm", "/docs/**", "/README.md", "/pyproject.toml", "/uv.lock"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
