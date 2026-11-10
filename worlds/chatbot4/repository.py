@@ -78,8 +78,9 @@ class Repository:
         self.attributes = root.parent / "union.gitattributes" if union else None
         if self.attributes:
             self.attributes.write_text("".join(f"{p} merge=union\n" for p in union))
-        # Fetches start no background gc: it packed refs outside refs_lock. maintain() runs gc.
+        # Fetches start no background gc: it packed refs outside refs_lock. maintain() packs.
         self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")  # nor does any git command run gc --auto here
         # Only this world runs gc here: a gc.pid is a gc stopped with a world that ran elsewhere,
         # and git would honour it for 12 h.
         (root / "gc.pid").unlink(missing_ok=True)
@@ -208,32 +209,34 @@ class Repository:
             self.git("update-ref", "--stdin", data="".join(f"update {ref} {sha}\n" for ref, sha in refs).encode())
 
     def maintain(self, info):
-        """Keep the bare repository fast: pack every ref, then gc --auto in the foreground (it
-        ignores and removes a gc.log). gc --auto never packs unreachable loose objects (rebased
-        and refused commits), so past gc.auto of them a full gc --cruft packs them (what fixed
-        the live v8 world: 120k loose objects, merges at 3/h). Fills info with the loose-object
-        counts and each step's seconds, also when a step fails."""
+        """Keep the bare repository fast in a pass that takes minutes: pack every ref, pack every
+        loose object (reachable or not: rebased and refused commits) into one new pack, then
+        delete their loose copies. Packs already there are never rewritten: a full or cruft gc
+        of the live v8 repository (~1 GiB in ~45 packs on FSx) no longer finished in 30 min.
+        Nothing is pruned; the pack count grows by one per pass. Fills info with the counts and
+        each step's seconds, also when a step fails."""
         info["loose_before"] = self.loose()
         start = time.monotonic()
         with self.refs_lock:
             self.git("pack-refs", "--all")
         info["pack_refs_s"], start = time.monotonic() - start, time.monotonic()
-        # gc.packRefs off: refs were packed above under refs_lock, never while the world writes one
-        # pack.threads=2: a full repack leaves the world's other git work some cores
-        gc = ("-c", "gc.autoDetach=false", "-c", "gc.cruftPacks=true", "-c", "gc.packRefs=false",
-              "-c", "pack.threads=2", "gc", "--quiet")
+        objects = self.root / "objects"
+        for tmp in (objects / "pack").glob("tmp_*"):  # a pass killed at its timeout left it
+            if tmp.stat().st_mtime < time.time() - 3600:  # a running fetch writes fresh ones
+                tmp.unlink(missing_ok=True)
+        # objects/xx/<38 hex>; a loose object being written is still tmp_obj_* and is skipped
+        ids = "".join(f"{d.name}{f.name}\n" for d in objects.glob("[0-9a-f][0-9a-f]")
+                      for f in d.iterdir() if len(f.name) == 38)
         try:
-            self.git(*gc, "--auto", timeout=1800, group=True)
+            if ids:  # pack.threads=2: leaves the world's other git work some cores
+                self.git("-c", "pack.threads=2", "pack-objects", "-q", str(objects / "pack" / "pack"),
+                         data=ids.encode(), timeout=1800, group=True)
+            self.git("prune-packed", "-q", timeout=1800, group=True)
+            self.git("multi-pack-index", "write")  # one index over all packs: lookups don't scan each
         finally:
-            info["gc_auto_s"], start = time.monotonic() - start, time.monotonic()
-        loose = self.loose()
-        if loose > int(self.git("config", "--get", "--default", "6700", "gc.auto")):
-            try:
-                self.git(*gc, timeout=1800, group=True)
-            finally:
-                info["gc_full_s"] = time.monotonic() - start
-            loose = self.loose()
-        info["loose_after"] = loose
+            info["pack_loose_s"] = time.monotonic() - start
+        info["packs"] = len(list((objects / "pack").glob("pack-*.pack")))
+        info["loose_after"] = self.loose()
 
     def loose(self):
         """Loose objects in the repository (git count-objects)."""

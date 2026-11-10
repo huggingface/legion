@@ -1557,27 +1557,39 @@ def test_without_union_paths_deck_appends_still_conflict(setup_v8):
     assert err.value.code == "conflict"
 
 
-def test_git_maintenance_packs_refs_and_cruft_packs_unreachable_loose_objects(setup, caplog):
+def test_git_maintenance_packs_refs_and_all_loose_objects_without_rewriting_packs(setup, caplog):
     world, clone, _remote = setup
     repo = world.repo
     rec = submit(world, clone)
     _module(clone, "weather", "sunny")
     rec = submit(world, clone, pr=rec["pr"])  # a superseded head keeps its refs/flock/pr ref
     assert repo.git("config", "maintenance.auto") == "false"  # fetches start no background gc
-    repo.git("config", "gc.auto", "20")
+    assert repo.git("config", "gc.auto") == "0"  # no git command starts gc --auto either
     orphans = [repo.git("hash-object", "-w", "--stdin", data=f"orphan {i}".encode())
                for i in range(30)]  # unreachable loose objects, as refused rebases leave behind
+    pack_dir = repo.root / "objects" / "pack"
+    packs = set(pack_dir.glob("pack-*.pack"))
+    stale, fresh = pack_dir / "tmp_pack_killed", pack_dir / "tmp_pack_fetching"
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    os.utime(stale, (time.time() - 7200,) * 2)  # left by a pass killed at its timeout
     caplog.set_level("INFO", logger="chatbot4")
     world._maintain_repo()
     line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("git maintenance"))
     info = dict(item.split("=") for item in line.split(": ", 1)[1].split())
     assert line.startswith("git maintenance done: ") and int(info["loose_before"]) >= 30
-    assert set(info) == {"loose_before", "pack_refs_s", "gc_auto_s", "gc_full_s", "loose_after"}
+    assert set(info) == {"loose_before", "pack_refs_s", "pack_loose_s", "packs", "loose_after"}
     assert info["loose_after"] == "0"
     assert not [f for f in (repo.root / "refs").rglob("*") if f.is_file()]  # all in packed-refs
     assert len(repo.git("for-each-ref", "--format=%(refname)", f"refs/flock/pr/{rec['pr']}/").split()) == 2
     assert re.search(r"^count: 0$", repo.git("count-objects", "-v"), re.MULTILINE)
-    repo.git("cat-file", "-e", orphans[0])  # packed into the cruft pack, not pruned
+    repo.git("cat-file", "-e", orphans[0])  # packed, not pruned
+    after = set(pack_dir.glob("pack-*.pack"))
+    assert packs < after and len(after) == len(packs) + 1 == int(info["packs"])  # old packs kept as they are
+    assert (pack_dir / "multi-pack-index").exists()
+    assert not stale.exists() and fresh.exists() and not (repo.root / "gc.pid").exists()
+    world._maintain_repo()  # nothing loose: no new pack
+    assert set(pack_dir.glob("pack-*.pack")) == after
 
 
 def test_merged_and_closed_prs_answer_instead_of_no_open_pr(setup):

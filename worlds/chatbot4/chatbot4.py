@@ -64,7 +64,7 @@ WINDOW = 3600.0  # the new-PR budget counts opens and merges in this rolling win
 WINDOW_MAX = 10000  # timestamps kept per list (oldest dropped)
 OUTBOX_BACKOFF = (5.0, 600.0)  # first retry delay, longest retry delay (doubling, forever)
 HUB_SYNC_EVERY = float(os.environ.get("CHATBOT_HUB_STATES_EVERY_S", "600"))  # PR state check
-GIT_MAINTAIN_EVERY = 1800.0  # refs packed and gc (the hub-sync thread)
+GIT_MAINTAIN_EVERY = 1800.0  # refs and loose objects packed (the hub-sync thread)
 FINAL_CODES = ("pr_closed", "pr_merged")
 # Hub write failures that feed a lane's breaker: "vote failed: transaction was aborted" and
 # other Hub-side refusals arrive as one of these (git push or HTTP API).
@@ -400,7 +400,7 @@ class Chatbot4World(World):
                 maintained = time.monotonic()  # the period counts from the end of a pass
 
     def _maintain_repo(self):
-        """Pack refs and gc (Repository.maintain). Never raises."""
+        """Pack refs and loose objects (Repository.maintain). Never raises."""
         info = {}
         try:
             self.repo.maintain(info)
