@@ -412,3 +412,13 @@ def test_a_shepherd_config_compiles():
     assert ts.secrets == []  # a managed board, docker: the worker reads no token
     assert ts.harbor.team == (EXAMPLES.parent / "prompts" / "team.md").read_text()
     assert swarm.providers["inference"].pricing == {"*": [0.0, 0.0, 0.0]}
+
+
+def test_a_missing_resource_module_is_refused_at_compile(tmp_path):
+    data = load_spec_yaml(COMPILE)
+    data["resources"] = {"board": data["resources"]["message_board"]}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="no resource module .*board.py .*now message_board"):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)

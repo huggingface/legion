@@ -23,6 +23,10 @@ flock's additions (lines marked `flock:`; unused options keep shepherd's behavio
   there is no proxy: the rules are not enforced, and the resource says so in its metadata and in
   every agent's binding.
 - `kickoff`: posted once to the first channel at start (every worker posts it under one key).
+- `private: false` with a reused Space that is private: start fails (a private Space's gate
+  would need the HF token in every agent's container).
+- A worker restarted on the same state dir (local compute shares it) renames the earlier
+  `operator.token` to `operator.token.<ns>` instead of failing to create it.
 """
 
 import asyncio

@@ -228,9 +228,9 @@ async def test_a_round_before_the_fetch_does_not_take_the_line(sim):
 
 async def test_harbor_types_get_the_line(sim):
     """The line is plain text after the template. A harbor type's board events are `resource`
-    events from the board resource: wake `board.mention`."""
-    wake = "board.mention"
-    event = ("resource", {"resource": "board", "kind": "mention", "data": {
+    events from the message_board resource: wake `message_board.mention`."""
+    wake = "message_board.mention"
+    event = ("resource", {"resource": "message_board", "kind": "mention", "data": {
         "msg_id": 11, "thread": 19820, "from": "cmpatino", "identity_type": "user"}})
     got = await started(sim, {**CTRL, "on": [wake]}, model="fake:m", secrets=[])
     assert got[A0]["loop"]["kind"] == "loop"

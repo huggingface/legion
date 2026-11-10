@@ -427,13 +427,16 @@ def pack_folders(tools_dir, resources_dir):
 def resource_secrets(spec: Spec) -> list[str]:
     """The env names resources read a token from on the worker: a plugin's `token_env` (its
     default too) when it connects to a `url`, HF_TOKEN when it deploys a Space (`space_id`). A
-    missing module is the worker's error."""
+    missing module is refused here, before any worker or sandbox starts."""
     from .resources import load_module
 
     names = []
     for name, options in spec.resources.items():
         path = spec.resources_dir / f"{name}.py"
-        schema = getattr(load_module(path), "Options", None) if path.is_file() else None
+        if not path.is_file():
+            renamed = " (the board resource is now message_board)" if name == "board" else ""
+            raise ValueError(f"resources.{name}: no resource module {path}{renamed}")
+        schema = getattr(load_module(path), "Options", None)
         settings = schema.model_validate(options) if schema is not None else None
         if getattr(settings, "url", None) and getattr(settings, "token_env", None):
             names.append(settings.token_env)
