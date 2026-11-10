@@ -1573,6 +1573,7 @@ def test_git_maintenance_packs_refs_and_all_loose_objects_without_rewriting_pack
     stale.write_bytes(b"x")
     fresh.write_bytes(b"x")
     os.utime(stale, (time.time() - 7200,) * 2)  # left by a pass killed at its timeout
+    (pack_dir / "tmp_pack_renamed").symlink_to(pack_dir / "gone")  # its stat() raises, as after a rename
     caplog.set_level("INFO", logger="chatbot4")
     world._maintain_repo()
     line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("git maintenance"))
@@ -1590,6 +1591,23 @@ def test_git_maintenance_packs_refs_and_all_loose_objects_without_rewriting_pack
     assert not stale.exists() and fresh.exists() and not (repo.root / "gc.pid").exists()
     world._maintain_repo()  # nothing loose: no new pack
     assert set(pack_dir.glob("pack-*.pack")) == after
+
+
+def test_git_maintenance_packs_a_bounded_batch_per_pass(setup, monkeypatch, caplog):
+    repo = setup[0].repo
+    world = setup[0]
+    for i in range(25):
+        repo.git("hash-object", "-w", "--stdin", data=f"orphan {i}".encode())
+    monkeypatch.setattr("repository.PACK_LOOSE_MAX", 10)
+    caplog.set_level("INFO", logger="chatbot4")
+    left = []
+    for _ in range(3):
+        caplog.clear()
+        world._maintain_repo()
+        line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("git maintenance"))
+        assert line.startswith("git maintenance done: ")
+        left.append(int(re.search(r"loose_after=(\d+)", line)[1]))
+    assert left[0] >= 15 and left[1] == left[0] - 10 and left[2] == max(0, left[1] - 10)
 
 
 def test_merged_and_closed_prs_answer_instead_of_no_open_pr(setup):
@@ -1644,8 +1662,10 @@ def test_a_stale_gc_pid_is_removed_at_start(setup):
     world, _clone, _remote = setup
     pid = world.repo.root / "gc.pid"
     pid.write_text("12345 another-node")  # a gc stopped with a world that ran on another node
+    lock = world.repo.root / "objects" / "pack" / "multi-pack-index.lock"
+    lock.write_text("")  # a multi-pack-index write killed with the world
     restarted = Chatbot4World(world.ws, Repository(world.repo.root, world.repo.remote))
-    assert not pid.exists() and restarted.repo.loose() >= 0
+    assert not pid.exists() and not lock.exists() and restarted.repo.loose() >= 0
 
 
 def test_patch_id_is_cached_and_none_for_an_empty_diff(setup):

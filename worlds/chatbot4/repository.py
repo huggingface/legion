@@ -18,6 +18,8 @@ from flock.world import ToolError
 from flock.world.server import redact
 
 log = logging.getLogger(__name__)
+# Loose objects packed per maintenance pass at most: every pass finishes; a backlog drains over passes.
+PACK_LOOSE_MAX = int(os.environ.get("CHATBOT_PACK_LOOSE_MAX", "20000"))
 
 _URL_CREDENTIALS = re.compile(r"(?<=://)[^/@\s]+@")
 _HUB_HEADERS = ("x-error-code", "x-error-message", "x-request-id", "retry-after")
@@ -84,6 +86,7 @@ class Repository:
         # Only this world runs gc here: a gc.pid is a gc stopped with a world that ran elsewhere,
         # and git would honour it for 12 h.
         (root / "gc.pid").unlink(missing_ok=True)
+        (root / "objects" / "pack" / "multi-pack-index.lock").unlink(missing_ok=True)  # likewise
         self.fetch()
 
     def git(self, *args, at=None, data=None, env=None, timeout=120, group=False):
@@ -222,21 +225,25 @@ class Repository:
         info["pack_refs_s"], start = time.monotonic() - start, time.monotonic()
         objects = self.root / "objects"
         for tmp in (objects / "pack").glob("tmp_*"):  # a pass killed at its timeout left it
-            if tmp.stat().st_mtime < time.time() - 3600:  # a running fetch writes fresh ones
-                tmp.unlink(missing_ok=True)
+            try:
+                if tmp.stat().st_mtime < time.time() - 3600:  # a running fetch writes fresh ones
+                    tmp.unlink(missing_ok=True)
+            except FileNotFoundError:  # a fetch just renamed its tmp_pack
+                pass
         # objects/xx/<38 hex>; a loose object being written is still tmp_obj_* and is skipped
-        ids = "".join(f"{d.name}{f.name}\n" for d in objects.glob("[0-9a-f][0-9a-f]")
-                      for f in d.iterdir() if len(f.name) == 38)
+        ids = sorted(f"{d.name}{f.name}\n" for d in objects.glob("[0-9a-f][0-9a-f]")
+                     for f in d.iterdir() if len(f.name) == 38)[:PACK_LOOSE_MAX]
         try:
             if ids:  # pack.threads=2: leaves the world's other git work some cores
                 self.git("-c", "pack.threads=2", "pack-objects", "-q", str(objects / "pack" / "pack"),
-                         data=ids.encode(), timeout=1800, group=True)
+                         data="".join(ids).encode(), timeout=1800, group=True)
             self.git("prune-packed", "-q", timeout=1800, group=True)
-            self.git("multi-pack-index", "write")  # one index over all packs: lookups don't scan each
+            # one index over all packs: lookups don't scan each
+            self.git("multi-pack-index", "write", timeout=1800, group=True)
         finally:
             info["pack_loose_s"] = time.monotonic() - start
         info["packs"] = len(list((objects / "pack").glob("pack-*.pack")))
-        info["loose_after"] = self.loose()
+        info["loose_after"] = self.loose()  # what the next passes still pack
 
     def loose(self):
         """Loose objects in the repository (git count-objects)."""
