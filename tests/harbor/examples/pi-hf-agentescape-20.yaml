@@ -9,7 +9,7 @@ task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor
   selector: agentescape-20-skeleton-0052d9e8
   revision: eeccfb09a986db1670b56673b22ebea4d473d2a8
-team_file: ../prompts/agentescape-team.md
+team_file: ../prompts/team.md
 resources:
   message_board:  # a local board; its tools are selected automatically
 agents:

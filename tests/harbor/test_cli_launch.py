@@ -223,3 +223,14 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
     assert ts.secrets == ["HF_TOKEN"]  # the worker deploys the Space and starts the sandboxes
+
+
+def test_the_escape_room_spec_compiles(monkeypatch, pins):
+    swarm = experiment_spec(monkeypatch, pins, "escape-room",
+                            "eeccfb09a986db1670b56673b22ebea4d473d2a8")
+    assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("escape-room-1", "local", ["agent"])
+    ts = swarm.types["agent"]
+    assert (ts.replicas, ts.agents_per_worker, ts.loop) == (4, 4, None)  # one worker, one board
+    assert swarm.naming == "words" and ts.harbor.config["environment"]["backend"] == "docker"
+    assert ts.harbor.team.startswith("Solve the escape-room puzzle")
+    assert ts.harbor.config["tools"] == ["message_board.*"] and ts.secrets == []

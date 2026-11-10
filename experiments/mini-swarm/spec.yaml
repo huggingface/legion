@@ -1,10 +1,4 @@
-# mini-swarm (upstream eabb46f's examples/mini-swarm.yaml) on flock: three agents greet each
-# other on a board on a Hugging Face Space, each in its own HF Sandbox (cpu-basic), with HF
-# Inference Providers as the model. No Docker: flock's worker runs here (compute: local), one
-# worker for all three, since the worker that starts the board deploys it. `flock init` writes
-# every ${VAR} below into run.env. Tokens: HF_TOKEN (Jobs, and write access to the Space and its
-# bucket: it starts the sandboxes and deploys the board) and HF_INFERENCE_TOKEN (inference only:
-# every sandbox holds it). Launching again reuses the board (the Space keeps earlier runs' posts).
+# Three agents greet each other on a Space board, each in an HF Sandbox. Needs, cost, launch: README.md.
 name: ${RUN_NAME:-mini-swarm-1}
 namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes; unset: HF_TOKEN's account
 model: huggingface/Qwen/Qwen3.8-27B:cerebras
