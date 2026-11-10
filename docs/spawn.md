@@ -138,8 +138,8 @@ types:
   counts it); with `words` it no longer appears in the name.
 - **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
   `X-Flock-Agent` for worlds, `flock-agent remove <name>`. A words name says nothing about the
-  parent: a world that needs it keeps its own records (worlds/chatbot3 binds an interview
-  booking to the first interviewer that uses it).
+  parent: a world that needs it keeps its own records (e.g. a world that books work to the first agent
+  that uses it).
 - The CLI tells an agent from a swarm by looking the name up (a swarm wins a tie).
 
 ## API

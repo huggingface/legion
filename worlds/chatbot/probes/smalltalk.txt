@@ -1,6 +1,0 @@
-# Small talk: stay on the user's topic, add something, keep it going. Not a therapist.
-I just got back from a trip to Japan => japan|trip|travel|!tell me more about your feelings
-the food there was amazing => food|eat|ramen|sushi|dish|!how does that make you feel
-do you like music? => music|song|listen|band|!why do you ask
-I play the guitar a bit => guitar|play|chord|song
-what should I cook tonight? => cook|pasta|recipe|dinner|try|curry|!why do you want

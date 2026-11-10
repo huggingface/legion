@@ -1,6 +1,0 @@
-# Memory: names and facts the user gave earlier in the same conversation.
-my name is Priya => priya
-I work as a nurse => nurse|shift|hospital|job
-I have a dog called Biscuit => biscuit|dog
-what's my name? => priya
-what's my dog called? => biscuit

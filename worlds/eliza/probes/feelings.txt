@@ -1,4 +1,0 @@
-I feel sad today => sad|feel|sorry
-My mother never listens to me => mother|family|listen
-Because nobody cares about me => nobody|care|why|because
-I am tired of everything => tired|why|feel|everything
