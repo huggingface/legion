@@ -1,24 +1,14 @@
 # Verified two-agent Harbor execution on 2026-11-03.
 name: pi-hf-qwen-team
-harness: pi
 model: huggingface/Qwen/Qwen3.8-27B:cerebras
-inference:
-  base_url: https://router.huggingface.co/v1
-  api_key_env: HF_TOKEN
-  api_format: openai_chat_completions
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   dataset: terminal-bench-2.1@2.1.0
   selector: regex-log
   revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
 team_file: ../prompts/team.md
-resources_dir: ../resources
 resources:
-  message_board:
-    channels: [general]
-tools_dir: ../tools
-tools:
-  - message_board.*  # All tools exported by tools/message_board.py
+  message_board:  # a local board; its tools are selected automatically
 agents:
   count: 2
 environment:
@@ -26,4 +16,3 @@ environment:
 limits:
   run_timeout_seconds: 600.0
   agent_max_turns: 30
-output_dir: ../results

@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 from msgboard.client import Client
 
+from flock.config import BUILTIN
 from flock.resources import load_module
 
-RESOURCES = Path(__file__).resolve().parents[1] / "resources"
+RESOURCES = BUILTIN / "resources"
 board = load_module(RESOURCES / "message_board.py")
 
 

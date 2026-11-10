@@ -31,7 +31,7 @@ def test_reasoning_effort_reaches_native_pi(monkeypatch, tmp_path, effort):
         "test",
     )
     config = launch.build_trial_config(
-        spec, resolved, tmp_path, "agent-001", "instructions"
+        spec, resolved, tmp_path, "agent-001", "instructions", spec.api_key()
     )
     assert ("reasoning_effort" in config.agent.kwargs) == (effort is not None)
     assert config.agent.override_timeout_sec == 3480
@@ -437,7 +437,9 @@ async def test_resource_failure_cancels_peers_and_retains_state(
 @pytest.mark.parametrize("handler_kind", ["default", "custom", "asyncio"])
 async def test_preflight_failure_preserves_sigterm_handler(monkeypatch, handler_kind):
     spec = Config.load(Path("examples/pi-hf.yaml"))
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    # HF_TOKEN would fall back to a logged-in token, so use a key with no fallback.
+    spec.inference.api_key_env = "FLOCK_TEST_MISSING_KEY"
+    monkeypatch.delenv("FLOCK_TEST_MISSING_KEY", raising=False)
     previous_handler = signal.getsignal(signal.SIGTERM)
     loop = asyncio.get_running_loop()
     called = asyncio.Event()
@@ -447,7 +449,7 @@ async def test_preflight_failure_preserves_sigterm_handler(monkeypatch, handler_
         loop.add_signal_handler(signal.SIGTERM, called.set)
     expected_handler = signal.getsignal(signal.SIGTERM)
     try:
-        with pytest.raises(ValueError, match="Set HF_TOKEN"):
+        with pytest.raises(ValueError, match="Set FLOCK_TEST_MISSING_KEY"):
             await launch.run_experiment(spec)
         assert signal.getsignal(signal.SIGTERM) == expected_handler
         if handler_kind != "default":
@@ -608,8 +610,28 @@ def test_podman_retains_images_shared_by_trials(prepared, tmp_path, backend, del
         "c" * 40,
         "test",
     )
-    trial = launch.build_trial_config(prepared, task, tmp_path, "agent-001", "")
+    trial = launch.build_trial_config(
+        prepared, task, tmp_path, "agent-001", "", "test-inference-secret"
+    )
     assert trial.environment.delete is delete
+
+
+def test_hf_sandbox_outlives_the_run(tmp_path):
+    spec = Config.load(Path("examples/mini-swarm.yaml"))
+    task = ResolvedTask(
+        GitTaskId(
+            git_url=spec.task.repo, git_commit_id="c" * 40, path=Path("tasks/test")
+        ),
+        "c" * 40,
+        "test",
+    )
+    trial = launch.build_trial_config(
+        spec, task, tmp_path, "agent-001", "", "test-inference-secret"
+    )
+    # Pi's run is one command, which the sandbox's idle timeout doesn't count.
+    assert trial.environment.type == "hf-sandbox" and trial.environment.delete
+    assert trial.environment.kwargs["flavor"] == "cpu-basic"
+    assert trial.environment.kwargs["job_timeout"] > spec.limits.run_timeout_seconds
 
 
 @pytest.mark.parametrize("failure", [None, "pi", "missing_reward"])

@@ -1,0 +1,18 @@
+# Three agents greet each other on a board on a Hugging Face Space. They run in
+# HF Sandboxes and use HF Inference Providers, so no Docker is needed.
+name: mini-swarm
+model: huggingface/Qwen/Qwen3.8-27B:cerebras
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
+  selector: mini-swarm
+  revision: d0e1fee0f1036a80d5400d67f7fad9143668ba94
+agents:
+  count: 3
+resources:
+  message_board:
+    space_id: mini-swarm  # bare name = your own account
+environment:
+  backend: hf-sandbox
+limits:
+  run_timeout_seconds: 600
+  agent_max_turns: 20

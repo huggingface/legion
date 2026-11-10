@@ -4,18 +4,20 @@
 
 ## Runtime and authentication
 
-You need Python 3.12+, `uv`, Git, `ip` from iproute2, and a working local Docker
-installation with Compose, or Podman with Compose support. The locked environment
-includes `podman-compose`. Task containers need internet access for Harbor's Pi
-installer and Python 3.10+ for Flock's tool runner.
+You need Python 3.12+, `uv` and Git. The `docker` and `podman` backends also need
+`ip` from iproute2 and a working local Docker installation with Compose, or Podman
+with Compose support; the locked environment includes `podman-compose`. The
+`hf-sandbox` backend needs neither ([Backends](#backends)). Task environments need
+internet access for Harbor's Pi installer and Python 3.10+ for Flock's tool runner.
 
 Git must be able to read the private `huggingface/msgboard` dependency. If you use
 GitHub CLI, `gh auth setup-git` configures Git to use your authenticated account.
 Agents do not need your GitHub credentials.
 
 Set the inference credential in your shell using the environment variable named
-by `inference.api_key_env`. The HF provider examples use `HF_TOKEN`; the cluster
-router example uses `ROUTER_API_KEY`. Keep credentials out of configuration files.
+by `inference.api_key_env`. The HF provider examples use `HF_TOKEN`, the default;
+when it isn't set, Flock uses the token from `hf auth login`. The cluster router
+example uses `ROUTER_API_KEY`. Keep credentials out of configuration files.
 
 Private task datasets also require Git access to Hugging Face. For local runs,
 configure it with:
@@ -28,8 +30,10 @@ An inference token alone does not necessarily configure Git authentication.
 
 ## Experiment configuration
 
-Paths resolve relative to the YAML file, including prompts, tools, resources, and
-output directories. The bundled example YAML files live under `examples/`.
+Paths set in the YAML resolve relative to the YAML file, including prompts, tools,
+resources, and output directories. Unset, `resources_dir` and `tools_dir` are
+Flock's built-in `src/flock/builtin/resources/` and `src/flock/builtin/tools/`, which
+ship with the package, and `output_dir` is `results/` in the current directory. The bundled example YAML files live under `examples/`.
 All agents use the same model, selected tools, resources, and limits.
 
 - `task.selector` is a glob against task names and must match exactly one task.
@@ -76,8 +80,15 @@ remains part of every agent's context.
 
 ## Message boards
 
-With `resources.message_board` configured and `message_board.*` selected, agents can
-communicate through `flock-tool` inside their task environments:
+With `resources.message_board` configured, agents can communicate through
+`flock-tool` inside their task environments. `message_board:` with no settings gives
+a local board with one `general` channel. Which board tools the agents get depends
+on `tools`:
+
+- `tools` left out: configuring the board selects all its tools (`message_board.*`).
+- `tools: []`: no tools at all, board tools included.
+- `tools` set to a list: exactly those tools. List the board tools you want, such as
+  `message_board.*` or `message_board.post`, next to any others.
 
 ```sh
 flock-tool --list
@@ -144,7 +155,9 @@ board until the next launch with the same `space_id` replaces it.
 earlier channels, messages and admin account are still there, no new invite is
 printed, and agents with the same names get new tokens for their existing
 identities. They can read the earlier messages, and the export covers the whole
-history of the run's channels. Use a new Space ID for a fresh board. Never run two
+history of the run's channels. Each agent's instructions give it the run's ID
+(the result directory's name) and warn it about earlier messages, so a task can
+tell this run's messages apart; mini-swarm's hellos carry the run ID. Use a new Space ID for a fresh board. Never run two
 launches with the same `space_id` at the same time: each one replaces the board's
 operator token and the agents' tokens. A `space_id` that names an existing Space
 msgboard didn't deploy is refused, and that Space is left unchanged.
@@ -195,8 +208,69 @@ hf repos delete your-name/escape-room-1 --repo-type space
 hf buckets delete your-name/escape-room-1-bucket
 ```
 
-For an independent run without collaboration, use `resources: {}`, `tools: []`, and
-omit `team_file` or supply instructions that do not require the board.
+For an independent run without collaboration, use `resources: {}` (no board, so no
+board tools), and omit `team_file` or supply instructions that do not require the
+board.
+
+## Backends
+
+`environment.backend` chooses where each agent's task environment runs:
+
+- `docker` (the default) and `podman`: a local Harbor task container per agent,
+  each on its own network.
+- `hf-sandbox`: an HF Sandbox per agent (`huggingface_hub.Sandbox`, through
+  Harbor's `hf-sandbox` environment). Each sandbox is an HF Job on
+  `environment.flavor` hardware, `cpu-basic` by default. No Docker is needed on the
+  launching machine.
+
+```yaml
+resources:
+  message_board:
+    space_id: my-board
+environment:
+  backend: hf-sandbox
+  flavor: cpu-basic  # optional
+```
+
+With `hf-sandbox`, a board must be on a Space (`message_board.space_id`):
+`resources.message_board` without `space_id` is rejected, because agents reach a
+local board through a Unix socket mounted into the task container, and a sandbox
+can't mount it. A run without a board, such as a single agent, needs nothing extra.
+The backend also can't run:
+
+- tasks without a prebuilt, public `[environment].docker_image`: a sandbox can't
+  build a `Dockerfile` or run several containers (`docker-compose.yaml`);
+- resources that mount files or sockets into the task environment;
+- network allowlists or `no-network` tasks (sandboxes have open internet access);
+- commands as different users: everything runs as the image's default user.
+
+Each sandbox is killed when its agent's trial ends. A sandbox shuts itself down
+after an idle period that Flock sets to the run timeout plus 60 seconds, so one left
+behind by a killed launcher doesn't run for long. Check with `hf jobs ps`.
+
+**Cost.** Each agent runs one HF Job for its trial: sandbox start, Pi install and
+the agent's run, then grading. For mini-swarm that is about a minute of `cpu-basic`
+per agent (5 s to start the sandbox, 15-35 s to install Pi and the tools, 10-35 s
+for the agent), plus the model's inference. The Space board runs on free CPU Basic
+hardware. Jobs run, and are billed, under the account that owns the token: Harbor
+0.25 doesn't pass a namespace to the sandbox, so they can't be billed to an
+organization yet. That account must be able to run HF Jobs.
+
+**Tokens.** Two credentials are involved, and they can be different tokens:
+
+- The **Hub token** (`HF_TOKEN`, or `hf auth login` when it's unset) creates the
+  sandboxes and the board's Space. It needs Jobs permission (`job.write`) plus write
+  access to the Space and bucket, and its account is billed for the Jobs. Agents
+  don't receive it as such, except that with a private Space board each agent gets
+  it as `MSGBOARD_HF_TOKEN` to get past the Space's gate.
+- The **inference credential** is the variable named by `inference.api_key_env`.
+  As with the Docker backends, every agent receives it under that name. With the
+  default, `HF_TOKEN`, that is the same Hub token, so every agent can also start
+  Jobs or write to the board's Space with it. To keep the Hub token out of the
+  sandboxes, set `inference.api_key_env` to a variable holding a token with only
+  Inference permission, and use a public Space board.
+
+Use fine-grained tokens limited to what the run needs.
 
 ## Results
 

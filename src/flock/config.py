@@ -7,9 +7,12 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import yaml
+from huggingface_hub import get_token
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PI_VERSION = "1.5.0"
+# Flock's own resource providers and tools, shipped inside the package.
+BUILTIN = Path(__file__).resolve().parent / "builtin"
 
 
 class Settings(BaseModel):
@@ -102,7 +105,17 @@ class AgentSettings(Settings):
 
 
 class EnvironmentSettings(Settings):
-    backend: Literal["docker", "podman"] = "docker"
+    backend: Literal["docker", "podman", "hf-sandbox"] = "docker"
+    # Hugging Face Jobs hardware for hf-sandbox, e.g. cpu-basic or cpu-upgrade.
+    flavor: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def sandbox_flavor(self):
+        if self.backend == "hf-sandbox":
+            self.flavor = self.flavor or "cpu-basic"
+        elif self.flavor is not None:
+            raise ValueError("environment.flavor is only valid with hf-sandbox")
+        return self
 
 
 class Limits(Settings):
@@ -118,22 +131,51 @@ class Config(Settings):
     inference: InferenceSettings = Field(default_factory=InferenceSettings)
     task: TaskSettings
     team_file: Path | None = None
-    resources_dir: Path = Path("resources")
-    resources: dict[str, dict] = Field(default_factory=dict)
-    tools_dir: Path = Path("tools")
+    resources_dir: Path = BUILTIN / "resources"
+    # `message_board:` with no settings means the defaults.
+    resources: dict[str, dict | None] = Field(default_factory=dict)
+    tools_dir: Path = BUILTIN / "tools"
     tools: list[str] = Field(default_factory=list)
     agents: AgentSettings = Field(default_factory=AgentSettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     limits: Limits = Field(default_factory=Limits)
     output_dir: Path = Path("results")
 
+    @model_validator(mode="after")
+    def resource_defaults(self):
+        self.resources = {
+            name: options or {} for name, options in self.resources.items()
+        }
+        board = self.resources.get("message_board")
+        # A board comes with all its tools unless `tools` is set; `tools: []`
+        # means none.
+        if board is not None and "tools" not in self.model_fields_set:
+            self.tools = ["message_board.*"]
+        if (
+            self.environment.backend == "hf-sandbox"
+            and board is not None
+            and not board.get("space_id")
+        ):
+            # Agents reach a local board through a mounted Unix socket, and a
+            # sandbox can't mount it. A run without a board is fine.
+            raise ValueError(
+                "environment.backend hf-sandbox can't reach a local board: set "
+                "message_board.space_id to put the board on a Space, or remove "
+                "resources.message_board"
+            )
+        return self
+
     @classmethod
     def load(cls, path: Path):
+        """Paths set in the YAML resolve relative to it. By default, resources and
+        tools are Flock's built-in ones and results go to ./results."""
         path = path.resolve()
         spec = cls.model_validate(yaml.safe_load(path.read_text()))
-        spec.output_dir = (path.parent / spec.output_dir.expanduser()).resolve()
-        spec.tools_dir = (path.parent / spec.tools_dir.expanduser()).resolve()
-        spec.resources_dir = (path.parent / spec.resources_dir.expanduser()).resolve()
+        for field in ("output_dir", "tools_dir", "resources_dir"):
+            value = getattr(spec, field)
+            if field in spec.model_fields_set:
+                value = path.parent / value.expanduser()
+            setattr(spec, field, value.resolve())
         if spec.team_file is not None:
             spec.team_file = (path.parent / spec.team_file.expanduser()).resolve()
         for role in (spec.agents.roles or {}).values():
@@ -141,22 +183,30 @@ class Config(Settings):
                 role.role_file = (path.parent / role.role_file.expanduser()).resolve()
         return spec
 
-    def check_credentials(self):
-        if not os.environ.get(self.inference.api_key_env):
+    def api_key(self):
+        """The inference credential. HF_TOKEN falls back to the logged-in token
+        (`hf auth login`), as for the Space board."""
+        name = self.inference.api_key_env
+        key = os.environ.get(name) or (get_token() if name == "HF_TOKEN" else None)
+        if not key:
             raise ValueError(
-                f"Set {self.inference.api_key_env} before running an experiment"
+                f"Set {name}"
+                + (" or run `hf auth login`" if name == "HF_TOKEN" else "")
+                + " before running an experiment"
             )
+        return key
 
-    def check_model_connection(self):
+    def check_model_connection(self, api_key):
         from harbor.agents.installed.pi import Pi
 
+        environment = {**os.environ, self.inference.api_key_env: api_key}
         Pi.resolve_model_connection_config(
             self.model,
             lambda key, *others: next(
                 (
-                    (name, os.environ[name])
+                    (name, environment[name])
                     for name in (key, *others)
-                    if os.environ.get(name)
+                    if environment.get(name)
                 ),
                 None,
             ),
