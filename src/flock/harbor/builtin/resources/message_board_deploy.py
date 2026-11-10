@@ -1,4 +1,4 @@
-# from shepherd eabb46f:src/flock/builtin/resources/message_board_deploy.py
+# vendored from eabb46f:src/flock/builtin/resources/message_board_deploy.py
 """Run msgboard.space.deploy() for the board resource in a process of its own.
 
 deploy()'s Hub calls have no timeout, so the resource kills this process when its

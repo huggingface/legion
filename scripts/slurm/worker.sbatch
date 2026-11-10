@@ -26,9 +26,9 @@
 #   Without an image flock-worker runs here, in this job's shell (exec), with the env file's paths.
 # - FLOCK_HARNESS=harbor (the env file): each agent is a Harbor Trial in a rootless podman
 #   container, which cannot run inside Enroot, so flock-worker runs here (never in CONTAINER) as
-#   a child of this shell, with shepherd's podman setup (f3970bc launch.slurm): the job's own
+#   a child of this shell, with the upstream podman setup (f3970bc launch.slurm): the job's own
 #   podman storage under /tmp, podman's health checks run by flock.harbor.podman_healthchecks,
-#   shepherd's git credential helper for huggingface.co (the token from a 0600 file there), and
+#   the upstream git credential helper for huggingface.co (the token from a 0600 file there), and
 #   at exit the job's containers stopped. Unverified on compute nodes.
 # - Spot reclaim (container): the watcher sends SIGUSR1 to this shell, to srun AND to every process
 #   of the step. flock-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
@@ -122,7 +122,7 @@ if [ "${FLOCK_HARNESS:-}" = harbor ]; then
   trap podman_cleanup EXIT
   export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
   mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
-  # Harbor clones task repos with git: HF_TOKEN for huggingface.co only (shepherd's helper), read
+  # Harbor clones task repos with git: HF_TOKEN for huggingface.co only (the upstream helper), read
   # from a 0600 file, as the worker's environment never holds it
   if [ -n "${HF_TOKEN:-}" ]; then
     printf '%s\n' "$HF_TOKEN" > "$PODMAN_LOCAL/hf-token" || die "cannot write $PODMAN_LOCAL/hf-token"

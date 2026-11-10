@@ -122,7 +122,7 @@ A long-lived local controller can also be started by hand:
 ## What differs locally
 
 - Agent names follow the spec's `naming:` as on HF Jobs: a Harbor spec's random words by default,
-  shepherd's `agent-001`, ... with `naming: consecutive-id`, `<type>-NNNN` for a swarm spec
+  consecutive `agent-001`, ... with `naming: consecutive-id`, `<type>-NNNN` for a swarm spec
   (docs/spawn.md "Names"); the run bundle's
   `events/<name>.jsonl` and `agents/<name>/` use the same names.
 

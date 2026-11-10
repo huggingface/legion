@@ -1,4 +1,4 @@
-# from shepherd eabb46f:src/flock/resources.py
+# vendored from eabb46f:src/flock/resources.py
 """Load experiment resources and manage their lifecycle without provider-specific code."""
 
 import asyncio
@@ -109,7 +109,7 @@ class Resources:
         config.environment.mounts = mounts or None
         return metadata
 
-    # flock: the optional hooks; shepherd's launcher calls none of them
+    # flock: the optional hooks; the upstream launcher calls none of them
     async def add(self, names):
         """Agents that now run here: each resource with `add` sets them up (idempotent)."""
         for provider in self.providers.values():

@@ -244,7 +244,7 @@ cache is server-side with a 1 h TTL either way. Hence the 120 s idle grace and
 the measured defaults of 50 agents and 20 concurrent turns per worker.
 
 `harness: harbor` is the only harness now: each agent is one long-lived Harbor Trial on
-shepherd's task path (flock.worker.adapters.harbor), in which Harbor's Pi runs one turn per
+the upstream Harbor task path (flock.worker.adapters.harbor), in which Harbor's Pi runs one turn per
 prompt; the Trial outlives the bursts and its Pi sessions are synced like a harness's files.
 
 ### Resume across workers

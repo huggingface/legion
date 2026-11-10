@@ -2,7 +2,7 @@
 # prompts) on flock's Harbor path, on HF Jobs: one agent per lane, each a dedicated hf-sandbox
 # Trial of the task chatbot4-v8-agent, started by its own worker job. The shared chatbot4 world and a dedicated board are resources, reached over
 # HTTP through the world.* and message_board.* tools. `flock init` writes every ${VAR} below into run.env.
-# Differences from v8: prompts/system.md names $CHATBOT_REPO and shepherd's tool calls, and
+# Differences from v8: prompts/system.md names $CHATBOT_REPO and the upstream tool calls, and
 # arrives in the first prompt (not as a system prompt); one agent per lane, no ramps; the board's
 # rules are not enforced on hf-sandbox (no mounts, no rule proxy: run.json warns).
 name: ${RUN_NAME:-v8h-1}
@@ -47,7 +47,7 @@ resources:
 tools_dir: tools                               # links to flock's built-in ones, as resources
 tools:
   - message_board.*
-  - message_board_extra.*                     # react, doc, edit_doc: v8's board tools beyond shepherd's
+  - message_board_extra.*                     # react, doc, edit_doc: v8's board tools beyond message_board.*
   - world.*
 agents:
   roles:

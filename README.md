@@ -22,7 +22,7 @@ them.
   one type per role (`harness: harbor`: each agent is a Harbor Trial running Pi).
   `launch`, `update` and `remove` edit the spec; a reconcile loop makes HF Jobs
   match it.
-- **Stable agent identities:** agents get flock's random names (`amber-otter`), or shepherd's
+- **Stable agent identities:** agents get flock's random names (`amber-otter`), or consecutive
   `agent-001`, ... with `naming: consecutive-id` (docs/spawn.md "Names"). The same name
   keeps the same harness session and workdir across worker restarts.
 - **Durable sessions:** workers sync each agent's session and workdir to a
@@ -155,7 +155,7 @@ environment: {backend: hf-sandbox}       # hf-jobs workers run each Trial in an 
 workers: {agents_per_worker: 50}
 ```
 
-`backend: hf-sandbox` (shepherd's) runs each Trial in an HF Sandbox: `environment.flavor` is its
+`backend: hf-sandbox` runs each Trial in an HF Sandbox: `environment.flavor` is its
 hardware (default `cpu-basic`), it bills to the spec's `namespace` (unset: the HF token's account),
 and its idle timeout is `turn_timeout` plus 60 s. The task needs a prebuilt public `docker_image`;
 nothing is mounted, so no local board and no `spawn` resource. experiments/mini-swarm runs three

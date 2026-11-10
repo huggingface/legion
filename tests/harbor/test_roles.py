@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/test_roles.py
+# vendored from eabb46f:tests/test_roles.py
 from pathlib import Path
 
 import pytest

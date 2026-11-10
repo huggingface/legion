@@ -1,9 +1,9 @@
-"""flock's run spec: shepherd's `Config` plus flock's blocks (loop, ramps, workers, compute, spawn).
+"""flock's run spec: the upstream `Config` plus flock's blocks (loop, ramps, workers, compute, spawn).
 
-One `spec.yaml` (plus its prompt files) per run. A shepherd config loads unchanged.
+One `spec.yaml` (plus its prompt files) per run. An upstream config loads unchanged.
 `Spec.load` fills `${VAR}` / `${VAR:-default}` in string values and inlines prompt files.
 `compile_spec` turns a Spec into the `SwarmSpec` flock's controller and workers run: one type
-per role, `harness: harbor`, each agent one Harbor Trial on shepherd's task path.
+per role, `harness: harbor`, each agent one Harbor Trial on the upstream Harbor task path.
 
 Each role is a flock type, so a loop's `while.budget_usd` is per role; `limits.budget_usd` is
 the run's.
@@ -168,13 +168,13 @@ class Spec(Config):
     loop: Loop | None = None
     pricing: Pricing | None = None
     workers: Workers = Field(default_factory=Workers)
-    # Where flock's workers run (docs/local.md); a shepherd config runs here, on its engine.
+    # Where flock's workers run (docs/local.md); an upstream config runs here, on its engine.
     compute: ComputeSpec = Field(default_factory=lambda: ComputeSpec(kind="local"))
     namespace: str = ""  # bills the HF Jobs workers and the hf-sandbox sandboxes (unset: the token's)
     bucket: str = ""
     dashboard: DashboardSpec | None = None
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
-    # agent names: flock's random `<adjective>-<noun>` (words), or shepherd's roster() names
+    # agent names: flock's random `<adjective>-<noun>` (words), or the upstream roster() names
     # (`agent-001`, ... numbered across the roles in order) for a task that relies on them
     naming: Literal["words", "consecutive-id"] = "words"
 
@@ -267,7 +267,7 @@ class Spec(Config):
         # YAML 1.2 booleans, as flock's specs: `on:` stays a key
         data = load_spec_yaml(path.read_text())
         spec = cls.model_validate(substitute(data, os.environ if env is None else env))
-        # as shepherd's Config.load: a path set in the YAML is relative to it
+        # as the upstream Config.load: a path set in the YAML is relative to it
         for field in ("output_dir", "tools_dir", "resources_dir"):
             value = getattr(spec, field)
             if field in spec.model_fields_set:
@@ -374,7 +374,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "tools": tools,
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,
-                # shepherd's names and roles; words: none here, each assign carries the run's
+                # consecutive names and roles; words: none here, each assign carries the run's
                 "roster": spec.agents.roster() if spec.naming == "consecutive-id" else {},
                 "folders": folders,
             },

@@ -1,4 +1,4 @@
-# from shepherd eabb46f:src/flock/tools/setup.py
+# vendored from eabb46f:src/flock/tools/setup.py
 """Install the same selected tool bundle for any native installed Harbor agent."""
 
 import asyncio

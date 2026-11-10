@@ -76,7 +76,7 @@ def test_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
     """The bootstrap script on stubs (uv, hf from a local bucket, curl, mkdir, flock,
     flock-worker). A worker installs flock on Python 3.12 with uv.lock's versions
     as constraints and msgboard overridden to the wheel shipped next to flock's (never its
-    private git source) and gets shepherd's git credential helper for huggingface.co."""
+    private git source) and gets the upstream git credential helper for huggingface.co."""
     stubs, log, bucket = tmp_path / "stubs", tmp_path / "calls.log", tmp_path / "bucket"
     wheels = tmp_path / "wheels"  # the script's /opt/wheels
     (bucket / "ns/sh/dist").mkdir(parents=True)

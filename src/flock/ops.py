@@ -53,7 +53,7 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
     """Read a spec (${VAR} from --env files and the environment substituted:
     flock.specrender, `sources` filled) and inline each type's
     system_prompt_file (plus system_prompt_append_file) and loop prompt files, and the comms
-    kickoff and protocol files (relative to the spec file). A Harbor spec (shepherd's YAML plus
+    kickoff and protocol files (relative to the spec file). A Harbor spec (the upstream YAML plus
     flock's blocks: a top-level `task:`) is compiled instead (`harbor_spec`). Raises SpecError."""
     path = Path(spec_file)
     try:
@@ -98,7 +98,7 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
 
 
 def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
-    """A Harbor spec as flock runs it, done here on the operator's machine as shepherd's
+    """A Harbor spec as flock runs it, done here on the operator's machine as the upstream
     launcher does: load it (${VAR} from the environment, then the --env files), pin the task to
     one revision and build the tool bundle, whose sha every worker checks against the bundle it
     builds, then compile it (flock.harbor.spec.compile_spec). The tools and resources folders
@@ -159,7 +159,7 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
             return {r: a for a, r in reversed(roster.items())}
 
         if moved := [r for r, a in first(running).items() if first(new).get(r, a) != a]:
-            # shepherd's names run across the roles: another count would rename running agents
+            # consecutive names run across the roles: another count would rename running agents
             where = ", ".join(f"role {r}" for r in moved)
             raise SpecError([(f"agents.roles: a count change before {where} renumbers its "
                               "agents (names run agent-001, ... across the roles in order): "

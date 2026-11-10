@@ -160,7 +160,7 @@ async def test_rule_proxy_checks_posts_and_opens_only_the_board_tools_routes(
 
 
 async def test_a_url_board_fails_the_run_only_after_the_outage_grace(tmp_path, monkeypatch):
-    """`url` (a board that is up) is watched as shepherd's Space board: health checks every
+    """`url` (a board that is up) is watched as the upstream Space board: health checks every
     HEALTH_CHECK_SECONDS, an error only once it has been unreachable for the grace."""
     board, server, board.url = fake_msgboard.serve(prefix="/boards/x")
     operator = board.token_for("operator", "user")

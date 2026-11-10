@@ -1,4 +1,4 @@
-# from shepherd eabb46f:src/flock/networking.py
+# vendored from eabb46f:src/flock/networking.py
 """Owned container networks whose subnets do not overlap host or VPN routes."""
 
 import asyncio

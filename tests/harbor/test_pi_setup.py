@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/test_pi_setup.py
+# vendored from eabb46f:tests/test_pi_setup.py
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 

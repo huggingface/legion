@@ -1,6 +1,6 @@
 """Agent names (docs/spawn.md "Names"). `naming: numeric` (the default): `<type>-NNNN` for
 replicas, `<parent>-<type>-NNNN` for spawned children (`naming: consecutive-id`, Harbor types: the
-replicas get their roster's names, shepherd's `agent-001`, ...). `naming: words`: `<prefix><adjective>-
+replicas get their roster's names, consecutive `agent-001`, ...). `naming: words`: `<prefix><adjective>-
 <noun>` (the type's `name_prefix`, e.g. `iv-`), reserved in the store with the slot or the
 parent, unique on the controller, never reused while the swarm exists, and kept when a replica
 slot is recreated (also across controller restarts: the reservation is in the store). The
@@ -47,7 +47,7 @@ def replica_names(store, spec: SwarmSpec, type_name: str, replicas: int, now: fl
     if spec.naming == "consecutive-id" and ts and ts.harbor:
         roster = ts.harbor.roster
         taken = set(roster) | {a["name"] for a in store.list_agents(spec.swarm)}
-        # past the roster (replicas above the count): the next free shepherd-style names
+        # past the roster (replicas above the count): the next free `agent-NNN` names
         spare = (n for n in (f"agent-{i:03d}" for i in itertools.count(len(roster) + 1))
                  if n not in taken)
         named = ts.harbor.names()

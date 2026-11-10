@@ -1,4 +1,4 @@
-"""message_board_extra.* (flock's board tools beyond shepherd's) against a managed local board."""
+"""message_board_extra.* (flock's board tools beyond message_board.*) against a managed local board."""
 
 from pathlib import Path
 

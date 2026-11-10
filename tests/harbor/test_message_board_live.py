@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/test_message_board_live.py
+# vendored from eabb46f:tests/test_message_board_live.py
 """One end-to-end test of the board resource on a real Hugging Face Space.
 
 Skipped unless FLOCK_LIVE_SPACES says where test Spaces go, as <namespace>/<name-prefix>

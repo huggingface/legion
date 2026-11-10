@@ -721,19 +721,19 @@ class RampSpec(_Removable):
 class HarborSpec(BaseModel):
     """A `harness: harbor` type's Trial inputs, written by the compile step
     (`flock.harbor.spec.compile_spec`), never by hand: each agent is one long-lived Harbor Trial
-    on shepherd's task path. The worker composes the agent's instructions from `team`,
-    `role_text`, `roster` and the tools with shepherd's `build_agent_instructions`."""
+    on the upstream Harbor task path. The worker composes the agent's instructions from `team`,
+    `role_text`, `roster` and the tools with the upstream `build_agent_instructions`."""
 
     model_config = {"extra": "forbid"}
 
     task: dict[str, Any]  # ResolvedTask.manifest(): registry commit, dataset, the pinned task
     # a partial flock.harbor Spec (model, inference, task, environment, limits, tools_dir,
-    # tools, resources_dir) for shepherd's build_trial_config and the worker's HarborHost
+    # tools, resources_dir) for the upstream build_trial_config and the worker's HarborHost
     config: dict[str, Any]
     team: str = ""  # the team_file's text
     role: str | None = None  # the role named in the instructions (None: agents.count)
     role_text: str = ""  # the role_file's text
-    # every replica's name -> role: with `naming: consecutive-id`, shepherd's names compiled
+    # every replica's name -> role: with `naming: consecutive-id`, consecutive names compiled
     # from the counts; with words empty here, and filled by the controller in each assign
     roster: dict[str, str | None] = Field(default_factory=dict)
     tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
@@ -1050,7 +1050,7 @@ class SwarmSpec(BaseModel):
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
     # `<parent>-<type>-NNNN`), `words` (`<adjective>-<noun>`, unique on the controller,
     # reserved and never reused while the swarm exists; a Harbor spec's default) or
-    # `consecutive-id` (Harbor types: their roster's names, shepherd's `agent-001`, ...;
+    # `consecutive-id` (Harbor types: their roster's names, consecutive `agent-001`, ...;
     # children as numeric).
     naming: Literal["numeric", "words", "consecutive-id"] = "numeric"
 
@@ -1382,7 +1382,7 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
 LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
 NEEDS_WORLD = "needs a world (not in this version)"
 # message_board.*: the message_board resource's events (harness harbor); board.* (its name before
-# shepherd #94) and comms.* (the removed worker comms hub): no feeder now, a warning at launch
+# the rename) and comms.* (the removed worker comms hub): no feeder now, a warning at launch
 _LOOP_SOURCE_RE = re.compile(r"^(message_board|board|comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 

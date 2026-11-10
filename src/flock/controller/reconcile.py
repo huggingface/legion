@@ -577,7 +577,7 @@ def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None
 
 def harbor_roster(store: Store, spec: SwarmSpec) -> dict[str, str | None]:
     """With `naming: words`, each replica of the swarm's Harbor types (spawned children are not
-    teammates) -> its role, the type's `harbor.role`: what shepherd's launcher passes as the
+    teammates) -> its role, the type's `harbor.role`: what the upstream launcher passes as the
     roster. A replica's name is reserved with its slot; a ramp's are, up to its max."""
     roster: dict[str, str | None] = {}
     for type_name, ts in spec.types.items():

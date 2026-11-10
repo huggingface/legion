@@ -1,8 +1,8 @@
-"""Harness `harbor`: each agent is one long-lived Harbor Trial on shepherd's task path
+"""Harness `harbor`: each agent is one long-lived Harbor Trial on the upstream Harbor task path
 (flock.harbor), in which FlockPi (flock.harbor.agent) runs one `pi` turn per prompt.
 
-The Trial is built as shepherd builds it (build_trial_config, the resource bind, Trial.create,
-attach_pi_setup, attach_tool_setup) with FlockPi as the agent, and `trial.run()` runs in the
+The Trial is built as the upstream launcher builds it (build_trial_config, the resource bind,
+Trial.create, attach_pi_setup, attach_tool_setup) with FlockPi as the agent, and `trial.run()` runs in the
 background for as long as the agent lives here:
 - `start` reuses the Trial when it is up; otherwise it starts one, putting back the saved
   sessions when there are any (none for a session to resume: ResumeError), and waits until
@@ -13,7 +13,7 @@ background for as long as the agent lives here:
   /logs/agent is not mounted (hf-sandbox), it also downloads the sessions for the next push.
 - `close` ends the Trial: FlockPi returns, Harbor runs the verifier and stops the environment;
   `close(0)` cancels it unverified, and a Trial still starting is cancelled.
-On docker and podman each Trial gets its own network, as shepherd's launch gives each
+On docker and podman each Trial gets its own network, as the upstream launch gives each
 participant one (TrialNetworks), removed when the next Trial starts or at `close`.
 A Trial that fails (an idle probe, 3 failed turns in a row, a crash) is reported as `error`
 and `exited`, after a failed turn for any prompt queued for it; the next prompt starts a new
@@ -91,7 +91,7 @@ class HarborAdapter:
     async def start(self, workdir: Path, session_id: str | None, spec: TypeSpec, *,
                     env: dict[str, str] | None = None) -> str:
         """`env` is not passed on: a Trial's environment is the task's, plus the inference key,
-        the tools and the resources, as shepherd sets them."""
+        the tools and the resources, as the upstream launcher sets them."""
         self.spec = spec
         files = self.session_files(session_id)
         try:
@@ -219,7 +219,7 @@ class HarborAdapter:
         roster = h.roster if self.agent in h.roster else {**h.roster, self.agent: h.role}
         return build_agent_instructions(
             self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team, h.role_text,
-            run_id=os.environ.get("SWARM"))  # as shepherd's launcher: the run (swarm) a board spans
+            run_id=os.environ.get("SWARM"))  # as the upstream launcher: the run (swarm) a board spans
 
     async def _new_trial(self, restore: bool) -> None:
         """Create the agent's next Trial, run it in the background and wait until FlockPi
@@ -262,8 +262,8 @@ class HarborAdapter:
             trial_seconds + parse_duration(self.spec.turn_timeout).total_seconds())
         if config.environment.backend == "hf-sandbox":
             # job_timeout is the sandbox's idle timeout, and a running command is no activity:
-            # shepherd's outlasts its one Pi command (the run) by 60 s, flock's one turn (FlockPi
-            # probes between turns). Billed to the spec's namespace (unset: the token's owner).
+            # the upstream launcher's outlasts its one Pi command (the run) by 60 s, flock's one
+            # turn (FlockPi probes between turns). Billed to the spec's namespace (unset: the token's owner).
             tc.environment.kwargs.update(
                 job_timeout=math.ceil(parse_duration(self.spec.turn_timeout).total_seconds()) + 60,
                 namespace=config.namespace or None)

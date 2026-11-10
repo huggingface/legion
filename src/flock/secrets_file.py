@@ -95,7 +95,7 @@ def secret_env() -> Mapping[str, str]:
 
 @contextmanager
 def exposed() -> Iterator[None]:
-    """The file's secrets in `os.environ` for the code inside, which reads them there (shepherd's
+    """The file's secrets in `os.environ` for the code inside, which reads them there (the upstream
     build_trial_config and resource plugins), then removed again. Synchronous code only: an
     await inside would let another task's subprocess inherit them."""
     added = [name for name in _secrets if name not in os.environ]

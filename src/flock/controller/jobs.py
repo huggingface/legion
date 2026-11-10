@@ -51,7 +51,7 @@ echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/override
 uv tool install -q --python 3.12 "$WHEEL" -c /opt/wheels/constraints.txt \
   --overrides /opt/wheels/overrides.txt
 # Harbor downloads tasks with Git. Scope HF_TOKEN authentication to the Hub,
-# without writing a token or changing the user's Git configuration. (shepherd's launch.slurm)
+# without writing a token or changing the user's Git configuration. (the upstream launch.slurm)
 if [[ -n "${HF_TOKEN:-}" ]]; then
   git_slot=${GIT_CONFIG_COUNT:-0}
   export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"

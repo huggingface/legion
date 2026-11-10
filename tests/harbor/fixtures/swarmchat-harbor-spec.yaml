@@ -1,14 +1,14 @@
 # Copied from origin/harbor-v8 9f0865b:experiments/v8-harbor/spec.yaml (owned by that branch;
 # experiments/swarmchat-harbor here).
-# v8 (hf://buckets/cmpatino/legacy-swarmchat-experiments/v8: six lanes, prompts) in shepherd's config shape: it loads with
-# flock.harbor.config as copied from shepherd f3970bc. Each agent runs the Harbor task
+# v8 (hf://buckets/cmpatino/legacy-swarmchat-experiments/v8: six lanes, prompts) in the upstream config shape: it loads with
+# flock.harbor.config as vendored from f3970bc. Each agent runs the Harbor task
 # chatbot4-v8-agent in its own container; the shared chatbot4 world and the board are resources,
 # reached through the world.* and message_board.* tools. Differences from v8: prompts/system.md names
-# $CHATBOT_REPO and shepherd's tool calls, and arrives in the first prompt (not as a system
+# $CHATBOT_REPO and the upstream tool calls, and arrives in the first prompt (not as a system
 # prompt); no board rules, notifications or ramps; one agent per lane.
 #
 # NOT YET (marked, so they are not lost):
-# - hf-sandbox: shepherd's loader takes only environment.backend docker|podman. For hf-sandbox,
+# - hf-sandbox: the upstream loader takes only environment.backend docker|podman. For hf-sandbox,
 #   set the backend there and resources.world.transport: http (no mounts). http needs a world
 #   image rebuilt from this branch (re-vendor flock.world): older worlds refuse agent tokens.
 # - The flock loop is not read by flock.harbor.config (another workstream designs how flock drives
@@ -42,7 +42,7 @@ resources:
 tools_dir: ../../src/flock/harbor/builtin/tools
 tools:
   - message_board.*
-  - message_board_extra.*                             # react, doc, edit_doc: v8's board tools beyond shepherd's
+  - message_board_extra.*                             # react, doc, edit_doc: v8's board tools beyond message_board.*
   - world.*
 agents:
   roles:

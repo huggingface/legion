@@ -91,7 +91,7 @@ case ${{1:-}} in info) echo "$root";; unshare) shift; "$@";; esac
 
 def test_harbor_worker_runs_on_the_node_with_the_jobs_own_podman(tmp_path):
     """FLOCK_HARNESS=harbor: no container even with an image set; flock-worker runs here with
-    shepherd's podman setup (this job's storage, podman-compose, health checks), gets its
+    the upstream podman setup (this job's storage, podman-compose, health checks), gets its
     secrets in the file only (and the health checks none), git gets the HF token for
     huggingface.co from a 0600 file (never an environment), the worker's preempt exit (75)
     reaches Slurm, and at exit the job's containers are stopped with the job's own wrapper."""

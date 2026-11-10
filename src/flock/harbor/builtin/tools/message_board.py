@@ -1,4 +1,4 @@
-# from shepherd eabb46f:src/flock/builtin/tools/message_board.py
+# vendored from eabb46f:src/flock/builtin/tools/message_board.py
 """Message-board operations; connection settings come from the agent environment."""
 
 import os

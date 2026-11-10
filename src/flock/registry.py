@@ -19,7 +19,7 @@ class HarnessEntry:
 
 
 HARNESSES: dict[str, HarnessEntry] = {
-    # one Harbor Trial per agent on shepherd's task path (flock.harbor). Harbor installs Pi
+    # one Harbor Trial per agent on the upstream Harbor task path (flock.harbor). Harbor installs Pi
     # (flock.harbor.config.PI_VERSION) in the task's container and the Trial delivers the
     # instructions
     "harbor": HarnessEntry("flock.worker.adapters.harbor:make_adapter", "openai_compat",

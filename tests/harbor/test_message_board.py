@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/test_message_board.py
+# vendored from eabb46f:tests/test_message_board.py
 import json
 import os
 import subprocess

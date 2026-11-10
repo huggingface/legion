@@ -1,6 +1,6 @@
-"""What a worker's `harness: harbor` agents share: one `Resources` (shepherd's resources; the
+"""What a worker's `harness: harbor` agents share: one `Resources` (the vendored resources; the
 board's and world's sockets and proxies run on this host, each agent's Trial is bound to them),
-shepherd's tool bundle, the task downloaded once, and on hf-sandbox a thread pool sized for
+the vendored tool bundle, the task downloaded once, and on hf-sandbox a thread pool sized for
 every sandbox call. Prepared at the worker's first Trial start; a failed attempt is retried by
 the next one. The worker stops the resources when it exits.
 
@@ -37,7 +37,7 @@ class HarborHost:
         # the worker's controller_call(agent, entry, args): a call as that agent (its own token)
         self.controller = controller
         self.resources: Any = None  # flock.harbor Resources, started; None until prepared
-        self.bundle: Any = None  # shepherd's ToolBundle; None: the run has no tools
+        self.bundle: Any = None  # the vendored ToolBundle; None: the run has no tools
         self.task_path: Path | None = None  # the pinned task, downloaded for every agent here
         self._prepared: asyncio.Task | None = None
 
@@ -80,7 +80,7 @@ class HarborHost:
             self.task_path = await sources.download_task(task, self.root / "sources")
         if self.resources is None:
             key = secret_env().get(config.inference.api_key_env)
-            # a resource without the add hook gets the type's roster, as shepherd's launcher
+            # a resource without the add hook gets the type's roster, as the upstream launcher
             # gives it; one with it is told each agent placed here (adapters/harbor.py)
             with exposed():  # the plugins read their tokens (token_env) from os.environ
                 resources = Resources(

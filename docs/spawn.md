@@ -109,7 +109,7 @@ Harbor spec takes `words` (its default) or `consecutive-id`; it cannot change in
 | `naming` | replicas | spawned children |
 |---|---|---|
 | `words` (a Harbor spec's default) | `<adjective>-<noun>`, e.g. `amber-otter` | the same, e.g. `brisk-lantern` |
-| `consecutive-id` (Harbor) | shepherd's names: `agent-001`, ... numbered across the roles in order | `<parent>-<type>-NNNN` |
+| `consecutive-id` (Harbor) | `agent-001`, ... numbered across the roles in order | `<parent>-<type>-NNNN` |
 | `numeric` (a swarm spec's default) | `<type>-NNNN` (the slot) | `<parent>-<type>-NNNN` (the per-swarm counter) |
 
 **For task authors:** agent names are opaque strings. Verifiers and instructions must not

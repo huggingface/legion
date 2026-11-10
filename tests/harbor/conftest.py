@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/conftest.py
+# vendored from eabb46f:tests/conftest.py
 import os
 
 import pytest

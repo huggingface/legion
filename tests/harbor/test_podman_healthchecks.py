@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/test_podman_healthchecks.py
+# vendored from eabb46f:tests/test_podman_healthchecks.py
 import asyncio
 import importlib.util
 import json

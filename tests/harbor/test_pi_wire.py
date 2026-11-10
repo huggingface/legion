@@ -1,4 +1,4 @@
-# from shepherd eabb46f:tests/test_pi_wire.py
+# vendored from eabb46f:tests/test_pi_wire.py
 """Optional native Pi regression: FLOCK_PI_CLI points to its installed CLI JS."""
 
 import json

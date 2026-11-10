@@ -1,8 +1,8 @@
-# from shepherd eabb46f:src/flock/builtin/resources/message_board.py
+# vendored from eabb46f:src/flock/builtin/resources/message_board.py
 """The run's msgboard: a local board managed by the run, or a board on a Hugging Face Space.
 
-flock's additions (lines marked `flock:`; unused options keep shepherd's behaviour):
-- `url` / `token_env`: connect to a board that is already up (shepherd f3970bc's existing-board
+flock's additions (lines marked `flock:`; unused options keep the upstream behaviour):
+- `url` / `token_env`: connect to a board that is already up (f3970bc's existing-board
   mode, which eabb46f replaced with `space_id`). Each flock worker runs its own resources, and a
   `space_id` board is deployed (and its operator token rotated) by every one that starts: a run
   of more than one worker deploys its board once and connects every worker to it this way.
@@ -128,7 +128,7 @@ class Options(BaseModel):
             validate_repo_id(value)  # `name` or `namespace/name`
         return value
 
-    @field_validator("url")  # flock: as shepherd f3970bc's board.url
+    @field_validator("url")  # flock: as f3970bc's board.url
     @classmethod
     def endpoint(cls, value):
         if value is None:
@@ -192,7 +192,7 @@ class Resource:
         self.warning = None
         if self.options.rules is not None and self.options.transport == "http":
             self.warning = "board rules are not enforced: transport http has no rule proxy"
-        if self.options.url:  # flock: as shepherd f3970bc's board.url
+        if self.options.url:  # flock: as f3970bc's board.url
             self.url = self.options.url
             self.operator_token = os.environ.get(self.options.token_env)
             if not self.operator_token:
@@ -680,7 +680,7 @@ class Resource:
             if self.socket_directory:
                 self.socket_directory.cleanup()
 
-    # flock: the hooks flock's worker calls (flock.harbor.resources); shepherd's launcher does not
+    # flock: the hooks flock's worker calls (flock.harbor.resources); the upstream launcher does not
     def _kickoff(self):
         channel = self.client.channel_id(self.options.channels[0])
         key = hashlib.sha256(f"{channel}\n{self.options.kickoff}".encode()).hexdigest()[:32]

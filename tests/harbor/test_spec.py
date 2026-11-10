@@ -26,10 +26,10 @@ def within(small, big):
 @pytest.mark.parametrize(
     "example", [*sorted(EXAMPLES.glob("*.yaml")), SWARMCHAT_FIXTURE], ids=lambda p: p.name
 )
-def test_shepherd_configs_load_unchanged(example):
-    shepherd, spec = Config.load(example), Spec.load(example, env={})
-    assert within(shepherd.model_dump(), spec.model_dump())
-    assert spec.loop is None and spec.agents.roster() == shepherd.agents.roster()
+def test_upstream_configs_load_unchanged(example):
+    upstream, spec = Config.load(example), Spec.load(example, env={})
+    assert within(upstream.model_dump(), spec.model_dump())
+    assert spec.loop is None and spec.agents.roster() == upstream.agents.roster()
 
 
 def test_swarmchat_harbor_spec_loads():
@@ -402,7 +402,7 @@ def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, s
     assert all(kw["env"]["CHATBOT_REPO"] == "ns/chat" for kw in runs)
 
 
-def test_a_shepherd_config_compiles():
+def test_an_upstream_config_compiles():
     swarm = compile_spec(Spec.load(EXAMPLES / "pi-hf.yaml", env={}), TASK)
     (name, ts), = swarm.types.items()
     assert (swarm.swarm, name, ts.replicas, ts.loop) == ("pi-hf-team", "agent", 2, None)
@@ -462,7 +462,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
     assert {a["name"]: a["type"] for a in store.list_agents(swarm.swarm)} == roster
 
 
-SHEPHERD = """name: crew
+CONSECUTIVE = """name: crew
 model: m/x
 task: {repo: https://huggingface.co/datasets/a/b, selector: v8}
 naming: consecutive-id
@@ -473,18 +473,18 @@ agents:
 """
 
 
-def shepherd_swarm(tmp_path, reviewers=1, ramp=None):
-    text = SHEPHERD.replace("REVIEWERS", str(reviewers))
+def consecutive_swarm(tmp_path, reviewers=1, ramp=None):
+    text = CONSECUTIVE.replace("REVIEWERS", str(reviewers))
     if ramp:
         text = text.replace(f"{{count: {reviewers}}}", f"{{count: {reviewers}, ramp: {ramp}}}")
     (tmp_path / "spec.yaml").write_text(text)
     return compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 
-def test_naming_consecutive_id_gives_shepherds_names(tmp_path):
-    """`naming: consecutive-id`: the names shepherd's launcher gives the same config (its roster()),
+def test_naming_consecutive_id_gives_consecutive_names(tmp_path):
+    """`naming: consecutive-id`: the names the upstream launcher gives the same config (its roster()),
     numbered across the roles in order."""
-    swarm = shepherd_swarm(tmp_path)
+    swarm = consecutive_swarm(tmp_path)
     want = Config.model_validate(
         {k: v for k, v in yaml.safe_load((tmp_path / "spec.yaml").read_text()).items()
          if k != "naming"}).agents.roster()
@@ -496,8 +496,8 @@ def test_naming_consecutive_id_gives_shepherds_names(tmp_path):
 def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
     from flock.ops import SpecError, keep_pins
 
-    old = shepherd_swarm(tmp_path)
-    grown = shepherd_swarm(tmp_path, reviewers=3)  # the last role may grow
+    old = consecutive_swarm(tmp_path)
+    grown = consecutive_swarm(tmp_path, reviewers=3)  # the last role may grow
     keep_pins(old, grown)
     assert grown.types["reviewer"].harbor.names() == ["agent-003", "agent-004", "agent-005"]
     data = yaml.safe_load((tmp_path / "spec.yaml").read_text())
@@ -507,17 +507,17 @@ def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
         keep_pins(old, compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK))
     words = old.model_copy(update={"naming": "words"})
     with pytest.raises(SpecError, match="names never change in a run"):
-        keep_pins(words, shepherd_swarm(tmp_path))
+        keep_pins(words, consecutive_swarm(tmp_path))
 
 
-def test_naming_consecutive_id_a_raised_ramp_gets_shepherds_names(tmp_path, store, clock):
+def test_naming_consecutive_id_a_raised_ramp_gets_consecutive_names(tmp_path, store, clock):
     """The last role's ramp raised (count 1 -> 3): its new agents get agent-NNN names, never
     `<type>-NNNN` (the ramp is compared too, not only the replicas, which a ramp keeps at 0)."""
     from flock.controller.naming import replica_names
     from flock.ops import keep_pins
 
-    old = shepherd_swarm(tmp_path, ramp="{start: 1, add: 1, every: 10m}")
-    raised = shepherd_swarm(tmp_path, reviewers=3, ramp="{start: 1, add: 1, every: 10m}")
+    old = consecutive_swarm(tmp_path, ramp="{start: 1, add: 1, every: 10m}")
+    raised = consecutive_swarm(tmp_path, reviewers=3, ramp="{start: 1, add: 1, every: 10m}")
     assert raised.types["reviewer"].replicas == old.types["reviewer"].replicas == 0
     keep_pins(old, raised)
     store.put_swarm(raised, 0)
@@ -530,7 +530,7 @@ def test_naming_consecutive_id_a_raised_ramp_gets_shepherds_names(tmp_path, stor
 
 async def test_the_controller_refuses_a_naming_change_in_a_running_swarm(tmp_path, client, store,
                                                                           settings, clock):
-    swarm = shepherd_swarm(tmp_path)  # naming: consecutive-id
+    swarm = consecutive_swarm(tmp_path)  # naming: consecutive-id
     assert (await client.put("/swarms/crew", json=swarm.model_dump(mode="json"))).status_code == 200
     reconcile(store, SimpleNamespace(), clock(), settings)  # local: its agents exist now
     assert store.list_agents("crew")

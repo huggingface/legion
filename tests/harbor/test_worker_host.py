@@ -339,7 +339,7 @@ class Resource:
 
 
 async def test_secrets_from_the_workers_secrets_file_reach_the_trial(world, tmp_path, monkeypatch):
-    """A Slurm worker has its secrets in a file, not os.environ (worker.sbatch): shepherd's
+    """A Slurm worker has its secrets in a file, not os.environ (worker.sbatch): the upstream
     build_trial_config and a resource plugin, which read os.environ, still get them, and
     os.environ is without them again afterwards."""
     monkeypatch.delenv("HF_INFERENCE_TOKEN")
