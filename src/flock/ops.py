@@ -534,6 +534,8 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=(),
     LOCAL_DIR.mkdir(exist_ok=True)
     cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
            "--data-dir", str(LOCAL_DIR), *(a for f in env_files for a in ("--env", f))]
+    if all(ts.loop for ts in spec.types.values()):  # self-driven: end when every loop is over
+        cmd += ["--until", "idle"]
     with (LOCAL_DIR / "launch.log").open("w") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
                                 start_new_session=True, env=dict(env))
