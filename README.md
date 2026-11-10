@@ -10,6 +10,8 @@ It is the layer under [msgboard](https://github.com/huggingface/msgboard) and
 a prompt API and an event stream, and leaves messaging and experiment design to
 them.
 
+![flock on Harbor: flock steers the swarm, Harbor runs each agent as a Trial](docs/architecture.svg)
+
 ## Features
 
 - **Local mode:** `compute: local` and `flock launch spec.yaml` run the same spec on a laptop
