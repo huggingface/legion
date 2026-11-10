@@ -73,6 +73,7 @@ agents:
     steward:
       count: 1
       role_file: prompts/lanes/steward.md
+      name_prefix: steward-                   # steward-teal-heron: recognizable on the board and in PRs
       workers: {agents_per_worker: 10}
       loop:                                   # a round every 15 min; wakes on mentions and threads only
         prompt_file: prompts/round.md

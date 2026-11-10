@@ -481,6 +481,20 @@ def test_naming_consecutive_id_gives_consecutive_names(tmp_path):
         want) == {"agent-001": "explorer", "agent-002": "explorer", "agent-003": "reviewer"}
 
 
+def test_a_role_name_prefix_reaches_its_type_and_needs_words_naming(tmp_path):
+    text = CONSECUTIVE.replace("REVIEWERS", "1").replace(
+        "{count: 1}", '{count: 1, name_prefix: "rev-"}')
+    (tmp_path / "spec.yaml").write_text(text.replace("naming: consecutive-id\n", ""))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert (swarm.types["reviewer"].name_prefix, swarm.types["explorer"].name_prefix) == ("rev-", None)
+    (tmp_path / "spec.yaml").write_text(text)
+    with pytest.raises(ValueError, match="agents.roles.reviewer.name_prefix needs naming: words"):
+        Spec.load(tmp_path / "spec.yaml", env={})
+    (tmp_path / "spec.yaml").write_text(text.replace('"rev-"', '"Rev"'))
+    with pytest.raises(ValueError, match="lowercase letters and hyphens"):
+        Spec.load(tmp_path / "spec.yaml", env={})
+
+
 def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
     from flock.ops import SpecError, keep_pins
 

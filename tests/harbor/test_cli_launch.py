@@ -165,6 +165,7 @@ def test_the_pybot_spec_compiles(monkeypatch, pins):
         assert ts.harbor.config["limits"]["trial_hours"] == 21
     steward, answers = swarm.types["steward"], swarm.types["answers"]
     assert (steward.loop.every, answers.loop.every) == ("15m", "turn_end")
+    assert (steward.name_prefix, answers.name_prefix) == ("steward-", None)
     assert steward.loop.final.reserve_usd == 0.3 and answers.loop.final.reserve_usd == 3 / 9
 
 

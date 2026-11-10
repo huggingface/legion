@@ -126,6 +126,9 @@ types:
   interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
 ```
 
+A Harbor spec sets it per role (`agents.roles.<role>.name_prefix`, words only), e.g.
+`steward: {name_prefix: steward-, ...}` in experiments/pybot.
+
 - **Words.** About 190 adjectives (colors, simple qualities) and 340 nouns (animals, fruits,
   plants, everyday objects), lowercase, letters and hyphens only, so every name is a valid
   board handle. When two-word names get crowded, a third word is added.

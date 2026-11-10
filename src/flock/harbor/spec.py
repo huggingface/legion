@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from harbor.utils.env import is_sensitive_env_key
-from pydantic import BeforeValidator, Field, field_validator, model_validator
+from pydantic import AfterValidator, BeforeValidator, Field, field_validator, model_validator
 
 from flock.models import (
     ComputeSpec,
@@ -125,6 +125,8 @@ class Role(RoleSettings):
     loop: Loop | None = None  # replaces the run's loop for this role
     workers: Workers | None = None  # overrides keys of the run's workers
     pricing: Pricing | None = None  # its own `model`'s; budgets need it (else the run's)
+    # `naming: words` only: put before every name of the role, e.g. "steward-" (TypeSpec's)
+    name_prefix: Annotated[str | None, AfterValidator(TypeSpec._name_prefix)] = None
 
     @model_validator(mode="after")
     def ramp_within_count(self):
@@ -227,6 +229,10 @@ class Spec(Config):
                     f"hf-sandbox caps a sandbox at 24 h: limits.trial_hours plus {name}'s "
                     f"turn_timeout ({turn}, a Trial's last turn) must stay below it"
                 )
+        if self.naming == "consecutive-id" and (
+                named := [n for n, r in self.roles().items() if r.name_prefix]):
+            raise ValueError(f"agents.roles.{named[0]}.name_prefix needs naming: words "
+                             "(consecutive-id names are agent-001, ...)")
         if backend == "hf-sandbox" and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
         if backend == "hf-sandbox" and (self.resources.get("message_board") or {}).get("rules"):
@@ -343,6 +349,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             **packing,
             "harness": "harbor",
             "model": f"{PROVIDER}:{model}",
+            "name_prefix": role.name_prefix,
             "replicas": 0 if ramp else role.count,  # the ramp raises them
             "replicas_ramp": ramp and {
                 "start": ramp.start, "add": ramp.add, "every": flock_duration(ramp.every),
