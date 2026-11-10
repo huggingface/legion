@@ -117,7 +117,9 @@ assume a format; flock's default names are random words. `naming: consecutive-id
 that already expect `agent-NNN` (experiments/mini-swarm). With it, only the last role's count
 may change in a running swarm: names run across the roles, so an earlier role's change would
 rename running agents, and `flock update` refuses it. With words, each agent's instructions list
-its teammates and their roles as the controller has named them.
+its teammates and their roles as the controller has named them when the agent's Trial starts:
+every role's replicas, a ramp's up to its max. Replicas added later by `flock update` are
+missing from the instructions of agents already running (they still meet on the board).
 
 ```yaml
 naming: words

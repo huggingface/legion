@@ -424,17 +424,16 @@ def test_a_missing_resource_module_is_refused_at_compile(tmp_path):
 
 def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
         tmp_path, monkeypatch, store, settings, clock):
-    """Words names (`<adjective>-<noun>`, reserved on the controller), whatever the roles: the
-    instructions' roster comes with each assign, as names -> roles. A name never encodes the
-    role, and a type's grown replicas keep the names already given."""
+    """Words names (`<adjective>-<noun>`, reserved on the controller), whatever the roles. The
+    first pass creates every type's agents before any assign, and each assign carries the
+    run's roster (names -> roles), a ramp's names up to its max included; a raised ramp's
+    agents take the names the rosters listed."""
     import json
 
     from flock.controller.naming import HANDLE_RE
-    from flock.controller.reconcile import _send_assign, harbor_roster
 
     data = load_spec_yaml(COMPILE)
     data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
-    data["agents"]["roles"]["answers"].pop("ramp")
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
@@ -444,23 +443,23 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
     jobs.api = SimpleNamespace(run_job=lambda **kw: SimpleNamespace(id="job"))
     store.put_swarm(swarm, 0)
     reconcile(store, jobs, clock(), settings)
-    agents = store.list_agents(swarm.swarm)
-    roles = {a["name"]: a["type"] for a in agents}
-    assert sorted(roles.values()) == ["answers"] * 3 + ["safety"]
-    assert all(HANDLE_RE.match(n) and len(n) <= 40 for n in roles)
-    assert harbor_roster(store, swarm.swarm) == roles  # each type's role is its name
+    agents = {a["name"]: a["type"] for a in store.list_agents(swarm.swarm)}
+    assert sorted(agents.values()) == ["answers", "safety"]  # the ramp's start: 1 answers
+    assigns = [json.loads(c["body"]) for w in store.list_workers(swarm.swarm)
+               for c in store.commands_for(w["id"]) if '"assign"' in c["body"]]
+    assert sorted(a["agent"] for a in assigns) == sorted(agents)
+    (roster,) = {json.dumps(a["spec"]["harbor"]["roster"]) for a in assigns}  # one, for all
+    roster = json.loads(roster)
+    assert sorted(roster.values()) == ["answers"] * 3 + ["safety"]  # the ramp's max listed
+    assert agents.items() <= roster.items()
+    assert all(HANDLE_RE.match(n) and len(n) <= 40 for n in roster)
 
-    a = agents[0]
-    _send_assign(store, "w-test", a, a["type"], swarm.types[a["type"]])
-    (cmd,) = store.commands_for("w-test")
-    assert json.loads(cmd["body"])["spec"]["harbor"]["roster"] == roles
-
-    grown = swarm.model_copy(deep=True)
-    grown.types["answers"].replicas = 4
-    store.put_swarm(grown, 1)
+    raised = swarm.model_copy(deep=True)
+    raised.types["answers"].replicas_ramp = None
+    raised.types["answers"].replicas = 3
+    store.put_swarm(raised, 1)
     reconcile(store, jobs, clock(), settings)
-    now = {a["name"]: a["type"] for a in store.list_agents(swarm.swarm)}
-    assert roles.items() <= now.items() and len(now) == len(roles) + 1
+    assert {a["name"]: a["type"] for a in store.list_agents(swarm.swarm)} == roster
 
 
 SHEPHERD = """name: crew
@@ -529,16 +528,12 @@ def test_naming_consecutive_id_a_raised_ramp_gets_shepherds_names(tmp_path, stor
         "agent-001", "agent-002", "agent-006"]
 
 
-def test_old_type_names_are_refused_by_name(tmp_path):
-    """A run launched before (`agent-0000`, no roles): the refusal names agents.count and says
-    why, not `None`."""
-    from flock.ops import SpecError, keep_pins
-
-    (tmp_path / "spec.yaml").write_text(
-        "name: crew\nmodel: m/x\ntask: {repo: https://huggingface.co/datasets/a/b, selector: v8}"
-        "\nnaming: consecutive-id\nagents: {count: 2}\n")
-    new = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
-    old = new.model_copy(deep=True)
-    old.types["agent"].harbor.roster = {"agent-0000": None, "agent-0001": None}
-    with pytest.raises(SpecError, match=r"before agents.count renumbers .* old `<type>-NNNN`"):
-        keep_pins(old, new)
+async def test_the_controller_refuses_a_naming_change_in_a_running_swarm(tmp_path, client, store,
+                                                                          settings, clock):
+    swarm = shepherd_swarm(tmp_path)  # naming: consecutive-id
+    assert (await client.put("/swarms/crew", json=swarm.model_dump(mode="json"))).status_code == 200
+    reconcile(store, SimpleNamespace(), clock(), settings)  # local: its agents exist now
+    assert store.list_agents("crew")
+    words = swarm.model_copy(update={"naming": "words"})
+    r = await client.put("/swarms/crew", json=words.model_dump(mode="json"))
+    assert r.status_code == 400 and "names never change in a run" in r.text, r.text

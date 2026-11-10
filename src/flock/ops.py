@@ -145,9 +145,9 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
     there is no roster in the file: each assign carries the run's agents (reconcile.harbor_roster).
     Changes `spec` in place."""
     if any(ts.harbor for ts in spec.types.values()) and old.naming != spec.naming:
-        old_names = " (old `<type>-NNNN` names)" if old.naming == "numeric" else ""
-        raise SpecError([(f"naming: the run names its agents `{old.naming}`{old_names}, the "
-                          f"file `{spec.naming}`: names never change in a run: launch a new run")])
+        raise SpecError([(f"naming: the run names its agents `{old.naming}`, the file "
+                          f"`{spec.naming}`: names never change in a run: launch a new run "
+                          f"(`flock launch {old.swarm}` still resumes this one as it is)")])
     if spec.naming == "consecutive-id":
         kept = {old.types[n].harbor.role for n, ts in spec.types.items() if n in old.types
                 and ts.harbor and old.types[n].harbor and ts.replicas == old.types[n].replicas
@@ -160,11 +160,10 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
 
         if moved := [r for r, a in first(running).items() if first(new).get(r, a) != a]:
             # shepherd's names run across the roles: another count would rename running agents
-            where = ", ".join("agents.count" if r is None else f"role {r}" for r in moved)
+            where = ", ".join(f"role {r}" for r in moved)
             raise SpecError([(f"agents.roles: a count change before {where} renumbers its "
                               "agents (names run agent-001, ... across the roles in order): "
-                              "change only the last role's count, or launch a new run; or the "
-                              "run was launched with old `<type>-NNNN` names: launch a new run")])
+                              "change only the last role's count, or launch a new run")])
         for ts in spec.types.values():
             if ts.harbor:  # a role's names: its role label in the run-wide roster
                 ts.harbor.roster = {

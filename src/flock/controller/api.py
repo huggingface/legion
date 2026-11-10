@@ -903,6 +903,10 @@ def create_app(
         check_tools(swarm, spec)
         if refused := loop_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
+        if (prev and prev["spec"].naming != spec.naming and store.list_agents(swarm)
+                and any(ts.harbor for ts in spec.types.values())):  # docs/spawn.md "Names"
+            raise HTTPException(400, f"naming: the run names its agents `{prev['spec'].naming}`, "
+                                     f"the spec `{spec.naming}`: names never change in a run")
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
             # a harbor worker prepares the task, tools and resources once and each agent keeps
