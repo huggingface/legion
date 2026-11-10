@@ -186,7 +186,6 @@ def test_normalise_swarm_events():
         ("worker.sync_failed", None, "s-w-w0002", None)]
     assert got[0] == {"name": "worker.crashed", "ts": "2026-11-03T10:00:00+00:00", "swarm": "s",
                       "worker": "s-w-w0001", "data": {"target": "s-w-w0001", "detail": "exit 1"}}
-    assert fs.event_name("comms_mention", "agent") == "comms.mention"
     assert fs.event_name("turn_interrupted", "agent") == "agent.turn_interrupted"
 
 

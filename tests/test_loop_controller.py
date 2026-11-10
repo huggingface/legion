@@ -90,6 +90,11 @@ async def sim(store, clock, tick):
         yield s
 
 
+def board(kind: str, data: dict) -> tuple[str, dict]:
+    """A message_board `resource` event, as the worker posts it."""
+    return ("resource", {"resource": "message_board", "kind": kind, "data": data})
+
+
 def prompts(cmds: list[dict]) -> dict[str, dict]:
     out = {}
     for c in cmds:
@@ -332,26 +337,26 @@ async def test_budget_without_reserve_is_one_hard_stop(sim):
 
 async def test_wake_queue_debounces_and_skips_pending(sim):
     # the queue as before `wake:` existed: no gap, no cap, wakes are rounds
-    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"],
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["message_board.mention"],
                      "wake": {"min_gap": "0s", "max": None, "counts_as_round": True}})
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
     for a in (A0, A1):
         await sim.turn(a, got[a])
-    assert not sim.loops.wake(A0, "comms.thread")  # not in `on`
-    assert sim.loops.wake(A0, "comms.mention")
+    assert not sim.loops.wake(A0, "message_board.thread")  # not in `on`
+    assert sim.loops.wake(A0, "message_board.mention")
     sim.tick(1)
-    assert sim.loops.wake(A0, "comms.mention:42")  # a burst of mentions...
+    assert sim.loops.wake(A0, "message_board.mention:42")  # a burst of mentions...
     sim.tick(1.5)
     assert await sim.commands() == []  # ...is held until 2 s of quiet
     sim.tick(0.6)
     got = prompts(await sim.commands())
-    assert list(got) == [A0] and got[A0]["loop"]["why"] == "wake: comms.mention, comms.mention:42"
+    assert list(got) == [A0] and got[A0]["loop"]["why"] == "wake: message_board.mention, message_board.mention:42"
     assert got[A0]["loop"]["round"] == 2
     # wakes while the prompt is out (working) wait for idle, and give one prompt, not several
     for _ in range(3):
-        sim.loops.wake(A0, "comms.mention")
+        sim.loops.wake(A0, "message_board.mention")
         sim.tick(3)
     assert await sim.commands() == []
     await sim.turn(A0, got[A0])
@@ -361,33 +366,33 @@ async def test_wake_queue_debounces_and_skips_pending(sim):
     # a steady stream of wakes is not held forever: at most 10 s
     await sim.turn(A0, got[A0])
     for _ in range(12):
-        sim.loops.wake(A0, "comms.mention")
+        sim.loops.wake(A0, "message_board.mention")
         sim.tick(1)
     assert list(prompts(await sim.commands())) == [A0]
 
 
 async def test_comms_events_wake_the_loop(sim):
-    """The worker's comms events reach the wake queue (`on_comms` -> `wake(agent, comms.<reason>)`):
+    """The worker's board events reach the wake queue (`wake(agent, message_board.<kind>)`):
     two mentions of A0 give it one prompt; a thread reply to A1 (not in `on:`) gives none."""
-    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"]})
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["message_board.mention"]})
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
     for a in (A0, A1):
         await sim.turn(a, got[a])
     msg = {"msg_id": 7, "thread": 7, "from": "carlos"}
-    await sim.events(A0, ("comms_mention", msg), ("comms_mention", {**msg, "msg_id": 8}))
-    await sim.events(A1, ("comms_thread_reply", msg))
+    await sim.events(A0, board("mention", msg), board("mention", {**msg, "msg_id": 8}))
+    await sim.events(A1, board("thread", msg))
     sim.tick(2.1)
     got = prompts(await sim.commands())
-    assert list(got) == [A0] and got[A0]["loop"]["why"] == "wake: comms.mention"
+    assert list(got) == [A0] and got[A0]["loop"]["why"] == "wake: message_board.mention"
     # by default a wake is not a round: it carries round 1 again and leaves the count alone
     assert got[A0]["loop"]["round"] == 1 and got[A0]["loop"]["counted"] is False
     await sim.turn(A0, got[A0])
     sim.tick(3)
     assert await sim.commands() == []
     wake = [d for k, d in sim.swarm_events() if k == "loop_wake"]
-    assert wake == [{"type": "researcher", "agent": A0, "reason": "comms.mention", "events": 2,
+    assert wake == [{"type": "researcher", "agent": A0, "reason": "message_board.mention", "events": 2,
                      "coalesced": 1, "round": 1, "counted": False, "wakes": 1}]
     assert [e["type"] for e in sim.store.read_events(A0, 0)].count("loop_wake") == 1
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]
@@ -395,7 +400,7 @@ async def test_comms_events_wake_the_loop(sim):
 
 
 async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
-    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"]},
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["message_board.mention"]},
                     limits={"budget_usd": 1.0})
     await sim.heartbeat()
     sim.tick()
@@ -403,8 +408,8 @@ async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
     for a in (A0, A1):
         await sim.turn(a, got[a])
     sim.store.put_swarm_flags("demo", {"budget_stop": "hard", "budget_usd": 1.0, "at": 0})
-    assert not sim.loops.wake(A0, "comms.mention")  # the loop has not seen the stop yet
-    await sim.events(A0, ("comms_mention", {"msg_id": 7, "thread": 7, "from": "carlos"}))
+    assert not sim.loops.wake(A0, "message_board.mention")  # the loop has not seen the stop yet
+    await sim.events(A0, board("mention", {"msg_id": 7, "thread": 7, "from": "carlos"}))
     sim.tick(2.1)
     assert not [c for c in await sim.commands() if c["kind"] == "prompt"]
 
@@ -734,29 +739,29 @@ async def test_wake_min_gap_coalesces_and_max_caps(sim):
     """Defaults: a wake is not a round, two wake prompts are at least 30 s apart (wakes in
     between become one prompt when the gap ends), and `wake.max` caps them per run. Each wake
     prompt is a `loop_wake` event (swarm and agent stream) and counts in `wakes_total`."""
-    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["comms.mention"],
+    await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["message_board.mention"],
                      "while": {"max_rounds": 2}, "wake": {"max": 2}})
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
     for a in (A0, A1):
         await sim.turn(a, got[a])  # round 1 each
-    assert sim.loops.wake(A0, "comms.mention")
+    assert sim.loops.wake(A0, "message_board.mention")
     sim.tick(2.1)
     w1 = prompts(await sim.commands())
     assert list(w1) == [A0] and (w1[A0]["loop"]["round"], w1[A0]["loop"]["counted"]) == (1, False)
     await sim.turn(A0, w1[A0])
     for i in range(3):  # a thread's worth of chatter inside the gap
-        assert sim.loops.wake(A0, f"comms.mention:{i}")
+        assert sim.loops.wake(A0, f"message_board.mention:{i}")
         sim.tick(5)
     sim.tick(10)  # 25 s after the first wake prompt: still held
     assert await sim.commands() == []
     sim.tick(5.5)
     w2 = prompts(await sim.commands())
     assert list(w2) == [A0] and w2[A0]["loop"]["round"] == 1
-    assert w2[A0]["loop"]["why"] == "wake: comms.mention:0, comms.mention:1, comms.mention:2"
+    assert w2[A0]["loop"]["why"] == "wake: message_board.mention:0, message_board.mention:1, message_board.mention:2"
     await sim.turn(A0, w2[A0])
-    assert not sim.loops.wake(A0, "comms.mention")  # wake.max: 2 reached for this run
+    assert not sim.loops.wake(A0, "message_board.mention")  # wake.max: 2 reached for this run
     sim.tick(60)
     assert await sim.commands() == []
     wakes = [d for k, d in sim.swarm_events() if k == "loop_wake"]
@@ -770,14 +775,14 @@ async def test_wake_min_gap_coalesces_and_max_caps(sim):
 async def test_wake_window_cap_and_deferred_wake(sim):
     """`wake.max` per `wake.window`; a wake prompt the worker deferred is taken back from the
     wake count and never from the round count."""
-    await sim.apply({"prompt": "p", "every": "1h", "on": ["comms.mention"],
+    await sim.apply({"prompt": "p", "every": "1h", "on": ["message_board.mention"],
                      "wake": {"min_gap": "0s", "max": 1, "window": "1m"}})
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
     for a in (A0, A1):
         await sim.turn(a, got[a])
-    assert sim.loops.wake(A0, "comms.mention")
+    assert sim.loops.wake(A0, "message_board.mention")
     sim.tick(2.1)
     w = prompts(await sim.commands())[A0]["loop"]
     await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": w["round"], "why": w["why"],
@@ -788,14 +793,14 @@ async def test_wake_window_cap_and_deferred_wake(sim):
     assert (st["rounds"], st["wakes"]) == (1, 0)
     sim.tick()
     assert await sim.commands() == []  # no cadence round in its place
-    assert sim.loops.wake(A0, "comms.mention")  # under the cap again
+    assert sim.loops.wake(A0, "message_board.mention")  # under the cap again
     sim.tick(2.1)
     w = prompts(await sim.commands())[A0]
-    assert w["loop"]["why"] == "wake: comms.mention" and w["loop"]["round"] == 1
+    assert w["loop"]["why"] == "wake: message_board.mention" and w["loop"]["round"] == 1
     await sim.turn(A0, w)
-    assert not sim.loops.wake(A0, "comms.mention")  # 1 per minute
+    assert not sim.loops.wake(A0, "message_board.mention")  # 1 per minute
     sim.tick(61)
-    assert sim.loops.wake(A0, "comms.mention")
+    assert sim.loops.wake(A0, "message_board.mention")
     sim.tick(2.1)
     assert list(prompts(await sim.commands())) == [A0]
 
@@ -805,7 +810,7 @@ async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
     """Review of #19: with `counts_as_round: true` and `wake.max: 1`, a wake prompt the worker
     deferred, or one dropped while still queued, gives back both its round and its wake, so
     the next wake is accepted and is round 2 again."""
-    await sim.apply({"prompt": "round {round}", "every": "100s", "on": ["comms.mention"],
+    await sim.apply({"prompt": "round {round}", "every": "100s", "on": ["message_board.mention"],
                      "wake": {"max": 1, "counts_as_round": True}})
     await sim.heartbeat()
     sim.tick()
@@ -813,7 +818,7 @@ async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
         await sim.turn(a, p)
     sim.clock.advance(50)
     await sim.heartbeat()
-    assert sim.loops.wake(A0, "comms.mention")
+    assert sim.loops.wake(A0, "message_board.mention")
     sim.tick(2.1)
     if how == "deferred":
         w = prompts(await sim.commands())[A0]["loop"]
@@ -825,10 +830,10 @@ async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
             assert sim.loops._drop("demo", "researcher") == 1
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
     assert (st["rounds"], st["wakes"]) == (1, 0)
-    assert sim.loops.wake(A0, "comms.mention")  # the allowance is back
+    assert sim.loops.wake(A0, "message_board.mention")  # the allowance is back
     sim.tick(2.1)
     w = prompts(await sim.commands())[A0]["loop"]
-    assert (w["round"], w["why"], w["wake"]) == (2, "wake: comms.mention", True)
+    assert (w["round"], w["why"], w["wake"]) == (2, "wake: message_board.mention", True)
 
 
 async def test_transport_stalls_do_not_exhaust_controller_loop(sim):

@@ -81,23 +81,11 @@ class Ramp(Settings):
 
 class Loop(LoopSpec):
     """flock's loop (docs/loop.md) plus `resume_prompt`, the type's prompt after a restart.
-    Board wakes are `message_board.<kind>`; `comms.<kind>` is read as `message_board.<kind>`."""
+    Board wakes are `message_board.<kind>`."""
 
     resume_prompt: str = (
         "Your session was restarted. Check your notes and state, and continue your work."
     )
-
-    @field_validator("on", mode="before")
-    @classmethod
-    def _board(cls, value):
-        if not isinstance(value, list):
-            return value
-        return [
-            "message_board." + x.removeprefix("comms.")
-            if isinstance(x, str) and x.startswith("comms.")
-            else x
-            for x in value
-        ]
 
 
 class Workers(Settings):
@@ -437,8 +425,7 @@ def resource_secrets(spec: Spec) -> list[str]:
     for name, options in spec.resources.items():
         path = spec.resources_dir / f"{name}.py"
         if not path.is_file():
-            renamed = " (the board resource is now message_board)" if name == "board" else ""
-            raise ValueError(f"resources.{name}: no resource module {path}{renamed}")
+            raise ValueError(f"resources.{name}: no resource module {path}")
         schema = getattr(load_module(path), "Options", None)
         settings = schema.model_validate(options) if schema is not None else None
         if getattr(settings, "url", None) and getattr(settings, "token_env", None):

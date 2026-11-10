@@ -703,7 +703,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'controller'", specifier = ">=0.30" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'dev'", specifier = ">=0.30" },
 ]
-provides-extras = ["controller", "worker", "harbor", "dev"]
+provides-extras = ["controller", "worker", "dev"]
 
 [[package]]
 name = "frozenlist"

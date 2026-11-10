@@ -28,7 +28,7 @@ RENAMED = {
     "release": "worker.released", "memory_rotation": "worker.rotated",
     "sync_failed": "worker.sync_failed",
 }
-FAMILIES = ("loop", "ramp", "world", "budget", "comms")  # `ramp_held` -> `ramp.held`
+FAMILIES = ("loop", "ramp", "world", "budget")  # `ramp_held` -> `ramp.held`
 
 
 def event_name(kind: str, stream: str) -> str:

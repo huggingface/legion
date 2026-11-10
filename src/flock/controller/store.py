@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS swarms (
   spec TEXT NOT NULL,
   applied_at REAL NOT NULL,
   removing INTEGER NOT NULL DEFAULT 0,
-  generation INTEGER NOT NULL DEFAULT 1
+  generation INTEGER NOT NULL DEFAULT 1,
+  spawned INTEGER NOT NULL DEFAULT 0,
+  removed_cost REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS spec_history (
   swarm TEXT NOT NULL,
@@ -71,9 +73,16 @@ CREATE TABLE IF NOT EXISTS agents (
   nudges INTEGER NOT NULL DEFAULT 0,
   nudged_at REAL,
   created_at REAL NOT NULL,
-  last_heartbeat REAL
+  last_heartbeat REAL,
+  parent TEXT,  -- spawn lineage (docs/spawn.md)
+  depth INTEGER NOT NULL DEFAULT 0,
+  removing INTEGER NOT NULL DEFAULT 0,  -- set while a cascade removal is in flight
+  rev TEXT,  -- rev, start_rev, endpoint (host:port): from the last heartbeat
+  start_rev TEXT,
+  endpoint TEXT
 );
 CREATE INDEX IF NOT EXISTS agents_by_swarm ON agents (swarm, type);
+CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent);
 CREATE INDEX IF NOT EXISTS agents_by_worker ON agents (worker);
 CREATE TABLE IF NOT EXISTS workers (
   id TEXT PRIMARY KEY,
@@ -93,7 +102,14 @@ CREATE TABLE IF NOT EXISTS workers (
   consecutive_crashes INTEGER NOT NULL DEFAULT 0,
   next_launch_at REAL,
   retire_at REAL,
-  created_at REAL NOT NULL
+  created_at REAL NOT NULL,
+  last_error TEXT,  -- last launch failure or crash, shown by `flock status`
+  last_seen REAL,  -- last poll / event post / heartbeat from the current job
+  pending_reason TEXT,  -- the scheduler's word while queued, e.g. Slurm's %r
+  log_path TEXT,  -- the current job's log file (compute slurm)
+  preempted INTEGER NOT NULL DEFAULT 0,  -- the current job's last heartbeat said `preempted`
+  drained INTEGER NOT NULL DEFAULT 0,  -- the current job's last heartbeat said `drained`
+  telemetry TEXT  -- the last heartbeat's mem/restore/tools/knobs_rev (JSON)
 );
 CREATE INDEX IF NOT EXISTS workers_by_swarm ON workers (swarm, type, idx);
 CREATE TABLE IF NOT EXISTS commands (
@@ -217,7 +233,6 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
-        self._migrate()
         # Called with ("commands", worker_id) / ("events", agent) / ("reconcile", "") after
         # writes; the API turns these into wake-ups for long-polls. Must be thread-safe.
         self.listener: Callable[[str, str], None] = lambda kind, key: None
@@ -225,56 +240,6 @@ class Store:
         # token and never stored: the table holds only hashes.
         self.agent_token_key: bytes | None = None
         self._liveness: dict[str, Liveness] = {}  # swarm -> its spec's timings (`liveness`)
-
-    def _migrate(self) -> None:
-        """Additive column changes for databases created by an older version."""
-        types_cols = {r["name"] for r in self._q("PRAGMA table_info(types)")}
-        if "launch_error" not in types_cols:  # last worker-launch error per type
-            self._x("ALTER TABLE types ADD COLUMN launch_error TEXT")
-            self._x("ALTER TABLE types ADD COLUMN launch_failures INTEGER NOT NULL DEFAULT 0")
-
-        cols = {r["name"] for r in self._q("PRAGMA table_info(workers)")}
-        if "incarnation" not in cols:
-            self._x("ALTER TABLE workers ADD COLUMN incarnation TEXT")
-        if "last_error" not in cols:  # last launch failure or crash, shown by `flock status`
-            self._x("ALTER TABLE workers ADD COLUMN last_error TEXT")
-        if "last_seen" not in cols:  # last poll / event post / heartbeat from the current job
-            self._x("ALTER TABLE workers ADD COLUMN last_seen REAL")
-        if "pending_reason" not in cols:  # the scheduler's word while queued, e.g. Slurm's %r
-            self._x("ALTER TABLE workers ADD COLUMN pending_reason TEXT")
-        if "log_path" not in cols:  # the current job's log file (compute slurm)
-            self._x("ALTER TABLE workers ADD COLUMN log_path TEXT")
-        if "preempted" not in cols:  # the current job's last heartbeat said `preempted`
-            self._x("ALTER TABLE workers ADD COLUMN preempted INTEGER NOT NULL DEFAULT 0")
-        if "drained" not in cols:  # the current job's last heartbeat said `drained`
-            self._x("ALTER TABLE workers ADD COLUMN drained INTEGER NOT NULL DEFAULT 0")
-        if "telemetry" not in cols:  # the last heartbeat's mem/restore/tools/knobs_rev (JSON)
-            self._x("ALTER TABLE workers ADD COLUMN telemetry TEXT")
-        if "started_at" not in cols:  # launch-timeout clock: last time the job was seen queued
-            self._x("ALTER TABLE workers ADD COLUMN started_at REAL")
-        # Spawn (docs/spawn.md): lineage on agents, the never-reused spawn counter and the cost
-        # of removed agents on swarms.
-        cols = {r["name"] for r in self._q("PRAGMA table_info(agents)")}
-        if "parent" not in cols:
-            self._x("ALTER TABLE agents ADD COLUMN parent TEXT")
-            self._x("ALTER TABLE agents ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
-        self._x("CREATE INDEX IF NOT EXISTS agents_by_parent ON agents (parent)")
-        if "removing" not in cols:  # set while a cascade removal is in flight
-            self._x("ALTER TABLE agents ADD COLUMN removing INTEGER NOT NULL DEFAULT 0")
-        for col in ("rev", "start_rev", "endpoint"):  # from the last heartbeat (endpoint: host:port)
-            if col not in cols:
-                self._x(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
-        # stuck-agent nudges (reconcile._nudge_stuck); each column on its own guard
-        for col, ddl in (("stuck_since", "REAL"), ("nudges", "INTEGER NOT NULL DEFAULT 0"),
-                         ("nudged_at", "REAL")):
-            if col not in cols:
-                self._x(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
-        cols = {r["name"] for r in self._q("PRAGMA table_info(swarms)")}
-        if "spawned" not in cols:
-            self._x("ALTER TABLE swarms ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0")
-            self._x("ALTER TABLE swarms ADD COLUMN removed_cost REAL NOT NULL DEFAULT 0")
-        if "generation" not in cols:  # bumped by every apply that changes the spec
-            self._x("ALTER TABLE swarms ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
 
     # ----------------------------------------------------------------- low level
 
@@ -426,8 +391,7 @@ class Store:
         return lv
 
     def list_swarms(self) -> list[Row]:
-        """Every stored swarm whose spec still loads. One that does not (a harness removed from
-        flock, say) is skipped with a logged error, so the others keep running; `get_swarm`
+        """Every stored swarm whose spec loads. One that does not is skipped with a logged error, so the others keep running; `get_swarm`
         still raises for it."""
         out = []
         for row in self._q("SELECT * FROM swarms ORDER BY name"):

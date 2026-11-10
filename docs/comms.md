@@ -5,8 +5,7 @@ the `message_board` resource (`flock.harbor.builtin.resources.message_board`) an
 `message_board.*` tools: the run's `resources: {message_board: {...}}`; its tools come with it
 unless `tools` is set (experiments/harbor-smoke/spec.yaml). Its mentions come back as
 `resource` events, which wake loops whose `loop.on` lists `message_board.*` (docs/loop.md "Wake
-queue"). Only `message_board.*` wakes are fed; a `comms.*` entry is read as `message_board.*`.
-The names before the rename to message_board (`board`, `board.*`, `board_extra.*`) are gone, with no alias.
+queue"). Only `message_board.*` wakes are fed.
 
 ## Where the board runs
 

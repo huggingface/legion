@@ -73,7 +73,7 @@ pricing: [0.3, 1.2, 0.03]
 loop:
   prompt_file: prompts/round.md
   every: turn_end
-  on: [comms.mention, message_board.thread]
+  on: [message_board.mention, message_board.thread]
   while: {until: 48h, max_rounds: 10000, agent_usd: 5}
   final: {prompt_file: prompts/final.md, reserve_usd: 20}
   resume_prompt: Your previous turn was interrupted. Continue.
@@ -107,7 +107,7 @@ def test_v8_shaped_spec_loads(tmp_path):
         "48h",
         "The run is ending.",
     )
-    assert loop.on == ["message_board.mention", "message_board.thread"]  # comms.* is read as message_board.*
+    assert loop.on == ["message_board.mention", "message_board.thread"]
     assert "transport" not in spec.resources["message_board"]
     ruled = v8_spec(tmp_path, V8.replace("[general]}", "[general], rules: {max_len: 2000}}"))
     assert ruled.resources["message_board"]["transport"] == "http"  # no mounts: no rule proxy
@@ -189,7 +189,7 @@ agents:
       model: huggingface/other/Model
       pricing: [1, 2, 0.1]
       workers: {agents_per_worker: 1, max_extra: 2}
-      loop: {prompt: 'Safety round {round}.', every: 5m, on: [comms.mention], while: {until: 2h}}
+      loop: {prompt: 'Safety round {round}.', every: 5m, on: [message_board.mention], while: {until: 2h}}
 environment: {backend: hf-sandbox, flavor: cpu-basic}
 workers: {agents_per_worker: 10, turn_timeout: 20m, worker: {sync_interval_s: 60}}
 limits: {run_timeout_seconds: 180000, agent_max_turns: 150, budget_usd: 400, alive: 10}
@@ -418,7 +418,7 @@ def test_a_missing_resource_module_is_refused_at_compile(tmp_path):
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
-    with pytest.raises(ValueError, match="no resource module .*board.py .*now message_board"):
+    with pytest.raises(ValueError, match="no resource module .*board.py"):
         compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 

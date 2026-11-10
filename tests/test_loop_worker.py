@@ -186,7 +186,7 @@ async def test_a_wake_outside_the_round_count_keeps_the_round(tmp_path):
     rt, ad = runtime(tmp_path, idle_grace="5s")
     await rt.setup(restore=False)
     rt.state.loop_round = 3
-    wake = meta(round=None, why="wake: comms.mention", counted=False)
+    wake = meta(round=None, why="wake: message_board.mention", counted=False)
     rt.allow_starts = False  # draining
     await rt.prompt("r{round}", loop=wake)
     [d] = custom(rt, "prompt_deferred")
@@ -194,8 +194,8 @@ async def test_a_wake_outside_the_round_count_keeps_the_round(tmp_path):
     rt.allow_starts = True
     await rt.prompt("r{round} {why}", loop=wake)
     await until(lambda: rt.state.turns == 1)
-    assert ad.sent == ["r3 wake: comms.mention"] and rt.state.loop_round == 3
-    assert custom(rt, "loop_prompt")[-1] == {"kind": "loop", "round": 3, "why": "wake: comms.mention",
+    assert ad.sent == ["r3 wake: message_board.mention"] and rt.state.loop_round == 3
+    assert custom(rt, "loop_prompt")[-1] == {"kind": "loop", "round": 3, "why": "wake: message_board.mention",
                                              "counted": False}
     await rt.stop()
 

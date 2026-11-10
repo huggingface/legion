@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from pydantic import ValidationError
 
@@ -143,43 +141,6 @@ def test_provider_and_alias_names():
 def test_standalone_typespec_is_unresolved():
     ts = TypeSpec(**HB, model="hf:Qwen/Qwen3.8-27B")
     assert ts.resolved_model is None and ts.harness_model == "hf:Qwen/Qwen3.8-27B"
-
-
-def test_removed_typespec_keys_are_dropped_with_a_warning(monkeypatch, caplog):
-    from flock import models
-
-    monkeypatch.setattr(models, "_warned", set())
-    with caplog.at_level("WARNING", logger="flock.models"):
-        s = spec({"w": {**HB, "model": "qwen-27b", "tool_memory_mb": 512,
-                        "node_heap_mb": None}})
-    assert "tool_memory_mb" not in s.model_dump_json()
-    assert [r.getMessage() for r in caplog.records] == [
-        "spec: TypeSpec.tool_memory_mb was removed from flock; ignoring it"]
-
-
-@pytest.mark.parametrize("harness", ["pi", "claude", "codex", "llm"])
-def test_a_removed_harness_gets_a_clear_refusal(harness):
-    msg = err({"w": {"harness": harness, "model": "qwen-27b"}})
-    assert f"harness '{harness}' was removed from flock; relaunch the type as harbor" in msg
-
-
-def test_a_stored_swarm_that_no_longer_loads_is_skipped(tmp_path, caplog):
-    from flock.controller.store import Store
-
-    store = Store(tmp_path)
-    good = spec({"w": {**HB, "model": "qwen-27b"}})
-    store.put_swarm(good, 0)
-    old = good.model_dump(mode="json") | {"swarm": "old"}
-    old["types"]["w"]["harness"] = "pi"
-    store._x("INSERT INTO swarms (name, spec, applied_at) VALUES (?, ?, 0)",
-             ["old", json.dumps(old)])
-    with caplog.at_level("ERROR", logger="flock.controller.store"):
-        assert [r["name"] for r in store.list_swarms()] == [good.swarm]
-        assert [r["name"] for r in store.list_swarms()] == [good.swarm]
-    assert len(caplog.records) == 1 and "swarm old: stored spec no longer loads" in caplog.text
-    with pytest.raises(ValidationError, match="harness 'pi' was removed from flock"):
-        store.get_swarm("old")
-    store.close()
 
 
 def test_auth_option():

@@ -47,7 +47,7 @@ class ToolError(Exception):
 
 def readonly[F](fn: F) -> F:
     """Mark a tool as read-only (`readonly: true` in the manifest): it changes no state.
-    Informational: nothing in flock acts on it since loop `while.idle_rounds` was removed."""
+    Informational: nothing in flock acts on it."""
     setattr(fn, READONLY_ATTR, True)
     return fn
 

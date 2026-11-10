@@ -311,28 +311,6 @@ async def test_spawned_rows_survive_a_controller_restart(client, store, tmp_path
         again.close()
 
 
-def test_store_migrates_agents_and_swarms(tmp_path):
-    import sqlite3
-
-    d = tmp_path / "old"
-    d.mkdir()
-    db = sqlite3.connect(d / "controller.db")
-    db.execute("CREATE TABLE agents (name TEXT PRIMARY KEY, swarm TEXT NOT NULL, type TEXT NOT "
-               "NULL, slot INTEGER NOT NULL, worker TEXT, created_at REAL NOT NULL)")
-    db.execute("CREATE TABLE swarms (name TEXT PRIMARY KEY, spec TEXT NOT NULL, "
-               "applied_at REAL NOT NULL, removing INTEGER NOT NULL DEFAULT 0)")
-    db.commit()
-    db.close()
-    s = Store(d)
-    try:
-        cols = {r["name"] for r in s._q("PRAGMA table_info(agents)")}
-        assert {"parent", "depth"} <= cols
-        cols = {r["name"] for r in s._q("PRAGMA table_info(swarms)")}
-        assert {"spawned", "removed_cost"} <= cols
-    finally:
-        s.close()
-
-
 def test_spawn_during_cascade_removal_leaves_no_orphan(store, client, swarm):
     """Review P1 (spawn_remove_race.py): a spawn racing a removal must not leave a child of a
     removed parent, nor a live token. The remover pauses while enumerating the subtree; the

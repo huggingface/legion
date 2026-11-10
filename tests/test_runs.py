@@ -190,7 +190,7 @@ LOOPS = """\
       loop:
         prompt: "tick {round}"
         every: 500ms
-        on: [comms.mention]
+        on: [message_board.mention]
         while: {until: 6s}
         final: {prompt: "bye"}
 limits: {budget_usd: 1000, run_timeout_seconds: 900}
@@ -202,8 +202,7 @@ def test_loops(tiny):
     (re-prompted by the worker) and `every: 500ms` with `while.until` (by the controller).
     Then the run's bundle sums them up."""
     out = tiny.flock("launch", tiny.spec(replicas=2, extra=LOOPS), "--skip-preflight")
-    # unquoted `on:` is the key "on" (YAML 1.2), `comms.` reads as `message_board.`, and the run has no
-    # message_board resource
+    # unquoted `on:` is the key "on" (YAML 1.2), and the run has no message_board resource
     assert "loop.on message_board.mention: no feeder: the run has no message_board resource" in out, out
     run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
     w0, w1 = tiny.names("writer", 2)

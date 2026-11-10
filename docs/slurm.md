@@ -300,8 +300,7 @@ preemption of the whole worker; every agent's Trial stops, its Pi sessions go to
 the agents resume on the relaunched worker. On docker and podman a Trial's container memory
 counts against the worker's job only when the engine puts its containers inside the job's
 cgroup; on hf-sandbox it does not count at all. `worker_lifetime` stays the
-backstop. (`worker.memory.spike_mb` and `recycle_gap_s`, the removed per-agent guard, are
-dropped from stored specs with a warning.)
+backstop.
 
 The controller rotates workers that ask for it: each pass, among workers whose heartbeat says
 `wants_rotation`, it sends a drain to the one with the smallest `eta_limit_s` while fewer than

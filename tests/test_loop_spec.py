@@ -21,7 +21,7 @@ def spec_with(loop: dict, **type_kw) -> SwarmSpec:
 
 def test_loop_fields_and_the_while_alias_round_trip():
     s = spec_with({"prompt": "r{round}", "every": "120s",
-                   "on": ["comms.mention", "comms.thread"],
+                   "on": ["message_board.mention", "message_board.thread"],
                    "while": {"until": "2h", "max_rounds": 200, "budget_usd": 12, "agent_usd": 3.6},
                    "final": {"prompt": "fin", "reserve_usd": 0.6}})
     lp = s.types["researcher"].loop
@@ -64,7 +64,7 @@ def test_agent_usd_by_model():
 
 
 def test_world_backed_settings_are_accepted_but_refused():
-    s = spec_with({"prompt": "x", "on": ["world.event:claim", "comms.mention"]})
+    s = spec_with({"prompt": "x", "on": ["world.event:claim", "message_board.mention"]})
     assert loop_refusals(s) == [
         "types.researcher.loop.on: world.event:claim needs a world (not in this version)"]
 
@@ -86,13 +86,13 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     (tmp_path / "prompts" / "final.md").write_text("Final: submit.\n")
     raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
     raw["types"]["researcher"]["loop"] = {
-        "prompt_file": "prompts/round.md", "every": "30s", "on": ["comms.mention", "comms.channel"],
+        "prompt_file": "prompts/round.md", "every": "30s", "on": ["message_board.mention", "message_board.channel"],
         "final": {"prompt_file": "prompts/final.md", "reserve_usd": 0.5}}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no feeder: only message_board.* wakes are fed" in r.output
+    assert "loop.on message_board.mention: no feeder: the run has no message_board resource" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 
@@ -101,7 +101,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 1
     assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
-    raw["types"]["researcher"]["loop"]["on"] = ["comms.mention"]
+    raw["types"]["researcher"]["loop"]["on"] = ["message_board.mention"]
     raw["types"]["researcher"]["loop"]["prompt_file"] = "prompts/missing.md"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
@@ -125,12 +125,12 @@ def test_local_run_checks_loops_like_apply(tmp_path, monkeypatch):
     raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
     raw["compute"] = {"kind": "local"}
     raw["types"]["researcher"]["loop"] = {"prompt_file": "prompts/round.md", "every": "30s",
-                                          "on": ["comms.mention"]}
+                                          "on": ["message_board.mention"]}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no feeder" in r.output and len(started) == 1
+    assert "loop.on message_board.mention: no feeder" in r.output and len(started) == 1
 
     raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))

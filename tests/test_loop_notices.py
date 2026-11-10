@@ -1,5 +1,5 @@
 """`loop.notices` (docs/loop.md): the controller keeps each agent's board notifications
-(`comms_mention`, `comms_thread_reply` from its worker) and names them in one line after the
+(message_board `resource` events from its worker) and names them in one line after the
 agent's next round prompt, then forgets them. Controller only: workers never see the key."""
 
 from __future__ import annotations
@@ -16,21 +16,21 @@ from flock.worker.loop import render
 
 from .conftest import TOKEN, make_spec
 from .test_api import W0, hb_body
-from .test_loop_controller import A0, A1, Sim, prompts
+from .test_loop_controller import A0, A1, Sim, board, prompts
 
 HEAD = "New for you since your last round: "
-CTRL = {"prompt": "round {round} ({why})", "every": "1h", "on": ["comms.mention"],
+CTRL = {"prompt": "round {round} ({why})", "every": "1h", "on": ["message_board.mention"],
         "notices": True}  # a duration `every`: the controller sends every round prompt
-WORKER = {"prompt": "round {round}", "on": ["comms.mention", "comms.thread"],
+WORKER = {"prompt": "round {round}", "on": ["message_board.mention", "message_board.thread"],
           "notices": True}  # `turn_end`: the worker re-sends the loop_start text each round
 
 
 def mention(mid: int, thread: int, who: str) -> tuple[str, dict]:
-    return ("comms_mention", {"msg_id": mid, "thread": thread, "from": who})
+    return board("mention", {"msg_id": mid, "thread": thread, "from": who})
 
 
 def reply(mid: int, thread: int, who: str) -> tuple[str, dict]:
-    return ("comms_thread_reply", {"msg_id": mid, "thread": thread, "from": who})
+    return board("thread", {"msg_id": mid, "thread": thread, "from": who})
 
 
 def line(text: str) -> str | None:
@@ -125,7 +125,7 @@ async def test_a_notice_waits_for_the_next_round_of_any_kind(sim):
 async def test_off_by_default(sim):
     await started(sim, {**CTRL, "notices": False})
     spec = sim.store.get_swarm("demo")["spec"]
-    assert "notices" not in spec.model_dump_json()  # the dump (and its hashes) as before
+    assert "notices" not in spec.model_dump_json()
     await sim.events(A0, mention(11, 19820, "cmpatino"))
     sim.tick(2.1)
     got = prompts(await sim.commands())

@@ -7,7 +7,6 @@ is expressed here. Change it deliberately and update the design doc.
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -25,7 +24,7 @@ from flock.world.protocol import WorldManifest
 
 class _SpecLoader(yaml.SafeLoader):
     """SafeLoader with YAML 1.2 booleans: only true/false. YAML 1.1 (PyYAML's default) also
-    reads on/off/yes/no as booleans, so the documented `on: [comms.mention]` key became `True`.
+    reads on/off/yes/no as booleans, so an `on:` key became `True`.
     Dropping them in the loader protects every key and value of a spec, not just `loop.on`."""
 
 
@@ -271,53 +270,7 @@ def comms_name(entry: str) -> str:
     return entry.split(":", 1)[1]
 
 
-# --------------------------------------------------------------------------- removed keys
-
-log = logging.getLogger(__name__)
-
-# Keys deleted from an extra=forbid spec model, by class name: dropped, with one warning (per
-# key, per process) when it holds a value, instead of refused, so a spec stored before the deletion still loads on
-# resume. Any other unknown key is still refused. e.g. {"LoopSpec": {"stagger"}}
-REMOVED: dict[str, set[str]] = {
-    "LoopSpec": {"first", "context", "stagger", "stop_when"},
-    "LoopWhile": {"idle_rounds", "score"},
-    "LoopFinal": {"add_tools"},
-    # the removed pi harness's memory limits, the removed llm harness's settings
-    "TypeSpec": {"tool_memory_mb", "node_heap_mb", "context_tokens", "tool_choice", "done_tool",
-                 "bash", "chars_per_token", "tool_output_chars", "msgboard_invite"},
-    # the per-agent memory guard (spike kill, recycle): removed, no harness had the process it read
-    "MemoryKnobs": {"spike_mb", "recycle_gap_s"},
-    # the removed worker comms hub's budgets
-    "WorkerKnobs": {"comms_rate", "comms_burst", "comms_agent_rate", "comms_agent_burst",
-                    "comms_poll_cycle_s"},
-}
-_warned: set[tuple[str, str]] = set()
-REMOVED_HARNESSES = frozenset({"pi", "claude", "codex", "llm"})  # a stored spec: a clear refusal
-
-
-def _is_set(v: Any) -> bool:
-    """A removed key worth a warning: a stored spec's dump carries every default (`first: null`,
-    `stop_when: {all_agents_done: false}`), which says nothing."""
-    return any(_is_set(x) for x in v.values()) if isinstance(v, dict) else bool(v)
-
-
-class _Removable(BaseModel):
-    """Base of the extra=forbid spec models: drops the class's REMOVED keys before validation."""
-
-    @model_validator(mode="before")
-    @classmethod
-    def _drop_removed(cls, data: Any) -> Any:
-        gone = REMOVED.get(cls.__name__, set()) & set(data) if isinstance(data, dict) else None
-        if not gone:
-            return data
-        for k in sorted(gone):
-            if _is_set(data[k]) and (cls.__name__, k) not in _warned:
-                _warned.add((cls.__name__, k))
-                log.warning("spec: %s.%s was removed from flock; ignoring it", cls.__name__, k)
-        return {k: v for k, v in data.items() if k not in gone}
-
-
-class CommsRules(_Removable):
+class CommsRules(BaseModel):
     """Enforced by the worker before it calls the board; a refused post is a tool result
     ("refused: ..."), never a board request. Live: a re-apply reaches workers by heartbeat."""
 
@@ -350,7 +303,7 @@ class CommsRules(_Removable):
         return parse_duration(self.min_post_gap).total_seconds() if self.min_post_gap else 0.0
 
 
-class CommsSpec(_Removable):
+class CommsSpec(BaseModel):
     """Swarm-level `comms:` (docs/comms.md). `url`, `invite_env` and `channel` are resolved
     once by the controller at apply (channel name -> `channel_id`); `kickoff_file` and
     `protocols` are files next to the spec that `flock launch` inlines (`kickoff`,
@@ -461,7 +414,7 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
             if t != "comms:search" or comms.search]
 
 
-class DashboardSpec(_Removable):
+class DashboardSpec(BaseModel):
     """Swarm-level `dashboard:` (docs/dashboard.md): `flock init` writes the run's flock-overview
     row to `<registry>/runs/<id>.json` (id: default the swarm). The other row keys are derived from the spec."""
 
@@ -489,7 +442,7 @@ class DashboardSpec(_Removable):
 # --------------------------------------------------------------------------- world (docs/world.md)
 
 
-class WorldSpec(_Removable):
+class WorldSpec(BaseModel):
     """Swarm-level `world:` (docs/world.md): an HTTP service speaking World API v1 whose tools
     the agents get. `command` (run in `dir`) is started by the controller as a child process
     with `compute: local`; `url` names a world already running (required with `compute:
@@ -518,13 +471,6 @@ class WorldSpec(_Removable):
     # use it; resumed when it is back (docs/health.md). None: FLOCK_WORLD_DOWN_PAUSE_S or 1800;
     # 0: never. Controller only (not sent to workers).
     down_pause_s: float | None = Field(default=None, ge=0)
-
-    @model_serializer(mode="wrap")
-    def _dump(self, handler):  # unset: dumps exactly as before the key existed (older workers)
-        out = handler(self)
-        if isinstance(out, dict) and out.get("down_pause_s", 0) is None:
-            out.pop("down_pause_s")
-        return out
 
     @field_validator("command", mode="before")
     @classmethod
@@ -575,7 +521,7 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     return world.manifest.names() if world.manifest is not None else []
 
 
-class WorkdirSpec(_Removable):
+class WorkdirSpec(BaseModel):
     """Workdir size feedback and throwaway dirs (docs/design.md "Workdir"). Sizes count what the
     bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
     a note naming its largest dirs (at most hourly); above `max_*` (default 5x soft) a
@@ -607,7 +553,7 @@ class WorkdirSpec(_Removable):
         return out
 
 
-class MemoryKnobs(_Removable):
+class MemoryKnobs(BaseModel):
     """Worker memory thresholds, passed through as the FLOCK_MEM_* settings (worker.main)."""
 
     model_config = {"extra": "forbid"}
@@ -617,7 +563,7 @@ class MemoryKnobs(_Removable):
     preempt: float | None = None
 
 
-class WorkerKnobs(_Removable):
+class WorkerKnobs(BaseModel):
     """A type's worker settings, applied live (heartbeats) by its workers. Each one unset
     falls back to the worker's env variable, then to the built-in default (docs/slurm.md)."""
 
@@ -643,7 +589,7 @@ def _positive_duration(v: str) -> str:
     return v
 
 
-class RampPhase(_Removable):
+class RampPhase(BaseModel):
     """One phase of `replicas_ramp.phases`: `add` every `every` until `until` (default: the
     ramp's `max`). The next phase starts where this one reached `until`. `stagger`: the
     agents of each of its raises join this far apart (waves.yaml's per-wave `stagger_s`)."""
@@ -659,7 +605,7 @@ class RampPhase(_Removable):
     _stagger = field_validator("stagger")(_duration)
 
 
-class RampHold(_Removable):
+class RampHold(BaseModel):
     """`replicas_ramp.hold_if` (was hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/load_guard.py):
     a step that takes the swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
     had `waiting` or more requests queued in every sample of the last 2 minutes, or takes
@@ -673,7 +619,7 @@ class RampHold(_Removable):
     above: int = Field(default=100, ge=0)
 
 
-class RampSpec(_Removable):
+class RampSpec(BaseModel):
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): the controller raises the type's
     replicas to `start`, then by `add` every `every` (or through `phases`), up to `max`. It
     never lowers them: a lowered `max` only caps later raises. `stagger`: the `start` raise
@@ -749,7 +695,7 @@ class HarborSpec(BaseModel):
         return [a for a, r in self.roster.items() if r == self.role]
 
 
-class TypeSpec(_Removable):
+class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
     harness: Harness
@@ -876,15 +822,6 @@ class TypeSpec(_Removable):
             raise ValueError("must be >= 0")
         return v
 
-    @field_validator("harness", mode="before")
-    @classmethod
-    def _removed_harness(cls, v: Any) -> Any:
-        if v in REMOVED_HARNESSES:
-            raise ValueError(f"harness {v!r} was removed from flock; relaunch the type as harbor, "
-                             "or remove the swarm with flock <= 3ce0843 (llm), <= cf322fc "
-                             "(pi, claude, codex)")
-        return v
-
     @model_validator(mode="after")
     def _checks(self) -> TypeSpec:
         if self.ephemeral and self.replicas:
@@ -935,7 +872,7 @@ def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str | 
     return None
 
 
-class SlurmResources(_Removable):
+class SlurmResources(BaseModel):
     """Per-type overrides of a `compute: slurm` spec."""
 
     model_config = {"extra": "forbid"}
@@ -947,7 +884,7 @@ class SlurmResources(_Removable):
     container_root: str | None = None
 
 
-class ComputeSpec(_Removable):
+class ComputeSpec(BaseModel):
     """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
     `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
     (`flock launch` runs them on this machine). `slurm`: one `sbatch` job per worker (docs/slurm.md).
@@ -1267,7 +1204,7 @@ class WorkersSpec(BaseModel):
         return v
 
 
-class SpawnRule(_Removable):
+class SpawnRule(BaseModel):
     """What an agent of one type may spawn. `types` is a list (with one total `max`) or a map
     of per-type caps (`max` then an optional total cap). Caps count the parent's existing
     children. `depth` is the generations allowed below the agent (0: cannot spawn). Unknown
@@ -1381,12 +1318,12 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
 # Placeholders the worker fills in loop prompts; any other `{name}` is left as written.
 LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
 NEEDS_WORLD = "needs a world (not in this version)"
-# message_board.*: the message_board resource's events (harness harbor); board.* (its name before
-# the rename) and comms.* (the removed worker comms hub): no feeder now, a warning at launch
-_LOOP_SOURCE_RE = re.compile(r"^(message_board|board|comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
+# message_board.*: the message_board resource's events (harness harbor); world.* and artifacts.*
+# have no feeder now: a warning at launch
+_LOOP_SOURCE_RE = re.compile(r"^(message_board|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 
-class LoopWhile(_Removable):
+class LoopWhile(BaseModel):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
     `agent_usd` (the agent's cost; a map is keyed by model alias or model id)."""
@@ -1434,7 +1371,7 @@ class LoopWhile(_Removable):
         return v
 
 
-class LoopFinal(_Removable):
+class LoopFinal(BaseModel):
     """One last prompt per live agent when the loop stops (any reason but `--no-final`).
     `reserve_usd` is held back from `limits.budget_usd` for it."""
 
@@ -1458,7 +1395,7 @@ class LoopFinal(_Removable):
         return self
 
 
-class LoopWake(_Removable):
+class LoopWake(BaseModel):
     """How `on:` wake-ups spend rounds (docs/loop.md, "Wake queue"). Per agent: at least
     `min_gap` between two wake prompts (wakes in between are coalesced into the next one), at
     most `max` wake prompts per run of the loop, or per `window` when set (None: no cap).
@@ -1487,7 +1424,7 @@ class LoopWake(_Removable):
         return v
 
 
-class LoopSpec(_Removable):
+class LoopSpec(BaseModel):
     """A type's prompting loop (docs/loop.md). The loop prompt goes on every `every`
     (`turn_end`: re-sent by the worker when a turn completes; a duration: the controller
     prompts idle agents that long after their last loop prompt) and on each `on` wake-up,
@@ -1512,7 +1449,7 @@ class LoopSpec(_Removable):
         if isinstance(out, dict) and "while_" in out:
             out["while"] = out.pop("while_")
         if isinstance(out, dict) and not self.notices:
-            out.pop("notices", None)  # off: dumps (and hashes) exactly as before the key existed
+            out.pop("notices", None)  # off: not dumped, so workers never see the key
         return out
 
     @field_validator("every")
@@ -1527,8 +1464,8 @@ class LoopSpec(_Removable):
     def _sources(cls, v: list[str]) -> list[str]:
         for x in v:
             if not _LOOP_SOURCE_RE.match(x):
-                raise ValueError(f"{x!r}: expected message_board.<name>, comms.<name>, "
-                                 "world.<name> or artifacts.<name>")
+                raise ValueError(f"{x!r}: expected message_board.<name>, world.<name> "
+                                 "or artifacts.<name>")
         return v
 
     @model_validator(mode="after")
@@ -1665,8 +1602,7 @@ class RestoreProgress(BaseModel):
 
 
 class ToolCounters(BaseModel):
-    """One world tool's calls since this worker process started (the removed worker world hub;
-    kept so stored heartbeats still load)."""
+    """One world tool's calls since this worker process started."""
 
     n: int = 0
     err: int = 0

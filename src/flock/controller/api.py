@@ -83,9 +83,6 @@ from flock.world.host import resolve as world_resolve
 from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER
 
 log = logging.getLogger(__name__)
-# Comms wake events by reason (fed by the removed worker comms hub; board wakes are `resource`).
-COMMS_WAKE_EVENTS = {"comms_mention": "mention", "comms_thread_reply": "thread",
-                    "comms_dm": "dm", "comms_channel_message": "channel"}
 
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
@@ -663,12 +660,10 @@ def create_app(
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
     default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`).
-    `comms_transport` lets tests fake the message board (docs/comms.md). Every `comms_mention`
-    (reason "mention") and `comms_thread_reply` (reason "thread") event a worker posts goes to
-    the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
-    `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
-    A harbor resource's `resource` event {resource, kind, data} goes the same way, as
-    `<resource>.<kind>` (a board mention: `message_board.mention`).
+    `comms_transport` lets tests fake the message board (docs/comms.md). A harbor resource's
+    `resource` event {resource, kind, data} a worker posts goes to the loop's wake queue as
+    `wake(agent, "<resource>.<kind>")` (a board mention: `message_board.mention`; honoured when
+    the type's `loop.on` lists it) and then to `on_comms(agent, kind, data)`, an optional observer.
     `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.
@@ -715,11 +710,10 @@ def create_app(
 
     def comms_event(agent: str, ev: Event) -> None:
         data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
-        source, reason = "comms", COMMS_WAKE_EVENTS.get(ev.type)
-        if ev.type == "resource":  # {resource, kind, data} from a harbor resource's watch
-            source, reason, data = data.get("resource"), data.get("kind"), data.get("data")
-            if not (isinstance(source, str) and isinstance(reason, str) and isinstance(data, dict)):
-                return
+        # {resource, kind, data} from a harbor resource's watch
+        source, reason, data = data.get("resource"), data.get("kind"), data.get("data")
+        if not (isinstance(source, str) and isinstance(reason, str) and isinstance(data, dict)):
+            return
         try:  # `loop.notices`: named in the agent's next round prompt
             loops.notice(agent, reason, data)
         except Exception:
@@ -1585,7 +1579,7 @@ def create_app(
             a = store.get_agent(agent)
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
             for ev in evs:
-                if ev.type in COMMS_WAKE_EVENTS or ev.type == "resource":
+                if ev.type == "resource":
                     comms_event(agent, ev)
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
