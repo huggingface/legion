@@ -11,7 +11,7 @@ casually: controller, worker and CLI all import it.
 - `src/flock/harbor/` — the Harbor task path: spec compile, Trials, Pi, and the `message_board`, `world`, `spawn` resources and tools (builtin/).
 - `src/flock/comms/` — the controller's msgboard client and the board rules the board resource applies (docs/comms.md).
 - `src/flock/cli.py` — `flock` CLI (typer) over the controller API.
-- `experiments/` — Harbor experiments (`harbor-smoke`, `mini-swarm`, `escape-room`, `swarmchat-harbor`).
+- `experiments/` — Harbor experiments (`harbor-smoke`, `mini-swarm`, `escape-room`, `pybot`).
 - `tests/` — pytest; no network, no real jobs. Fake the Hub client and Harbor; tiny real runs use tests/tinyrun.py.
 
 ## Conventions

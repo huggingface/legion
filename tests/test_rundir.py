@@ -23,7 +23,7 @@ SPEC = {
     "swarm": "${SWARM:-demo}",
     "namespace": "ns",
     "bucket": "hf://buckets/ns/sh",
-    "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"},
+    "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "PYBOT_WORLD_TOKEN"},
     "providers": FAKE_PROVIDERS,
     "types": {"researcher": {
         **HB, "model": "fake:m", "replicas": 2, "agents_per_worker": 2,
@@ -72,7 +72,7 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     values = read_env_file(env_file)
     assert len(values["FLOCK_TOKEN"]) > 30 and values["FLOCK_WORLD_TOKEN"] != values["FLOCK_TOKEN"]
-    assert values["CHATBOT_WORLD_TOKEN"] == values["FLOCK_WORLD_TOKEN"]  # world.token_env
+    assert values["PYBOT_WORLD_TOKEN"] == values["FLOCK_WORLD_TOKEN"]  # world.token_env
     text = env_file.read_text()
     assert "# swarm (default: demo)\n#SWARM=demo\n" in text  # a default stays the spec's
     assert "#ANTHROPIC_API_KEY=" in text and "#HF_TOKEN=" in text  # secrets named, unset
@@ -162,10 +162,10 @@ def test_slots_count_ramp_max_and_spawned_children(tmp_path):
 
 
 def test_tokens_must_match(tmp_path):
-    data = {"world": {"token_env": "CHATBOT_WORLD_TOKEN"}}
-    ok = {"FLOCK_TOKEN": "a", "FLOCK_WORLD_TOKEN": "w", "CHATBOT_WORLD_TOKEN": "w"}
+    data = {"world": {"token_env": "PYBOT_WORLD_TOKEN"}}
+    ok = {"FLOCK_TOKEN": "a", "FLOCK_WORLD_TOKEN": "w", "PYBOT_WORLD_TOKEN": "w"}
     assert rundir.check_tokens(data, ok).ok
-    assert not rundir.check_tokens(data, {**ok, "CHATBOT_WORLD_TOKEN": "x"}).ok
+    assert not rundir.check_tokens(data, {**ok, "PYBOT_WORLD_TOKEN": "x"}).ok
     assert "FLOCK_TOKEN" in rundir.check_tokens(data, {**ok, "FLOCK_TOKEN": ""}).detail
 
 
@@ -294,7 +294,7 @@ def test_world_conformance_when_up(tmp_path, monkeypatch):
     for failed in (False, True):
         monkeypatch.setattr("flock.world.doctor.doctor",
                             lambda url, token, f=failed: (calls.append((url, token)) or ["manifest ok"], f))
-        c = rundir.check_world(spec, {"CHATBOT_WORLD_TOKEN": "w"}, run)
+        c = rundir.check_world(spec, {"PYBOT_WORLD_TOKEN": "w"}, run)
         assert c.ok is (not failed) and c.lines == ["manifest ok"]
     assert calls[:2] == ["http://node7:7860/healthz", ("http://node7:7860", "w")]
 
@@ -436,11 +436,11 @@ def test_spec_keys_never_show_a_secret_from_cluster_env():
 
 def test_spec_keys_name_a_harbor_specs_inference_and_resource_tokens():
     data = {"inference": {"api_key_env": "HF_INFERENCE_TOKEN"},
-            "resources": {"world": {"token_env": "CHATBOT_WORLD_TOKEN"}, "board": {}}}
+            "resources": {"world": {"token_env": "PYBOT_WORLD_TOKEN"}, "board": {}}}
     assert rundir.spec_keys(data) == {
         "HF_TOKEN": (None, "secret: bucket sync and the Hub"),
         "HF_INFERENCE_TOKEN": (None, "secret: inference.api_key_env"),
-        "CHATBOT_WORLD_TOKEN": (None, "secret: resources.world.token_env")}
+        "PYBOT_WORLD_TOKEN": (None, "secret: resources.world.token_env")}
 
 
 def test_cluster_env_is_0644_whatever_the_umask_and_the_doctor_checks_it_like_the_jobs(

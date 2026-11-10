@@ -352,7 +352,7 @@ def test_a_loop_without_until_ends_at_the_run_timeout(tmp_path):
 ])
 def test_workers_env_refuses_secret_names(tmp_path, path, where):
     data = load_spec_yaml(COMPILE)
-    path(data)["env"] = {"CHATBOT_REPO": "ns/chat", "OPENAI_API_KEY": "sk-x"}
+    path(data)["env"] = {"PYBOT_REPO": "ns/chat", "OPENAI_API_KEY": "sk-x"}
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
@@ -365,14 +365,14 @@ def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, s
     resolve_env_vars): `workers.env` puts it there, in every type and every launched job."""
     data = load_spec_yaml(COMPILE)
     data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
-    data["workers"]["env"] = {"CHATBOT_REPO": "${CHATBOT_REPO}"}
+    data["workers"]["env"] = {"PYBOT_REPO": "${PYBOT_REPO}"}
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
-    spec = Spec.load(tmp_path / "spec.yaml", env={"CHATBOT_REPO": "ns/chat"})
+    spec = Spec.load(tmp_path / "spec.yaml", env={"PYBOT_REPO": "ns/chat"})
     swarm = compile_spec(spec, TASK)
     assert {name: ts.env for name, ts in swarm.types.items()} == {
-        "answers": {"CHATBOT_REPO": "ns/chat"}, "safety": {"CHATBOT_REPO": "ns/chat"},
+        "answers": {"PYBOT_REPO": "ns/chat"}, "safety": {"PYBOT_REPO": "ns/chat"},
     }
     monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/flock/dist/x.whl")
     runs = []
@@ -387,7 +387,7 @@ def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, s
     store.put_swarm(swarm, 0)
     reconcile(store, jobs, clock(), settings)
     assert {kw["labels"]["type"] for kw in runs} == {"answers", "safety"}
-    assert all(kw["env"]["CHATBOT_REPO"] == "ns/chat" for kw in runs)
+    assert all(kw["env"]["PYBOT_REPO"] == "ns/chat" for kw in runs)
 
 
 def test_an_upstream_config_compiles():

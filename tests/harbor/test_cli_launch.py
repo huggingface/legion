@@ -147,20 +147,25 @@ def test_the_smoke_spec_compiles(monkeypatch, pins):
     assert h.config["limits"]["trial_hours"] == 0.15
 
 
-def test_the_swarmchat_harbor_spec_compiles(monkeypatch, pins):
-    env = {"TASK_REV": "c" * 40, "BOARD_URL": "https://board.example",
-           "WORLD_URL": "https://world.example", "CHATBOT_REPO": "ns/chat"}
-    swarm = experiment_spec(monkeypatch, pins, "swarmchat-harbor", "c" * 40, env)
-    assert (swarm.swarm, swarm.compute.kind, len(swarm.types)) == ("v8h-1", "hf-jobs", 6)
+def test_the_pybot_spec_compiles(monkeypatch, pins):
+    env = {"PYBOT_TASK_REVISION": "c" * 40, "BUCKET": "hf://buckets/ns/runs",
+           "BOARD_URL": "https://board.example", "WORLD_URL": "https://world.example",
+           "PYBOT_REPO": "ns/bot"}
+    swarm = experiment_spec(monkeypatch, pins, "pybot", "c" * 40, env)
+    assert (swarm.swarm, swarm.compute.kind, len(swarm.types)) == ("pybot-1", "hf-jobs", 10)
     h = swarm.types["answers"].harbor
     assert h.config["environment"]["flavor"] == "cpu-basic"
     assert h.config["namespace"] == "HuggingFaceSwarms"  # the sandboxes bill there too
     assert h.resources["message_board"]["transport"] == h.resources["world"]["transport"] == "http"
-    assert len(h.resources["message_board"]["channels"]) == 7  # the poller watches only these
+    assert len(h.resources["message_board"]["channels"]) == 11  # general and the ten lanes
+    assert set(swarm.types) < set(h.resources["message_board"]["channels"])
     for ts in swarm.types.values():
-        assert ts.env == {"CHATBOT_REPO": "ns/chat"} and ts.agents_per_worker == 1
-        assert ts.secrets == ["MSGBOARD_OPERATOR_TOKEN", "CHATBOT_WORLD_TOKEN", "HF_TOKEN"]
-        assert ts.loop.final.reserve_usd == 0.5 and ts.harbor.config["limits"]["trial_hours"] == 20
+        assert ts.env == {"PYBOT_REPO": "ns/bot"} and ts.replicas == 1
+        assert ts.secrets == ["MSGBOARD_OPERATOR_TOKEN", "PYBOT_WORLD_TOKEN", "HF_TOKEN"]
+        assert ts.harbor.config["limits"]["trial_hours"] == 21
+    steward, answers = swarm.types["steward"], swarm.types["answers"]
+    assert (steward.loop.every, answers.loop.every) == ("15m", "turn_end")
+    assert steward.loop.final.reserve_usd == 0.3 and answers.loop.final.reserve_usd == 3 / 9
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):

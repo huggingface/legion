@@ -103,6 +103,9 @@ Each of these folders has a `spec.yaml` and a README (what it runs, tokens, cost
   Sandbox; no Docker.
 - `experiments/escape-room`: four agents solve an AgentEscapeBench room in local Docker,
   sharing a local board.
+- `experiments/pybot`: the large example. A swarm in ten lanes builds a Python chatbot through
+  pull requests to a shared world, on HF Jobs and HF Sandboxes; one agent per lane by default,
+  the sizes of a 1,000-agent run in the spec.
 
 ### Run the controller
 

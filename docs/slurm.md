@@ -146,7 +146,7 @@ private file and execs `flock-worker` with only its path:
   expansion, escapes or multi-line values.
 - Names: the worker's credentials, `FLOCK_TOKEN` and `HF_TOKEN`, plus the launch's provider
   key (e.g. `OPENAI_API_KEY`, the type's `api_key_env`), board invite (e.g.
-  `CHATBOT_BOARD_INVITE`), `FLOCK_WORLD_TOKEN`, and any name in a type's `secrets`.
+  `BOARD_INVITE`), `FLOCK_WORLD_TOKEN`, and any name in a type's `secrets`.
 - Precedence: a name in the file wins over the same name in the environment, and every name
   in the file is removed from the worker's `os.environ`, so processes it starts never inherit
   it. Names not in the file are still read from the environment (the old way keeps working).
@@ -157,9 +157,9 @@ private file and execs `flock-worker` with only its path:
 # worker-inner.sh
 umask 077
 secrets=$(mktemp "${TMPDIR:-/tmp}/flock-worker-secrets.XXXXXX")
-printf 'FLOCK_TOKEN=%s\nHF_TOKEN=%s\nOPENAI_API_KEY=%s\nFLOCK_WORLD_TOKEN=%s\nCHATBOT_BOARD_INVITE=%s\n' \
-  "$FLOCK_TOKEN" "$HF_TOKEN" "$OPENAI_API_KEY" "$FLOCK_WORLD_TOKEN" "$CHATBOT_BOARD_INVITE" > "$secrets"
-exec env -u FLOCK_TOKEN -u HF_TOKEN -u OPENAI_API_KEY -u FLOCK_WORLD_TOKEN -u CHATBOT_BOARD_INVITE \
+printf 'FLOCK_TOKEN=%s\nHF_TOKEN=%s\nOPENAI_API_KEY=%s\nFLOCK_WORLD_TOKEN=%s\nBOARD_INVITE=%s\n' \
+  "$FLOCK_TOKEN" "$HF_TOKEN" "$OPENAI_API_KEY" "$FLOCK_WORLD_TOKEN" "$BOARD_INVITE" > "$secrets"
+exec env -u FLOCK_TOKEN -u HF_TOKEN -u OPENAI_API_KEY -u FLOCK_WORLD_TOKEN -u BOARD_INVITE \
   FLOCK_WORKER_SECRETS_FILE="$secrets" FLOCK_WORKER_SECRETS_FILE_UNLINK=1 flock-worker
 ```
 

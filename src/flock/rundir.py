@@ -241,7 +241,7 @@ def _files(root: Path) -> dict[str, Path]:
 def outside_links(src: Path) -> list[tuple[Path, str]]:
     """(path in `src`, target) of links below `src`'s top level that point outside it:
     `copy_experiment` copies what they point to (a secret file, say) as a plain file, which
-    `flock launch` may then ship. A top-level link (swarmchat-harbor's `tools`) and links within its own
+    `flock launch` may then ship. A top-level link (a linked `tools` folder) and links within its own
     target are not listed."""
     root, out = src.resolve(), []
     for top in src.iterdir():

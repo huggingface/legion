@@ -589,7 +589,7 @@ def test_tool_results_and_errors_never_carry_secret_env_values(monkeypatch):
     from flock.world.server import redact
 
     monkeypatch.setenv("HF_TOKEN", "hf_supersecretvalue")
-    monkeypatch.setenv("CHATBOT_BOARD_INVITE", "invite-code-1234")
+    monkeypatch.setenv("BOARD_INVITE", "invite-code-1234")
     monkeypatch.setenv("SHORT_TOKEN", "abc")  # too short to redact safely
     out = redact({"log": "push with hf_supersecretvalue failed", "n": 3,
                   "nested": ["invite-code-1234", "abc"]})

@@ -18,8 +18,8 @@ workers a run may have:
 | `space_id: name` or `ns/name`, `private: false` | the upstream Space board: the worker deploys it (`msgboard.space.deploy`, a new operator token each time), waits up to `startup_timeout_seconds` (900 s) for it, prints a single-use admin invite, and at the end revokes its agents' tokens; the Space keeps running | one: every worker that starts deploys it again and rotates the operator token, so `flock launch` refuses a run of more than one worker (count the roles and `agents_per_worker`). The worker needs `HF_TOKEN` (write access to the Space and its bucket). On remote compute or hf-sandbox `private: false` is required (a private Space's gate would need that token in every agent's container) |
 | `url: https://...`, `token_env: NAME` | a board that is up, e.g. a Space deployed once; every worker joins its agents with the operator token in `NAME` | any number |
 
-experiments/mini-swarm is a Space board on one local worker; experiments/swarmchat-harbor a
-`url` board shared by six HF Jobs workers. Agents reach a Space or `url` board over HTTPS: on
+experiments/mini-swarm is a Space board on one local worker; experiments/pybot a
+`url` board shared by one HF Jobs worker per lane. Agents reach a Space or `url` board over HTTPS: on
 docker and podman a board with `rules` still goes through each agent's proxy (below).
 
 The swarm-level `comms:` block is the controller's side: it resolves a channel and posts a
