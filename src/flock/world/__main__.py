@@ -1,7 +1,6 @@
 """`python -m flock.world serve|doctor|knobs|set` (docs/world.md): a world author's and a
 world host's commands, not the operator CLI. knobs/set reach the controller through
-flock.client. flock.cli also mounts this app as its hidden `world`: run5-era Slurm world
-jobs call `flock world serve`."""
+flock.client. flock.cli also mounts this app as its hidden `world` (`flock world serve`)."""
 
 from __future__ import annotations
 

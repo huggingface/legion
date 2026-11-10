@@ -125,10 +125,10 @@ async def test_draining_worker_does_not_get_prompts(client, store, clock, tick):
     }
 
 
-async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick):
+async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick, priced):
     await apply(client, make_spec(researcher={"replicas": 2}))
     tick()
-    tokens = {"claude-opus-5-5": TokenUsage(input=1_000_000, output=100_000)}
+    tokens = {priced: TokenUsage(input=1_000_000, output=100_000)}
     agents = [
         AgentHeartbeat(
             name="researcher-0000", state="working", turn_id="t-1", tokens=tokens, turns=3
@@ -140,7 +140,7 @@ async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick):
     ).status_code == 200
     a = (await client.get("/agents/researcher-0000")).json()
     assert a["state"] == "working" and a["turn_id"] == "t-1" and a["worker"] == W0
-    # opus 5.5: 1M input at $4 + 0.1M output at $20
+    # 1M input at $4 + 0.1M output at $20
     assert a["cost_usd"] == 6.0 and a["turns"] == 3 and a["model"] == "fake:m"
     page = (await client.get("/swarms/demo/agents", params={"state": "idle"})).json()
     assert [x["name"] for x in page["agents"]] == ["researcher-0001"]
@@ -211,7 +211,7 @@ async def test_status_page_renders(client, store, clock, tick):
         client,
         make_spec(
             researcher={"replicas": 2},
-            reviewer={"replicas": 1, "model": "fake:codex"},
+            reviewer={"replicas": 1, "model": "fake:m2"},
         ),
     )
     tick()
@@ -238,7 +238,7 @@ async def test_delete_swarm(client, store, clock, tick):
 async def test_parked_poll_of_a_finished_job_gets_nothing_from_its_replacement(
     client, store, jobs, clock, tick
 ):
-    """e2e run 1: a drained job's last long-poll was still parked on the controller when the
+    """A drained job's last long-poll was still parked on the controller when the
     planned relaunch queued the new job's assigns. It woke, took two assigns and a held prompt
     to a client that had exited, and the ack deleted them. Polls are now bound to the job's
     incarnation, so the parked poll gets 409 and the replacement gets everything."""
@@ -343,15 +343,15 @@ async def test_healthz_reports_requests_and_process(client, tick):
     assert h["process"]["rss_mb"] > 0 and h["process"]["cpu_s"] > 0
 
 
-async def test_heartbeat_during_restore_does_not_double_count_cost(client, clock, tick):
+async def test_heartbeat_during_restore_does_not_double_count_cost(client, clock, tick, priced):
     """1k run: after a relaunch the worker heartbeats agents whose restore has not finished yet,
     with an empty token map. That read as "counters went backwards" and folded the old totals
     into the base; once restored, the worker reported its cumulative totals again (they survive
     in the bucket state), so the agent's cost was counted twice (+$0.67 on $2.00)."""
     await apply(client, make_spec(researcher={"replicas": 1}))
     tick()
-    t1 = {"claude-opus-5-5": TokenUsage(input=1_000_000)}  # $4
-    t2 = {"claude-opus-5-5": TokenUsage(input=1_500_000)}  # $6, cumulative across workers
+    t1 = {priced: TokenUsage(input=1_000_000)}  # $4
+    t2 = {priced: TokenUsage(input=1_500_000)}  # $6, cumulative across workers
     for tokens in (t1, {}, t2):  # before the relaunch, while restoring, after the restore
         hb = AgentHeartbeat(name="researcher-0000", state="idle", idle_since=clock(), tokens=tokens)
         r = await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, [hb]))
@@ -359,4 +359,4 @@ async def test_heartbeat_during_restore_does_not_double_count_cost(client, clock
         clock.advance(30)
     a = (await client.get("/agents/researcher-0000")).json()
     assert a["cost_usd"] == 6.0
-    assert a["tokens"]["claude-opus-5-5"]["input"] == 1_500_000
+    assert a["tokens"][priced]["input"] == 1_500_000

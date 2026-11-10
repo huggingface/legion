@@ -604,8 +604,8 @@ class Worker:
             "FLOCK_AGENT": cmd.agent,
             "FLOCK_PARENT": cmd.parent or "",
             "FLOCK_AGENT_TOKEN": cmd.agent_token or "",
-            # Masks the worker's token in the environment the adapters still inherit; the
-            # harness env allow-list (PR #2) makes this redundant.
+            # Masks the worker's token in the environment the adapters inherit (the harness env
+            # allow-list also drops it).
             "FLOCK_TOKEN": "",
         }
 
@@ -1056,7 +1056,7 @@ def run_and_exit(coro, *, exit: Callable[[int], object] = os._exit) -> None:
     sent its last heartbeat, so nothing in the process is needed any more. asyncio.run would
     then cancel leftover tasks and join the default executor, and the interpreter would join
     non-daemon threads; any of them blocking (a hung bucket or SDK call) keeps the job RUNNING
-    after a drain (1k run, check 5). Log what is still alive, then os._exit."""
+    after a drain. Log what is still alive, then os._exit."""
     loop = asyncio.new_event_loop()
     code = loop.run_until_complete(coro)
     pending = [t for t in asyncio.all_tasks(loop) if not t.done()]

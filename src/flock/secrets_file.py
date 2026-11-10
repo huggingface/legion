@@ -7,8 +7,8 @@ there passes `FLOCK_WORKER_SECRETS_FILE=<path>` instead: an env-format file, mod
 group or other bits), read once at start. Its values take precedence over the environment, and
 every name it defines is removed from `os.environ`, so child processes that inherit the
 environment never see it. `secret_env()` is the view the worker reads secrets through: the
-file's values over the live `os.environ`. Without the variable nothing changes: secrets come
-from the environment as before. (`FLOCK_SECRETS_FILE` is the cluster's shell-sourced file and
+file's values over the live `os.environ`. Without the variable secrets come from the
+environment. (`FLOCK_SECRETS_FILE` is the cluster's shell-sourced file and
 is never read by flock.)
 
 Format: one `NAME=value` per line; blank lines and lines starting with `#` are ignored; an

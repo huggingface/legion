@@ -7,7 +7,7 @@ from flock.comms.board import SyncBoard
 
 from . import fake_msgboard
 
-PREFIX = "/boards/hierarchy-v6"
+PREFIX = "/boards/demo"
 
 
 @pytest.fixture

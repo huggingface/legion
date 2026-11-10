@@ -16,19 +16,19 @@ command reads it. The steps and their order are the same on every backend (docs/
 "Lifecycle"):
 
 ```sh
-flock init $PWD/runs/hierarchy --from my-experiment --profile my-cluster.env --secrets secrets.env
+flock init $PWD/runs/demo --from my-experiment --profile my-cluster.env --secrets secrets.env
 #   logs/ hosts/        the jobs' logs and host files (controller.host, world.host)
 #   experiment/         a copy of the folder (links followed): what is launched
 #   slurm/              a copy of scripts/slurm: the job scripts `flock launch` submits
 #   cluster.env         a copy of the cluster profile (below)
 #   run.env (mode 600)  every ${VAR} the spec reads (commented: the spec's default),
 #                       the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
-$EDITOR runs/hierarchy/run.env              # fill what the checks report; rerun `flock init runs/hierarchy`
-export FLOCK_RUN_DIR=$PWD/runs/hierarchy    # or `flock --run runs/hierarchy ...` on each command
-flock launch runs/hierarchy/experiment      # sbatch the world and the controller, wait, create
-flock status hierarchy
-flock stop hierarchy --release              # drain, checkpoint, stop the world, cancel both jobs
-flock launch runs/hierarchy/experiment      # the jobs again: the controller restores, the swarm resumes
+$EDITOR runs/demo/run.env              # fill what the checks report; rerun `flock init runs/demo`
+export FLOCK_RUN_DIR=$PWD/runs/demo    # or `flock --run runs/demo ...` on each command
+flock launch runs/demo/experiment      # sbatch the world and the controller, wait, create
+flock status demo
+flock stop demo --release              # drain, checkpoint, stop the world, cancel both jobs
+flock launch runs/demo/experiment      # the jobs again: the controller restores, the swarm resumes
 ```
 
 The jobs are named `flock-world-<run>` and `flock-ctl-<run>` (one of each per run:
@@ -323,15 +323,15 @@ name, optional port) receives it.
 
 ## Containers (Enroot/Pyxis)
 
-`harness: harbor` is the only harness, so `container_root` and `container_image` (and
-`CONTAINER_IMAGE`) are ignored for workers (below). A worker with no usable HOME derives HOME, HF_HOME, XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the
+`container_root` and `container_image` (and `CONTAINER_IMAGE`) are ignored for workers
+(below). A worker with no usable HOME derives HOME, HF_HOME, XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the
 parent of `WORK_ROOT`; other processes use `FLOCK_HOMELESS_ROOT`.
 
 `harness: harbor` workers never run in a container: each agent is a Harbor Trial in rootless
 podman, which cannot run inside Enroot. Their env file carries `FLOCK_HARNESS=harbor` and node
 paths, and `worker.sbatch` runs `flock-worker` here as its child with the upstream podman setup:
-the job's own podman storage in `/tmp/flock-podman.*` (left to the job's own `/tmp`, a per-job
-tmpfs on hopper-cpu), `podman-compose` from the venv (a flock dependency, Python 3.12+), podman's
+the job's own podman storage in `/tmp/flock-podman.*` (left to the job's own `/tmp`, e.g. a per-job
+tmpfs), `podman-compose` from the venv (a flock dependency, Python 3.12+), podman's
 health checks run by `python -m flock.harbor.podman_healthchecks` (compute nodes have no user
 systemd), and the upstream git credential helper for huggingface.co (private task repos), which
 reads `HF_TOKEN` from a 0600 file there. At exit the job's containers are stopped, within

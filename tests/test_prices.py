@@ -8,28 +8,25 @@ from flock.controller import prices
 from flock.controller.store import agent_tokens
 from flock.models import TokenUsage
 
+BIG, MID, SMALL = prices.Price(4.0, 20.0, 0.2, 5.0), prices.Price(2.0, 10.0, 0.2, 2.5), \
+    prices.Price(0.10, 0.50, 0.01, 0.125)
+TABLE = {**prices.PRICES, "big-model": BIG, "mid-model": MID, "small-model": SMALL}
+
 
 def test_cost_by_model():
     tokens = {
-        "claude-opus-5-5": TokenUsage(
+        "big-model": TokenUsage(
             input=1_000_000, output=1_000_000, cache_read=1_000_000, cache_write=1_000_000
         ),
-        "claude-haiku-5-5": TokenUsage(input=2_000_000),
+        "small-model": TokenUsage(input=2_000_000),
     }
-    p = prices.PRICES["claude-opus-5-5"]
-    expected = (
-        p.input
-        + p.output
-        + p.cache_read
-        + p.cache_write
-        + 2 * prices.PRICES["claude-haiku-5-5"].input
-    )
-    assert prices.cost_usd(tokens) == pytest.approx(expected)
+    expected = BIG.input + BIG.output + BIG.cache_read + BIG.cache_write + 2 * SMALL.input
+    assert prices.cost_usd(tokens, TABLE) == pytest.approx(expected)
 
 
 def test_prefix_and_default():
-    assert prices.price_for("claude-sonnet-5-5-20261001") == prices.PRICES["claude-sonnet-5-5"]
-    assert prices.price_for("mystery-model") == prices.PRICES["default"]
+    assert prices.price_for("mid-model-20261001", TABLE) == MID
+    assert prices.price_for("mystery-model", TABLE) == prices.PRICES["default"]
 
 
 def test_override_file(tmp_path, monkeypatch):
@@ -48,7 +45,7 @@ def test_override_file(tmp_path, monkeypatch):
 
 def test_token_counter_reset_is_folded_into_base(store):
     store.insert_agent("a-0000", "s", "a", 0, 0)
-    m = "claude-opus-5-5"
+    m = "big-model"
     store.record_agent_heartbeat(
         "a-0000", {}, {m: TokenUsage(input=100, output=10)}, prices.cost_usd
     )
@@ -62,33 +59,23 @@ def test_token_counter_reset_is_folded_into_base(store):
     assert row["cost"] == prices.cost_usd({m: TokenUsage(input=155, output=21)})
 
 
-def test_haiku_5_5_matches_claude_code_estimate():
-    # resume-gate job A: Claude Code reported total_cost_usd 0.001143 for this usage
-    u = TokenUsage(input=4, output=196, cache_read=28_030, cache_write=6_111)
-    assert prices.cost_usd({"claude-haiku-5-5": u}) == pytest.approx(0.001143, abs=2e-6)
-    # local e2e smoke turn: 0.001034465
-    u = TokenUsage(input=1206, output=265, cache_read=25_374, cache_write=4_221)
-    assert prices.cost_usd({"claude-haiku-5-5": u}) == pytest.approx(0.0010345, abs=2e-6)
-
-
 def test_provider_qualified_ids():
-    """A harness may report `provider/model` (review 2026-10-16 finding 3: 1M input tokens of
-    anthropic/claude-haiku-5-5 were billed $15 at the default row instead of $0.10)."""
+    """A harness may report `provider/model`: priced as the model, not at the default row."""
     u = TokenUsage(input=1_000_000)
-    assert prices.cost_usd({"anthropic/claude-haiku-5-5": u}) == prices.cost_usd(
-        {"claude-haiku-5-5": u}) == pytest.approx(0.10)
+    assert prices.cost_usd({"acme/small-model": u}, TABLE) == prices.cost_usd(
+        {"small-model": u}, TABLE) == pytest.approx(0.10)
     # prefix rows apply after the provider too; the full id is tried first
-    assert prices.price_for("anthropic/claude-sonnet-5-5-20261001") == prices.PRICES["claude-sonnet-5-5"]
-    assert prices.price_for("x/mystery") == prices.PRICES["default"]
+    assert prices.price_for("acme/mid-model-20261001", TABLE) == MID
+    assert prices.price_for("x/mystery", TABLE) == prices.PRICES["default"]
     full = prices.Price(9, 9, 9, 9)
-    assert prices.price_for("anthropic/claude-haiku-5-5", {**prices.PRICES, "anthropic/claude-haiku-5-5": full}) == full
+    assert prices.price_for("acme/small-model", {**TABLE, "acme/small-model": full}) == full
 
 
 def test_pinned_price_wins_for_the_qualified_id():
-    """A provider price pinned under the bare model id (PR A's type_price_table) wins over the
+    """A provider price pinned under the bare model id (type_price_table) wins over the
     global row and the default, also when the model id itself contains '/'."""
     pinned = prices.Price(0.2, 0.8, 0.02, 0.2)
-    table = {**prices.PRICES, "claude-haiku-5-5": pinned, "Qwen/Qwen3-Coder": pinned}
-    assert prices.price_for("flock/claude-haiku-5-5", table) == pinned
+    table = {**TABLE, "small-model": pinned, "Qwen/Qwen3-Coder": pinned}
+    assert prices.price_for("flock/small-model", table) == pinned
     assert prices.price_for("flock/Qwen/Qwen3-Coder", table) == pinned
     assert prices.price_for("Qwen/Qwen3-Coder", table) == pinned

@@ -421,7 +421,7 @@ def test_watch_shows_world_metrics_and_provider_queues(capsys):
         assert want in out, (want, out)
 
 
-# --------------------------------------------------------------------------- review fixes
+# --------------------------------------------------------------------------- prober resilience
 
 async def test_a_failing_probe_does_not_end_the_loop(store, monkeypatch):
     import asyncio

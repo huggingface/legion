@@ -4,7 +4,7 @@
 # run the controller as an HF Job instead (scripts/deploy-job.sh, docs/deploy-job.md).
 #   scripts/deploy-space.sh <wheel-url> <space-id>     e.g. <you>/flock
 # JOB_LABELS sets the deployment-wide worker job labels (default experiment=flock-m1).
-# Needs HF_TOKEN and FLOCK_TOKEN in the environment (ANTHROPIC_KEY is optional); values are never
+# Needs HF_TOKEN and FLOCK_TOKEN in the environment; values are never
 # printed. The Space is public: the API is protected by the bearer token (a private Space would
 # need an HF bearer on every request, which collides with our Authorization header).
 set -euo pipefail
@@ -39,11 +39,8 @@ from huggingface_hub import HfApi
 space, stage, wheel, job_labels = sys.argv[1:]
 api = HfApi()
 api.create_repo(space, repo_type="space", space_sdk="docker", private=False, exist_ok=True)
-for key, env in (("FLOCK_TOKEN", "FLOCK_TOKEN"), ("HF_TOKEN", "HF_TOKEN"),
-                 ("ANTHROPIC_API_KEY", "ANTHROPIC_KEY")):
-    if key == "ANTHROPIC_API_KEY" and not os.environ.get(env):
-        continue  # optional
-    api.add_space_secret(space, key, os.environ[env])
+for key in ("FLOCK_TOKEN", "HF_TOKEN"):
+    api.add_space_secret(space, key, os.environ[key])
 for key, value in {
     "FLOCK_WORKER_BOOTSTRAP": "1",
     "FLOCK_WHEEL_URL": wheel,

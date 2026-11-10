@@ -177,7 +177,7 @@ def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions
     assert types["r"].replicas == 2 and types["b"].replicas == 1
 
 
-# ----------------------------------------------------------------- review fixes
+# ----------------------------------------------------------------- bucket guard
 
 
 def test_the_bucket_guard_stops_at_the_first_file(monkeypatch):

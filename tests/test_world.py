@@ -429,7 +429,7 @@ HTTPServer(("127.0.0.1", int(os.environ["FLOCK_WORLD_PORT"])), H).serve_forever(
 
 async def test_a_refused_reapply_keeps_the_running_world(store, tmp_path):
     """A changed command whose apply is refused (unknown selected tool) leaves the running
-    world and the stored endpoint as they were (review of PR #20)."""
+    world and the stored endpoint as they were."""
     (tmp_path / "world.py").write_text(TINY_WORLD)
     host = WorldHost(log_dir=tmp_path / "logs", start_timeout=10)
     app = controller_app(store, TOKEN, worlds=host, compute="local", loop_interval=0,
@@ -483,7 +483,7 @@ def _alive(pid: int) -> bool:
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="needs procfs")
 def test_stop_kills_a_helper_that_ignores_sigterm(tmp_path):
     """The world's leader exits on SIGTERM at once; a helper in its process group ignores it
-    and is SIGKILLed before the world counts as stopped (review of PR #20)."""
+    and is SIGKILLed before the world counts as stopped."""
     (tmp_path / "world.py").write_text(HELPER_WORLD)
     host = WorldHost(log_dir=tmp_path / "logs", start_timeout=10, stop_grace=1.0)
     helper = None
@@ -533,7 +533,7 @@ async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path)
 # --------------------------------------------------------------------------- worker hub
 
 
-# --------------------------------------------------------------------------- review of PR #20
+# --------------------------------------------------------------------------- changing worlds
 
 
 class Changing(World):

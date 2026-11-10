@@ -108,7 +108,7 @@ def test_value_sources_lines_env_files_defaults(tmp_path, monkeypatch):
 
 def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, store):
     wire(monkeypatch, app)
-    monkeypatch.setenv("USER", "carlos")
+    monkeypatch.setenv("USER", "alice")
     repo = tmp_path / "repo"
     exp = repo / "exp"
     exp.mkdir(parents=True)
@@ -129,7 +129,7 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
     r = runner.invoke(cli.app, ["launch", str(exp / "spec.yaml"), "--ref", "v1"])
     assert r.exit_code == 0, r.output
     (gen1,) = store.spec_history("demo")
-    assert gen1["source"] == {"git_sha": sha, "ref": "v1", "dirty": False, "by": "carlos"}
+    assert gen1["source"] == {"git_sha": sha, "ref": "v1", "dirty": False, "by": "alice"}
     stored = store.get_swarm("demo")["spec"]
     assert stored.types["researcher"].replicas == 3 and stored.namespace == "committed"
     # update --check with REF:PATH (the positional only names the repo); nothing stored
@@ -139,7 +139,7 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
     r = runner.invoke(cli.app, ["update", str(exp), "--ref", "nope"])
     assert r.exit_code == 1 and "--ref nope" in r.output
     hdr = ops.source_header(exp / "spec.yaml")["X-Flock-Source"]
-    assert json.loads(hdr)["dirty"] is True  # without --ref: the working tree, as before
+    assert json.loads(hdr)["dirty"] is True  # without --ref: the working tree
 
 
 def test_base_urls_take_a_comma_separated_string():

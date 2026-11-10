@@ -13,7 +13,6 @@ from flock.harbor.spec import Spec, compile_spec, substitute
 from flock.models import SwarmSpec, load_spec_yaml, loop_refusals
 
 EXAMPLES = Path(__file__).parent / "examples"
-SWARMCHAT_FIXTURE = Path(__file__).parent / "fixtures" / "swarmchat-harbor-spec.yaml"
 RESOURCES = Path(flock.harbor.__file__).parent / "builtin" / "resources"
 
 
@@ -23,30 +22,19 @@ def within(small, big):
     return small == big
 
 
-@pytest.mark.parametrize(
-    "example", [*sorted(EXAMPLES.glob("*.yaml")), SWARMCHAT_FIXTURE], ids=lambda p: p.name
-)
+@pytest.mark.parametrize("example", sorted(EXAMPLES.glob("*.yaml")), ids=lambda p: p.name)
 def test_upstream_configs_load_unchanged(example):
     upstream, spec = Config.load(example), Spec.load(example, env={})
     assert within(upstream.model_dump(), spec.model_dump())
     assert spec.loop is None and spec.agents.roster() == upstream.agents.roster()
 
 
-def test_swarmchat_harbor_spec_loads():
-    spec = Spec.load(SWARMCHAT_FIXTURE, env={})
-    assert list(spec.roles()) == [
-        "understanding", "answers", "conversation", "routing", "quality", "safety",
-    ]
-    assert "world.*" in spec.tools and set(spec.resources) == {"message_board", "world"}
-    assert spec.compute.kind == "local" and spec.environment.backend == "docker"
-
-
-V8 = """
-name: v8
+LANES = """
+name: lanes
 model: huggingface/${MODEL:-Qwen/Qwen3.8-27B}
 task:
-  repo: https://huggingface.co/datasets/HuggingFaceSwarms/v8-harbor
-  selector: v8
+  repo: https://huggingface.co/datasets/a/b
+  selector: lanes
 team_file: prompts/system.md
 resources:
   message_board: {url: '${BOARD_URL:-https://board.example}', channels: [general]}
@@ -80,7 +68,7 @@ loop:
 """
 
 
-def v8_spec(tmp_path, text=V8, env=None):
+def six_lane_spec(tmp_path, text=LANES, env=None):
     (tmp_path / "prompts" / "lanes").mkdir(parents=True, exist_ok=True)
     (tmp_path / "prompts" / "round.md").write_text("Continue your work. Round {round}, ${spend}.")
     (tmp_path / "prompts" / "final.md").write_text("The run is ending.")
@@ -89,8 +77,8 @@ def v8_spec(tmp_path, text=V8, env=None):
     return Spec.load(path, env={"ANSWERS": "24"} if env is None else env)
 
 
-def test_v8_shaped_spec_loads(tmp_path):
-    spec = v8_spec(tmp_path)
+def test_six_lane_spec_loads(tmp_path):
+    spec = six_lane_spec(tmp_path)
     assert spec.model == "huggingface/Qwen/Qwen3.8-27B"
     answers, safety = spec.agents.roles["answers"], spec.agents.roles["safety"]
     assert (answers.count, answers.ramp.every, safety.count, safety.ramp.start) == (24, 600, 6, 3)
@@ -109,7 +97,7 @@ def test_v8_shaped_spec_loads(tmp_path):
     )
     assert loop.on == ["message_board.mention", "message_board.thread"]
     assert "transport" not in spec.resources["message_board"]
-    ruled = v8_spec(tmp_path, V8.replace("[general]}", "[general], rules: {max_len: 2000}}"))
+    ruled = six_lane_spec(tmp_path, LANES.replace("[general]}", "[general], rules: {max_len: 2000}}"))
     assert ruled.resources["message_board"]["transport"] == "http"  # no mounts: no rule proxy
     # run.json holds this dump; it validates again as written
     dumped = spec.model_dump(mode="json")
@@ -150,15 +138,15 @@ def test_v8_shaped_spec_loads(tmp_path):
     ],
 )
 def test_spec_checks(tmp_path, edit, error):
-    data = load_spec_yaml(V8)
+    data = load_spec_yaml(LANES)
     edit(data)
     with pytest.raises(ValidationError, match=error):
-        v8_spec(tmp_path, yaml.safe_dump(data))
+        six_lane_spec(tmp_path, yaml.safe_dump(data))
 
 
 def test_unset_variable_without_default(tmp_path):
     with pytest.raises(ValueError, match="unset variables without a default: ANSWERS"):
-        v8_spec(tmp_path, V8.replace("${ANSWERS:-96}", "${ANSWERS}"), env={})
+        six_lane_spec(tmp_path, LANES.replace("${ANSWERS:-96}", "${ANSWERS}"), env={})
 
 
 @pytest.mark.parametrize(
@@ -172,10 +160,10 @@ def test_placeholders_take_json_types(value, typed):
 
 
 COMPILE = """
-name: v8
+name: lanes
 model: huggingface/Qwen/Qwen3.8-27B
 inference: {max_working: 40, reasoning_effort: high, api_key_env: HF_INFERENCE_TOKEN}
-task: {repo: https://huggingface.co/datasets/HuggingFaceSwarms/v8-harbor, selector: v8}
+task: {repo: https://huggingface.co/datasets/a/b, selector: lanes}
 team_file: team.md
 resources: {message_board: {url: https://board.example, channels: [general]}}
 tools: [message_board.*]
@@ -201,7 +189,7 @@ loop:
   final: {prompt: The run is ending., reserve_usd: 20}
   resume_prompt: Continue.
 """
-TASK = {"registry_commit": "d" * 40, "dataset": "v8@1", "task": {"git_url": "x", "path": "t"}}
+TASK = {"registry_commit": "d" * 40, "dataset": "lanes@1", "task": {"git_url": "x", "path": "t"}}
 
 
 def test_compile_gives_one_harbor_type_per_role(tmp_path):
@@ -214,7 +202,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     swarm = compile_spec(spec, TASK, bundle)
 
     assert (swarm.swarm, swarm.namespace, swarm.bucket, swarm.compute.kind) == (
-        "v8", "", "", "local",
+        "lanes", "", "", "local",
     )
     provider = swarm.providers["inference"]
     assert (provider.type, provider.base_url, provider.api_key_env, provider.max_working) == (
@@ -261,8 +249,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
             "api_format": "openai_chat_completions", "reasoning_effort": "high",
             "max_working": 40,
         },
-        "task": {"repo": "https://huggingface.co/datasets/HuggingFaceSwarms/v8-harbor",
-                 "dataset": None, "selector": "v8", "revision": "main"},
+        "task": {"repo": "https://huggingface.co/datasets/a/b",
+                 "dataset": None, "selector": "lanes", "revision": "main"},
         "environment": {"backend": "hf-sandbox", "flavor": "cpu-basic"},
         "limits": {"agent_max_turns": 150, "agent_timeout_seconds": None, "trial_hours": 23},
         "tools_dir": str(spec.tools_dir), "tools": ["message_board.*"],
@@ -464,7 +452,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
 
 CONSECUTIVE = """name: crew
 model: m/x
-task: {repo: https://huggingface.co/datasets/a/b, selector: v8}
+task: {repo: https://huggingface.co/datasets/a/b, selector: lanes}
 naming: consecutive-id
 agents:
   roles:

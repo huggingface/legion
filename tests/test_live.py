@@ -183,7 +183,7 @@ async def test_an_update_changes_the_worker_liveness_timings(client, store, tick
 async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client, store, tick,
                                                                          tmp_path):
     spec = await applied(client, tmp_path, tick)
-    src = {"git_sha": "abc123", "ref": "main", "dirty": 1, "by": "carlos", "extra": "dropped"}
+    src = {"git_sha": "abc123", "ref": "main", "dirty": 1, "by": "alice", "extra": "dropped"}
     hdr = {"x-flock-source": json.dumps(src)}
     r = await client.put("/swarms/demo", json=spec.model_dump(mode="json"), headers=hdr)
     assert r.json()["generation"] == 1  # nothing changed: same generation, no history entry
@@ -200,9 +200,9 @@ async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client
     assert [(h["generation"], h["diff"]) for h in hist] == [
         (1, ["created"]), (2, [f"types.researcher.replicas: {n} -> {n + 1}"])]
     assert hist[0]["source"] == {}
-    assert hist[1]["source"] == {"git_sha": "abc123", "ref": "main", "dirty": True, "by": "carlos"}
+    assert hist[1]["source"] == {"git_sha": "abc123", "ref": "main", "dirty": True, "by": "alice"}
     evs = [e["data"] for e in store.read_events("_swarm.demo", 0) if e["type"] == "spec_applied"]
-    assert [e["generation"] for e in evs] == [1, 2] and evs[1]["source"]["by"] == "carlos"
+    assert [e["generation"] for e in evs] == [1, 2] and evs[1]["source"]["by"] == "alice"
     assert evs[1]["diff_summary"] == hist[1]["diff"]
 
 

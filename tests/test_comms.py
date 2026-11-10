@@ -50,7 +50,7 @@ def test_comms_block_validates():
     assert s.comms.channel == "flock-test" and s.comms.wake == ["mention", "thread"]
     assert s.comms.rules.gap_s == 20 and s.comms.search == "board"
     assert comms_tools(s.types["dev"], s.comms) == list(COMMS_TOOLS)
-    with pytest.raises(ValidationError, match="not built yet"):
+    with pytest.raises(ValidationError, match="not supported"):
         SwarmSpec.model_validate(swarm_raw(search="index"))
     with pytest.raises(ValidationError, match="extra"):
         SwarmSpec.model_validate(swarm_raw(rules={"min_gap": "1s"}))
@@ -112,7 +112,7 @@ def test_rate_rules():
 
 
 def test_controller_resolves_channel_and_posts_kickoff_once(board):
-    raw = swarm_raw(url=board.url, kickoff="Kickoff: build Eliza. Reply in this thread.")
+    raw = swarm_raw(url=board.url, kickoff="Kickoff: build the bot. Reply in this thread.")
     s1 = SwarmSpec.model_validate(raw)
     resolve(s1, None, {INVITE_ENV: board.invite})
     assert s1.comms.channel_id == CH and s1.comms.kickoff_id == board.msgs[0]["id"]
@@ -151,19 +151,7 @@ def test_controller_refuses_an_archived_channel_before_any_post_or_join():
         srv.shutdown()
 
 
-# --------------------------------------------------------------------------- review of #16
-
-
-# --------------------------------------------------------------------------- re-review of #16
-
-
-# --------------------------------------------------------------------------- third review of #16
-
-
-# --------------------------------------------------------------------------- fourth review of #16
-
-
-# --------------------------------------------------------------------------- fifth review of #16
+# --------------------------------------------------------------------------- board urls
 
 
 def test_board_urls_have_one_spelling():
@@ -172,7 +160,6 @@ def test_board_urls_have_one_spelling():
     assert normalize_board_url("https://b.invalid:8443/x/") == "https://b.invalid:8443/x"
 
 
-# --------------------------------------------------------------------------- sixth review of #16
 
 URLS = [("http://[::1]:8080/", "http://[::1]:8080"), ("https://[2001:db8::1]/", "https://[2001:db8::1]"),
         ("http://[2001:DB8::1]:80/", "http://[2001:db8::1]"), ("http://Board.invalid:80/", "http://board.invalid"),

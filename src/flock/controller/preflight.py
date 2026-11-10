@@ -3,8 +3,8 @@
 Run by the controller, which holds the provider keys (the same secrets it hands to jobs, read
 by the names in `api_key_env`). Each probe is two streamed turns, the way a harness starts: turn
 one asks the model to call a trivial tool; turn two sends the model's output back with the tool's
-result and must complete. A server that accepts turn one but fails the follow-up (the HF router's
-auto provider choice did, 2026-10-16) fails preflight. Zero reported usage is a warning.
+result and must complete. A server that accepts turn one but fails the follow-up (some HF router
+providers do) fails preflight. Zero reported usage is a warning.
 Harbor's Pi speaks Chat Completions, so models are probed there, non-streamed. A tool call the
 model writes as text is no tool call: Pi takes only `tool_calls`.
 """

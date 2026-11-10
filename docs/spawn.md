@@ -26,11 +26,11 @@ limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
 | `spawn.<type>.types` | required | a list of child types (then `max` is required), or a map `{child type: cap}` |
 | `spawn.<type>.max` | none | cap on the agent's existing children, all types together. Optional with the map form |
 | `spawn.<type>.depth` | 1 | generations allowed below the agent. 0: it cannot spawn |
-| `types.<t>.workers.initial` | v1's count: `ceil(replicas / agents_per_worker)` | worker slots counted toward the cap. Not pre-created: a worker opens only when an agent needs one |
+| `types.<t>.workers.initial` | `ceil(replicas / agents_per_worker)` | worker slots counted toward the cap. Not pre-created: a worker opens only when an agent needs one |
 | `types.<t>.workers.max_extra` | 0 | worker slots spawned children of `<t>` may add on demand |
 | `limits.alive` | none | agents that exist in the swarm, replicas and spawned together |
 | `limits.spawned_total` | none | children ever spawned in the swarm (the name counter); removing one does not free a place |
-| `limits.budget_usd` | none | cost of every agent of the swarm, removed ones included. Checked when spawning; it does not stop running agents |
+| `limits.budget_usd` | none | cost of every agent of the swarm, removed ones included. Checked when spawning, and a hard stop for the swarm (docs/loop.md "Budget stop") |
 
 Caps count a parent's existing children, so removing a child frees its place. A child's own
 per-prompt `max_turns` and `max_budget_usd` come from its type, as for replicas.
@@ -51,11 +51,11 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 - **Name:** `<parent>-<type>-<NNNN>` (with `naming: words`: a reserved `<adjective>-<noun>`, see
   "Names"), `NNNN` from a per-swarm counter that is never reused while
   the swarm exists, e.g. `leader-0000-analyst-0007`, then `leader-0000-analyst-0007-helper-0012`.
-- **Placement:** on the child type's own workers with v1's fill rule (fill in order, never move,
+- **Placement:** on the child type's own workers with the default fill rule (fill in order, never move,
   open a new worker on demand). A type that declares `workers` never gets more than
   `initial + max_extra` worker slots, replicas included: `apply` rejects replicas that do not fit
   in `(initial + max_extra) x agents_per_worker`, admission refuses children past it (`workers`),
-  and placement opens no further slot. Types without `workers` keep v1's unbounded placement. The first child of a type with no worker waits for a job launch
+  and placement opens no further slot. Types without `workers` have unbounded placement. The first child of a type with no worker waits for a job launch
   (about 30 to 45 s).
 - **First prompt:** `prompt` in the spawn request is held as a pending prompt and delivered when
   the child's worker polls, like any prompt to an agent whose worker is not up yet.
@@ -71,7 +71,7 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
 ### Ephemeral types
 
 `ephemeral: true` on a type makes each spawned agent of it live for one session: a judge, an
-interviewer, a one-shot helper. Added 2026-10-22 for hf://buckets/cmpatino/legacy-swarmchat-experiments/chatbot-v1's interviewers.
+interviewer, a one-shot helper.
 
 ```yaml
 types:
@@ -135,7 +135,7 @@ types:
   (scale down and up, a cascade removal) keeps its name, also across controller restarts (the
   reservations are in `state.db`).
 - **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
-  counts it); with `words` it no longer appears in the name.
+  counts it); with `words` it is not part of the name.
 - **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
   `X-Flock-Agent` for worlds, `flock-agent remove <name>`. A words name says nothing about the
   parent: a world that needs it keeps its own records (e.g. a world that books work to the first agent
@@ -239,7 +239,5 @@ limits: {spawned_total: 50}
 - Pre-warming is a possible later feature. Today a worker is opened only for agents that
   exist, so the first spawn of a type with no agents pays the worker's boot time (a job launch,
   about 30 to 45 s), whatever `workers.initial` says.
-- `limits.budget_usd` is checked at spawn time only; it does not stop agents that keep working.
-- Spawned rows are not mirrored to the bucket. If the controller loses its SQLite (no persistent
-  storage), workers report agents the controller does not know and the controller unassigns them.
+- If the controller loses its SQLite (no persistent storage and no state sync), workers report agents the controller does not know and the controller unassigns them.
 - No cap on name length and no caller-chosen child names.

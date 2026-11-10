@@ -262,7 +262,6 @@ def agent_status(
         pending=pending,
         tokens=agent_tokens(a),
         cost_usd=a["cost"],
-        harness_estimate_usd=a["harness_estimate_usd"],
         turns=a["turns"],
         created_at=_dt(a["created_at"]),
         last_heartbeat=_dt(a["last_heartbeat"]),
@@ -1224,7 +1223,7 @@ def create_app(
                 ack.skipped_state += 1
                 continue
             if pending.get(a["name"]):
-                ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
+                ack.skipped_pending += 1  # repeated calls must never stack prompts
                 continue
             cmd = build(a) if build else PromptCommand(
                 agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
@@ -1302,8 +1301,8 @@ def create_app(
         return worker_status(w, names, clock().timestamp(), store.liveness(w["swarm"]))
 
     def stale(w: Row, incarnation: str | None) -> bool:
-        """The caller is not the slot's current job. Workers that send no incarnation (older
-        versions) are trusted, as before."""
+        """The caller is not the slot's current job. Workers that send no incarnation are
+        trusted."""
         return incarnation is not None and w["incarnation"] != incarnation
 
     def caps(spec: SwarmSpec, type_name: str) -> list[tuple[frozenset[str], int]]:
@@ -1589,7 +1588,7 @@ def create_app(
                     health.on_events(a, evs, now)
                 except Exception:  # counters never break event ingestion
                     log.exception("health counters failed for %s", agent)
-        if released and pools:  # slots freed now, not at the next heartbeat (run-1k finding 1)
+        if released and pools:  # slots freed now, not at the next heartbeat
             wake_window(w["swarm"], pools)
         return {"ok": True, "accepted": len(batch.events)}
 

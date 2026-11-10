@@ -121,16 +121,12 @@ def public_status_supported() -> bool:
 
 
 def collect_secrets(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
-    """FLOCK_TOKEN, HF_TOKEN, ANTHROPIC_API_KEY (or ANTHROPIC_KEY, as deploy-space.sh) and
-    every `--secret NAME` from the local environment. Values are never printed."""
+    """FLOCK_TOKEN, HF_TOKEN and every `--secret NAME` from the local environment. Values are never printed."""
     out = {}
     for name in ("FLOCK_TOKEN", "HF_TOKEN"):
         if not env.get(name):
             raise SystemExit(f"{name} must be set in the environment")
         out[name] = env[name]
-    anthropic = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_KEY")
-    if anthropic:
-        out["ANTHROPIC_API_KEY"] = anthropic
     for name in extra:
         if not env.get(name):
             raise SystemExit(f"--secret {name}: not set in the environment")

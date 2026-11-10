@@ -74,7 +74,7 @@ def test_compute_local_short_and_long_form():
 def test_liveness_defaults_per_backend_and_overrides():
     assert make_spec().compute.liveness() == ComputeSpec(kind="slurm").liveness() == (90, 180, 30)
     assert local_spec().compute.liveness() == (15, 30, 2)
-    assert local_spec().model_dump(mode="json")["compute"] == {"kind": "local"}  # stored as before
+    assert local_spec().model_dump(mode="json")["compute"] == {"kind": "local"}  # only the set keys
     c = ComputeSpec(kind="local", worker_dead_after="1m", crash_backoff="500ms")
     assert c.liveness() == (15, 60, 0.5)
     with pytest.raises(ValueError, match=re.escape("(90s (default)) must be shorter than "
@@ -346,7 +346,7 @@ def test_tracker_idle(tmp_path):
     assert snap["completed"] == 2 and tr.idle(snap)
     assert "completed 2" in localrun.status_line(snap, 3)
     # an agent removed with a turn still open (an ephemeral child whose turn_ended was never
-    # read): its open turn goes with its row and does not block idle (chatbot-v1 run 2)
+    # read): its open turn goes with its row and does not block idle
     store.insert_agent("w-gone", "loc", "w", 9, now)
     _events(store, "w-gone", "turn_started")
     assert not tr.idle(tr.snapshot(spec, now)) and "w-gone" in tr.open_turns
@@ -406,7 +406,7 @@ def test_run_local_refuses_a_jobs_spec(tmp_path):
         asyncio.run(localrun.run_local(opts))
 
 
-# --------------------------------------------------------------------------- review of #13
+# --------------------------------------------------------------------------- local env
 
 
 def test_local_env_keeps_harness_overrides_and_drops_the_callers_flock_env(tmp_path):

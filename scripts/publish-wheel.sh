@@ -10,7 +10,7 @@
 # private GitHub dependency a job cannot clone; built here with your git credentials) and
 # constraints.txt, uv.lock's versions, so the controller and every worker of a run install the
 # same ones.
-# --harbor is accepted and ignored (it used to make harbor-deps.tar optional).
+# --harbor is accepted and ignored.
 set -euo pipefail
 USAGE="usage: scripts/publish-wheel.sh hf://buckets/<namespace>/<bucket>/<dir>"
 if [ "${1:-}" = --harbor ]; then shift; fi

@@ -1,13 +1,13 @@
 """Schedule native Podman health checks without a user systemd session (in flock.harbor so a
 worker venv can run it with `python -m`).
 
-On this cluster, Podman normally schedules periodic health checks through user
-systemd timers, but CPU Slurm jobs have no working user systemd session. The
+Podman normally schedules periodic health checks through user systemd timers,
+but Slurm jobs on clusters without user systemd have no working session. The
 launcher starts this helper to run each container's existing health check at
 its configured interval; it does not replace or bypass the checks.
 
-AgentEscape's Compose dependencies require healthy services before startup:
-worker -> puzzle -> agent. Without scheduled checks, services can remain marked
+Compose dependencies can require healthy services before startup (e.g.
+worker -> puzzle -> agent). Without scheduled checks, services can remain marked
 "starting" even when their servers are ready, leaving Compose waiting. Removing
 the health-based dependency conditions instead would allow startup races and
 connection errors unless another readiness mechanism replaced them.

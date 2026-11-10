@@ -747,8 +747,7 @@ def remove(name: str) -> None:
     typer.echo(json.dumps(_api().remove(name)))
 
 
-# Hidden: run5-era Slurm world jobs call `flock world serve`
-# (hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/slurm/world-inner.sh).
+# Hidden: `flock world serve` runs a world (python -m flock.world serve).
 app.add_typer(world_app, name="world", hidden=True)
 
 

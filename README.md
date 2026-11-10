@@ -119,7 +119,7 @@ cannot install msgboard, a private GitHub repo (Dockerfile.controller).
 Or locally:
 
 ```sh
-FLOCK_TOKEN=... HF_TOKEN=... ANTHROPIC_API_KEY=... \
+FLOCK_TOKEN=... HF_TOKEN=... \
 FLOCK_WHEEL_URL=hf://buckets/<you>/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl \
 uv run flock-controller          # http://127.0.0.1:7860
 ```
@@ -209,27 +209,14 @@ uv run ruff check src tests experiments
 
 No network, no real jobs: the Hub client and Harbor are faked (tiny real runs: tests/tinyrun.py).
 
-## Limits and status
+## Limits
 
-- Measured on 2026-10-14: 100 agents on 3 `cpu-basic` workers and 1,000 agents
-  on 5 `cpu-upgrade` workers pass every check (apply, prompt all, kill and
-  resume, planned drain, scale down, remove). A 10,000-agent run on 50 workers
-  reached all agents and delivered every prompt, then the HF Spaces edge in
-  front of the controller throttled the workers' heartbeats; the controller
-  took them for dead and relaunched them. Reports in
-  `hf://buckets/cmpatino/legacy-swarmchat-experiments/*/RESULTS.md`.
-- Packing: one `cpu-upgrade` worker holds 200 resident agents and about 120
-  concurrent turns; `cpu-basic` 50 and 20. Cold turns are CPU-bound at about
-  1.5 CPU-seconds each.
-- Not built yet: bulk prompt endpoint, swarm-level event stream, per-worker
-  batched bucket sync, spend ledger, autoscaling, API-loop agents, per-caller auth.
-- The controller's bearer token sits in the `Authorization` header, so the
-  Space must be public; the API is still token-protected.
-
-- Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in
-  the controller image. Without the Space's persistent storage a redeploy wipes
-  it; replicas come back from the spec, spawned agents do not.
-- Earlier experiments are archived in `hf://buckets/cmpatino/legacy-swarmchat-experiments` (README inside); most target the
-  pre-cleanup layout, so run them from commit `8949085` (`git checkout 8949085`).
+- Defaults: 50 agents per worker, at most 20 of them in a turn (`agents_per_worker`,
+  `max_working_per_worker`).
+- An HF Spaces edge in front of the controller rate-limits a large swarm's heartbeats; run the
+  controller as a job in the workers' network group ([docs/deploy-job.md](docs/deploy-job.md)).
+- Controller state (SQLite and event files) lives in `FLOCK_DATA`, `/data` in the controller
+  image; in job mode it is synced to `FLOCK_STATE_URL`. Without either a restart wipes it:
+  replicas come back from the spec, spawned agents do not.
 
 Design and contracts: [docs/design.md](docs/design.md).

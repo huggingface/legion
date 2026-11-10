@@ -77,7 +77,7 @@ async def test_dead_server_flags_its_agents(store, clock, tick):
     h.tick(t)
     body = h.latest("demo")["body"]
     assert body["alerts"] == [] and fs.dead_servers({"body": body}) == set()  # one miss: no alert
-    assert body["providers"]["v"] == {"waiting": 1.0, "running": 2.0}  # summed, as before
+    assert body["providers"]["v"] == {"waiting": 1.0, "running": 2.0}  # summed
     await h.probe(t)
     h.tick(t)
     body = h.latest("demo")["body"]

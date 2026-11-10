@@ -38,7 +38,7 @@ class Context:
     env: dict[str, str] = field(default_factory=dict)
 
 
-Ctx = Context  # the design note's spelling
+Ctx = Context
 
 
 class ToolError(Exception):

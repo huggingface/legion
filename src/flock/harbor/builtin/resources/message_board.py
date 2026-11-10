@@ -126,7 +126,7 @@ class Options(BaseModel):
             validate_repo_id(value)  # `name` or `namespace/name`
         return value
 
-    @field_validator("url")  # flock: as f3970bc's board.url
+    @field_validator("url")  # flock: a board that is already up
     @classmethod
     def endpoint(cls, value):
         if value is None:
@@ -190,7 +190,7 @@ class Resource:
         self.warning = None
         if self.options.rules is not None and self.options.transport == "http":
             self.warning = "board rules are not enforced: transport http has no rule proxy"
-        if self.options.url:  # flock: as f3970bc's board.url
+        if self.options.url:  # flock: a board that is already up
             self.url = self.options.url
             self.operator_token = os.environ.get(self.options.token_env)
             if not self.operator_token:

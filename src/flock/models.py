@@ -112,7 +112,7 @@ TOOLS_VERSION_RE = re.compile(r"^[0-9a-f]{16}$")
 SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
 
 Reasoning = Literal["off", "low", "medium", "high"]
-# `reasoning` -> OpenAI `reasoning.effort` / Codex `model_reasoning_effort`.
+# `reasoning` -> OpenAI `reasoning.effort`.
 REASONING_EFFORT = {"off": "none", "low": "low", "medium": "medium", "high": "high"}
 
 
@@ -143,9 +143,8 @@ class ProviderSpec(BaseModel):
     pricing: dict[str, list[float]] = Field(default_factory=dict)  # model id ("*" = any) -> row
     timeout_s: float | None = None  # passthrough to the harness / preflight
     max_retries: int | None = None  # passthrough to the harness
-    # How the key is sent. `anthropic` providers: "x-api-key" (default, Claude Code's
-    # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
-    # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
+    # How the key is sent. `anthropic` providers: "x-api-key" (default) or "bearer"
+    # (`Authorization: Bearer`), for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
     auth: Literal["x-api-key", "bearer"] | None = None
     # Scrape `<server root>/metrics` (vLLM Prometheus text) of each base URL into the swarm's
     # health snapshots: num_requests_waiting / running, KV cache usage (docs/health.md).
@@ -314,7 +313,7 @@ class CommsSpec(BaseModel):
     kind: Literal["msgboard"] = "msgboard"
     extended: bool = False  # multi-channel tools and serialized per-identity activity polling
     # extended: each agent identity's feed is polled about once per this many seconds; the
-    # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
+    # worker's poll interval is max(2 s, poll_cycle_s / its agents).
     poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # unset: 300
     url: str
     # `space`: `flock init` duplicates `template` into a private per-run Space (`space`, default
@@ -374,15 +373,14 @@ class CommsSpec(BaseModel):
     def _channel(cls, v: str) -> str:
         v = v.strip().lstrip("#")
         if not COMMS_NAME_RE.match(v):
-            raise ValueError(f"channel {v!r}: use the channel's name, e.g. prj-eliza-v1")
+            raise ValueError(f"channel {v!r}: use the channel's name, e.g. general")
         return v
 
     @field_validator("search")
     @classmethod
     def _search(cls, v: str | None) -> str | None:
         if v == "index":
-            raise ValueError("search: index (a per-worker FTS5 index) is not built yet; use "
-                             "search: board (docs/comms.md, cut 2)")
+            raise ValueError("search: index is not supported; use search: board (docs/comms.md)")
         return v
 
     @field_validator("wake")
@@ -592,7 +590,7 @@ def _positive_duration(v: str) -> str:
 class RampPhase(BaseModel):
     """One phase of `replicas_ramp.phases`: `add` every `every` until `until` (default: the
     ramp's `max`). The next phase starts where this one reached `until`. `stagger`: the
-    agents of each of its raises join this far apart (waves.yaml's per-wave `stagger_s`)."""
+    agents of each of its raises join this far apart."""
 
     model_config = {"extra": "forbid"}
 
@@ -606,8 +604,7 @@ class RampPhase(BaseModel):
 
 
 class RampHold(BaseModel):
-    """`replicas_ramp.hold_if` (was hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/load_guard.py):
-    a step that takes the swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
+    """`replicas_ramp.hold_if`: a step that takes the swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
     had `waiting` or more requests queued in every sample of the last 2 minutes, or takes
     more than `request_s` per request (running / completions per second), or its metrics
     are missing, short or reset."""
@@ -623,7 +620,7 @@ class RampSpec(BaseModel):
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): the controller raises the type's
     replicas to `start`, then by `add` every `every` (or through `phases`), up to `max`. It
     never lowers them: a lowered `max` only caps later raises. `stagger`: the `start` raise
-    adds one agent at a time this far apart (waves.yaml's wave-1 `stagger_s`, default 10 s)."""
+    adds one agent at a time this far apart (default 10 s)."""
 
     model_config = {"extra": "forbid"}
 
@@ -716,7 +713,7 @@ class TypeSpec(BaseModel):
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)
     replicas: int = 0
-    # measured defaults (hf://buckets/cmpatino/legacy-swarmchat-experiments/packing)
+    # measured defaults
     agents_per_worker: int = 50
     max_working_per_worker: int = 20
     # Agents of this type in a turn at once, swarm-wide, admitted like a provider's
@@ -724,7 +721,7 @@ class TypeSpec(BaseModel):
     max_working: int | None = Field(default=None, ge=1)
     replicas_ramp: RampSpec | None = None  # controller only (docs/live.md "Ramp")
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
-    # `spawn:` lets others create; None keeps v1's placement.
+    # `spawn:` lets others create; None: unbounded.
     workers: WorkersSpec | None = None
     # Spawned agents of this type live for one session (docs/spawn.md "Ephemeral types"): the
     # controller removes one once a heartbeat reports it idle after a turn with nothing pending
@@ -1190,8 +1187,8 @@ def agent_name(type_name: str, slot: int) -> str:
 
 
 class WorkersSpec(BaseModel):
-    """Worker slots a type may use: `initial` (default: what v1 computes from replicas and
-    agents_per_worker) plus up to `max_extra` opened on demand for spawned agents."""
+    """Worker slots a type may use: `initial` (default: `ceil(replicas /
+    agents_per_worker)`) plus up to `max_extra` opened on demand for spawned agents."""
 
     initial: int | None = None
     max_extra: int = 0
@@ -1293,7 +1290,7 @@ def child_name(parent: str, type_name: str, n: int) -> str:
 
 
 def initial_workers(ts: TypeSpec) -> int:
-    """v1's worker count for a type's replicas, or the declared `workers.initial`."""
+    """`ceil(replicas / agents_per_worker)` for a type, or the declared `workers.initial`."""
     if ts.workers is not None and ts.workers.initial is not None:
         return ts.workers.initial
     return -(-ts.replicas // max(1, ts.agents_per_worker))
@@ -1400,7 +1397,7 @@ class LoopWake(BaseModel):
     `min_gap` between two wake prompts (wakes in between are coalesced into the next one), at
     most `max` wake prompts per run of the loop, or per `window` when set (None: no cap).
     `counts_as_round: false` keeps wake prompts out of `max_rounds` (they carry the current
-    round number and do not advance it); `true` is the behaviour before this setting."""
+    round number and do not advance it); `true`: a wake prompt is a round."""
 
     model_config = {"extra": "forbid"}
 
@@ -1483,7 +1480,7 @@ class LoopSpec(BaseModel):
 
 
 def hit_max_turns(turn_ended: dict) -> bool:
-    """A `turn_ended` that stopped at the type's `max_turns` (Pi: `reason`; Claude: `subtype`).
+    """A `turn_ended` that stopped at the type's `max_turns` (its `reason`, or `subtype: error_max_turns`).
     Not a failed turn for a loop."""
     return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
 
@@ -1570,7 +1567,6 @@ class AgentHeartbeat(BaseModel):
     session_id: str | None = None
     resumed: bool | None = None  # None until the first (re)start on this worker
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # by model, cumulative
-    harness_estimate_usd: float | None = None  # Claude's client-side total, stored not trusted
     turns: int = 0
     last_sync: datetime | None = None
     msgboard_principal: str | None = None
@@ -1849,7 +1845,6 @@ class AgentStatus(BaseModel):
     pending: int = 0
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)
     cost_usd: float = 0.0  # derived by the controller from its price table
-    harness_estimate_usd: float | None = None
     turns: int = 0
     created_at: datetime
     last_heartbeat: datetime | None = None
@@ -1966,7 +1961,7 @@ class PreflightResult(BaseModel):
     model: str  # "<provider>:<model id>"
     provider: str
     types: list[str]
-    # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic) |
+    # "responses" (openai_compat) | "messages" (anthropic) |
     # "chat_completions" (openai_compat; Harbor's Pi)
     api: str
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result

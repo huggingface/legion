@@ -1,12 +1,12 @@
-"""A run-1k-shaped admission simulation against the real controller app (fake jobs, fake
+"""A 1,000-agent admission simulation against the real controller app (fake jobs, fake
 workers, frozen clock). Not a test module: tests/test_admission.py drives it, and it also runs
 standalone against any controller version (`python -m tests.admission_sim`) for before/after
 numbers.
 
-Shape (pixel run 1k, 2026-10-19): 3 self-hosted providers with `max_working`, one agent type
+Shape: 3 self-hosted providers with `max_working`, one agent type
 per provider (334 + 333 + 333 agents), 25 agents per worker, so 42 workers. One round is 3 s:
 the driver prompts every agent the controller lists idle that has no pending prompt, every
-worker polls its commands once (in worker-id order, as the run's early pollers did), turns
+worker polls its commands once (in worker-id order), turns
 last 5-15 rounds (15-45 s), events are flushed every round and heartbeats go out every 10
 rounds (30 s) with a per-worker phase.
 """

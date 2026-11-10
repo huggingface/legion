@@ -26,7 +26,7 @@
 #   Without an image flock-worker runs here, in this job's shell (exec), with the env file's paths.
 # - FLOCK_HARNESS=harbor (the env file): each agent is a Harbor Trial in a rootless podman
 #   container, which cannot run inside Enroot, so flock-worker runs here (never in CONTAINER) as
-#   a child of this shell, with the upstream podman setup (f3970bc launch.slurm): the job's own
+#   a child of this shell, with the standard rootless podman setup: the job's own
 #   podman storage under /tmp, podman's health checks run by flock.harbor.podman_healthchecks,
 #   the upstream git credential helper for huggingface.co (the token from a 0600 file there), and
 #   at exit the job's containers stopped. Unverified on compute nodes.
@@ -69,9 +69,9 @@ run_worker() {
 }
 
 # podman_cleanup (EXIT, harbor): stop the health checks and this job's containers (the wrapper's
-# --root: never the user's storage), quickly: Slurm's KillWait (30 s on hopper-cpu) runs from the
+# --root: never the user's storage), quickly: Slurm's KillWait (e.g. 30 s) runs from the
 # scancel, the worker's drain included.
-# shortcut: the storage stays for the job's own /tmp (a per-job tmpfs on hopper-cpu) to take;
+# shortcut: the storage stays for the job's own /tmp (e.g. a per-job tmpfs) to take;
 # on a cluster with a shared /tmp, remove it here with `podman unshare rm -rf` (sub-uid files)
 podman_cleanup() {
   local p=$PODMAN_LOCAL/bin/podman  # by path: a plain `podman` here would be the user's storage

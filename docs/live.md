@@ -9,7 +9,7 @@ they can change while the swarm runs. `flock update` does this:
 ## `flock update`
 
 ```console
-$ flock update experiments/calc          # the folder, or its spec.yaml
+$ flock update experiments/my-experiment   # the folder, or its spec.yaml
 tools: 3f9c0e2a7b61d4c8 -> 9a1b2c3d4e5f6a7b (+mul)
 prompts changed: calc (system_prompt); comms (protocols_text)
 types.calc.replicas: 2 -> 3
@@ -17,7 +17,7 @@ types.calc.replicas: 2 -> 3
 
 It reads the folder exactly as `flock launch` does: the spec, `system_prompt_file`, the loop
 prompt files, the comms kickoff and protocols, and the tools folder. (`system_prompt*` and
-`comms:` come only from a hand-written swarm spec, not a Harbor spec; a follow-up removes them.) It checks the folder,
+`comms:` come only from a hand-written swarm spec, not a Harbor spec.) It checks the folder,
 compares it with the spec the controller is running and applies it. The output is one line per
 change: the tools version (old -> new, with the tools added and removed), the prompts changed
 per type, then every other key as `path: old -> new`. When nothing changed it prints
@@ -59,9 +59,9 @@ through `.flock/current`, like the other commands do.
 (one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock launch my-experiment/spec.yaml --env runs/run4/run.env
-$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/run4/run.env
-$ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
+$ flock launch my-experiment/spec.yaml --env runs/demo/run.env
+$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/demo/run.env
+$ flock update my-experiment --env runs/demo/run.env --ref origin/main --check
 ```
 
 - Every string value, inline prompts and commands included, may use `${VAR}` and

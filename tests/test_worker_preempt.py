@@ -25,7 +25,7 @@ from flock.worker.main import PREEMPT_EXIT, ControllerClient, Worker, WorkerConf
 from .test_worker_main import WID, FakeController
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
-N_AGENTS = 25  # agents_per_worker in run 3
+N_AGENTS = 25  # agents per worker
 UPLOAD_S = 0.25  # per blocking bucket call: 25 agents x 2 calls = 12.5 s if run one by one
 
 

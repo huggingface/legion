@@ -14,7 +14,7 @@ EXAMPLES = Path(__file__).parent / "examples"
 
 @pytest.mark.parametrize("dataset", ["unversioned", "name@@version"])
 def test_explicit_dataset_still_requires_a_version(dataset):
-    data = Config.load(EXAMPLES / "pi-hf-agentescape.yaml").task.model_dump()
+    data = Config.load(EXAMPLES / "pi-hf.yaml").task.model_dump()
     data["dataset"] = dataset
     with pytest.raises(ValidationError, match="name@version"):
         TaskSettings.model_validate(data)
@@ -115,9 +115,8 @@ async def test_preserves_registry_and_separate_task_commit(monkeypatch):
 async def test_repository_discovery_preserves_identity_and_pinned_task(monkeypatch):
     from flock.harbor import sources
 
-    task = Config.load(EXAMPLES / "pi-hf-agentescape.yaml").task
-    assert task.dataset is None
-    identity = f"huggingface.co/HuggingFaceSwarms/AgentEscapeBench-harbor/tree/{task.revision}/tasks"
+    task = Config.load(EXAMPLES / "pi-hf.yaml").task.model_copy(update={"dataset": None})
+    identity = f"huggingface.co/harborframework/terminal-bench-2.1/tree/{task.revision}/tasks"
 
     async def metadata(self, name):
         assert name == ""

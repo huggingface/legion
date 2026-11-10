@@ -42,8 +42,7 @@ provider must be `openai_compat` and `base_url` end in `/v1`.
 For the HF router use `base_url: https://router.huggingface.co/v1`, an inference-only token
 and the router's per-token prices in `pricing` (they are not fetched for you; `GET /v1/models` lists
 them per provider). Pin the router provider in the model id (`Qwen/Qwen3.8-27B:deepinfra`, with
-`pricing` keyed on that id): on 2026-10-16 the router's automatic choice for Qwen3.8-27B
-(cerebras) failed every turn after a tool call, while deepinfra, novita and ovhcloud worked.
+`pricing` keyed on that id): some router providers fail every turn after a tool call.
 Preflight catches this: it sends a tool result back.
 
 ## Reaching a self-hosted server
@@ -56,9 +55,9 @@ runs inside the worker job. Options: a public endpoint behind its own key (e.g. 
 the controller); HF Inference Endpoints, which serve an HTTPS URL that takes an HF token as
 `Authorization: Bearer` (`api_key_env: HF_TOKEN`); or the HF Jobs proxy, untested: start the
 GPU job with `--expose 8000` (URL `https://<job id>--8000.hf.jobs`, which checks an HF token),
-serve vLLM without `--api-key` and set `api_key_env: HF_TOKEN`. On 2026-10-16
-`--expose-public 8000` with vLLM's own `--api-key` returned vLLM's 401 for every keyed request
-(the proxy most likely did not pass the key through).
+serve vLLM without `--api-key` and set `api_key_env: HF_TOKEN`. `--expose-public 8000` with
+vLLM's own `--api-key` has returned vLLM's 401 for every keyed request (the proxy most likely
+does not pass the key through).
 
 ## Keys
 
@@ -99,8 +98,7 @@ Cost is only as good as the usage the server reports. A provider-backed turn tha
 zero tokens is flagged: the worker logs a warning (once per agent), the `turn_ended` event carries
 `usage_missing: true`, and `flock status` / the status page count such agents per provider
 (`zero_usage_agents`) with a "cost unknown" warning. The HF router streams zero usage for some
-providers (deepinfra, novita and ovhcloud for Qwen3.8-27B on 2026-10-16), so such a model
-shows $0 today.
+providers, so such a model shows $0.
 
 ## Preflight
 
@@ -111,8 +109,8 @@ no tool call, since Pi takes only `tool_calls`).
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
 `follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
-server that answers turn one and fails the follow-up (the HF router's automatic provider choice
-did, see below) fails preflight. A server that streams zero token usage passes with a warning,
+server that answers turn one and fails the follow-up (some HF router providers do,
+see below) fails preflight. A server that streams zero token usage passes with a warning,
 since flock then cannot count cost. `flock launch` runs preflight whenever the spec has
 provider-backed models and refuses to apply on a failure; `--skip-preflight` bypasses it.
 

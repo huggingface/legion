@@ -94,7 +94,7 @@ class MaxTurnsAdapter(ScriptedAdapter):
         self._turn = None
 
 
-@pytest.mark.parametrize("data", [{"reason": "max_turns"},             # llm, pi
+@pytest.mark.parametrize("data", [{"reason": "max_turns"},             # reason
                                   {"subtype": "error_max_turns"}])     # subtype alone
 async def test_max_turns_is_not_a_failed_loop_turn(tmp_path, data):
     """Defect 5: with tool_choice required, ending at max_turns is normal; 5 in a row run the
@@ -220,8 +220,8 @@ class StoppedAdapter(ScriptedAdapter):
 
 
 async def test_a_turn_stopped_without_done_replaces_the_stale_summary(tmp_path):
-    """A loop turn that ends at max_turns used to leave `last_summary` at an older turn's
-    `done` summary, so every later prompt repeated it."""
+    """A loop turn that ends at max_turns replaces `last_summary`, so later prompts do not repeat
+    an older turn's `done` summary."""
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=StoppedAdapter(tmp_path / "h"))
     await rt.setup(restore=False)
     rt.start_loop(start("round {round}: {last_summary}", max_rounds=3))

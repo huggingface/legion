@@ -47,6 +47,25 @@ HARBOR = {"task": {"registry_commit": SHA, "task": {"git_commit_id": SHA}},
 HB = {"harness": "harbor", "harbor": HARBOR}  # a placeholder harbor type: {**HB, "model": ...}
 
 
+PRICED = "priced-model"  # $4 input, $20 output per 1M tokens (the `priced` fixture)
+
+
+@pytest.fixture
+def priced(tmp_path, monkeypatch):
+    """Adds the `PRICED` row to the controller's price table (FLOCK_PRICES)."""
+    import json
+
+    from flock.controller import prices
+
+    path = tmp_path / "prices.json"
+    path.write_text(json.dumps({PRICED: {"input": 4, "output": 20, "cache_read": 0.2,
+                                         "cache_write": 5}}))
+    monkeypatch.setenv("FLOCK_PRICES", str(path))
+    prices.price_table.cache_clear()
+    yield PRICED
+    prices.price_table.cache_clear()
+
+
 def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
     if not types:
         types = {"researcher": {"replicas": 3, "agents_per_worker": 2}}

@@ -108,7 +108,7 @@ def test_cli_prompt_by_type(tmp_path, monkeypatch, app, store, tick):
 
 
 async def test_repeated_idle_bulk_calls_do_not_stack_prompts(store, clock, tick):
-    """Pixel run 1k: with admission blocked, 645 `--state idle` calls queued 73,394 prompts."""
+    """With admission blocked, repeated `--state idle` calls must not queue a prompt each."""
     spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 3})
     wid = "p-worker-w0000"
     body = {"type": "worker", "state": "idle", "text": "paint"}
@@ -132,7 +132,7 @@ async def test_repeated_idle_bulk_calls_do_not_stack_prompts(store, clock, tick)
         await c.post(f"/workers/{wid}/events", json={"worker": wid, "events": evs})
         ack = (await c.post("/swarms/p/prompts", json=body)).json()
         assert (ack["queued"], ack["skipped_pending"]) == (1, 2)
-        # explicit skip_pending=false stacks, as before
+        # explicit skip_pending=false stacks
         ack = (await c.post("/swarms/p/prompts", json={**body, "skip_pending": False})).json()
         assert ack["queued"] == 3 and ack["skipped_pending"] == 0
 

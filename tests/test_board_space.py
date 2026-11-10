@@ -298,7 +298,7 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
 @pytest.mark.parametrize("over, why", [
     ({"comms": {**SPEC["comms"], "url": "https://elsewhere.invalid/boards/demo"}}, "board"),
     # nothing hard-coded: another org's Spaces are refused for an acme registry
-    ({"dashboard": {**DASH, "viewer": "https://huggingfaceswarms-flock-viewer-v8.hf.space"}}, "viewer"),
+    ({"dashboard": {**DASH, "viewer": "https://otherorg-viewer.hf.space"}}, "viewer"),
     ({"bucket": "hf://buckets/someone/runs"}, "namespace"),
 ])
 def test_dashboard_refuses_rows_the_overview_drops(monkeypatch, over, why):

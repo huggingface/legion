@@ -1,4 +1,4 @@
-# Verified two-agent Harbor execution on 2026-11-03.
+# A two-agent Harbor run.
 name: pi-hf-qwen-team
 model: huggingface/Qwen/Qwen3.8-27B:cerebras
 task:

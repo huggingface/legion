@@ -1,40 +1,13 @@
 # Controller as an HF Job (job mode)
 
-Added 2026-10-20. Decision 32 in [design.md](design.md). The Space deployment
-(`scripts/deploy-space.sh`) is unsupported for now (its build cannot install the private
-msgboard, Dockerfile.controller); before that it served small swarms, and job mode once a swarm had
-more than a few dozen worker jobs.
-
-## Results (2026-10-20)
-
-- **Smoke run** (controller job plus 4 cpu-basic workers):
-  - The jobs proxy forwards `X-Flock-Token`.
-  - After `--replace`, the alias stops resolving to the old controller once that job ends.
-  - Worker heartbeats paused for about 55 s during the replace. No worker was relaunched.
-  - Up to 60 s of state can be lost (one sync interval).
-- **Pixel run 3** (job mode, cpu-upgrade):
-  - 1,010 agents on 44 worker jobs.
-  - The controller served 36,218 requests: 0 errors from flock (1 x 4xx was a deliberate
-    permission test) and 0 x 429.
-  - Peak RSS was 508 MB.
-  - No worker was declared dead or relaunched. Run 2, through a Space, had 847 x 429 and
-    22 workers killed.
+The Space deployment (`scripts/deploy-space.sh`) is unsupported: its build cannot install the
+private msgboard (Dockerfile.controller).
 
 ## Why
 
-Workers in a Space deployment reach the controller through the HF Spaces edge, which
-rate-limits all traffic to one Space at roughly 90-120 req/s in aggregate (design §10).
-Two pixel runs hit this with about 44 worker jobs:
-
-- **Run 1k (2026-10-19):** 1,076 HTTP 429 lines in 54 of 71 worker jobs. 29 workers
-  (725 agents) were declared dead and relaunched.
-- **Run 2 (2026-10-20):** 300 + 329 + 218 throttled requests, the first ~30 s after the
-  first worker booted. PR #10's backoff was already in place. 22 workers went silent for
-  over 180 s, were declared dead and relaunched, and the leaders' prompts never arrived.
-
-The controller never saw those 429s (12,486 requests, 0 5xx). A shared edge limit is the
-ceiling, and retries cannot raise it. In job mode the controller and its workers share an
-HF Jobs network group, so worker traffic never crosses an edge or a proxy.
+The HF Spaces edge rate-limits all traffic to one Space at about 90-120 req/s, and retries
+cannot raise that ceiling. In job mode the controller and its workers share an HF Jobs network
+group, so worker traffic never crosses an edge or a proxy.
 
 ## Shape
 
@@ -57,19 +30,19 @@ HF Jobs network group, so worker traffic never crosses an edge or a proxy.
   literally: HF Jobs sets `HF_NETWORK_GROUP_PREFIX` only inside group members, so the
   worker expands it at start (`flock.worker.main.expand_env`). A worker outside the group
   fails fast and says so. Agents get the expanded URL. The launch budget per 5 minutes is
-  unchanged.
+  the same as in any mode.
 - **Namespace.** A network group spans one namespace (and resource group). A job-mode
   controller refuses (`400`) a spec whose `namespace` differs from its own `FLOCK_NAMESPACE`.
 - **Model jobs** (vLLM on GPUs) are not in the group. A group started by an A100 job
-  refused CPU members (probe-reachability, 2026-10-19), and other GPU pools are untested. Workers keep reaching models
-  through the proxy (`--expose`, `auth: bearer` with an HF token), as before.
+  refused CPU members, and other GPU pools are untested. Workers reach models through the
+  proxy (`--expose`, `auth: bearer` with an HF token).
 
 ## Deploy
 
 ```sh
 export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
 W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)
-scripts/deploy-job.sh "$W" --group flock-run3 [--flavor cpu-upgrade] [--timeout 48h] \
+scripts/deploy-job.sh "$W" --group my-run [--flavor cpu-upgrade] [--timeout 48h] \
     [--secret OPENAI_API_KEY ...] [--dry-run]
 # controller job: 6ad7...   API: https://6ad7...--7860.hf.jobs   status: https://6ad7...--7861.hf.jobs
 export FLOCK_URL=https://6ad7...--7860.hf.jobs
@@ -92,7 +65,7 @@ same wheel and tar. The job gets:
 |---|---|
 | network | `--network-group <group> --network-alias controller` |
 | ports | `--expose 7860` (API, HF token), `--expose-public 7861` (status; needs a huggingface_hub whose `run_job` has `expose_public`, otherwise only the API is exposed and the launch says so) |
-| secrets | `FLOCK_TOKEN`, `HF_TOKEN`, `ANTHROPIC_API_KEY` (from `ANTHROPIC_API_KEY` or `ANTHROPIC_KEY`), each `--secret NAME` (spec secrets such as `OPENAI_API_KEY`, `MSGBOARD_INVITE_*`) |
+| secrets | `FLOCK_TOKEN`, `HF_TOKEN`, each `--secret NAME` (spec secrets such as `OPENAI_API_KEY`, `MSGBOARD_INVITE_*`) |
 | env | `FLOCK_MODE=job`, `FLOCK_NETWORK_GROUP`, `FLOCK_NAMESPACE`, `FLOCK_STATE_URL`, `FLOCK_WHEEL_URL`, `FLOCK_WORKER_BOOTSTRAP=1`, `FLOCK_JOB_LABELS` (from `JOB_LABELS`) |
 | labels | `flock-role=controller`, `flock-group=<group>` (no `swarm` label, so it is never adopted as a worker) |
 
@@ -109,15 +82,11 @@ reports them in `/healthz` (`public_url`, `status_url`). `FLOCK_PUBLIC_URL` over
 | humans, CLI, anything outside the group | `https://<job>--7860.hf.jobs` | `Authorization: Bearer <HF token>` for the proxy **and** `X-Flock-Token: <flock token>` |
 | anyone | `https://<job>--7861.hf.jobs` | none; `GET /` (status page) and `/healthz`, everything else 404 |
 
-The jobs proxy consumes `Authorization` and returns 401 without a valid HF token
-(probe-reachability, 2026-10-19). The API therefore takes the flock token, or an agent
-token, from `X-Flock-Token` first, then from `Authorization: Bearer`, which keeps Space
-mode working unchanged. The `flock` CLI always sends `X-Flock-Token`. When `FLOCK_URL`
+The jobs proxy consumes `Authorization` and returns 401 without a valid HF token. The API therefore takes the flock token, or an agent
+token, from `X-Flock-Token` first, then from `Authorization: Bearer`. The `flock` CLI always sends `X-Flock-Token`. When `FLOCK_URL`
 ends in `.hf.jobs` or `FLOCK_PROXY_AUTH=hf`, it also sends `HF_TOKEN` (or the token saved by
-`hf auth login`) as the bearer; otherwise it sends the flock token as the bearer, as before.
+`hf auth login`) as the bearer; otherwise it sends the flock token as the bearer.
 `/` on 7860 still works through the proxy with an HF token.
-
-The 2026-10-20 smoke run confirmed that the proxy forwards `X-Flock-Token`.
 
 ## State
 
@@ -145,9 +114,8 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
   3. Give open requests (parked long-polls) 5 s.
   4. Exit, logging `flock controller: exit`.
 
-  The push runs before the drain, so a short platform grace period still gets it. In the smoke
-  run, one of the two controllers never logged its final push. The likely cause is that
-  uvicorn waited on parked long-polls before reaching the push.
+  The push runs before the drain, so a short platform grace period still gets it: uvicorn may
+  wait on parked long-polls before it would reach a push placed after them.
 - **Teardown:** `scripts/deploy-job.sh --down --group <g> (<wheel-url> | --state-url URL)`.
   1. It cancels the group's controller and waits for it to end (the final push).
   2. Only then does it delete everything under `controller/<g>/`.
@@ -169,7 +137,7 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
 ## Timeout and restart
 
 - **Max timeout.** The Hub's OpenAPI schema bounds `timeoutSeconds` only by 2^53, and the
-  docs give no cap (2026-10-20). Workers already run 24 h + jitter. A multi-day controller
+  docs give no cap. Workers already run 24 h + jitter. A multi-day controller
   job is **unverified**. The script defaults to `--timeout 48h`.
 - **Restart (or renewal before the timeout).** Run `scripts/deploy-job.sh "$W" --group <same> --replace`.
   1. It cancels the running controller of that group. The cancel sends SIGTERM, and the
@@ -180,8 +148,8 @@ The job's disk is ephemeral. With `FLOCK_STATE_URL` set (the script sets
   may claim the same alias, which then resolves to all of them". So a new job can take
   `controller` while workers stay up. For this reason the script refuses to start a second
   controller in a group while one runs: workers would split their traffic between two
-  controllers. In the smoke run, the alias stopped resolving to the old job once it ended,
-  and heartbeats paused for about 55 s during the replace.
+  controllers. The alias stops resolving to the old job once it ends; heartbeats pause
+  during the replace.
 - **Workers during a restart.** They retry with backoff. They are declared dead only after
   180 s of silence measured by the new controller, which also resets the clock for the
   workers it adopts. A restart of under about 2 minutes therefore relaunches nothing. A

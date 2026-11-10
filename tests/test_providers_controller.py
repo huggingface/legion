@@ -112,7 +112,7 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
 
     @fake.post("/v1/chat/completions")
     async def chat(request: Request):
-        """Non-streamed Chat Completions (the llm harness). `text_call`: the model writes the
+        """Non-streamed Chat Completions (Harbor's Pi). `text_call`: the model writes the
         call as JSON text instead of `tool_calls`, as small models do."""
         body = await request.json()
         seen.append({"path": "chat", "auth": request.headers.get("authorization"), **body})
@@ -345,7 +345,7 @@ async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, mon
         assert st["working"] == st["max_working"] == 1
         ack = (await c.post("/agents/worker-0001/prompt", json={"text": "start"})).json()
         assert ack["status"] == "queued"  # accepted, never rejected
-        if not enforced:  # FLOCK_MAX_WORKING_ENFORCE=0: report only, as before
+        if not enforced:  # FLOCK_MAX_WORKING_ENFORCE=0: report only
             assert await _delivered(c, wid) == ["worker-0001"]
             return
         assert await _delivered(c, wid) == []  # provider full: held in the controller

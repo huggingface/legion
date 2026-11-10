@@ -199,7 +199,7 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
     import subprocess
 
     wire(monkeypatch, app)
-    monkeypatch.setenv("USER", "carlos")
+    monkeypatch.setenv("USER", "alice")
     git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
                                      "-c", "user.email=t@t", *a], check=True, capture_output=True)
     git("init", "-q", "-b", "exp")
@@ -211,16 +211,16 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
                          capture_output=True, text=True).stdout.strip()
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     (gen1,) = store.spec_history("demo")
-    assert gen1["source"] == {"by": "carlos", "git_sha": sha, "ref": "exp", "dirty": False}
+    assert gen1["source"] == {"by": "alice", "git_sha": sha, "ref": "exp", "dirty": False}
     assert json.loads(ops.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
-        "by": "carlos"}  # not a repo (the folder does not exist)
+        "by": "alice"}  # not a repo (the folder does not exist)
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
     assert json.loads(ops.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
 
 
 def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     wire(monkeypatch, app)
-    monkeypatch.setenv("USER", "carlos")
+    monkeypatch.setenv("USER", "alice")
     spec_file = tmp_path / "spec.yaml"
     write_spec(spec_file, make_spec())
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
@@ -228,11 +228,11 @@ def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     assert runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"]).exit_code == 0
     r = runner.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[1], r.output
-    assert store.spec_history("demo")[1]["source"]["by"] == "carlos"
+    assert store.spec_history("demo")[1]["source"]["by"] == "alice"
 
 
 def test_hidden_world_app_and_plain_help():
-    """run5-era Slurm world jobs call `flock world serve`; help is not re-wrapped by rich."""
+    """`flock world serve` works but is not listed; help is not re-wrapped by rich."""
     r = runner.invoke(cli.app, ["world", "serve", "--help"])
     assert r.exit_code == 0 and "module:Class" in r.output
     out = runner.invoke(cli.app, ["--help"]).output

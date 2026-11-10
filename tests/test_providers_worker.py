@@ -29,7 +29,7 @@ WORKER_ENV = {
     "PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm",
     "FLOCK_TOKEN": "flock-secret", "WORKER_INCARNATION": "inc", "HF_TOKEN": "hf-secret",
     "VLLM_KEY": "vllm-secret", "MY_ANTHROPIC": "ant-secret", "GITHUB_TOKEN": "gh-secret",
-    "MSGBOARD_INVITE_X": "invite", "CLAUDE_CONFIG_DIR": "/state/claude", "CODEX_HOME": "/state/codex",
+    "MSGBOARD_INVITE_X": "invite",
 }
 
 

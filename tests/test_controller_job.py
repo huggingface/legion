@@ -565,12 +565,12 @@ def test_controller_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
 
 def test_deploy_job_dry_run_never_prints_secret_values(capsys):
     env = {"FLOCK_TOKEN": "flock-secret-value", "HF_TOKEN": "hf_secret_value",
-           "ANTHROPIC_KEY": "sk-secret", "OPENAI_API_KEY": "sk-openai-secret"}
+           "OPENAI_API_KEY": "sk-openai-secret"}
     rc = jobdeploy.main(["hf://buckets/me/flock/dist/a/f.whl", "--namespace", "me",
                          "--secret", "OPENAI_API_KEY", "--dry-run"], env)
     out = capsys.readouterr().out
     assert rc == 0 and "network_group: flock" in out
-    assert "OPENAI_API_KEY" in out and "ANTHROPIC_API_KEY" in out
+    assert "OPENAI_API_KEY" in out
     assert not any(v in out for v in env.values())
     with pytest.raises(SystemExit, match="FLOCK_TOKEN"):
         jobdeploy.main(["hf://buckets/me/flock/dist/a/f.whl", "--namespace", "me", "--dry-run"],

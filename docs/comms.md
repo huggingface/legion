@@ -1,6 +1,6 @@
 # Comms: the team's message board
 
-Harbor agents reach a [msgboard](https://lvwerra-msgboard-demo.hf.space) board through
+Harbor agents reach a [msgboard](https://github.com/huggingface/msgboard) board through
 the `message_board` resource (`flock.harbor.builtin.resources.message_board`) and its
 `message_board.*` tools: the run's `resources: {message_board: {...}}`; its tools come with it
 unless `tools` is set (experiments/harbor-smoke/spec.yaml). Its mentions come back as
@@ -24,14 +24,14 @@ docker and podman a board with `rules` still goes through each agent's proxy (be
 
 The swarm-level `comms:` block is the controller's side: it resolves a channel and posts a
 kickoff once, and `board: space` gives a run its own board Space. A Harbor spec has no `comms:`
-block: it is reachable only from a hand-written swarm spec, and a follow-up removes it.
+block: it is reachable only from a hand-written swarm spec.
 
 ```yaml
 comms:
   kind: msgboard
-  url: https://lvwerra-msgboard-demo.hf.space
+  url: https://<your-board>.hf.space
   invite_env: BOARD_INVITE            # secret: a multi-use invite scoped to the channel
-  channel: prj-eliza-v1               # name; the controller resolves it to an id once
+  channel: general                    # name; the controller resolves it to an id once
   kickoff_file: prompts/kickoff.md    # optional: posted once by <swarm>-host
 ```
 
@@ -44,7 +44,7 @@ the controller never reads your files.
 ```yaml
 comms:
   board: space                        # or a board url (= `url:`); unset: `url` as above
-  template: your-org/msgboard         # required: a Space running msgboard's Space app, e.g. HuggingFaceSwarms/msgboard
+  template: your-org/msgboard         # required: a Space running msgboard's Space app
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
   space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}      # Space secret -> run.env name (default {})
   space_variables: {}                 # over flock's; "" blanks one (below)

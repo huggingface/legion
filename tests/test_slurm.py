@@ -32,12 +32,12 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
         "kind": "slurm",
         "partition": "cpu",
         "account": "acct",
-        "worker_script": "/fsx/run3/slurm/worker.sbatch",
+        "worker_script": "/shared/demo/slurm/worker.sbatch",
         "log_dir": str(tmp_path / "logs"),
         "launch_dir": str(tmp_path / "launch"),
-        "host_file": "/fsx/run3/controller.host",
-        "venv": "/fsx/run3/venv",
-        "secrets_file": "/fsx/run3/secrets.env",
+        "host_file": "/shared/demo/controller.host",
+        "venv": "/shared/demo/venv",
+        "secrets_file": "/shared/demo/secrets.env",
         **compute,
     }
     return SwarmSpec.model_validate({
@@ -364,7 +364,7 @@ def test_unknown_compute_kind_is_a_hard_error(tmp_path, caplog):
 def test_harbor_workers_run_on_the_node_and_say_so(tmp_path, slurm, store, clock):
     """A harbor type's Trials run in podman, which cannot run inside Enroot: its env file names
     the harness for worker.sbatch and keeps the node's paths, even with a container configured."""
-    store.put_swarm(slurm_spec(tmp_path, container_root="/work", container_image="/fsx/img.sqsh"), 0)
+    store.put_swarm(slurm_spec(tmp_path, container_root="/work", container_image="/shared/img.sqsh"), 0)
     reconcile(store, SlurmJobsClient(env={}), clock(), settings())
     harbor = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))
     assert harbor["FLOCK_HARNESS"] == "harbor" and "FLOCK_CONTAINER_IMAGE" not in harbor

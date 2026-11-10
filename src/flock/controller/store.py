@@ -64,7 +64,6 @@ CREATE TABLE IF NOT EXISTS agents (
   tokens_base TEXT NOT NULL DEFAULT '{}',
   tokens_last TEXT NOT NULL DEFAULT '{}',
   cost REAL NOT NULL DEFAULT 0,
-  harness_estimate_usd REAL,
   turns INTEGER NOT NULL DEFAULT 0,
   last_sync REAL,
   msgboard_principal TEXT,
@@ -698,14 +697,12 @@ class Store:
         bucket); if a model's counters go backwards the count restarted (a failed restore), so
         fold the old values into base. An empty map means "not known yet" (an agent still
         restoring on a relaunched worker) and leaves tokens and cost alone: folding there
-        counted every restored agent twice (1k run)."""
+        counted every restored agent twice."""
         with self.transaction():
             row = self.get_agent(name)
             if row is None:
                 return
             if not tokens and row["tokens_last"] not in ("", "{}"):
-                if fields.get("harness_estimate_usd") is None:
-                    fields.pop("harness_estimate_usd", None)
                 self._update("agents", "name", name, fields)
                 return
             base, last = _tokens(row["tokens_base"]), _tokens(row["tokens_last"])

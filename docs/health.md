@@ -24,7 +24,7 @@ stream is tailed by byte offset.
   so a world waiting for a node is told apart from a crash.
 - **vLLM.** With `providers.<p>.metrics: true`, each base URL's server root `/metrics`
   (Prometheus text): `providers` sums `waiting` and `running` over servers with the highest
-  `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`), as before; `provider_servers` has
+  `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`); `provider_servers` has
   each server (`host:port`): `up`, its queues, or `up: false`, the `error` and `fails` (failed
   scrapes in a row; `dead` from 2 on). Each agent's heartbeat names the server it is pinned to
   (`endpoint`, `pick_endpoint`), so a server counts its `agents`; a dead one lists them
@@ -169,10 +169,8 @@ the last control-plane events.
 `--agent A --events`) an agent's; `--only PREFIX` keeps the names starting with it (`--only
 agent.`), `--after N` starts after a cursor, `--follow` keeps long-polling, `--wait` returns
 once something new arrived (the next cursor on stderr), `--json` prints JSONL.
-`flock.status.events` yields the same pages (a removed agent's stored events too). Hidden,
-for prompts in resumed runs: `flock events NAME [--after --follow --wait --timeout --pretty]`
-(raw JSONL) and `flock agents SWARM [--type --state --parent]` (the old table). Stored events are never rewritten (resume reads
-them); `flock.status.normalise` maps each to one schema:
+`flock.status.events` yields the same pages (a removed agent's stored events too). Stored events
+are never rewritten (resume reads them); `flock.status.normalise` maps each to one schema:
 
 `{name, ts, swarm, agent?, type?, worker?, data}`; `data` is the event's payload, with
 `turn_id` when it has one.

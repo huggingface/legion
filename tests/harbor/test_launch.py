@@ -19,7 +19,7 @@ EXAMPLES = Path(__file__).parent / "examples"
 def test_reasoning_effort_reaches_native_pi(monkeypatch, tmp_path, effort):
     from harbor.agents.factory import AgentFactory
 
-    spec = Config.load(EXAMPLES / "pi-hf-agentescape-20.yaml")
+    spec = Config.load(EXAMPLES / "pi-hf.yaml")
     spec.inference.reasoning_effort = effort
     spec.limits.agent_timeout_seconds = 3480
     monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
@@ -41,7 +41,7 @@ def test_reasoning_effort_reaches_native_pi(monkeypatch, tmp_path, effort):
         config.agent, logs_dir=tmp_path / "logs"
     )
     assert agent.options.reasoning_effort == effort
-    assert agent.options.max_turns == 200
+    assert agent.options.max_turns == spec.limits.agent_max_turns
 
 
 @pytest.fixture

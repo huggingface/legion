@@ -116,7 +116,7 @@ def _iso(ts: float) -> str:
 
 def last_seen(w: Row) -> float | None:
     """When the current job last reached us: its last heartbeat, or a later command poll or
-    event post. Heartbeats can be throttled away (HTTP 429 at the Space edge, pixel run 1k)
+    event post. Heartbeats can be throttled away (HTTP 429 at the Space edge)
     while other requests get through; only silence on every route makes a worker dead."""
     hb = w["last_heartbeat"]
     if hb is None:
@@ -532,7 +532,7 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
     for w in workers:
         fill(w)
     # A type that declares `workers` never has more than initial + max_extra worker slots
-    # (retiring ones included); agents that do not fit wait unplaced. Others: v1, unbounded.
+    # (retiring ones included); agents that do not fit wait unplaced. Others: unbounded.
     slots = max_workers(ts) if ts.workers is not None else None
     while pending:
         if slots is not None and len(store.list_workers(spec.swarm, type_name)) >= slots:
@@ -774,7 +774,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     timeout = lifetime + s.rng.uniform(0, jitter)
     deadline = p.now + timeout
     # Binds polls and heartbeats to this job: a parked poll or a late heartbeat from the job
-    # this one replaces must not take the new job's commands (e2e run 1, see the API).
+    # this one replaces must not take the new job's commands (see the API).
     incarnation = uuid.uuid4().hex
     env = {
         **ts.env,
@@ -921,7 +921,6 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
                 "idle_since": ah.idle_since.timestamp() if ah.idle_since else None,
                 "session_id": ah.session_id,
                 "resumed": None if ah.resumed is None else int(ah.resumed),
-                "harness_estimate_usd": ah.harness_estimate_usd,
                 "turns": ah.turns,
                 "last_sync": ah.last_sync.timestamp() if ah.last_sync else None,
                 "msgboard_principal": ah.msgboard_principal,

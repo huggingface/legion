@@ -14,7 +14,7 @@ import pytest
 from flock.controller.api import create_app
 from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage
 
-from .conftest import HB, TOKEN, make_spec, wire
+from .conftest import HB, PRICED, TOKEN, make_spec, wire
 from .test_api import W0, hb_body
 
 A0, A1 = "researcher-0000", "researcher-0001"
@@ -43,7 +43,7 @@ class Sim:
     async def heartbeat(self, working: tuple[str, ...] = ()) -> None:
         agents = [AgentHeartbeat(name=n, state="working" if n in working else "idle",
                                  turn_id="t-1" if n in working else None,
-                                 tokens={"claude-opus-5-5": TokenUsage(output=self.cost[n])})
+                                 tokens={PRICED: TokenUsage(output=self.cost[n])})
                   for n in (A0, A1)]
         r = await self.c.post(f"/workers/{W0}/heartbeat", json=hb_body(self.clock, W0, agents))
         assert r.status_code == 200, r.text
@@ -81,7 +81,7 @@ class Sim:
 
 
 @pytest.fixture
-async def sim(store, clock, tick):
+async def sim(store, clock, tick, priced):
     app = create_app(store, TOKEN, clock=clock, loop_interval=0)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
                                  headers={"Authorization": f"Bearer {TOKEN}"}) as c:
@@ -268,7 +268,7 @@ async def test_while_until_clock_time_stops_regardless_of_start(sim):
 
 
 async def test_agent_usd_takes_an_agent_out(sim):
-    # claude-opus-5-5 output: $20 per 1M tokens, so 25,000 tokens = $0.50
+    # PRICED output: $20 per 1M tokens, so 25,000 tokens = $0.50
     await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_usd": 0.5}})
     await sim.heartbeat()
     sim.tick()
@@ -336,7 +336,7 @@ async def test_budget_without_reserve_is_one_hard_stop(sim):
 
 
 async def test_wake_queue_debounces_and_skips_pending(sim):
-    # the queue as before `wake:` existed: no gap, no cap, wakes are rounds
+    # wake: no gap, no cap, wakes are rounds
     await sim.apply({"prompt": "p {why}", "every": "1h", "on": ["message_board.mention"],
                      "wake": {"min_gap": "0s", "max": None, "counts_as_round": True}})
     await sim.heartbeat()
@@ -380,7 +380,7 @@ async def test_comms_events_wake_the_loop(sim):
     got = prompts(await sim.commands())
     for a in (A0, A1):
         await sim.turn(a, got[a])
-    msg = {"msg_id": 7, "thread": 7, "from": "carlos"}
+    msg = {"msg_id": 7, "thread": 7, "from": "alice"}
     await sim.events(A0, board("mention", msg), board("mention", {**msg, "msg_id": 8}))
     await sim.events(A1, board("thread", msg))
     sim.tick(2.1)
@@ -409,7 +409,7 @@ async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
         await sim.turn(a, got[a])
     sim.store.put_swarm_flags("demo", {"budget_stop": "hard", "budget_usd": 1.0, "at": 0})
     assert not sim.loops.wake(A0, "message_board.mention")  # the loop has not seen the stop yet
-    await sim.events(A0, board("mention", {"msg_id": 7, "thread": 7, "from": "carlos"}))
+    await sim.events(A0, board("mention", {"msg_id": 7, "thread": 7, "from": "alice"}))
     sim.tick(2.1)
     assert not [c for c in await sim.commands() if c["kind"] == "prompt"]
 
@@ -481,7 +481,7 @@ async def test_type_budget_usd_stops_the_loop(sim):
     assert {p["loop"]["why"] for p in fin.values()} == {"final: budget_usd"}
 
 
-# --------------------------------------------------------------------------- after review (PR #15)
+# --------------------------------------------------------------------------- capped providers
 
 
 def provider_spec(loop: dict, max_working: int | None = None) -> dict:
@@ -615,7 +615,7 @@ async def test_removing_final_during_the_final_round_ends_it(sim):
 
 
 async def test_handover_to_the_workers_rolls_back_dropped_rounds(store, clock, tick, tmp_path):
-    """Re-review: capped turn_end with max_rounds 1, round 1 queued for both agents, then
+    """Capped turn_end with max_rounds 1, round 1 queued for both agents, then
     max_working removed before any command poll. The queued rounds are dropped, so they were
     never rounds: the workers start from round 0 and each sends exactly one prompt."""
     from flock.models import LoopStartCommand
@@ -699,7 +699,7 @@ async def test_finish_never_resends_a_fetched_final(sim):
 async def test_until_idle_ignores_a_dormant_looping_type(sim):
     """`--until idle` (localrun.Tracker): a `replicas: 0` type with a loop and no
     agents never runs a round, so it must not hold a finished run open. A type whose replicas
-    are not created yet, or one just spawned into, still counts (review of PR #17)."""
+    are not created yet, or one just spawned into, still counts."""
     from flock.controller.api import swarm_status
     from flock.controller.localrun import Tracker, loops_settled
 
@@ -807,7 +807,7 @@ async def test_wake_window_cap_and_deferred_wake(sim):
 
 @pytest.mark.parametrize("how", ["deferred", "dropped"])
 async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
-    """Review of #19: with `counts_as_round: true` and `wake.max: 1`, a wake prompt the worker
+    """With `counts_as_round: true` and `wake.max: 1`, a wake prompt the worker
     deferred, or one dropped while still queued, gives back both its round and its wake, so
     the next wake is accepted and is round 2 again."""
     await sim.apply({"prompt": "round {round}", "every": "100s", "on": ["message_board.mention"],

@@ -12,8 +12,7 @@ container (on hf-sandbox each agent gets its own agent token instead).
 
 The swarm-level `world:` block is the controller's side: it starts the world (`compute: local`)
 or connects to one already running (`url:`), and fetches and checks its manifest at every apply.
-A Harbor spec has no `world:` block: it is reachable only from a hand-written swarm spec, and a
-follow-up removes it. The rest of this page up to "Protocol" is about that block.
+A Harbor spec has no `world:` block: it is reachable only from a hand-written swarm spec. The rest of this page up to "Protocol" is about that block.
 
 ```yaml
 # spec.yaml
@@ -357,7 +356,7 @@ by, reason}`):
   its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
 - any other world (`url`; Slurm, a Space): set `FLOCK_WORLD_ADMIN_TOKEN` in the world's
   environment and in the controller's secrets (the run's secrets file on Slurm,
-  `hf://buckets/cmpatino/legacy-swarmchat-experiments/run4/slurm/secrets.env.example`), and keep it from the workers.
+  `flock init --secrets`), and keep it from the workers.
 
 ```bash
 python -m flock.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
@@ -457,14 +456,14 @@ instead of rebasing automatically; refreshing a PR always requires fresh review.
 `eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
 this implementation does not start an evaluator.
 
-Run 4 uses one explicit `HF_TOKEN` for the experiment bucket and dataset. It is
+The chatbot4 world uses one explicit `HF_TOKEN` for the experiment bucket and dataset. It is
 required by the PR backend and should grant access only to those resources. The
-controller and workers share its dataset-write access. Run4 requires separate
+controller and workers share its dataset-write access. The world requires separate
 user/PID/mount namespaces and private `/proc` for Pi and bot subprocesses, plus
 `PR_SET_DUMPABLE=0` on the worker and world. Pi sees only its own writable work
-and session directories and its live, read-only tool-pin directory. Bots also
+and session directories. Bots also
 get a new network namespace and read-only filesystems. Runtimes are mounted
-read-only; host homes, sibling pins and world state are absent from the child
+read-only; host homes and world state are absent from the child
 root. Namespace capabilities are dropped and `no_new_privs` is set before exec.
 Setup errors abort instead of falling back to a plain process. The cluster dry
 run requires the real kernel isolation tests; these skip on hosts that prohibit
