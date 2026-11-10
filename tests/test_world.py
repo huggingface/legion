@@ -1,6 +1,6 @@
 """Worlds (docs/world.md): the `flock.world` base and server, the manifest and spec models, the
 controller's apply (start, health check, refusals), the worker hub (calls, gateway, section,
-hooks, secret). The example world (worlds/taskboard) and a recording world are served in
+hooks, secret). A small task-board world (tests/fixtures/taskboard) and a recording world are served in
 process with uvicorn on 127.0.0.1; no network beyond loopback."""
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from flock.world.server import create_app
 from .conftest import FAKE_PROVIDERS, HB, TOKEN, Clock
 
 ROOT = Path(__file__).resolve().parent.parent
-TASKBOARD = ROOT / "worlds" / "taskboard"
+TASKBOARD = Path(__file__).resolve().parent / "fixtures" / "taskboard"
 SECRET = "world-secret"
 
 

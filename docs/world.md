@@ -17,13 +17,11 @@ A Harbor spec has no `world:` block: it is reachable only from a hand-written sw
 ```yaml
 # spec.yaml
 world:
-  dir: ../../worlds/taskboard                       # where `command` runs, relative to the spec
-  command: ["{python}", -m, flock.world, serve, "taskboard:TaskBoard"]
+  dir: counter                                      # where `command` runs, relative to the spec
+  command: ["{python}", -m, flock.world, serve, "counter:Counter"]
 ```
 
-[`worlds/taskboard/`](../worlds/taskboard/taskboard.py) is a small world: a shared task board in
-SQLite with `list_tasks`, `add_task`, `claim_task`, `finish_task` and `release_task`, where a
-claim is exclusive.
+`counter/counter.py` is the one-tool world under "Write your own world" below.
 
 ## Spec
 
@@ -97,11 +95,11 @@ HTTP and JSON. A world is any server that answers these routes:
 The manifest:
 
 ```json
-{"world_api": "v1", "name": "taskboard", "version": "0.1.0",
- "description": "A shared task board. Claim a task before you work on it ...",
- "tools": [{"name": "claim_task", "description": "Claim an open task ...",
-            "parameters": {"type": "object", "properties": {"name": {"type": "string"}},
-                           "required": ["name"], "additionalProperties": false}}],
+{"world_api": "v1", "name": "counter", "version": "0.1.0",
+ "description": "One shared counter.",
+ "tools": [{"name": "bump", "description": "Add `by` to the shared counter ...",
+            "parameters": {"type": "object", "properties": {"by": {"type": "integer"}},
+                           "additionalProperties": false}}],
  "capabilities": ["hooks"], "hooks": ["agent_done"]}
 ```
 
@@ -129,7 +127,7 @@ type hints and the docstring (`flock.tools.loader`). A parameter named
 `agent` (or annotated `Agent`) receives the caller and is never shown to the model.
 
 ```python
-# worlds/counter/counter.py
+# counter/counter.py
 from flock.world import Agent, ToolError, World, tool
 
 
@@ -157,7 +155,7 @@ class Counter(World):
 ```
 
 ```sh
-cd worlds/counter && FLOCK_WORLD_TOKEN=dev python -m flock.world serve counter:Counter   # :8765
+cd counter && FLOCK_WORLD_TOKEN=dev python -m flock.world serve counter:Counter   # :8765
 curl -s -H 'X-World-Token: dev' localhost:8765/manifest
 curl -s -H 'X-World-Token: dev' -H 'X-Flock-Agent: me' -d '{"args": {"by": 2}}' \
   localhost:8765/tools/bump        # {"ok":true,"result":{"n":2,"last":"me"}}
@@ -181,8 +179,7 @@ args, agent)` serves tools that are not methods. The server checks each call aga
 which `flock launch` needs too.
 
 `raise ToolError(message, code, retry_after_s=N)` adds `retry_after_s` to the error, for a
-refusal that will not change for a while (chatbot4 sends it with its new-PR budget,
-`open_budget`, and with `hub_busy`). The message stays what the agent reads.
+refusal that will not change for a while (a used-up budget, a busy backend). The message stays what the agent reads.
 
 **Admission control.** The server refuses a tool call with `429`, `Retry-After` and
 `code: "overloaded"` when its pool is overloaded: the fast pool's oldest queued call has
@@ -217,11 +214,7 @@ window; `calls_total` and `errors_total` since start, as are `upload_v1_total` a
 queued calls; `pools.*.overloaded_429_total` the refusals since start, by pool (each pool also
 logs one WARNING at most every 10 s with the reason, the tool and how many it refused since). `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
-concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
-`merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
-`stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s` (the last `state.db`
-flush), `save_age_s`, `state_bytes` (`state.db` plus its WAL), `dirty_rows` (changed rows not yet
-saved), and its lanes' numbers as `lane_<lane>_<key>` (below).
+concurrently with tools: keep it cheap.
 
 **Saving state.** A world that keeps its state in memory can save it in O(changes) with
 `flock.world.store`, a `(kind, key) -> JSON` table on SQLite in WAL mode:
@@ -241,15 +234,6 @@ store.backup_to(path)                           # consistent copy while others w
 after, and a row changed meanwhile stays dirty. A failed flush writes nothing and keeps the
 rows dirty for the next one. `close()` checkpoints the WAL into the database file. `backup_to(db_file,
 path)` (module function) copies a database another process is writing, for archive scripts.
-
-chatbot4 keeps its dicts in memory and saves through `state.db` (rows: one per PR, cached
-`open_pr` result, parked draft and inbox, plus `pr_opens` and `pr_merges`), at most every
-`save.interval_s`. On a first start without `state.db` it imports `prs.json`. With `save.legacy_json` off,
-merged and closed PRs leave memory an hour after they ended (`ended_at`), for the cold table; `get_pr` and `list_prs` with
-`state` merged, closed or all still return them. While the knob `save.legacy_json` is on
-(default) it also writes the whole state to `prs.json`, keeps every PR in memory (so a rollback
-to `prs.json` loses nothing), and warns at start when the two differ.
-The archive (`snapshot.py`) carries a `backup_to` copy of `state.db`.
 
 **Lanes for external writes.** A world that writes to an outside service with one token (a
 Git host, an API) can give each kind of write its own lane, from `flock.world.lanes`:
@@ -288,14 +272,6 @@ lanes.outbox("comment", drain=post).put(key=pr, payload=text)   # post(key, payl
   `wait_s_total`, `ok`, `transient`, `final`, `tripped`, `paused`, `outbox_depth`,
   `outbox_oldest_age_s`.
 
-chatbot4 uses `push` (create, push, ready and close PRs; `CHATBOT_HUB_WRITE_SLOTS`), `merge`
-(`CHATBOT_MERGE_HUB_SLOTS`) and `comment` (review comments through the outbox,
-`CHATBOT_HUB_OUTBOX_GAP_S`); `push` and `merge` share one breaker. `git_error`/`hub_error`
-(where "vote failed: transaction was aborted" lands) count as transient, `pr_closed`/`pr_merged`
-as final, and so does a single comment the Hub refuses with a 4xx other than 429 (counted in
-`hub_comments_rejected_total`); joined comments it refuses are split. The pause file pauses
-`push` and `merge` (closes still go through).
-
 **Parked mode.** `python -m flock.world serve` binds its port first and builds the world in a background
 thread. While that raises (a failed restore, the Hub unreachable, a bad config), it is
 *parked*: it logs the error and builds again after 30 s, doubling up to 10 min, forever.
@@ -313,7 +289,7 @@ The SDK has no separate startup phase: do restores and first fetches in `__init_
 failure there parks the world.
 
 **Admin API: knobs and lane pauses.** A world registers runtime knobs in `__init__` and reads
-them later; a lane is a kind of work operators may pause (chatbot4: `open`, `push`, `merge`):
+them later; a lane is a kind of work operators may pause (for example `push` and `merge`):
 
 ```python
 class Shop(World):
@@ -332,8 +308,7 @@ class Shop(World):
 
 `on_change(value)` runs in a thread (raise to refuse); without one, read `self.knobs[name]`.
 Values set through the API and the paused lanes are written to `knobs.json` in the world's
-state dir (`World.state_dir()`: `$FLOCK_WORLD_STATE_DIR` by default; chatbot4 uses its
-workspace, archived with it) and read back at the next start, so a requeued world keeps them;
+state dir (`World.state_dir()`: `$FLOCK_WORLD_STATE_DIR` by default) and read back at the next start, so a requeued world keeps them;
 the defaults a world passes (usually from its environment) apply only to knobs never set.
 The manifest lists the knob names under `knobs` and adds the capability `admin-v1`.
 
@@ -362,12 +337,6 @@ by, reason}`):
 python -m flock.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
 python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 ```
-
-chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`
-(`CHATBOT_PR_OPEN_FLOOR`), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
-`hub.comment.gap_s` (its Hub write lanes, below). `open_pr` honours the `open` lane (new PRs)
-and `push`, `merge_pr` the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file;
-pausing `comment` holds the review comment outbox.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
@@ -416,8 +385,8 @@ git clone named by that argument, rooted inside the agent's workspace, unless th
 `skip` or starts with `skip_prefix`. It forwards `{args: {...}, workspace: {base_sha, files}}` to
 the existing authenticated tool route; the file map contains base64 bytes. The
 upload is outside the model's tool arguments, so the model supplies neither a
-server path nor a base SHA. chatbot4 declares it on `open_pr` (`path`) and `run_bot`
-(`ref_or_path`; `main` and `pr:<number>` use no upload).
+server path nor a base SHA. For example, a tool that opens a pull request from the agent's
+clone declares it on its `path` argument.
 
 Only tracked and nonignored files are captured; missing tracked files represent
 deletions. Symlinks, paths outside the agent workspace, git metadata, more than
@@ -440,32 +409,8 @@ stages the tree); it refuses symlinks, submodules, paths outside the tree or in
 `prlimit`: 128 MiB per file, 2 GiB of memory). A world that cannot use a patch
 but could use the full tree answers the error code `need_full` before doing
 anything; the tool then resends the call once as v1. `GET /metrics` counts
-`upload_v1_total` and `upload_v2_total`. chatbot4 advertises both, checks the PR
-budget before any apply, and answers `need_full` only from `run_bot` (whose v1
-path takes any base); `open_pr` refuses a base that is not on main either way.
+`upload_v1_total` and `upload_v2_total`.
 
 A tool's optional
-`x-flock-timeout_s` raises the tool's HTTP read timeout for its calls; chatbot4
-sets 330 seconds on every tool so a 300-second conversation can finish.
-
-The chatbot4 world preserves the seed input/output and module loader, runs the
-bot under stdlib/import and side-effect restrictions with resource limits, and
-requires a different agent's review of the exact PR head. It refuses stale bases
-instead of rebasing automatically; refreshing a PR always requires fresh review.
-`prs.jsonl` records PR events with both the main parent and PR head for merges.
-`eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
-this implementation does not start an evaluator.
-
-The chatbot4 world uses one explicit `HF_TOKEN` for the experiment bucket and dataset. It is
-required by the PR backend and should grant access only to those resources. The
-controller and workers share its dataset-write access. The world requires separate
-user/PID/mount namespaces and private `/proc` for Pi and bot subprocesses, plus
-`PR_SET_DUMPABLE=0` on the worker and world. Pi sees only its own writable work
-and session directories. Bots also
-get a new network namespace and read-only filesystems. Runtimes are mounted
-read-only; host homes and world state are absent from the child
-root. Namespace capabilities are dropped and `no_new_privs` is set before exec.
-Setup errors abort instead of falling back to a plain process. The cluster dry
-run requires the real kernel isolation tests; these skip on hosts that prohibit
-unprivileged namespaces. The audit hook is an additional language restriction,
-not the process boundary. See [unshare](https://man7.org/linux/man-pages/man1/unshare.1.html).
+`x-flock-timeout_s` raises the tool's HTTP read timeout for its calls (for example
+330 seconds for a tool that may run for 300).

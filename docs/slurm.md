@@ -5,8 +5,8 @@ too, which `flock launch` submits and `flock stop --release` cancels. The reconc
 placement, heartbeats, events and bucket sync are the same as for `hf-jobs`; only the backend
 that starts a worker differs (`controller/slurm.py`). Agent state, the controller's state and the
 run bundle stay in HF buckets. The shared disk holds code, the venv or image, the run directory
-(env files, host files, logs) and the world's own state when the world keeps it there: chatbot4
-uses `$CHATBOT_WS`, default `<world.dir>/ws`, so set a per-run `CHATBOT_WS` in run.env (runs from
+(env files, host files, logs) and the world's own state when the world keeps it there. A world
+whose state dir defaults to a path under `world.dir` needs a per-run one in run.env (runs from
 one checkout would share it).
 
 ## Deploying

@@ -62,8 +62,8 @@ them.
 - **Worlds (optional):** a world is an HTTP service holding the swarm's shared state (World
   API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); the `world` resource and
   its `world.*` tools reach it, each call carrying the agent's name.
-  `python -m flock.world serve module:Class` serves a `flock.world.World` subclass;
-  `worlds/taskboard` is an example. See [docs/world.md](docs/world.md).
+  `python -m flock.world serve module:Class` serves a `flock.world.World` subclass.
+  See [docs/world.md](docs/world.md).
 - **Status page and CLI:** `/` shows every swarm with state chips and cost;
   `flock` wraps the HTTP API.
 
