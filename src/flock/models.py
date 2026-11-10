@@ -733,7 +733,9 @@ class HarborSpec(BaseModel):
     team: str = ""  # the team_file's text
     role: str | None = None  # the role named in the instructions (None: agents.count)
     role_text: str = ""  # the role_file's text
-    roster: dict[str, str | None] = Field(default_factory=dict)  # every replica's name -> role
+    # every replica's name -> role: filled by the controller in each assign (names are flock's
+    # random words, reserved on the controller); empty in the stored spec
+    roster: dict[str, str | None] = Field(default_factory=dict)
     tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
     tools_sha256: str | None = None
     resources: dict[str, dict[str, Any]] = Field(default_factory=dict)  # resource options

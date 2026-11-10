@@ -29,27 +29,28 @@ def test_lifecycle(tiny):
     assert "writer  ok      1" in out, out
     assert "warning: inference:fake-model: unverified (preflight skipped)" in out
     run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
+    w0, = tiny.names("writer", 1)  # flock's random words
 
     # a turn: its Trial's Pi answered (tests/harbor/test_adapter.py), the events say so, the
     # cost is priced
-    ack = json.loads(tiny.flock("prompt", "writer-0000", "one"))
-    assert ack["agent"] == "writer-0000" and ack["prompt_id"], ack
+    ack = json.loads(tiny.flock("prompt", w0, "one"))
+    assert ack["agent"] == w0 and ack["prompt_id"], ack
     tiny.flock("prompt", "nobody-0001", "x", code=1)
-    a = tiny.turns("writer-0000", 1)
+    a = tiny.turns(w0, 1)
     session = a["session_id"]
     assert session and a["resumed"] is False and a["cost_usd"] > 0, a
     assert a["worker"] == "tiny-writer-w0000"
-    evs = tiny.flock("status", "writer-0000", "--events")
+    evs = tiny.flock("status", w0, "--events")
     for line in ("agent.session_started", "assistant reply-1",
                  "agent.turn_ended completed fake-model"):
         assert line in evs, evs
-    turn = tiny.events("writer-0000", "agent.turn")
+    turn = tiny.events(w0, "agent.turn")
     assert [(e["name"], e["data"]["turn_id"]) for e in turn] == [
         ("agent.turn_started", "t-1"), ("agent.turn_ended", "t-1")], turn
     assert turn[1]["data"]["tokens"]["fake-model"]["output"] > 0, turn
-    started = tiny.events("writer-0000", "agent.session_started")[0]["data"]
+    started = tiny.events(w0, "agent.session_started")[0]["data"]
     assert (started["harness"], started["model_id"]) == ("harbor", "fake-model"), started
-    assert tiny.said("writer-0000")[0].endswith("\n\none")  # after the task's
+    assert tiny.said(w0)[0].endswith("\n\none")  # after the task's
     st = tiny.wait(lambda: (s := json.loads(tiny.flock("status", "tiny", "--json")))
                    ["verdict"]["level"] == "ok" and s)
     t = st["status"]["types"]["writer"]
@@ -60,22 +61,23 @@ def test_lifecycle(tiny):
     # update: one more replica joins the running worker (agents_per_worker 2)
     tiny.spec(replicas=2)
     assert tiny.flock("update", spec, "--replicas", "spec").splitlines() == [
-        "types.writer.harbor.roster.writer-0001: - -> writer", "types.writer.replicas: 1 -> 2"]
-    b = tiny.wait(lambda: (b := tiny.agent("writer-0001"))["state"] == "idle" and b)
+        "types.writer.replicas: 1 -> 2"]
+    (w1,) = set(tiny.names("writer", 2)) - {w0}  # the first keeps its name
+    b = tiny.wait(lambda: (b := tiny.agent(w1))["state"] == "idle" and b)
     assert b["worker"] == "tiny-writer-w0000"
     out = tiny.flock("status", "tiny", "--type", "writer")
-    assert "gen 2" in tiny.flock("status", "tiny") and out.count("writer-000") == 2, out
+    assert "gen 2" in tiny.flock("status", "tiny") and w0 in out and w1 in out, out
 
     # stop holds: a prompt waits, launch SWARM resumes and it is delivered
     tiny.flock("stop", "tiny", "--type", "nope", code=1)
     out = tiny.flock("stop", "tiny", "--type", "writer", "--reason", "lunch")
     assert out.strip() == "tiny: held: type writer", out
-    tiny.flock("prompt", "writer-0000", "two")
+    tiny.flock("prompt", w0, "two")
     out = tiny.flock("status", "tiny")
     assert "HELD type writer: lunch (by operator" in out and "pending=1" in out, out
-    assert tiny.agent("writer-0000")["turns"] == 1
+    assert tiny.agent(w0)["turns"] == 1
     assert tiny.flock("launch", "tiny").strip() == "tiny: held: nothing"
-    assert tiny.turns("writer-0000", 2)["pending"] == 0
+    assert tiny.turns(w0, 2)["pending"] == 0
     assert "HELD" not in tiny.flock("status", "tiny")
 
     # stop --release frees the workers and keeps everything; launch FOLDER resumes the
@@ -90,10 +92,10 @@ def test_lifecycle(tiny):
     assert "run `flock update` first" in tiny.flock("launch", spec, "--skip-preflight", code=1)
     tiny.spec(replicas=1)
     assert "tiny: held: nothing" in tiny.flock("launch", spec, "--skip-preflight")
-    tiny.flock("prompt", "writer-0000", "three")
-    a = tiny.turns("writer-0000", 3)
+    tiny.flock("prompt", w0, "three")
+    a = tiny.turns(w0, 3)
     assert (a["session_id"], a["resumed"]) == (session, True), a
-    assert tiny.said("writer-0000")[1:] == ["two", "three"]  # the same
+    assert tiny.said(w0)[1:] == ["two", "three"]  # the same
     assert [e["name"] for e in tiny.events("tiny")] == [
         "swarm.spec_applied", "worker.launched", "swarm.spec_applied",  # launch, update
         "swarm.stopped", "swarm.resumed",  # stop, launch
@@ -109,7 +111,7 @@ def test_lifecycle(tiny):
     assert doc["stop_reason"] == "interrupted"
     assert doc["spec"]["compute"]["kind"] == "local"
     assert {x["name"]: x["turns_completed"] for x in doc["agents"]} == {  # replicas kept: 2
-        "writer-0000": 3, "writer-0001": 0}
+        w0: 3, w1: 0}
     assert doc["totals"]["cost_usd"] == round(a["cost_usd"], 6)
 
 
@@ -135,11 +137,12 @@ def test_controller_restart(tiny, tmp_path):
     data = tmp_path / "ctl"
     port = tiny.controller(data)
     tiny.flock("launch", tiny.spec(replicas=2, extra=RESTART_LOOP), "--skip-preflight")
-    tiny.turns("writer-0000", 1)  # the loop's first round
-    child = tiny.flock("spawn", "helper", "--parent", "writer-0000", "--prompt", "hi").strip()
-    assert tiny.agent("writer-0000")["children"] == [child]
+    w0, w1 = tiny.names("writer", 2)
+    tiny.turns(w0, 1)  # the loop's first round
+    child = tiny.flock("spawn", "helper", "--parent", w0, "--prompt", "hi").strip()
+    assert tiny.agent(w0)["children"] == [child]
     tiny.turns(child, 1)
-    writers = ("writer-0000", "writer-0001")
+    writers = (w0, w1)
     before = {n: tiny.agent(n) for n in (*writers, child)}
     loop = json.loads(tiny.flock("status", "tiny", "--type", "writer", "--json"))["loop"]
     rounds = {n: loop["per_agent"][n]["rounds"] for n in writers}
@@ -154,9 +157,9 @@ def test_controller_restart(tiny, tmp_path):
         now = tiny.agent(n)
         assert now["session_id"] == a["session_id"] and now["turns"] >= a["turns"] >= 1, now
         assert now["cost_usd"] >= a["cost_usd"] > 0, now
-    assert tiny.agent(child)["parent"] == "writer-0000"
-    assert tiny.agent("writer-0000")["children"] == [child]
-    assert child in tiny.flock("status", "tiny", "--parent", "writer-0000")
+    assert tiny.agent(child)["parent"] == w0
+    assert tiny.agent(w0)["children"] == [child]
+    assert child in tiny.flock("status", "tiny", "--parent", w0)
 
     # the loop engine goes on: a round past the one before the crash reaches each writer and
     # its model, in the same session (the workers died with the controller and were relaunched);
@@ -203,6 +206,8 @@ def test_loops(tiny):
     # message_board resource
     assert "loop.on message_board.mention: no feeder: the run has no message_board resource" in out, out
     run = Path(json.loads(Path(".flock/current").read_text())["run_dir"])
+    w0, w1 = tiny.names("writer", 2)
+    t0, = tiny.names("ticker", 1)
 
     def loop(t: str) -> dict:
         return json.loads(tiny.flock("status", "tiny", "--type", t, "--json"))["loop"]
@@ -212,7 +217,7 @@ def test_loops(tiny):
     time.sleep(1)  # then idle: nothing more is sent
     assert (w["mode"], w["reason"], w["rounds_total"], w["final_sent"], w["final_done"]) == (
         "worker", "max_rounds", 6, 2, 2), w
-    for n in ("writer-0000", "writer-0001"):
+    for n in (w0, w1):
         said = tiny.said(n)  # rendered on the worker, {last_summary}: the last reply
         assert said[0].endswith("\n\nround 1") and said[1:3] == ["round 2", "round 3"], said
         assert said[3].startswith("final after 3 rounds; last: reply-") and len(said) == 4, said
@@ -231,10 +236,10 @@ def test_loops(tiny):
     # final round
     assert (t["mode"], t["reason"], t["final_done"]) == ("controller", "until", 1), t
     k = t["rounds_total"]
-    said = tiny.said("ticker-0000")
+    said = tiny.said(t0)
     assert k >= 2 and said[0].endswith("\n\ntick 1") and said[1:] == [
         *(f"tick {i}" for i in range(2, k + 1)), "bye"], said
-    assert [e["data"]["why"] for e in tiny.events("ticker-0000", "loop.prompt")] == [
+    assert [e["data"]["why"] for e in tiny.events(t0, "loop.prompt")] == [
         "start", *["every 500ms"] * (k - 1), "final: until"]
 
     swarm = [(e["name"], e["data"]) for e in tiny.events("tiny", "loop.")
@@ -249,7 +254,7 @@ def test_loops(tiny):
     # once; run.json sums up each loop and the budget
     tiny.flock("stop", "tiny", "--delete", "--yes")
     merged = [json.loads(x) for x in (run / "events.jsonl").read_text().splitlines()]
-    agents = ("writer-0000", "writer-0001", "ticker-0000")
+    agents = (w0, w1, t0)
     per_agent = sum(len((run / "events" / f"{a}.jsonl").read_text().splitlines()) for a in agents)
     assert len(merged) == len([e for e in merged if e["agent"] == ""]) + per_agent
     stamps = [datetime.fromisoformat(e["ts"]) for e in merged]
@@ -310,7 +315,8 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
         'limits: {run_timeout_seconds: 900}\nbucket: hf://buckets/ns/tiny\n'))
     tiny.flock("launch", spec, "--skip-preflight")
     assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
-    session = tiny.turns("writer-0000", 1)["session_id"]
+    w0, = tiny.names("writer", 1)
+    session = tiny.turns(w0, 1)["session_id"]
 
     # the job: sbatch's line, an env file without secrets, sbatch's scrubbed environment
     w = "tiny-writer-w0000"
@@ -336,8 +342,8 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
         assert not any(secret in x for x in [env_file.read_text(), *argv, *environ]), secret
 
     # the Spot notice mid-turn: the worker drains once and exits 75; the same job name again
-    tiny.flock("prompt", "writer-0000", "work [hold]")  # the fake Pi waits until killed
-    tiny.wait(lambda: tiny.agent("writer-0000")["state"] == "working")
+    tiny.flock("prompt", w0, "work [hold]")  # the fake Pi waits until killed
+    tiny.wait(lambda: tiny.agent(w0)["state"] == "working")
     for _ in range(2):
         os.killpg(int((slurm.dir / "jobs" / f"{first}.pid").read_text()), signal.SIGUSR1)
     second = tiny.wait(lambda: [i for i in slurm.ids() if i != first])[0]
@@ -345,9 +351,9 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
     assert argv2[:-1] == argv[:-1] and argv2[-1] != argv[-1]  # same name, new incarnation
     log = (tmp_path / "logs" / f"{w}-{first}.out").read_text()
     assert log.count("preempted (") == 1 and "preempted (SIGUSR1)" in log, log
-    a = tiny.wait(lambda: (a := tiny.turns("writer-0000", 2))["resumed"] and a)
+    a = tiny.wait(lambda: (a := tiny.turns(w0, 2))["resumed"] and a)
     assert (a["session_id"], a["worker"]) == (session, w), a
-    said = tiny.said("writer-0000")  # the cut turn left nothing in the session
+    said = tiny.said(w0)  # the cut turn left nothing in the session
     assert said[0].endswith("\n\none") and said[1:] == ["resumed"], said
     # a planned restart, from the worker's last heartbeat or the job's exit 75 (whichever is
     # first): the old job ends FAILED, or CANCELLED by the controller
@@ -380,8 +386,9 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
                                    extra="namespace: ns\nbucket: hf://buckets/ns/tiny\n"),
                "--skip-preflight")
     assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
-    tiny.flock("prompt", "writer-0000", "one")
-    assert tiny.turns("writer-0000", 1)["cost_usd"] > 0
+    w0, = tiny.names("writer", 1)
+    tiny.flock("prompt", w0, "one")
+    assert tiny.turns(w0, 1)["cost_usd"] > 0
 
     w = "tiny-writer-w0000"
     [(job, sent)] = hub.jobs.items()

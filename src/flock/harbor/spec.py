@@ -28,7 +28,6 @@ from flock.models import (
     SwarmSpec,
     TypeSpec,
     WorkerKnobs,
-    agent_name,
     load_spec_yaml,
     max_workers,
     parse_duration,
@@ -295,7 +294,6 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     team = spec.team_file.read_text(encoding="utf-8") if spec.team_file is not None else ""
     roles, loops = spec.roles(), spec.type_loops()
     label = {name: name if spec.agents.roles else None for name in roles}
-    roster = {agent_name(n, i): label[n] for n, role in roles.items() for i in range(role.count)}
     # the folders: a worker builds the tool bundle and loads the resource modules from them
     config = spec.model_dump(mode="json", include={
         "inference", "task", "environment", "tools_dir", "tools", "resources_dir", "namespace"})
@@ -370,7 +368,6 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "team": team,
                 "role": label[name],
                 "role_text": role.role_file.read_text(encoding="utf-8") if role.role_file else "",
-                "roster": roster,
                 "tools": tools,
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,
@@ -396,6 +393,8 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         "spawn": spec.spawn,
         "limits": spec.limits.model_dump(include={"alive", "spawned_total", "budget_usd"}),
         "compute": spec.compute,
+        # flock's random names (`<adjective>-<noun>`): a task must not rely on a name format
+        "naming": "words",
     })
     most = [max_workers(ts.model_copy(update={"replicas": ts.replicas_ramp.max}) if ts.replicas_ramp
                         else ts) for ts in swarm.types.values()]  # a ramp's max, not its start

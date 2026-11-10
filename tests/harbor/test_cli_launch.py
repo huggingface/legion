@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 import flock.harbor
 from flock import cli, rundir
 from flock.controller import localrun
+from flock.controller.naming import HANDLE_RE
 from flock.harbor import sources
 from flock.ops import SpecError, check_spec, read_spec
 
@@ -201,9 +202,10 @@ def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
         worker_command=[sys.executable, str(Path(__file__).with_name("fake_worker.py"))])))
     assert result.reason == "idle" and result.exit_code == 0, out.getvalue()
     assert result.totals["turns_completed"] == 2, out.getvalue()
-    for agent in ("agent-0000", "agent-0001"):
-        events = [json.loads(x) for x in
-                  (result.run_dir / "events" / f"{agent}.jsonl").read_text().splitlines()]
+    files = sorted((result.run_dir / "events").glob("*.jsonl"))
+    assert len(files) == 2 and all(HANDLE_RE.match(f.stem) for f in files)  # flock's names
+    for f in files:
+        events = [json.loads(x) for x in f.read_text().splitlines()]
         assert "reply-" in json.dumps([e for e in events if e["type"] == "message"])
         assert not [e for e in events if e["type"] == "error"], events
 

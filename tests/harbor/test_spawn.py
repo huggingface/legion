@@ -14,6 +14,7 @@ import pytest
 
 import flock.harbor
 from flock.controller import localrun
+from flock.controller.naming import HANDLE_RE
 from flock.harbor.spec import Spec, compile_spec
 from flock.harbor.tools.bundle import build_tool_bundle
 from flock.harbor.tools.runner import load_module
@@ -176,13 +177,14 @@ def test_a_leader_spawns_a_child_that_runs_a_turn(tmp_path, monkeypatch):
         refresh=0.2, reconcile_interval=0.2, out=out, tools=folders.data,
         worker_command=[sys.executable, str(Path(__file__).with_name("fake_spawn_worker.py"))])))
     assert result.reason == "idle" and result.exit_code == 0, out.getvalue()
-    child = "leader-0000-helper-0001"
 
     def events(agent):
         return [json.loads(x) for x in
                 (result.run_dir / "events" / f"{agent}.jsonl").read_text().splitlines()]
 
-    spawned = [e for e in events("leader-0000") if e["type"] == "spawned"]
-    assert [e["data"]["child"] for e in spawned] == [child], out.getvalue()
+    names = sorted(f.stem for f in (result.run_dir / "events").glob("*.jsonl"))
+    spawned = [e for n in names for e in events(n) if e["type"] == "spawned"]
+    (child,) = [e["data"]["child"] for e in spawned]  # a words name too, never `<parent>-...`
+    assert HANDLE_RE.match(child) and len(names) == 2 and child in names, out.getvalue()
     kid = events(child)
     assert "reply-" in json.dumps([e for e in kid if e["type"] == "message"]), kid

@@ -143,7 +143,8 @@ def agents(tmp_path, *, mount=False, sha=None, resources=None):
         bundle = SimpleNamespace(manifest=bundle.manifest, sha256=sha)
     ts = compile_spec(spec, TASK, bundle).types["agent"]
     host = HarborHost(tmp_path / "work" / "_harbor" / "_worker")
-    names = list(ts.harbor.roster)
+    names = [f"agent-{i:04d}" for i in range(20)]  # opaque: the controller's would be words
+    ts.harbor.roster = dict.fromkeys(names)  # as the controller fills it in each assign
     return host, [make_adapter(tmp_path / "work" / n, n, ts, host=host) for n in names]
 
 

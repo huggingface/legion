@@ -250,10 +250,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     h = answers.harbor
     assert h.task == TASK and h.tools == bundle.manifest and h.tools_sha256 == "f" * 64
     assert (h.team, h.role, h.role_text) == ("Team.", "answers", "Answer.")
-    assert h.roster == {
-        "answers-0000": "answers", "answers-0001": "answers", "answers-0002": "answers",
-        "safety-0000": "safety",
-    }
+    assert h.roster == {} and swarm.naming == "words"  # the controller names them, and sends
+    # each assign the roster: the run's names and their roles (reconcile.harbor_roster)
     assert h.resources == {"message_board": {"url": "https://board.example", "channels": ["general"]}}
     assert h.config == {
         "model": "huggingface/Qwen/Qwen3.8-27B",
@@ -408,7 +406,7 @@ def test_a_shepherd_config_compiles():
     swarm = compile_spec(Spec.load(EXAMPLES / "pi-hf.yaml", env={}), TASK)
     (name, ts), = swarm.types.items()
     assert (swarm.swarm, name, ts.replicas, ts.loop) == ("pi-hf-team", "agent", 2, None)
-    assert ts.harbor.role is None and ts.harbor.roster == {"agent-0000": None, "agent-0001": None}
+    assert ts.harbor.role is None and ts.harbor.roster == {} and swarm.naming == "words"
     assert ts.secrets == []  # a managed board, docker: the worker reads no token
     assert ts.harbor.team == (EXAMPLES.parent / "prompts" / "team.md").read_text()
     assert swarm.providers["inference"].pricing == {"*": [0.0, 0.0, 0.0]}
@@ -422,3 +420,44 @@ def test_a_missing_resource_module_is_refused_at_compile(tmp_path):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match="no resource module .*board.py .*now message_board"):
         compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
+def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
+        tmp_path, monkeypatch, store, settings, clock):
+    """Words names (`<adjective>-<noun>`, reserved on the controller), whatever the roles: the
+    instructions' roster comes with each assign, as names -> roles. A name never encodes the
+    role, and a type's grown replicas keep the names already given."""
+    import json
+
+    from flock.controller.naming import HANDLE_RE
+    from flock.controller.reconcile import _send_assign, harbor_roster
+
+    data = load_spec_yaml(COMPILE)
+    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
+    data["agents"]["roles"]["answers"].pop("ramp")
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/flock/dist/x.whl")
+    jobs = HubJobsClient(token="t", image=None)
+    jobs.api = SimpleNamespace(run_job=lambda **kw: SimpleNamespace(id="job"))
+    store.put_swarm(swarm, 0)
+    reconcile(store, jobs, clock(), settings)
+    agents = store.list_agents(swarm.swarm)
+    roles = {a["name"]: a["type"] for a in agents}
+    assert sorted(roles.values()) == ["answers"] * 3 + ["safety"]
+    assert all(HANDLE_RE.match(n) and len(n) <= 40 for n in roles)
+    assert harbor_roster(store, swarm.swarm) == roles  # each type's role is its name
+
+    a = agents[0]
+    _send_assign(store, "w-test", a, a["type"], swarm.types[a["type"]])
+    (cmd,) = store.commands_for("w-test")
+    assert json.loads(cmd["body"])["spec"]["harbor"]["roster"] == roles
+
+    grown = swarm.model_copy(deep=True)
+    grown.types["answers"].replicas = 4
+    store.put_swarm(grown, 1)
+    reconcile(store, jobs, clock(), settings)
+    now = {a["name"]: a["type"] for a in store.list_agents(swarm.swarm)}
+    assert roles.items() <= now.items() and len(now) == len(roles) + 1

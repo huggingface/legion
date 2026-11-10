@@ -1,4 +1,4 @@
-"""fake_worker.py whose leader-0000 calls the spawn.spawn tool in its first turn, through
+"""fake_worker.py whose leader (the leader type's one agent) calls the spawn.spawn tool in its first turn, through
 the host side of its Trial's spawn socket (test_spawn.py's local run)."""
 
 import asyncio
@@ -35,7 +35,8 @@ def trial(self, config, fakes):
 
 async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
     agent = self.agent_env.get("SPAWN_AGENT", "")
-    if " pi --print " in command and agent == "leader-0000" and not self.fakes.pi:
+    leader = os.environ.get("TYPE") == "leader"  # this worker's type; names are flock's words
+    if " pi --print " in command and leader and agent and not self.fakes.pi:
         os.environ.update(SPAWN_SOCKET=self.mounts["/run/flock-spawn.sock"], SPAWN_AGENT=agent)
         await asyncio.to_thread(tool.spawn, "helper", prompt="help", key="h1")
     return await run_pi(self, command, cwd, env, timeout_sec, user)

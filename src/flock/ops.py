@@ -138,18 +138,10 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
     """A Harbor type keeps the task revision its run pinned while the spec names the same task
     (a branch that moved since is not a change), and the folder paths it was launched from
     while the folders' content is the same (the run folder moved or copied, `--ref`'s copy:
-    workers unpack the shipped folders). The roster (every type's agents, compiled from the
-    file's counts) keeps the running agents of each type whose live replicas were kept
-    (`keep_replicas` first), so teammates are never told of agents that do not exist. Changes
-    `spec` in place."""
-    kept = {n for n, ts in spec.types.items() if n in old.types
-            and ts.harbor and old.types[n].harbor and ts.replicas == old.types[n].replicas}
-    running = next((t.harbor.roster for t in old.types.values() if t.harbor), {})  # run-wide
+    workers unpack the shipped folders). The roster is not in the file: the controller sends
+    each assign the run's agents as they are (reconcile.harbor_roster). Changes `spec` in
+    place."""
     for name, ts in spec.types.items():
-        if ts.harbor:  # agent_name(type, slot) is "<type>-NNNN"
-            ts.harbor.roster = {
-                **{a: r for a, r in running.items() if a.rpartition("-")[0] in kept},
-                **{a: r for a, r in ts.harbor.roster.items() if a.rpartition("-")[0] not in kept}}
         was = old.types.get(name)
         if not (ts.harbor and was and was.harbor):
             continue

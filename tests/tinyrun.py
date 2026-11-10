@@ -65,6 +65,15 @@ class TinyRun:
         assert r.exit_code == code, (args, r.output, r.exception)
         return r.output
 
+    def names(self, type_name: str, n: int, swarm: str = "tiny") -> list[str]:
+        """The names of `n` replicas of the type, sorted, once they exist: flock's random words,
+        so tests look them up."""
+        def got():
+            agents = [a["name"] for a in Client().agents(swarm, type=type_name)
+                      if a["parent"] is None]
+            return len(agents) == n and sorted(agents)
+        return self.wait(got)
+
     def agent(self, name: str) -> dict:
         return json.loads(self.flock("status", name))
 

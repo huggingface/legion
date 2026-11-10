@@ -563,6 +563,16 @@ def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None
         p.act("nudge", a["name"], f"stuck: resume_prompt queued ({nudges + 1}/{NUDGE_MAX})")
 
 
+def harbor_roster(store: Store, swarm: str) -> dict[str, str | None]:
+    """Every replica of the swarm's Harbor types (spawned children are not teammates) -> its
+    role, the type's `harbor.role`: what shepherd's launcher passes as the roster."""
+    row = store.get_swarm(swarm)
+    types = row["spec"].types if row else {}
+    return {a["name"]: types[a["type"]].harbor.role for a in store.list_agents(swarm)
+            if a["parent"] is None and not a["removing"]
+            and a["type"] in types and types[a["type"]].harbor}
+
+
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec,
                  tools_version: str | None = None, comms: CommsSpec | None = None,
                  world: WorldSpec | None = None) -> None:
@@ -579,6 +589,9 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     hard = flags.get("budget_stop") == "hard" or store.held(a, flags)  # or paused
     hold = bool(resume) and (hard or bool(r and r.provider.max_working))
     held, resume = (resume, None) if hold else (None, resume)
+    if ts.harbor:  # the run's agents as they are now: their names and roles for the instructions
+        ts = ts.model_copy(update={"harbor": ts.harbor.model_copy(
+            update={"roster": harbor_roster(store, a["swarm"])})})
     cmd = AssignCommand(
         agent=a["name"], type=type_name, spec=worker_type_spec(ts), restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
