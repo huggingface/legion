@@ -151,9 +151,11 @@ class Config(Settings):
             tool.startswith("message_board.") for tool in self.tools
         ):
             self.tools = ["message_board.*", *self.tools]
-        if self.environment.backend == "hf-sandbox" and not (
-            "message_board" not in self.resources
-            or self.resources["message_board"].get("space_id")
+        board = self.resources.get("message_board")
+        if (
+            self.environment.backend == "hf-sandbox"
+            and board is not None
+            and not board.get("space_id")
         ):
             # Agents reach a local board through a mounted Unix socket, and a
             # sandbox can't mount it.
