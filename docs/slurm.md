@@ -24,7 +24,7 @@ The launcher uses the existing environment and isolates Podman storage in job-lo
 `/tmp`. It schedules native health checks without requiring a user systemd session.
 
 Logs go to `flock-JOBID.log`; experiment artifacts go to the configured
-`output_dir`. Inspect jobs with `squeue --me` and `sacct -j JOBID`, or cancel with
+`output_dir`, by default `results/` in the submission directory. Inspect jobs with `squeue --me` and `sacct -j JOBID`, or cancel with
 `scancel JOBID`. CPU nodes use Spot instances: reclamation interrupts the run.
 Automatic requeue and experiment resume are not supported; partial artifacts on
 shared storage are retained. Multi-node experiments are not supported.

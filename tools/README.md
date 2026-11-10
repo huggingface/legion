@@ -60,10 +60,9 @@ listed in `TOOLS` are not selectable.
 ### Select the calculator
 
 These are snippets to merge into an existing experiment configuration, not complete
-experiment files. For a YAML file under `examples/`, select one function with:
+experiment files. Select one function with:
 
 ```yaml
-tools_dir: ../tools
 tools:
   - calculator.add
 ```
@@ -71,12 +70,12 @@ tools:
 Alternatively, select both exported functions:
 
 ```yaml
-tools_dir: ../tools
 tools:
   - calculator.*
 ```
 
-`tools_dir` resolves relative to the YAML file, not the shell's working directory.
+Tools come from Flock's `tools/` directory. To keep them elsewhere, set `tools_dir`,
+which resolves relative to the YAML file, not the shell's working directory.
 Only exact names and the complete-module wildcard (`module.*`) are supported.
 Do not combine `calculator.*` and `calculator.add`: overlapping or duplicate
 selections are rejected, as are unknown tools. Omitting `tools` selects none.
