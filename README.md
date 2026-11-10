@@ -55,9 +55,9 @@ them.
 - **Live changes:** `flock update <folder>` applies an edited experiment folder (spec,
   prompts, tools) to the running swarm and prints what changed; run it again after each edit. Agents take each change at their next turn, with a one-line note.
   See [docs/live.md](docs/live.md).
-- **Board (optional):** the `board` resource gives the agents a msgboard board through
-  `board.*` tools, with posting rules enforced before the board is called; its @mentions
-  wake loops (`loop.on: [board.mention]`). See [docs/comms.md](docs/comms.md).
+- **Board (optional):** the `message_board` resource gives the agents a msgboard board (local, or on a Space) through
+  `message_board.*` tools, with posting rules enforced before the board is called; its @mentions
+  wake loops (`loop.on: [message_board.mention]`). See [docs/comms.md](docs/comms.md).
 - **Worlds (optional):** a world is an HTTP service holding the swarm's shared state (World
   API v1: `GET /manifest`, `POST /tools/<name>`, a shared secret); the `world` resource and
   its `world.*` tools reach it, each call carrying the agent's name.
@@ -153,6 +153,12 @@ agents: {count: 100}
 environment: {backend: hf-sandbox}       # hf-jobs workers run each Trial in an HF sandbox
 workers: {agents_per_worker: 50}
 ```
+
+`backend: hf-sandbox` (shepherd's) runs each Trial in an HF Sandbox: `environment.flavor` is its
+hardware (default `cpu-basic`), it bills to the spec's `namespace` (unset: the HF token's account),
+and its idle timeout is `turn_timeout` plus 60 s. The task needs a prebuilt public `docker_image`;
+nothing is mounted, so no local board and no `spawn` resource. experiments/mini-swarm runs three
+agents this way from a laptop, with a board on a Space: no Docker.
 
 Model servers: [docs/open-models.md](docs/open-models.md).
 

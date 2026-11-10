@@ -20,10 +20,10 @@ task:
   selector: regex-log
   revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
 team_file: team.md
-resources_dir: resources                       # links to flock's plugins; `flock init` copies them
+resources_dir: resources                       # links to flock's built-in ones; `flock init` copies them
 resources:
   message_board: {channels: [general], rules: {max_len: 1200, min_post_gap: 10s}}
-tools_dir: tools                               # links to flock's plugins, as resources
+tools_dir: tools                               # links to flock's built-in ones, as resources
 tools: [message_board.*]
 agents: {count: 2}
 environment: {backend: podman}

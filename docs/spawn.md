@@ -193,7 +193,7 @@ to 5 attempts with exponential backoff and jitter, never sooner than `Retry-Afte
 
 An agent runs in a Trial (the task's container), so it calls the controller through the `spawn`
 resource and the `spawn.*` tools
-(`flock.harbor.plugins`, copied into the run's `resources/` and `tools/` like `board`):
+(`flock.harbor.builtin`, copied into the run's `resources/` and `tools/` like `message_board`):
 
 ```yaml
 resources: {spawn: {}}

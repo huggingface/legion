@@ -6,7 +6,7 @@ secret. flock never reads or stores the world's state.
 
 Harbor agents reach a world through the `world` resource and its `world.*` tools: the run's
 `resources: {world: {url, token_env}}` and `tools: [world.*]`
-(experiments/swarmchat-harbor/spec.yaml; `flock.harbor.plugins.resources.world`). The resource
+(experiments/swarmchat-harbor/spec.yaml; `flock.harbor.builtin.resources.world`). The resource
 adds the secret and the agent's name on the worker, so no world credential enters a Trial's
 container (on hf-sandbox each agent gets its own agent token instead).
 
