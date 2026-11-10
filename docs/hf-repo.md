@@ -78,7 +78,7 @@ creation are not blindly retried by the wrapper.
 
 ## ProgramBench
 
-See [the collaboration example](../examples/pi-hf-programbench-collaboration.yaml).
+See [the collaboration example](../examples/programbench.yaml).
 Agents publish only original source, their own tests and build scripts. Never share
 the provided reference executable, hidden tests, upstream source, credentials or
 large artifacts. Git LFS upload/download is outside this tool's scope.
