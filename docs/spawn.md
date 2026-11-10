@@ -4,8 +4,7 @@ A running agent (a "leader") can create child agents of other roles, prompt them
 status and remove them. Children are ordinary agents: they have a Trial, a session, a worker, a
 state and a cost like any replica, and they idle and resume the same way. What is new is a
 `parent`, a `depth`, and a token that lets the agent call the controller as itself. Agents do
-it with the `spawn.*` tools ("Harbor agents" below). Design notes and decisions:
-[design.md §13](design.md#13-spawn).
+it with the `spawn.*` tools ("Harbor agents" below). Design: [design.md](design.md#spawn).
 
 ## Spec
 

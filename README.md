@@ -230,4 +230,4 @@ No network, no real jobs: the Hub client and Harbor are faked (tiny real runs: t
 - Earlier experiments are archived in `hf://buckets/cmpatino/legacy-swarmchat-experiments` (README inside); most target the
   pre-cleanup layout, so run them from commit `8949085` (`git checkout 8949085`).
 
-Design, contract and decision log: [docs/design.md](docs/design.md).
+Design and contracts: [docs/design.md](docs/design.md).

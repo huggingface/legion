@@ -22,7 +22,7 @@ inference:
 `flock launch` compiles it into the swarm spec's `providers:` block (one `openai_compat`
 provider, `inference`, with `pricing` keyed by model id) and each type's `model` as
 `inference:<model id>`. The contract of `providers:` and `models:` is in docs/design.md
-section 5 ("Providers"); field names match swarmlab's.
+"Providers"; field names match swarmlab's.
 
 Harbor's Pi speaks OpenAI **Chat Completions** (`POST {base_url}/chat/completions`); the
 provider must be `openai_compat` and `base_url` end in `/v1`.

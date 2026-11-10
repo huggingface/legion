@@ -1,6 +1,6 @@
 """Shared contracts between controller, worker and CLI.
 
-This file is the contract. Everything in docs/design.md section 5 ("Contracts")
+This file is the contract. Everything in docs/design.md "Contracts"
 is expressed here. Change it deliberately and update the design doc.
 """
 
@@ -123,7 +123,7 @@ def _pricing_row(v: list[float], where: str) -> list[float]:
 
 
 class ProviderSpec(BaseModel):
-    """Where a model is served (design.md section 5, 'Providers'). Field names follow swarmlab's
+    """Where a model is served (design.md 'Providers'). Field names follow swarmlab's
     provider params so a `providers:` block moves between the two projects.
 
     `api_key_env` names a secret / env var; the value is never in the spec. The controller
@@ -699,7 +699,7 @@ class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
     harness: Harness
-    # Resolution order (design.md section 5): an alias under `models:`, else "<provider>:<id>"
+    # Resolution order (design.md 'Providers'): an alias under `models:`, else "<provider>:<id>"
     # with the prefix under `providers:`; SwarmSpec refuses a model that names no provider.
     model: str
     reasoning: Reasoning | None = None  # overrides the alias's reasoning

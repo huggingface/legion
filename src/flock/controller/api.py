@@ -1395,7 +1395,7 @@ def create_app(
         return taken, window, owner
 
     def admit(w: Row, prompts: list[Row]) -> list[Row]:
-        """Provider `max_working` at prompt admission (design.md section 5). A prompt for an
+        """Provider `max_working` at prompt admission (design.md 'Providers'). A prompt for an
         agent in a turn always goes out (it joins that turn). A prompt that would start a turn
         needs a free slot, and free slots go to pending prompts in FIFO order of creation
         across all workers of the provider (`admission_view`), not to whichever worker polls

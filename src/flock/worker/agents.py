@@ -1,4 +1,4 @@
-"""AgentRuntime: one per assigned agent; process-per-burst (design.md section 4).
+"""AgentRuntime: one per assigned agent; design.md "Agent lifecycle".
 
 Phases of the harness process: none -> starting -> running -> (stopping) -> none.
 - A prompt with no process starts a burst; prompts arriving while it starts are buffered and

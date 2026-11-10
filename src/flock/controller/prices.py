@@ -10,7 +10,7 @@ is still a placeholder. Override any row with a JSON file whose path is in FLOCK
 All prices are USD per 1M tokens. Reasoning tokens are assumed to be included in the
 output count the harness reports, so they are not billed separately.
 
-Provider-backed models (design.md section 5, 'Providers') are priced from the row pinned into
+Provider-backed models (design.md 'Providers') are priced from the row pinned into
 the applied spec (`TypeSpec.resolved_model.pricing`, [input, output, cached]), which wins over
 this table for that type's model id. Cache writes are billed at the input price (OpenAI-style
 servers report none; vLLM's Anthropic endpoint has no cache-write tier).

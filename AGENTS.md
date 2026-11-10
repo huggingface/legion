@@ -1,7 +1,7 @@
 # flock — notes for agents working in this repo
 
-Read `docs/design.md` first. It is the agreed design; section 5 is the contract and
-`src/flock/models.py` is that contract in code. Do not change models.py
+Read `docs/design.md` first. It is the current design; its "Contracts" section is the
+contract and `src/flock/models.py` is that contract in code. Do not change models.py
 casually: controller, worker and CLI all import it.
 
 ## Layout
