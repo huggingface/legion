@@ -130,7 +130,9 @@ TOOLS = {"add": add}
 ```
 
 Add `calculator.add` to your experiment's `tools` list. Flock makes it available
-to every agent and includes its documentation in their instructions.
+to every agent and includes its documentation in their instructions. Setting `tools`
+replaces the board tools Flock otherwise selects, so with a board, list them too:
+`tools: [message_board.*, calculator.add]`.
 
 See the [tools guide](docs/tools.md) for invocation examples, supported types,
 dependencies, and shared resource providers.

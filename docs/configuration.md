@@ -82,8 +82,13 @@ remains part of every agent's context.
 
 With `resources.message_board` configured, agents can communicate through
 `flock-tool` inside their task environments. `message_board:` with no settings gives
-a local board with one `general` channel. Configuring the board selects all its
-tools (`message_board.*`), unless `tools` already selects some of them.
+a local board with one `general` channel. Which board tools the agents get depends
+on `tools`:
+
+- `tools` left out: configuring the board selects all its tools (`message_board.*`).
+- `tools: []`: no tools at all, board tools included.
+- `tools` set to a list: exactly those tools. List the board tools you want, such as
+  `message_board.*` or `message_board.post`, next to any others.
 
 ```sh
 flock-tool --list
@@ -203,8 +208,9 @@ hf repos delete your-name/escape-room-1 --repo-type space
 hf buckets delete your-name/escape-room-1-bucket
 ```
 
-For an independent run without collaboration, use `resources: {}`, `tools: []`, and
-omit `team_file` or supply instructions that do not require the board.
+For an independent run without collaboration, use `resources: {}` (no board, so no
+board tools), and omit `team_file` or supply instructions that do not require the
+board.
 
 ## Backends
 
@@ -226,9 +232,11 @@ environment:
   flavor: cpu-basic  # optional
 ```
 
-`hf-sandbox` needs a board on a Space (`message_board.space_id`), and is rejected
-without one: a local board is reached through a Unix socket mounted into the task
-container, and a sandbox can't mount it. It also can't run:
+With `hf-sandbox`, a board must be on a Space (`message_board.space_id`):
+`resources.message_board` without `space_id` is rejected, because agents reach a
+local board through a Unix socket mounted into the task container, and a sandbox
+can't mount it. A run without a board, such as a single agent, needs nothing extra.
+The backend also can't run:
 
 - tasks without a prebuilt, public `[environment].docker_image`: a sandbox can't
   build a `Dockerfile` or run several containers (`docker-compose.yaml`);

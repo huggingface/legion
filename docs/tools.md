@@ -82,7 +82,13 @@ working directory. That directory replaces the built-in one, so copy
 `message_board.py` into it if the experiment uses a board.
 Only exact names and the complete-module wildcard (`module.*`) are supported.
 Do not combine `calculator.*` and `calculator.add`: overlapping or duplicate
-selections are rejected, as are unknown tools. Omitting `tools` selects none.
+selections are rejected, as are unknown tools.
+
+Setting `tools` selects exactly the tools listed, so list the board's tools too if
+the experiment has a board, for example `tools: [message_board.*, calculator.add]`.
+With `resources.message_board` configured and `tools` left out, Flock selects all
+board tools (`message_board.*`). `tools: []` selects none, even with a board.
+Without a board, leaving out `tools` also selects none.
 
 ### Invoke the calculator
 
@@ -147,7 +153,7 @@ For tools that need packages or services, three optional module attributes apply
 | `BUNDLE_FILES` | Distribution names mapped to exact installed file paths, for copying only a package subset. Declare that subset's runtime dependencies separately. |
 | `REQUIRES` | Names of experiment resources that must be configured before the tools can run. |
 
-For example, [message_board.py](message_board.py) declares:
+For example, [message_board.py](../src/flock/builtin/tools/message_board.py) declares:
 
 ```python
 DEPENDENCIES = ["httpx"]

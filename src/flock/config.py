@@ -146,18 +146,22 @@ class Config(Settings):
         self.resources = {
             name: options or {} for name, options in self.resources.items()
         }
-        # A board comes with its tools, unless some are selected explicitly.
-        if "message_board" in self.resources and not any(
-            tool.startswith("message_board.") for tool in self.tools
+        board = self.resources.get("message_board")
+        # A board comes with all its tools unless `tools` is set; `tools: []`
+        # means none.
+        if board is not None and "tools" not in self.model_fields_set:
+            self.tools = ["message_board.*"]
+        if (
+            self.environment.backend == "hf-sandbox"
+            and board is not None
+            and not board.get("space_id")
         ):
-            self.tools = ["message_board.*", *self.tools]
-        board = self.resources.get("message_board") or {}
-        if self.environment.backend == "hf-sandbox" and not board.get("space_id"):
             # Agents reach a local board through a mounted Unix socket, and a
-            # sandbox can't mount it.
+            # sandbox can't mount it. A run without a board is fine.
             raise ValueError(
-                "environment.backend hf-sandbox needs message_board.space_id: "
-                "agents in HF Sandboxes can only reach a board on a Space"
+                "environment.backend hf-sandbox can't reach a local board: set "
+                "message_board.space_id to put the board on a Space, or remove "
+                "resources.message_board"
             )
         return self
 

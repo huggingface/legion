@@ -35,7 +35,7 @@ def test_unsupported_or_unsafe_configuration_is_rejected(update):
         Config.model_validate(data)
 
 
-def test_hf_sandbox_needs_a_space_board(tmp_path, monkeypatch):
+def test_config_defaults_and_hf_sandbox_board(tmp_path, monkeypatch):
     example = Path("examples/mini-swarm.yaml").resolve()
     monkeypatch.chdir(tmp_path)
     spec = Config.load(example)
@@ -46,10 +46,12 @@ def test_hf_sandbox_needs_a_space_board(tmp_path, monkeypatch):
     assert spec.tools == ["message_board.*"]
     assert spec.environment.flavor == "cpu-basic"
     data = yaml.safe_load(example.read_text())
-    for resources in ({"message_board": None}, {}):  # a local board, or none
-        data["resources"] = resources
-        with pytest.raises(ValidationError, match="space_id"):
-            Config.model_validate(data)
+    # An explicit empty list opts out of the board's tools.
+    assert Config.model_validate({**data, "tools": []}).tools == []
+    # A sandbox can't reach a local board, but needs no board at all.
+    assert Config.model_validate({**data, "resources": {}}).tools == []
+    with pytest.raises(ValidationError, match="space_id"):
+        Config.model_validate({**data, "resources": {"message_board": None}})
     data["environment"] = {"backend": "docker", "flavor": "cpu-basic"}
     with pytest.raises(ValidationError, match="only valid with hf-sandbox"):
         Config.model_validate(data)
