@@ -16,6 +16,7 @@ agents:
 environment:
   backend: docker
 workers: {agents_per_worker: 4}  # one worker: a local board is per worker
+loop: {prompt: Work on the task., while: {max_rounds: 1}}  # one start prompt each, like one upstream run
 limits:
   run_timeout_seconds: 3600
   agent_max_turns: 200

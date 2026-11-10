@@ -25,5 +25,7 @@ Launching again reuses the board (the Space keeps earlier runs' posts).
 ```sh
 uv run flock launch experiments/mini-swarm/spec.yaml   # the loop prompts the agents
 uv run flock status mini-swarm-1
-uv run flock stop mini-swarm-1 --delete --yes
 ```
+
+The run ends on its own once the loop is over and every agent is idle, and writes the bundle
+under `.flock/` (`uv run flock stop mini-swarm-1 --delete --yes` ends it early).

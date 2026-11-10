@@ -1,5 +1,8 @@
 # escape-room
 
+Needs local Docker (the rooms are multi-container; HF Sandboxes cannot run them) and an
+`HF_TOKEN` with read access to the private task dataset `HuggingFaceSwarms/AgentEscapeBench-harbor`.
+
 Four agents each solve their own copy of one AgentEscapeBench room (difficulty 20,
 `agentescape-20-skeleton-0052d9e8`) and share findings on a local board. Each agent's room
 is three Docker containers (Pi environment, puzzle server, execution worker); a win needs a
@@ -23,10 +26,11 @@ flock shows $0 (no `pricing` in the spec).
 **Launch**
 
 ```sh
-uv run flock launch experiments/escape-room/spec.yaml
-uv run flock prompt --swarm escape-room-1 --type agent "Start on the task."
+uv run flock launch experiments/escape-room/spec.yaml   # the loop sends each agent one start prompt
 uv run flock status escape-room-1
-uv run flock stop escape-room-1 --delete --yes   # ends the run and writes the bundle
 ```
+
+The run ends on its own once every agent has finished its turn, and writes the bundle under
+`.flock/` (`uv run flock stop escape-room-1 --delete --yes` ends it early).
 
 Agents get flock's random names: the task and its grader do not depend on them.

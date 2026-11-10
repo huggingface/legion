@@ -51,3 +51,20 @@ def test_start_local_refuses_another_swarms_run(tmp_path, monkeypatch):
     assert ops.start_local(make_spec("other"), "spec.yaml") is None  # already serves it
     monkeypatch.setenv("FLOCK_URL", "http://elsewhere:1")
     assert ops.start_local(make_spec(), "spec.yaml") is None  # an explicit controller
+
+
+@pytest.mark.parametrize("loop", [None, {"prompt": "go"}])
+def test_start_local_ends_a_looped_run_when_idle(tmp_path, monkeypatch, loop):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FLOCK_URL", raising=False)
+    monkeypatch.delenv("FLOCK_CURRENT", raising=False)
+    cmds = []
+
+    def popen(cmd, **_):
+        cmds.append(cmd)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(ops.subprocess, "Popen", popen)
+    with pytest.raises(RuntimeError):
+        ops.start_local(make_spec(agent={"replicas": 1, "loop": loop}), "spec.yaml")
+    assert (cmds[0][-2:] == ["--until", "idle"]) == (loop is not None)
