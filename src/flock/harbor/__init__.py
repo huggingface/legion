@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/__init__.py
 """Parallel Harbor experiments with a shared message board.
 
 Its in-container `flock-tool` (installed at /usr/local/bin by tools/setup.py, FLOCK_TOOLS_MANIFEST,

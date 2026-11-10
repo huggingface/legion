@@ -9,7 +9,7 @@ dependencies = [
   "pyyaml>=6",
   "typer>=0.12",
   "huggingface_hub>=1.0",
-  # Harbor (flock.harbor: every agent is a Trial); pins as upstream at eabb46f
+  # Harbor (flock.harbor: every agent is a Trial)
   "harbor==0.25.0",
   "podman-compose==1.5.0",
   "msgboard[hf] @ git+https://github.com/huggingface/msgboard.git@563911d586e3435f2aadb25d7a8f565cce828406",
@@ -63,7 +63,7 @@ target-version = "py312"
 [tool.ruff.lint.per-file-ignores]
 # ruff >= 0.17 enables PYI041 by default; models.py is the shared contract, left as written.
 "src/flock/models.py" = ["PYI041"]
-# Vendored from eabb46f, whose ruff selects only E4/E7/E9/F/I; left as written.
+# The vendored Harbor task-runner code keeps its own lint settings.
 "src/flock/harbor/**" = ["BLE001", "PLR1704", "SIM117", "TRY004", "TRY201", "UP017"]
 "tests/harbor/**" = ["C401", "ISC004", "PLW1510", "RUF012", "SIM117"]
 "tests/harbor/test_message_board_live.py" = ["BLE001"]

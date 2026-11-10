@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/resources.py
 """Load experiment resources and manage their lifecycle without provider-specific code."""
 
 import asyncio

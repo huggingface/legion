@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/config.py
 """The small, deliberately strict experiment interface."""
 
 import os

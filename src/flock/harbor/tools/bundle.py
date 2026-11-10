@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/tools/bundle.py
 """Build a portable bundle from selected tool modules and installed dependencies."""
 
 import gzip

@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/instructions.py
 """Assemble experiment instructions, runtime context and selected tool documentation."""
 
 import json

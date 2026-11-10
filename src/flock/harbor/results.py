@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/results.py
 """Atomic manifests and redacted errors."""
 
 import json

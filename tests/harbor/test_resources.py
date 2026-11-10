@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/test_resources.py
 import pytest
 
 from flock.harbor.resources import Resources

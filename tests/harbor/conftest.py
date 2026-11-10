@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/conftest.py
 import os
 
 import pytest

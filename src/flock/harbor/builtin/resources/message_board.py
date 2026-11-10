@@ -1,9 +1,7 @@
-# vendored from eabb46f:src/flock/builtin/resources/message_board.py
 """The run's msgboard: a local board managed by the run, or a board on a Hugging Face Space.
 
 flock's additions (lines marked `flock:`; unused options keep the upstream behaviour):
-- `url` / `token_env`: connect to a board that is already up (f3970bc's existing-board
-  mode, which eabb46f replaced with `space_id`). Each flock worker runs its own resources, and a
+- `url` / `token_env`: connect to a board that is already up. Each flock worker runs its own resources, and a
   `space_id` board is deployed (and its operator token rotated) by every one that starts: a run
   of more than one worker deploys its board once and connects every worker to it this way.
 - `add` / `remove`: agents placed after start join under their names; a name the board already

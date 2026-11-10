@@ -1,5 +1,5 @@
-# vendored from eabb46f:scripts/podman_healthchecks.py (here so a worker venv has it: python -m)
-"""Schedule native Podman health checks without a user systemd session.
+"""Schedule native Podman health checks without a user systemd session (in flock.harbor so a
+worker venv can run it with `python -m`).
 
 On this cluster, Podman normally schedules periodic health checks through user
 systemd timers, but CPU Slurm jobs have no working user systemd session. The

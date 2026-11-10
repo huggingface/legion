@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/test_config_sources.py
 from pathlib import Path
 
 import pytest

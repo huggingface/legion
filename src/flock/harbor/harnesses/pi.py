@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/harnesses/pi.py
 """Compatibility setup for native Pi against Hugging Face's chat API."""
 
 import json

@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/test_networking.py
 import ipaddress
 import json
 

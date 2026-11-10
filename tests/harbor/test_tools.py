@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/test_tools.py
 import json
 import os
 import subprocess

@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/launch.py
 """Experiment resources around ordinary concurrent Harbor trials."""
 
 import asyncio

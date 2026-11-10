@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/builtin/resources/message_board_server.py
 """Serve one native msgboard on localhost and an agent Unix socket."""
 
 import signal

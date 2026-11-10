@@ -1,6 +1,3 @@
-# vendored from eabb46f:tests/test_results.py
-
-
 from flock.harbor.results import safe_error
 
 

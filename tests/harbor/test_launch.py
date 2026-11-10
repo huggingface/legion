@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/test_launch.py
 import asyncio
 import json
 import signal

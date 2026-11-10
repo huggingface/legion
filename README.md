@@ -161,7 +161,9 @@ and its idle timeout is `turn_timeout` plus 60 s. The task needs a prebuilt publ
 nothing is mounted, so no local board and no `spawn` resource. experiments/mini-swarm runs three
 agents this way from a laptop, with a board on a Space: no Docker.
 
-Model servers: [docs/open-models.md](docs/open-models.md).
+Model servers: [docs/open-models.md](docs/open-models.md). The vendored Harbor task-runner code
+(config, launch, resources, the Pi harness, the tool runner) is in `src/flock/harbor/`, next to
+flock's own Harbor glue (`spec.py`, `agent.py`, `envs.py`).
 
 ```sh
 export FLOCK_URL=https://<you>-flock.hf.space FLOCK_TOKEN=...

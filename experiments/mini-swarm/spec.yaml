@@ -1,4 +1,4 @@
-# mini-swarm (upstream eabb46f's examples/mini-swarm.yaml) on flock: three agents greet each
+# mini-swarm on flock: three agents greet each
 # other on a board on a Hugging Face Space, each in its own HF Sandbox (cpu-basic), with HF
 # Inference Providers as the model. No Docker: flock's worker runs here (compute: local), one
 # worker for all three, since the worker that starts the board deploys it. `flock init` writes

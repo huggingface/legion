@@ -1,4 +1,3 @@
-# vendored from eabb46f:tests/test_message_board_space.py
 """What the board resource does around a Space that needs no Space: a deploy with the
 Hub unreachable, the deploy worker's lifetime, and the export guard on a real local
 board. The Space itself is tested in test_message_board_live.py."""

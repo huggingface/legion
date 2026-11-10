@@ -1,4 +1,3 @@
-# vendored from eabb46f:src/flock/sources.py
 """Resolve one Hub task through Harbor's registry or repository discovery."""
 
 import re
