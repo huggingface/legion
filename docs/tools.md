@@ -3,9 +3,12 @@
 [Back to the README](../README.md)
 
 Flock's built-in tools live in [src/flock/builtin/tools](../src/flock/builtin/tools/) and ship
-with the package. Currently, [message_board.py](../src/flock/builtin/tools/message_board.py)
-provides message-board operations. The reusable code that packages, installs, and
-executes tools lives in [src/flock/tools](../src/flock/tools/).
+with the package. [message_board.py](../src/flock/builtin/tools/message_board.py)
+provides message-board operations, and [hf_repo.py](../src/flock/builtin/tools/hf_repo.py)
+provides Git and native HF dataset PR operations. See [repository collaboration](hf-repo.md)
+for configuration and usage. The reusable packaging and execution code lives in
+[src/flock/tools](../src/flock/tools/).
+
 
 Tools are ordinary Python functions. Agents invoke them through their existing shell
 tool using `flock-tool`; they are not registered as native Pi tools or MCP tools.

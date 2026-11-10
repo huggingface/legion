@@ -1,0 +1,32 @@
+name: programbench-csview-repository
+harness: pi
+model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+inference:
+  base_url: https://router.huggingface.co/v1
+  api_key_env: HF_TOKEN
+  api_format: openai_chat_completions
+  reasoning_effort: low
+task:
+  repo: https://huggingface.co/datasets/edbeeching/programbench-harbor-staging
+  revision: 71a3477240b19b966da44873be69e15364e50481
+  selector: wfxr--csview.8ac4de0
+team_file: ../prompts/programbench-repository.md
+resources:
+  message_board:
+    channels:
+    - general
+  hf_repo:
+    namespace: edbeeching
+    token_env: HF_TOKEN
+tools:
+- message_board.*
+- hf_repo.*
+agents:
+  count: 8
+environment:
+  backend: podman
+limits:
+  run_timeout_seconds: 10800
+  agent_timeout_seconds: 7200
+  agent_max_turns: 200
+output_dir: ../results

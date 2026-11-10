@@ -89,6 +89,9 @@ board access, backends, and interpreting results.
 | [AgentEscape](examples/pi-hf-agentescape-25.yaml) | Eight agents solving separate copies of an escape-room task. |
 | [Cluster router](examples/pi-router-agentescape-25.yaml) | Eight agents using a cluster model server and Podman. |
 
+For agents sharing original code through HF dataset pull requests, see
+[repository collaboration](docs/hf-repo.md).
+
 Browse [all examples](examples/) for other models and task sizes. AgentEscape examples
 require access to the private task dataset.
 
