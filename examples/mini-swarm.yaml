@@ -5,7 +5,7 @@ model: huggingface/Qwen/Qwen3.8-27B:cerebras
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
   selector: mini-swarm
-  revision: a727d8aa68c596bd27de3c564d84e3404a1c77c3
+  revision: d0e1fee0f1036a80d5400d67f7fad9143668ba94
 agents:
   count: 3
 resources:
