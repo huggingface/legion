@@ -169,8 +169,8 @@ A swarm spec (`SwarmSpec`) names the swarm, its compute, namespace and bucket, `
 `models:`, and its `types:`; `flock launch` writes it from a Harbor spec (README, docs/local.md).
 Each type sets `harness: harbor`, its `harbor:` block (written by the compile step), its model,
 `replicas`, packing (`agents_per_worker` 50, `max_working_per_worker` 20), lifetime, `workdir`,
-`worker` knobs, `loop`, `spawn` and `resume_prompt`. Every model is `extra: forbid`: an unknown
-key is refused.
+`worker` knobs, `loop`, `spawn` and `resume_prompt`. The blocks inside the spec are `extra: forbid`
+(an unknown key is refused); `SwarmSpec` and `TypeSpec` themselves drop unknown keys.
 
 ### Providers
 

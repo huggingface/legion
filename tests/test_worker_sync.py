@@ -325,7 +325,7 @@ async def test_flock_part_files_are_never_pushed_and_restore_cleans_them(tmp_pat
     await rt.sync_now("test")
     assert not any(k.endswith(".flock-part") for k in store.files)
     assert "sw/researcher/researcher-0001/workdir/f.txt" in store.files
-    # a remote .flock-part (pushed by an older worker) is not deleted by the mirror either
+    # a .flock-part already in the bucket is not deleted by the mirror either
     store.files["sw/researcher/researcher-0001/workdir/old.flock-part"] = b""
     await rt.sync.push(rt)
     assert "sw/researcher/researcher-0001/workdir/old.flock-part" in store.files

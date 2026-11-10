@@ -11,6 +11,7 @@ from flock import cli, ops
 from flock.client import Client, ClientError
 from flock.current import write_current
 from flock.ops import SpecError, launch, read_spec, update
+from flock.worker.agents import VERIFY_WAIT
 
 from .conftest import make_spec, write_spec
 
@@ -67,4 +68,6 @@ def test_start_local_ends_a_looped_run_when_idle(tmp_path, monkeypatch, loop):
     monkeypatch.setattr(ops.subprocess, "Popen", popen)
     with pytest.raises(RuntimeError):
         ops.start_local(make_spec(agent={"replicas": 1, "loop": loop}), "spec.yaml")
-    assert (cmds[0][-2:] == ["--until", "idle"]) == (loop is not None)
+    assert (cmds[0][-4:-2] == ["--until", "idle"]) == (loop is not None)
+    if loop is not None:  # the grace covers the Trials' verifier wait
+        assert float(cmds[0][cmds[0].index("--grace") + 1]) > VERIFY_WAIT

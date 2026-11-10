@@ -97,13 +97,12 @@ uv run flock stop hello --delete --yes   # ends the run and writes the bundle
 
 ### Examples
 
-Each folder has a `spec.yaml` and a README (what it runs, tokens, cost, launch):
+Each of these folders has a `spec.yaml` and a README (what it runs, tokens, cost, launch):
 
 - `experiments/mini-swarm`: three agents greet each other on a Space board, each in an HF
   Sandbox; no Docker.
 - `experiments/escape-room`: four agents solve an AgentEscapeBench room in local Docker,
   sharing a local board.
-- `experiments/pybot`: the large example (coming).
 
 ### Run the controller
 

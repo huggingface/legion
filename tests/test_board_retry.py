@@ -21,7 +21,7 @@ def test_retry_after_seconds_and_http_date():
 def test_delay_waits_retry_after_plus_jitter_up_to_the_cap(monkeypatch):
     r = httpx.Response(429, headers={"retry-after": "60"})
     monkeypatch.setattr(board_mod.random, "uniform", lambda a, b: b)
-    assert _delay(0, r, 1.0) == 60.0 + 12.0  # no longer capped at 20 s, 20% jitter
+    assert _delay(0, r, 1.0) == 60.0 + 12.0  # Retry-After is honoured in full, 20% jitter
     monkeypatch.setattr(board_mod.random, "uniform", lambda a, b: a)
     assert _delay(0, r, 1.0) == 60.0
     assert _delay(0, httpx.Response(429, headers={"retry-after": "600"}), 1.0) == 120.0

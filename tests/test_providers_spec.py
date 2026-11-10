@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -141,6 +143,25 @@ def test_provider_and_alias_names():
 def test_standalone_typespec_is_unresolved():
     ts = TypeSpec(**HB, model="hf:Qwen/Qwen3.8-27B")
     assert ts.resolved_model is None and ts.harness_model == "hf:Qwen/Qwen3.8-27B"
+
+
+def test_a_stored_swarm_that_does_not_load_is_skipped(tmp_path, caplog):
+    from flock.controller.store import Store
+
+    store = Store(tmp_path)
+    good = spec({"w": {**HB, "model": "qwen-27b"}})
+    store.put_swarm(good, 0)
+    bad = good.model_dump(mode="json") | {"swarm": "bad"}
+    bad["types"]["w"]["harness"] = "nope"
+    store._x("INSERT INTO swarms (name, spec, applied_at) VALUES (?, ?, 0)",
+             ["bad", json.dumps(bad)])
+    with caplog.at_level("ERROR", logger="flock.controller.store"):
+        assert [r["name"] for r in store.list_swarms()] == [good.swarm]
+        assert [r["name"] for r in store.list_swarms()] == [good.swarm]  # logged once
+    assert len(caplog.records) == 1 and "swarm bad: stored spec" in caplog.text
+    with pytest.raises(ValidationError):
+        store.get_swarm("bad")
+    store.close()
 
 
 def test_auth_option():
