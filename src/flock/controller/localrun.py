@@ -50,7 +50,13 @@ from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
 from flock.controller.prices import cost_usd, type_price_table
-from flock.controller.reconcile import Settings, agent_state, run_reconciler, worker_state
+from flock.controller.reconcile import (
+    NUDGE_MAX,
+    Settings,
+    agent_state,
+    run_reconciler,
+    worker_state,
+)
 from flock.controller.state import DEFAULT_INTERVAL, state_sync_from_env
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
@@ -239,6 +245,8 @@ class Tracker:
             "loops_settled": loops_settled(spec, status),
             "agents": agents,
             "states": states,
+            "stuck_done": {a["name"] for a in agents
+                           if states[a["name"]] == "stuck" and not self._nudge_left(spec, a)},
             "workers": {wid: worker_state(w, now, lv).value for wid, w in workers.items()},
             "pending": sum(pending.values()),
             "running": sum(1 for s in states.values() if s == "working"),
@@ -247,17 +255,26 @@ class Tracker:
             "tokens": tokens,
         }
 
+    def _nudge_left(self, spec: SwarmSpec, a: dict[str, Any]) -> bool:
+        """A stuck agent the controller may still send its type's resume_prompt to (as in
+        reconcile._nudge_stuck)."""
+        ts = spec.types.get(a["type"])
+        return bool(ts and ts.resume_prompt) and a["nudges"] < NUDGE_MAX and (
+            self.store.get_loop_agent(a["name"]) or {}).get("phase") != "done"
+
     def idle(self, snap: dict[str, Any]) -> bool:
-        """Every agent idle, nothing pending, no turn open, at least one turn done overall, every
-        agent `--prompt` went to has finished a turn, and every type's loop is over (agents are
-        idle between loop rounds)."""
+        """Every agent idle or done, nothing pending, no turn open, at least one turn done
+        overall, every agent `--prompt` went to has finished a turn, and every type's loop is
+        over (agents are idle between loop rounds). An agent stuck after a turn timeout that
+        will get no resume_prompt is done."""
         if not snap["agents"] or snap["pending"] or self.open_turns or not snap["loops_settled"]:
             return False
-        if any(s != "idle" for s in snap["states"].values()):
+        done = snap["stuck_done"]
+        if any(s != "idle" and n not in done for n, s in snap["states"].items()):
             return False
-        if any(self.completed[n] < 1 for n in self.prompted):
+        if any(self.completed[n] < 1 and n not in done for n in self.prompted):
             return False
-        return snap["completed"] >= 1
+        return snap["completed"] >= 1 or bool(done)
 
 
 def status_line(snap: dict[str, Any], elapsed: float) -> str:

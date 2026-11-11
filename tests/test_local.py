@@ -355,6 +355,33 @@ def test_tracker_idle(tmp_path):
     store.close()
 
 
+def test_tracker_idle_after_a_turn_timeout(tmp_path):
+    """An agent stuck after its turn timed out ends an `--until idle` run once no resume_prompt
+    can reach it: none on the type, its loop over, or its nudges used up."""
+    store = Store(tmp_path / "data")
+    spec = local_spec(replicas=1, resume_prompt="go on")
+    store.put_swarm(spec, time.time())
+    reconcile(store, LocalJobsClient(root=tmp_path, command=_script("pass")),
+              datetime.now(UTC), Settings(token=TOKEN, secret_source={}))
+    tr = localrun.Tracker(store, "loc")
+    tr.prompted = {"w-0000"}
+    now = time.time()
+    store.record_agent_heartbeat("w-0000", {"hb_state": "stuck", "last_heartbeat": now}, {},
+                                 lambda t: 0.0)
+    for w in store.list_workers("loc"):
+        store.update_worker(w["id"], last_heartbeat=now, last_seen=now, launched_at=now - 1)
+    _events(store, "w-0000", "turn_started", "turn_interrupted")
+    assert not tr.idle(tr.snapshot(spec, now))  # the controller will nudge it
+    store.put_loop_agent("w-0000", "loc", "w", {"phase": "done"})
+    assert tr.idle(tr.snapshot(spec, now))
+    store.put_loop_agent("w-0000", "loc", "w", {"phase": "looping"})
+    store.update_agent("w-0000", nudges=3)
+    assert tr.idle(tr.snapshot(spec, now))
+    store.update_agent("w-0000", nudges=0)
+    assert tr.idle(tr.snapshot(local_spec(replicas=1), now))  # no resume_prompt
+    store.close()
+
+
 def test_write_bundle(tmp_path):
     store = Store(tmp_path / "data")
     spec = local_spec(env={"X_TOKEN": "hunter2"})
