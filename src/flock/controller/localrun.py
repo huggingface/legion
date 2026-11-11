@@ -50,7 +50,13 @@ from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
 from flock.controller.prices import cost_usd, type_price_table
-from flock.controller.reconcile import Settings, agent_state, run_reconciler, worker_state
+from flock.controller.reconcile import (
+    Settings,
+    agent_state,
+    can_resume,
+    run_reconciler,
+    worker_state,
+)
 from flock.controller.state import DEFAULT_INTERVAL, state_sync_from_env
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
@@ -223,11 +229,16 @@ class Tracker:
         workers = {w["id"]: w for w in self.store.list_workers(self.swarm)}
         lv = spec.compute.liveness()
         states: dict[str, str] = {}
+        stuck_done: set[str] = set()  # stuck after a turn timeout, no resume_prompt to come
         for a in agents:
             st = agent_state(a, workers.get(a["worker"]), now, lv).value
             if a["name"] in self.open_turns and st in ("idle", "unknown"):
                 st = "working"  # turn_started seen, heartbeat not yet
             states[a["name"]] = st
+            ts = spec.types.get(a["type"])
+            if st == "stuck" and not can_resume(ts and ts.resume_prompt, a["nudges"],
+                                                self.store.get_loop_agent(a["name"])):
+                stuck_done.add(a["name"])
         pending = self.store.pending_counts(self.swarm)
         tokens: dict[str, TokenUsage] = {}
         for a in agents:
@@ -239,6 +250,7 @@ class Tracker:
             "loops_settled": loops_settled(spec, status),
             "agents": agents,
             "states": states,
+            "stuck_done": stuck_done,
             "workers": {wid: worker_state(w, now, lv).value for wid, w in workers.items()},
             "pending": sum(pending.values()),
             "running": sum(1 for s in states.values() if s == "working"),
@@ -248,16 +260,18 @@ class Tracker:
         }
 
     def idle(self, snap: dict[str, Any]) -> bool:
-        """Every agent idle, nothing pending, no turn open, at least one turn done overall, every
-        agent `--prompt` went to has finished a turn, and every type's loop is over (agents are
-        idle between loop rounds)."""
+        """Every agent idle or done, nothing pending, no turn open, at least one turn done
+        overall, every agent `--prompt` went to has finished a turn, and every type's loop is
+        over (agents are idle between loop rounds). An agent stuck after a turn timeout that
+        will get no resume_prompt is done."""
         if not snap["agents"] or snap["pending"] or self.open_turns or not snap["loops_settled"]:
             return False
-        if any(s != "idle" for s in snap["states"].values()):
+        done = snap["stuck_done"]
+        if any(s != "idle" and n not in done for n, s in snap["states"].items()):
             return False
-        if any(self.completed[n] < 1 for n in self.prompted):
+        if any(self.completed[n] < 1 and n not in done for n in self.prompted):
             return False
-        return snap["completed"] >= 1
+        return snap["completed"] >= 1 or bool(done)
 
 
 def status_line(snap: dict[str, Any], elapsed: float) -> str:
@@ -657,8 +671,9 @@ def main(
     data_dir: str = typer.Option(".flock", "--data-dir", help="Where the run dir and `current` go."),
     until: str = typer.Option(
         None, "--until",
-        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle with nothing "
-             "pending, after at least one turn (and one per agent with --prompt), every loop over."),
+        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle (or stuck after "
+             "a turn timeout with no resume left) with nothing pending, after at least one turn "
+             "(and one per agent with --prompt), every loop over."),
     prompt_text: str = typer.Option(None, "--prompt",
                                     help="Send this prompt to every agent once at start."),
     preflight: bool = typer.Option(

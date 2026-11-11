@@ -62,7 +62,7 @@ runs the same thing in the foreground and exits when done.
 - `flock stop <swarm>` holds the swarm; `flock stop <swarm> --release` drains the workers and keeps
   the controller (`flock launch <swarm>` resumes); `flock stop <swarm> --delete` ends the
   controller and writes the bundle. A run also ends at the spec's `limits.budget_usd`, and a run
-  whose every type has a `loop:` ends by itself once every loop is over and every agent is idle. The test harness (`python -m flock.controller.localrun`) additionally has
+  whose every type has a `loop:` ends by itself once every loop is over and every agent is idle (or stuck after a turn timeout with no resume left). The test harness (`python -m flock.controller.localrun`) additionally has
   `--until idle|10m` and `--grace S`.
 - The spec's `tools_dir` and `resources_dir` are packed, uploaded and named in the spec by
   their hash before the run starts, as `flock launch` does.
